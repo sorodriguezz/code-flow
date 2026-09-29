@@ -4602,6 +4602,8 @@ export const es = {
 
 
   "chat.copyCode": "Copiar el código",
+  "chat.copyCodeShort": "Copiar",
+  "chat.copyFailed": "No se pudo copiar al portapapeles",
   "chat.saveCode": "Guardar como\u2026",
   "chat.codeFileStem": "fragmento",
   "chat.copied": "Copiado",

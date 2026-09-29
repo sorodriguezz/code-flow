@@ -4719,7 +4719,11 @@ const en = {
 
 
   "chat.copyCode": "Copy code",
-  /* The other corner button on a code block: writes it to a file the user picks. The suggested
+  /* The word beside the copy icon on a code block's bar; `chat.copyCode` is its tooltip, and
+     `chat.copied` replaces it for a moment once the clipboard took the text. */
+  "chat.copyCodeShort": "Copy",
+  "chat.copyFailed": "Could not copy to the clipboard",
+  /* The other button on a code block's bar: writes it to a file the user picks. The suggested
      name comes from the model's own first-line comment when it wrote one, and otherwise from the
      fence language — see `lib/codeFileName`. */
   "chat.saveCode": "Save as\u2026",

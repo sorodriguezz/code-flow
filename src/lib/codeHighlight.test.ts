@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { languageOf } from "./codeHighlight";
+import { fenceLabelOf, languageOf, untyped } from "./codeHighlight";
 
 /** The class string `marked` puts on a fenced block's `<code>`. */
 const fenced = (className: string) => className;
@@ -52,5 +52,45 @@ describe("the language a fence declares", () => {
     // Monaco will refuse it and the block degrades to plain text — the same outcome as `null`, but
     // reached without this module having to know every language Monaco ships.
     expect(languageOf(fenced("language-nim"))).toBe("nim");
+  });
+});
+
+describe("the label on a code block's bar", () => {
+  it("is the fence exactly as the model wrote it, not Monaco's id", () => {
+    expect(fenceLabelOf(fenced("language-ts"))).toBe("ts");
+    expect(fenceLabelOf(fenced("language-JSON"))).toBe("JSON");
+    expect(fenceLabelOf(fenced("hljs language-c++ extra"))).toBe("c++");
+  });
+
+  it("is absent for a bare fence", () => {
+    expect(fenceLabelOf(fenced(""))).toBeNull();
+  });
+});
+
+describe("telling a cold language from a loaded one", () => {
+  // What `monaco.editor.tokenize` returns when no tokenizer is registered: one untyped token per
+  // line, whatever the line holds.
+  const cold = [[{ offset: 0, type: "", language: "json" }], [{ offset: 0, type: "", language: "json" }]];
+
+  it("reads Monaco's no-tokenizer answer as cold", () => {
+    expect(untyped(cold)).toBe(true);
+    expect(untyped([])).toBe(true);
+  });
+
+  it("reads any named token as loaded", () => {
+    // `{ "a": 1 }` through the JSON tokenizer once it is in.
+    expect(
+      untyped([
+        [
+          { offset: 0, type: "delimiter.bracket.json" },
+          { offset: 2, type: "string.key.json" },
+          { offset: 5, type: "delimiter.colon.json" },
+          { offset: 7, type: "number.json" },
+          { offset: 9, type: "delimiter.bracket.json" },
+        ],
+      ]),
+    ).toBe(false);
+    // One token is enough when it has a name: a JSON block that is just `42`.
+    expect(untyped([[{ offset: 0, type: "number.json" }]])).toBe(false);
   });
 });

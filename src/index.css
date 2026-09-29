@@ -3100,32 +3100,100 @@ body.cf-dragging * {
   font-size: 0.95em;
 }
 
-/* The frame `ChatMessageBubble` wraps around every fenced block so its copy and save buttons have
- * something to sit in the corner of.
+/* The frame `ChatMessageBubble` builds around every code block in an answer: a bar that names the
+ * language and carries Save and Copy, over the block itself.
  *
- * It exists because the `<pre>` scrolls. A child positioned absolutely inside a scrolling box is
- * placed against that box's content, so buttons pinned to `right: 6px` were pinned to the end of
- * the longest line — scroll the block sideways and they came riding in over the code. This element
- * is the same size as the block and does not scroll, which is what "top right of the block" needs
- * to mean.
+ * The frame is the rounded, tinted box now, and the `<pre>` inside it is flat — so the bar and the
+ * code read as one object. The `<pre>` keeps the horizontal scroll and the bar sits outside it, so
+ * scrolling a long line sideways never moves the buttons.
  *
- * Deliberately no margin of its own. The `<pre>`'s margins collapse straight through a wrapper
- * with no border, padding or inline content, so the spacing between blocks is exactly what it was
- * before this element existed — and `position: relative` does not create a block formatting
- * context, so it does not interfere. Giving this div padding or a border would silently change the
- * rhythm of every answer in the app.
+ * The bar is always drawn. The corner pair it replaced appeared only under the pointer, which in
+ * practice meant never: nothing at rest said a block could be copied.
  *
- * `position: relative` is set inline by the same code that creates the buttons, not here. It is
- * the one declaration they cannot work without, and a control that becomes unreachable when a
- * stylesheet does not arrive is not a control. What is left in this file is the padding, which is
- * cosmetic in the exact sense that matters: without it a long first line runs under the buttons,
- * which is a blemish, not a loss. */
-/* After `.cf-markdown-chat pre` and `.cf-markdown-preview pre`, both of which set `padding`
- * wholesale at the same specificity — order is what carries this one. */
+ * The frame takes over the `<pre>`'s vertical margin (the same 0.7em / 0.5em), so answers keep the
+ * rhythm they had. `overflow: hidden` is what rounds the bar's corners and the scrolling `<pre>`'s
+ * with the frame's. */
+.cf-chat-code {
+  margin: 0.7em 0;
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--cf-text) 6%, transparent);
+  overflow: hidden;
+}
+.cf-markdown-chat .cf-chat-code {
+  margin: 0.5em 0;
+}
+/* After `.cf-markdown-chat pre` and `.cf-markdown-preview pre`, whose margin, radius and ground the
+ * frame has taken over — same specificity, so order is what carries these. */
 .cf-chat-code > pre {
-  /* Room for the pair, so the first line does not begin underneath them. Text further right still
-   * passes under on scroll, which is why the buttons carry an opaque background. */
-  padding-right: 3.5rem;
+  margin: 0;
+  border-radius: 0;
+  background: none;
+}
+.cf-chat-code-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  /* The label starts where the code does: `1em` here is the `<pre>`'s own left padding, because the
+   * bar inherits the same font size the `<pre>` does (13.5px). The panel's `<pre>` is 0.95em with a
+   * 0.8em pad — 9.1px on its 12px — hence 0.76em below. */
+  padding: 3px 5px 3px 1em;
+  border-bottom: 1px solid color-mix(in oklab, var(--cf-text) 7%, transparent);
+  color: var(--cf-text-muted);
+  /* Not text: a drag across two blocks must not pick up "json Copiar" between them. Prefixed as
+   * well, because WKWebView reads only the prefixed property. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+.cf-markdown-chat .cf-chat-code-bar {
+  padding: 2px 4px 2px 0.76em;
+}
+.cf-chat-code-lang {
+  margin-right: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+.cf-chat-code-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: inherit;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.cf-chat-code-btn:hover {
+  background: var(--cf-hover);
+  color: var(--cf-text);
+}
+.cf-chat-code-btn[data-done] {
+  color: var(--cf-success);
+}
+.cf-chat-code-btn svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+/* The panel's 12px sidebar: same bar, icons only — its tooltip still says what each one does. */
+.cf-markdown-chat .cf-chat-code-lang,
+.cf-markdown-chat .cf-chat-code-btn {
+  font-size: 10.5px;
+}
+.cf-markdown-chat .cf-chat-code-btn {
+  height: 20px;
+  padding: 0 5px;
+}
+.cf-markdown-chat .cf-chat-code-btn svg {
+  width: 12px;
+  height: 12px;
+}
+.cf-markdown-chat .cf-chat-code-btn-text {
+  display: none;
 }
 
 /* Single-line variant (`renderInlineMarkdown`) — a finding's subtitle/why/suggestion field,

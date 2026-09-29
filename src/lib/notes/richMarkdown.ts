@@ -1,16 +1,24 @@
-import * as monaco from "monaco-editor";
-import { Marked } from "marked";
+import { monaco } from "../monacoSetup";
+import { Marked, type Tokens } from "marked";
 import DOMPurify from "dompurify";
+import { warm } from "../codeHighlight";
 import { resolveTokenRule, tokenRulesFor, type CodeTheme } from "../codeThemes";
 
 /**
  * The note preview's Markdown renderer: the shared one plus highlighted code and a copy button.
  *
- * **Loaded on demand, and that is structural.** It imports `monaco-editor`, which is the largest
+ * **Loaded on demand, and that is structural.** It imports Monaco, which is the largest
  * chunk in the app — so a static import from anywhere the Notes gallery reaches would put the whole
  * editor on the path of a screen that draws cards. `NotePreview` imports this with a dynamic
  * `import()` and renders the plain Markdown until it resolves, which is why `renderMarkdown` in
  * `lib/markdown.ts` stays as it is and is not extended in place.
+ *
+ * **Monaco comes through the editor's own setup (`monacoSetup`), not bare `monaco-editor`** — as
+ * in the chat's `highlightCodeBlocks`, and for the same two reasons. A block is tokenized by
+ * exactly what the editor would use, TOML, DBML and ObjectScript included: the app registers those
+ * itself, so bare Monaco in a window where no editor has opened has never heard of them. And a
+ * language service woken by a warm-up (see `renderRichMarkdown`) never starts before the app has
+ * configured it.
  *
  * **Why Monaco's own tokenizer rather than a highlighting library.** Two reasons, and the first is
  * the one that decided it: in split view the same code is on screen twice, and any other
@@ -45,31 +53,6 @@ const FENCE_ALIASES: Record<string, string> = {
   psql: "pgsql",
   postgres: "pgsql",
 };
-
-/**
- * Languages whose tokenizer has been pulled in this session.
- *
- * Monaco *registers* every basic language at import but loads each tokenizer only when something
- * asks for it — so `tokenize` on a language the user has never opened a file in returns one untyped
- * token per line, i.e. plain text. For an editor that is invisible (opening a `.js` loads it on the
- * way). For this it would be the normal case: most notes quote a language the session never touched,
- * and the preview would silently never colour anything.
- *
- * `colorize` is the public API that *waits* for the tokenizer, so one throwaway call per language
- * warms it; everything after is the synchronous `tokenize` this module actually paints with. The
- * set makes it once per language per session rather than once per render.
- */
-const warmed = new Set<string>();
-
-async function warm(language: string): Promise<void> {
-  if (!language || warmed.has(language)) return;
-  warmed.add(language);
-  try {
-    await monaco.editor.colorize("x", language, {});
-  } catch {
-    // An unknown language id. `highlight` degrades to plain text on its own; nothing to do.
-  }
-}
 
 function languageOf(fence: string | undefined): string {
   // A fence may carry more than the language (```js title=foo), so only the first word counts.
@@ -224,16 +207,6 @@ export async function renderRichMarkdown(
   resolveNote: NoteLinkResolver,
   missingLabel: string,
 ): Promise<string> {
-  // Every language the document quotes, warmed before a single block is painted — see `warm`.
-  // Done up front rather than per block so one pass covers a note that repeats a language, and so
-  // the render itself stays synchronous once they are all in.
-  const languages = new Set<string>();
-  for (const match of source.matchAll(/^ {0,3}(?:```|~~~)([^\n]*)$/gm)) {
-    const language = languageOf(match[1]);
-    if (language) languages.add(language);
-  }
-  await Promise.all([...languages].map(warm));
-
   const renderer = new Marked({
     gfm: true,
     breaks: false,
@@ -252,7 +225,27 @@ export async function renderRichMarkdown(
     },
   });
 
-  const html = renderer.parse(source, { async: false }) as string;
+  // Lexed once, and these same tokens are what `parser` paints below — so the blocks warmed are
+  // exactly the blocks rendered, a fence inside a blockquote or a list item included, which a scan
+  // of the source for fence lines would miss.
+  const tokens = renderer.lexer(source);
+
+  // Every language the document quotes, warmed before a single block is painted — see `warm` in
+  // `lib/codeHighlight`. Each is tested against its first block with something in it: JSON and
+  // TOML get a tokenizer only once a model exists, and their own text is how `warm` sees it arrive.
+  // A language whose blocks are all blank has nothing to colour and is left alone. Up front rather
+  // than per block so one pass covers a note that repeats a language, and so the render itself
+  // stays synchronous once they are all in.
+  const samples = new Map<string, string>();
+  renderer.walkTokens(tokens, (token) => {
+    if (token.type !== "code") return;
+    const { lang, text } = token as Tokens.Code;
+    const language = languageOf(lang);
+    if (language && !samples.has(language) && /\S/.test(text)) samples.set(language, text);
+  });
+  await Promise.all(Array.from(samples, ([language, sample]) => warm(monaco, language, sample)));
+
+  const html = renderer.parser(tokens);
   return DOMPurify.sanitize(html, {
     // `target` matches `lib/markdown.ts`. The rest is this renderer's own markup: the button needs
     // its marker attribute to be found by the delegated click handler, and the wrapper needs

@@ -1,5 +1,8 @@
 import type { CodeTheme } from "./codeThemes";
 import { tokenRulesFor } from "./codeThemes";
+import { reportError } from "./diagnostics";
+
+type Monaco = typeof import("monaco-editor");
 
 /**
  * Colours a rendered code block, using the same tokenizer and the same palette as the editor.
@@ -76,10 +79,23 @@ const ALIASES: Record<string, string> = {
  * Takes the class string rather than the element so it is a pure function of its input: the DOM is
  * the caller's business, and a language table is the part worth pinning down in tests. */
 export function languageOf(className: string): string | null {
-  const match = className.match(LANGUAGE_CLASS);
-  if (!match) return null;
-  const label = match[1].toLowerCase();
+  const label = fenceLabelOf(className)?.toLowerCase();
+  if (!label) return null;
   return ALIASES[label] ?? label;
+}
+
+/** The fence label exactly as the model wrote it — `ts`, `json`, `bash` — for the bar over the
+ *  block. Not `languageOf`: that is Monaco's id (`typescript`, `shell`), and a label that differs
+ *  from what the answer's own text says reads as a correction nobody asked for. */
+export function fenceLabelOf(className: string): string | null {
+  return className.match(LANGUAGE_CLASS)?.[1] ?? null;
+}
+
+/** Whether `tokenize` answered the way it answers when the language has no tokenizer registered:
+ *  one untyped token per line. A real tokenizer names what it finds — `delimiter.bracket.json`,
+ *  `keyword.ts` — so this is how a cold language is told apart from a loaded one. */
+export function untyped<Token extends { type: string }>(lines: readonly (readonly Token[])[]): boolean {
+  return lines.every((line) => line.length <= 1 && (line[0]?.type ?? "") === "");
 }
 
 /**
@@ -134,17 +150,65 @@ const warmed = new Map<string, Promise<void>>();
  *
  * A language Monaco cannot serve rejects, is swallowed, and gets tokenized cold anyway: that block
  * renders as plain text, which is what it would have done regardless.
+ *
+ * # JSON, which `colorize` cannot warm
+ *
+ * `colorize` only waits for a grammar that sits behind a *loader* — every Monarch language does.
+ * JSON does not: Monaco ships no Monarch grammar for it, and its tokenizer is installed by the JSON
+ * language service from an `onLanguage` hook, alongside completions and validation. That hook fires
+ * when a **model** in the language is created (`TextModel` asks for the language's "rich features"),
+ * and `colorize` creates none. So `colorize` resolved at once, `tokenize` went on answering cold,
+ * and every JSON block in the chat came out plain — unless an editor in the same window had opened
+ * a `.json` file first, which is why it looked fine on one machine and grey on another. The app's
+ * own TOML grammar (`monacoToml`) is installed the same way.
+ *
+ * So a language that is still cold after `colorize` gets a throwaway model — created and disposed
+ * at once, which is all the hook needs — and a short wait for the tokenizer the hook installs:
+ * polled, because Monaco publishes no event for it. `sample` is the caller's first non-blank block
+ * in the language, the only honest test of "does this now colour?" — blank text shows no tokenizer
+ * however long it waits. A language that never gets a tokenizer (`plaintext`) spends
+ * `HOOK_WAIT_MS` once per session. In the chat only its own blocks wait on it — see
+ * `highlightCodeBlocks`, which colours each language as soon as it is ready.
+ *
+ * Shared with the Notes preview (`lib/notes/richMarkdown`), which had the same grey JSON. A note
+ * is painted in one pass, so there that wait holds back the whole note's colours — once per
+ * session, with the plain rendering on screen meanwhile. The memo is per window either way: a
+ * language warmed for the chat is warm for a note, and the other way round.
  */
-function warm(monaco: typeof import("monaco-editor"), language: string): Promise<void> {
+export function warm(monaco: Monaco, language: string, sample: string): Promise<void> {
   let pending = warmed.get(language);
   if (!pending) {
-    pending = monaco.editor.colorize("", language, {}).then(
-      () => undefined,
-      () => undefined,
-    );
+    pending = (async () => {
+      await monaco.editor.colorize("", language, {}).catch(() => undefined);
+      const known = monaco.languages.getLanguages().some((entry) => entry.id === language);
+      if (!known || !coldFor(monaco, language, sample)) return;
+      try {
+        monaco.editor.createModel("", language).dispose();
+      } catch {
+        return;
+      }
+      for (let waited = 0; waited < HOOK_WAIT_MS; waited += HOOK_POLL_MS) {
+        await new Promise((resolve) => setTimeout(resolve, HOOK_POLL_MS));
+        if (!coldFor(monaco, language, sample)) return;
+      }
+    })();
     warmed.set(language, pending);
   }
   return pending;
+}
+
+/** How long a language whose tokenizer comes from an `onLanguage` hook gets to produce one. The hook
+ *  is an `import()` of the language service: a microtask away in a build, where it sits in the
+ *  monaco chunk, one request away under the dev server. */
+const HOOK_WAIT_MS = 1500;
+const HOOK_POLL_MS = 25;
+
+function coldFor(monaco: Monaco, language: string, sample: string): boolean {
+  try {
+    return untyped(monaco.editor.tokenize(sample, language));
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -162,65 +226,94 @@ export async function highlightCodeBlocks(host: HTMLElement, theme: CodeTheme): 
   );
   if (blocks.length === 0) return 0;
 
-  // Loaded only now, and only once per session: the first code block in the first answer pays for
-  // it, and a transcript of prose never does.
-  const monaco = await import("monaco-editor");
-  // Every language this batch needs, warmed before a single token is asked for. See `warm`.
-  await Promise.all(
-    Array.from(new Set(blocks.map((code) => languageOf(code.className)))).flatMap((language) =>
-      language ? [warm(monaco, language)] : [],
-    ),
-  );
-  const colourOf = colourResolver(theme);
-  let done = 0;
-
+  // Marked as handled before the work, not after: a block whose language has no tokenizer must not
+  // be retried on every re-render.
+  const byLanguage = new Map<string, Element[]>();
   for (const code of blocks) {
     const language = languageOf(code.className);
-    const source = code.textContent ?? "";
-    // Marked as handled before the work, not after: a block whose language has no tokenizer must
-    // not be retried on every re-render.
     code.setAttribute("data-cf-hl", language ?? "text");
-    if (!language) continue;
+    if (language) byLanguage.set(language, [...(byLanguage.get(language) ?? []), code]);
+  }
+  if (byLanguage.size === 0) return 0;
 
-    let lines: ReturnType<typeof monaco.editor.tokenize>;
-    try {
-      lines = monaco.editor.tokenize(source, language);
-    } catch {
+  // Loaded only now, and only once per session: the first code block in the first answer pays for
+  // it, and a transcript of prose never does. The editor's own setup rather than bare
+  // `monaco-editor`, so a block is tokenized by exactly what the editor would use — the languages
+  // the app registers itself (TOML, DBML, ObjectScript) and its fixes to Monaco's grammars
+  // (TypeScript decorators) included — and so no language service a warm-up wakes (see `warm`)
+  // ever starts before the app has configured it.
+  let monaco: Monaco;
+  try {
+    ({ monaco } = await import("./monacoSetup"));
+  } catch (error) {
+    // A chunk that failed to load leaves every block plain, which is readable; saying so in the app
+    // log is what makes "the code has no colour on this machine" answerable.
+    reportError("code-highlight", error);
+    return 0;
+  }
+  const colourOf = colourResolver(theme);
+
+  // Each language is coloured the moment *its* tokenizer is in, not when every language's is: one
+  // that has to wait on a hook (see `warm`) holds back its own blocks and nobody else's.
+  const coloured = await Promise.all(
+    Array.from(byLanguage, async ([language, codes]) => {
+      // The first block with something in it is what `warm` tests the tokenizer against. A language
+      // whose blocks are all blank has nothing to colour, and must not be recorded as warmed on the
+      // strength of a sample that could never have shown a tokenizer.
+      const sample = codes.map((code) => code.textContent ?? "").find((text) => /\S/.test(text));
+      if (sample === undefined) return 0;
+      await warm(monaco, language, sample);
+      return codes.filter((code) => paint(monaco, code, language, colourOf)).length;
+    }),
+  );
+  return coloured.reduce((sum, n) => sum + n, 0);
+}
+
+/** Replaces one block's text with coloured spans. False when the tokenizer refused the language. */
+function paint(
+  monaco: Monaco,
+  code: Element,
+  language: string,
+  colourOf: (tokenType: string) => string | undefined,
+): boolean {
+  const source = code.textContent ?? "";
+  let lines: ReturnType<Monaco["editor"]["tokenize"]>;
+  try {
+    lines = monaco.editor.tokenize(source, language);
+  } catch {
+    return false;
+  }
+  if (lines.length === 0) return false;
+
+  const sourceLines = source.split("\n");
+  const fragment = document.createDocumentFragment();
+  for (let i = 0; i < sourceLines.length; i += 1) {
+    if (i > 0) fragment.appendChild(document.createTextNode("\n"));
+    const text = sourceLines[i];
+    const tokens = lines[i];
+    if (!tokens || tokens.length === 0) {
+      fragment.appendChild(document.createTextNode(text));
       continue;
     }
-    if (lines.length === 0) continue;
-
-    const sourceLines = source.split("\n");
-    const fragment = document.createDocumentFragment();
-    for (let i = 0; i < sourceLines.length; i += 1) {
-      if (i > 0) fragment.appendChild(document.createTextNode("\n"));
-      const text = sourceLines[i];
-      const tokens = lines[i];
-      if (!tokens || tokens.length === 0) {
-        fragment.appendChild(document.createTextNode(text));
+    for (let t = 0; t < tokens.length; t += 1) {
+      // A token runs from its own offset to the next one's, and the last to end of line.
+      const start = tokens[t].offset;
+      const end = t + 1 < tokens.length ? tokens[t + 1].offset : text.length;
+      const slice = text.slice(start, end);
+      if (!slice) continue;
+      const colour = colourOf(tokens[t].type);
+      if (!colour) {
+        fragment.appendChild(document.createTextNode(slice));
         continue;
       }
-      for (let t = 0; t < tokens.length; t += 1) {
-        // A token runs from its own offset to the next one's, and the last to end of line.
-        const start = tokens[t].offset;
-        const end = t + 1 < tokens.length ? tokens[t + 1].offset : text.length;
-        const slice = text.slice(start, end);
-        if (!slice) continue;
-        const colour = colourOf(tokens[t].type);
-        if (!colour) {
-          fragment.appendChild(document.createTextNode(slice));
-          continue;
-        }
-        const span = document.createElement("span");
-        // `textContent`, never `innerHTML`: this is model output, and the whole reason this runs
-        // on the DOM instead of on the HTML string is that nothing here should ever be parsed.
-        span.textContent = slice;
-        span.style.color = colour;
-        fragment.appendChild(span);
-      }
+      const span = document.createElement("span");
+      // `textContent`, never `innerHTML`: this is model output, and the whole reason this runs
+      // on the DOM instead of on the HTML string is that nothing here should ever be parsed.
+      span.textContent = slice;
+      span.style.color = colour;
+      fragment.appendChild(span);
     }
-    code.replaceChildren(fragment);
-    done += 1;
   }
-  return done;
+  code.replaceChildren(fragment);
+  return true;
 }

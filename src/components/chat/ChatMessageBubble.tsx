@@ -10,7 +10,7 @@ import { AiErrorBanner } from "../ai/AiErrorBanner";
 import { AiRunLog } from "../ai/AiRunLog";
 import { LazyTrace } from "./LazyTrace";
 import { CostChip, formatResponseTime, parseStamp, useCopy, useLocale } from "./chatChrome";
-import { highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
+import { fenceLabelOf, highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
 import { bodyForBlock, fileNameForBlock } from "../../lib/codeFileName";
 import { OutputBar } from "./OutputBar";
 import type { ChatOutput } from "../../lib/tauri/chatCommands";
@@ -187,13 +187,14 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     [message.isError, message.content],
   );
 
-  const bodyRef = useCodeBlockActions(
-    html,
-    reading,
-    t("chat.copyCode"),
-    t("chat.saveCode"),
-    t("chat.codeFileStem"),
-  );
+  const bodyRef = useCodeBlockActions(html, {
+    copy: t("chat.copyCode"),
+    copyShort: t("chat.copyCodeShort"),
+    copied: t("chat.copied"),
+    copyFailed: t("chat.copyFailed"),
+    save: t("chat.saveCode"),
+    fileStem: t("chat.codeFileStem"),
+  });
 
   const stampRow = <ChatStamp message={message} detail={stamp} />;
 
@@ -408,8 +409,79 @@ function BubbleAction({
 }
 
 
+/** The words on a code block's bar, translated by the caller. */
+interface CodeBlockLabels {
+  /** The copy button's tooltip — "Copiar el código". */
+  copy: string;
+  /** Its visible word — "Copiar". */
+  copyShort: string;
+  /** What that word becomes for a moment after it worked — "Copiado". */
+  copied: string;
+  copyFailed: string;
+  save: string;
+  /** The generic stem a saved block falls back to — "snippet", "fragmento". */
+  fileStem: string;
+}
+
 /**
- * Hangs a copy button off every fenced code block in a rendered answer.
+ * Lucide's `copy`, `check` and `download` (lucide-react 1.25), as data: these buttons are built
+ * outside React (see `useCodeBlockActions`), so they cannot render the components — but they draw
+ * the same glyphs every other copy and save control in the app draws. The Unicode marks they
+ * replaced (⧉, ↓) came out in whatever font the platform happened to have for them.
+ */
+type IconShape = readonly [tag: string, attributes: Readonly<Record<string, string>>];
+const COPY_ICON: readonly IconShape[] = [
+  ["rect", { width: "14", height: "14", x: "8", y: "8", rx: "2", ry: "2" }],
+  ["path", { d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" }],
+];
+const CHECK_ICON: readonly IconShape[] = [["path", { d: "M20 6 9 17l-5-5" }]];
+const DOWNLOAD_ICON: readonly IconShape[] = [
+  ["path", { d: "M12 15V3" }],
+  ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }],
+  ["path", { d: "m7 10 5 5 5-5" }],
+];
+
+function icon(shapes: readonly IconShape[]): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  const frame: Record<string, string> = {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": "2",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true",
+  };
+  for (const [name, value] of Object.entries(frame)) svg.setAttribute(name, value);
+  for (const [tag, attributes] of shapes) {
+    const shape = document.createElementNS(ns, tag);
+    for (const [name, value] of Object.entries(attributes)) shape.setAttribute(name, value);
+    svg.append(shape);
+  }
+  return svg;
+}
+
+/** One button on a code block's bar: an icon, and a word when `text` is given. */
+function barButton(shapes: readonly IconShape[], title: string, text?: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "cf-chat-code-btn";
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.append(icon(shapes));
+  if (text) {
+    const word = document.createElement("span");
+    word.className = "cf-chat-code-btn-text";
+    word.textContent = text;
+    button.append(word);
+  }
+  return button;
+}
+
+/**
+ * Frames every code block in a rendered answer: a bar over it that names the language and carries
+ * Copy and Save, always on screen.
  *
  * Done to the DOM after the fact rather than in the markdown pipeline, and that is a deliberate
  * trade rather than laziness. `renderMarkdown` runs `marked` and then DOMPurify, and the sanitiser
@@ -420,19 +492,20 @@ function BubbleAction({
  * -free listener afterwards touches none of that: the sanitiser still sees, and still cleans, every
  * byte that came from the model.
  *
- * Keyed on the rendered HTML so a turn that re-renders (a language switch, a theme change) does not
- * accumulate a second button per block. Only the reading variant gets these: the two panel
- * transcripts are 12px sidebars whose code blocks are four columns wide, and this lift is a
- * refactor of those, not a redesign.
+ * # Why a bar, and why in both variants
+ *
+ * This used to be a pair of 22px glyph buttons in the block's corner that appeared only under the
+ * pointer, and only in the reading variant. Invisible at rest is invisible in practice: nothing on
+ * screen said a block could be copied, a screenshot never showed the control, and the report that
+ * retired it was simply that the code "has no copy". A bar costs one short line above the block and
+ * no width, which is also why the panel variant — whose 12px sidebar blocks were too narrow to give
+ * a corner to — can have one too: its bar keeps the icons and drops the word.
+ *
+ * Keyed on the rendered HTML and the labels, so a turn that re-renders (a language switch) rebuilds
+ * the bars instead of stacking a second one per block.
  */
-function useCodeBlockActions(
-  html: string | null,
-  enabled: boolean,
-  copyLabel: string,
-  saveLabel: string,
-  /** The generic stem a saved block falls back to — "snippet", "fragmento". */
-  fileStem: string,
-) {
+function useCodeBlockActions(html: string | null, labels: CodeBlockLabels) {
+  const { copy: copyLabel, copyShort, copied, copyFailed, save: saveLabel, fileStem } = labels;
   const ref = useRef<HTMLDivElement>(null);
 
   // The active code scheme, so a block in an answer is coloured exactly like the same code in the
@@ -459,82 +532,80 @@ function useCodeBlockActions(
 
   useEffect(() => {
     const host = ref.current;
-    if (!host || !enabled || html === null) return;
-    const added: HTMLButtonElement[] = [];
-    const wrappers: HTMLElement[] = [];
-
-    /** One of these corner buttons, styled the same and placed by how far in from the right. */
-    const corner = (glyph: string, title: string, right: number, onClick: () => void) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.title = title;
-      button.setAttribute("aria-label", title);
-      button.textContent = glyph;
-      button.style.cssText =
-        `position:absolute;top:6px;right:${right}px;width:22px;height:22px;border-radius:6px;` +
-        "border:1px solid var(--cf-border);background:var(--cf-surface);color:var(--cf-text-muted);" +
-        "font-size:11px;line-height:1;cursor:pointer;opacity:0;transition:opacity .12s";
-      button.addEventListener("click", onClick);
-      return button;
-    };
+    if (!host || html === null) return;
+    const frames: HTMLElement[] = [];
+    const timers: number[] = [];
 
     for (const pre of Array.from(host.querySelectorAll("pre"))) {
       /*
-       * The buttons hang off a wrapper around the `<pre>`, never off the `<pre>` itself.
+       * The bar goes in a frame around the `<pre>`, never inside the `<pre>` itself.
        *
        * The `<pre>` is the horizontal scroll container (`.cf-markdown-preview pre` is
-       * `overflow-x: auto`), and an absolutely-positioned child of a scrolling box is placed
-       * against its **content**, not against the part of it you can see. So `right: 6px` did not
-       * mean "six pixels from the right edge of the block", it meant "six pixels past the end of
-       * the longest line" — and scrolling a block sideways sent both buttons sliding into the
-       * middle of the code, sitting on top of whatever was there. They describe the block, not a
-       * position in the text, so they belong to something that does not scroll.
+       * `overflow-x: auto`), so anything inside it scrolls away with a long line, and anything
+       * inside it is *text* of it: selected along with the code by a drag, and read back by
+       * `pre.textContent` — which is how copying a block once put a stray `⧉` on the clipboard.
+       * The frame is the rounded, tinted box on screen; the `<pre>` in it is flat (`index.css`).
        *
-       * Idempotent, because this effect re-runs on a DOM it has already wrapped whenever the
-       * labels change with the app's language. A second wrapper would nest inside the first and
-       * the buttons would be positioned against a box the width of the code again.
+       * Defensive about a frame already being there: the cleanup below unwraps every frame before
+       * this runs again, but a second frame nested in the first would draw a box inside a box.
        */
       let frame = pre.parentElement;
-      if (!frame?.classList.contains("cf-chat-code")) {
-        const box = document.createElement("div");
-        box.className = "cf-chat-code";
-        pre.replaceWith(box);
-        box.append(pre);
-        frame = box;
+      if (frame?.classList.contains("cf-chat-code")) {
+        frame.querySelector(":scope > .cf-chat-code-bar")?.remove();
+      } else {
+        frame = document.createElement("div");
+        frame.className = "cf-chat-code";
+        pre.replaceWith(frame);
+        frame.append(pre);
       }
-      // Inline, and **not** left to `.cf-chat-code` in the stylesheet. This one declaration is what
-      // gives the buttons a containing block; without it they anchor to whatever positioned
-      // ancestor they find — the bubble, or further — and every block's pair lands in one pile far
-      // from the code it belongs to, invisible in practice. The class still exists, for the padding
-      // that keeps the first line out from under them, but that is cosmetic: losing it puts text
-      // under a button, while losing this loses the button. A control should not depend on a
-      // stylesheet to be reachable, and the code it replaced did exactly this on the `<pre>`.
-      frame.style.position = "relative";
-      wrappers.push(frame);
+      frames.push(frame);
 
       /**
-       * The block's source, read from the `<code>` and **not** from the `<pre>`.
-       *
-       * These buttons are appended *inside* the `<pre>`, so `pre.textContent` is the code plus
-       * whatever glyphs are sitting in its corner — which is why copying a block used to put a
-       * stray `⧉` on the clipboard, and would now have put one in a saved file too. The `<code>`
-       * holds the code and nothing else. It still reads back the original source after
-       * highlighting, which replaces its children with spans but changes no text.
+       * The block's source, read from the `<code>` and **not** from the `<pre>`, which is the one
+       * that would carry anything ever put inside it. The `<code>` holds the code and nothing else,
+       * and still reads back the original source after highlighting, which replaces its children
+       * with spans but changes no text.
        */
-      const language = languageOf(pre.querySelector("code")?.className ?? "");
+      const className = pre.querySelector("code")?.className ?? "";
+      const language = languageOf(className);
       // `bodyForBlock` is what strips the naming line the system prompt asks the model for, and
       // only in the formats where that line is not valid syntax — see `lib/codeFileName`. Both
       // buttons read through it, so copying and saving can never produce two different files.
       const sourceOf = () =>
         bodyForBlock(language, (pre.querySelector("code") ?? pre).textContent ?? "");
 
-      const copy = corner("⧉", copyLabel, 6, () => {
-        void navigator.clipboard.writeText(sourceOf());
-        copy.textContent = "✓";
-        setTimeout(() => (copy.textContent = "⧉"), 1500);
+      const bar = document.createElement("div");
+      bar.className = "cf-chat-code-bar";
+      // The label as the model wrote it. A bare fence gets an empty one, which still pushes the
+      // buttons to the right — the bar is the same shape whether or not the block is named.
+      const name = document.createElement("span");
+      name.className = "cf-chat-code-lang";
+      name.textContent = fenceLabelOf(className) ?? "";
+
+      const copy = barButton(COPY_ICON, copyLabel, copyShort);
+      /** Swaps the button between its resting face and "Copiado". */
+      const showCopied = (done: boolean) => {
+        copy.toggleAttribute("data-done", done);
+        copy.replaceChildren(done ? icon(CHECK_ICON) : icon(COPY_ICON));
+        const word = document.createElement("span");
+        word.className = "cf-chat-code-btn-text";
+        word.textContent = done ? copied : copyShort;
+        copy.append(word);
+      };
+      copy.addEventListener("click", () => {
+        // "Copiado" only once the clipboard said yes. The button this replaced flipped to ✓ before
+        // the write had even been attempted, so a refused write looked exactly like a good one.
+        navigator.clipboard.writeText(sourceOf()).then(
+          () => {
+            showCopied(true);
+            timers.push(window.setTimeout(() => showCopied(false), 1500));
+          },
+          () => pushErrorToast(copyFailed),
+        );
       });
 
-      const save = corner("↓", saveLabel, 32, () => {
+      const save = barButton(DOWNLOAD_ICON, saveLabel);
+      save.addEventListener("click", () => {
         const source = sourceOf();
         // Named from the raw text, saved from the stripped one: the naming line is the only place
         // the name exists, so reading it back out of a body it has already been removed from would
@@ -564,40 +635,21 @@ function useCodeBlockActions(
         })();
       });
 
-      const show = () => {
-        copy.style.opacity = "1";
-        save.style.opacity = "1";
-      };
-      const hide = () => {
-        copy.style.opacity = "0";
-        save.style.opacity = "0";
-      };
-      // On the frame, not on the `<pre>`: the buttons are now the `<pre>`'s siblings rather than
-      // its children, so a pointer moving from the code onto a button *leaves* the `<pre>` — which
-      // hid the button out from under the cursor that was reaching for it.
-      frame.addEventListener("mouseenter", show);
-      frame.addEventListener("mouseleave", hide);
-      // Focus reveals them too, and not as a nicety: a button at `opacity:0` is still in the tab
-      // order, so without this a keyboard user tabs onto a control they cannot see and has no way
-      // to know what pressing space would do. The pointer and the caret get the same affordance.
-      for (const button of [copy, save]) {
-        button.addEventListener("focus", show);
-        button.addEventListener("blur", hide);
-      }
-      frame.append(copy, save);
-      added.push(copy, save);
+      bar.append(name, save, copy);
+      frame.prepend(bar);
     }
     return () => {
-      added.forEach((button) => button.remove());
-      // Unwrapped too, so a bubble that stops offering the buttons stops reserving room for them.
-      // `replaceWith` on a node React has already discarded has no parent and does nothing, which
-      // is the common case: changing `html` rewrites this subtree wholesale.
-      wrappers.forEach((frame) => {
-        const pre = frame.firstElementChild;
+      timers.forEach((timer) => window.clearTimeout(timer));
+      // Unwrapped, bar and all, so the next run starts from the markup React put there. `replaceWith`
+      // on a node React has already discarded has no parent and does nothing, which is the common
+      // case: changing `html` rewrites this subtree wholesale.
+      frames.forEach((frame) => {
+        frame.querySelector(":scope > .cf-chat-code-bar")?.remove();
+        const pre = frame.querySelector(":scope > pre");
         if (pre) frame.replaceWith(pre);
       });
     };
-  }, [html, enabled, copyLabel, saveLabel, fileStem]);
+  }, [html, copyLabel, copyShort, copied, copyFailed, saveLabel, fileStem]);
   return ref;
 }
 
