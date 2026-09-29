@@ -84,17 +84,31 @@ const DRIVERS = [
  * travels with the jar — the way `build-llama-runtime.mjs` writes llama.cpp's LICENSE beside its
  * binaries.
  *
- * Fetched from InterSystems rather than kept in this repository: the terms are theirs, they publish
- * the version in force at a stable address, and the copy an installer has to carry is the one in
- * force when it is built. For the same reason it is not pinned by hash — InterSystems revising its
- * terms must not break a release.
+ * Kept in this repository and copied from there, not fetched. Fetching from `url` at build time was
+ * the first design, so that an installer would carry the version in force the day it was built, and
+ * the first release to try it died on both runners: intersystems.com sits behind Akamai, which
+ * answered 403 to GitHub's hosted runners while serving the very same request to a developer's
+ * machine. Dressing the request up as a browser might get through today and not tomorrow, and a
+ * release that depends on a third party's bot filter is not one anyone controls — so the terms are
+ * an input like the drivers now: fixed in git, the same bytes on every build.
  *
- * What *is* checked is that the answer is a PDF. A captive portal's HTML page saved under this name
- * would ship something that is not the terms while looking as if the condition were met.
+ * To refresh it, from a machine InterSystems answers:
+ *
+ *   curl -fL https://www.intersystems.com/IERTU/ -o scripts/assets/InterSystems-External-Repository-Terms-of-Use.pdf
+ *
+ * and `git status` says whether they revised anything. The copy here was taken on 2026-09-28; the
+ * PDF's own date is 2024-10-04.
+ *
+ * What *is* checked on every build is that the copy is a PDF. An HTML page saved under this name —
+ * a captive portal's, or that 403 — would ship something that is not the terms while looking as if
+ * the condition were met.
  */
 const DRIVER_TERMS = {
   url: "https://www.intersystems.com/IERTU/",
   file: "InterSystems-External-Repository-Terms-of-Use.pdf",
+  get vendored() {
+    return join(ROOT, "scripts", "assets", this.file);
+  },
 };
 
 /**
@@ -160,10 +174,9 @@ async function main() {
   await buildRuntime(jdk);
   await fetchDriver();
   await buildBridge(jdk);
-  // Last, so that under `--optional` a network hiccup here costs only the terms file and not the
-  // bridge a developer is iterating on. Packaging runs without `--optional`, where this failing
-  // fails the build: an installer must not carry the driver without its terms.
-  await fetchDriverTerms();
+  // Packaging runs without `--optional`, where this failing fails the build: an installer must not
+  // carry the driver without its terms.
+  await installDriverTerms();
 
   console.log(`\niris-runtime: ready in ${OUT}`);
 }
@@ -452,29 +465,34 @@ function isPdf(bytes) {
   return bytes.subarray(0, 5).toString("latin1") === "%PDF-";
 }
 
-/** Writes the InterSystems terms beside the driver. See `DRIVER_TERMS` for why, and why unpinned. */
-async function fetchDriverTerms() {
+/**
+ * Writes the InterSystems terms beside the driver, from the copy kept in `scripts/assets/`. See
+ * `DRIVER_TERMS` for why a copy, and how to refresh it.
+ */
+async function installDriverTerms() {
+  const source = DRIVER_TERMS.vendored;
   const target = join(OUT, DRIVER_TERMS.file);
 
-  if (!force && existsSync(target) && isPdf(await readFile(target))) {
-    console.log(`iris-runtime: ${DRIVER_TERMS.file} is present, skipping download`);
-    return;
-  }
-
-  console.log(`iris-runtime: downloading ${DRIVER_TERMS.url}`);
-  const response = await fetch(DRIVER_TERMS.url, { redirect: "follow" });
-  if (!response.ok) {
-    throw new Error(`InterSystems answered ${response.status} for the driver's terms (${DRIVER_TERMS.url})`);
-  }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (!isPdf(bytes)) {
+  if (!existsSync(source)) {
     throw new Error(
-      `${DRIVER_TERMS.url} did not answer with a PDF. Nothing was written: the driver's terms have to ` +
-        "ship beside it, and a web page saved in their place would not be them.",
+      `${source} is gone, and the driver cannot ship without its terms.\n` +
+        `Restore it from git, or refresh it from ${DRIVER_TERMS.url} (see DRIVER_TERMS in this script).`,
     );
   }
+  const bytes = await readFile(source);
+  if (!isPdf(bytes)) {
+    throw new Error(
+      `${source} is not a PDF. Nothing was written: the driver's terms have to ship beside it, and a ` +
+        "web page saved in their place would not be them. Restore the file from git.",
+    );
+  }
+
+  if (!force && existsSync(target) && bytes.equals(await readFile(target))) {
+    console.log(`iris-runtime: ${DRIVER_TERMS.file} matches the vendored copy, skipping`);
+    return;
+  }
   await writeFile(target, bytes);
-  console.log(`iris-runtime: ${DRIVER_TERMS.file} written (${Math.round(bytes.length / 1024)} KB)`);
+  console.log(`iris-runtime: ${DRIVER_TERMS.file} copied from scripts/assets (${Math.round(bytes.length / 1024)} KB)`);
 }
 
 // ---------------------------------------------------------------------------

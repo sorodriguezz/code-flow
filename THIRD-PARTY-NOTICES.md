@@ -104,10 +104,10 @@ and shipped unmodified. It is **not** open source: its POM points at the
 conditions — among them that a copy of those terms accompany every distribution of the driver,
 that no fee be charged for its distribution or use, that its markings and notices stay in place,
 and that it be neither modified nor reverse engineered. CodeFlow ships it verbatim and free of
-charge. The copy travels with it: `scripts/build-iris-runtime.mjs` downloads the terms in force
-from InterSystems when the installer is built and writes them beside the jar, as
-`resources/iris/InterSystems-External-Repository-Terms-of-Use.pdf`, which the installer carries
-in the app's `iris/` resources. A build that cannot fetch them fails rather than ship without them.
+charge. The copy travels with it: the terms as InterSystems publishes them are kept in this
+repository, in `scripts/assets/`, and `scripts/build-iris-runtime.mjs` writes them beside the jar
+as `resources/iris/InterSystems-External-Repository-Terms-of-Use.pdf`, which the installer carries
+in the app's `iris/` resources. A build without them fails rather than ship the driver alone.
 
 ### The Oracle JDBC driver — its licence travels inside the jar
 

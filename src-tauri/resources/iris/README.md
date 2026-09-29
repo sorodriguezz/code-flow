@@ -7,7 +7,7 @@ Everything else in this directory is a build output of `scripts/build-iris-runti
 | `runtime/` | a `jlink`-trimmed Java runtime (~36 MB) |
 | `intersystems-jdbc-<version>.jar` | the IRIS driver, from Maven Central, verified against a pinned SHA-256 |
 | `ojdbc11-<version>.jar` | Oracle's thin JDBC driver, from Maven Central, pinned the same way |
-| `InterSystems-External-Repository-Terms-of-Use.pdf` | the IRIS driver's terms, downloaded from InterSystems at build time |
+| `InterSystems-External-Repository-Terms-of-Use.pdf` | the IRIS driver's terms, copied from `scripts/assets/` |
 | `iris-bridge.jar` | compiled from `src-tauri/java/` |
 
 InterSystems IRIS has no Rust driver, so `datasource/iris.rs` drives the vendor's JDBC driver
@@ -20,9 +20,11 @@ the jar carries that licence itself (`META-INF/license.txt`) and is shipped unmo
 
 The InterSystems driver is redistributed under the InterSystems External Repository Terms of Use,
 which ask for a copy of them to accompany every distribution. Its jar carries no such copy, so the
-script fetches the version in force from <https://www.intersystems.com/IERTU/> and writes it here as a
-PDF. Since this whole directory ships inside the installer, the copy goes wherever the driver goes.
-Packaging fails if the download does, rather than shipping the driver without it.
+script writes one here as a PDF, from `scripts/assets/`, where a copy taken from
+<https://www.intersystems.com/IERTU/> is kept. It is not fetched at build time because that site
+answers 403 to GitHub's build runners. Since this whole directory ships inside the installer, the
+copy goes wherever the driver goes. Packaging fails if the vendored copy is missing, rather than
+shipping the driver without it.
 
 ## Building them
 

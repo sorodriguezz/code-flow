@@ -282,8 +282,10 @@ jobs:
           # `jlink` emits a runtime for whatever platform ran it, so the OS is part of the identity,
           # and so is the JDK that `setup-java` above pins. The script carries the driver's version
           # and its pinned checksum and the module list, so hashing the script covers all three;
-          # `src-tauri/java` is the bridge's own source.
-          key: iris-runtime-${{ runner.os }}-jdk17-${{ hashFiles('scripts/build-iris-runtime.mjs', 'src-tauri/java/**') }}
+          # `src-tauri/java` is the bridge's own source. The vendored terms are in the key for the
+          # reason the llama key below covers its vendored license: the script copies them into the
+          # directory being cached.
+          key: iris-runtime-${{ runner.os }}-jdk17-${{ hashFiles('scripts/build-iris-runtime.mjs', 'scripts/assets/InterSystems-External-Repository-Terms-of-Use.pdf', 'src-tauri/java/**') }}
 
       # `tauri build` runs this again through `beforeBuildCommand`, where it is an incremental
       # no-op. Doing it here first is for the log: when the Java toolchain is the thing that broke,
