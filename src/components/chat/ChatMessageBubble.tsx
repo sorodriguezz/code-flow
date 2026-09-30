@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, GitBranch, Pencil, Puzzle, RefreshCw, Square, type LucideIcon } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
@@ -180,6 +180,28 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         : null,
     [message.role, message.isError, streaming, body, emptyReply, t],
   );
+  /**
+   * What `dangerouslySetInnerHTML` is handed — one object for as long as the HTML is the same.
+   *
+   * **React 19 rewrites `innerHTML` whenever this is a different object**, whatever `__html` holds.
+   * It diffs host props by identity and sends a changed one straight to `setProp`, which assigns
+   * `innerHTML`; React 18 compared the two strings, React 19 does not. The inline
+   * `{{ __html: html }}` this used to be is a new object on every render, so every re-render of the
+   * bubble put the sanitised HTML back — and with it threw away everything `useCodeBlockActions`
+   * draws on top after the fact: the colours and the bar of every code block. And a bubble
+   * re-renders a lot without its text changing. Sending a question flips `actions` on every earlier
+   * turn (nothing can be regenerated while a turn runs), and flips it back when the answer lands;
+   * the transcript is re-read from disk when a turn ends, which hands every turn a new message
+   * object; the copy button's "copied" and the trace disclosure are state of the bubble itself. The
+   * effects that draw were keyed on the HTML string, which had not changed, so nothing drew them
+   * again — the whole transcript went grey the moment a question was sent, the new answer lost its
+   * colours and bars a moment after landing, and only a remount (another chat and back) brought
+   * them back.
+   *
+   * Memoised on the string, the object changes exactly when the markup does, and that is exactly
+   * when the effects in `useCodeBlockActions` run again: they are keyed on this same object.
+   */
+  const markup = useMemo(() => (html === null ? null : { __html: html }), [html]);
   // Parsed at render, not stored: a reopened conversation gets the same billing link and retry
   // advice as the moment it failed, from the raw text kept in the transcript.
   const parsedError = useMemo(
@@ -187,7 +209,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     [message.isError, message.content],
   );
 
-  const bodyRef = useCodeBlockActions(html, {
+  const bodyRef = useCodeBlockActions(markup, {
     copy: t("chat.copyCode"),
     copyShort: t("chat.copyCodeShort"),
     copied: t("chat.copied"),
@@ -262,14 +284,15 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
             {message.skill}
           </span>
         )}
-        {html !== null ? (
+        {markup !== null ? (
           <div
             ref={bodyRef}
             // The reading variant takes `cf-markdown-preview` on its own — the app's document
             // style, 13.5px at 1.65 — where the panel adds `cf-markdown-chat` to squeeze it to
             // 12px. That is the whole typographic difference between a page and a sidebar.
             className={`cf-markdown-preview ${reading ? "" : "cf-markdown-chat"}`}
-            dangerouslySetInnerHTML={{ __html: html }}
+            // The memoised object, never an inline `{{ __html }}` — see `markup`.
+            dangerouslySetInnerHTML={markup}
           />
         ) : streaming ? (
           // A caret while the tokens land, dropped the instant the turn is whole. It is the one
@@ -501,10 +524,31 @@ function barButton(shapes: readonly IconShape[], title: string, text?: string): 
  * no width, which is also why the panel variant — whose 12px sidebar blocks were too narrow to give
  * a corner to — can have one too: its bar keeps the icons and drops the word.
  *
- * Keyed on the rendered HTML and the labels, so a turn that re-renders (a language switch) rebuilds
- * the bars instead of stacking a second one per block.
+ * # Why it draws again, and when
+ *
+ * Everything here — the bars and, in the effect before them, the colours — is drawn on markup React
+ * owns, and lasts exactly as long as React leaves that markup alone. React replaces it wholesale
+ * whenever `dangerouslySetInnerHTML` is handed a different object, so both effects are keyed on
+ * that same object (`markup` in the bubble, memoised on the HTML): every write React makes is
+ * followed by a pass that draws on the new markup. A theme switch re-runs the colours, a language
+ * switch the bars — the cleanup unwraps every frame first, so a block never gets a second bar.
+ *
+ * Layout effects rather than passive ones. A layout effect's cleanup runs inside the commit that
+ * wrote the new markup, ahead of any `MutationObserver` callback (a microtask), so the observer
+ * below is disconnected before it hears of that write. A passive cleanup is only that early for a
+ * synchronous render; after any other, a pass bound to the old markup would decorate the new one
+ * and then be undone by the pass that replaces it. It also puts the bars — and, once Monaco is in,
+ * the colours (see `loadedMonaco` in `lib/codeHighlight`) — in the same frame as the markup they
+ * belong to, whatever priority the render ran at.
+ *
+ * That observer is the second line: a redraw whenever the host's children are replaced by anything
+ * the keys do not see. Nothing does today — the memo is what guarantees it — but the failure it
+ * guards against was silent and total (every block in the transcript went grey while an answer was
+ * being written, and nothing brought it back short of a remount), and the idiomatic spelling of the
+ * prop, an inline `{{ __html: html }}`, is precisely the one that brings it back. With the observer
+ * such a rewrite costs a redraw, not the colours.
  */
-function useCodeBlockActions(html: string | null, labels: CodeBlockLabels) {
+function useCodeBlockActions(markup: { __html: string } | null, labels: CodeBlockLabels) {
   const { copy: copyLabel, copyShort, copied, copyFailed, save: saveLabel, fileStem } = labels;
   const ref = useRef<HTMLDivElement>(null);
 
@@ -514,29 +558,44 @@ function useCodeBlockActions(html: string | null, labels: CodeBlockLabels) {
   const mode = useThemeStore((s) => s.resolved);
   const themeId = useThemeStore((s) => (s.resolved === "dark" ? s.darkThemeId : s.lightThemeId));
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const host = ref.current;
-    if (!host || html === null) return;
+    if (!host || markup === null) return;
     // Clearing the done-marker is what makes a theme switch recolour blocks that are already on
     // screen. It is safe to run over spans this already produced: `textContent` still reads back
     // the original source, so the second pass tokenizes the same text and replaces the children.
     for (const code of Array.from(host.querySelectorAll("pre > code[data-cf-hl]"))) {
       code.removeAttribute("data-cf-hl");
     }
+    const theme = findTheme(themeId, mode);
     // Fire-and-forget: Monaco is a 4.4 MB chunk, loaded on the first code block of the session, and
     // the text is already on screen and readable while it arrives. No cancellation to do — the
     // function walks whatever nodes are still there when it resolves, and an unmounted bubble's
-    // query simply comes back empty.
-    void highlightCodeBlocks(host, findTheme(themeId, mode)).catch(() => {});
-  }, [html, themeId, mode]);
+    // query simply comes back empty. Idempotent through the same marker, which is what lets the
+    // observer call it again: a block already coloured is skipped, not tokenized twice.
+    const paint = () => void highlightCodeBlocks(host, theme).catch(() => {});
+    paint();
+    return onMarkupReplaced(host, paint);
+  }, [markup, themeId, mode]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const host = ref.current;
-    if (!host || html === null) return;
+    if (!host || markup === null) return;
     const frames: HTMLElement[] = [];
     const timers: number[] = [];
+    /** The blocks this run has put a bar on, so a pass the observer starts skips them rather than
+     *  rebuilding their bars — the only thing it is there for is a `<pre>` nobody has framed. */
+    const framed = new WeakSet<Element>();
 
-    for (const pre of Array.from(host.querySelectorAll("pre"))) {
+    const frameBlocks = () => {
+      for (const pre of Array.from(host.querySelectorAll("pre"))) {
+        if (framed.has(pre)) continue;
+        framed.add(pre);
+        frameBlock(pre);
+      }
+    };
+
+    const frameBlock = (pre: HTMLPreElement) => {
       /*
        * The bar goes in a frame around the `<pre>`, never inside the `<pre>` itself.
        *
@@ -637,20 +696,42 @@ function useCodeBlockActions(html: string | null, labels: CodeBlockLabels) {
 
       bar.append(name, save, copy);
       frame.prepend(bar);
-    }
+    };
+
+    frameBlocks();
+    const stopWatching = onMarkupReplaced(host, frameBlocks);
     return () => {
+      stopWatching();
       timers.forEach((timer) => window.clearTimeout(timer));
       // Unwrapped, bar and all, so the next run starts from the markup React put there. `replaceWith`
       // on a node React has already discarded has no parent and does nothing, which is the common
-      // case: changing `html` rewrites this subtree wholesale.
+      // case: a new `markup` rewrites this subtree wholesale.
       frames.forEach((frame) => {
         frame.querySelector(":scope > .cf-chat-code-bar")?.remove();
         const pre = frame.querySelector(":scope > pre");
         if (pre) frame.replaceWith(pre);
       });
     };
-  }, [html, copyLabel, copyShort, copied, copyFailed, saveLabel, fileStem]);
+  }, [markup, copyLabel, copyShort, copied, copyFailed, saveLabel, fileStem]);
   return ref;
+}
+
+/**
+ * Calls `redraw` whenever the host's own children are replaced, and returns the way to stop.
+ *
+ * `childList` on the host and nothing deeper, which is all the question needs: React writing new
+ * markup replaces the host's children, so it is always a change at this level, wherever in the
+ * answer the code blocks sit. The colours a pass paints live a level down, inside each `<code>`,
+ * and are never heard. The frame wrapped around a top-level `<pre>` *is* a change here, so every
+ * pass that frames something is followed by one more — which finds every block already done and
+ * changes nothing, so it settles after a single round rather than feeding itself.
+ */
+function onMarkupReplaced(host: HTMLElement, redraw: () => void): () => void {
+  const observer = new MutationObserver(redraw);
+  observer.observe(host, { childList: true });
+  // `disconnect` also drops records already queued and not yet delivered, which is what makes
+  // calling this from a layout effect's cleanup mean "never for markup this pass did not draw".
+  return () => observer.disconnect();
 }
 
 /**

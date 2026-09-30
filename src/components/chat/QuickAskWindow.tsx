@@ -9,6 +9,8 @@ import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { providerCapabilities } from "../../lib/aiProviders";
 import type { ChatAttachment, ChatOutput } from "../../lib/tauri/chatCommands";
 import { EMPTY_CONVERSATION, effortKey, useConversationStore } from "../../state/conversationStore";
+import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
+import type { ComposerQueue } from "./QueuedMessages";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
@@ -66,6 +68,7 @@ export function QuickAskWindow() {
   const init = useConversationStore((s) => s.init);
   const create = useConversationStore((s) => s.create);
   const send = useConversationStore((s) => s.send);
+  const submit = useConversationStore((s) => s.submit);
   const stopTurn = useConversationStore((s) => s.stop);
   const streamingText = useConversationStore((s) => s.streamingText);
   const streamingThinking = useConversationStore((s) => s.streamingThinking);
@@ -160,8 +163,10 @@ export function QuickAskWindow() {
 
   const onSend = useCallback(
     (message: string) => {
+      // A follow-up written while the answer is still coming waits its turn, exactly as in the
+      // workspace — this box is a real conversation, so it gets the same queue.
       if (conversationId) {
-        send(conversationId, message);
+        submit(conversationId, message);
         return;
       }
       // Unbound, which is what makes it read-only: a question asked from a hotkey over an unrelated
@@ -172,12 +177,28 @@ export function QuickAskWindow() {
         send(id, message);
       });
     },
-    [conversationId, send, create, provider, routedModel],
+    [conversationId, submit, send, create, provider, routedModel],
   );
 
   const onStop = useCallback(() => {
     if (conversationId) stopTurn(conversationId);
   }, [conversationId, stopTurn]);
+
+  const queueKey = conversationId ? chatQueueKey("chat", conversationId) : null;
+  const queued = useChatQueue(queueKey);
+  const queueHeld = useChatQueueHold(queueKey);
+  const composerQueue = useMemo<ComposerQueue | undefined>(() => {
+    if (!conversationId) return undefined;
+    const store = useConversationStore.getState;
+    return {
+      items: queued,
+      held: queueHeld,
+      busy: session.sending,
+      onRemove: (id) => store().discardQueued(conversationId, id),
+      onEdit: (id) => store().editQueued(conversationId, id),
+      onResume: () => store().resumeQueue(conversationId),
+    };
+  }, [conversationId, queued, queueHeld, session.sending]);
 
   /** Before the first question there is no row to write the level to, so it is held as this
    *  window's pending level and `create` applies it to the conversation it makes — which is what
@@ -350,6 +371,7 @@ export function QuickAskWindow() {
         // Always repo-less by construction (see `onSend`), so the only question is the setting.
         canWriteFiles={fileGeneration}
         onRunAppCommand={() => {}}
+        queue={composerQueue}
       />
 
       {conversationId && (

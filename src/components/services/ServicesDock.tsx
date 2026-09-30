@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, CirclePlay, Pencil, Plus, SplitSquareHorizontal, TerminalSquare, X } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -18,6 +19,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { isMainWindow } from "../../lib/windowIdentity";
+import { folderName, relativeInside } from "../../lib/folderPath";
 import type { ServiceRow } from "../../types/services";
 
 const MIN_HEIGHT = 140;
@@ -123,6 +125,20 @@ export function ServicesDock() {
     void openNew(project.id, project.local_path).catch((e: unknown) => pushErrorToast(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProjectId]);
+
+  /**
+   * A shell in a folder picked from the disk — the subfolder three levels down that `+` (the
+   * repository's root) cannot reach without a `cd`. The picker opens at the repository; anywhere
+   * is allowed, it is a shell, and it is filed under this repository like every terminal here.
+   */
+  const openInFolder = async () => {
+    // Captured before the dialog: the active repository can change while it is open.
+    const target = project;
+    if (!target) return;
+    const picked = await openDialog({ directory: true, multiple: false, defaultPath: target.local_path });
+    if (typeof picked !== "string") return;
+    await openNew(target.id, picked).catch((e: unknown) => pushErrorToast(String(e)));
+  };
 
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -262,6 +278,7 @@ export function ServicesDock() {
                   onPick={(profileId) =>
                     project && void openNew(project.id, project.local_path, { profileId })
                   }
+                  onOpenInFolder={() => void openInFolder()}
                 />
               </>
             }
@@ -285,6 +302,7 @@ export function ServicesDock() {
             <TerminalRow
               key={tab.id}
               tab={tab}
+              where={project ? whereOf(project.local_path, tab.cwd) : ""}
               inSplit={visibleIds.includes(tab.id)}
               selected={selection.kind === "terminals" && visibleIds.includes(tab.id)}
               renaming={renamingId === tab.id}
@@ -388,9 +406,17 @@ export function ServicesDock() {
   );
 }
 
+/** Where a shell stands, as its row says it: nothing at the repository's root, where `+` opens every
+ *  one of them; the path below it otherwise; the folder's own name when it is outside. */
+function whereOf(root: string, cwd: string): string {
+  const rel = relativeInside(root, cwd);
+  return rel === null ? folderName(cwd) : rel;
+}
+
 /** One ad-hoc shell in the list. Everything the old tab strip's tab could do, in a row. */
 function TerminalRow({
   tab,
+  where,
   inSplit,
   selected,
   renaming,
@@ -404,6 +430,9 @@ function TerminalRow({
   onClose,
 }: {
   tab: TerminalTab;
+  /** The folder the shell was opened in, when it is not the repository's root — three shells all
+   *  called `zsh` are told apart by where they stand. See `whereOf`. */
+  where: string;
   /** Part of the split currently on screen — drawn on every member, not just the focused one, so a
    *  split reads as the pair it is. */
   inSplit: boolean;
@@ -449,8 +478,9 @@ function TerminalRow({
               size={10}
               className={`shrink-0 ${inSplit ? "text-[var(--cf-accent)]" : "opacity-60"}`}
             />
-            <span className="min-w-0 flex-1 truncate" title={tab.title}>
+            <span className="min-w-0 flex-1 truncate" title={where ? `${tab.title} — ${tab.cwd}` : tab.title}>
               {tab.title}
+              {where && <span className="ml-1.5 font-mono text-[11px] opacity-70">{where}</span>}
             </span>
           </button>
           <div className="flex shrink-0 items-center gap-0.5 opacity-0 focus-within:opacity-100 group-hover/row:opacity-100">

@@ -665,6 +665,22 @@ pub fn list_messages(
     rows.collect()
 }
 
+/// What the user asked in a conversation — the questions' text and nothing else, oldest first.
+///
+/// For [`crate::commands::chat_attach::chat_list_staged_attachments`], which tells a file still
+/// waiting in the composer from one already sent by whether a question names it: a turn with files
+/// writes their paths into the question's own row (see `chat_send`). One column rather than
+/// [`list_messages`], because a long transcript's answers are most of its bytes and none of them
+/// are read.
+pub fn user_message_contents(conn: &Connection, conversation_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT content FROM chat_messages WHERE conversation_id = ?1 AND role = 'user' \
+         ORDER BY turn, created_at",
+    )?;
+    let rows = statement.query_map(params![conversation_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
 /// Writes one message and bumps its conversation's `updated_at`.
 ///
 /// Both statements or neither: a message stored under a thread whose `updated_at` still points at
@@ -1399,5 +1415,21 @@ mod tests {
         assert_eq!(undone.compacted_summary, "");
         assert!(undone.compacted_through_turn.is_none());
         assert!(undone.engine_session_id.is_none());
+    }
+
+    /// The questions of one conversation, and only those: what tells an attachment already sent from
+    /// one still waiting in the composer (`chat_attach::chat_list_staged_attachments`).
+    #[test]
+    fn user_message_contents_are_the_questions_of_that_conversation_in_order() {
+        let conn = seeded();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
+        let other = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
+        append_message(&conn, &user_message(&chat.id, 0, "primera")).unwrap();
+        append_message(&conn, &assistant_message(&chat.id, 0, "respuesta", None)).unwrap();
+        append_message(&conn, &user_message(&chat.id, 1, "segunda")).unwrap();
+        append_message(&conn, &user_message(&other.id, 0, "de otra")).unwrap();
+
+        assert_eq!(user_message_contents(&conn, &chat.id).unwrap(), vec!["primera", "segunda"]);
+        assert!(user_message_contents(&conn, "nope").unwrap().is_empty());
     }
 }

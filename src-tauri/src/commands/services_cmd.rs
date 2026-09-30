@@ -145,12 +145,20 @@ pub fn service_clear_log(app: AppHandle, id: String) {
     Supervisor::of(&app).clear_log(&id);
 }
 
-/// What a folder can run, best first. See [`crate::services::detect`].
+/// What a folder can run, best first. See [`crate::services::detect`]. With `focus` — the subfolder
+/// the editor has picked, relative to `path` — that folder is read however deep it is and what it
+/// holds comes first ([`detect::detect_in`]).
 #[tauri::command]
-pub async fn service_detect(path: String) -> Vec<Candidate> {
-    tauri::async_runtime::spawn_blocking(move || detect::detect(Path::new(path.trim())))
-        .await
-        .unwrap_or_default()
+pub async fn service_detect(path: String, focus: Option<String>) -> Vec<Candidate> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = Path::new(path.trim());
+        match focus.as_deref() {
+            Some(focus) => detect::detect_in(root, focus),
+            None => detect::detect(root),
+        }
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// The env files in a service's folder, for the form to offer — `.env` first. See

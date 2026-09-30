@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, Settings2, TerminalSquare } from "lucide-react";
+import { ChevronDown, FolderOpen, Settings2, TerminalSquare } from "lucide-react";
 import { listShellProfiles } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
@@ -18,12 +18,18 @@ import type { ShellProfile } from "../../types/domain";
  * the added logins — and the user had it removed (2026-09-26): the model and the account are picked
  * where an AI run is asked for, not by opening a terminal. The login flow in Settings › Accounts
  * still opens its own terminal as the account; that is a different door.
+ *
+ * It does carry *where*: "Open in folder…" starts the default shell in a folder picked from the
+ * disk, for the subfolder several levels down that `+` (the repository's root) cannot reach.
  */
 export function ProfileMenu({
   onPick,
+  onOpenInFolder,
   disabled,
 }: {
   onPick: (profileId: string) => void;
+  /** Omitted where there is no folder to start from; the item is then not drawn. */
+  onOpenInFolder?: () => void;
   disabled: boolean;
 }) {
   const t = useT();
@@ -111,6 +117,22 @@ export function ProfileMenu({
             style={{ position: "fixed", right: pos.right, top: pos.top, bottom: pos.bottom, maxHeight: pos.maxHeight }}
             className="z-[9999] min-w-[200px] overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
           >
+            {onOpenInFolder && (
+              <>
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setOpen(false);
+                    onOpenInFolder();
+                  }}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
+                >
+                  <FolderOpen size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  <span className="truncate">{t("terminal.openInFolder")}</span>
+                </button>
+                <div className="my-1 border-t border-[var(--cf-border)]" />
+              </>
+            )}
             <p className="px-2 pb-0.5 pt-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("terminal.profilesHeading")}
             </p>

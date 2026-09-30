@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ChevronDown,
@@ -24,6 +24,7 @@ import { promptAction } from "../../state/promptStore";
 import { useServicesStore } from "../../state/servicesStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { detectServices, listEnvFiles, servicePathExists } from "../../lib/tauri/services";
+import { relativeInside } from "../../lib/folderPath";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import {
   isComposeCommand,
@@ -130,24 +131,42 @@ export function ServiceEditor({
   const project = projects.find((p) => p.id === projectId) ?? null;
   /** The folder the detector reads: the repository's root, or the absolute folder typed. */
   const scanRoot = project ? project.local_path : cwd.trim();
+  /**
+   * The subfolder the detector is pointed at, inside a repository: what was typed or picked in the
+   * Subfolder field — **not** what a proposal filled in. The detector lists that folder first (and
+   * reads it however deep it is), so following the proposals too would re-order the list under the
+   * pointer on every click.
+   */
+  const [focus, setFocus] = useState(service?.cwd ?? "");
+  const scanFocus = project ? focus.trim() : "";
+  /** The root the proposals on screen were read from — see the effect below. */
+  const shownRoot = useRef<string | null>(null);
 
   useEffect(() => {
     if (!scanRoot) {
+      shownRoot.current = null;
       setCandidates([]);
       return;
     }
     let alive = true;
-    setCandidates(null);
+    // Another folder altogether starts from "reading…"; another subfolder of the same repository
+    // keeps the proposals on screen until the new order arrives, rather than blinking them away on
+    // every keystroke of a path.
+    if (shownRoot.current !== scanRoot) setCandidates(null);
     const timer = setTimeout(() => {
-      void detectServices(scanRoot)
-        .then((found) => alive && setCandidates(found))
+      void detectServices(scanRoot, scanFocus)
+        .then((found) => {
+          if (!alive) return;
+          shownRoot.current = scanRoot;
+          setCandidates(found);
+        })
         .catch(() => alive && setCandidates([]));
     }, 250);
     return () => {
       alive = false;
       clearTimeout(timer);
     };
-  }, [scanRoot]);
+  }, [scanRoot, scanFocus]);
 
   /** Checked against the disk as it is typed, because the alternative is finding out at the first
    *  run — by which point the group is half up and the failure reads as the service's fault. */
@@ -277,9 +296,36 @@ export function ServiceEditor({
     if (group) setGroupId(group.id);
   };
 
+  /**
+   * The folder picker — for a subfolder as much as for a folder of its own: a service three folders
+   * down is walked to, not typed. It opens where the field points (the repository's root when the
+   * field is blank).
+   *
+   * Where the pick lands decides what the form holds. Inside the chosen repository it is a
+   * subfolder of it. Inside another repository of the workspace the form moves to that one — the
+   * folder is the fact, the dropdown was a guess, and a service named by its repository keeps working
+   * when the checkout moves (`services.repositoryHint`). Anywhere else it is a folder of its own.
+   */
   const browse = async () => {
-    const picked = await openDialog({ directory: true, multiple: false, defaultPath: cwd.trim() || undefined });
-    if (typeof picked === "string") setCwd(picked);
+    const start = project ? joinPath(project.local_path, cwd.trim()) : cwd.trim();
+    const picked = await openDialog({ directory: true, multiple: false, defaultPath: start || undefined });
+    if (typeof picked !== "string") return;
+    const holds = (candidate: { local_path: string }) => relativeInside(candidate.local_path, picked) !== null;
+    // The repository already chosen wins; otherwise the innermost one, for a checkout nested in another.
+    const owner =
+      (project && holds(project) ? project : null) ??
+      [...projects].filter(holds).sort((a, b) => b.local_path.length - a.local_path.length)[0] ??
+      null;
+    if (owner) {
+      const rel = relativeInside(owner.local_path, picked) ?? "";
+      setProjectId(owner.id);
+      setCwd(rel);
+      setFocus(rel);
+    } else {
+      setProjectId("");
+      setCwd(picked);
+      setFocus("");
+    }
   };
 
   const learned = service ? serviceDetectedPorts(service) : [];
@@ -346,6 +392,7 @@ export function ServiceEditor({
                 onChange={(value) => {
                   setProjectId(value);
                   setCwd("");
+                  setFocus("");
                 }}
                 size="field"
                 options={[
@@ -362,21 +409,25 @@ export function ServiceEditor({
               <div className="flex gap-1.5">
                 <input
                   value={cwd}
-                  onChange={(e) => setCwd(literal(e.target.value))}
+                  onChange={(e) => {
+                    const value = literal(e.target.value);
+                    setCwd(value);
+                    setFocus(value);
+                  }}
                   {...MACHINE_TEXT}
                   placeholder={project ? "apps/api" : "/Users/…/api"}
                   className={`${INPUT} font-mono ${cwdOk === false ? "border-[var(--cf-danger)]" : ""}`}
                 />
-                {!project && (
-                  <button
-                    onClick={() => void browse()}
-                    title={t("services.browse")}
-                    aria-label={t("services.browse")}
-                    className="flex shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)] px-2 text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-                  >
-                    <FolderOpen size={13} />
-                  </button>
-                )}
+                {/* With a repository too: a subfolder can sit several folders down, and walking to
+                    it beats typing its path. */}
+                <button
+                  onClick={() => void browse()}
+                  title={t("services.browse")}
+                  aria-label={t("services.browse")}
+                  className="flex shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)] px-2 text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                >
+                  <FolderOpen size={13} />
+                </button>
               </div>
             </Labelled>
           </div>
@@ -399,7 +450,9 @@ export function ServiceEditor({
             </div>
             {candidates && candidates.length > 0 && (
               <div className="grid max-h-[168px] grid-cols-2 gap-1.5 overflow-y-auto pr-1">
-                {candidates.slice(0, 12).map((candidate) => {
+                {/* More than the grid shows at once — it scrolls — because the detector now reads
+                    nested folders too, and the one the person came for may be the 13th. */}
+                {candidates.slice(0, 40).map((candidate) => {
                   const key = `${project ? candidate.cwd : ""}\u0000${candidate.command}`;
                   const chosen = key === pickedKey;
                   return (

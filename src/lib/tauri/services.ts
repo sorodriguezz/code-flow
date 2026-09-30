@@ -58,8 +58,10 @@ export const serviceLog = (id: string) =>
 
 export const clearServiceLog = (id: string) => invoke<void>("service_clear_log", { id });
 
-/** What a folder can run, best first. */
-export const detectServices = (path: string) => invoke<ServiceCandidate[]>("service_detect", { path });
+/** What a folder can run, best first. `focus` — a subfolder of `path`, relative to it — is read
+ *  however deep it sits, and what it holds is listed first. */
+export const detectServices = (path: string, focus?: string) =>
+  invoke<ServiceCandidate[]>("service_detect", { path, focus: focus?.trim() ? focus.trim() : null });
 
 /** The env files in a folder, `.env` first — what the editor offers to load. Templates
  *  (`.env.example`) are left out. */

@@ -6,15 +6,16 @@
 //! lists the scripts, a compose file lists the containers — so this reads them and proposes the
 //! command a person would have typed. It proposes; the form still takes anything.
 //!
-//! Deliberately shallow: the repository itself, every folder directly inside it — a `backend/`
-//! beside a `frontend/` is the commonest layout there is — the folders inside the conventional
-//! monorepo containers (`apps/`, `packages/`, `services/`, `src/`, `modules/`), and whatever
-//! workspaces a monorepo or a JVM build declares. Walking a whole checkout would find the
-//! `package.json` of every dependency ever vendored, and a suggestion list nobody can scan is worse
-//! than none.
+//! Deep, but not blind. It used to read only the repository, the folders directly in it and the
+//! children of the monorepo containers (`apps/`, `packages/`, …), so a folder of services inside a
+//! folder — `backend/pagos/`, `backend/usuarios/` — was never found. It now walks down to
+//! [`MAX_DEPTH`] levels, and what keeps that from finding the `package.json` of every dependency
+//! ever vendored is *where* it goes, not how far: build output, dependencies and example apps are
+//! never entered, and inside a project only a folder that is a project too is — see
+//! [`project_dirs`]. A suggestion list nobody can scan is still worse than none.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::collections::{HashSet, VecDeque};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -128,13 +129,25 @@ const SKIP_DIRS: [&str; 21] = [
     "tmp", "temp", "coverage", "logs", "log", "Pods", "DerivedData", "public", "static", "assets",
 ];
 
-/// Folders whose children are the projects — the monorepo conventions, and `src/` for .NET
-/// solutions (`src/Api/Api.csproj`).
-const CONTAINERS: [&str; 5] = ["apps", "packages", "services", "src", "modules"];
+/// Folders whose insides are not services even when they run: a library's example apps, test
+/// fixtures, vendored code. One sitting directly in the repository is still read itself, as it
+/// always was — a `tests/` with a compose file for the test database is a thing people start — but
+/// none is ever walked into, and deeper down, where a `tests/` belongs to the project around it,
+/// none is read at all.
+const NOISE_DIRS: [&str; 16] = [
+    "examples", "example", "samples", "sample", "demo", "demos", "fixtures", "__fixtures__", "testdata", "test",
+    "tests", "__tests__", "__mocks__", "e2e", "third_party", "third-party",
+];
 
-/// The most folders one repository is read in. A checkout with more top-level folders than this is
-/// not a set of services.
-const MAX_DIRS: usize = 60;
+/// How far below the scanned folder a project is looked for: `a/b/c/d/e` at most — a folder of
+/// services inside a folder of systems (`backend/pagos/api`), with a level to spare.
+const MAX_DEPTH: usize = 5;
+
+/// The most folders one scan lists, and the most it reads for a command. Breadth first, so what a
+/// budget cuts is always the deepest. No repository anyone works in comes near either — they are
+/// for the folder that is not one: a home directory typed into "another folder".
+const MAX_LISTED: usize = 2_000;
+const MAX_PROJECTS: usize = 150;
 
 /// Every candidate in `root`, best first. Never fails: a folder that cannot be read has nothing to
 /// suggest.
@@ -144,29 +157,107 @@ pub fn detect(root: &Path) -> Vec<Candidate> {
 
 /// [`detect`], for a given machine.
 pub fn detect_on(root: &Path, host: &Host) -> Vec<Candidate> {
+    detect_dirs(root, host, project_dirs(root))
+}
+
+/// [`detect`], told which folder the person is pointing at — the subfolder picked in the editor.
+///
+/// `focus` is relative to `root` and is read however deep it sits: past [`MAX_DEPTH`], past the
+/// budget, inside a project the walk would not have entered. Picking a folder is the plainest way
+/// there is of saying "this one", and answering "nothing detected" because the folder was one level
+/// too deep would be the detector overruling the person. What it finds is listed first; the rest of
+/// the repository still follows, so a pick in the wrong folder costs nothing.
+///
+/// The folders between the two are read too when they are projects: a Maven or Gradle build above
+/// the pick is what says the pick is one of its modules, and is run from there (`-pl api`) — see
+/// [`jvm_candidates`]. A focus that leaves `root` (`..`, an absolute path) is ignored.
+pub fn detect_in(root: &Path, focus: &str) -> Vec<Candidate> {
+    detect_focused(root, focus, &Host::current())
+}
+
+/// [`detect_in`], for a given machine.
+fn detect_focused(root: &Path, focus: &str, host: &Host) -> Vec<Candidate> {
+    let Some(focus) = clean_focus(focus) else { return detect_on(root, host) };
+    let focus_dir = root.join(&focus);
+    if !focus_dir.is_dir() {
+        return detect_on(root, host);
+    }
+    let mut dirs = project_dirs(root);
+    dirs.extend(
+        focus_dir
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| *dir != root && dir.starts_with(root))
+            .filter(|dir| list(dir, 0).0)
+            .map(Path::to_path_buf),
+    );
+    dirs.extend(project_dirs(&focus_dir));
+    let mut seen = HashSet::new();
+    dirs.retain(|dir| seen.insert(dir.clone()));
+    // Parents before what they hold, which the JVM coverage relies on; stable, so each depth keeps
+    // the walk's own order.
+    dirs.sort_by_key(|dir| dir.strip_prefix(root).map(|rel| rel.components().count()).unwrap_or(0));
+
+    let mut out = detect_dirs(root, host, dirs);
+    let inside = |path: &str| path == focus || path.strip_prefix(focus.as_str()).is_some_and(|rest| rest.starts_with('/'));
+    // A module run from its build's root (`-pl api`) has its `cwd` there, but was read from the
+    // module's own `pom.xml` — which is what makes it this folder's.
+    out.sort_by_key(|c| !(inside(&c.cwd) || inside(&c.source)));
+    out
+}
+
+/// `focus` as a forward-slash path inside the scanned folder, or `None` when it names the folder
+/// itself or leads out of it.
+fn clean_focus(focus: &str) -> Option<String> {
+    let normalized = focus.trim().replace('\\', "/");
+    let trimmed = normalized.trim_matches('/');
+    if trimmed.is_empty() || Path::new(focus.trim()).is_absolute() || normalized.starts_with('/') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in Path::new(trimmed).components() {
+        match part {
+            Component::Normal(name) => parts.push(name.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            // `..`, a root, a drive: not somewhere inside the repository.
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// The candidates of `dirs`, read as parts of `root`: root first, then parents before children.
+fn detect_dirs(root: &Path, host: &Host, dirs: Vec<PathBuf>) -> Vec<Candidate> {
     let mut out = Vec::new();
     let folder_name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "app".to_string());
-    let dirs = project_dirs(root);
 
-    // Node. A workspace package runs with the root's package manager; a folder with a lockfile of
-    // its own is a separate project, and says for itself.
+    // Node. A workspace package runs with its workspace's package manager; a folder with a lockfile
+    // of its own is a separate project, and says for itself. The workspace is the nearest folder
+    // above that names a manager — the repository's root for a monorepo, a `frontend/` for a pnpm
+    // workspace kept inside one.
     let root_manager = declared_manager(root).unwrap_or_else(|| "npm".to_string());
+    let manager_of = |dir: &Path| -> String {
+        dir.ancestors()
+            .take_while(|at| *at != root && at.starts_with(root))
+            .find_map(declared_manager)
+            .unwrap_or_else(|| root_manager.clone())
+    };
     let mut node_dirs = node_package_dirs(root);
     node_dirs.extend(dirs.iter().filter(|d| d.join("package.json").is_file()).cloned());
     let mut seen_dirs = HashSet::new();
     node_dirs.retain(|d| seen_dirs.insert(d.clone()));
     for dir in &node_dirs {
-        let manager = if dir == root { root_manager.clone() } else { declared_manager(dir).unwrap_or_else(|| root_manager.clone()) };
-        out.extend(node_candidates(root, dir, &manager, &folder_name));
+        out.extend(node_candidates(root, dir, &manager_of(dir), &folder_name));
     }
 
     // Everything else, folder by folder. A JVM build speaks for its modules, so a folder it covers
     // is not read a second time on its own — that would offer `mvn spring-boot:run` inside a module
-    // beside the `-pl` form that actually resolves its sibling modules.
-    let mut covered: HashSet<PathBuf> = HashSet::new();
+    // beside the `-pl` form that actually resolves its sibling modules. Nor is anything inside a
+    // module, which the walk now reaches: a build nested in a module is part of the same build.
+    let mut covered: Vec<PathBuf> = Vec::new();
     for dir in &dirs {
         let rel = relative(root, dir);
         let name = if rel.is_empty() { folder_name.clone() } else { last_segment(&rel) };
@@ -177,7 +268,7 @@ pub fn detect_on(root: &Path, host: &Host) -> Vec<Candidate> {
         found.extend(make_candidates(dir, &name));
         found.extend(other_candidates(dir, &name, host));
         found.extend(dotnet_candidates(dir));
-        if !covered.contains(dir) {
+        if !covered.iter().any(|module| dir.starts_with(module)) {
             let (jvm, modules) = jvm_candidates(dir, &name, host);
             found.extend(jvm);
             covered.extend(modules);
@@ -208,42 +299,99 @@ pub fn detect_on(root: &Path, host: &Host) -> Vec<Candidate> {
     out
 }
 
-/// The folders read for a project: the root, each folder directly in it, and each folder inside
-/// the conventional containers. Root first, then by depth, then by name — the order the JVM
-/// coverage above relies on.
+/// The folders read for a project: the root, and below it every folder holding something this
+/// module can read (see [`is_marker`]), down to [`MAX_DEPTH`].
+///
+/// # Where it goes
+///
+/// A folder with no project in it — a `backend/` holding `pagos/` and `usuarios/` — is walked
+/// through whole: any of its folders could be the project. A project's own folders mostly are its
+/// source code — a Node app's `src/`, a Maven module's `src/main/java/com/…` — so inside a project a
+/// folder is entered only to see whether it is a project too (a Maven module, a `client/` beside a
+/// `server/`, a `docker/` with its compose file), and left at once when it is not. That one rule is
+/// what keeps a whole checkout from costing a walk of every package of a Java tree, without a list
+/// of source-folder names that would always be missing one.
+///
+/// The repository's own folders are all walked whatever the root holds: a `package.json` at the
+/// top is as often the tooling of a repository of services as it is the app.
+///
+/// Breadth first, so a parent always comes before what it holds — the JVM coverage in
+/// [`detect_dirs`] relies on it — and what a budget cuts is always the deepest. Hidden folders,
+/// symlinks, build output and dependencies are never entered; see [`list`].
 fn project_dirs(root: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![root.to_path_buf()];
-    let children = subfolders(root);
-    dirs.extend(children.iter().cloned());
-    for child in &children {
-        let is_container = child
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| CONTAINERS.contains(&n));
-        if is_container {
-            dirs.extend(subfolders(child));
+    let mut out = vec![root.to_path_buf()];
+    let mut listed = 0;
+    // A folder, its depth below `root`, and whether it was entered only to see if it is a project —
+    // which is how a folder inside one is entered.
+    let mut queue = VecDeque::from([(root.to_path_buf(), 0usize, false)]);
+    while let Some((dir, depth, on_trial)) = queue.pop_front() {
+        if listed >= MAX_LISTED || out.len() >= MAX_PROJECTS {
+            break;
         }
+        listed += 1;
+        let (marked, mut children) = list(&dir, depth);
+        if depth > 0 {
+            if marked {
+                out.push(dir.clone());
+            } else if on_trial {
+                continue;
+            }
+        }
+        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if depth >= MAX_DEPTH || (depth > 0 && NOISE_DIRS.contains(&name.as_str())) {
+            continue;
+        }
+        children.sort();
+        let inside_project = depth > 0 && (marked || on_trial);
+        queue.extend(children.into_iter().map(|child| (child, depth + 1, inside_project)));
     }
-    dirs.truncate(MAX_DIRS);
-    dirs
+    out
 }
 
-/// The folders directly inside `dir` that could be a project: not hidden, not build output or
-/// dependencies, and not a symlink — `file_type` does not follow one, so a link back up the tree
-/// cannot turn this into a walk.
-fn subfolders(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut out: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str())
-        })
-        .collect();
-    out.sort();
-    out
+/// What `dir` holds that the walk cares about: whether one of its files makes it a project, and
+/// the folders it could go on into — not hidden, not build output or dependencies, not noise below
+/// the repository's own level (see [`NOISE_DIRS`]), and not a symlink: `file_type` does not follow
+/// one, so a link back up the tree cannot turn the walk into a loop.
+fn list(dir: &Path, depth: usize) -> (bool, Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return (false, Vec::new()) };
+    let mut marked = false;
+    let mut children = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if kind.is_dir() {
+            let skipped = name.starts_with('.')
+                || SKIP_DIRS.contains(&name.as_str())
+                || (depth > 0 && NOISE_DIRS.contains(&name.as_str()));
+            if !skipped {
+                children.push(entry.path());
+            }
+        } else if !marked && is_marker(&name) {
+            // A linked manifest still says what the folder is; a linked folder is still not walked.
+            marked = kind.is_file() || (kind.is_symlink() && entry.path().is_file());
+        }
+    }
+    (marked, children)
+}
+
+/// Whether a file says its folder is something this module can read a command out of: a manifest
+/// ([`node_candidates`], [`jvm_candidates`], [`other_candidates`], [`dotnet_candidates`]) or a file
+/// that is itself a way to run things — compose, Docker, a Procfile, a task runner. A folder with
+/// none of them has nothing any reader here would find, so the walk passes through it unread.
+fn is_marker(name: &str) -> bool {
+    const MARKERS: [&str; 29] = [
+        "package.json", "deno.json", "deno.jsonc", "pom.xml", "build.gradle", "build.gradle.kts",
+        "settings.gradle", "settings.gradle.kts", "Cargo.toml", "go.mod", "pyproject.toml", "requirements.txt",
+        "setup.py", "Pipfile", "manage.py", "main.py", "app.py", "composer.json", "artisan", "Gemfile",
+        "config.ru", "mix.exs", "Procfile", "Procfile.dev", "Makefile", "justfile", "Taskfile.yml", "Dockerfile",
+        "Dockerfile.dev",
+    ];
+    if MARKERS.contains(&name) || name.ends_with(".csproj") || name.ends_with(".fsproj") {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    (lower.starts_with("docker-compose") || lower.starts_with("compose"))
+        && (lower.ends_with(".yml") || lower.ends_with(".yaml"))
 }
 
 /// The command that runs `script` with this package manager.
@@ -1667,5 +1815,101 @@ mod tests {
         let dir = scratch(&[]);
         assert!(detect(dir.path()).is_empty());
         assert!(detect(Path::new("/definitely/not/here")).is_empty());
+    }
+
+    /// What the walk exists for: services two and more folders down, in folders named nothing a
+    /// monorepo convention would recognise — and a limit to how far down.
+    #[test]
+    fn services_in_a_folder_of_services_are_found() {
+        let dir = scratch(&[
+            ("package.json", r#"{"name":"tooling","devDependencies":{"husky":"9"}}"#),
+            ("backend/pagos/pom.xml", "<project><artifactId>pagos</artifactId><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></project>"),
+            ("backend/usuarios/package.json", r#"{"name":"usuarios","scripts":{"start:dev":"nest start --watch"}}"#),
+            ("backend/usuarios/yarn.lock", ""),
+            ("sistemas/ventas/web/package.json", r#"{"scripts":{"dev":"vite"}}"#),
+            ("sistemas/ventas/infra/docker-compose.yml", "services:\n  db:\n    image: postgres\n"),
+            ("a/b/c/d/e/package.json", r#"{"scripts":{"dev":"vite"}}"#),
+            ("a/b/c/d/e/f/package.json", r#"{"scripts":{"dev":"vite"}}"#),
+        ]);
+        let found = detect(dir.path());
+        assert_eq!(find(&found, "backend/pagos", "mvn spring-boot:run").detail, "Spring Boot");
+        assert_eq!(find(&found, "backend/usuarios", "yarn start:dev").name, "usuarios");
+        find(&found, "sistemas/ventas/web", "npm run dev");
+        find(&found, "sistemas/ventas/infra", "docker compose up");
+        find(&found, "a/b/c/d/e", "npm run dev");
+        assert!(found.iter().all(|c| c.cwd != "a/b/c/d/e/f"), "past MAX_DEPTH: {found:#?}");
+    }
+
+    /// Inside a project only a folder that is a project too is entered — so a `client/` beside the
+    /// server is found, and a `package.json` somewhere in the app's own `src/` is not.
+    #[test]
+    fn a_projects_own_folders_are_entered_only_when_they_are_projects() {
+        let dir = scratch(&[
+            ("apps/shop/package.json", r#"{"name":"shop","scripts":{"dev":"node server.js"}}"#),
+            ("apps/shop/pnpm-lock.yaml", ""),
+            ("apps/shop/client/package.json", r#"{"name":"shop-client","scripts":{"dev":"vite"}}"#),
+            ("apps/shop/src/widgets/embed/package.json", r#"{"scripts":{"dev":"vite"}}"#),
+        ]);
+        let found = detect(dir.path());
+        find(&found, "apps/shop", "pnpm dev");
+        let client = find(&found, "apps/shop/client", "pnpm dev");
+        assert_eq!(client.name, "shop-client", "the nearest workspace's package manager, not npm");
+        assert!(found.iter().all(|c| !c.cwd.contains("/src")), "a project's source is not walked: {found:#?}");
+    }
+
+    #[test]
+    fn example_apps_and_tests_are_not_walked_into() {
+        let dir = scratch(&[
+            ("examples/next-app/package.json", r#"{"scripts":{"dev":"next dev"}}"#),
+            ("api/package.json", r#"{"scripts":{"dev":"node server.js"}}"#),
+            ("api/tests/stack/docker-compose.yml", "services:\n  db:\n    image: postgres\n"),
+            ("tests/docker-compose.yml", "services:\n  db:\n    image: postgres\n"),
+        ]);
+        let found = detect(dir.path());
+        find(&found, "api", "npm run dev");
+        // Directly in the repository, a `tests/` is read itself, as it always was.
+        find(&found, "tests", "docker compose up");
+        assert!(found.iter().all(|c| !c.cwd.starts_with("examples/") && !c.cwd.starts_with("api/tests")), "{found:#?}");
+    }
+
+    /// The folder picked in the editor is read even past the walk's reach, and leads the list.
+    #[test]
+    fn a_picked_folder_is_read_however_deep_and_comes_first() {
+        let dir = scratch(&[
+            ("package.json", r#"{"scripts":{"dev":"turbo dev"}}"#),
+            ("x/y/z/w/v/u/api/package.json", r#"{"name":"deep","scripts":{"dev":"node server.js"}}"#),
+            ("x/y/z/w/v/u/api/.env", "PORT=1\n"),
+        ]);
+        assert!(detect(dir.path()).iter().all(|c| c.name != "deep"), "out of the walk's reach by itself");
+
+        let found = detect_in(dir.path(), "x/y/z/w/v/u/api");
+        let deep = &found[0];
+        assert_eq!((deep.cwd.as_str(), deep.command.as_str()), ("x/y/z/w/v/u/api", "npm run dev"));
+        assert_eq!(deep.source, "x/y/z/w/v/u/api/package.json");
+        assert_eq!(deep.env_files, vec![".env".to_string()]);
+        find(&found, "", "npm run dev");
+
+        // Backslashes and a trailing separator are the same folder; a way out of the root is ignored.
+        assert_eq!(detect_in(dir.path(), "x\\y\\z\\w\\v\\u\\api\\")[0].name, "deep");
+        assert_eq!(detect_in(dir.path(), "../elsewhere"), detect(dir.path()));
+        assert_eq!(detect_in(dir.path(), "/etc"), detect(dir.path()));
+    }
+
+    /// Picking a module of a multi-module build offers the module as its build runs it — from the
+    /// build's root, by module — not a second copy from inside the module folder.
+    #[test]
+    fn a_picked_maven_module_is_run_from_its_build() {
+        let dir = scratch(&[
+            ("README.md", "# plataforma"),
+            ("plataforma/core/pom.xml", "<project><packaging>pom</packaging><modules>\n<module>api</module>\n<module>common</module>\n</modules></project>"),
+            ("plataforma/core/api/pom.xml", "<project><artifactId>api</artifactId><build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>"),
+            ("plataforma/core/common/pom.xml", "<project><artifactId>common</artifactId></project>"),
+            ("web/package.json", r#"{"scripts":{"dev":"vite"}}"#),
+        ]);
+        let found = detect_in(dir.path(), "plataforma/core/api");
+        assert_eq!(found[0].command, "mvn -pl api spring-boot:run");
+        assert_eq!(found[0].cwd, "plataforma/core", "run from the build's root");
+        assert!(found.iter().all(|c| c.cwd != "plataforma/core/api"), "no copy from inside the module: {found:#?}");
+        find(&found, "web", "npm run dev");
     }
 }

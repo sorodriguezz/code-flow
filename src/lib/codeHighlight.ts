@@ -128,6 +128,21 @@ function colourResolver(theme: CodeTheme): (tokenType: string) => string | undef
 const warmed = new Map<string, Promise<void>>();
 
 /**
+ * The editor's Monaco, once {@link highlightCodeBlocks} has loaded it — so no later pass waits on it.
+ *
+ * Not a micro-optimisation, and the time saved is not the point: the *task* is. An `import()` of a
+ * module that is already loaded does not settle in the microtasks right behind its caller — only
+ * after a task has gone by (checked in the browser pane, which is Chromium) — and the browser is
+ * free to paint in between. The chat calls this from a layout effect, straight after React writes
+ * an answer's markup, so with that hop in the way the new markup was painted plain before its
+ * colours landed: once per frame of the typewriter that uncovers a non-streaming answer, which made
+ * the block being uncovered flicker between grey and coloured. With the handle kept here, every
+ * pass after the first is microtasks all the way down — `warm`'s promises are settled by then as
+ * well — and the colours go in ahead of the paint.
+ */
+let loadedMonaco: Monaco | null = null;
+
+/**
  * Makes sure Monaco can actually tokenize `language` before anybody asks it to.
  *
  * **`monaco.editor.tokenize` is synchronous, and Monaco's languages are not.** All ~90 are
@@ -241,15 +256,21 @@ export async function highlightCodeBlocks(host: HTMLElement, theme: CodeTheme): 
   // `monaco-editor`, so a block is tokenized by exactly what the editor would use — the languages
   // the app registers itself (TOML, DBML, ObjectScript) and its fixes to Monaco's grammars
   // (TypeScript decorators) included — and so no language service a warm-up wakes (see `warm`)
-  // ever starts before the app has configured it.
+  // ever starts before the app has configured it. Every pass after the first takes the handle the
+  // first one kept, without an `await` — see `loadedMonaco`.
   let monaco: Monaco;
-  try {
-    ({ monaco } = await import("./monacoSetup"));
-  } catch (error) {
-    // A chunk that failed to load leaves every block plain, which is readable; saying so in the app
-    // log is what makes "the code has no colour on this machine" answerable.
-    reportError("code-highlight", error);
-    return 0;
+  if (loadedMonaco) {
+    monaco = loadedMonaco;
+  } else {
+    try {
+      ({ monaco } = await import("./monacoSetup"));
+    } catch (error) {
+      // A chunk that failed to load leaves every block plain, which is readable; saying so in the
+      // app log is what makes "the code has no colour on this machine" answerable.
+      reportError("code-highlight", error);
+      return 0;
+    }
+    loadedMonaco = monaco;
   }
   const colourOf = colourResolver(theme);
 

@@ -13,6 +13,8 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { openTerminal, writeFileBytes } from "../../lib/tauri/commands";
 import { chatAttachBytes, chatAttachFile, type ChatAttachment, type SkillPick } from "../../lib/tauri/chatCommands";
 import { EMPTY_CONVERSATION, effortKey, useConversationStore } from "../../state/conversationStore";
+import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
+import type { ComposerQueue } from "./QueuedMessages";
 import { estimateTokens } from "../../lib/contextWindow";
 import { appendQuote, passageForNewChat } from "../../lib/quoteSelection";
 import { providerCapabilities } from "../../lib/aiProviders";
@@ -67,6 +69,7 @@ export function ChatView() {
   const loadConversations = useConversationStore((s) => s.loadConversations);
   const create = useConversationStore((s) => s.create);
   const send = useConversationStore((s) => s.send);
+  const submit = useConversationStore((s) => s.submit);
   const setEngine = useConversationStore((s) => s.setEngine);
   const setEffort = useConversationStore((s) => s.setEffort);
   const pendingEffort = useConversationStore((s) => s.pendingEffort);
@@ -505,21 +508,44 @@ export function ChatView() {
    * can unsay a turn, so "edit" cannot mean "replace turn N" — it means asking a better version of
    * the question with everything said so far still in the engine's context. The banner above the
    * composer says exactly that; what it must not do is look like a rewind.
+   *
+   * An open conversation goes through `submit`, which sends now or queues behind the turn still
+   * running — the composer no longer refuses a second message. A brand-new one cannot be busy.
    */
   const onSend = useCallback(
     (message: string, skill?: SkillPick | null) => {
       setEditingTurn(null);
       const over = skill ? { skill } : undefined;
       if (activeId) {
-        send(activeId, message, over);
+        submit(activeId, message, over);
         return;
       }
       void create(null, provider, routedModel).then((id) => {
         if (id) send(id, message, over);
       });
     },
-    [activeId, send, create, provider, routedModel, setEditingTurn],
+    [activeId, submit, send, create, provider, routedModel, setEditingTurn],
   );
+
+  /**
+   * The open conversation's queue, as the composer takes it. Keyed by the conversation, so a thread
+   * left mid-turn keeps what was queued in it and the one opened next shows only its own.
+   */
+  const queueKey = activeId ? chatQueueKey("chat", activeId) : null;
+  const queued = useChatQueue(queueKey);
+  const queueHeld = useChatQueueHold(queueKey);
+  const composerQueue = useMemo<ComposerQueue | undefined>(() => {
+    if (!activeId) return undefined;
+    const store = useConversationStore.getState;
+    return {
+      items: queued,
+      held: queueHeld,
+      busy: session.sending || compacting,
+      onRemove: (id) => store().discardQueued(activeId, id),
+      onEdit: (id) => store().editQueued(activeId, id),
+      onResume: () => store().resumeQueue(activeId),
+    };
+  }, [activeId, queued, queueHeld, session.sending, compacting]);
   // Whose skills the `/` menu offers: the conversation's workspace (a chat is stamped with one, and
   // the app's skills are that workspace's), or the one in front before the first message.
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
@@ -583,6 +609,19 @@ export function ChatView() {
     }
   }, [conversation, session.messages, t]);
 
+  /**
+   * The app's own commands — which, now that the composer stays live during a turn, can be typed
+   * while one runs. Decided per command, by what each one touches:
+   *
+   * - `/compact` **waits its turn** (`submit` queues it behind the running answer and anything
+   *   already queued). It summarises the conversation, so it has to see what is still being said;
+   *   the backend would refuse it mid-turn anyway, and a refusal was silence.
+   * - `/branch` runs now, from the last turn that *has* an answer — the question in flight has none
+   *   yet, and a branch ending on a dangling question would be a copy of nothing.
+   * - `/new`, `/export` and `/caveman` run now: the first two act on the view, not on a turn, and a
+   *   style applies to the next turn *sent* — queued ones included, which is what "from now on"
+   *   means once the running answer has already been asked for.
+   */
   const runAppCommand = useCallback(
     (command: ChatAppCommand, args: string) => {
       switch (command) {
@@ -602,7 +641,10 @@ export function ChatView() {
           // whatever the user typed after the command steers what the summary keeps. `/compact
           // quédate con las rutas de archivo` is a different summary from `/compact` alone, and
           // there is nowhere else in the app to say so.
-          if (activeId) void useConversationStore.getState().compact(activeId, args);
+          if (activeId) {
+            const line = args ? `/compact ${args}` : "/compact";
+            useConversationStore.getState().submit(activeId, line, { command: { id: "compact", args } });
+          }
           break;
         case "caveman": {
           /*
@@ -630,14 +672,16 @@ export function ChatView() {
         }
         case "branch": {
           // From the last turn, which is what "branch this conversation" means with no turn picked.
-          // The per-turn branch lives on the bubble's hover row.
-          const last = session.messages[session.messages.length - 1];
+          // The per-turn branch lives on the bubble's hover row. While a turn runs, the last message
+          // is its question — unanswered — so the branch is taken from the one before it.
+          const settled = session.sending ? session.messages.slice(0, -1) : session.messages;
+          const last = settled[settled.length - 1];
           if (activeId && last) void useConversationStore.getState().branch(activeId, last.turn);
           break;
         }
       }
     },
-    [deselect, exportTranscript, activeId, session.messages, t],
+    [deselect, exportTranscript, activeId, session.messages, session.sending, t],
   );
 
   // Writability follows the conversation's own `projectId`, not the lookup above: a repository the
@@ -824,12 +868,12 @@ export function ChatView() {
                   if (activeId) void setCaveman(activeId, level);
                 },
               }}
-              // Shut while a compaction runs, and this is not politeness. The backend takes the
-              // conversation's lease for the whole summarising turn, so a message sent meanwhile
-              // is refused — and the composer has already cleared the draft by then, so the
-              // question is simply gone. A closed box for twenty seconds beats a lost paragraph.
-              disabled={compacting}
-              disabledReason={t("chat.contextCompacting")}
+              // Open during a compaction too. It used to be shut for one: the backend holds the
+              // conversation's lease for the whole summarising turn, and a message sent meanwhile
+              // was refused after the composer had already cleared it — a lost paragraph. Now
+              // `submit` counts a compaction as busy, so what is sent meanwhile waits in the queue
+              // and goes out once the summary has landed.
+              queue={composerQueue}
             />
           </>
         )}

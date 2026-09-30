@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, Lock, Square, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ListPlus, Lock, Square, UsersRound } from "lucide-react";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
 import { SkillChip } from "../chat/ChatComposer";
 import { McpMenu } from "../chat/McpMenu";
+import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
+import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
 import { openNewChat } from "../../lib/aiPanelNav";
 import { openTerminal } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
@@ -44,6 +46,10 @@ const MAX_COMPOSER_HEIGHT = 180;
  *   answering on even if the routing changes.
  * - **A busy repository is said before sending**, and what is sent waits its turn instead of being
  *   handed back with a toast.
+ * - **Enter keeps working while a turn runs.** What is sent then waits above the box and goes out
+ *   in order as each answer lands — the chat workspace's queue, over this store's turns (see
+ *   `chatQueueStore`). Not the repository wait above: that one is a sent turn waiting for a lease,
+ *   this is a message not sent yet.
  */
 export function PanelChat({
   tabKey,
@@ -61,7 +67,6 @@ export function PanelChat({
   const accountName = useAccountName();
   const session = useChatStore((s) => s.byConversation[conversationId]) ?? EMPTY_CHAT;
   const picked = useChatStore((s) => s.engineByConversation[conversationId]);
-  const send = useChatStore((s) => s.send);
   const project = useWorkspaceStore((s) =>
     Object.values(s.projectsByWorkspace)
       .flat()
@@ -175,12 +180,18 @@ export function PanelChat({
     setSkill(null);
   }, [provider]);
 
-  /** The panel's own commands — see `CommandSurface`. Everything else behind a slash is the CLI's. */
+  /**
+   * The panel's own commands — see `CommandSurface`. Everything else behind a slash is the CLI's.
+   *
+   * Typed or clicked while a turn runs, `/clear` **waits its turn** (the store's `submit` queues it):
+   * the questions already queued were asked of the session they were written in, and only the ones
+   * after it should start fresh. `/new` and `/export` act on the tab, not on a turn, and run now.
+   */
   const runAppCommand = (command: ChatAppCommand) => {
     if (command === "new") {
       openNewChat(projectId);
     } else if (command === "clear") {
-      useChatStore.getState().clearContext(conversationId);
+      useChatStore.getState().submit(projectId, conversationId, "/clear", { command: { id: "clear", args: "" } });
     } else if (command === "export" && session.persisted && session.messages.length > 0) {
       const rect = boxRef.current?.getBoundingClientRect();
       setExportMenu({ x: rect ? rect.left + 8 : 16, y: rect ? rect.top - 8 : 16 });
@@ -189,7 +200,8 @@ export function PanelChat({
 
   const submit = () => {
     const text = draft.trim();
-    if (!text || session.sending) return;
+    // No `sending` guard any more: a message sent while a turn runs is queued by the store.
+    if (!text) return;
     // A typed app command runs instead of being sent — `/clear` must not reach a model as seven
     // characters. Anything else starting with a slash is the CLI's, and goes through as written.
     const command = appCommandFor(text, "panel");
@@ -198,12 +210,38 @@ export function PanelChat({
       runAppCommand(command.id);
       return;
     }
-    send(projectId, conversationId, text, skill);
+    useChatStore.getState().submit(projectId, conversationId, text, { skill });
     setDraft("");
     setSkill(null);
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
+
+  /** This conversation's queue — the same strip, and the same rules, as the chat workspace's. Its
+   *  names say "message" on purpose: `queued` above is the repository wait, a different thing. */
+  const queueKey = chatQueueKey("panel", conversationId);
+  const queuedMessages = useChatQueue(queueKey);
+  const queueHeld = useChatQueueHold(queueKey);
+  const queue = useMemo<ComposerQueue>(
+    () => ({
+      items: queuedMessages,
+      held: queueHeld,
+      busy: session.sending,
+      onRemove: (id) => void useChatStore.getState().takeQueued(conversationId, id),
+      // Back into the box, in front of whatever is there: it was written first.
+      onEdit: (id) => {
+        const item = useChatStore.getState().takeQueued(conversationId, id);
+        if (!item) return null;
+        const current = useAiPanelStore.getState().drafts[tabKey] ?? "";
+        useAiPanelStore.getState().setDraft(tabKey, current.trim() ? `${item.text}\n${current}` : item.text);
+        if (item.skill) setSkill(item.skill);
+        boxRef.current?.focus();
+        return item;
+      },
+      onResume: () => useChatStore.getState().resumeQueue(conversationId),
+    }),
+    [queuedMessages, queueHeld, session.sending, conversationId, tabKey],
+  );
   /** The `/` menu is open while the draft is one token that begins with a slash. */
   const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
   const menuOpen = slash !== null && !slash.includes(" ");
@@ -366,6 +404,7 @@ export function PanelChat({
             }
           />
         )}
+        <QueuedMessages queue={queue} />
         <div className="flex flex-col gap-1.5 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1.5 focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]">
           {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
           <textarea
@@ -381,7 +420,7 @@ export function PanelChat({
                 submit();
               }
             }}
-            placeholder={t("assistant.askPlaceholder", { repo: repoName })}
+            placeholder={session.sending ? t("chat.queuePlaceholder") : t("assistant.askPlaceholder", { repo: repoName })}
             aria-label={t("assistant.askPlaceholder", { repo: repoName })}
             className="max-h-[180px] resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
           />
@@ -396,14 +435,28 @@ export function PanelChat({
             <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />
             <span className="flex-1" />
             {session.sending ? (
-              <button
-                onClick={stop}
-                disabled={cancelling}
-                className="flex shrink-0 items-center gap-1 rounded-lg border border-[var(--cf-border)] px-2 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-50"
-              >
-                <Square size={9} className="fill-current" />
-                {cancelling ? t("ai.stopping") : t("chat.stop")}
-              </button>
+              <>
+                {/* Only while there is something to queue — Enter does the same — and beside Stop,
+                    never instead of it: both stay live for the whole turn. */}
+                {draft.trim() && (
+                  <button
+                    onClick={submit}
+                    title={t("chat.queueAdd")}
+                    aria-label={t("chat.queueAdd")}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                  >
+                    <ListPlus size={13} />
+                  </button>
+                )}
+                <button
+                  onClick={stop}
+                  disabled={cancelling}
+                  className="flex shrink-0 items-center gap-1 rounded-lg border border-[var(--cf-border)] px-2 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-50"
+                >
+                  <Square size={9} className="fill-current" />
+                  {cancelling ? t("ai.stopping") : t("chat.stop")}
+                </button>
+              </>
             ) : (
               <button
                 onClick={submit}

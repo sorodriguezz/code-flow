@@ -10,12 +10,35 @@ import type { ActivityLogEntry } from "../types/domain";
 
 let stored: ActivityLogEntry[] = [];
 
+/**
+ * Every `send_chat_message` is parked until a test settles it — "a turn is running" is then a state
+ * the queue tests hold open as long as they need. Lists answer `[]`, anything else `null`.
+ */
+const backend = vi.hoisted(() => ({
+  sends: [] as { args: Record<string, unknown>; resolve: (value: unknown) => void; reject: (error: unknown) => void }[],
+  asked: [] as string[],
+}));
+
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: async (name: string) => (name === "get_chat_conversation" ? stored : null),
+  invoke: async (name: string, args: Record<string, unknown> = {}) => {
+    if (name === "get_chat_conversation") return stored;
+    if (name === "send_chat_message") {
+      backend.asked.push(String(args.message));
+      return new Promise((resolve, reject) => backend.sends.push({ args, resolve, reject }));
+    }
+    return /(^|_)list(_|$)/.test(name) ? [] : null;
+  },
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {}, emit: async () => {} }));
+// A landed turn raises a notification, and for an assistant target that notification lazily imports
+// `lib/aiPanelNav` to mark the tab unread — a module graph that, pulled in mid-test, can reach a
+// module of the cycle before it has finished initialising ("Cannot access … before
+// initialization"), as an unhandled rejection after the test that caused it has passed. The app
+// has all of it loaded long before; the queue tests below have no use for notifications at all.
+vi.mock("./notificationStore", () => ({ notify: () => {} }));
 
 const { turnsToMessages, useChatStore } = await import("./chatStore");
+const { chatQueueKey, queueHold, queuedMessages, useChatQueueStore } = await import("./chatQueueStore");
 
 function turn(n: number, partial: Partial<ActivityLogEntry> = {}): ActivityLogEntry {
   return {
@@ -95,5 +118,120 @@ describe("the line survives the ways a conversation reaches the screen", () => {
     const messages = useChatStore.getState().byConversation["conv-1"].messages;
     expect(messages.map((m) => m.content)).toEqual(["question 1", "answer 1", "question 2", "answer 2"]);
     expect(messages[2].accountBreak).toEqual({ provider: "claude", accountId: "acct-home" });
+  });
+});
+
+/**
+ * The panel's half of the queue the two chats share (`chatQueueStore`): the same rules as the chat
+ * workspace's, driven by this store's own turns — which go through the repository wait first, so
+ * these also prove the two waits do not get in each other's way.
+ */
+describe("messages sent while a turn runs", () => {
+  const KEY = chatQueueKey("panel", "conv-1");
+  const queued = (key = KEY) => queuedMessages(key).map((item) => item.text);
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  function answer(conversationId: string) {
+    const at = backend.sends.findIndex((s) => s.args.conversationId === conversationId);
+    const [turn] = backend.sends.splice(at, 1);
+    turn.resolve({
+      text: "ok",
+      session_id: "ses-1",
+      model: null,
+      provider: "claude",
+      engine_version: null,
+      created_at: `2026-09-30T10:00:0${backend.asked.length}Z`,
+      response_time_ms: 10,
+    });
+  }
+  function fail(conversationId: string, error: string) {
+    const at = backend.sends.findIndex((s) => s.args.conversationId === conversationId);
+    const [turn] = backend.sends.splice(at, 1);
+    turn.reject(error);
+  }
+
+  beforeEach(() => {
+    backend.sends.length = 0;
+    backend.asked.length = 0;
+    useChatQueueStore.setState({ items: {}, held: {} });
+  });
+
+  it("sends at once when the conversation is free", () => {
+    useChatStore.getState().submit("p-1", "conv-1", "hola");
+    expect(backend.asked).toEqual(["hola"]);
+    expect(queued()).toEqual([]);
+  });
+
+  it("queues what is sent during a turn and sends it, in order, as each answer lands", async () => {
+    const store = useChatStore.getState();
+    store.submit("p-1", "conv-1", "one");
+    store.submit("p-1", "conv-1", "two");
+    store.submit("p-1", "conv-1", "three");
+    expect(backend.asked).toEqual(["one"]);
+    expect(queued()).toEqual(["two", "three"]);
+
+    answer("conv-1");
+    await flush();
+    expect(backend.asked).toEqual(["one", "two"]);
+    answer("conv-1");
+    await flush();
+    expect(backend.asked).toEqual(["one", "two", "three"]);
+    expect(queued()).toEqual([]);
+  });
+
+  it("holds the queue when the turn fails, and when it is stopped", async () => {
+    const store = useChatStore.getState();
+    store.submit("p-1", "conv-1", "one");
+    store.submit("p-1", "conv-1", "two");
+    fail("conv-1", "boom");
+    await flush();
+    expect(backend.asked).toEqual(["one"]);
+    expect(queueHold(KEY)).toBe("error");
+
+    useChatStore.getState().resumeQueue("conv-1");
+    expect(backend.asked).toEqual(["one", "two"]);
+    store.submit("p-1", "conv-1", "three");
+    fail("conv-1", "RUN_CANCELLED::");
+    await flush();
+    expect(backend.asked).toEqual(["one", "two"]);
+    expect(queued()).toEqual(["three"]);
+    expect(queueHold(KEY)).toBe("stopped");
+  });
+
+  it("keeps each conversation's queue to itself", async () => {
+    const store = useChatStore.getState();
+    store.submit("p-1", "conv-1", "one");
+    store.submit("p-1", "conv-2", "elsewhere");
+    store.submit("p-1", "conv-1", "two");
+    answer("conv-2");
+    await flush();
+    expect(backend.asked).toEqual(["one", "elsewhere"]);
+    expect(queued()).toEqual(["two"]);
+    answer("conv-1");
+    await flush();
+    expect(backend.asked).toEqual(["one", "elsewhere", "two"]);
+  });
+
+  it("applies a `/clear` written during a turn after it, so only what follows starts fresh", async () => {
+    const store = useChatStore.getState();
+    store.submit("p-1", "conv-1", "one");
+    store.submit("p-1", "conv-1", "two");
+    store.submit("p-1", "conv-1", "/clear", { command: { id: "clear", args: "" } });
+    store.submit("p-1", "conv-1", "three");
+
+    answer("conv-1");
+    await flush();
+    // "two" was asked before the `/clear`, so it resumes the session "one" left.
+    expect(backend.sends[0].args.sessionId).toBe("ses-1");
+    answer("conv-1");
+    await flush();
+    expect(backend.asked).toEqual(["one", "two", "three"]);
+    expect(backend.sends[0].args.sessionId).toBeNull();
+    const questions = useChatStore.getState().byConversation["conv-1"].messages.filter((m) => m.role === "user");
+    expect(questions.map((m) => [m.content, m.contextReset ?? false])).toEqual([
+      ["one", false],
+      ["two", false],
+      ["three", true],
+    ]);
   });
 });

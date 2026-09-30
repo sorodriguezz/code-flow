@@ -15,7 +15,31 @@ import { useWorkspaceStore } from "./workspaceStore";
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { isQueuedCancellation, whenRepoFree } from "../lib/repoQueue";
 import { onAiChatDelta } from "../lib/tauri/events";
+import type { SkillPick } from "../lib/tauri/chatCommands";
 import type { ActivityLogEntry } from "../types/domain";
+import {
+  chatQueueKey,
+  dropChatQueue,
+  enqueueChatMessage,
+  holdChatQueue,
+  queuedMessages,
+  releaseChatQueue,
+  shiftChatQueue,
+  takeQueuedChatMessage,
+  type QueuedChatMessage,
+  type QueuedCommand,
+} from "./chatQueueStore";
+
+/**
+ * The assistant's queue for one conversation — see `chatQueueStore`.
+ *
+ * Not to be confused with `lib/repoQueue`, which is the *other* wait a turn here can be in: a turn
+ * that has been sent and is waiting for its repository's lease ("En cola tras …", under its
+ * question). This one is the messages written while a turn of the same conversation ran, which
+ * have not been sent at all yet. A queued message that is then sent can go on to wait for the
+ * repository too; the two never describe the same message at the same moment.
+ */
+const queueOf = (conversationId: string) => chatQueueKey("panel", conversationId);
 
 /** The repository name the backend puts after its busy marker. */
 function repoNameFromBusy(error: string): string {
@@ -119,12 +143,10 @@ export interface ChatSession {
   resetPending: boolean;
 }
 
-/** A skill picked for one turn — the same shape `chat_send` takes (see `SkillPick`). */
-export interface ChatSkillPick {
-  name: string;
-  source: string;
-  path: string | null;
-}
+/** A skill picked for one turn — `chat_send`'s `SkillPick` itself rather than a copy of its shape:
+ *  both composers pick from the same `/` menu, and a queued message (`chatQueueStore`) carries its
+ *  skill in that one type whichever chat it was written in. */
+export type ChatSkillPick = SkillPick;
 
 /** Which engine a conversation runs on, when it has been pinned rather than left to the routing. */
 export interface ChatEngine {
@@ -321,11 +343,14 @@ function pruneConversations(): void {
   recentConversations = recentConversations.filter((id) => byConversation[id] !== undefined);
   const candidates = recentConversations;
 
+  // A conversation with messages queued keeps its session too: they exist only in memory, and
+  // sending one needs the session — its project, its engine session — that a collapse would drop.
   const evictable = (session: ChatSession): boolean =>
     !session.sending &&
     session.persisted &&
     !active.has(session.conversationId) &&
-    !session.messages.some((m) => m.isCancelled);
+    !session.messages.some((m) => m.isCancelled) &&
+    queuedMessages(queueOf(session.conversationId)).length === 0;
 
   const gone = new Set<string>();
   for (const id of candidates) {
@@ -369,6 +394,27 @@ interface ChatState {
    * hold the same lease — waits for it instead of failing: see `lib/repoQueue`.
    */
   send: (projectId: string, conversationId: string, message: string, skill?: ChatSkillPick | null) => void;
+  /**
+   * What the composer's Enter does: sends now when this conversation is free, queues otherwise —
+   * the same rule as the chat workspace's (`conversationStore.submit`), over this store's turns.
+   *
+   * Busy is a turn in flight, including one still waiting for its repository, or a queue that
+   * still has something in it: a message written after three others is the fourth. `command` is
+   * `/clear`, the one panel command that has to wait its turn — the questions queued before it keep
+   * the engine session they were asked in, the ones after it start a fresh one.
+   */
+  submit: (
+    projectId: string,
+    conversationId: string,
+    message: string,
+    opts?: { skill?: ChatSkillPick | null; command?: QueuedCommand },
+  ) => void;
+  /** Sends the next queued message if the conversation is free and its queue is not held. */
+  drainQueue: (conversationId: string) => void;
+  /** Lets a held queue go again, starting with its oldest message. */
+  resumeQueue: (conversationId: string) => void;
+  /** Takes one message out of the queue — for good, or to be edited in the box. */
+  takeQueued: (conversationId: string, itemId: string) => QueuedChatMessage | null;
   /** `/clear`: the next question in this conversation starts a fresh engine session — on every
    *  engine, since it is the app that simply stops passing the old session on. */
   clearContext: (conversationId: string) => void;
@@ -576,8 +622,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           status: "success",
           detail: base.title || liveTitle(trimmed),
         });
+        // The conversation is free: what was written while this answer was produced goes next.
+        get().drainQueue(conversationId);
       })
       .catch((e) => {
+        // Nothing queued behind this turn is sent on a failure or a Stop — whichever branch below
+        // this is, it is not an answer to build the next question on. The queue is held and says
+        // so; a question that never ran goes back to the box as before.
+        holdChatQueue(queueOf(conversationId), isCancellation(e) ? "stopped" : "error");
         // Stopped while it was still waiting for the repository: it never ran, so there is nothing
         // to file — the question goes back into the composer it was typed in.
         if (isQueuedCancellation(e)) {
@@ -672,6 +724,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
         useAiRunStore.getState().finish(runId);
       });
   },
+
+  submit: (projectId, conversationId, message, opts) => {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    const key = queueOf(conversationId);
+    const command = opts?.command;
+    const busy = get().byConversation[conversationId]?.sending ?? false;
+    if (!busy && queuedMessages(key).length === 0) {
+      if (command?.id === "clear") get().clearContext(conversationId);
+      else get().send(projectId, conversationId, trimmed, opts?.skill ?? null);
+      return;
+    }
+    enqueueChatMessage(key, { text: trimmed, skill: command ? null : (opts?.skill ?? null), command });
+    // A no-op while the turn runs. When the conversation is idle behind a held queue, queuing
+    // released it, and the oldest message goes now.
+    get().drainQueue(conversationId);
+  },
+
+  drainQueue: (conversationId) => {
+    const session = get().byConversation[conversationId];
+    if (!session || session.sending) return;
+    const key = queueOf(conversationId);
+    // A queued `/clear` is instantaneous — it only marks the next question as a fresh start — so it
+    // is applied and the queue moves straight on to that question.
+    for (let next = shiftChatQueue(key); next; next = shiftChatQueue(key)) {
+      if (next.command?.id === "clear") {
+        get().clearContext(conversationId);
+        continue;
+      }
+      get().send(session.projectId, conversationId, next.text, next.skill ?? null);
+      return;
+    }
+  },
+
+  resumeQueue: (conversationId) => {
+    releaseChatQueue(queueOf(conversationId));
+    get().drainQueue(conversationId);
+  },
+
+  takeQueued: (conversationId, itemId) => takeQueuedChatMessage(queueOf(conversationId), itemId),
 
   ensureLoaded: async (projectId, conversationId) => {
     touchConversation(conversationId);
@@ -780,9 +872,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   discard: (conversationId) => {
     // Deleted from history: there is nothing left to reload, so the cap's bookkeeping about it
-    // goes too rather than outliving the thing it describes.
+    // goes too rather than outliving the thing it describes — and so does anything still queued
+    // for it, which has no conversation left to be sent to.
     recentConversations = recentConversations.filter((id) => id !== conversationId);
     modelOfCollapsed.delete(conversationId);
+    dropChatQueue(queueOf(conversationId));
     set((s) => {
       if (!s.byConversation[conversationId]) return s;
       const { [conversationId]: _dropped, ...rest } = s.byConversation;

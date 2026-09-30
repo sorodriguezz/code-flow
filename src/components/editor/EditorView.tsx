@@ -2130,6 +2130,7 @@ export function EditorView() {
           ) : (
             <FileTree
               repoPath={project.local_path}
+              projectId={project.id}
               selectedPath={activePath}
               onSelectFile={selectFileInTree}
               onOpenFile={openFileInTree}

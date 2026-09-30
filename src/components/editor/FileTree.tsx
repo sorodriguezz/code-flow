@@ -16,6 +16,7 @@ import {
   PenLine,
   RefreshCw,
   Scissors,
+  TerminalSquare,
   Trash2,
 } from "lucide-react";
 import {
@@ -60,6 +61,7 @@ import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { canDropInto, useTreeDragStore, type TreeDrag } from "../../state/treeDragStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { useTerminalStore } from "../../state/terminalStore";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
 import { useMinimumSpin } from "../../lib/useMinimumSpin";
@@ -619,6 +621,7 @@ const TreeNode = memo(function TreeNode({
 
 export function FileTree({
   repoPath,
+  projectId,
   selectedPath,
   onSelectFile,
   onOpenFile,
@@ -632,9 +635,11 @@ export function FileTree({
   onOpenScratch,
 }: {
   repoPath: string;
-  /** The project the terminal dock indexes its shells by. Passed in rather than read from the
+  /** The project the terminal dock indexes its shells by — what "Open in Integrated Terminal" files
+   *  its shell under; without one the item is not offered. Passed in rather than read from the
    *  project store here: the tree is given its `repoPath` from outside too, and two sources for
-   *  one project is how a script ends up running in the previous project's dock. */
+   *  one project is how a shell ends up in the previous project's dock. */
+  projectId?: string;
   selectedPath: string | null;
   /** Single click — opens the file as a reusable preview tab. */
   onSelectFile: (path: string) => void;
@@ -1412,6 +1417,22 @@ export function FileTree({
         separated: true,
         onClick: () => revealInOs(entry),
       });
+      // VS Code's "Open in Integrated Terminal", beside its "Reveal": a shell standing in the folder
+      // under the pointer — or at the repository's root, from the empty space. Always the one under
+      // the pointer, whatever else is selected: a shell is in one place. It lands in this window's
+      // dock, under this repository, and the dock opens to show it.
+      if (projectId && (!entry || entry.is_dir)) {
+        const cwd = entry ? `${repoPath}/${entry.path}` : repoPath;
+        items.push({
+          label: t("editor.openInTerminal"),
+          icon: TerminalSquare,
+          onClick: () =>
+            void useTerminalStore
+              .getState()
+              .openNew(projectId, cwd)
+              .catch((e: unknown) => pushErrorToast(String(e))),
+        });
+      }
       if (entry) {
         items.push(
           {
@@ -1456,6 +1477,7 @@ export function FileTree({
       revealInOs,
       copyToClipboard,
       repoPath,
+      projectId,
       hideEntry,
       isDirPath,
       nestingEnabled,

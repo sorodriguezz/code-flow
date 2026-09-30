@@ -25,7 +25,7 @@ import {
   chatGroupAttachFile,
   chatGroupListContext,
   chatGroupRemoveContext,
-  chatListAttachments,
+  chatListStagedAttachments,
   chatListOutputs,
   chatAdoptPendingAttachments,
   chatAttachPendingBytes,
@@ -61,6 +61,23 @@ import { translate } from "./languageStore";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import {
+  chatQueueKey,
+  dropChatQueue,
+  enqueueChatMessage,
+  holdChatQueue,
+  queuedAttachmentIds,
+  queuedMessages,
+  releaseChatQueue,
+  requeueChatMessageFirst,
+  shiftChatQueue,
+  takeQueuedChatMessage,
+  type QueuedChatMessage,
+  type QueuedCommand,
+} from "./chatQueueStore";
+
+/** This workspace's queue for one conversation — see `chatQueueStore`. */
+const queueOf = (conversationId: string) => chatQueueKey("chat", conversationId);
 
 /**
  * State for the `chat` workspace: the flat conversation list and the transcripts behind it.
@@ -595,12 +612,42 @@ interface ConversationState {
    *  lost nor misfiled if the user has moved on. Several conversations may be in flight at once;
    *  only a second turn *within one conversation* is refused, since its engine session can only be
    *  resumed once at a time. */
-  /** `over.skill` is a skill picked in the composer: told to the engine for this turn only. */
+  /** `over.skill` is a skill picked in the composer: told to the engine for this turn only.
+   *  `over.attachments` names this turn's files outright — a queued message carrying its own —
+   *  and leaves the composer's staged list alone; absent, the staged list is what goes. */
   send: (
     conversationId: string,
     message: string,
-    over?: { provider?: string; model?: string; skill?: SkillPick | null },
+    over?: { provider?: string; model?: string; skill?: SkillPick | null; attachments?: ChatAttachment[] },
   ) => void;
+  /**
+   * What the composer's Enter does: sends now when the conversation is free, queues otherwise.
+   *
+   * "Busy" is a turn in flight *or* a compaction — the backend holds the conversation's lease for
+   * both — and also a queue that still has something in it, even an idle one: a message written
+   * after three others is the fourth, and sending it first would answer the conversation out of
+   * order. Queuing releases a held queue (see `enqueueChatMessage`) and the files staged on the
+   * composer go with the message they were attached to.
+   *
+   * `over.command` is an app command that must wait its turn — `/compact` — sent as the line it
+   * was typed as; the others never reach here (see `ChatView.runAppCommand`).
+   */
+  submit: (
+    conversationId: string,
+    message: string,
+    over?: { skill?: SkillPick | null; command?: QueuedCommand },
+  ) => void;
+  /** Sends the next queued message if the conversation is free and its queue is not held. Called
+   *  whenever a turn or a compaction settles well, and by `resumeQueue`. */
+  drainQueue: (conversationId: string) => void;
+  /** Lets a held queue go again, starting with its oldest message. */
+  resumeQueue: (conversationId: string) => void;
+  /** Takes a message out of the queue for good. Its staged files are deleted, the same as removing
+   *  their chips from the composer would have: they were never sent. */
+  discardQueued: (conversationId: string, itemId: string) => void;
+  /** Takes a message out of the queue and hands it back to be edited: its files go back on the
+   *  composer, and the caller puts the text and the skill in the box. */
+  editQueued: (conversationId: string, itemId: string) => QueuedChatMessage | null;
   /**
    * Asks the question behind the answer at `turn` again, in the selected conversation.
    *
@@ -774,8 +821,11 @@ interface ConversationState {
    * "quédate con los nombres de archivo", "olvida lo de los tests". It is added to the standing
    * instructions rather than replacing them, so a steer cannot accidentally turn the summary into
    * something unusable as context.
+   *
+   * Resolves `true` when a summary was filed — what the queue waits on before it sends the message
+   * written after a `/compact`.
    */
-  compact: (conversationId: string, guidance?: string) => Promise<void>;
+  compact: (conversationId: string, guidance?: string) => Promise<boolean>;
   /** Throws the summary away, so the whole transcript is replayed again. Instant and free. */
   uncompact: (conversationId: string) => Promise<void>;
 
@@ -918,7 +968,23 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       if (streamedInto) clearBuffers(streamedInto);
       // Re-read rather than patch: the row, its trace, its usage and its timing were all written by
       // the backend, and this window never saw any of them.
-      void get().open(conversationId);
+      //
+      // And only then the queue, because the event carries no outcome and the re-read is the only
+      // place one is written down: a message typed here while another window's turn ran waits on
+      // that turn exactly as it would on one of this window's own — sent if it answered, held if
+      // the last row it left is a failure or a stop.
+      void get()
+        .open(conversationId)
+        .then(() => {
+          if (queuedMessages(queueOf(conversationId)).length === 0) return;
+          const messages = get().byConversation[conversationId]?.messages ?? [];
+          const last = messages[messages.length - 1];
+          if (last?.role === "assistant" && (last.isError || last.isCancelled)) {
+            holdChatQueue(queueOf(conversationId), last.isCancelled ? "stopped" : "error");
+          } else {
+            get().drainQueue(conversationId);
+          }
+        });
       void get().loadConversations();
     }).then((off) => {
       offs.push(off);
@@ -1340,13 +1406,17 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     // Captured before the await, like the workspace stamp beside it: the user is free to remove a
     // chip while the turn is in flight, and the turn must be sent with what was staged when they
     // pressed send — not with whatever the list happens to hold when the promise is constructed.
-    const staged = (get().attachments[conversationId] ?? []).map((a) => a.id);
+    //
+    // A queued message names its own files instead, and must never take the staged ones: those
+    // belong to whatever the user is writing *now*, which is a different message.
+    const files = over?.attachments ?? get().attachments[conversationId] ?? [];
+    const staged = files.map((a) => a.id);
     // Cleared here, before the turn even starts, and the *files are not deleted*. The distinction
     // is the whole design: the chips belong to the message that is being sent, so leaving them up
     // would make every later turn re-announce "files attached to this message" about a screenshot
     // from five turns ago. The copies themselves live as long as the conversation, because a
     // follow-up question can make the model read one again — see `commands::chat_attach`.
-    if (staged.length > 0) {
+    if (staged.length > 0 && !over?.attachments) {
       set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
     }
     void chatSend(
@@ -1449,6 +1519,11 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           status: "success",
           detail: title,
         });
+        // Last, once the turn is settled everywhere else: the conversation is free, so whatever
+        // was written while this answer was being produced goes next. Not held back for the
+        // typewriter — the text is already whole and on disk, the reveal is only the screen
+        // catching up, and the next question can be on its way while it does.
+        get().drainQueue(conversationId);
       })
       .catch((e) => {
         // Whichever id the answer is filed under by now: a turn that streamed before it failed
@@ -1470,10 +1545,23 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
             pendingMessageId: null,
             updatedAt: Date.now(),
           }));
+          // The question is not dropped with its bubble: it goes back to the head of the queue —
+          // files and skill included — held, where it can be resumed once the other window is done
+          // or pulled back into the box. It used to vanish with the toast, after the composer had
+          // already been cleared, which made "busy" indistinguishable from "lost".
+          requeueChatMessageFirst(queueOf(conversationId), {
+            text: trimmed,
+            skill: over?.skill ?? null,
+            attachments: files.length > 0 ? files : undefined,
+          });
+          holdChatQueue(queueOf(conversationId), "error");
           pushErrorToast(translate("agents.busyInRepo", { name: repoNameFromBusy(String(e)) }));
           return;
         }
         const cancelled = isCancellation(e);
+        // Whatever was queued behind this turn stays where it is: a failure, or a Stop, is not an
+        // answer to build the next question on. The queue says it is held and waits for the user.
+        holdChatQueue(queueOf(conversationId), cancelled ? "stopped" : "error");
         const trace = snapshotTrace(runId);
         // The failure joins the transcript rather than sitting in a banner the next message would
         // wipe. The raw text is kept so the bubble can re-parse the quota marker. A turn the user
@@ -1522,6 +1610,82 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         }
       })
       .finally(() => useAiRunStore.getState().finish(runId));
+  },
+
+  submit: (conversationId, message, over) => {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    const session = get().byConversation[conversationId];
+    if (!session) return;
+    const key = queueOf(conversationId);
+    const command = over?.command;
+    const busy = session.sending || Boolean(get().compacting[conversationId]);
+    if (!busy && queuedMessages(key).length === 0) {
+      if (command?.id === "compact") void get().compact(conversationId, command.args);
+      else get().send(conversationId, trimmed, { skill: over?.skill ?? null });
+      return;
+    }
+    // The staged files leave the composer with the message they were attached to, exactly as a
+    // send takes them — the next thing written starts with an empty tray. A command carries none.
+    const files = command ? [] : (get().attachments[conversationId] ?? []);
+    if (files.length > 0) set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
+    enqueueChatMessage(key, {
+      text: trimmed,
+      skill: command ? null : (over?.skill ?? null),
+      attachments: files.length > 0 ? files : undefined,
+      command,
+    });
+    // A no-op while a turn runs, which is the ordinary case. It matters when the conversation is
+    // idle behind a held queue: queuing released it, so the oldest message goes now.
+    get().drainQueue(conversationId);
+  },
+
+  drainQueue: (conversationId) => {
+    const session = get().byConversation[conversationId];
+    if (!session || session.sending || get().compacting[conversationId]) return;
+    const next = shiftChatQueue(queueOf(conversationId));
+    if (!next) return;
+    // A queued `/compact` runs as the compaction it is; `compact` itself advances the queue again
+    // when the summary is filed, and holds it when it is not.
+    if (next.command?.id === "compact") {
+      void get().compact(conversationId, next.command.args);
+      return;
+    }
+    // Always with an explicit list, even an empty one: without it `send` would take the composer's
+    // staged files, which belong to whatever is being written now.
+    get().send(conversationId, next.text, { skill: next.skill ?? null, attachments: next.attachments ?? [] });
+  },
+
+  resumeQueue: (conversationId) => {
+    releaseChatQueue(queueOf(conversationId));
+    get().drainQueue(conversationId);
+  },
+
+  discardQueued: (conversationId, itemId) => {
+    const taken = takeQueuedChatMessage(queueOf(conversationId), itemId);
+    for (const file of taken?.attachments ?? []) {
+      // Best-effort, like the chip's own ✕: a copy that could not be deleted is swept with the
+      // conversation, and failing the removal over it would leave the message in the queue.
+      void chatRemoveAttachment(conversationId, file.id).catch(() => {});
+    }
+  },
+
+  editQueued: (conversationId, itemId) => {
+    const taken = takeQueuedChatMessage(queueOf(conversationId), itemId);
+    const files = taken?.attachments ?? [];
+    if (files.length > 0) {
+      set((s) => {
+        const current = s.attachments[conversationId] ?? [];
+        const known = new Set(current.map((file) => file.id));
+        return {
+          attachments: {
+            ...s.attachments,
+            [conversationId]: [...current, ...files.filter((file) => !known.has(file.id))],
+          },
+        };
+      });
+    }
+    return taken;
   },
 
   regenerate: (turn) => {
@@ -1772,8 +1936,16 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   },
 
   loadAttachments: async (conversationId) => {
-    const files = await chatListAttachments(conversationId);
-    set((s) => ({ attachments: { ...s.attachments, [conversationId]: files } }));
+    // Only what no question has sent yet. The folder keeps every copy for the conversation's whole
+    // life, and filling the composer from all of it put every file ever sent back on the box each
+    // time the conversation was reopened — see `chat_list_staged_attachments`.
+    const files = await chatListStagedAttachments(conversationId);
+    // The folder also holds the files a queued message is carrying — they are copies on disk like
+    // any other — and putting them back on the composer would send them twice, once with the
+    // message they belong to and once with whatever is written next.
+    const carried = queuedAttachmentIds(queueOf(conversationId));
+    const staged = carried.size > 0 ? files.filter((file) => !carried.has(file.id)) : files;
+    set((s) => ({ attachments: { ...s.attachments, [conversationId]: staged } }));
   },
 
   loadOutputs: async (conversationId) => {
@@ -1835,8 +2007,10 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   remove: async (conversationId) => {
     await chatDeleteConversation(conversationId);
     // Deleted means there is nothing left to reload, so the cap's bookkeeping about it goes too
-    // rather than outliving the thing it describes.
+    // rather than outliving the thing it describes. So does its queue: there is no conversation
+    // left to send it to, and the files it carried went with the conversation's folder.
     recent = recent.filter((id) => id !== conversationId);
+    dropChatQueue(queueOf(conversationId));
     set((s) => {
       const { [conversationId]: dropped, ...rest } = s.byConversation;
       if (dropped?.revealingMessageId) stopRevealer(dropped.revealingMessageId);
@@ -1863,9 +2037,12 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     // the one on screen and then clear the session that exchange is about to be written into. The
     // Rust side refuses both as well — it takes the conversation's lease — but refusing here is
     // what keeps the button from looking broken.
-    if (get().compacting[conversationId]) return;
-    if (get().byConversation[conversationId]?.sending) return;
+    if (get().compacting[conversationId]) return false;
+    if (get().byConversation[conversationId]?.sending) return false;
 
+    // How this ended, for the queue — read once everything below has settled, after the `finally`,
+    // so no route out of the `try` can skip telling it.
+    let outcome: "compacted" | "failed" | "stopped" = "failed";
     const runId = newRunId("chat");
     const title = get().conversations.find((c) => c.id === conversationId)?.title ?? "";
     set((s) => ({ compacting: { ...s.compacting, [conversationId]: runId } }));
@@ -1911,10 +2088,12 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         ? Math.max(0, Math.round((1 - result.after_chars / result.before_chars) * 100))
         : 0;
       pushSuccessToast(translate("chat.compactedBy", { percent: saved }));
+      outcome = "compacted";
     } catch (e) {
       // A cancellation is the user pressing Stop on their own compaction. Nothing was written —
       // the summary is filed only after the run returns — so there is nothing to explain.
-      if (!isCancellation(e)) pushErrorToast(String(e));
+      if (isCancellation(e)) outcome = "stopped";
+      else pushErrorToast(String(e));
     } finally {
       useAiRunStore.getState().finish(runId);
       set((s) => {
@@ -1923,6 +2102,12 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         return { compacting: next };
       });
     }
+    // The lease is free again, so the queue gets the same treatment it gets after a turn: what was
+    // written during the summary — or queued behind a `/compact` — goes on a summary that landed,
+    // and waits for the user behind one that did not.
+    if (outcome === "compacted") get().drainQueue(conversationId);
+    else holdChatQueue(queueOf(conversationId), outcome === "stopped" ? "stopped" : "error");
+    return outcome === "compacted";
   },
 
   uncompact: async (conversationId) => {
@@ -2099,11 +2284,13 @@ function prune(): void {
       active: id === activeId,
       persisted: session.persisted && session.loaded,
       // A stopped turn is never written, and a revealing one is only half on screen. Either way
-      // memory holds something the re-read would not bring back.
+      // memory holds something the re-read would not bring back. A queue is the third case: its
+      // messages live nowhere else, and sending one needs the session the cap would drop.
       holdsUnwritten:
         session.revealingMessageId !== null ||
         session.pendingMessageId !== null ||
-        session.messages.some((m) => m.isCancelled),
+        session.messages.some((m) => m.isCancelled) ||
+        queuedMessages(queueOf(id)).length > 0,
     };
   });
   const gone = new Set(pickEvictions(recent, candidates));

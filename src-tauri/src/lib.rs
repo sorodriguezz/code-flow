@@ -764,6 +764,7 @@ pub fn run() {
             commands::chat_attach::chat_attach_file,
             commands::chat_attach::chat_attach_bytes,
             commands::chat_attach::chat_list_attachments,
+            commands::chat_attach::chat_list_staged_attachments,
             commands::chat_attach::chat_remove_attachment,
             commands::chat_attach::chat_attach_pending_file,
             commands::chat_attach::chat_attach_pending_bytes,

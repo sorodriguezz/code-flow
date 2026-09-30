@@ -279,12 +279,55 @@ pub fn chat_attach_bytes(
     store_bytes(&safe_conversation_dir(&conversation_id)?, &name, data)
 }
 
+/// Every file the conversation has — sent or not. What the export lists and what the send path
+/// resolves ids against; the composer wants [`chat_list_staged_attachments`] instead.
 #[tauri::command]
 pub fn chat_list_attachments(conversation_id: String) -> Result<Vec<ChatAttachment>, String> {
     // A conversation with no attachments has no directory, which is not an error — it is the
     // ordinary case, and creating one here to be able to read it back empty would put a folder on
     // disk for every conversation that never attached anything.
     Ok(list_dir(&safe_conversation_dir(&conversation_id)?))
+}
+
+/// The files waiting in the composer: every attachment of the conversation that no question has
+/// named yet.
+///
+/// # Why it is read off the transcript
+///
+/// A conversation keeps its copies for its whole life (see the module docs), so its folder alone
+/// cannot say which of them were already sent — and the composer used to be filled from the folder
+/// on every open. The send clears the chips only in memory, so reopening a conversation, or
+/// restarting, put every file ever sent back on the composer as if it were about to go again. What
+/// does say it is the transcript: `chat_send` writes the files' paths into the question's own row
+/// before the engine runs, whatever becomes of the turn. So a file has been sent exactly when a
+/// question names it — by its stored name, which carries a random prefix and so is never named by
+/// accident, and which, unlike the whole path, still matches after the state root has moved.
+///
+/// Derived rather than recorded: no column, no migration, and right for every conversation that
+/// existed before this did, which is where the bug was seen.
+#[tauri::command]
+pub fn chat_list_staged_attachments(
+    db: State<'_, Db>,
+    conversation_id: String,
+) -> Result<Vec<ChatAttachment>, String> {
+    let files = list_dir(&safe_conversation_dir(&conversation_id)?);
+    if files.is_empty() {
+        return Ok(files);
+    }
+    let asked = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        chat_queries::user_message_contents(&conn, &conversation_id).map_err(|e| e.to_string())?
+    };
+    Ok(unsent(files, &asked))
+}
+
+/// `files` without the ones a question in `asked` already names. See
+/// [`chat_list_staged_attachments`].
+fn unsent(files: Vec<ChatAttachment>, asked: &[String]) -> Vec<ChatAttachment> {
+    files
+        .into_iter()
+        .filter(|file| !asked.iter().any(|question| question.contains(&file.id)))
+        .collect()
 }
 
 #[tauri::command]
@@ -967,5 +1010,32 @@ mod tests {
         assert!(is_image("photo.jpeg"));
         assert!(!is_image("notes.md"));
         assert!(!is_image("no-extension"));
+    }
+
+    /// The bug this exists for: a file already sent went back on the composer every time its
+    /// conversation was reopened. Sent is "a question names it" — here by the paths `chat_send`
+    /// writes into the question — and one attached since is still waiting.
+    #[test]
+    fn only_files_no_question_names_are_still_waiting_to_be_sent() {
+        let dir = Path::new("/state/chat-attachments/c1");
+        let files = vec![
+            describe(&dir.join("a3f19c2e-factura.pdf"), 3),
+            describe(&dir.join("b4e2d1c0-captura.png"), 3),
+            describe(&dir.join("c5d3e2f1-log.txt"), 3),
+        ];
+        let asked = vec![
+            "¿qué dice?\n\nArchivos adjuntos a este mensaje (léelos con tu herramienta de lectura de archivos):\n- factura.pdf (/state/chat-attachments/c1/a3f19c2e-factura.pdf)".to_string(),
+            // Written under an older state root: the stored name still says which file it was.
+            "y esta\n\nArchivos adjuntos a este mensaje (léelos con tu herramienta de lectura de archivos):\n- captura.png (/old/root/chat-attachments/c1/b4e2d1c0-captura.png)".to_string(),
+            "sin archivos".to_string(),
+        ];
+        let waiting = unsent(files, &asked);
+        assert_eq!(waiting.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec!["c5d3e2f1-log.txt"]);
+    }
+
+    #[test]
+    fn nothing_asked_yet_leaves_every_file_waiting() {
+        let files = vec![describe(Path::new("/state/c1/a3f19c2e-factura.pdf"), 3)];
+        assert_eq!(unsent(files, &[]).len(), 1);
     }
 }

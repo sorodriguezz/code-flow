@@ -581,8 +581,14 @@ export const chatAttachFile = (conversationId: string, sourcePath: string) =>
 export const chatAttachBytes = (conversationId: string, name: string, data: number[]) =>
   invoke<ChatAttachment>("chat_attach_bytes", { conversationId, name, data });
 
+/** Every file the conversation has, sent or not — what an export lists. The composer wants
+ *  {@link chatListStagedAttachments}. */
 export const chatListAttachments = (conversationId: string) =>
   invoke<ChatAttachment[]>("chat_list_attachments", { conversationId });
+
+/** The files waiting in the composer: the conversation's attachments no question has sent yet. */
+export const chatListStagedAttachments = (conversationId: string) =>
+  invoke<ChatAttachment[]>("chat_list_staged_attachments", { conversationId });
 
 export const chatRemoveAttachment = (conversationId: string, attachmentId: string) =>
   invoke<void>("chat_remove_attachment", { conversationId, attachmentId });

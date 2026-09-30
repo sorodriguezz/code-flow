@@ -4426,6 +4426,7 @@ const en = {
   "editor.generateTree": "Generate Tree",
   "editor.treeTruncated": "… truncated at {n} entries",
   "editor.scratchCrumb": "Temporary",
+  "editor.openInTerminal": "Open in Integrated Terminal",
 
   // Hiding entries from the explorer. The wording carries the one thing that matters about this
   // feature — that it is only about what is drawn — because the alternative reading is "delete".
@@ -4467,6 +4468,7 @@ const en = {
   "terminal.noneOpen": "None open — open one",
   "terminal.new": "New terminal",
   "terminal.selectProfile": "Open a different shell",
+  "terminal.openInFolder": "Open in folder…",
   "terminal.profilesHeading": "Shell",
   "terminal.configureProfiles": "Configure profiles…",
   "terminal.split": "Split terminal",
@@ -4779,6 +4781,18 @@ const en = {
   "chat.skillSourceBundled": "built-in",
   "chat.skillRemove": "Remove skill",
   "chat.skillPicked": "The next message will use this skill",
+  /* The queue above both composers — messages sent while a turn was still running. Labels only;
+     why a queue is paused lives in the tooltip on its heading. */
+  "chat.queueTitle": "Queued",
+  "chat.queueHint": "Sent in order as each answer finishes",
+  "chat.queueHeld": "Paused",
+  "chat.queueHeldError": "The last turn failed — nothing more goes out until you resume",
+  "chat.queueHeldStopped": "You stopped the turn — nothing more goes out until you resume",
+  "chat.queueResume": "Resume",
+  "chat.queueEdit": "Edit in the box",
+  "chat.queueRemove": "Remove from the queue",
+  "chat.queueAdd": "Queue — goes after this answer (Enter)",
+  "chat.queuePlaceholder": "Queue another message…",
   "chat.cliCompact": "Compact the conversation to free context",
   "chat.cliClear": "Reset Claude's session",
   "chat.cliContext": "See how much context this conversation uses",

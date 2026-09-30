@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Paperclip, Puzzle, Square, X } from "lucide-react";
+import { ArrowUp, ListPlus, Paperclip, Puzzle, Square, X } from "lucide-react";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { EffortPicker } from "./EffortPicker";
 import { AttachmentBar } from "./AttachmentBar";
+import { QueuedMessages, type ComposerQueue } from "./QueuedMessages";
 import { ChatCapabilities } from "./ChatCapabilities";
 import { ContextMeter, type ContextReading } from "./ContextMeter";
 import { CavemanChip } from "./CavemanChip";
@@ -36,6 +37,15 @@ const MAX_COMPOSER_HEIGHT = 260;
  * muscle memory built in one would destroy work in the other. IME composition is excluded: a
  * Japanese or Chinese input method uses Enter to *accept a candidate*, and a composer that read
  * that as "send" would post the first half of every sentence typed in those languages.
+ *
+ * # Enter while a turn runs queues
+ *
+ * Given a `queue`, the box stays live for the whole turn and Enter keeps working: what is sent then
+ * waits above the box (`QueuedMessages`) and goes out when the answer is done — the store decides
+ * which, see `conversationStore.submit`. Stop keeps its place, and a small queue button joins it
+ * only while there is something in the box to queue. Without a `queue` a running turn still refuses
+ * a second message, which is the old behaviour and the right one for a surface that cannot show
+ * what it is holding.
  */
 export function ChatComposer({
   provider,
@@ -65,6 +75,7 @@ export function ChatComposer({
   disabledReason,
   surface = "chat",
   skillScope,
+  queue,
 }: {
   provider: string;
   /** The model this conversation runs on. Its own prop rather than read from the workspace routing:
@@ -120,6 +131,10 @@ export function ChatComposer({
   surface?: CommandSurface;
   /** Whose skills the `/` menu offers. Absent where a surface takes no skill (the ask box). */
   skillScope?: { accountId?: string | null; workspaceId?: string | null; conversationId?: string | null };
+  /** This conversation's queue — what was sent while a turn ran. Absent where there is no
+   *  conversation to wait behind (the empty state), and then a running turn refuses a second
+   *  message as it always did. */
+  queue?: ComposerQueue;
 }) {
   const t = useT();
   const boxRef = useRef<HTMLTextAreaElement>(null);
@@ -172,7 +187,9 @@ export function ChatComposer({
 
   const submit = useCallback(() => {
     const trimmed = draft.trim();
-    if (!trimmed || sending || disabled) return;
+    // A running turn stops nothing when there is a queue to put the message in — see the note on
+    // the component. Commands pass through too: the view decides which ones wait their turn.
+    if (!trimmed || (sending && !queue) || disabled) return;
     // A typed command runs instead of being sent. Until this existed, pressing Enter on `/compact`
     // sent those seven characters to the model — the menu could only be used by clicking a row,
     // which is the one way nobody uses a slash command. See `appCommandFor` for what counts as one;
@@ -186,7 +203,30 @@ export function ChatComposer({
     onSend(trimmed, skill);
     onDraftChange("");
     setSkill(null);
-  }, [draft, sending, disabled, onSend, onDraftChange, onRunAppCommand, surface, skill]);
+  }, [draft, sending, queue, disabled, onSend, onDraftChange, onRunAppCommand, surface, skill]);
+
+  /**
+   * The queue as the strip is handed it, with "edit" finished here: the store takes the message out
+   * of the queue (and puts its files back on the tray), and the box — which is this component's —
+   * gets the text and the skill.
+   *
+   * In front of whatever is already in the box, on a line of its own: it was written first, and
+   * merging it into the middle of a half-written sentence would be the one way to make it worse.
+   */
+  const shownQueue = useMemo<ComposerQueue | undefined>(() => {
+    if (!queue) return undefined;
+    return {
+      ...queue,
+      onEdit: (id) => {
+        const item = queue.onEdit(id);
+        if (!item) return null;
+        onDraftChange(draft.trim() ? `${item.text}\n${draft}` : item.text);
+        if (item.skill) setSkill(item.skill);
+        boxRef.current?.focus();
+        return item;
+      },
+    };
+  }, [queue, draft, onDraftChange]);
 
   /** The `/` menu is open while the draft is a single token beginning with a slash. It closes the
    *  moment a space is typed, because by then the user is writing arguments, not choosing. */
@@ -300,6 +340,8 @@ export function ChatComposer({
           </div>
         )}
 
+        {shownQueue && <QueuedMessages queue={shownQueue} />}
+
         <div
           data-tour="chat-composer"
           className="flex flex-col gap-1.5 rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 shadow-[var(--cf-shadow)] focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]"
@@ -327,7 +369,13 @@ export function ChatComposer({
                 submit();
               }
             }}
-            placeholder={disabled ? disabledReason : t("chat.composerPlaceholder")}
+            placeholder={
+              disabled
+                ? disabledReason
+                : sending && queue
+                  ? t("chat.queuePlaceholder")
+                  : t("chat.composerPlaceholder")
+            }
             className="max-h-[260px] resize-none bg-transparent px-2 py-1 text-[14px] leading-[1.6] outline-none placeholder:text-[var(--cf-text-muted)] disabled:opacity-60"
           />
 
@@ -411,15 +459,32 @@ export function ChatComposer({
             )}
 
             {sending ? (
-              <button
-                type="button"
-                onClick={onStop}
-                disabled={stopping}
-                className="ml-auto flex h-[26px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] transition-colors hover:text-[var(--cf-danger)] hover:shadow-[inset_0_0_0_1px_var(--cf-danger)] disabled:opacity-50"
-              >
-                <Square size={9} className="fill-current" />
-                {stopping ? t("ai.stopping") : t("chat.stop")}
-              </button>
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                {/* Only while there is something to queue: an idle box has nothing for it to do,
+                    and Enter already does the same. Beside Stop rather than instead of it — both
+                    are live for the whole turn, and neither should move under the hand. */}
+                {queue && draft.trim() && (
+                  <button
+                    type="button"
+                    onClick={submit}
+                    disabled={disabled}
+                    title={t("chat.queueAdd")}
+                    aria-label={t("chat.queueAdd")}
+                    className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] transition-colors hover:text-[var(--cf-text)] disabled:opacity-40"
+                  >
+                    <ListPlus size={14} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onStop}
+                  disabled={stopping}
+                  className="flex h-[26px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] transition-colors hover:text-[var(--cf-danger)] hover:shadow-[inset_0_0_0_1px_var(--cf-danger)] disabled:opacity-50"
+                >
+                  <Square size={9} className="fill-current" />
+                  {stopping ? t("ai.stopping") : t("chat.stop")}
+                </button>
+              </div>
             ) : (
               <button
                 type="button"
