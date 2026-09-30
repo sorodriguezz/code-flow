@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { closeTerminal, getSetting, openTerminal, setSetting, writeTerminal } from "../lib/tauri/commands";
 import { onTerminalExit, onTerminalOutput } from "../lib/tauri/events";
+import { isMainWindow } from "../lib/windowIdentity";
 
 export interface TerminalTab {
   id: string;
@@ -45,13 +46,37 @@ export function activeGroup(proj: ProjectTerminals | undefined): string[] {
 }
 
 const PANEL_OPEN_KEY = "terminal_panel_open";
+const DOCK_VIEW_KEY = "terminal_dock_view";
+
+/**
+ * Which of its two panels the bottom dock shows in the main window: the terminals, or the services.
+ *
+ * They were one panel, services above and shells below, and the user had them split (2026-09-30)
+ * to take load off it — each has its own button at the foot of the projects panel now. One dock
+ * still holds both, showing one at a time, so going from a shell to the services and back never
+ * unmounts the shells (see `ServicesDock`). A satellite has no services, so it only ever shows
+ * `"terminal"` and never reads or writes the remembered value.
+ */
+export type DockView = "terminal" | "services";
 
 interface TerminalState {
   /** Hidden by default — only opens when the user asks for it (or a new terminal is created). */
   panelOpen: boolean;
+  /** What the dock shows while it is open. Remembered in the main window, so it reopens on the panel
+   *  it was closed on. */
+  dockView: DockView;
   byProject: Record<string, ProjectTerminals>;
   init: () => Promise<void>;
+  /** The terminal's own toggle — ⌘J, the palette, a satellite. With the services on screen it shows
+   *  the terminals rather than closing the dock: that key is about the terminal. */
   togglePanel: () => void;
+  /** Each panel's button: shows `view`, or hides the dock when `view` is what it already shows. */
+  toggleDock: (view: DockView) => void;
+  /** Shows `view`, opening the dock if it is closed and never closing it — for whatever means
+   *  "take me there": the running-services badge, a shell just opened. */
+  showDock: (view: DockView) => void;
+  /** Hides the dock, whichever panel it shows — its own chevron. */
+  hidePanel: () => void;
   /** With `split: true`, adds the new terminal to whichever group is currently active instead
    * of starting a new one — otherwise every new terminal gets its own group. `profileId` picks
    * the shell; omitted, the backend resolves the configured default. */
@@ -227,19 +252,38 @@ function forgetTerminal(id: string): void {
 
 export const useTerminalStore = create<TerminalState>((set, get) => ({
   panelOpen: false,
+  dockView: "terminal",
   byProject: {},
 
   init: async () => {
     // At app start, so the router is live well before any pane asks for one.
     startTerminalRouter();
-    const raw = await getSetting(PANEL_OPEN_KEY).catch(() => null);
-    set({ panelOpen: raw === "1" });
+    const [raw, view] = await Promise.all([
+      getSetting(PANEL_OPEN_KEY).catch(() => null),
+      // The main window's alone: a satellite's dock is terminals only, and a remembered "services"
+      // there would turn its ⌘J into "switch to terminals" instead of "close".
+      isMainWindow() ? getSetting(DOCK_VIEW_KEY).catch(() => null) : Promise.resolve(null),
+    ]);
+    set({ panelOpen: raw === "1", dockView: view === "services" ? "services" : "terminal" });
   },
 
-  togglePanel: () => {
-    const next = !get().panelOpen;
-    set({ panelOpen: next });
-    void setSetting(PANEL_OPEN_KEY, next ? "1" : "0");
+  togglePanel: () => get().toggleDock("terminal"),
+
+  toggleDock: (view) => {
+    const { panelOpen, dockView } = get();
+    if (panelOpen && dockView === view) get().hidePanel();
+    else get().showDock(view);
+  },
+
+  showDock: (view) => {
+    set({ panelOpen: true, dockView: view });
+    void setSetting(PANEL_OPEN_KEY, "1");
+    if (isMainWindow()) void setSetting(DOCK_VIEW_KEY, view);
+  },
+
+  hidePanel: () => {
+    set({ panelOpen: false });
+    void setSetting(PANEL_OPEN_KEY, "0");
   },
 
   openNew: async (projectId, cwd, opts) => {
@@ -260,11 +304,13 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
           ? proj.groups.map((g) => (g === current ? [...g, id] : g))
           : [...proj.groups, [id]];
       return {
-        panelOpen: true,
         byProject: { ...s.byProject, [projectId]: { tabs, groups, focusedId: id, nextNumber: proj.nextNumber + 1 } },
       };
     });
-    void setSetting(PANEL_OPEN_KEY, "1");
+    // The terminals, whichever panel was up: a shell was just asked for, from the `+`, the
+    // explorer's "Open in Integrated Terminal" or a script — and a dock left on the services would
+    // put it out of sight the moment it opened.
+    get().showDock("terminal");
     // Returned so a caller that has something to type can address the shell it just asked for,
     // rather than going back to the store and guessing which of the tabs is the new one.
     return id;
@@ -279,9 +325,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     if (existing) {
       get().focus(projectId, existing.id);
       // `focus` only decides which group the dock *would* draw; it does not open the dock. Without
-      // this, running a script while the panel is collapsed appears to do nothing at all.
-      set({ panelOpen: true });
-      void setSetting(PANEL_OPEN_KEY, "1");
+      // this, running a script while the panel is collapsed — or while it shows the services —
+      // appears to do nothing at all.
+      get().showDock("terminal");
       try {
         await writeTerminal(existing.id, line);
         return;

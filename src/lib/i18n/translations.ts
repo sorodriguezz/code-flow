@@ -33,7 +33,6 @@ const en = {
   "sidebar.reorderHint": "Hold a repository to drag it into a new position",
   "sidebar.collapseProjects": "Collapse to project icons",
   "sidebar.expandProjects": "Show project names",
-  "sidebar.servicesDock": "Services and terminals",
   "import.title": "Import repositories",
   "import.found": "{count} repositories in this folder",
   "import.selectAll": "Select all",
@@ -82,6 +81,7 @@ const en = {
   "windows.maximize": "Maximize",
   "windows.restore": "Restore",
   "services.title": "Services",
+  "services.toggle": "Show or hide the services",
   "services.detect": "Detect services",
   "services.detectHint":
     "Reads the repositories in this workspace — package.json, Docker Compose, Dockerfiles, Spring Boot, Django, Rails, Go… — and proposes what to run. You choose what to add.",
@@ -8205,9 +8205,9 @@ const en = {
   "tour.prReview.body":
     "Two ways, and neither needs the code checked out. The pull requests of the repositories you have added are listed in the sidebar, and under this + for the repository on screen: pick one and it opens in its own tab of the assistant, where CodeFlow reviews the diff and can post the comments back to Azure DevOps, GitHub or GitLab. Or choose From a link… in the same menu — or press {key} from anywhere — and paste the URL of any pull request: the diff comes over the API and nothing is cloned.",
 
-  "tour.terminal.title": "Services and terminals",
+  "tour.terminal.title": "Terminal and services",
   "tour.terminal.body":
-    "Everything this workspace has running, in one panel. Above: services — a command with a name, a folder and a definition of being up, so a group of them starts in the right order. Below: ordinary shells, one set per repository, starting in that repository's folder. Both survive switching views, so a build left running keeps running while you read a diff. Drag the top edge to make it taller.",
+    "Two buttons at the foot of this panel, each with a panel of its own below. Terminal: ordinary shells, one set per repository, starting in that repository's folder. Services: what this workspace knows how to start — a command with a name, a folder and a definition of being up, so a group of them starts in the right order. Going from one to the other stops nothing, and both survive switching views, so a build left running keeps running while you read a diff. Drag the top edge to make it taller.",
 
   "tour.workspaceApps.title": "The apps, and their tours",
   "tour.workspaceApps.body":

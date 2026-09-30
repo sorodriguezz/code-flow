@@ -25,7 +25,6 @@ export const es = {
   "sidebar.reorderHint": "Mantén presionado un repositorio para arrastrarlo a otra posición",
   "sidebar.collapseProjects": "Contraer a iconos de proyecto",
   "sidebar.expandProjects": "Mostrar nombres de proyecto",
-  "sidebar.servicesDock": "Servicios y terminales",
   "import.title": "Importar repositorios",
   "import.found": "{count} repositorios en esta carpeta",
   "import.selectAll": "Seleccionar todos",
@@ -74,6 +73,7 @@ export const es = {
   "windows.maximize": "Maximizar",
   "windows.restore": "Restaurar",
   "services.title": "Servicios",
+  "services.toggle": "Mostrar/ocultar los servicios",
   "services.detect": "Detectar servicios",
   "services.detectHint":
     "Lee los repos de este workspace —package.json, Docker Compose, Dockerfile, Spring Boot, Django, Rails, Go…— y te propone qué arrancar. Tú eliges qué añadir.",
@@ -8036,9 +8036,9 @@ export const es = {
   "tour.prReview.body":
     "Dos caminos, y ninguno necesita el código descargado. Los pull requests de los repositorios que agregaste se listan en el sidebar, y bajo este + los del repositorio en pantalla: eliges uno y se abre en su propia pestaña del asistente, donde CodeFlow revisa el diff y puede publicar los comentarios en Azure DevOps, GitHub o GitLab. O eliges «Desde un enlace…» en el mismo menú —o pulsas {key} desde cualquier parte— y pegas la URL de cualquier pull request: el diff se trae por la API y no se clona nada.",
 
-  "tour.terminal.title": "Servicios y terminales",
+  "tour.terminal.title": "Terminal y servicios",
   "tour.terminal.body":
-    "Todo lo que este workspace tiene corriendo, en un solo panel. Arriba: los servicios — un comando con nombre, carpeta y una definición de «ya está listo», para que un grupo arranque en el orden correcto. Abajo: shells normales, un juego por repositorio, arrancando en su carpeta. Ambos sobreviven a los cambios de vista: una compilación que dejaste corriendo sigue corriendo mientras lees un diff. Arrastra el borde superior para hacerlo más alto.",
+    "Dos botones al pie de este panel, cada uno con su propio panel abajo. Terminal: shells normales, un juego por repositorio, arrancando en su carpeta. Servicios: lo que este workspace sabe arrancar — un comando con nombre, carpeta y una definición de «ya está listo», para que un grupo arranque en el orden correcto. Pasar de uno a otro no corta nada, y ambos sobreviven a los cambios de vista: una compilación que dejaste corriendo sigue corriendo mientras lees un diff. Arrastra el borde superior para hacerlo más alto.",
 
   "tour.workspaceApps.title": "Las apps, y sus tours",
   "tour.workspaceApps.body":

@@ -27,8 +27,9 @@ import {
   Zap,
   Sparkles,
   SaveAll,
+  CirclePlay,
+  TerminalSquare,
 } from "lucide-react";
-import { ServicesDockIcon } from "../services/ServicesDockIcon";
 import { canPasteJsonHere, pasteJsonInFocusedEditor } from "../editor/pasteJsonAsCode";
 import { fetchNow, pullNow, pushNow } from "../../lib/gitActions";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -156,6 +157,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const openProjectInit = useUiStore((s) => s.openProjectInit);
   const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
   const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
+  const toggleDock = useTerminalStore((s) => s.toggleDock);
   const quickAskChord = useQuickAskHotkeyStore((s) => s.accelerator);
   useEffect(() => {
     void useQuickAskHotkeyStore.getState().load();
@@ -215,10 +217,19 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       },
       {
         key: "view:terminal",
-        icon: ServicesDockIcon,
+        icon: TerminalSquare,
         label: t("tabbar.terminal"),
         group: "views" as const,
         onSelect: () => toggleTerminalPanel(),
+      },
+      // Its own entry since the dock split into two panels (2026-09-30), the same toggle as its
+      // button at the foot of the projects panel.
+      {
+        key: "view:services",
+        icon: CirclePlay,
+        label: t("services.title"),
+        group: "views" as const,
+        onSelect: () => toggleDock("services"),
       },
     ];
 
@@ -409,6 +420,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     openProjectInit,
     toggleAiPanel,
     toggleTerminalPanel,
+    toggleDock,
     quickAskChord,
   ]);
 

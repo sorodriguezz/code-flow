@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleDot,
+  CirclePlay,
   Cloud,
   Code2,
   Eye,
@@ -28,6 +29,7 @@ import {
   Pencil,
   Plus,
   Settings,
+  TerminalSquare,
   Trash2,
   Undo2,
   Unlink,
@@ -49,7 +51,6 @@ import {
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useTerminalStore } from "../../state/terminalStore";
-import { ServicesDockIcon } from "../services/ServicesDockIcon";
 import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
 import { useAiPanelStore, useVisiblePrId } from "../../state/aiPanelStore";
@@ -2146,11 +2147,16 @@ function basename(path: string): string {
 }
 
 /**
- * The services dock and settings, at the foot of this panel — moved here from the status bar and
- * made bigger at the user's ask (2026-09-25), which left that bar to the repository it reports on.
- * The dock above, the gear at the very bottom: the user's order.
+ * The terminal, the services and settings, at the foot of this panel — moved here from the status
+ * bar and made bigger at the user's ask (2026-09-25), which left that bar to the repository it
+ * reports on. The panels above, the gear at the very bottom: the user's order.
  *
- * Two controls about the whole app rather than about a repository, in the corner the app rail across
+ * Terminal and Servicios were one button, "Servicios y terminales", over one combined panel; the
+ * user split them (2026-09-30), so each has its own button and its own panel in the dock. Pressing
+ * the other one switches the dock over rather than closing it; pressing the lit one closes it (see
+ * `terminalStore.toggleDock`).
+ *
+ * Controls about the whole app rather than about a repository, in the corner the app rail across
  * the window keeps for its own one: the same 32px square as the tour's cap there, the same short rule
  * above, lit in the accent while their panel is open.
  *
@@ -2160,24 +2166,34 @@ function basename(path: string): string {
  * the icon sits in the same 32px box on the rail's axis — folded the rail is 56px and centres it on
  * 28, unfolded `px-3` starts the row at 12 — so folding never moves the glyphs, and the status bar
  * starts on that same axis (see `StatusBar`). The `data-tour` anchors travel with them; the tour's
- * terminal step points at `toggle-terminal`.
+ * terminal step points at `toggle-terminal` and `toggle-services`.
  */
 function SidebarFoot({ collapsed }: { collapsed: boolean }) {
   const settingsOpen = useUiStore((s) => s.settingsOpen);
   const toggleSettings = useUiStore((s) => s.toggleSettings);
-  const terminalOpen = useTerminalStore((s) => s.panelOpen);
-  const toggleTerminal = useTerminalStore((s) => s.togglePanel);
+  const dockOpen = useTerminalStore((s) => s.panelOpen);
+  const dockView = useTerminalStore((s) => s.dockView);
+  const toggleDock = useTerminalStore((s) => s.toggleDock);
   const t = useT();
   const hint = useShortcutHint();
 
   const items = [
     {
       tour: "toggle-terminal",
-      open: terminalOpen,
-      onClick: toggleTerminal,
-      icon: <ServicesDockIcon size={17} />,
-      label: t("sidebar.servicesDock"),
+      open: dockOpen && dockView === "terminal",
+      onClick: () => toggleDock("terminal"),
+      icon: <TerminalSquare size={17} />,
+      label: t("tabbar.terminal"),
       tip: hint("panel.terminal", t("terminal.toggle")),
+    },
+    {
+      tour: "toggle-services",
+      open: dockOpen && dockView === "services",
+      onClick: () => toggleDock("services"),
+      // The glyph the running-services badge in the status bar wears, so the two read as one thing.
+      icon: <CirclePlay size={17} />,
+      label: t("services.title"),
+      tip: t("services.toggle"),
     },
     {
       tour: "open-settings",

@@ -183,7 +183,7 @@ const MAIN_TOUR: TourStep[] = [
     chapterKey: "tour.chapter.tools",
     titleKey: "tour.terminal.title",
     bodyKey: "tour.terminal.body",
-    anchors: ['[data-tour="toggle-terminal"]', '[data-tour="terminal-dock"]'],
+    anchors: ['[data-tour="toggle-terminal"]', '[data-tour="toggle-services"]', '[data-tour="terminal-dock"]'],
     padding: 6,
     stage: { terminal: true },
   },

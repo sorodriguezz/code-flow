@@ -28,11 +28,10 @@ export function ServicesActivity() {
   // Subscribed to the map the answer is derived from, then derived — a selector returning a fresh
   // array on every store write would hand back a new reference each time.
   const runtime = useServicesStore((s) => s.runtime);
-  // Services live in the bottom panel now, so this opens the panel rather than switching view.
-  // Not `togglePanel`: pressing a "3 running" badge is a request to see them, and a toggle would
-  // close the panel for anyone who already had it open.
-  const panelOpen = useTerminalStore((s) => s.panelOpen);
-  const togglePanel = useTerminalStore((s) => s.togglePanel);
+  // Services are a panel of the bottom dock, so this shows that panel rather than switching view —
+  // over the terminals if they are up. `showDock`, never a toggle: pressing a "3 running" badge is a
+  // request to see them, and a toggle would close the panel for anyone who already had it open.
+  const showDock = useTerminalStore((s) => s.showDock);
   const t = useT();
 
   useEffect(() => ensureServicesSync(), []);
@@ -55,7 +54,7 @@ export function ServicesActivity() {
       }
     >
       <button
-        onClick={() => !panelOpen && togglePanel()}
+        onClick={() => showDock("services")}
         className="flex h-[22px] items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         <CirclePlay

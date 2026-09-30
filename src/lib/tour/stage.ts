@@ -4,7 +4,7 @@ import type { ApiSettingsTab } from "../../state/apiModalStore";
 import { useDbModalStore, type DbModal } from "../../state/dbModalStore";
 import { useDiagramsStore } from "../../state/diagramsStore";
 import { useLayoutStore } from "../../state/layoutStore";
-import { useTerminalStore } from "../../state/terminalStore";
+import { useTerminalStore, type DockView } from "../../state/terminalStore";
 import {
   useUiStore,
   type ApiWorkspace,
@@ -67,7 +67,7 @@ export interface TourStage {
   diagramsAi?: boolean;
   /** AI panel docked open. Default `false`. */
   ai?: boolean;
-  /** Terminal dock open. Default `false`. */
+  /** The dock open on its terminal panel. Default `false`. */
   terminal?: boolean;
   /** Settings open on a section, or `null` for closed. Default `null`. */
   settings?: SettingsSectionId | null;
@@ -93,6 +93,9 @@ export interface AppSnapshot {
   settingsSection: SettingsSectionId;
   apiSettingsTab: ApiSettingsTab | undefined;
   terminalOpen: boolean;
+  /** Which panel the dock was on — a step that opens the terminals must not leave a dock that was
+   *  on the services showing the terminals. */
+  dockView: DockView;
   agentsRosterOpen: boolean;
   agentsBenchOpen: boolean;
   dbModal: DbModal | null;
@@ -126,6 +129,7 @@ export function captureAppState(): AppSnapshot {
     settingsSection: ui.settingsSection,
     apiSettingsTab: ui.apiSettingsTab,
     terminalOpen: useTerminalStore.getState().panelOpen,
+    dockView: useTerminalStore.getState().dockView,
     agentsRosterOpen: useAgentsStore.getState().rosterOpen,
     agentsBenchOpen: useBenchStore.getState().open,
     dbModal: useDbModalStore.getState().modal,
@@ -144,7 +148,7 @@ export function restoreAppState(snapshot: AppSnapshot): void {
     settingsSection: snapshot.settingsSection,
     apiSettingsTab: snapshot.apiSettingsTab,
   });
-  useTerminalStore.setState({ panelOpen: snapshot.terminalOpen });
+  useTerminalStore.setState({ panelOpen: snapshot.terminalOpen, dockView: snapshot.dockView });
   useAgentsStore.setState({ rosterOpen: snapshot.agentsRosterOpen });
   useBenchStore.setState({ open: snapshot.agentsBenchOpen });
   useDbModalStore.setState({ modal: snapshot.dbModal });
@@ -174,7 +178,9 @@ export function applyStage(stage: TourStage | undefined): void {
     settingsSection: settings ?? current.settingsSection,
     apiSettingsTab: stage?.apiSettingsTab ?? current.apiSettingsTab,
   });
-  useTerminalStore.setState({ panelOpen: stage?.terminal ?? false });
+  // The view only when the step opens the dock: a closed dock's panel is nobody's business, and
+  // leaving it keeps the snapshot's restore the one place it changes back.
+  useTerminalStore.setState(stage?.terminal ? { panelOpen: true, dockView: "terminal" } : { panelOpen: false });
   useAgentsStore.setState({ rosterOpen: stage?.agentsRoster ?? false });
   useBenchStore.setState({ open: stage?.agentsBench ?? false });
   // `kind: "connections"` is the dialog opened from the workspace rather than from one connection's

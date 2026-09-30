@@ -10,11 +10,11 @@ import { ServiceEditor } from "./ServiceEditor";
 import { ServiceImportModal } from "./ServiceImportModal";
 import { ServiceConsole } from "./ServiceConsole";
 import { PortsPanel } from "./PortsPanel";
-import { HeaderButton, SectionHeader, ServiceList } from "./ServiceList";
+import { HeaderButton, SectionHeader, ServiceActions, ServiceList } from "./ServiceList";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
 import { STATUS_TONE, useServicesStore } from "../../state/servicesStore";
-import { activeGroup, useTerminalStore, type TerminalTab } from "../../state/terminalStore";
+import { activeGroup, useTerminalStore, type DockView, type TerminalTab } from "../../state/terminalStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
@@ -26,26 +26,33 @@ const MIN_HEIGHT = 140;
 const MAX_HEIGHT = 720;
 
 /**
- * The bottom panel: everything this workspace has running, and everything it can start.
+ * The bottom panel: the shells of the repository on screen, and the services of the workspace —
+ * two panels in one dock.
  *
- * # Why services and terminals are one panel
+ * # Two panels, one dock
  *
- * They were two lists of the same thing in two places. Both are a process in a folder printing into
- * a pty; the only difference is whether somebody wrote it down. Splitting them meant the daily move
- * — start the group, then open a shell against one of them to poke at it — crossed a rail, a view
- * and a panel. Here it is one list.
+ * Services and terminals were one panel, services above and shells below, and it had grown heavy:
+ * the user split it (2026-09-30). In the main window each is a panel of its own now, with its own
+ * button at the foot of the projects panel (`SidebarFoot`), and the dock shows one of them at a time
+ * (`terminalStore.dockView`). They still share this component, and that is the point of it: the
+ * shells stay mounted for as long as the dock is open, whichever panel is showing, so a look at a
+ * service's console and back finds a terminal exactly as it was — scrollback, the command still
+ * running, all of it. Two docks would unmount one to show the other.
  *
- * The split that remains is the one that is real, and it is visible rather than explained: a
- * **service** belongs to the workspace, because the thing being started is a system and a system
- * spans repositories. A **terminal** belongs to the repository it was opened in, because a shell in
- * the frontend folder is about the frontend. Switching repository changes the second section and
- * leaves the first alone, which is exactly what those two scopes mean.
+ * Each panel's title row says what it is and carries its actions — "Terminales · repo" with `+` and
+ * the shell menu, "Servicios" with detect / group / service — so neither list has a heading of its
+ * own: the same word twice, one line apart, was a complaint once already.
+ *
+ * The scopes are what they were: a **service** belongs to the workspace, because the thing being
+ * started is a system and a system spans repositories; a **terminal** belongs to the repository it
+ * was opened in. Switching repository changes the terminals and leaves the services alone.
  *
  * # In a satellite
  *
  * Services are main-window-only — one window may start processes (see `servicesStore`) — so a
- * repository window renders the terminals half alone. Same component, one section shorter, and the
- * same name on top: the panel is "Terminal" in every window, and its sections name themselves.
+ * repository window has the terminals alone, exactly as before the split: "Terminal" on top, and
+ * the list's own "Terminales · repo" heading with its actions. The split was asked for the main
+ * window.
  */
 
 /** Kept out of the dock's own render so a burst of output in one pane cannot re-render the others:
@@ -67,9 +74,9 @@ const DockPane = memo(function DockPane({
   return <TerminalPane sessionId={tabId} visible={visible} onClose={close} />;
 });
 
-/** What the pane area is showing: one service's console, the machine's ports, or the active split
- *  of terminals. */
-type Selection = { kind: "service"; id: string } | { kind: "ports" } | { kind: "terminals" };
+/** What the services panel's pane shows: one service's console, or the machine's ports. `null`
+ *  until something is picked. */
+type ServiceSelection = { kind: "service"; id: string } | { kind: "ports" };
 
 /** The editor's subject: a service to edit, or a new one filed under a group. */
 type Editing = { service: ServiceRow | null; groupId: string | null };
@@ -84,20 +91,24 @@ export function ServicesDock() {
   const closeTab = useTerminalStore((s) => s.close);
   const focusTab = useTerminalStore((s) => s.focus);
   const rename = useTerminalStore((s) => s.rename);
-  const togglePanel = useTerminalStore((s) => s.togglePanel);
+  const dockView = useTerminalStore((s) => s.dockView);
+  const hidePanel = useTerminalStore((s) => s.hidePanel);
   const height = useLayoutStore((s) => s.sizes.terminalPanelHeight);
   const listWidth = useLayoutStore((s) => s.sizes.servicesListWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
 
   const services = useServicesStore((s) => s.services);
+  const groups = useServicesStore((s) => s.groups);
   const runtimeMap = useServicesStore((s) => s.runtime);
   const loadServices = useServicesStore((s) => s.load);
 
   /** Services exist only where they can be started. See the note at the top. */
   const showServices = isMainWindow();
+  /** The panel on screen — always the terminals in a satellite, which has nothing else. */
+  const view: DockView = showServices ? dockView : "terminal";
 
-  const [selection, setSelection] = useState<Selection>({ kind: "terminals" });
+  const [selection, setSelection] = useState<ServiceSelection | null>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [importing, setImporting] = useState(false);
 
@@ -110,21 +121,25 @@ export function ServicesDock() {
   }, [showServices, workspaceId, loadServices]);
 
   /**
-   * Opening the panel opens a shell, exactly as it did when this was the terminal dock.
+   * Opening the terminal opens a shell, exactly as it did when this was the terminal dock.
    *
    * The reason to press ⌃` is to type a command, and "no terminals open — click + to start one" is
    * a button press standing between the user and that. Keyed on the project rather than on the tab
    * count, so closing the last terminal leaves it closed instead of spawning its replacement on the
    * spot — and so StrictMode's double-invoked effects cannot open two.
+   *
+   * The terminal panel only: opening the services is not asking for a shell, and one opened then
+   * would also pull the dock over to the terminals (`openNew` shows them) — away from the services
+   * that were just asked for.
    */
   const autoOpened = useRef(new Set<string>());
   useEffect(() => {
-    if (!project || autoOpened.current.has(project.id)) return;
+    if (view !== "terminal" || !project || autoOpened.current.has(project.id)) return;
     if ((activeProj?.tabs.length ?? 0) > 0) return;
     autoOpened.current.add(project.id);
     void openNew(project.id, project.local_path).catch((e: unknown) => pushErrorToast(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProjectId]);
+  }, [activeProjectId, view]);
 
   /**
    * A shell in a folder picked from the disk — the subfolder three levels down that `+` (the
@@ -149,21 +164,44 @@ export function ServicesDock() {
     if (id && project) rename(project.id, id, renameValue);
   };
 
-  // Every terminal ever opened stays mounted, hidden unless it belongs to the active project and to
-  // its current split — so switching project never kills a shell or loses its scrollback.
+  // Every terminal ever opened stays mounted, hidden unless the terminals are the panel on screen and
+  // it belongs to the active project and to its current split — so switching project, or looking at
+  // the services, never kills a shell or loses its scrollback.
   const allPanes = Object.entries(byProject).flatMap(([projectId, proj]) =>
     proj.tabs.map((tab) => ({
       projectId,
       tab,
-      visible:
-        selection.kind === "terminals" &&
-        projectId === activeProjectId &&
-        visibleIds.includes(tab.id),
+      visible: view === "terminal" && projectId === activeProjectId && visibleIds.includes(tab.id),
     })),
   );
 
   const selectedService =
-    selection.kind === "service" ? (services.find((s) => s.id === selection.id) ?? null) : null;
+    selection?.kind === "service" ? (services.find((s) => s.id === selection.id) ?? null) : null;
+  const servicesEmpty = services.length === 0 && groups.length === 0;
+
+  /** The terminal panel's two ways in: a shell in the repository, or one of the other shells (and
+   *  "in a folder…"). In the panel's title row in the main window, in the list's heading in a
+   *  satellite — see the note at the top. */
+  const terminalActions = (
+    <>
+      <HeaderButton
+        onClick={() => project && void openNew(project.id, project.local_path)}
+        disabled={!project}
+        label={shortcutHint("terminal.new", t("terminal.new"))}
+      >
+        <Plus size={11} />
+      </HeaderButton>
+      <ProfileMenu
+        disabled={!project}
+        onPick={(profileId) => project && void openNew(project.id, project.local_path, { profileId })}
+        onOpenInFolder={() => void openInFolder()}
+      />
+    </>
+  );
+  const terminalsLabel = project ? t("terminal.forRepo", { name: project.name }) : t("terminal.title");
+  /** What the title row calls the panel. A satellite keeps the one name it always had, with the
+   *  list's heading below it naming the repository. */
+  const panelTitle = view === "services" ? t("services.title") : showServices ? terminalsLabel : t("terminal.panelTitle");
 
   // What the header says about this workspace's services at a glance — the reason to look below.
   const here = services.map((service) => runtimeMap[service.id]).filter(Boolean);
@@ -194,16 +232,22 @@ export function ServicesDock() {
       />
 
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2">
-        {/* The panel's name, not its first section's: it holds Services *and* Terminals, and the
-            list below already heads each of them. Naming the panel after one of them put the word
-            "Servicios" twice on screen, one line apart. */}
-        <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-        <span className="mr-2 text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("terminal.panelTitle")}
+        {/* The panel on screen and what it covers — the one heading it has. The list below does not
+            repeat it: "Servicios" twice, one line apart, was the complaint that once named the
+            combined panel after neither half. */}
+        {view === "services" ? (
+          <CirclePlay size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+        ) : (
+          <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+        )}
+        {/* The name gives way last: capped rather than shrinkable, so a narrow dock cuts the summary
+            beside it before it cuts "Servicios" — and a long repository name still ends in "…". */}
+        <span className="mr-2 max-w-[60%] shrink-0 truncate text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+          {panelTitle}
         </span>
 
-        {showServices && services.length > 0 && (runningHere > 0 || failedHere > 0) && (
-          <span className="flex min-w-0 items-center gap-2.5 text-[11px] text-[var(--cf-text-muted)]">
+        {view === "services" && services.length > 0 && (runningHere > 0 || failedHere > 0) && (
+          <span className="flex min-w-0 items-center gap-2.5 overflow-hidden whitespace-nowrap text-[11px] text-[var(--cf-text-muted)]">
             {runningHere > 0 && (
               <span className="flex items-center gap-1">
                 <span
@@ -233,10 +277,20 @@ export function ServicesDock() {
 
         <div className="flex-1" />
 
+        {/* Not while the list is empty, same as the list's heading used to: the empty list's two
+            buttons are the same choice with words on them. */}
+        {showServices && view === "services" && !servicesEmpty && (
+          <ServiceActions
+            onNew={(groupId) => setEditing({ service: null, groupId })}
+            onImport={() => setImporting(true)}
+          />
+        )}
+        {showServices && view === "terminal" && terminalActions}
+
         <button
-          onClick={togglePanel}
+          onClick={hidePanel}
           title={t("terminal.hide")}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
+          className="ml-1 flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
         >
           <ChevronDown size={13} />
         </button>
@@ -249,86 +303,67 @@ export function ServicesDock() {
           className="flex min-h-0 shrink-0 flex-col overflow-y-auto border-r border-[var(--cf-border)]"
           style={{ width: listWidth }}
         >
-          {showServices && (
+          {view === "services" ? (
             <ServiceList
-              selectedId={selection.kind === "service" ? selection.id : null}
-              portsSelected={selection.kind === "ports"}
+              heading={false}
+              selectedId={selection?.kind === "service" ? selection.id : null}
+              portsSelected={selection?.kind === "ports"}
               onSelect={(id) => setSelection({ kind: "service", id })}
               onSelectPorts={() => setSelection({ kind: "ports" })}
               onEdit={(service) => setEditing({ service, groupId: service.group_id })}
               onNew={(groupId) => setEditing({ service: null, groupId })}
               onImport={() => setImporting(true)}
             />
-          )}
-
-          <SectionHeader
-            icon={TerminalSquare}
-            label={project ? t("terminal.forRepo", { name: project.name }) : t("terminal.title")}
-            actions={
-              <>
-                <HeaderButton
-                  onClick={() => project && void openNew(project.id, project.local_path)}
-                  disabled={!project}
-                  label={shortcutHint("terminal.new", t("terminal.new"))}
+          ) : (
+            <div className={showServices ? "pt-1" : undefined}>
+              {!showServices && <SectionHeader icon={TerminalSquare} label={terminalsLabel} actions={terminalActions} />}
+              {!project && (
+                <p className="px-2.5 py-2 text-[11px] text-[var(--cf-text-muted)]">
+                  {t("terminal.noProject")}
+                </p>
+              )}
+              {/* Said in the list, not only in the pane: a list with nothing in it reads as one
+                  still loading. */}
+              {project && (activeProj?.tabs.length ?? 0) === 0 && (
+                <button
+                  onClick={() => void openNew(project.id, project.local_path).catch((e: unknown) => pushErrorToast(String(e)))}
+                  className={`${showServices ? "ml-4" : "ml-6"} py-0.5 text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]`}
                 >
-                  <Plus size={11} />
-                </HeaderButton>
-                <ProfileMenu
-                  disabled={!project}
-                  onPick={(profileId) =>
-                    project && void openNew(project.id, project.local_path, { profileId })
+                  {t("terminal.noneOpen")}
+                </button>
+              )}
+              {(activeProj?.tabs ?? []).map((tab) => (
+                <TerminalRow
+                  key={tab.id}
+                  tab={tab}
+                  where={project ? whereOf(project.local_path, tab.cwd) : ""}
+                  inSplit={visibleIds.includes(tab.id)}
+                  selected={visibleIds.includes(tab.id)}
+                  renaming={renamingId === tab.id}
+                  renameValue={renameValue}
+                  onRenameChange={setRenameValue}
+                  onRenameStart={() => {
+                    setRenamingId(tab.id);
+                    setRenameValue(tab.title);
+                  }}
+                  onRenameCommit={commitRename}
+                  onRenameCancel={() => setRenamingId(null)}
+                  onSelect={() => {
+                    if (project) focusTab(project.id, tab.id);
+                  }}
+                  onSplit={() =>
+                    project && void openNew(project.id, project.local_path, { split: true })
                   }
-                  onOpenInFolder={() => void openInFolder()}
+                  onClose={() =>
+                    project &&
+                    void confirmCloseTerminal(tab.id).then((ok) => {
+                      if (ok) void closeTab(project.id, tab.id);
+                    })
+                  }
                 />
-              </>
-            }
-          />
-          {!project && (
-            <p className="px-2.5 py-2 text-[11px] text-[var(--cf-text-muted)]">
-              {t("terminal.noProject")}
-            </p>
+              ))}
+            </div>
           )}
-          {/* Said in the list, not only in the pane: with a service selected the pane shows its
-              console, and an empty heading with nothing under it reads as a list still loading. */}
-          {project && (activeProj?.tabs.length ?? 0) === 0 && (
-            <button
-              onClick={() => void openNew(project.id, project.local_path).catch((e: unknown) => pushErrorToast(String(e)))}
-              className="ml-6 py-0.5 text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-            >
-              {t("terminal.noneOpen")}
-            </button>
-          )}
-          {(activeProj?.tabs ?? []).map((tab) => (
-            <TerminalRow
-              key={tab.id}
-              tab={tab}
-              where={project ? whereOf(project.local_path, tab.cwd) : ""}
-              inSplit={visibleIds.includes(tab.id)}
-              selected={selection.kind === "terminals" && visibleIds.includes(tab.id)}
-              renaming={renamingId === tab.id}
-              renameValue={renameValue}
-              onRenameChange={setRenameValue}
-              onRenameStart={() => {
-                setRenamingId(tab.id);
-                setRenameValue(tab.title);
-              }}
-              onRenameCommit={commitRename}
-              onRenameCancel={() => setRenamingId(null)}
-              onSelect={() => {
-                setSelection({ kind: "terminals" });
-                if (project) focusTab(project.id, tab.id);
-              }}
-              onSplit={() =>
-                project && void openNew(project.id, project.local_path, { split: true })
-              }
-              onClose={() =>
-                project &&
-                void confirmCloseTerminal(tab.id).then((ok) => {
-                  if (ok) void closeTab(project.id, tab.id);
-                })
-              }
-            />
-          ))}
         </div>
 
         <ResizeHandle
@@ -340,34 +375,34 @@ export function ServicesDock() {
           onCommit={(w) => commitSize("servicesListWidth", w)}
         />
 
-        {/* The pane area. Every terminal stays mounted here whatever is selected; a service's
-            console mounts on top of them when one is picked. */}
+        {/* The pane area. Every terminal stays mounted here whichever panel is up; with the
+            services on screen, a service's console or the ports mount on top of them. */}
         <div className="relative flex min-h-0 min-w-0 flex-1">
-          {selection.kind === "service" ? (
-            selectedService ? (
-              <ServiceConsole
-                key={selectedService.id}
-                service={selectedService}
-                onEdit={() => setEditing({ service: selectedService, groupId: selectedService.group_id })}
-              />
-            ) : (
+          {view === "services" ? (
+            selection?.kind === "service" ? (
+              selectedService ? (
+                <ServiceConsole
+                  key={selectedService.id}
+                  service={selectedService}
+                  onEdit={() => setEditing({ service: selectedService, groupId: selectedService.group_id })}
+                />
+              ) : (
+                <EmptyState icon={CirclePlay} title={t("services.pickOne")} />
+              )
+            ) : selection?.kind === "ports" ? (
+              <PortsPanel onOpenService={(id) => setSelection({ kind: "service", id })} />
+            ) : services.length > 0 ? (
               <EmptyState icon={CirclePlay} title={t("services.pickOne")} />
-            )
-          ) : selection.kind === "ports" ? (
-            <PortsPanel onOpenService={(id) => setSelection({ kind: "service", id })} />
-          ) : (
-            <>
-              {!project ? (
-                <div className="absolute inset-0">
-                  <EmptyState icon={TerminalSquare} title={t("terminal.noProject")} />
-                </div>
-              ) : (activeProj?.tabs.length ?? 0) === 0 ? (
-                <div className="absolute inset-0">
-                  <EmptyState icon={TerminalSquare} title={t("terminal.emptyHint")} />
-                </div>
-              ) : null}
-            </>
-          )}
+            ) : null
+          ) : !project ? (
+            <div className="absolute inset-0">
+              <EmptyState icon={TerminalSquare} title={t("terminal.noProject")} />
+            </div>
+          ) : (activeProj?.tabs.length ?? 0) === 0 ? (
+            <div className="absolute inset-0">
+              <EmptyState icon={TerminalSquare} title={t("terminal.emptyHint")} />
+            </div>
+          ) : null}
           {allPanes.map(({ projectId, tab, visible }) => (
             <div
               key={tab.id}

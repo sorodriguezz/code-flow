@@ -37,37 +37,23 @@ import { buttonClass } from "../common/Button";
 const still = (Icon: LucideIcon) => <Icon size={13} className="mt-[2px] shrink-0 opacity-70" />;
 
 /**
- * The services half of the dock's list: groups of services, the Ports view, and whatever is still
- * running in another workspace.
+ * The list's three ways to add something: detect, a group, a service by hand.
  *
- * A group is a unit of work in both directions — it starts in dependency order and stops in the
- * reverse — so its header carries both verbs, drawn rather than hover-revealed: they are what the
- * panel is for.
+ * Its own component because it is drawn in two places: in the list's heading, and — in the main
+ * window, where the services are a panel of their own — in that panel's title row, which names the
+ * panel already (see `ServicesDock`). Neither draws it while the list is empty: the two buttons the
+ * empty list shows are the same choice with words on them.
  */
-export function ServiceList({
-  selectedId,
-  portsSelected,
-  onSelect,
-  onSelectPorts,
-  onEdit,
+export function ServiceActions({
   onNew,
   onImport,
 }: {
-  selectedId: string | null;
-  portsSelected: boolean;
-  onSelect: (id: string) => void;
-  onSelectPorts: () => void;
-  onEdit: (service: ServiceRow) => void;
   onNew: (groupId: string | null) => void;
   onImport: () => void;
 }) {
   const t = useT();
-  const services = useServicesStore((s) => s.services);
-  const groups = useServicesStore((s) => s.groups);
-  const runtime = useServicesStore((s) => s.runtime);
   const addGroup = useServicesStore((s) => s.addGroup);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const newGroup = async () => {
     if (!workspaceId) return;
@@ -77,6 +63,59 @@ export function ServiceList({
     });
     if (name?.trim()) await addGroup(workspaceId, name.trim());
   };
+
+  return (
+    <>
+      <HeaderButton onClick={onImport} label={t("services.detect")} description={t("services.detectHint")}>
+        <Radar size={11} />
+      </HeaderButton>
+      <HeaderButton onClick={() => void newGroup()} label={t("services.newGroup")} description={t("services.newGroupHint")}>
+        <FolderPlus size={11} />
+      </HeaderButton>
+      <HeaderButton onClick={() => onNew(null)} label={t("services.newService")} description={t("services.newServiceHint")}>
+        <Plus size={11} />
+      </HeaderButton>
+    </>
+  );
+}
+
+/**
+ * The services list: groups of services, the Ports view, and whatever is still running in another
+ * workspace.
+ *
+ * A group is a unit of work in both directions — it starts in dependency order and stops in the
+ * reverse — so its header carries both verbs, drawn rather than hover-revealed: they are what the
+ * panel is for.
+ *
+ * `heading={false}` leaves out the list's own "Services" heading, for a panel whose title row
+ * already says it and carries {@link ServiceActions} — the word twice, one line apart, was the
+ * complaint that once named the whole dock "Terminal".
+ */
+export function ServiceList({
+  selectedId,
+  portsSelected,
+  onSelect,
+  onSelectPorts,
+  onEdit,
+  onNew,
+  onImport,
+  heading = true,
+}: {
+  selectedId: string | null;
+  portsSelected: boolean;
+  onSelect: (id: string) => void;
+  onSelectPorts: () => void;
+  onEdit: (service: ServiceRow) => void;
+  onNew: (groupId: string | null) => void;
+  onImport: () => void;
+  heading?: boolean;
+}) {
+  const t = useT();
+  const services = useServicesStore((s) => s.services);
+  const groups = useServicesStore((s) => s.groups);
+  const runtime = useServicesStore((s) => s.runtime);
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const ungrouped = services.filter((s) => !s.group_id);
   const sections = [
@@ -101,35 +140,22 @@ export function ServiceList({
 
   return (
     <>
-      <SectionHeader
-        icon={CirclePlay}
-        label={t("services.title")}
-        // Not while the list is empty: the card below offers the same two ways in, with words on
-        // them, and three bare glyphs above it were the same choice asked twice.
-        actions={
-          empty ? null : (
-            <>
-              <HeaderButton onClick={onImport} label={t("services.detect")} description={t("services.detectHint")}>
-                <Radar size={11} />
-              </HeaderButton>
-              <HeaderButton onClick={() => void newGroup()} label={t("services.newGroup")} description={t("services.newGroupHint")}>
-                <FolderPlus size={11} />
-              </HeaderButton>
-              <HeaderButton onClick={() => onNew(null)} label={t("services.newService")} description={t("services.newServiceHint")}>
-                <Plus size={11} />
-              </HeaderButton>
-            </>
-          )
-        }
-      />
+      {heading && (
+        <SectionHeader
+          icon={CirclePlay}
+          label={t("services.title")}
+          // Not while the list is empty: the card below offers the same two ways in, with words on
+          // them, and three bare glyphs above it were the same choice asked twice.
+          actions={empty ? null : <ServiceActions onNew={onNew} onImport={onImport} />}
+        />
+      )}
 
-      {/* The two ways in, and nothing around them. This sits above the terminals in every
-          workspace without services, so it is kept to what can be pressed: no box, no heading, no
-          paragraph — the user took each of those out. The Detect button's tooltip still says what
-          it reads. Centred under the heading rather than hung off its left edge (the user's ask,
-          2026-09-25): alone in the section, two buttons pushed left read as a row that ran out. */}
+      {/* The two ways in, and nothing around them: no box, no heading, no paragraph — the user
+          took each of those out. The Detect button's tooltip still says what it reads. Centred
+          rather than hung off the left edge (the user's ask, 2026-09-25): alone in the list, two
+          buttons pushed left read as a row that ran out. */}
       {services.length === 0 && (
-        <div className="mx-2 mb-1.5 mt-1 flex flex-wrap justify-center gap-1.5">
+        <div className={`mx-2 mb-1.5 flex flex-wrap justify-center gap-1.5 ${heading ? "mt-1" : "mt-2"}`}>
           <Tooltip side="top" label={t("services.detect")} description={t("services.detectHint")}>
             <button
               onClick={onImport}
