@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ArrowUp, ListPlus, Paperclip, Puzzle, Square, X } from "lucide-react";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
@@ -14,6 +14,7 @@ import type { ChatAttachment, SkillPick } from "../../lib/tauri/chatCommands";
 import { CommandMenu, appCommandFor, type ChatAppCommand, type CommandSurface } from "./CommandMenu";
 import { COLUMN_GUTTER, READING_COLUMN } from "./chatChrome";
 import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
+import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 
@@ -59,6 +60,7 @@ export function ChatComposer({
   onAttachBytes,
   onRemoveAttachment,
   onPickEngine,
+  onContinueOn,
   account,
   onPickEffort,
   sending,
@@ -104,6 +106,9 @@ export function ChatComposer({
    *  chip writes the workspace's chat routing itself, which is what the next question will run on.
    *  `account` is passed only when one was picked. */
   onPickEngine?: (provider: string, model: string, account?: string) => void | Promise<void>;
+  /** A version of a provider this thread is locked out of, picked anyway: where it goes instead —
+   *  "continuar en un hilo nuevo" on that engine. */
+  onContinueOn?: (provider: string, model: string, account?: string) => void;
   /** The conversation's account — `null` for the system one; absent before there is a conversation. */
   account?: string | null;
   onPickEffort?: (effort: string) => void | Promise<void>;
@@ -150,15 +155,7 @@ export function ChatComposer({
   }, [provider]);
   const caps = providerCapabilities(provider);
 
-  // Autosize. Height is reset to `auto` first because `scrollHeight` of an element already sized to
-  // its content only ever reports that size — without the reset the box grows and never shrinks,
-  // which is the classic version of this bug and is invisible until someone deletes a paragraph.
-  useLayoutEffect(() => {
-    const el = boxRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, MAX_COMPOSER_HEIGHT)}px`;
-  }, [draft]);
+  useAutosizeTextarea(boxRef, draft, MAX_COMPOSER_HEIGHT);
 
   /**
    * `Mod+L` — the chord `chat.placeholder` has been promising in both languages since long before
@@ -395,6 +392,7 @@ export function ChatComposer({
                 chatActive={turns > 0}
                 bound={onPickEngine ? { provider, model, account } : undefined}
                 onPick={onPickEngine}
+                onLockedPick={onContinueOn}
               />
             </div>
 

@@ -140,6 +140,8 @@ pub const TABLES: &[&str] = &[
     "ai_usage",
     "workspace_activity",
     "conversation_titles",
+    // The assistant panel's `/clear`s, beside the titles they are keyed like.
+    "conversation_resets",
     // The chat workspace. Conversations before messages: a message points at the thread it is in.
     //
     // Beside `activity_log` rather than with the authored content above, because these rows are the
@@ -301,6 +303,7 @@ pub const GROUPS: &[Group] = &[
         tables: &[
             "activity_log",
             "conversation_titles",
+            "conversation_resets",
             // The chat workspace's threads and their messages. Here rather than in a switch of
             // their own for the reason the group's name argues: to the person reading the settings
             // panel, "conversations" is one thing, and somebody who chose not to carry the AI

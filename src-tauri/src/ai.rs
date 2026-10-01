@@ -1047,6 +1047,8 @@ pub mod task {
     pub const PIPELINE_ANALYZE: &str = "pipeline-analyze";
     /// A notebook cell generated, explained, fixed or documented — see [`super::notebook_assist`].
     pub const NOTEBOOK: &str = "notebook";
+    /// A conversation named after its first question — see [`super::chat_title`].
+    pub const CHAT_TITLE: &str = "chat-title";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -4624,6 +4626,34 @@ pub async fn draft_comment_reply(
     // Some engines wrap prose in a fence when asked for "only the text" — the fence is never part
     // of the comment the user meant to leave.
     Ok(strip_code_fence(&run.text))
+}
+
+/// How much of a question is worth sending to name its conversation: a title is about what is
+/// being asked, and a log pasted under the question changes nothing about that.
+const MAX_TITLE_SOURCE_CHARS: usize = 2_000;
+
+/// The instructions behind a conversation's title. Not a stored template, like the reply draft's:
+/// what it makes is a few words the user can rename in a click.
+const CHAT_TITLE_PROMPT: &str = "Escribe un título para la conversación que empieza con la pregunta \
+    que recibes por la entrada estándar. Responde ÚNICAMENTE con el título, en una sola línea.\n\n\
+    Reglas:\n\
+    - En el mismo idioma que la pregunta.\n\
+    - De 2 a 6 palabras que nombren el tema: no copies la pregunta ni la respondas.\n\
+    - Sin comillas, sin punto final, sin emojis, sin Markdown y sin prefijos como \"Título:\".";
+
+/// Names a conversation after its first question — a few words in the question's own language,
+/// where the question cut at sixty characters used to stand. Text only: nothing is read from disk,
+/// and no engine session is started for the conversation or resumed. The reply comes back as the
+/// engine wrote it; `crate::chat_title` reads the title out of it and decides where it goes.
+pub async fn chat_title(engine: &dyn AiEngine, binary: &str, model: &str, question: &str) -> Result<String, String> {
+    let source: String = question.trim().chars().take(MAX_TITLE_SOURCE_CHARS).collect();
+    if source.is_empty() {
+        return Err("No hay pregunta que titular".to_string());
+    }
+    let mut inv = AiInvocation::new(CHAT_TITLE_PROMPT, &source);
+    inv.model = model;
+    inv.task = task::CHAT_TITLE;
+    Ok(run(engine, binary, inv).await?.text)
 }
 
 /// Drafts a pull-request description from the diff between two branches, with the active engine.

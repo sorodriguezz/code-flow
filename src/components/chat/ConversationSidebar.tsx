@@ -8,6 +8,8 @@ import {
   Folder,
   FolderPlus,
   FolderOpen,
+  FolderGit2,
+  Forward,
   GitBranch,
   MessageSquarePlus,
   MoreHorizontal,
@@ -26,6 +28,7 @@ import { StatusDot, type ConversationStatus } from "./StatusDot";
 import { ICON_BUTTON, ROW, ROW_ACTIVE, ROW_IDLE, useLocale } from "./chatChrome";
 import { relativeTime } from "../notes/notesChrome";
 import type { ChatConversation, ChatGroup, ChatSearchHit } from "../../lib/tauri/chatCommands";
+import { useContinueThreadStore } from "../../state/continueThreadStore";
 import { dropTarget, useChatDragStore, type ChatDrag } from "../../state/chatDragStore";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { confirmAction } from "../../state/confirmStore";
@@ -395,6 +398,13 @@ export function ConversationSidebar() {
               if (last) await store.branch(conversation.id, last.turn);
             })();
           },
+        },
+        // Beside branching, its sibling: a branch copies this thread on the same engine, this
+        // starts one on any engine from a summary of it.
+        {
+          label: t("chat.continueInNewThread"),
+          icon: Forward,
+          onClick: () => useContinueThreadStore.getState().open({ conversationId: conversation.id }),
         },
         {
           label: t("chat.delete"),
@@ -1001,9 +1011,32 @@ const ConversationRow = memo(function ConversationRow({
         <StatusDot status={status} />
         <ProviderGlyph providerId={conversation.provider} size={12} className="shrink-0 opacity-70" />
         <span className="cf-fade-edge min-w-0 flex-1">{conversation.title || t("chat.untitled")}</span>
-        {conversation.parentConversationId && (
-          <GitBranch size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+        {/* Bound to a repository — a conversation moved here from the assistant — which is what
+            lets its turns read and edit that working copy. A mark like the branch's beside it, with
+            the name on hover: spelled out, it left a narrow sidebar no room for the title. */}
+        {conversation.projectName && (
+          <span
+            title={t("chat.repoBadge", { name: conversation.projectName })}
+            aria-label={t("chat.repoBadge", { name: conversation.projectName })}
+            className="flex shrink-0 text-[var(--cf-text-muted)]"
+          >
+            <FolderGit2 size={10} />
+          </span>
         )}
+        {/* Where it came from, when it came from another thread: a branch (a copy, `GitBranch`) or
+            a continuation (a summary, on whatever engine, with the other thread named on hover —
+            all it says of it, and still true once that thread is gone). */}
+        {conversation.parentConversationId && conversation.branchedAtTurn !== null ? (
+          <GitBranch size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+        ) : conversation.continuedFrom ? (
+          <span
+            title={t("chat.continuedFrom", { title: conversation.continuedFrom.title || t("chat.untitled") })}
+            aria-label={t("chat.continuedFrom", { title: conversation.continuedFrom.title || t("chat.untitled") })}
+            className="flex shrink-0 text-[var(--cf-text-muted)]"
+          >
+            <Forward size={10} />
+          </span>
+        ) : null}
         {/* `hidden`, not `opacity-0`: invisible and *still in the layout* is what made every title
             truncate early and left a blank strip on the right of a list whose whole job is to let
             you recognise a conversation by its name. "hace 3 horas" is sixty pixels the row was

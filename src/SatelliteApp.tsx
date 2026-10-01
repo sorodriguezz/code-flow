@@ -37,6 +37,7 @@ import { onWindowMessage } from "./lib/windowBus";
 import { showDiagramHere } from "./lib/dbmlBridge";
 import { showChatHere } from "./lib/chatBridge";
 import { pushErrorToast } from "./state/toastStore";
+import { SwitcherLock } from "./components/layout/SwitcherLock";
 
 /**
  * The whole of a satellite window.
@@ -485,6 +486,9 @@ export default function SatelliteApp() {
       <ConfirmModal />
       <PromptModal />
       <TitleTooltips />
+      {/* An app island switches its own workspace with the lock; a repository window holds one
+          repository and gets none (see `SwitcherLock`). */}
+      {kind === "app" && <SwitcherLock repos={false} />}
     </div>
   );
 }

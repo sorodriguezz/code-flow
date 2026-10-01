@@ -1,13 +1,17 @@
 import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { useT } from "../../state/languageStore";
-import { CATEGORY_LABELS, CATEGORY_ORDER, TEMPLATES, type Template } from "../../lib/scaffold/catalog";
+import { CATEGORY_LABELS, CATEGORY_ORDER, TEMPLATES, templateName, type Template } from "../../lib/scaffold/catalog";
 import { explorerClass, fieldClass, rowClass, sectionLabelClass } from "../common/recipes";
 import { TemplateLogo } from "./TemplateLogo";
 
+/** Lowercase, without accents: "vacio" finds "Vacío", "movil" the "Móvil" group's templates. */
+const fold = (text: string) => text.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+
 /**
- * The column of templates, grouped by what they build. The search matches the name and the one-line
- * description, so "api" finds Express, Nest and FastAPI as well as anything called API.
+ * The column of templates, grouped by what they build. The search matches the name — on screen and,
+ * for a translated one, in English too ("empty") — and the one-line description, so "api" finds
+ * Express, Nest and FastAPI as well as anything called API.
  */
 export function TemplateList({
   selected,
@@ -22,12 +26,11 @@ export function TemplateList({
   const [query, setQuery] = useState("");
 
   const groups = useMemo(() => {
-    const needle = query.trim().toLowerCase();
+    const needle = fold(query.trim());
     const matches = TEMPLATES.filter(
       (template) =>
         !needle ||
-        template.name.toLowerCase().includes(needle) ||
-        t(template.descriptionKey).toLowerCase().includes(needle),
+        [template.name, templateName(template, t), t(template.descriptionKey)].some((text) => fold(text).includes(needle)),
     );
     return CATEGORY_ORDER.map((category) => ({
       category,
@@ -68,8 +71,8 @@ export function TemplateList({
                   title={t(template.descriptionKey)}
                   className={rowClass(active, "h-8 disabled:opacity-50")}
                 >
-                  <TemplateLogo logo={template.logo} name={template.name} size={16} />
-                  <span className="min-w-0 flex-1 truncate">{template.name}</span>
+                  <TemplateLogo logo={template.logo} name={templateName(template, t)} size={16} />
+                  <span className="min-w-0 flex-1 truncate">{templateName(template, t)}</span>
                 </button>
               );
             })}

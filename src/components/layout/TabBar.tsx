@@ -4,7 +4,7 @@ import { useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { ActivePill } from "../common/ActivePill";
+import { ActiveMarker, ActivePill } from "../common/ActivePill";
 import { Kbd } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
 import { useT } from "../../state/languageStore";
@@ -70,6 +70,11 @@ function TabButton({ tab, active, badge }: { tab: Tab; active: boolean; badge?: 
         {/* The same lifted sheet the active project and the active app wear: one way to say
             "selected" across the frame. */}
         {active && <ActivePill layoutId="cf-tab-pill" variant="raised" />}
+        {/* And a short bar in the accent at its start, the way the projects panel marks the open
+            repository. Under some themes the lifted sheet is a shade on a shade, and which view is
+            open stopped being obvious (user report, 2026-10-01); a rule along its foot, the first
+            answer, looked wrong there ("abajo se ve mal"). */}
+        {active && <ActiveMarker layoutId="cf-tab-mark" color="var(--cf-accent-fill)" className="left-0 inset-y-1.5" />}
         <span className="relative flex items-center gap-1.5">
           <Icon size={14} />
           {t(tab.labelKey)}

@@ -478,6 +478,52 @@ pub fn repo_conversation_attachments(conversation_id: &str) -> Vec<ChatAttachmen
     safe_repo_conversation_dir(conversation_id).map(|dir| list_dir(&dir)).unwrap_or_default()
 }
 
+/// Moves a repository conversation's images to the chat workspace's folder for the same id, for a
+/// thread moving there (`chat_cmd::chat_move_from_panel`). Returns both folders as the stored
+/// questions spell them, so the caller can point each attachment note at the new one — `None` when
+/// the conversation had no images.
+///
+/// A rename, not a copy: both roots are under the state directory. It has to happen, and happen
+/// before the rows move: the repository chat's sweep keeps only conversations `activity_log` still
+/// holds, so a folder left behind would be collected on the next launch.
+pub(crate) fn move_repo_attachments_to_chat(conversation_id: &str) -> Result<Option<(String, String)>, String> {
+    let from = safe_repo_conversation_dir(conversation_id)?;
+    if !from.is_dir() {
+        return Ok(None);
+    }
+    let to = safe_conversation_dir(conversation_id)?;
+    if to.exists() {
+        return Err("ya hay archivos del Chat con el id de esta conversación".to_string());
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
+    Ok(Some((from.to_string_lossy().into_owned(), to.to_string_lossy().into_owned())))
+}
+
+/// Deletes the files in a conversation's folder that none of `sent` names — images attached in a
+/// composer and never sent. The rule `chat_list_staged_attachments` reads them by: a sent question
+/// carries the stored name in its attachment note. The folder goes too when that leaves it empty.
+pub(crate) fn drop_unsent_attachments(conversation_id: &str, sent: &[&str]) {
+    let Ok(dir) = safe_conversation_dir(conversation_id) else { return };
+    for file in list_dir(&dir) {
+        if !sent.iter().any(|text| text.contains(&file.id)) {
+            let _ = std::fs::remove_file(&file.path);
+        }
+    }
+    if std::fs::read_dir(&dir).map(|mut entries| entries.next().is_none()).unwrap_or(false) {
+        let _ = std::fs::remove_dir(&dir);
+    }
+}
+
+/// Puts back what [`move_repo_attachments_to_chat`] moved, when the move it was part of failed.
+pub(crate) fn return_moved_attachments(conversation_id: &str) {
+    if let (Ok(from), Ok(to)) = (safe_repo_conversation_dir(conversation_id), safe_conversation_dir(conversation_id)) {
+        let _ = std::fs::rename(to, from);
+    }
+}
+
 /// Removes a repository conversation's images. Called when the conversation is deleted.
 pub fn discard_repo_conversation_attachments(conversation_id: &str) {
     if let Ok(dir) = safe_repo_conversation_dir(conversation_id) {

@@ -2078,6 +2078,22 @@ export const deleteChatConversation = (projectId: string, sessionId: string) =>
 export const renameChatConversation = (projectId: string, sessionId: string, title: string) =>
   invoke<void>("rename_chat_conversation", { projectId, sessionId, title });
 
+/** The panel's `/clear`, written down: the next question in this conversation starts a fresh engine
+ *  session — whichever window or phone asks it, after a restart too, and in the chat workspace if
+ *  the conversation moves there. */
+export const resetChatContext = (projectId: string, sessionId: string) =>
+  invoke<void>("reset_chat_context", { projectId, sessionId });
+
+/** Where a conversation's `/clear`s fall: the turns (by position) whose question started over, and
+ *  whether one is still waiting for its question. */
+export interface ChatContextResets {
+  turns: number[];
+  pending: boolean;
+}
+
+export const chatContextResets = (projectId: string, sessionId: string) =>
+  invoke<ChatContextResets>("chat_context_resets", { projectId, sessionId });
+
 /** One project's job history, newest first.
  *
  * `limit`/`offset` page it. Omitting them returns the whole table, which is what this did before

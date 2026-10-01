@@ -85,6 +85,21 @@ describe("appCommandFor, per composer", () => {
     expect(appCommandFor("/caveman", "panel")).toBeNull();
   });
 
+  it("continues a chat in a new thread with /continue, carrying what the summary should keep", () => {
+    expect(appCommandFor("/continue")).toEqual({ id: "continue", args: "" });
+    expect(appCommandFor("/continue céntrate en el esquema")).toEqual({ id: "continue", args: "céntrate en el esquema" });
+    // A repository conversation in the panel has its own way out (`/move`), not this one.
+    expect(appCommandFor("/continue", "panel")).toBeNull();
+  });
+
+  it("moves a repository conversation to the chat workspace with /move, only from the panel", () => {
+    expect(appCommandFor("/move", "panel")).toEqual({ id: "move", args: "" });
+    // A sentence that starts with the word is a message, not a move.
+    expect(appCommandFor("/move esto a otro lado", "panel")).toBeNull();
+    // Nothing to move it to from the chat workspace itself — typed there, it goes to the CLI.
+    expect(appCommandFor("/move", "chat")).toBeNull();
+  });
+
   it("keeps the free chat's commands as they were", () => {
     expect(appCommandFor("/compact")).toEqual({ id: "compact", args: "" });
     // The free chat has no `/clear` of its own — typed there, it goes to the CLI.

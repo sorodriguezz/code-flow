@@ -7,6 +7,7 @@ import {
   Link2,
   Loader2,
   MessageSquare,
+  MessageSquareShare,
   Pencil,
   Plus,
   Search,
@@ -32,6 +33,7 @@ import {
   type ActivityEntry,
 } from "../../lib/activityEntries";
 import { workspaceActivityKey } from "../../lib/prTarget";
+import { moveChatToApp } from "../../lib/moveChatToApp";
 import {
   openActivityEntry,
   openAnalysis,
@@ -662,6 +664,17 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
         >
           <Pencil size={13} />
         </button>
+        {/* A repository conversation can move to the chat workspace, for good. */}
+        {entry.type === "chat" && (
+          <button
+            onClick={() => void moveChatToApp(bucket, entry.conv.session_id)}
+            title={t("assistant.moveToChat")}
+            aria-label={t("assistant.moveToChat")}
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]"
+          >
+            <MessageSquareShare size={13} />
+          </button>
+        )}
         <button
           onClick={() => setMode("deleting")}
           title={t("chatHistory.delete")}

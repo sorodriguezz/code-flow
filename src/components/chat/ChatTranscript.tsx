@@ -1,5 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, MessageSquarePlus, Quote } from "lucide-react";
+import { ArrowDown, ArrowUpRight, ChevronDown, Eraser, Forward, MessageSquarePlus, MessageSquareShare, Quote, UsersRound } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
 import { AiRunLog } from "../ai/AiRunLog";
 import {
@@ -17,7 +17,9 @@ import { providerCapabilities } from "../../lib/aiProviders";
 import { diagnoseRun, serviceOnPort } from "../../lib/runDiagnosis";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useT } from "../../state/languageStore";
-import type { ChatOutput } from "../../lib/tauri/chatCommands";
+import type { ChatContinuation, ChatOutput, ContextReset } from "../../lib/tauri/chatCommands";
+import { modelRouteLabel } from "../ai/ModelTag";
+import { useAccountName } from "../../state/aiAccountsStore";
 import { EMPTY_CONVERSATION, useConversationStore } from "../../state/conversationStore";
 import type { ConversationMessage } from "../../state/conversationStore";
 
@@ -115,6 +117,32 @@ export function ChatTranscript({
     (s) => s.conversations.find((c) => c.id === s.activeId)?.compactedSummary ?? "",
   );
   const uncompact = useConversationStore((s) => s.uncompact);
+  /** Where this conversation arrived from the assistant panel, if it did — primitives again, for the
+   *  reason given above. */
+  const movedThrough = useConversationStore(
+    (s) => s.conversations.find((c) => c.id === s.activeId)?.movedThroughTurn ?? null,
+  );
+  const movedAt = useConversationStore((s) => s.conversations.find((c) => c.id === s.activeId)?.movedAt ?? null);
+  const movedRepo = useConversationStore(
+    (s) => s.conversations.find((c) => c.id === s.activeId)?.projectName ?? "",
+  );
+  /** Where its context started again in the assistant — the row's own array, so the reference holds
+   *  until the row changes. */
+  const contextResets = useConversationStore(
+    (s) => s.conversations.find((c) => c.id === s.activeId)?.contextResets ?? NO_RESETS,
+  );
+  /** What this thread continues, if it was started from another — the row's own object, so the
+   *  reference holds until the row changes — and whether that thread is still here to go back to. */
+  const continuedFrom = useConversationStore(
+    (s) => s.conversations.find((c) => c.id === s.activeId)?.continuedFrom ?? null,
+  );
+  const originListed = useConversationStore((s) => {
+    const from = s.conversations.find((c) => c.id === s.activeId)?.continuedFrom;
+    return !!from && s.conversations.some((c) => c.id === from.conversationId);
+  });
+  /** The ones whose turn has not been asked yet: a `/clear` still waiting, drawn at the end. */
+  const lastTurn = session.messages[session.messages.length - 1]?.turn ?? -1;
+  const waitingResets = useMemo(() => contextResets.filter((reset) => reset.turn > lastTurn), [contextResets, lastTurn]);
 
   const atBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -166,9 +194,13 @@ export function ChatTranscript({
    * way back to an answer being written off the bottom of the screen.
    *
    * A `ResizeObserver` on the content is the honest signal, because the question is not "did state
-   * change" but "did this get taller". That also picks up, for free, the three cases nobody had
-   * handled: a composer growing as the user types, the window being resized mid-answer, and an
+   * change" but "did this get taller". That also picks up the window being resized mid-answer and an
    * image finishing loading after its markdown rendered.
+   *
+   * The scroller is observed as well, for the cases that change the *window* onto the transcript
+   * rather than the transcript: the composer growing as the user types, the queue strip appearing
+   * above it — each shrinks the scroller from below, and the newest lines went under them — and the
+   * view coming back from another app, where a hidden scroller could not follow what landed.
    */
   useLayoutEffect(() => {
     const content = contentRef.current;
@@ -178,6 +210,7 @@ export function ChatTranscript({
       if (stick.current) el.scrollTop = el.scrollHeight;
     });
     observer.observe(content);
+    observer.observe(el);
     return () => observer.disconnect();
   }, []);
 
@@ -204,7 +237,14 @@ export function ChatTranscript({
           {/* `session.loaded` and not just an empty array: a conversation whose transcript is
               still in flight also has no messages, and telling the reader "nothing asked yet" for
               two frames about a chat they can see in the sidebar is worse than showing nothing. */}
-          {count === 0 && session.loaded && !session.sending && (
+          {/* Where a thread started from another came from, and the summary it carries — above
+              everything, since everything here comes after it. Open while nothing has been asked:
+              then it is the whole of what this thread knows. */}
+          {continuedFrom && (
+            <ContinuedMark key={activeId} from={continuedFrom} linked={originListed} startOpen={count === 0} />
+          )}
+
+          {count === 0 && session.loaded && !session.sending && !continuedFrom && (
             <div className="flex flex-col items-center gap-3 pt-16 text-center">
               <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">
                 <AiSparkles size={20} />
@@ -218,6 +258,11 @@ export function ChatTranscript({
 
           {session.messages.map((message, index) => (
             <Fragment key={message.id}>
+              {/* Above the turn the assistant started over at — drawn before its question. */}
+              {session.messages[index - 1]?.turn !== message.turn &&
+                contextResets
+                  .filter((reset) => reset.turn === message.turn)
+                  .map((reset) => <ContextMark key={`${reset.reason}-${reset.turn}`} reset={reset} />)}
               <TranscriptTurn
                 message={message}
                 previous={session.messages[index - 1]}
@@ -245,7 +290,18 @@ export function ChatTranscript({
                     onUndo={() => void uncompact(activeId)}
                   />
                 )}
+              {/* Where it arrived from the assistant: what is above was asked there, what is below
+                  here. The same rule for placing it as the compaction line's. */}
+              {movedThrough !== null &&
+                message.turn === movedThrough &&
+                session.messages[index + 1]?.turn !== movedThrough && (
+                  <MovedMark repo={movedRepo} at={movedAt} locale={locale} />
+                )}
             </Fragment>
+          ))}
+
+          {waitingResets.map((reset) => (
+            <ContextMark key={`${reset.reason}-${reset.turn}`} reset={reset} />
           ))}
 
           {session.sending && (
@@ -460,3 +516,107 @@ const TranscriptTurn = memo(function TranscriptTurn({
     </Fragment>
   );
 });
+
+/** The line under the last turn a conversation brought from the assistant panel's repository chat:
+ *  everything above it was asked there. */
+function MovedMark({ repo, at, locale }: { repo: string; at: string | null; locale: string }) {
+  const t = useT();
+  const when = at ? new Date(at).toLocaleDateString(locale, { day: "numeric", month: "short" }) : "";
+  const label = [t("chat.movedFromAssistant"), repo, when].filter(Boolean).join(" · ");
+  return (
+    <div role="separator" aria-label={label} className="flex items-center gap-2 py-1">
+      <div className="h-px flex-1 bg-[var(--cf-border)]" />
+      <span className="flex min-w-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)]">
+        <MessageSquareShare size={11} className="shrink-0" />
+        <span className="truncate">{label}</span>
+      </span>
+      <div className="h-px flex-1 bg-[var(--cf-border)]" />
+    </div>
+  );
+}
+
+/**
+ * The top of a thread started from another with "continuar en un hilo nuevo": where it came from,
+ * which engine summarised it, and the summary itself, word for word — the same rule as
+ * `CompactionMark`: what the engine is handed instead of a conversation is shown, not described.
+ * The way back is offered while that thread is still in the list; deleted, it does not matter (the
+ * user's words) — this thread is whole without it.
+ */
+function ContinuedMark({ from, linked, startOpen }: { from: ChatContinuation; linked: boolean; startOpen: boolean }) {
+  const t = useT();
+  const [open, setOpen] = useState(startOpen);
+  const title = from.title || t("chat.untitled");
+  return (
+    <div className="py-1">
+      <div className="flex items-center gap-2">
+        <div className="h-px flex-1 bg-[var(--cf-border)]" />
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex min-w-0 max-w-[80%] items-center gap-1.5 rounded-full border border-[var(--cf-border)] px-2 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-text)]"
+        >
+          <Forward size={10} className="shrink-0" />
+          <span className="truncate">{t("chat.continuedFrom", { title })}</span>
+          <ChevronDown size={10} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+        <div className="h-px flex-1 bg-[var(--cf-border)]" />
+      </div>
+      {open && (
+        <div className="mt-2 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3">
+          <p className="mb-1.5 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
+            {t("chat.continuedExplains", { engine: modelRouteLabel(from.provider, from.model, t), n: from.turns })}
+          </p>
+          {/* Not Markdown, for `CompactionMark`'s reason: this is the literal text the engine got. */}
+          <p className="max-h-72 overflow-y-auto whitespace-pre-wrap text-[12px] leading-relaxed text-[var(--cf-text)]">
+            {from.summary}
+          </p>
+          {linked && (
+            <button
+              type="button"
+              onClick={() => void useConversationStore.getState().open(from.conversationId)}
+              className="mt-2 flex items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
+            >
+              <ArrowUpRight size={10} />
+              {t("chat.continuedOpenOrigin")}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const NO_RESETS: ContextReset[] = [];
+
+/** Where a moved thread's context started again in the assistant — the lines the assistant drew
+ *  there, carried here: a `/clear`, or a turn that ran as another account. */
+function ContextMark({ reset }: { reset: ContextReset }) {
+  const t = useT();
+  const accountName = useAccountName();
+  if (reset.reason === "account") {
+    const label = t("assistant.accountBreak");
+    const detail = t("assistant.accountBreakHint", { account: accountName(reset.provider ?? "", reset.accountId ?? null) });
+    return (
+      <div role="separator" aria-label={`${label}. ${detail}`} title={detail} className="flex items-center gap-2 py-1">
+        <div className="h-px flex-1 bg-[color-mix(in_oklab,var(--cf-warning)_40%,transparent)]" />
+        <span className="flex min-w-0 items-center gap-1 text-[11px] font-medium text-[var(--cf-warning)]">
+          <UsersRound size={11} className="shrink-0" />
+          <span className="truncate">{label}</span>
+        </span>
+        <div className="h-px flex-1 bg-[color-mix(in_oklab,var(--cf-warning)_40%,transparent)]" />
+      </div>
+    );
+  }
+  const label = t("assistant.contextCleared");
+  return (
+    <div role="separator" aria-label={label} className="flex items-center gap-2 py-1">
+      <div className="h-px flex-1 bg-[var(--cf-border)]" />
+      <span className="flex min-w-0 items-center gap-1 text-[11px] font-medium text-[var(--cf-text-muted)]">
+        <Eraser size={11} className="shrink-0" />
+        <span className="truncate">{label}</span>
+      </span>
+      <div className="h-px flex-1 bg-[var(--cf-border)]" />
+    </div>
+  );
+}

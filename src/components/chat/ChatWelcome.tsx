@@ -1,4 +1,4 @@
-import { AlertCircle, FileDown, GitCommitHorizontal, ScanEye, SquareTerminal, type LucideIcon } from "lucide-react";
+import { AlertCircle, FileDown, GitCommitHorizontal, ScanEye, Sparkles, SquareTerminal, type LucideIcon } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -78,7 +78,9 @@ const STARTERS: Starter[] = [
     draft: "chat.starterGitDraft",
   },
   {
-    icon: AiSparkles,
+    // Plain, like its neighbours: the AI gradient marks a model at work, and this card is a topic
+    // (the user, 2026-10-01: "no tiene nada que ver ahí").
+    icon: Sparkles,
     label: "chat.starterDiffLabel",
     hint: "chat.starterDiffHint",
     draft: "chat.starterDiffDraft",

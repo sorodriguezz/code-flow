@@ -87,7 +87,7 @@ use crate::ai_runs;
 use crate::ai_accounts;
 use crate::commands::claude_cmd::{load_ai_config_as, load_ai_config_in, AiConfig, AiTask};
 use crate::commands::skills_cmd::sync_skills_into_project;
-use crate::db::models::{ChatConversation, ChatGroup, ChatMessageRow, ChatSearchHit};
+use crate::db::models::{ActivityLogEntry, ChatConversation, ChatGroup, ChatMessageRow, ChatSearchHit, ContextReset, Continuation};
 use crate::db::{chat_queries, queries, Db};
 use crate::git;
 
@@ -491,6 +491,17 @@ pub fn chat_set_engine(
     let conversation = chat_queries::get_conversation(&conn, &conversation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "conversation not found".to_string())?;
+    // A thread that has answered on one provider stays on it — the picker locks the others, and so
+    // does this, for whatever else might ask. Its history lives in that CLI's session store and its
+    // answers were that provider's: carrying them to another is a new chat, not this one.
+    if provider != conversation.provider
+        && chat_queries::has_messages(&conn, &conversation_id).map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "Esta conversación ya respondió con {}: para usar otro proveedor, empieza un chat nuevo.",
+            conversation.provider
+        ));
+    }
     // No account named and the provider unchanged: the thread keeps the account it has. Only an
     // explicit pick, or a move to another provider, resolves a new one.
     let account_id = match (account.as_deref(), provider == conversation.provider) {
@@ -946,10 +957,20 @@ pub fn chat_branch_conversation(
     // an empty title makes the fork autotitle from the copied first message, which produces the
     // parent's title anyway, only after a turn has run and with any title the user typed by hand
     // thrown away on the way. The fork is told apart by `parent_conversation_id`, which the UI has.
+    //
+    // A thread that continued another hands its fork what it continued from: the copied prefix
+    // starts where that summary ends, and without it the fork's engine would be given the middle of
+    // a conversation with no beginning.
     conn.execute(
         "UPDATE chat_conversations SET parent_conversation_id = ?2, branched_at_turn = ?3,
-             title = ?4 WHERE id = ?1",
-        rusqlite::params![fork.id, parent.id, at_turn, parent.title],
+             title = ?4, continued_from = ?5 WHERE id = ?1",
+        rusqlite::params![
+            fork.id,
+            parent.id,
+            at_turn,
+            parent.title,
+            chat_queries::continuation_column(parent.continued_from.as_ref())
+        ],
     )
     .map_err(|e| e.to_string())?;
 
@@ -1043,6 +1064,9 @@ pub async fn chat_send(
     // agent with a file-reading tool, so "attaching" a document to one is telling it where the
     // document is. The engines that can do better also get `attachment_args`; this line is what
     // makes the feature exist for the rest.
+    // The user's own words, kept for the conversation's title: the note below names files, not the
+    // topic.
+    let asked = message.clone();
     let message = if attachments.is_empty() {
         message
     } else {
@@ -1437,6 +1461,8 @@ pub async fn chat_send(
     // Only where there is a working copy to snapshot. A repo-less turn writes nothing by design,
     // and a checkpoint of an empty scratch directory would be an undo button for nothing.
     let checkpoint = project.as_ref().and_then(|p| checkpoint_before(&p.local_path, "chat"));
+    // Kept for the title run below; `app` moves into the run's scope.
+    let title_app = app.clone();
     let (result, trace) = ai_runs::scoped_with_trace(app, run_id, async {
         ai::chat_turn(
             &*config.engine,
@@ -1535,7 +1561,7 @@ pub async fn chat_send(
         }
     };
 
-    let created_at = {
+    let (created_at, wants_title) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let row = ChatMessageRow {
             id: assistant_message_id.clone(),
@@ -1577,19 +1603,29 @@ pub async fn chat_send(
                     // standing rather than emptying the gauge.
                     run.context_tokens,
                 );
-                chat_queries::list_messages(&conn, &conversation_id, false)
+                let created_at = chat_queries::list_messages(&conn, &conversation_id, false)
                     .ok()
                     .and_then(|rows| {
                         rows.into_iter().find(|m| m.id == assistant_message_id).map(|m| m.created_at)
                     })
-                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339())
+                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                // Its first answer: the thread is named after what was asked — see `chat_title`.
+                (created_at, chat_queries::awaits_written_title(&conn, &conversation_id).unwrap_or(false))
             }
             // The reply is already in hand; a failed *write* must not cost the user their answer.
             // It is returned anyway, stamped with the time it arrived rather than the time it was
             // filed.
-            Err(_) => chrono::Utc::now().to_rfc3339(),
+            Err(_) => (chrono::Utc::now().to_rfc3339(), false),
         }
     };
+    if wants_title {
+        crate::chat_title::spawn(
+            &title_app,
+            Some(conversation.workspace_id.clone()),
+            asked,
+            crate::chat_title::Target::Chat { conversation_id: conversation_id.clone() },
+        );
+    }
 
     Ok(ChatReply {
         account_id: config.account_id().map(str::to_string),
@@ -1606,6 +1642,153 @@ pub async fn chat_send(
         // about what this turn made.
         outputs: produced_paths,
     })
+}
+
+/// The engine a repository conversation's next turn would have run on in the panel, when its chip
+/// picked one — `chatStore.engineFor`'s `picked`. Absent: the last turn's engine, as there.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickedEngine {
+    provider: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    account: Option<String>,
+}
+
+/// Moves a conversation from the assistant panel's repository chat into this workspace, for good —
+/// see `chat_queries::move_from_panel` for what it brings and why it keeps its repository.
+///
+/// It runs on the engine the panel would have answered its next question on: `picked` when the chip
+/// picked one, else the last turn's engine, with the account resolved the way the panel resolves it.
+/// The engine's session comes along only when that engine and account are the ones it lives under,
+/// and not when a `/clear` is still waiting for its question (`conversation_resets`): that promised a
+/// fresh start, and the thread's `context_resets` keeps the promise here — nothing before it is
+/// replayed. Without a session for any other reason, the first turn here starts one and is handed the
+/// transcript since the last `/clear`, as a change of account does.
+///
+/// Takes the conversation's own lease first, the one a panel turn takes: a turn running in it — from
+/// this desk or a phone — refuses the move instead of being cut in half, and none starts while it
+/// happens. The images change folders before the rows do and go back if the rows could not move.
+#[tauri::command]
+pub fn chat_move_from_panel(
+    db: State<'_, Db>,
+    project_id: String,
+    conversation_id: String,
+    picked: Option<PickedEngine>,
+) -> Result<ChatConversation, String> {
+    let _lease = ai_locks::acquire_key(&format!("panel::{conversation_id}"))
+        .ok_or_else(|| "Hay una respuesta en curso en esta conversación: muévela cuando termine.".to_string())?;
+
+    let (project, turns, resets, title, overrides, config) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        if chat_queries::get_conversation(&conn, &conversation_id).map_err(|e| e.to_string())?.is_some() {
+            return Err("Esta conversación ya está en el Chat.".to_string());
+        }
+        let project = queries::get_project(&conn, &project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Project not found".to_string())?;
+        let turns = queries::get_conversation_messages(&conn, &project_id, &conversation_id).map_err(|e| e.to_string())?;
+        let title = queries::conversation_title(&conn, &conversation_id).map_err(|e| e.to_string())?;
+        let resets = queries::conversation_resets(&conn, &conversation_id).map_err(|e| e.to_string())?;
+        let overrides = queries::get_setting(&conn, &crate::chat_mcp::panel_setting_key(&project_id))
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        // `chatStore.engineFor`, then `send_chat_message`'s resolution of it.
+        let last = turns.iter().rev().find(|turn| turn.provider.is_some());
+        let config = match (&picked, last) {
+            (Some(engine), _) => load_ai_config_as(
+                &conn,
+                &engine.provider,
+                engine.model.trim(),
+                ai_accounts::Choice::parse(engine.account.as_deref()),
+                Some(AiTask::Chat),
+                Some(&project.workspace_id),
+            )?,
+            (None, Some(turn)) => load_ai_config_as(
+                &conn,
+                turn.provider.as_deref().unwrap_or_default(),
+                turn.model.as_deref().unwrap_or_default(),
+                ai_accounts::Choice::Auto,
+                Some(AiTask::Chat),
+                Some(&project.workspace_id),
+            )?,
+            (None, None) => load_ai_config_in(&conn, AiTask::Chat, Some(&project.workspace_id))?,
+        };
+        (project, turns, resets, title, overrides, config)
+    };
+    if turns.is_empty() {
+        return Err("Esta conversación todavía no tiene nada que mover.".to_string());
+    }
+
+    // Where its context started again in the panel, as turn numbers here: each `/clear` before the
+    // turn it started over at (a waiting one at the turn not asked yet), and each turn that ran as
+    // another account — the panel drew a line there too, and resumed nothing across it.
+    let placed = queries::place_context_resets(&turns, &resets);
+    let clear = |turn: usize| ContextReset { turn: turn as i64, reason: "clear".into(), provider: None, account_id: None };
+    let mut context_resets: Vec<ContextReset> = placed.turns.iter().map(|&turn| clear(turn)).collect();
+    if placed.pending {
+        context_resets.push(clear(turns.len()));
+    }
+    context_resets.extend(queries::account_breaks(&turns).into_iter().map(|(turn, provider, account_id)| ContextReset {
+        turn: turn as i64,
+        reason: "account".into(),
+        provider: Some(provider),
+        account_id,
+    }));
+    context_resets.sort_by_key(|reset| reset.turn);
+    // The session lives under the engine and the account of the turn that last reported one.
+    let last_session = turns.iter().rev().find(|turn| turn.engine_session_id.is_some());
+    let engine_session_id = last_session
+        .filter(|turn| {
+            !placed.pending
+                && turn.provider.as_deref() == Some(config.provider.as_str())
+                && turn.account_id.as_deref() == config.account_id()
+        })
+        .and_then(|turn| turn.engine_session_id.clone());
+
+    let moved_images = super::chat_attach::move_repo_attachments_to_chat(&conversation_id)?;
+    let turns: Vec<ActivityLogEntry> = match &moved_images {
+        Some((from, to)) => turns
+            .into_iter()
+            .map(|turn| ActivityLogEntry { question: turn.question.replace(from.as_str(), to), ..turn })
+            .collect(),
+        None => turns,
+    };
+    let moved = {
+        let conn = db.0.lock().map_err(|e| e.to_string());
+        conn.and_then(|conn| {
+            chat_queries::move_from_panel(
+                &conn,
+                &chat_queries::PanelMove {
+                    conversation_id: &conversation_id,
+                    project_id: &project_id,
+                    workspace_id: &project.workspace_id,
+                    title: title.as_deref(),
+                    provider: &config.provider,
+                    model: &config.model,
+                    account_id: config.account_id(),
+                    engine_session_id: engine_session_id.as_deref(),
+                    mcp_overrides: &overrides,
+                    context_resets: &context_resets,
+                    turns: &turns,
+                },
+            )
+            .map_err(|e| e.to_string())
+        })
+    };
+    match &moved {
+        Err(_) if moved_images.is_some() => super::chat_attach::return_moved_attachments(&conversation_id),
+        // Images attached in the panel's box and never sent go: they belonged to a message nobody
+        // wrote, in a composer that no longer exists — carried here they would turn up staged in
+        // this workspace's box, unexplained.
+        Ok(_) if moved_images.is_some() => {
+            let questions: Vec<&str> = turns.iter().map(|turn| turn.question.as_str()).collect();
+            super::chat_attach::drop_unsent_attachments(&conversation_id, &questions);
+        }
+        _ => {}
+    }
+    moved
 }
 
 /// What a compaction did, for the window that asked for it.
@@ -1872,6 +2055,41 @@ async fn run_compaction(
     guidance: Option<&str>,
     run_id: Option<String>,
 ) -> Result<ChatCompaction, String> {
+    let Summary { text: summary, through_turn, before_chars } =
+        summarize(app, db, conversation_id, config, guidance, run_id).await?;
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    chat_queries::set_compaction(&conn, conversation_id, &summary, through_turn)
+        .map_err(|e| e.to_string())?;
+    let after_chars = replayed_prefix(&conn, conversation_id)
+        .map(|prefix| prefix.chars().count() as i64)
+        .unwrap_or(0);
+
+    Ok(ChatCompaction { summary, through_turn, before_chars, after_chars })
+}
+
+/// What a conversation comes to when its engine summarises it — what a compaction and a thread
+/// continued elsewhere are both made of.
+struct Summary {
+    text: String,
+    /// The last turn it covers: every exchange on disk when it was asked for.
+    through_turn: i64,
+    /// How long the replay it stands in for was, in characters.
+    before_chars: i64,
+}
+
+/// Asks `config`'s engine for a [`Summary`] of everything `conversation_id` would replay, in a fresh
+/// session, and files it nowhere: [`run_compaction`] files it on the conversation itself,
+/// [`chat_continue_in_new_thread`] on the thread it opens. No lease of its own — both callers hold
+/// the conversation's.
+async fn summarize(
+    app: AppHandle,
+    db: &State<'_, Db>,
+    conversation_id: &str,
+    config: &crate::commands::claude_cmd::AiConfig,
+    guidance: Option<&str>,
+    run_id: Option<String>,
+) -> Result<Summary, String> {
     let (material, through_turn) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         // Exactly what the next fresh session would be sent — summary already folded in if this
@@ -1944,22 +2162,90 @@ async fn run_compaction(
     })
     .await;
 
-    let summary = result?.text.trim().to_string();
-    if summary.is_empty() {
-        // An engine that answered with nothing has not compacted anything, and filing an empty
+    let text = result?.text.trim().to_string();
+    if text.is_empty() {
+        // An engine that answered with nothing has not summarised anything, and filing an empty
         // summary would be the worst of both: the turns would stop being replayed and nothing would
         // stand in for them.
         return Err("the model returned an empty summary".to_string());
     }
+    Ok(Summary { text, through_turn, before_chars })
+}
+
+/// Starts a new thread from the whole of this one — the way to go on with another engine, since a
+/// thread keeps the provider it first answered on (see [`chat_set_engine`]).
+///
+/// The summary is written by **this thread's own engine** (the user's call, 2026-10-01): the model
+/// that held the conversation is the one that knows what in it mattered. Same instructions as
+/// `/compact`, plus whatever the user asked it to keep; the same lease, so it cannot run beside a
+/// turn of this thread. **Nothing is created unless the summary is**: an engine that fails — out of
+/// quota, say, which is a common reason to switch — leaves no thread behind, only its error.
+///
+/// The new thread carries that summary and nothing else ([`chat_queries::continue_into`]): no
+/// message, no session, no file. The legend at its top says where it came from; on disk the two
+/// share nothing, so deleting either leaves the other whole. This thread is not touched — its own
+/// compaction, if it has one, stays as it was.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn chat_continue_in_new_thread(
+    app: AppHandle,
+    db: State<'_, Db>,
+    conversation_id: String,
+    provider: String,
+    model: String,
+    account: Option<String>,
+    guidance: Option<String>,
+    run_id: Option<String>,
+) -> Result<ChatConversation, String> {
+    if provider.trim().is_empty() || model.trim().is_empty() {
+        return Err("Elige el modelo del hilo nuevo.".to_string());
+    }
+    let origin = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let origin = chat_queries::get_conversation(&conn, &conversation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "conversation not found".to_string())?;
+        if !chat_queries::has_messages(&conn, &conversation_id).map_err(|e| e.to_string())? {
+            return Err("Esta conversación todavía no tiene nada que continuar.".to_string());
+        }
+        origin
+    };
+
+    // The lease a turn and a compaction take: summarising while an answer is being written would
+    // hand the new thread a conversation one exchange short of the one on screen.
+    let busy = || {
+        let name = if origin.title.trim().is_empty() { &conversation_id } else { &origin.title };
+        format!("{}{name}", ai_locks::BUSY_MARKER)
+    };
+    let _lease = ai_locks::acquire_key(&conversation_id).ok_or_else(busy)?;
+
+    let config = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        conversation_config(&conn, &origin, None, None)?
+    };
+    let summary = summarize(app, &db, &conversation_id, &config, guidance.as_deref(), run_id).await?;
 
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    chat_queries::set_compaction(&conn, conversation_id, &summary, through_turn)
-        .map_err(|e| e.to_string())?;
-    let after_chars = replayed_prefix(&conn, conversation_id)
-        .map(|prefix| prefix.chars().count() as i64)
-        .unwrap_or(0);
-
-    Ok(ChatCompaction { summary, through_turn, before_chars, after_chars })
+    // Settled now and stamped, as for any new thread (see `chat_create_conversation`): the account
+    // picked, or the one the thread's workspace uses for that provider.
+    let account_id = ai_accounts::resolve(
+        &conn,
+        &provider,
+        Some(AiTask::Chat.key()),
+        Some(&origin.workspace_id),
+        ai_accounts::Choice::parse(account.as_deref()),
+    )
+    .account_id;
+    let continuation = Continuation {
+        conversation_id: origin.id.clone(),
+        title: origin.title.clone(),
+        provider: config.provider.clone(),
+        model: config.model.clone(),
+        turns: summary.through_turn + 1,
+        summary: summary.text,
+    };
+    chat_queries::continue_into(&conn, &origin, &provider, account_id.as_deref(), &model, &continuation)
+        .map_err(|e| e.to_string())
 }
 
 /// Throws a conversation's summary away, so the whole transcript is replayed again.
@@ -2011,19 +2297,32 @@ const COMPACT_PROMPT: &str = "Resume la conversación anterior para que otra ins
 /// context is the correct thing to do when its history cannot be read, and failing the turn over it
 /// would refuse to answer a question the engine is perfectly able to answer.
 fn replayed_prefix(conn: &Connection, conversation_id: &str) -> Option<String> {
+    let conversation = chat_queries::get_conversation(conn, conversation_id).ok().flatten();
     // Read first, because it decides which of the messages below are eligible at all. A
     // conversation nobody has compacted — almost all of them — comes back `None` here, and
     // everything after this line behaves exactly as it did before compaction existed.
-    let compaction = chat_queries::get_conversation(conn, conversation_id).ok().flatten().and_then(
-        |conversation| {
-            let through = conversation.compacted_through_turn?;
-            let summary = conversation.compacted_summary.trim().to_string();
-            (!summary.is_empty()).then_some((summary, through))
-        },
-    );
+    let compaction = conversation.as_ref().and_then(|conversation| {
+        let through = conversation.compacted_through_turn?;
+        let summary = conversation.compacted_summary.trim().to_string();
+        (!summary.is_empty()).then_some((summary, through))
+    });
+    // The last place its context started again in the assistant (a `/clear`, a change of account):
+    // nothing before it is the conversation as far as the model is concerned.
+    let starts_at = conversation
+        .as_ref()
+        .and_then(|conversation| conversation.context_resets.iter().map(|reset| reset.turn).max());
+    // A thread continued from another starts from that one's summary, which is all it knows of it —
+    // replayed even before its first turn has been asked, since that turn is the one that needs it.
+    // Its own compaction, once it has one, was written from a prefix that already held this, so it
+    // stands in for both.
+    let inherited = conversation
+        .as_ref()
+        .and_then(|conversation| conversation.continued_from.as_ref())
+        .map(|continuation| continuation.summary.trim().to_string())
+        .filter(|summary| !summary.is_empty());
 
     let messages = chat_queries::list_messages(conn, conversation_id, false).ok()?;
-    if messages.is_empty() {
+    if messages.is_empty() && inherited.is_none() {
         return None;
     }
 
@@ -2033,6 +2332,9 @@ fn replayed_prefix(conn: &Connection, conversation_id: &str) -> Option<String> {
         // model's — neither is part of the conversation, and replaying the second would have the
         // model trying to account for an error it did not produce.
         if message.is_cancelled || message.is_error || message.content.trim().is_empty() {
+            continue;
+        }
+        if starts_at.is_some_and(|start| message.turn < start) {
             continue;
         }
         // Already inside the summary. Sending both is the one mistake compaction cannot survive: a
@@ -2045,13 +2347,6 @@ fn replayed_prefix(conn: &Connection, conversation_id: &str) -> Option<String> {
         lines.push(format!("{who}: {}", message.content));
     }
 
-    let Some((summary, _)) = compaction else {
-        if lines.is_empty() {
-            return None;
-        }
-        return Some(keep_tail(lines.join("\n\n"), REPLAY_CHAR_BUDGET));
-    };
-
     // The summary is kept **whole**, and the budget is spent on what came after it.
     //
     // The uncompacted path keeps the tail because recency is what a conversation mostly is. That
@@ -2059,11 +2354,24 @@ fn replayed_prefix(conn: &Connection, conversation_id: &str) -> Option<String> {
     // for with a turn and already as small as it will ever be, so trimming it from the front would
     // throw away the one thing the user spent that turn to keep and leave a context that is both
     // shorter and missing its own beginning.
-    let header = format!(
-        "Resumen de la parte anterior de esta conversación, hecho por ti mismo en una compactación \
-         previa. Es lo único que queda de esos mensajes: trátalo como tu propia memoria de lo ya \
-         hablado, no como algo que el usuario acabe de decir.\n\n{summary}"
-    );
+    let header = match (compaction, inherited) {
+        (Some((summary, _)), _) => format!(
+            "Resumen de la parte anterior de esta conversación, hecho por ti mismo en una compactación \
+             previa. Es lo único que queda de esos mensajes: trátalo como tu propia memoria de lo ya \
+             hablado, no como algo que el usuario acabe de decir.\n\n{summary}"
+        ),
+        (None, Some(summary)) => format!(
+            "Esta conversación continúa otra anterior, que el modelo que la llevaba resumió para \
+             empezar esta. Ese resumen es lo único que queda de ella: trátalo como tu propia memoria \
+             de lo ya hablado, no como algo que el usuario acabe de decir.\n\n{summary}"
+        ),
+        (None, None) => {
+            if lines.is_empty() {
+                return None;
+            }
+            return Some(keep_tail(lines.join("\n\n"), REPLAY_CHAR_BUDGET));
+        }
+    };
     if lines.is_empty() {
         return Some(keep_tail(header, REPLAY_CHAR_BUDGET));
     }
@@ -2658,6 +2966,68 @@ mod tests {
             prefix.find("User:").unwrap() < prefix.find("Assistant:").unwrap(),
             "the question has to precede its answer or the replay reads backwards"
         );
+    }
+
+    /// A thread moved from the assistant with a `/clear` (or a change of account) in it replays
+    /// nothing from before that point — the model never had it there either — and one whose last
+    /// `/clear` was still waiting replays nothing at all.
+    #[test]
+    fn a_moved_thread_replays_only_what_came_after_its_context_started_again() {
+        let conn = install();
+        let ws = workspace(&conn);
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
+        say(&conn, &c.id, 0, "user", "lo de antes");
+        say(&conn, &c.id, 0, "assistant", "respuesta de antes");
+        say(&conn, &c.id, 1, "user", "lo de después");
+        say(&conn, &c.id, 1, "assistant", "respuesta de después");
+        let set_resets = |json: &str| {
+            conn.execute("UPDATE chat_conversations SET context_resets = ?2 WHERE id = ?1", rusqlite::params![c.id, json])
+                .unwrap();
+        };
+
+        set_resets(r#"[{"turn":1,"reason":"clear"}]"#);
+        let prefix = replayed_prefix(&conn, &c.id).unwrap();
+        assert!(!prefix.contains("lo de antes"), "the clear is honoured: {prefix}");
+        assert!(prefix.contains("lo de después"));
+
+        set_resets(r#"[{"turn":1,"reason":"account","provider":"claude","accountId":"work"},{"turn":2,"reason":"clear"}]"#);
+        assert!(replayed_prefix(&conn, &c.id).is_none(), "a clear still waiting starts from nothing");
+    }
+
+    /// A thread continued from another hands its first turn that one's summary — before anything
+    /// has been asked in it — then the summary and what was said here; once compacted itself, only
+    /// its own summary, which was written from a prefix that already held the inherited one.
+    #[test]
+    fn a_continued_thread_replays_what_it_carries_until_it_is_compacted_itself() {
+        let conn = install();
+        let ws = workspace(&conn);
+        let origin = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "sonnet", "").unwrap();
+        let carried = Continuation {
+            conversation_id: origin.id.clone(),
+            title: "Origen".into(),
+            provider: "claude".into(),
+            model: "sonnet".into(),
+            turns: 3,
+            summary: "Decidido: pgloader para los datos.".into(),
+        };
+        let thread = chat_queries::continue_into(&conn, &origin, "codex", None, "gpt-5.5", &carried).unwrap();
+
+        let first = replayed_prefix(&conn, &thread.id).expect("its first turn is handed the summary");
+        assert!(first.contains("continúa otra anterior"), "{first}");
+        assert!(first.contains("Decidido: pgloader para los datos."));
+
+        say(&conn, &thread.id, 0, "user", "¿y los índices?");
+        say(&conn, &thread.id, 0, "assistant", "Recréalos a mano.");
+        let later = replayed_prefix(&conn, &thread.id).unwrap();
+        assert!(
+            later.find("pgloader").unwrap() < later.find("User: ¿y los índices?").unwrap(),
+            "what it carries comes before what was said here: {later}"
+        );
+
+        chat_queries::set_compaction(&conn, &thread.id, "Todo resumido otra vez.", 0).unwrap();
+        let compacted = replayed_prefix(&conn, &thread.id).unwrap();
+        assert!(compacted.contains("Todo resumido otra vez."));
+        assert!(!compacted.contains("pgloader"), "its own summary stands in for both: {compacted}");
     }
 
     /// A turn the user stopped, and one that failed, are not part of the conversation. Replaying

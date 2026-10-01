@@ -9,6 +9,8 @@ import type { ActivityLogEntry } from "../types/domain";
  */
 
 let stored: ActivityLogEntry[] = [];
+/** What `chat_context_resets` answers — where the stored `/clear`s fall. */
+let resets: { turns: number[]; pending: boolean } = { turns: [], pending: false };
 
 /**
  * Every `send_chat_message` is parked until a test settles it — "a turn is running" is then a state
@@ -17,11 +19,18 @@ let stored: ActivityLogEntry[] = [];
 const backend = vi.hoisted(() => ({
   sends: [] as { args: Record<string, unknown>; resolve: (value: unknown) => void; reject: (error: unknown) => void }[],
   asked: [] as string[],
+  /** Conversations a `/clear` was written down for. */
+  cleared: [] as string[],
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (name: string, args: Record<string, unknown> = {}) => {
     if (name === "get_chat_conversation") return stored;
+    if (name === "chat_context_resets") return resets;
+    if (name === "reset_chat_context") {
+      backend.cleared.push(String(args.sessionId));
+      return null;
+    }
     if (name === "send_chat_message") {
       backend.asked.push(String(args.message));
       return new Promise((resolve, reject) => backend.sends.push({ args, resolve, reject }));
@@ -67,6 +76,7 @@ function breaks(entries: ActivityLogEntry[]): string[] {
 
 beforeEach(() => {
   stored = [];
+  resets = { turns: [], pending: false };
   useChatStore.setState({ byConversation: {} });
 });
 
@@ -233,5 +243,46 @@ describe("messages sent while a turn runs", () => {
       ["two", false],
       ["three", true],
     ]);
+  });
+});
+
+describe("a /clear is kept on disk", () => {
+  it("draws its line where it fell, reopened", () => {
+    const messages = turnsToMessages([turn(1), turn(2), turn(3)], [2]);
+    expect(messages.filter((m) => m.contextReset).map((m) => m.content)).toEqual(["question 3"]);
+  });
+
+  it("is still waiting after a restart, and the composer says so", async () => {
+    stored = [turn(1), turn(2)];
+    resets = { turns: [1], pending: true };
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+    const session = useChatStore.getState().byConversation["conv-1"];
+    expect(session.resetPending).toBe(true);
+    expect(session.messages.filter((m) => m.contextReset).map((m) => m.content)).toEqual(["question 2"]);
+  });
+
+  it("is written down when typed, and only for a conversation that has something stored", async () => {
+    stored = [turn(1)];
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+    backend.cleared.length = 0;
+    useChatStore.getState().clearContext("conv-1");
+    expect(useChatStore.getState().byConversation["conv-1"].resetPending).toBe(true);
+    await Promise.resolve();
+    expect(backend.cleared).toEqual(["conv-1"]);
+  });
+
+  it("follows another window: a clear typed there, and the turn that used it up", async () => {
+    stored = [turn(1)];
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+    resets = { turns: [], pending: true };
+    await useChatStore.getState().reconcile("p-1", "conv-1");
+    expect(useChatStore.getState().byConversation["conv-1"].resetPending).toBe(true);
+
+    stored = [turn(1), turn(2)];
+    resets = { turns: [1], pending: false };
+    await useChatStore.getState().reconcile("p-1", "conv-1");
+    const session = useChatStore.getState().byConversation["conv-1"];
+    expect(session.resetPending).toBe(false);
+    expect(session.messages.filter((m) => m.contextReset).map((m) => m.content)).toEqual(["question 2"]);
   });
 });

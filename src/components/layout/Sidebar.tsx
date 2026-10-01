@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ActiveMarker, ActivePill } from "../common/ActivePill";
 import {
@@ -51,6 +51,7 @@ import {
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useTerminalStore } from "../../state/terminalStore";
+import { deriveRunning, ensureServicesSync, useServicesStore } from "../../state/servicesStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
 import { useAiPanelStore, useVisiblePrId } from "../../state/aiPanelStore";
@@ -2176,6 +2177,12 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
   const toggleDock = useTerminalStore((s) => s.toggleDock);
   const t = useT();
   const hint = useShortcutHint();
+  // Whether anything is running — in any workspace, as the status bar counts it. The bar says how
+  // many; this only says that there is something, on the button that shows them.
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const runtime = useServicesStore((s) => s.runtime);
+  const servicesRunning = deriveRunning(runtime, workspaceId).length > 0;
+  useEffect(() => ensureServicesSync(), []);
 
   const items = [
     {
@@ -2194,6 +2201,7 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
       icon: <CirclePlay size={17} />,
       label: t("services.title"),
       tip: t("services.toggle"),
+      running: servicesRunning,
     },
     {
       tour: "open-settings",
@@ -2224,10 +2232,12 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
               } ${item.open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`}
             >
               {collapsed ? (
-                item.icon
+                <FootIcon icon={item.icon} running={item.running} />
               ) : (
                 <>
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center">{item.icon}</span>
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center">
+                    <FootIcon icon={item.icon} running={item.running} />
+                  </span>
                   <span className="min-w-0 truncate text-[13px] font-medium">{item.label}</span>
                 </>
               )}
@@ -2236,6 +2246,18 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
         ))}
       </div>
     </>
+  );
+}
+
+/** A foot button's glyph, with the green dot that says something it shows is running. */
+function FootIcon({ icon, running }: { icon: ReactNode; running?: boolean }) {
+  return (
+    <span className="relative flex">
+      {icon}
+      {running && (
+        <span aria-hidden className="absolute -right-0.5 -top-0.5 h-[7px] w-[7px] rounded-full bg-[var(--cf-success)]" />
+      )}
+    </span>
   );
 }
 

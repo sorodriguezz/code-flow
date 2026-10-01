@@ -15,6 +15,7 @@ mod boot_guard;
 mod caveman;
 mod chain_memory;
 mod chat_mcp;
+mod chat_title;
 mod git_exclude;
 mod ci;
 mod boards;
@@ -794,6 +795,7 @@ pub fn run() {
             commands::mcp_cmd::mcp_import,
             commands::chat_cmd::chat_branch_conversation,
             commands::chat_cmd::chat_compact,
+            commands::chat_cmd::chat_continue_in_new_thread,
             commands::chat_cmd::chat_context_window,
             commands::chat_cmd::chat_set_caveman,
             commands::chat_cmd::chat_caveman_levels,
@@ -1241,6 +1243,9 @@ pub fn run() {
             commands::activity_cmd::get_job_result,
             commands::activity_cmd::delete_chat_conversation,
             commands::activity_cmd::rename_chat_conversation,
+            commands::chat_cmd::chat_move_from_panel,
+            commands::activity_cmd::reset_chat_context,
+            commands::activity_cmd::chat_context_resets,
             commands::activity_cmd::list_job_history,
             commands::activity_cmd::rename_job_history_entry,
             commands::activity_cmd::delete_job_history_entry,

@@ -36,7 +36,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use super::models::{ChatConversation, ChatGroup, ChatMessageRow, ChatSearchHit};
+use super::models::{ActivityLogEntry, ChatConversation, ChatGroup, ChatMessageRow, ChatSearchHit, ContextReset, Continuation};
 use super::queries::now;
 
 /// Every column of `chat_conversations`, plus the joined project name. Qualified with `c.`/`p.`
@@ -50,7 +50,8 @@ const CONVERSATION_COLUMNS: &str = "c.id, c.workspace_id, c.project_id, p.name, 
                                     c.context_tokens, c.caveman_level, c.engine_session_id, \
                                     c.pinned_at, c.archived_at, c.parent_conversation_id, \
                                     c.branched_at_turn, c.created_at, c.updated_at, c.account_id, \
-                                    c.mcp_overrides";
+                                    c.mcp_overrides, c.moved_at, c.moved_through_turn, c.context_resets, \
+                                    c.continued_from";
 
 /// A **LEFT** join, and that is the whole point of writing it once: `project_id` is nullable and
 /// usually null, so an inner join would return an empty sidebar on a correctly working app.
@@ -115,6 +116,12 @@ fn map_conversation(row: &rusqlite::Row) -> rusqlite::Result<ChatConversation> {
         updated_at: row.get(22)?,
         account_id: row.get(23)?,
         mcp_overrides: row.get(24)?,
+        moved_at: row.get(25)?,
+        moved_through_turn: row.get(26)?,
+        // A JSON array; empty — every thread that never had one — is none.
+        context_resets: serde_json::from_str(&row.get::<_, String>(27)?).unwrap_or_default(),
+        // A JSON object; empty — every thread that did not continue another — is none.
+        continued_from: serde_json::from_str(&row.get::<_, String>(28)?).ok(),
     })
 }
 
@@ -350,6 +357,37 @@ pub fn create_conversation(
     // this is the one place where a column default (`title`, the NULLs) would otherwise have to be
     // duplicated in Rust and kept in step with the schema by hand.
     get_conversation(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+/// The `continued_from` column's text for `continuation`: empty for none, which is what the column
+/// holds on every thread that did not continue another.
+pub fn continuation_column(continuation: Option<&Continuation>) -> String {
+    continuation.and_then(|continuation| serde_json::to_string(continuation).ok()).unwrap_or_default()
+}
+
+/// Opens a thread that continues `origin` on another engine — see
+/// `chat_cmd::chat_continue_in_new_thread`. It carries `continuation` and nothing else: no message,
+/// no session, no attachment. What it keeps of `origin` beyond that is where it lives — the
+/// workspace, the repository it may work on, the project folder it is filed in — and the link back
+/// (`parent_conversation_id`, which goes NULL if `origin` is deleted; this thread stays whole).
+///
+/// One transaction, so a failure leaves no half-made thread in the list.
+pub fn continue_into(
+    conn: &Connection,
+    origin: &ChatConversation,
+    provider: &str,
+    account_id: Option<&str>,
+    model: &str,
+    continuation: &Continuation,
+) -> rusqlite::Result<ChatConversation> {
+    let tx = conn.unchecked_transaction()?;
+    let thread = create_conversation(&tx, &origin.workspace_id, origin.project_id.as_deref(), provider, account_id, model, "")?;
+    tx.execute(
+        "UPDATE chat_conversations SET parent_conversation_id = ?2, group_id = ?3, continued_from = ?4 WHERE id = ?1",
+        params![thread.id, origin.id, origin.group_id, continuation_column(Some(continuation))],
+    )?;
+    tx.commit()?;
+    get_conversation(conn, &thread.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
 /// The sidebar's one query: **flat, global, pinned first, then most recently touched.**
@@ -846,15 +884,7 @@ pub fn autotitle_from_first_message(conn: &Connection, id: &str) -> rusqlite::Re
         _ => return Ok(()),
     }
 
-    let first: Option<String> = conn
-        .query_row(
-            "SELECT content FROM chat_messages WHERE conversation_id = ?1 AND role = 'user'
-             ORDER BY turn, created_at LIMIT 1",
-            params![id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(source) = first else { return Ok(()) };
+    let Some(source) = first_question(conn, id)? else { return Ok(()) };
 
     let title = truncate_on_word(source.trim(), TITLE_CHARS);
     if title.is_empty() {
@@ -869,10 +899,193 @@ pub fn autotitle_from_first_message(conn: &Connection, id: &str) -> rusqlite::Re
     Ok(())
 }
 
+/// The thread's first question, as stored — what its automatic name is cut from.
+fn first_question(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT content FROM chat_messages WHERE conversation_id = ?1 AND role = 'user'
+         ORDER BY turn, created_at LIMIT 1",
+        params![id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// Whether a thread has any message at all — once it has, its provider is settled (see
+/// `chat_cmd::chat_set_engine`).
+pub fn has_messages(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE conversation_id = ?1)",
+        params![id],
+        |row| row.get(0),
+    )
+}
+
+/// Whether a thread is still called what [`autotitle_from_first_message`] called it — or nothing —
+/// rather than a name somebody typed or a model wrote.
+fn has_automatic_title(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let current: Option<String> = conn
+        .query_row("SELECT title FROM chat_conversations WHERE id = ?1", params![id], |row| row.get(0))
+        .optional()?;
+    let Some(current) = current else { return Ok(false) };
+    if current.trim().is_empty() {
+        return Ok(true);
+    }
+    let automatic = first_question(conn, id)?.map(|source| truncate_on_word(source.trim(), TITLE_CHARS));
+    Ok(automatic.as_deref() == Some(current.as_str()))
+}
+
+/// Whether a thread is waiting for the title a model writes from its first question (see
+/// `crate::chat_title`): its first answer has just been filed — exactly one so far — and it still
+/// has its automatic name. Read right after an answer is written, so no later turn asks again, and
+/// a thread whose first turn failed asks when its first answer does land.
+pub fn awaits_written_title(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let answered: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM chat_messages
+         WHERE conversation_id = ?1 AND role = 'assistant' AND is_error = 0 AND is_cancelled = 0",
+        params![id],
+        |row| row.get(0),
+    )?;
+    Ok(answered == 1 && has_automatic_title(conn, id)?)
+}
+
+/// Gives a thread the title a model wrote from its first question, in place of its automatic name.
+///
+/// Only while it still has that name: the title lands seconds after the answer, and a rename typed
+/// in between is the user's and stays. Like the automatic name, it does not move the thread in the
+/// list.
+pub fn retitle_if_automatic(conn: &Connection, id: &str, title: &str) -> rusqlite::Result<bool> {
+    if !has_automatic_title(conn, id)? {
+        return Ok(false);
+    }
+    let changed = conn.execute("UPDATE chat_conversations SET title = ?2 WHERE id = ?1", params![id, title])?;
+    Ok(changed > 0)
+}
+
+// ---------- moving in from the assistant panel ----------
+
+/// What a repository conversation brings when it moves here — see [`move_from_panel`].
+pub struct PanelMove<'a> {
+    pub conversation_id: &'a str,
+    pub project_id: &'a str,
+    pub workspace_id: &'a str,
+    /// The name it had in the panel, typed or written by a model; `None` names it the way a thread
+    /// here is named, after its first question.
+    pub title: Option<&'a str>,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub account_id: Option<&'a str>,
+    /// The engine session to resume — only when the engine and the account are the ones it lives
+    /// under.
+    pub engine_session_id: Option<&'a str>,
+    /// The repository's MCP switches from the panel, which become this thread's own.
+    pub mcp_overrides: &'a str,
+    /// Where its context started again — its `/clear`s and its changes of account — in turn order.
+    pub context_resets: &'a [ContextReset],
+    /// Its exchanges, oldest first, as `activity_log` holds them — the questions already pointing at
+    /// the images' new folder.
+    pub turns: &'a [ActivityLogEntry],
+}
+
+/// Moves a conversation from the assistant panel's repository chat into this workspace: all of it,
+/// once, in one transaction. The thread is written here and its rows leave `activity_log` and
+/// `conversation_titles` in the same commit, so it is never in both places and never in neither.
+///
+/// It keeps its id and its repository — `project_id`, so its turns still run in that working copy
+/// and may edit it — and, when the caller says so, the engine's session: Claude Code keeps one per
+/// working directory and per login, both unchanged, so the next turn resumes where the panel left
+/// off. Each stored exchange becomes the two messages a turn is here, with its timestamp, engine,
+/// timing and trace.
+///
+/// `moved_at` and `moved_through_turn` say where it came from, and `updated_at` is now: it has just
+/// arrived, so it goes to the top of the list.
+pub fn move_from_panel(conn: &Connection, moving: &PanelMove) -> rusqlite::Result<ChatConversation> {
+    let at = now();
+    let created = moving.turns.first().map_or(at.as_str(), |turn| turn.created_at.as_str());
+    let title = match moving.title {
+        Some(title) if !title.trim().is_empty() => title.to_string(),
+        _ => moving.turns.first().map(|turn| truncate_on_word(turn.question.trim(), TITLE_CHARS)).unwrap_or_default(),
+    };
+    let through = moving.turns.len() as i64 - 1;
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO chat_conversations
+             (id, workspace_id, project_id, title, provider, model, system_prompt, engine_session_id,
+              pinned_at, archived_at, parent_conversation_id, branched_at_turn, created_at, updated_at,
+              account_id, mcp_overrides, moved_at, moved_through_turn, context_resets)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, NULL, NULL, NULL, NULL, ?8, ?9, ?10, ?11, ?9, ?12, ?13)",
+        params![
+            moving.conversation_id,
+            moving.workspace_id,
+            moving.project_id,
+            title,
+            moving.provider,
+            moving.model,
+            moving.engine_session_id,
+            created,
+            at,
+            moving.account_id,
+            moving.mcp_overrides,
+            through,
+            if moving.context_resets.is_empty() {
+                String::new()
+            } else {
+                serde_json::to_string(moving.context_resets).unwrap_or_default()
+            },
+        ],
+    )?;
+    for (turn, entry) in (0_i64..).zip(moving.turns) {
+        let question = ChatMessageRow {
+            id: Uuid::new_v4().to_string(),
+            conversation_id: moving.conversation_id.to_string(),
+            turn,
+            role: "user".to_string(),
+            content: entry.question.clone(),
+            provider: entry.provider.clone(),
+            model: None,
+            engine_version: None,
+            response_time_ms: None,
+            is_error: false,
+            is_cancelled: false,
+            trace: None,
+            outputs: None,
+            created_at: entry.created_at.clone(),
+        };
+        append_message(&tx, &question)?;
+        append_message(
+            &tx,
+            &ChatMessageRow {
+                id: Uuid::new_v4().to_string(),
+                role: "assistant".to_string(),
+                content: entry.answer.clone(),
+                model: entry.model.clone(),
+                engine_version: entry.engine_version.clone(),
+                response_time_ms: entry.response_time_ms,
+                is_error: entry.is_error,
+                trace: entry.trace.clone(),
+                ..question
+            },
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM activity_log WHERE project_id = ?1 AND session_id = ?2",
+        params![moving.project_id, moving.conversation_id],
+    )?;
+    tx.execute("DELETE FROM conversation_titles WHERE session_id = ?1", params![moving.conversation_id])?;
+    tx.execute("DELETE FROM conversation_resets WHERE session_id = ?1", params![moving.conversation_id])?;
+    // `append_message` stamped every row's own moment; the thread arrived now.
+    tx.execute(
+        "UPDATE chat_conversations SET updated_at = ?2 WHERE id = ?1",
+        params![moving.conversation_id, at],
+    )?;
+    tx.commit()?;
+    get_conversation(conn, moving.conversation_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
 /// See [`autotitle_from_first_message`]. Collapses whitespace first, so a message that begins with
 /// a fenced block or a hard-wrapped paragraph produces one line rather than a title with newlines
 /// in it.
-fn truncate_on_word(text: &str, limit: usize) -> String {
+pub(crate) fn truncate_on_word(text: &str, limit: usize) -> String {
     let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let chars: Vec<char> = flattened.chars().collect();
     if chars.len() <= limit {
@@ -1257,6 +1470,170 @@ mod tests {
         );
     }
 
+    /// A written title is asked for once — at the first answer — and only while the thread still
+    /// carries its automatic name. A failed first turn does not count as that answer.
+    #[test]
+    fn a_written_title_is_asked_for_at_the_first_answer_only() {
+        let conn = seeded();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
+        append_message(&conn, &user_message(&chat.id, 0, "por qué falla el build en CI")).unwrap();
+        autotitle_from_first_message(&conn, &chat.id).unwrap();
+        assert!(!awaits_written_title(&conn, &chat.id).unwrap(), "no answer yet");
+
+        let failed = ChatMessageRow { is_error: true, ..assistant_message(&chat.id, 0, "sin crédito", None) };
+        append_message(&conn, &failed).unwrap();
+        assert!(!awaits_written_title(&conn, &chat.id).unwrap(), "a failure is not an answer");
+
+        append_message(&conn, &user_message(&chat.id, 1, "otra vez")).unwrap();
+        append_message(&conn, &assistant_message(&chat.id, 1, "porque falta la variable", None)).unwrap();
+        assert!(awaits_written_title(&conn, &chat.id).unwrap(), "the first real answer asks");
+
+        append_message(&conn, &user_message(&chat.id, 2, "gracias")).unwrap();
+        append_message(&conn, &assistant_message(&chat.id, 2, "de nada", None)).unwrap();
+        assert!(!awaits_written_title(&conn, &chat.id).unwrap(), "a later answer never asks again");
+    }
+
+    /// The written title replaces the automatic name — and nothing else: a rename typed while it
+    /// was being written is the user's.
+    #[test]
+    fn a_written_title_replaces_only_the_automatic_name() {
+        let conn = seeded();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
+        append_message(&conn, &user_message(&chat.id, 0, "por qué falla el build en CI")).unwrap();
+        autotitle_from_first_message(&conn, &chat.id).unwrap();
+        assert!(retitle_if_automatic(&conn, &chat.id, "Build roto en CI").unwrap());
+        assert_eq!(get_conversation(&conn, &chat.id).unwrap().unwrap().title, "Build roto en CI");
+        assert!(!retitle_if_automatic(&conn, &chat.id, "Otro título").unwrap(), "already written");
+
+        let renamed = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
+        append_message(&conn, &user_message(&renamed.id, 0, "cómo despliego")).unwrap();
+        autotitle_from_first_message(&conn, &renamed.id).unwrap();
+        rename(&conn, &renamed.id, "Despliegues").unwrap();
+        assert!(!retitle_if_automatic(&conn, &renamed.id, "Desplegar la app").unwrap());
+        assert_eq!(get_conversation(&conn, &renamed.id).unwrap().unwrap().title, "Despliegues");
+
+        assert!(!retitle_if_automatic(&conn, "gone", "Nada").unwrap(), "a deleted thread is left alone");
+    }
+
+    /// The panel's turns of one conversation, two of them, the second a failure.
+    fn panel_turns(conn: &Connection, conversation: &str) -> Vec<ActivityLogEntry> {
+        use super::super::queries::{add_activity_log, get_conversation_messages, TurnMeta};
+        let meta = TurnMeta {
+            provider: Some("claude"),
+            account_id: None,
+            model: Some("opus"),
+            engine_version: Some("2.1"),
+            response_time_ms: Some(900),
+        };
+        add_activity_log(conn, "p1", conversation, Some("eng-1"), "por qué falla el build en CI", "falta una variable", Some("[]"), meta, false)
+            .unwrap();
+        add_activity_log(conn, "p1", conversation, None, "y en local", "sin crédito", None, Default::default(), true).unwrap();
+        get_conversation_messages(conn, "p1", conversation).unwrap()
+    }
+
+    fn panel_move<'a>(conversation: &'a str, title: Option<&'a str>, turns: &'a [ActivityLogEntry]) -> PanelMove<'a> {
+        PanelMove {
+            conversation_id: conversation,
+            project_id: "p1",
+            workspace_id: "w1",
+            title,
+            provider: "claude",
+            model: "opus",
+            account_id: None,
+            engine_session_id: Some("eng-1"),
+            mcp_overrides: r#"{"github":false}"#,
+            context_resets: &[],
+            turns,
+        }
+    }
+
+    /// A repository conversation moves whole: each exchange becomes its two messages with its own
+    /// time, engine and trace; it keeps its repository, its session and its name; and the panel is
+    /// left with nothing of it.
+    #[test]
+    fn a_panel_conversation_moves_whole_and_leaves_nothing_behind() {
+        use super::super::queries;
+        let conn = seeded();
+        let turns = panel_turns(&conn, "conv-x");
+        queries::rename_chat_conversation(&conn, "p1", "conv-x", "Build roto").unwrap();
+
+        let moved = move_from_panel(&conn, &panel_move("conv-x", Some("Build roto"), &turns)).unwrap();
+        assert_eq!(moved.project_id.as_deref(), Some("p1"), "still about the repository");
+        assert_eq!(moved.project_name.as_deref(), Some("api"));
+        assert_eq!(moved.title, "Build roto");
+        assert_eq!(moved.engine_session_id.as_deref(), Some("eng-1"), "resumes where the panel left off");
+        assert_eq!(moved.mcp_overrides, r#"{"github":false}"#);
+        assert_eq!(moved.moved_through_turn, Some(1));
+        assert!(moved.moved_at.is_some());
+
+        let messages = list_messages(&conn, "conv-x", true).unwrap();
+        let shape: Vec<(i64, &str, &str)> =
+            messages.iter().map(|m| (m.turn, m.role.as_str(), m.content.as_str())).collect();
+        assert_eq!(
+            shape,
+            vec![
+                (0, "user", "por qué falla el build en CI"),
+                (0, "assistant", "falta una variable"),
+                (1, "user", "y en local"),
+                (1, "assistant", "sin crédito"),
+            ]
+        );
+        assert_eq!(messages[1].model.as_deref(), Some("opus"));
+        assert_eq!(messages[1].response_time_ms, Some(900));
+        assert_eq!(messages[1].trace.as_deref(), Some("[]"));
+        assert_eq!(messages[0].created_at, turns[0].created_at, "each exchange keeps its own time");
+        assert!(messages[3].is_error, "a failed turn is still a failed turn");
+
+        assert!(queries::get_conversation_messages(&conn, "p1", "conv-x").unwrap().is_empty());
+        assert_eq!(queries::conversation_title(&conn, "conv-x").unwrap(), None);
+        assert!(queries::list_chat_conversations(&conn, "p1", None).unwrap().is_empty(), "gone from the panel");
+    }
+
+    /// Where its context started again in the panel travels with it, in turn order.
+    #[test]
+    fn a_moved_thread_keeps_where_its_context_started_again() {
+        let conn = seeded();
+        let turns = panel_turns(&conn, "conv-r");
+        let resets = [
+            ContextReset { turn: 1, reason: "account".into(), provider: Some("claude".into()), account_id: Some("work".into()) },
+            ContextReset { turn: 2, reason: "clear".into(), provider: None, account_id: None },
+        ];
+        let moving = PanelMove { context_resets: &resets, engine_session_id: None, ..panel_move("conv-r", None, &turns) };
+        let moved = move_from_panel(&conn, &moving).unwrap();
+        assert_eq!(moved.context_resets, resets);
+        assert_eq!(moved.engine_session_id, None);
+        let reread = get_conversation(&conn, "conv-r").unwrap().unwrap();
+        assert_eq!(reread.context_resets, resets, "read back from the row");
+    }
+
+    /// Never renamed in the panel, it is named the way any thread here is — after its first
+    /// question — which is also what lets a title still being written for it replace that name.
+    #[test]
+    fn an_unnamed_panel_conversation_is_named_after_its_first_question() {
+        let conn = seeded();
+        let turns = panel_turns(&conn, "conv-n");
+        let moved = move_from_panel(&conn, &panel_move("conv-n", None, &turns)).unwrap();
+        assert_eq!(moved.title, "por qué falla el build en CI");
+        assert!(retitle_if_automatic(&conn, "conv-n", "Build roto en CI").unwrap());
+    }
+
+    /// One transaction: when the thread cannot be written here, the panel still has all of it.
+    #[test]
+    fn a_move_that_fails_leaves_the_panel_conversation_where_it_was() {
+        use super::super::queries;
+        let conn = seeded();
+        let turns = panel_turns(&conn, "conv-y");
+        conn.execute(
+            "INSERT INTO chat_conversations (id, workspace_id, title, provider, model, system_prompt, created_at, updated_at)
+             VALUES ('conv-y', 'w1', '', 'claude', '', '', 't', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(move_from_panel(&conn, &panel_move("conv-y", None, &turns)).is_err());
+        assert_eq!(queries::get_conversation_messages(&conn, "p1", "conv-y").unwrap().len(), 2);
+        assert!(list_messages(&conn, "conv-y", false).unwrap().is_empty(), "no half-written thread");
+    }
+
     /// Titles are cut at a word, not mid-word — and the cut is on characters, so an accented
     /// letter near the limit cannot panic a byte slice.
     #[test]
@@ -1431,5 +1808,59 @@ mod tests {
 
         assert_eq!(user_message_contents(&conn, &chat.id).unwrap(), vec!["primera", "segunda"]);
         assert!(user_message_contents(&conn, "nope").unwrap().is_empty());
+    }
+
+    fn continuation_of(origin: &ChatConversation) -> Continuation {
+        Continuation {
+            conversation_id: origin.id.clone(),
+            title: "Migración a Postgres".into(),
+            provider: "claude".into(),
+            model: "sonnet".into(),
+            turns: 1,
+            summary: "Objetivo: pasar de MySQL a Postgres. Pendiente: índices parciales.".into(),
+        }
+    }
+
+    /// "Continuar en un hilo nuevo": the thread opens on the engine picked, where the other one
+    /// lives (its repository, its project folder), linked back — and with the summary and nothing
+    /// else. The other thread is not touched.
+    #[test]
+    fn a_continued_thread_carries_the_summary_and_nothing_else() {
+        let conn = seeded();
+        let folder = create_group(&conn, "Infra", "").unwrap();
+        let origin = create_conversation(&conn, "w1", Some("p1"), "claude", None, "sonnet", "").unwrap();
+        set_conversation_group(&conn, &origin.id, Some(&folder.id)).unwrap();
+        append_message(&conn, &user_message(&origin.id, 0, "¿y los índices?")).unwrap();
+        append_message(&conn, &assistant_message(&origin.id, 0, "Recréalos a mano.", None)).unwrap();
+        let origin = get_conversation(&conn, &origin.id).unwrap().unwrap();
+
+        let thread = continue_into(&conn, &origin, "codex", None, "gpt-5.5", &continuation_of(&origin)).unwrap();
+        assert_eq!((thread.provider.as_str(), thread.model.as_str()), ("codex", "gpt-5.5"));
+        assert_eq!(thread.parent_conversation_id.as_deref(), Some(origin.id.as_str()));
+        assert!(thread.branched_at_turn.is_none(), "a continuation copies nothing, so it is no branch");
+        assert_eq!(thread.project_id.as_deref(), Some("p1"));
+        assert_eq!(thread.group_id.as_deref(), Some(folder.id.as_str()));
+        assert_eq!(thread.continued_from, Some(continuation_of(&origin)));
+        assert!(thread.engine_session_id.is_none());
+        assert!(list_messages(&conn, &thread.id, false).unwrap().is_empty(), "no message is copied");
+
+        let untouched = get_conversation(&conn, &origin.id).unwrap().unwrap();
+        assert!(untouched.continued_from.is_none());
+        assert_eq!(list_messages(&conn, &origin.id, false).unwrap().len(), 2);
+    }
+
+    /// The link is provenance, not ownership: deleting the thread it came from leaves this one
+    /// whole, its legend included — only the way back goes.
+    #[test]
+    fn deleting_the_origin_leaves_the_continued_thread_whole() {
+        let conn = seeded();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        let origin = create_conversation(&conn, "w1", None, "claude", None, "sonnet", "").unwrap();
+        let thread = continue_into(&conn, &origin, "codex", None, "gpt-5.5", &continuation_of(&origin)).unwrap();
+
+        delete_conversation(&conn, &origin.id).unwrap();
+        let survivor = get_conversation(&conn, &thread.id).unwrap().expect("the continued thread outlives its origin");
+        assert!(survivor.parent_conversation_id.is_none());
+        assert_eq!(survivor.continued_from, Some(continuation_of(&origin)));
     }
 }

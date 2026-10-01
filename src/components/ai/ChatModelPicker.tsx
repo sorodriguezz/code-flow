@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Lock, Settings2 } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Forward, Loader2, Lock, Settings2 } from "lucide-react";
 import { AI_PROVIDERS, isLegacyModel, modelDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "./ProviderGlyph";
 import { modelOptionsFor } from "../settings/modelPicker";
@@ -38,19 +38,23 @@ const EDGE = 8;
  * ("Claude Code · Opus · Trabajo") and belongs in a composer. `tag` is `ModelTag`'s pill — the model,
  * and the account where there is a choice ("Haiku 4.5 · Sistema") — for a toolbar or a footer that
  * already had that pill. `icon` is the provider's mark
- * alone, beside a button whose run it routes (Commit). The two small ones put the whole route
- * in their tooltip, above `title`.
+ * alone, or the ✨ the caller hands in (`children`), at the head of a one-line AI prompt. The two
+ * small ones put the whole route in their tooltip, above `title`.
  *
  * `split` *is* the button whose run it routes: one outlined control, the run's own glyph (`action`)
- * on the left and a chevron on the right — the 🛡 that analyzes the changes. The glyph starts the
- * run, the chevron opens this menu, and both halves name the route in their tooltip (the glyph under
- * the run's name, the chevron above `title`), so the engine is one hover away from either. The menu
- * hangs from the whole control, dropping below it like any header dropdown.
+ * on the left and a chevron on the right — the 🛡 that analyzes the changes, the ✨ that writes the
+ * commit message. The glyph starts the run, the chevron opens this menu, and both halves name the
+ * route in their tooltip (the glyph under the run's name, the chevron above `title`), so the engine
+ * is one hover away from either. The menu hangs from the whole control, dropping below it like any
+ * header dropdown.
  *
  * While a conversation is open (`chatActive`) only the *current* provider's versions can be picked.
  * Switching provider mid-chat can't work: each CLI keeps its own session store, so the turns so far
  * live somewhere the next engine can't read, and its resume token means nothing there. Rather than
- * silently dropping the thread, the other providers are locked behind "new chat".
+ * silently dropping the thread, the other providers are locked behind "new chat" — or, where the
+ * caller can open one (`onLockedPick`, the chat workspace), the lock is that door: the row stays
+ * pickable, and its version goes to "continuar en un hilo nuevo" with that engine instead of to
+ * this thread.
  *
  * # Bound mode (`bound` + `onPick`)
  *
@@ -83,11 +87,11 @@ export function ChatModelPicker({
   task = "chat",
   title,
   variant = "chip",
-  size = "sm",
   className = "",
   children,
   action,
   tour,
+  onLockedPick,
 }: {
   liveModel: string | null;
   chatActive: boolean;
@@ -103,11 +107,9 @@ export function ChatModelPicker({
   /** The chip's tooltip; on `tag`, `icon` and `split`'s chevron, the line under the route. */
   title?: string;
   variant?: "chip" | "tag" | "icon" | "split";
-  /** `icon` only: `md` beside a full-size button (Commit), `sm` in a row of icon buttons. */
-  size?: "sm" | "md";
-  /** Added to the trigger's classes (on `split`, the whole control's), for a place that has to match
-   *  a neighbour (the Commit button's border). Only for what the variant leaves unset — two utilities
-   *  for one property do not stack. */
+  /** Added to the trigger's classes (on `split`, the whole control's), for a place that has to put
+   *  it somewhere (the ✨ pinned in the commit message's corner). Only for what the variant leaves
+   *  unset — two utilities for one property do not stack. */
   className?: string;
   /** `icon` only: the mark to show in place of the provider's — the editor's inline edit keeps the
    *  ✨ it always had, which is the thing its user reaches for. */
@@ -117,6 +119,9 @@ export function ChatModelPicker({
   action?: { icon: ReactNode; label: string; onClick: () => void; disabled?: boolean };
   /** `data-tour` for the guided tour, on the whole control. */
   tour?: string;
+  /** With `chatActive`: where a version of a *locked* provider goes — the chat workspace's
+   *  "continuar en un hilo nuevo" on that engine. Without it, locked rows cannot be picked. */
+  onLockedPick?: (provider: string, model: string, account?: string) => void;
 }) {
   const t = useT();
   const routedProvider = useTaskProvider(task);
@@ -266,6 +271,11 @@ export function ChatModelPicker({
 
   const pick = async (nextProvider: string, model: string) => {
     setOpen(false);
+    // A provider this thread cannot move to: the version picked is the engine of a new thread.
+    if (chatActive && nextProvider !== providerId && onLockedPick) {
+      onLockedPick(nextProvider, model, accountChoice ?? undefined);
+      return;
+    }
     // In bound mode the selection belongs to the conversation, and writing it to the workspace
     // routing as well would change what every *future* chat starts on because someone re-pointed
     // one thread. The two are deliberately not kept in step.
@@ -365,16 +375,14 @@ export function ChatModelPicker({
           data-tour={tour}
           title={[routeLabel, title].filter(Boolean).join("\n")}
           aria-label={routeLabel}
-          className={`flex min-h-[22px] shrink-0 items-center justify-center rounded-md transition-colors ${
-            size === "md" ? "gap-1 px-2.5" : "gap-0.5 px-1"
-          } ${
+          className={`flex min-h-[22px] shrink-0 items-center justify-center gap-0.5 rounded-md px-1 transition-colors ${
             open
               ? "bg-[var(--cf-hover)] text-[var(--cf-text)]"
               : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           } ${className}`}
         >
-          {children ?? <ProviderGlyph providerId={active.id} size={size === "md" ? 16 : 12} />}
-          {chevron(size === "md" ? 12 : 10)}
+          {children ?? <ProviderGlyph providerId={active.id} size={12} />}
+          {chevron(10)}
         </button>
       ) : (
         <button
@@ -416,12 +424,20 @@ export function ChatModelPicker({
                   {selectable.map((p) => {
                     const unavailable = statuses[p.id]?.available === false;
                     const locked = chatActive && p.id !== providerId;
+                    // Locked with somewhere to go: pickable, and said so on the row.
+                    const continues = locked && !!onLockedPick;
                     return (
                       <button
                         key={p.id}
                         onClick={() => browse(p.id)}
-                        disabled={unavailable || locked}
-                        title={locked ? t("chat.providerLocked") : undefined}
+                        disabled={unavailable || (locked && !continues)}
+                        title={
+                          continues
+                            ? t("chat.continueWith", { engine: p.label ?? labelOf(p.id) })
+                            : locked
+                              ? t("chat.providerLocked")
+                              : undefined
+                        }
                         className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12px] disabled:opacity-40 ${
                           p.id === providerId
                             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
@@ -434,6 +450,8 @@ export function ChatModelPicker({
                           <span className="shrink-0 text-[10.5px] text-[var(--cf-warning)]">
                             {t("settings.providerMissing")}
                           </span>
+                        ) : continues ? (
+                          <Forward size={12} className="shrink-0 opacity-60" />
                         ) : locked ? (
                           <Lock size={11} className="shrink-0 opacity-60" />
                         ) : (

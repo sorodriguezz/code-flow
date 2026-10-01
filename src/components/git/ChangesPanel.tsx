@@ -37,7 +37,6 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { BouncingDots } from "../common/BouncingDots";
 import { generateCommitMessage, getFileDiff, getStagedDiff, scanStagedSecrets } from "../../lib/tauri/commands";
-import { useTaskModelLabel } from "../ai/ModelTag";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { diffToText } from "../../lib/diffText";
 import { parseClaudeError, quotaRetryText, type ClaudeErrorInfo } from "../../lib/claudeError";
@@ -474,10 +473,6 @@ export function ChangesPanel({
     null,
   );
   const t = useT();
-  /** The engine and model the ✨ button will use, from the routing table — see `useTaskModelLabel`.
-   * `"commit"` is the key Rust's `AiTask::Commit` reports, which is what `generate_commit_message`
-   * loads its config from; naming any other task here would put a confident lie in the tooltip. */
-  const commitModel = useTaskModelLabel("commit");
 
   // Feedback for the row action buttons is otherwise invisible until refreshStatus() comes
   // back (stage/unstage/discard all trigger a full status+diff refresh) — set the pending
@@ -1068,24 +1063,29 @@ export function ChangesPanel({
               placeholder={t("changes.commitMessage")}
               rows={3}
               disabled={aiBusy}
-              className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 pr-7 text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
+              className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 pr-12 text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
             />
-            <button
-              onClick={generateWithAi}
-              disabled={aiBusy || status.staged.length === 0}
-              // Which engine is about to write the message, on the second line. Routing lives in
-              // Settings → AI, three screens from here, so the only place this is answerable is the
-              // button itself — and "why is this message suddenly terrible" is a question about the
-              // model far more often than about the diff.
-              title={[
-                status.staged.length === 0 ? t("changes.stageFirst") : t("changes.generateWithAi"),
-                commitModel,
-              ].join("\n")}
-              className="absolute right-1 top-1 flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)] disabled:opacity-30"
-            >
-              {/* The orb, not a spinner: this is a model writing the message. */}
-              {aiBusy ? <ThinkingOrb size="sm" /> : <AiSparkles size={13} />}
-            </button>
+            {/* The ✨ and its engine as one control, the same as the 🛡 above: the glyph writes the
+                message, the chevron changes the `commit` row of the routing (`AiTask::Commit`'s key,
+                what `generate_commit_message` loads its config from). Both halves name that engine
+                on hover — "why is this message suddenly terrible" is a question about the model far
+                more often than about the diff. The engine used to be a second control beside Commit,
+                which read as an option of the commit itself rather than of this button. */}
+            <ChatModelPicker
+              task="commit"
+              variant="split"
+              liveModel={null}
+              chatActive={false}
+              title={t("changes.commitModelHint")}
+              className="absolute right-1 top-1"
+              action={{
+                // The orb, not a spinner: this is a model writing the message.
+                icon: aiBusy ? <ThinkingOrb size="sm" /> : <AiSparkles size={13} />,
+                label: status.staged.length === 0 ? t("changes.stageFirst") : t("changes.generateWithAi"),
+                onClick: () => void generateWithAi(),
+                disabled: aiBusy || status.staged.length === 0,
+              }}
+            />
           </div>
           {aiError &&
             (aiError.isQuotaExceeded ? (
@@ -1101,28 +1101,16 @@ export function ChangesPanel({
             ) : (
               <p className="mt-1 text-[11px] text-[var(--cf-danger)]">{aiError.message}</p>
             ))}
-          {/* Commit, and beside it the model the ✨ writes its message with: the `commit` row of the
-              routing, behind the provider's mark because the button already takes the row. */}
-          <div className="mt-2 flex items-stretch gap-1.5">
-            <button
-              disabled={busy || aiBusy || scanning || !message.trim() || status.staged.length === 0}
-              onClick={handleCommit}
-              className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent-fill)] py-1.5 text-[13px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
-            >
-              {scanning && <Loader2 size={13} className="animate-spin" />}
-              {scanning ? t("secrets.scanning") : t("changes.commit")}{" "}
-              {!scanning && status.staged.length > 0 ? `(${status.staged.length})` : ""}
-            </button>
-            <ChatModelPicker
-              task="commit"
-              variant="icon"
-              size="md"
-              liveModel={null}
-              chatActive={false}
-              title={t("changes.commitModelHint")}
-              className="border border-[var(--cf-border)]"
-            />
-          </div>
+          {/* Commit alone on its row: the model the ✨ writes with is chosen on the ✨ itself. */}
+          <button
+            disabled={busy || aiBusy || scanning || !message.trim() || status.staged.length === 0}
+            onClick={handleCommit}
+            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent-fill)] py-1.5 text-[13px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
+          >
+            {scanning && <Loader2 size={13} className="animate-spin" />}
+            {scanning ? t("secrets.scanning") : t("changes.commit")}{" "}
+            {!scanning && status.staged.length > 0 ? `(${status.staged.length})` : ""}
+          </button>
         </div>
       </div>
 

@@ -254,6 +254,25 @@ export interface AiChatDeltaEvent {
 export const onAiChatDelta = (handler: (event: AiChatDeltaEvent) => void) =>
   listen<AiChatDeltaEvent>("ai:chat-delta", (e) => handler(e.payload));
 
+/** A conversation named after its first question — `chat_title.rs`'s `ChatTitled`. */
+export interface ChatTitledEvent {
+  /** `"chat"`, the chat workspace, or `"panel"`, the assistant's repository chat. */
+  surface: "chat" | "panel";
+  conversationId: string;
+  /** The repository a panel conversation is about; `null` in the chat workspace. */
+  projectId: string | null;
+  title: string;
+}
+
+/**
+ * A title a model wrote from a conversation's first question, seconds after its first answer —
+ * already filed by the backend, which only sends this when it replaced the automatic name (a
+ * rename the user typed is never overwritten). Every window hears it, so each store renames its
+ * own copy rather than re-reading the list.
+ */
+export const onChatTitled = (handler: (event: ChatTitledEvent) => void) =>
+  listen<ChatTitledEvent>("chat:titled", (e) => handler(e.payload));
+
 export interface AiEngineEvent {
   run_id: string;
   /** Stable provider id — `"claude"`, `"gemini"`, `"codex"`… What `ProviderGlyph` keys its brand

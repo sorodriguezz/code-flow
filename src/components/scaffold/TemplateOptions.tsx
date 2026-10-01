@@ -1,6 +1,7 @@
 import { useT } from "../../state/languageStore";
 import type { VersionLine } from "../../lib/scaffold/api";
-import type { Options, OptionValue, PackageManager, Template, TemplateOption } from "../../lib/scaffold/catalog";
+import type { Options, OptionValue, PackageManager, Template, TemplateOption, ToggleOption } from "../../lib/scaffold/catalog";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import { Checkbox } from "../common/Checkbox";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
@@ -9,8 +10,9 @@ import { Field } from "./Field";
 
 /**
  * A template's own choices, drawn by kind: two to four choices are a segmented control, more are a
- * select, the toggles share one row of checkboxes (they are extras, not decisions), free text is a
- * field, and a runtime version is a select of that runtime's living lines.
+ * select, the toggles share one row of checkboxes (they are extras, not decisions) — or a field of
+ * their own when they name a group, like NestJS's dependencies — free text is a field, and a runtime
+ * version is a select of that runtime's living lines.
  */
 export function TemplateOptions({
   template,
@@ -33,7 +35,11 @@ export function TemplateOptions({
 }) {
   const t = useT();
   const visible = template.options.filter((option) => !option.when || option.when(opts));
-  const toggles = visible.filter((option) => option.kind === "toggle");
+  const toggles = visible.filter((option): option is ToggleOption => option.kind === "toggle" && !option.group);
+  const groups = new Map<TranslationKey, ToggleOption[]>();
+  for (const option of visible) {
+    if (option.kind === "toggle" && option.group) groups.set(option.group, [...(groups.get(option.group) ?? []), option]);
+  }
   const rest = visible.filter((option) => option.kind !== "toggle");
   const label = (option: TemplateOption) => option.label ?? (option.labelKey ? t(option.labelKey) : option.id);
 
@@ -111,19 +117,38 @@ export function TemplateOptions({
       )}
       {toggles.length > 0 && (
         <Field label={t("scaffold.opt.include")} align="start">
-          <div className="flex flex-wrap gap-x-4 gap-y-1.5 pt-1">
-            {toggles.map((option) => {
-              const checked = Boolean(opts[option.id] ?? (option.kind === "toggle" ? option.default : false));
-              return (
-                <label key={option.id} className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-[var(--cf-text)]">
-                  <Checkbox checked={checked} onChange={(next) => onChange(option.id, next)} />
-                  {label(option)}
-                </label>
-              );
-            })}
-          </div>
+          <Checkboxes options={toggles} opts={opts} onChange={onChange} label={label} />
         </Field>
       )}
+      {[...groups].map(([group, options]) => (
+        <Field key={group} label={t(group)} align="start">
+          <Checkboxes options={options} opts={opts} onChange={onChange} label={label} />
+        </Field>
+      ))}
     </>
+  );
+}
+
+/** A row of toggles, wrapping. */
+function Checkboxes({
+  options,
+  opts,
+  onChange,
+  label,
+}: {
+  options: ToggleOption[];
+  opts: Options;
+  onChange: (id: string, value: OptionValue) => void;
+  label: (option: TemplateOption) => string;
+}) {
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-1.5 pt-1">
+      {options.map((option) => (
+        <label key={option.id} className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-[var(--cf-text)]">
+          <Checkbox checked={Boolean(opts[option.id] ?? option.default)} onChange={(next) => onChange(option.id, next)} />
+          {label(option)}
+        </label>
+      ))}
+    </div>
   );
 }

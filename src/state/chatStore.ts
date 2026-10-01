@@ -1,8 +1,10 @@
 import { create } from "zustand";
 import {
+  chatContextResets,
   getChatConversation,
   isRepoBusy,
   notifyStateChange,
+  resetChatContext,
   sendChatMessage,
   REPO_BUSY_MARKER,
 } from "../lib/tauri/commands";
@@ -96,8 +98,8 @@ export interface ChatMessage {
    * account than the turn before (see `turnsToMessages`). Who answered from here on, for the line
    * the transcript draws above it. */
   accountBreak?: { provider: string; accountId: string | null };
-  /** On a question: the first one after `/clear`, which started a fresh engine session. Live only —
-   * the stored turns do not record it, so a reopened conversation shows no line here. */
+  /** On a question: the first one after `/clear`, which started a fresh engine session. The `/clear`
+   * is kept on disk (`reset_chat_context`), so a reopened conversation draws the line here too. */
   contextReset?: boolean;
   /** On a question: the skill it was sent with, picked in the composer. Live only, like the above. */
   skill?: string;
@@ -161,7 +163,9 @@ export interface ChatSession {
   /** A question taken back before it ever ran — stopped while it was queued behind another run.
    *  The composer puts it back where it was typed and clears this. */
   restored: string | null;
-  /** `/clear` was run: the next question starts a fresh engine session and draws the line above it. */
+  /** `/clear` was run and nothing has been asked since: the next question starts a fresh engine
+   *  session and draws the line above it. Read back from disk, so it survives a restart and is the
+   *  same in every window. */
   resetPending: boolean;
 }
 
@@ -239,10 +243,10 @@ function markAccountBreak(messages: ChatMessage[], answeredBy: ChatMessage["acco
  * allow one mid-conversation. A failed turn draws no line: the live reply that would have drawn it
  * never arrived either, and the transcript has to read the same reopened as it did live.
  */
-export function turnsToMessages(entries: ActivityLogEntry[]): ChatMessage[] {
+export function turnsToMessages(entries: ActivityLogEntry[], cleared: readonly number[] = []): ChatMessage[] {
   let session: string | null = null;
   let last: { provider: string; account: string | null } | null = null;
-  return entries.flatMap((e) => {
+  return entries.flatMap((e, index) => {
     const account = e.account_id ?? null;
     const broke =
       !e.is_error && session !== null && last !== null && e.provider !== null && last.provider === e.provider && last.account !== account;
@@ -250,6 +254,8 @@ export function turnsToMessages(entries: ActivityLogEntry[]): ChatMessage[] {
     session = e.engine_session_id ?? session;
     const question: ChatMessage = { role: "user", content: e.question, createdAt: e.created_at };
     if (broke && e.provider) question.accountBreak = { provider: e.provider, accountId: account };
+    // Where a `/clear` started the engine over — kept on disk, so a reopened transcript draws it too.
+    if (cleared.includes(index)) question.contextReset = true;
     return [
       question,
       {
@@ -907,13 +913,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // add a turn: reopening the row showed the copy this window happened to have when it last
     // looked, so even "close it and open it again" did not surface a turn sent from a phone. The
     // read is one indexed query against a conversation the user just asked to see.
-    const entries = await getChatConversation(projectId, conversationId).catch(() => null);
+    const [entries, resets] = await Promise.all([
+      getChatConversation(projectId, conversationId).catch(() => null),
+      chatContextResets(projectId, conversationId).catch(() => null),
+    ]);
     // Nothing on disk under this id — a new chat whose first question has not been asked, which is
     // an empty conversation and nothing to read. Leaving the store alone is the right answer.
     if (!entries || entries.length === 0) return;
     // One stored row is one exchange, so both halves carry its timestamp — the question wasn't
     // recorded separately, and splitting hairs there would mean inventing a time.
-    const messages = turnsToMessages(entries);
+    const messages = turnsToMessages(entries, resets?.turns);
     // Continuing a reopened conversation resumes the engine session its *last* turn ran under —
     // earlier ones are stale (a CLI can hand out a new token per turn), and turns recorded before
     // the two ids were separated have none at all, which just means the next message starts a
@@ -943,6 +952,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             createdAt: firstAt ? new Date(firstAt).getTime() : Date.now(),
             updatedAt: lastAt ? new Date(lastAt).getTime() : Date.now(),
             persisted: true,
+            resetPending: resets?.pending ?? false,
           },
         },
       };
@@ -954,7 +964,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const before = get().byConversation[conversationId];
     if (!before || before.sending) return;
 
-    const entries = await getChatConversation(projectId, conversationId).catch(() => null);
+    const [entries, resets] = await Promise.all([
+      getChatConversation(projectId, conversationId).catch(() => null),
+      chatContextResets(projectId, conversationId).catch(() => null),
+    ]);
     if (!entries) return;
 
     set((s) => {
@@ -962,16 +975,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Re-checked after the await for the same reason `ensureLoaded` re-checks: a turn started in the
       // meantime owns this conversation, and its reply is about to land in it.
       if (!session || session.sending) return s;
+      // A `/clear` typed in another window, or one a turn from there has used up: the disk's answer
+      // is the one every window keeps.
+      const resetPending = resets ? resets.pending : session.resetPending;
       const known = new Set(
         session.messages
           .filter((m) => m.role === "assistant" && m.createdAt !== undefined)
           .map((m) => m.createdAt),
       );
       const added = entries.filter((e) => !known.has(e.created_at));
-      if (added.length === 0) return s;
+      if (added.length === 0) {
+        if (resetPending === session.resetPending) return s;
+        return { byConversation: { ...s.byConversation, [conversationId]: { ...session, resetPending } } };
+      }
       // Mapped over the whole conversation and then cut, not over the new rows alone: whether a
       // turn changed account depends on the one before it, which this window may already hold.
-      const all = turnsToMessages(entries);
+      const all = turnsToMessages(entries, resets?.turns);
       const messages = entries.flatMap((e, i) => (known.has(e.created_at) ? [] : all.slice(i * 2, i * 2 + 2)));
       return {
         byConversation: {
@@ -987,6 +1006,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             model: added[added.length - 1]?.model ?? session.model,
             persisted: true,
             updatedAt: Date.now(),
+            resetPending,
           },
         },
       };
@@ -1001,18 +1021,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
     modelOfCollapsed.delete(conversationId);
     dropChatQueue(queueOf(conversationId));
     set((s) => {
-      if (!s.byConversation[conversationId]) return s;
-      const { [conversationId]: _dropped, ...rest } = s.byConversation;
-      return { byConversation: rest };
+      const { [conversationId]: _session, ...byConversation } = s.byConversation;
+      const { [conversationId]: _engine, ...engineByConversation } = s.engineByConversation;
+      const { [conversationId]: _staged, ...attachments } = s.attachments;
+      return { byConversation, engineByConversation, attachments };
     });
   },
 
   clearContext: (conversationId) => {
-    set((s) => {
-      const session = s.byConversation[conversationId];
-      if (!session || session.sending) return s;
-      return { byConversation: { ...s.byConversation, [conversationId]: { ...session, resetPending: true } } };
-    });
+    const session = get().byConversation[conversationId];
+    if (!session || session.sending) return;
+    // Here at once — the composer says so, and a question queued right behind it goes out fresh
+    // whatever the disk has heard yet — and on disk, so a restart, another window, a phone and a move
+    // to the chat workspace keep the promise too. A conversation with nothing stored has no session
+    // to leave behind, and nothing to write it against.
+    set((s) => ({ byConversation: { ...s.byConversation, [conversationId]: { ...session, resetPending: true } } }));
+    if (!session.persisted) return;
+    void resetChatContext(session.projectId, conversationId)
+      .then(() => notifyStateChange("chat", session.projectId, conversationId))
+      .catch((error: unknown) => pushErrorToast(String(error)));
   },
 
   setEngine: (conversationId, engine) => {

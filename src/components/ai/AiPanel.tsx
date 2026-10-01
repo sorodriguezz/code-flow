@@ -18,7 +18,8 @@ const PANEL_MIN = 300;
  *
  * The three most recently visited — which is what makes switching between them instant and
  * lossless for everything that lives in a component rather than a store: a comment thread list that
- * took a round trip to load, a discard being composed, the exact scroll offset. Tabs further back
+ * took a round trip to load, a discard being composed, the exact scroll offset (a chat's excepted:
+ * coming back to a conversation lands on its newest turn — see `PanelChat`). Tabs further back
  * rebuild from their view state (`aiPanelStore.view`), which keeps what matters: segment, open
  * cards, selection, the run being read.
  */
@@ -145,7 +146,12 @@ export function AiPanel() {
         <div className="relative min-h-0 flex-1">
           {mounted.map((key) => (
             <div key={`${workspaceId}|${key}`} hidden={key !== activeKey} className="absolute inset-0 flex flex-col">
-              <TabBody tabKey={key} tab={tabs.find((tab) => tab.key === key) ?? null} workspaceId={workspaceId} />
+              <TabBody
+                tabKey={key}
+                tab={tabs.find((tab) => tab.key === key) ?? null}
+                workspaceId={workspaceId}
+                active={key === activeKey}
+              />
             </div>
           ))}
         </div>
@@ -157,11 +163,29 @@ export function AiPanel() {
   );
 }
 
-function TabBody({ tabKey, tab, workspaceId }: { tabKey: string; tab: PanelTab | null; workspaceId: string }) {
+function TabBody({
+  tabKey,
+  tab,
+  workspaceId,
+  active,
+}: {
+  tabKey: string;
+  tab: PanelTab | null;
+  workspaceId: string;
+  active: boolean;
+}) {
   if (tabKey === INBOX_KEY || !tab) return <AssistantInbox workspaceId={workspaceId} />;
   switch (tab.kind) {
     case "chat":
-      return <PanelChat tabKey={tab.key} projectId={tab.projectId} conversationId={tab.conversationId} fresh={Boolean(tab.fresh)} />;
+      return (
+        <PanelChat
+          tabKey={tab.key}
+          projectId={tab.projectId}
+          conversationId={tab.conversationId}
+          fresh={Boolean(tab.fresh)}
+          active={active}
+        />
+      );
     case "pr":
       return <PrDocument tabKey={tab.key} target={{ kind: "project", projectId: tab.projectId }} pr={tab.pr} session={null} />;
     case "prLink":

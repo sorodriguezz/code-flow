@@ -99,7 +99,6 @@ export function ServicesDock() {
   const commitSize = useLayoutStore((s) => s.commitSize);
 
   const services = useServicesStore((s) => s.services);
-  const groups = useServicesStore((s) => s.groups);
   const runtimeMap = useServicesStore((s) => s.runtime);
   const loadServices = useServicesStore((s) => s.load);
 
@@ -179,7 +178,6 @@ export function ServicesDock() {
   );
 
   const selectedService = selectedId ? (services.find((s) => s.id === selectedId) ?? null) : null;
-  const servicesEmpty = services.length === 0 && groups.length === 0;
 
   /** The terminal panel's two ways in: a shell in the repository, or one of the other shells (and
    *  "in a folder…"). In the panel's title row in the main window, in the list's heading in a
@@ -301,16 +299,15 @@ export function ServicesDock() {
             <>
               {/* Detect, new group, new service: small, at the top of the column they act on — not in
                   the panel's title row, where they sat over the console and read as its controls.
-                  Not while the list is empty: its two buttons are the same choice with words on them. */}
-              {!servicesEmpty && (
-                <div className="flex shrink-0 items-center justify-end gap-0.5 px-1.5 pt-1">
-                  <ServiceActions
-                    size="sm"
-                    onNew={(groupId) => setEditing({ service: null, groupId })}
-                    onImport={() => setImporting(true)}
-                  />
-                </div>
-              )}
+                  Always, an empty list included: it is the empty state too (the two big worded
+                  buttons it replaced were taken out at the user's ask, 2026-10-01). */}
+              <div className="flex shrink-0 items-center justify-end gap-0.5 px-1.5 pt-1">
+                <ServiceActions
+                  size="sm"
+                  onNew={(groupId) => setEditing({ service: null, groupId })}
+                  onImport={() => setImporting(true)}
+                />
+              </div>
               {/* The services on top, scrolling on their own; the row into the machine's listening
                   ports pinned under them, at the foot of the column, whatever the list's length. */}
               <div className="min-h-0 flex-1 overflow-y-auto">

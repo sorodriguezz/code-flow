@@ -1585,6 +1585,62 @@ pub struct ChatConversation {
     /// none. See `crate::chat_mcp`.
     #[serde(default)]
     pub mcp_overrides: String,
+    /// When this thread was moved here from the assistant panel's repository chat — `None` for one
+    /// that started here. See `chat_queries::move_from_panel`.
+    #[serde(default)]
+    pub moved_at: Option<String>,
+    /// The last turn it brought with it, under which the transcript says where it came from.
+    #[serde(default)]
+    pub moved_through_turn: Option<i64>,
+    /// Where the engine's context started again in the assistant, for a thread moved from there —
+    /// a `/clear`, or a turn that ran as another account. Nothing before the last is replayed; the
+    /// transcript draws each where it happened.
+    #[serde(default)]
+    pub context_resets: Vec<ContextReset>,
+    /// The thread this one continues, for one started with "continuar en un hilo nuevo": all it
+    /// knows of that thread is the summary in here. `None` on every other thread. See
+    /// `chat_cmd::chat_continue_in_new_thread`.
+    #[serde(default)]
+    pub continued_from: Option<Continuation>,
+}
+
+/// What a thread started from another carries of it — see [`ChatConversation::continued_from`].
+///
+/// **Text only** (the user's rule, 2026-10-01): no file, image or attachment of the other thread is
+/// copied, so deleting either thread leaves the other whole. Everything here is frozen when the
+/// thread starts — the other one may be renamed or deleted since, and the legend still says where
+/// this came from. `conversation_id` may therefore name a thread that no longer exists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Continuation {
+    pub conversation_id: String,
+    /// Its title at the time.
+    pub title: String,
+    /// The engine that wrote the summary — the other thread's own.
+    pub provider: String,
+    pub model: String,
+    /// How many of its turns the summary covers.
+    pub turns: i64,
+    /// What this thread's engine is handed in place of those turns: the only copy, and what the
+    /// legend shows.
+    pub summary: String,
+}
+
+/// One place a moved thread's context started again — see [`ChatConversation::context_resets`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextReset {
+    /// The turn it starts again at: the line is drawn above that turn's question, or at the end
+    /// when that turn has not been asked yet.
+    pub turn: i64,
+    /// `"clear"` — the user's `/clear` — or `"account"`, a turn that ran as another account and so
+    /// could not resume the session before it.
+    pub reason: String,
+    /// For `"account"`: the engine and the account that answered from there on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 /// A folder in the chat sidebar.

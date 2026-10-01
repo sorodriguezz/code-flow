@@ -132,6 +132,10 @@ pub(crate) enum AiTask {
     /// [`AiTask::Inline`]'s: a notebook is analysis more often than application code, and which
     /// engine explains a traceback is not the one a team picks for a quick rewrite.
     Notebook,
+    /// Naming a conversation after its first question, in both chats — see `crate::chat_title`.
+    /// Text-only and a handful of words, so like [`AiTask::Commit`] it defaults to the engine's fast
+    /// model rather than the base one: it runs once per new conversation, behind the user's back.
+    ChatTitle,
 }
 
 impl AiTask {
@@ -141,7 +145,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 18] = [
+    pub(crate) const ALL: [AiTask; 19] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -160,6 +164,7 @@ impl AiTask {
         AiTask::Pipeline,
         AiTask::SampleRows,
         AiTask::Notebook,
+        AiTask::ChatTitle,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -185,6 +190,7 @@ impl AiTask {
             AiTask::Pipeline => "pipeline",
             AiTask::SampleRows => "sample_rows",
             AiTask::Notebook => "notebook",
+            AiTask::ChatTitle => "chat_title",
         }
     }
 }
@@ -285,13 +291,13 @@ pub(crate) fn load_ai_config_in(
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Per-task model override → (for commits) the engine's dedicated fast model → the base model.
-    // The last fallback matters for engines with no fast model of their own (Cline, opencode),
-    // whose model depends entirely on what the user configured inside them.
+    // Per-task model override → (for commits and chat titles) the engine's dedicated fast model →
+    // the base model. The last fallback matters for engines with no fast model of their own (Cline,
+    // opencode), whose model depends entirely on what the user configured inside them.
     let model = match nonblank(get(&format!("{}_model", task.key()))?) {
         Some(override_model) => override_model,
         None => match task {
-            AiTask::Commit => {
+            AiTask::Commit | AiTask::ChatTitle => {
                 let dedicated = engine.commit_message_model();
                 if dedicated.is_empty() { base_model.clone() } else { dedicated.to_string() }
             }
@@ -804,6 +810,14 @@ pub async fn send_chat_message(
 ) -> Result<ChatReply, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
+        // Moved to the chat workspace (`chat_cmd::chat_move_from_panel`): it lives there now, and a
+        // turn filed here under the same id would start a second copy of it. A phone, or a window
+        // that had not heard yet, still has it open.
+        if let Some(id) = conversation_id.as_deref() {
+            if crate::db::chat_queries::get_conversation(&conn, id).map_err(|e| e.to_string())?.is_some() {
+                return Err("Esta conversación se movió al Chat.".to_string());
+            }
+        }
         queries::get_project(&conn, &project_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Project not found".to_string())?
@@ -854,6 +868,12 @@ pub async fn send_chat_message(
             )?,
             _ => load_ai_config_in(&conn, AiTask::Chat, Some(&workspace_id))?,
         };
+        // A `/clear` nothing has been asked since — typed here, in another window or on a phone, and
+        // kept on disk — promised this question a fresh session, whatever session the caller holds.
+        let session_id = match conversation_id.as_deref() {
+            Some(id) if queries::conversation_reset_pending(&conn, &project_id, id).unwrap_or(false) => None,
+            _ => session_id,
+        };
         // Shadows the argument on purpose: nothing below should see the unvalidated token, and the
         // turn is recorded against the session it actually ran under.
         let (session_id, account_changed) = session_for_engine(
@@ -896,6 +916,9 @@ pub async fn send_chat_message(
         }
         _ => Vec::new(),
     };
+    // The user's own words, kept for the conversation's title: the note below names files, not the
+    // topic.
+    let asked = message.clone();
     let message = match attachments.is_empty() {
         true => message,
         false => format!("{message}{}", ai::attachment_note(&attachments)),
@@ -963,6 +986,8 @@ pub async fn send_chat_message(
         conversation_id: conversation_id.clone().unwrap_or_default(),
         message_id: run_id.clone().unwrap_or_default(),
     });
+    // Kept for the title run below; `app` moves into the run's scope.
+    let title_app = app.clone();
     let (result, trace) = ai_runs::scoped_with_trace(app, run_id, async {
         ai::chat_with_repo(
             &*config.engine,
@@ -995,6 +1020,7 @@ pub async fn send_chat_message(
     // Every turn files under the conversation the frontend named. The fallback only matters for
     // a caller that didn't supply one (an older frontend): it mints a throwaway id so the turn is
     // still recorded, as its own single-turn activity, rather than silently lost.
+    let named_conversation = conversation_id.is_some();
     let conversation_id =
         conversation_id.unwrap_or_else(|| format!("conv-{}", uuid::Uuid::new_v4()));
 
@@ -1033,9 +1059,9 @@ pub async fn send_chat_message(
         }
     };
 
-    let created_at = {
+    let (created_at, wants_title) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::add_activity_log(
+        let created_at = queries::add_activity_log(
             &conn,
             &project_id,
             &conversation_id,
@@ -1056,8 +1082,22 @@ pub async fn send_chat_message(
         // The reply is already in hand; a failed *write* shouldn't cost the user their answer, so
         // the turn is still returned — just stamped with the time it arrived rather than the time
         // it was filed.
-        .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339())
+        .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
+        // Its first answer: the conversation is named after what was asked — see `chat_title`. Not
+        // an agent task's, which the Agents view names, nor a turn filed under a throwaway id.
+        let wants_title = named_conversation
+            && !conversation_id.starts_with(queries::AGENT_CONVERSATION_PREFIX)
+            && queries::conversation_awaits_title(&conn, &project_id, &conversation_id).unwrap_or(false);
+        (created_at, wants_title)
     };
+    if wants_title {
+        crate::chat_title::spawn(
+            &title_app,
+            Some(workspace_id.clone()),
+            asked,
+            crate::chat_title::Target::Panel { project_id: project_id.clone(), conversation_id: conversation_id.clone() },
+        );
+    }
 
     let account_id = config.account_id().map(str::to_string);
     Ok(ChatReply {

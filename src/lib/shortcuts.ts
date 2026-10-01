@@ -224,7 +224,8 @@ export function goHistory(direction: "back" | "forward"): void {
  * `missingProjectsStore` — and a keystroke that landed on one would point the git engine where the
  * row itself will not.
  */
-function openable(project: { id: string; local_path: string }): boolean {
+/** A repository this window can open: on disk, still a repository, and not out in a window of its own. */
+export function openable(project: { id: string; local_path: string }): boolean {
   const { missing, notARepo } = useMissingProjectsStore.getState();
   const { satellites } = useWindowStore.getState();
   return (

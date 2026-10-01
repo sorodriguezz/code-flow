@@ -67,6 +67,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   Smartphone,
   SquarePen,
   SunMoon,
@@ -79,7 +80,6 @@ import {
   Waypoints,
   Wrench,
 } from "lucide-react";
-import { AiSparkles } from "../components/common/AiGlyph";
 import type { TranslationKey } from "./i18n/translations";
 import type { SettingsSectionId } from "../state/uiStore";
 
@@ -296,7 +296,9 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         id: "completion",
         labelKey: "localai.title",
         hintKey: "localai.hint",
-        icon: AiSparkles,
+        // Plain, like the rest of the rail: a settings row is a place, not a model at work (the
+        // user, 2026-10-01 — the AI gradient "no tiene nada que ver" outside one).
+        icon: Sparkles,
         searchKey: "settings.searchTermsCompletion",
       },
       // How the "a model is thinking" mark is drawn. Last of the panes that set something up, before

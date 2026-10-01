@@ -89,6 +89,10 @@ export const AI_TASKS: AiTaskDef[] = [
   // `analyze`'s: that one is handed a diff and answers about the diff, this one is handed a log
   // and has to go looking, which is a different length of run and routinely a different engine.
   { key: "pipeline", labelKey: "task.pipeline", hintKey: "task.pipelineHint", agenticOnly: true, area: "other" },
+  // A few words naming a new conversation after its first question, in both chats — written once,
+  // after the first answer, without being asked (`chat_title.rs`). Text-only, and like `commit` it
+  // runs on the engine's fast model unless this row names another.
+  { key: "chat_title", labelKey: "task.chatTitle", hintKey: "task.chatTitleHint", area: "other", modelForKey: "task.chatTitleModelFor" },
 ];
 
 export const AI_TASK_KEYS = AI_TASKS.map((t) => t.key);

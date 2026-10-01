@@ -32,6 +32,7 @@ import {
   TEMPLATES,
   gitSteps,
   npmNameProblem,
+  templateName,
   type Options,
   type OptionValue,
   type PackageManager,
@@ -518,7 +519,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       purpose: "create",
       title: t("scaffold.run.creating", { name }),
       logo: template.logo,
-      logoName: template.name,
+      logoName: templateName(template, t),
       sessionId: null,
       status: "preparing",
       code: null,
@@ -538,11 +539,12 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
         patchRun({ stage: t("scaffold.run.spring") });
         await springGenerate(plan.spring, trimmedParent, name);
       }
-      if (plan.files?.length) {
-        patchRun({ stage: t("scaffold.run.files") });
+      // Writing makes the folder, so a plan with no files at all (the empty template) still has one.
+      if (plan.files) {
+        if (plan.files.length > 0) patchRun({ stage: t("scaffold.run.files") });
         await writeFiles(root, plan.files);
       }
-      const script = buildScript(shellFor(platform), [...plan.steps, ...gitSteps(root, (key) => t(key), commit)], labels);
+      const script = buildScript(shellFor(platform), [...plan.steps, ...gitSteps(root, (key) => t(key), commit, plan.emptyCommit)], labels);
       const code = await runShell(trimmedParent, script);
       if (code !== 0) {
         await failed({ code });
@@ -735,10 +737,10 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                 <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
                   <div className="flex items-start gap-3">
                     <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-sunken)]">
-                      <TemplateLogo logo={template.logo} name={template.name} size={22} />
+                      <TemplateLogo logo={template.logo} name={templateName(template, t)} size={22} />
                     </span>
                     <div className="min-w-0 flex-1">
-                      <h3 className="truncate text-[15px] font-semibold text-[var(--cf-text)]">{template.name}</h3>
+                      <h3 className="truncate text-[15px] font-semibold text-[var(--cf-text)]">{templateName(template, t)}</h3>
                       <p className="truncate text-[12px] text-[var(--cf-text-muted)]">{t(template.descriptionKey)}</p>
                     </div>
                     {template.versions && (

@@ -13,6 +13,7 @@ import { AddDependencyModal } from "./components/editor/AddDependencyModal";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
 import { AiPanel } from "./components/ai/AiPanel";
+import { SwitcherLock } from "./components/layout/SwitcherLock";
 import { UpdateNotesModal } from "./components/layout/UpdateNotesModal";
 import { RequirementsModal } from "./components/layout/RequirementsModal";
 import { DataDirsNotice } from "./components/layout/DataDirsNotice";
@@ -1219,6 +1220,8 @@ export default function App() {
           <CommandPalette scope={commandPaletteScope} onClose={closeCommandPalette} />
         </Suspense>
       )}
+      {/* Draws nothing until its chord is held — see `SwitcherLock`. */}
+      <SwitcherLock />
       {shortcutsModalOpen && (
         <Suspense fallback={<PaletteSkeleton />}>
           <ShortcutsModal onClose={closeShortcutsModal} />

@@ -84,8 +84,37 @@ export interface ChatConversation {
    *  provenance for the UI, not something the engine knows about. */
   parentConversationId: string | null;
   branchedAtTurn: number | null;
+  /** When this thread was moved here from the assistant panel's repository chat — `null` for one
+   *  that started here. See `chatMoveFromPanel`. */
+  movedAt?: string | null;
+  /** The last turn it brought with it; the transcript says where it came from right under it. */
+  movedThroughTurn?: number | null;
+  /** Where its context started again in the assistant, for a thread moved from there: a `/clear`, or
+   *  a turn that ran as another account. Nothing before the last is replayed; each draws its line. */
+  contextResets?: ContextReset[];
+  /** The thread this one continues, for one started with {@link chatContinueInNewThread} — all it
+   *  knows of that thread is the summary in here. `null` on every other thread. */
+  continuedFrom?: ChatContinuation | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * What a thread started from another carries of it: that thread's summary, written by its own
+ * engine, and nothing else — no message, file or image (the user's rule). Frozen when the thread
+ * started, so the legend still says where it came from after the other is renamed or deleted;
+ * `conversationId` may therefore name a thread that is gone.
+ */
+export interface ChatContinuation {
+  conversationId: string;
+  title: string;
+  /** The engine that wrote the summary — the other thread's own. */
+  provider: string;
+  model: string;
+  /** How many of its turns the summary covers. */
+  turns: number;
+  /** What this thread's engine is handed in place of them — shown in the legend, word for word. */
+  summary: string;
 }
 
 /** One message. Deliberately one row per message rather than per (question, answer) pair the way
@@ -277,6 +306,28 @@ export const chatGetConversation = (conversationId: string, withTrace?: boolean)
 export const chatRenameConversation = (conversationId: string, title: string) =>
   invoke<void>("chat_rename_conversation", { conversationId, title });
 
+/** One place a moved thread's context started again — see `ChatConversation.contextResets`. */
+export interface ContextReset {
+  /** The turn it starts again at: drawn above that turn's question, or at the end before it is asked. */
+  turn: number;
+  reason: "clear" | "account";
+  /** For `account`: the engine and the account that answered from there on. */
+  provider?: string;
+  accountId?: string | null;
+}
+
+/**
+ * Moves a conversation from the assistant panel's repository chat into this workspace, for good —
+ * everything it holds, still bound to its repository, resuming the same engine session when the
+ * engine and account stay the same and no `/clear` is waiting. `picked` is the engine the panel's
+ * chip chose for its next turn, if it chose one.
+ */
+export const chatMoveFromPanel = (
+  projectId: string,
+  conversationId: string,
+  picked: { provider: string; model: string; account?: string | null } | null,
+) => invoke<ChatConversation>("chat_move_from_panel", { projectId, conversationId, picked });
+
 /** Re-points the conversation at an engine. A provider change — or an **account** change — also
  *  clears the resume token on the Rust side, because a session id minted by one CLI (or one
  *  account's directory) means nothing to another. `account` omitted keeps the thread's account. */
@@ -406,6 +457,27 @@ export const chatCompact = (conversationId: string, runId?: string, guidance?: s
  *  was deleted when it was compacted. */
 export const chatUncompact = (conversationId: string) =>
   invoke<void>("chat_uncompact", { conversationId });
+
+/**
+ * Starts a new thread from the whole of this one, on `engine` — any provider, which is the point:
+ * a thread keeps the provider it first answered on. This thread's own engine writes the summary the
+ * new one starts from, so **this runs a turn**, under this thread's lease, stoppable by `runId`.
+ * Nothing is created unless the summary is. Resolves with the new thread.
+ */
+export const chatContinueInNewThread = (
+  conversationId: string,
+  engine: { provider: string; model: string; account: string | null },
+  guidance: string,
+  runId: string,
+) =>
+  invoke<ChatConversation>("chat_continue_in_new_thread", {
+    conversationId,
+    provider: engine.provider,
+    model: engine.model,
+    account: engine.account,
+    guidance: guidance.trim() || null,
+    runId,
+  });
 
 // ---------- turns ----------
 

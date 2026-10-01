@@ -33,7 +33,7 @@ import type { ToolId } from "./tools";
  * commit is the user's, whichever tool made it.
  */
 
-export type Category = "frontend" | "backend" | "mobile";
+export type Category = "general" | "frontend" | "backend" | "mobile";
 
 export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
 
@@ -58,6 +58,9 @@ export interface ChoiceOption extends OptionBase {
 export interface ToggleOption extends OptionBase {
   kind: "toggle";
   default: boolean;
+  /** Drawn with the rest of its group under this heading, instead of in the shared "Include" row —
+   *  NestJS's dependencies, a list of their own rather than extras of the template. */
+  group?: TranslationKey;
 }
 
 export interface TextOption extends OptionBase {
@@ -111,16 +114,23 @@ export interface TemplateContext {
 export interface Plan {
   /** start.spring.io's zip, unpacked as the project before anything else runs. */
   spring?: SpringRequest;
-  /** Written into the project folder before the steps run. */
+  /** Written into the project folder before the steps run — which makes the folder, so an empty
+   *  list is a plan asking for the folder alone (the empty template). */
   files?: FileSpec[];
   steps: Step[];
   /** How to start it, shown when it is done. */
   run?: string;
+  /** Nothing in the folder to commit: the initial commit is made empty, so the repository has a
+   *  first commit — and a branch to branch from or put a worktree on — from the start. */
+  emptyCommit?: boolean;
 }
 
 export interface Template {
   id: string;
   name: string;
+  /** For a name that is a word rather than a brand ("Empty"): shown in the app's language, while
+   *  the search still matches `name` as well. See `templateName`. */
+  nameKey?: TranslationKey;
   category: Category;
   /** A key in `SCAFFOLD_LOGOS`. */
   logo: string;
@@ -324,9 +334,136 @@ function bunInitFlag(template: OptionValue | undefined): string {
   return "--yes";
 }
 
+/** Which HTTP server a NestJS application runs on. Express is what `nest new` writes; Fastify is the
+ *  other adapter Nest ships, swapped in after generating (see `NEST_FASTIFY_PATCH`). */
+const NEST_PLATFORM: ChoiceOption = {
+  id: "platform",
+  kind: "choice",
+  labelKey: "scaffold.opt.platform",
+  choices: [
+    { value: "express", label: "Express" },
+    { value: "fastify", label: "Fastify" },
+  ],
+  default: "express",
+};
+
+/**
+ * The integrations NestJS's own documentation walks through (Techniques and Security), as checkboxes
+ * under "Dependencies". Only ones that work as installed — no database, whose driver is a decision of
+ * its own. Where Express and Fastify need different packages (Helmet, compression, Swagger's static
+ * files), the platform picked decides. `core` marks the ones released with `@nestjs/core` itself,
+ * which are pinned to the generated project's major so npm does not refuse the peer range.
+ */
+interface NestDependency {
+  id: string;
+  label?: string;
+  labelKey?: TranslationKey;
+  packages: (fastify: boolean) => string[];
+  /** TypeScript only. */
+  types?: (fastify: boolean) => string[];
+  core?: boolean;
+}
+
+const NEST_DEPENDENCIES: NestDependency[] = [
+  { id: "nestConfig", labelKey: "scaffold.nest.config", packages: () => ["@nestjs/config"] },
+  { id: "nestValidation", labelKey: "scaffold.nest.validation", packages: () => ["class-validator", "class-transformer"] },
+  {
+    id: "nestSwagger",
+    label: "Swagger (OpenAPI)",
+    packages: (fastify) => (fastify ? ["@nestjs/swagger", "@fastify/static"] : ["@nestjs/swagger"]),
+  },
+  {
+    id: "nestJwt",
+    label: "JWT + Passport",
+    packages: () => ["@nestjs/jwt", "@nestjs/passport", "passport", "passport-jwt"],
+    types: () => ["@types/passport-jwt"],
+  },
+  { id: "nestThrottler", labelKey: "scaffold.nest.throttler", packages: () => ["@nestjs/throttler"] },
+  { id: "nestSchedule", labelKey: "scaffold.nest.schedule", packages: () => ["@nestjs/schedule"] },
+  { id: "nestCache", labelKey: "scaffold.nest.cache", packages: () => ["@nestjs/cache-manager", "cache-manager"] },
+  { id: "nestEvents", labelKey: "scaffold.nest.events", packages: () => ["@nestjs/event-emitter"] },
+  { id: "nestHttp", labelKey: "scaffold.nest.http", packages: () => ["@nestjs/axios", "axios"] },
+  { id: "nestHealth", label: "Health checks (Terminus)", packages: () => ["@nestjs/terminus"] },
+  { id: "nestHelmet", label: "Helmet", packages: (fastify) => [fastify ? "@fastify/helmet" : "helmet"] },
+  {
+    id: "nestCompression",
+    labelKey: "scaffold.nest.compression",
+    packages: (fastify) => [fastify ? "@fastify/compress" : "compression"],
+    types: (fastify) => (fastify ? [] : ["@types/compression"]),
+  },
+  {
+    id: "nestWebsockets",
+    label: "WebSockets (Socket.IO)",
+    packages: () => ["@nestjs/websockets", "@nestjs/platform-socket.io"],
+    core: true,
+  },
+];
+
+const NEST_DEPENDENCY_OPTIONS: ToggleOption[] = NEST_DEPENDENCIES.map((dependency) => ({
+  id: dependency.id,
+  kind: "toggle",
+  label: dependency.label,
+  labelKey: dependency.labelKey,
+  default: false,
+  group: "scaffold.opt.dependencies",
+}));
+
+/**
+ * Puts a NestJS application generated for Express on Fastify: the adapter goes into
+ * `NestFactory.create`, and its import at the top. Edited in place rather than rewritten, because
+ * `main.ts` is not the same file from one CLI major to the next (CommonJS, then ESM with `.js`
+ * imports and a top-level `await`). A `main` that no longer reads `NestFactory.create(AppModule)`
+ * fails the step out loud instead of being left on Express by surprise.
+ *
+ * The generated end-to-end test keeps building its app with the default adapter — which is why
+ * `@nestjs/platform-express` stays installed — so `test:e2e` passes as generated.
+ *
+ * Single quotes only: this is one argument to `node -e`, quoted for sh and for PowerShell, and
+ * Windows PowerShell mangles double quotes in arguments to a native command.
+ */
+const NEST_FASTIFY_PATCH = [
+  "const fs=require('fs');",
+  "const file=fs.existsSync('src/main.ts')?'src/main.ts':'src/main.js';",
+  "let code=fs.readFileSync(file,'utf8');",
+  "const from='NestFactory.create(AppModule)';",
+  "if(!code.includes(from)){console.error(file+': '+from+' not found');process.exit(1);}",
+  "const typed=file.endsWith('.ts');",
+  "code=code.replace(from,typed?'NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter())':'NestFactory.create(AppModule, new FastifyAdapter())');",
+  "code=(typed?'import { FastifyAdapter, type NestFastifyApplication } from \\'@nestjs/platform-fastify\\';\\n':'import { FastifyAdapter } from \\'@nestjs/platform-fastify\\';\\n')+code;",
+  "fs.writeFileSync(file,code);",
+].join("");
+
+/** Hono's starters `create-hono` can make without a question, and what each one runs with. Vercel's
+ *  has no scripts of its own — it needs Vercel's CLI — so it is left out. */
+const HONO_RUNTIME: ChoiceOption = {
+  id: "runtime",
+  kind: "choice",
+  labelKey: "scaffold.opt.runtime",
+  choices: [
+    { value: "nodejs", label: "Node.js" },
+    { value: "bun", label: "Bun" },
+    { value: "cloudflare-workers", label: "Cloudflare Workers" },
+  ],
+  default: "nodejs",
+};
+
 // ── The catalogue ───────────────────────────────────────────────────────────────────────────────
 
 export const TEMPLATES: Template[] = [
+  {
+    id: "empty",
+    name: "Empty",
+    nameKey: "scaffold.tpl.emptyName",
+    category: "general",
+    logo: "empty",
+    descriptionKey: "scaffold.tpl.empty",
+    defaultName: "new-project",
+    options: [],
+    // Git is every plan's, and the dialog asks for it on every template already.
+    requirements: () => [],
+    // The folder and the runner's `git init`, nothing else: no file of ours in it, not even a README.
+    plan: () => ({ files: [], steps: [], emptyCommit: true }),
+  },
   {
     id: "react",
     name: "React",
@@ -867,6 +1004,93 @@ export const TEMPLATES: Template[] = [
     },
   },
   {
+    id: "fastify",
+    name: "Fastify",
+    category: "backend",
+    logo: "fastify",
+    descriptionKey: "scaffold.tpl.fastify",
+    versions: { kind: "npm", package: "fastify" },
+    defaultName: "fastify-api",
+    npmName: true,
+    pms: ALL_PMS,
+    options: [LANGUAGE],
+    requirements: (ctx) => [nodeRequirement(ctx, "Fastify"), ...pmRequirements(ctx)],
+    // Express's, on Fastify: one file and the package, no generator. Fastify ships its own types.
+    plan: (ctx) => {
+      const typed = ts(ctx);
+      const pkg = {
+        name: ctx.name,
+        version: "0.1.0",
+        private: true,
+        type: "module",
+        scripts: typed
+          ? { dev: "tsx watch src/index.ts", build: "tsc", start: "node dist/index.js" }
+          : { dev: "node --watch src/index.js", start: "node src/index.js" },
+      };
+      const server = [
+        'import Fastify from "fastify";',
+        "",
+        "const app = Fastify({ logger: true });",
+        "const port = Number(process.env.PORT ?? 3000);",
+        "",
+        `app.get("/", async () => ({ message: ${JSON.stringify(`Hello from ${ctx.name}!`)} }));`,
+        "",
+        "try {",
+        "  await app.listen({ port });",
+        "} catch (error) {",
+        "  app.log.error(error);",
+        "  process.exit(1);",
+        "}",
+        "",
+      ].join("\n");
+      const files: FileSpec[] = [
+        { path: "package.json", content: `${JSON.stringify(pkg, null, 2)}\n` },
+        { path: ".gitignore", content: NODE_GITIGNORE },
+        { path: typed ? "src/index.ts" : "src/index.js", content: server },
+      ];
+      if (typed) files.push({ path: "tsconfig.json", content: TSCONFIG_NODE });
+      const fastify = ctx.version ? `fastify@^${ctx.version.version}` : "fastify";
+      return {
+        files,
+        steps: [
+          inRoot(ctx, "scaffold.step.deps", addCmd(ctx.pm, [fastify])),
+          ...(typed ? [inRoot(ctx, "scaffold.step.devDeps", addCmd(ctx.pm, ["typescript", "tsx", "@types/node"], true))] : []),
+        ],
+        run: runCmd(ctx.pm, "dev"),
+      };
+    },
+  },
+  {
+    id: "hono",
+    name: "Hono",
+    category: "backend",
+    logo: "hono",
+    descriptionKey: "scaffold.tpl.hono",
+    engines: { kind: "npm", package: "hono" },
+    defaultName: "hono-app",
+    npmName: true,
+    pms: ALL_PMS,
+    options: [HONO_RUNTIME],
+    requirements: (ctx) =>
+      ctx.opts.runtime === "bun" ? [{ tool: "bun" }] : [nodeRequirement(ctx, "Hono"), ...pmRequirements(ctx)],
+    plan: (ctx) => {
+      // Bun's starter is Bun's: it installs and runs with it, whatever manager is picked.
+      const pm = ctx.opts.runtime === "bun" ? "bun" : ctx.pm;
+      return {
+        steps: [
+          // `create-hono` makes the folder, installs and starts no repository. Template, manager and
+          // install are all flags, so it asks nothing (run in a pty, 2026-10-01).
+          inParent(
+            ctx,
+            "scaffold.step.generate",
+            dlx(pm, "create-hono@latest", [ctx.name, "--template", String(ctx.opts.runtime ?? "nodejs"), "--pm", pm, "--install"]),
+          ),
+        ],
+        run: runCmd(pm, "dev"),
+      };
+    },
+  },
+  {
     id: "nest",
     name: "NestJS",
     category: "backend",
@@ -877,30 +1101,44 @@ export const TEMPLATES: Template[] = [
     defaultName: "nest-api",
     npmName: true,
     pms: ["npm", "pnpm", "yarn"],
-    options: [LANGUAGE],
+    options: [LANGUAGE, NEST_PLATFORM, ...NEST_DEPENDENCY_OPTIONS],
     requirements: (ctx) => [nodeRequirement(ctx, "NestJS"), ...pmRequirements(ctx)],
-    plan: (ctx) => ({
-      steps: [
-        inParent(
-          ctx,
-          "scaffold.step.generate",
-          dlx(ctx.pm, `@nestjs/cli@${at(ctx)}`, [
-            "new",
-            ctx.name,
-            "--skip-git",
-            "--package-manager",
-            ctx.pm,
-            "--language",
-            ts(ctx) ? "TypeScript" : "JavaScript",
-            ...(major(ctx) >= 12 ? ["--no-observe"] : []),
-          ]),
-          // The schematic behind `nest new` asks ESM-or-CommonJS and has no flag for it; told there
-          // is no TTY, the schematics runner takes the default (ESM) instead of asking.
-          { NG_FORCE_TTY: "false" },
-        ),
-      ],
-      run: runCmd(ctx.pm, "start:dev"),
-    }),
+    plan: (ctx) => {
+      const fastify = ctx.opts.platform === "fastify";
+      // Released with `@nestjs/core`, so pinned to the major `nest new` wrote — the CLI's own.
+      const core = (name: string) => (Number.isFinite(major(ctx)) ? `${name}@^${major(ctx)}` : name);
+      const picked = NEST_DEPENDENCIES.filter((dependency) => ctx.opts[dependency.id] === true);
+      const packages = [
+        ...(fastify ? [core("@nestjs/platform-fastify")] : []),
+        ...picked.flatMap((dependency) => dependency.packages(fastify).map((name) => (dependency.core ? core(name) : name))),
+      ];
+      const types = ts(ctx) ? picked.flatMap((dependency) => dependency.types?.(fastify) ?? []) : [];
+      return {
+        steps: [
+          inParent(
+            ctx,
+            "scaffold.step.generate",
+            dlx(ctx.pm, `@nestjs/cli@${at(ctx)}`, [
+              "new",
+              ctx.name,
+              "--skip-git",
+              "--package-manager",
+              ctx.pm,
+              "--language",
+              ts(ctx) ? "TypeScript" : "JavaScript",
+              ...(major(ctx) >= 12 ? ["--no-observe"] : []),
+            ]),
+            // The schematic behind `nest new` asks ESM-or-CommonJS and has no flag for it; told there
+            // is no TTY, the schematics runner takes the default (ESM) instead of asking.
+            { NG_FORCE_TTY: "false" },
+          ),
+          ...(packages.length > 0 ? [inRoot(ctx, "scaffold.step.deps", addCmd(ctx.pm, packages))] : []),
+          ...(types.length > 0 ? [inRoot(ctx, "scaffold.step.devDeps", addCmd(ctx.pm, types, true))] : []),
+          ...(fastify ? [inRoot(ctx, "scaffold.step.fastify", ["node", "-e", NEST_FASTIFY_PATCH])] : []),
+        ],
+        run: runCmd(ctx.pm, "start:dev"),
+      };
+    },
   },
   {
     id: "spring",
@@ -1189,28 +1427,39 @@ function goMain(framework: string, name: string): string {
 }
 
 export const CATEGORY_LABELS: Record<Category, TranslationKey> = {
+  general: "scaffold.cat.general",
   frontend: "scaffold.cat.frontend",
   backend: "scaffold.cat.backend",
   mobile: "scaffold.cat.mobile",
 };
 
-export const CATEGORY_ORDER: Category[] = ["frontend", "backend", "mobile"];
+export const CATEGORY_ORDER: Category[] = ["general", "frontend", "backend", "mobile"];
+
+/** What a template is called on screen: its brand, or — for one named by a word — that word in the
+ *  app's language. */
+export function templateName(template: Template, t: (key: TranslationKey) => string): string {
+  return template.nameKey ? t(template.nameKey) : template.name;
+}
 
 /** Where the dialog opens: the top of its list, which is grouped by `CATEGORY_ORDER` — never the
  *  template used last, which sat mid-list with nothing on screen saying why. */
 export const FIRST_TEMPLATE = TEMPLATES.find((template) => template.category === CATEGORY_ORDER[0]) ?? TEMPLATES[0];
 
 /** The git steps every plan ends with. `commit` is optional-tolerant: a machine with no git identity
- *  still gets a repository, just without the first commit, and is told so in the terminal. */
-export function gitSteps(root: string, label: (key: TranslationKey) => string, commit: boolean): Step[] {
+ *  still gets a repository, just without the first commit, and is told so in the terminal.
+ *
+ *  `empty` (`Plan.emptyCommit`) is for a folder with nothing to add. It is never the default: a
+ *  generator that commits its own work (Expo does) would get an empty twin of that commit. */
+export function gitSteps(root: string, label: (key: TranslationKey) => string, commit: boolean, empty = false): Step[] {
   const steps: Step[] = [{ title: label("scaffold.step.git"), cwd: root, argv: ["git", "init", "-q"] }];
+  const allow = empty ? " --allow-empty" : "";
   if (commit)
     steps.push({
       title: label("scaffold.step.commit"),
       cwd: root,
       optional: true,
-      sh: "git add -A && git commit -q -m 'Initial commit'",
-      ps: "git add -A; Cf-Check; git commit -q -m 'Initial commit'; Cf-Check",
+      sh: `git add -A && git commit -q${allow} -m 'Initial commit'`,
+      ps: `git add -A; Cf-Check; git commit -q${allow} -m 'Initial commit'; Cf-Check`,
     });
   return steps;
 }

@@ -25,7 +25,6 @@ import { deriveRunning, isActive, useServicesStore, type RunningService } from "
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { runsContainers, serviceDetectedPorts, type ServiceRow, type ServiceRuntime } from "../../types/services";
 import { PortChip, StatusGlyph, portsFor, rowHint, shortDuration, statusLabel, useElapsed } from "./serviceBits";
-import { buttonClass } from "../common/Button";
 
 /**
  * A menu glyph that holds still.
@@ -40,9 +39,10 @@ const still = (Icon: LucideIcon) => <Icon size={13} className="mt-[2px] shrink-0
  * The list's three ways to add something: detect, a group, a service by hand.
  *
  * Its own component because it is drawn in two places: in the list's heading, and — in the main
- * window, where the services are a panel of their own — in that panel's title row, which names the
- * panel already (see `ServicesDock`). Neither draws it while the list is empty: the two buttons the
- * empty list shows are the same choice with words on them.
+ * window, where the services are a panel of their own — in the strip at the top of that panel's
+ * column (see `ServicesDock`). Both draw it always, an empty list included: the user had the two
+ * big worded buttons the empty list used to show taken out (2026-10-01), so this strip is the
+ * empty state too.
  */
 export function ServiceActions({
   onNew,
@@ -138,43 +138,12 @@ export function ServiceList({
       return next;
     });
 
-  const empty = services.length === 0 && groups.length === 0;
-
   return (
     <>
+      {/* Empty or not, the list's ways in are the heading's three glyphs and nothing else — no
+          worded buttons, box, heading or paragraph (the user took each of those out). */}
       {heading && (
-        <SectionHeader
-          icon={CirclePlay}
-          label={t("services.title")}
-          // Not while the list is empty: the card below offers the same two ways in, with words on
-          // them, and three bare glyphs above it were the same choice asked twice.
-          actions={empty ? null : <ServiceActions onNew={onNew} onImport={onImport} />}
-        />
-      )}
-
-      {/* The two ways in, and nothing around them: no box, no heading, no paragraph — the user
-          took each of those out. The Detect button's tooltip still says what it reads. Centred
-          rather than hung off the left edge (the user's ask, 2026-09-25): alone in the list, two
-          buttons pushed left read as a row that ran out. */}
-      {services.length === 0 && (
-        <div className={`mx-2 mb-1.5 flex flex-wrap justify-center gap-1.5 ${heading ? "mt-1" : "mt-2"}`}>
-          <Tooltip side="top" label={t("services.detect")} description={t("services.detectHint")}>
-            <button
-              onClick={onImport}
-              className={buttonClass({ variant: "primary", size: "sm" })}
-            >
-              <Radar size={11} />
-              {t("services.detect")}
-            </button>
-          </Tooltip>
-          <button
-            onClick={() => onNew(null)}
-            className={buttonClass({ variant: "secondary", size: "sm" })}
-          >
-            <Plus size={11} />
-            {t("services.createByHand")}
-          </button>
-        </div>
+        <SectionHeader icon={CirclePlay} label={t("services.title")} actions={<ServiceActions onNew={onNew} onImport={onImport} />} />
       )}
 
       {sections.map((section) => (

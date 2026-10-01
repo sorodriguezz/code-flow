@@ -3564,6 +3564,54 @@ pub fn rename_chat_conversation(conn: &Connection, project_id: &str, session_id:
     Ok(())
 }
 
+/// The title a repository conversation was given — typed, or written by a model — if it has one.
+pub fn conversation_title(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT title FROM conversation_titles WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// Whether a repository conversation is waiting for the title a model writes from its first
+/// question (see `crate::chat_title`): exactly one answered turn — the one just filed — and no
+/// title yet, written or typed. Read right after a turn is filed, so no later turn asks again, and
+/// a conversation whose first turn failed asks when its first answer does land.
+pub fn conversation_awaits_title(conn: &Connection, project_id: &str, session_id: &str) -> rusqlite::Result<bool> {
+    let answered: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM activity_log WHERE project_id = ?1 AND session_id = ?2 AND is_error = 0",
+        params![project_id, session_id],
+        |row| row.get(0),
+    )?;
+    if answered != 1 {
+        return Ok(false);
+    }
+    let titled: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM conversation_titles WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    Ok(titled == 0)
+}
+
+/// Files the title a model wrote for a repository conversation — unless it already has one: the
+/// title lands seconds after the answer, and a rename typed in between is the user's and stays.
+pub fn title_conversation_if_untitled(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+    title: &str,
+) -> rusqlite::Result<bool> {
+    let inserted = conn.execute(
+        "INSERT INTO conversation_titles (session_id, project_id, title, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO NOTHING",
+        params![session_id, project_id, title, now()],
+    )?;
+    Ok(inserted > 0)
+}
+
 /// Every turn of one conversation, oldest first — flattened into `[user, assistant, user,
 /// assistant, ...]` by the frontend to redisplay exactly like a live chat.
 pub fn get_conversation_messages(
@@ -3666,7 +3714,116 @@ pub fn delete_chat_conversation(conn: &Connection, project_id: &str, session_id:
         "DELETE FROM conversation_titles WHERE project_id = ?1 AND session_id = ?2",
         params![project_id, session_id],
     )?;
+    conn.execute(
+        "DELETE FROM conversation_resets WHERE project_id = ?1 AND session_id = ?2",
+        params![project_id, session_id],
+    )?;
     Ok(())
+}
+
+// ---------- the assistant panel's `/clear` ----------
+
+/// Writes down a `/clear` in a repository conversation — see `migrations::add_context_resets`.
+pub fn add_conversation_reset(conn: &Connection, project_id: &str, session_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO conversation_resets (id, session_id, project_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![Uuid::new_v4().to_string(), session_id, project_id, now()],
+    )?;
+    Ok(())
+}
+
+/// A repository conversation's `/clear`s, oldest first.
+pub fn conversation_resets(conn: &Connection, session_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT created_at FROM conversation_resets WHERE session_id = ?1 ORDER BY created_at")?;
+    let rows = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// When a stored turn *started*: filed when its answer landed, less the time the engine took.
+///
+/// The start and not the filing is what a `/clear` is measured against. One typed while a turn was
+/// still running — in another window, or on a phone — cannot have reached that turn, which had
+/// already resumed its session: it is the next one's.
+fn turn_started(created_at: &str, response_time_ms: Option<i64>) -> chrono::DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(|at| at.with_timezone(&Utc) - chrono::Duration::milliseconds(response_time_ms.unwrap_or(0)))
+        .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC)
+}
+
+/// Where a repository conversation's `/clear`s fall among its turns.
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
+pub struct ContextResets {
+    /// The turns, by position in the list, whose question started over — the transcript draws the
+    /// line above each. Never the first: a `/clear` before anything was asked starts nothing over.
+    pub turns: Vec<usize>,
+    /// One is still waiting: the next question starts a fresh engine session.
+    pub pending: bool,
+}
+
+/// Places each `/clear` before the first turn that started after it — or, after the last one, as
+/// still pending.
+pub fn place_context_resets(turns: &[ActivityLogEntry], resets: &[String]) -> ContextResets {
+    let starts: Vec<_> = turns.iter().map(|turn| turn_started(&turn.created_at, turn.response_time_ms)).collect();
+    let mut placed = ContextResets::default();
+    for reset in resets {
+        let Ok(at) = chrono::DateTime::parse_from_rfc3339(reset) else { continue };
+        let at = at.with_timezone(&Utc);
+        match starts.iter().position(|start| *start > at).unwrap_or(starts.len()) {
+            0 => {}
+            index if index == starts.len() => placed.pending = true,
+            index if !placed.turns.contains(&index) => placed.turns.push(index),
+            _ => {}
+        }
+    }
+    placed.turns.sort_unstable();
+    placed
+}
+
+/// The turns of a repository conversation that ran as another account than the one before them, and
+/// so started a fresh engine session — the assistant draws a line above each (`turnsToMessages` in
+/// `chatStore.ts`, which this mirrors, as both mirror `session_for_engine`): same provider, another
+/// account than the last turn that named an engine, a session existed to lose, and the turn did not
+/// fail. Each with the provider and account that answered from there on.
+pub fn account_breaks(turns: &[ActivityLogEntry]) -> Vec<(usize, String, Option<String>)> {
+    let mut breaks = Vec::new();
+    let mut session = false;
+    let mut last: Option<(&str, Option<&str>)> = None;
+    for (index, turn) in turns.iter().enumerate() {
+        let account = turn.account_id.as_deref();
+        if let (Some(provider), Some((last_provider, last_account))) = (turn.provider.as_deref(), last) {
+            if !turn.is_error && session && last_provider == provider && last_account != account {
+                breaks.push((index, provider.to_string(), account.map(str::to_string)));
+            }
+        }
+        if let Some(provider) = turn.provider.as_deref() {
+            last = Some((provider, account));
+        }
+        session = session || turn.engine_session_id.is_some();
+    }
+    breaks
+}
+
+/// Whether a repository conversation has a `/clear` its next question must honour — the light form
+/// of [`place_context_resets`]'s `pending`, read on every panel turn whoever sends it.
+pub fn conversation_reset_pending(conn: &Connection, project_id: &str, session_id: &str) -> rusqlite::Result<bool> {
+    let latest: Option<String> = conn.query_row(
+        "SELECT MAX(created_at) FROM conversation_resets WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    let Some(Ok(latest)) = latest.as_deref().map(chrono::DateTime::parse_from_rfc3339) else { return Ok(false) };
+    let last: Option<(String, Option<i64>)> = conn
+        .query_row(
+            "SELECT created_at, response_time_ms FROM activity_log
+             WHERE project_id = ?1 AND session_id = ?2 ORDER BY created_at DESC LIMIT 1",
+            params![project_id, session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    // Nothing asked yet: there is no session to leave behind.
+    let Some((created_at, took)) = last else { return Ok(false) };
+    Ok(turn_started(&created_at, took) <= latest.with_timezone(&Utc))
 }
 
 // ---------- job history (PR reviews / pre-commit analyses) ----------
@@ -4841,6 +4998,124 @@ mod tests {
         (conn, project.id)
     }
 
+
+    /// A repository conversation is titled once, at its first answer, and never over a title it
+    /// already has — typed or written.
+    #[test]
+    fn a_repository_conversation_is_titled_once_at_its_first_answer() {
+        let (conn, project) = fixture();
+        add_activity_log(&conn, &project, "conv-a", None, "q1", "sin crédito", None, TurnMeta::default(), true).unwrap();
+        assert!(!conversation_awaits_title(&conn, &project, "conv-a").unwrap(), "a failure is not an answer");
+        add_activity_log(&conn, &project, "conv-a", None, "q1", "a1", None, TurnMeta::default(), false).unwrap();
+        assert!(conversation_awaits_title(&conn, &project, "conv-a").unwrap());
+
+        assert!(title_conversation_if_untitled(&conn, &project, "conv-a", "Build roto").unwrap());
+        assert!(!conversation_awaits_title(&conn, &project, "conv-a").unwrap(), "titled now");
+        assert!(!title_conversation_if_untitled(&conn, &project, "conv-a", "Otro").unwrap());
+
+        add_activity_log(&conn, &project, "conv-b", None, "q", "a", None, TurnMeta::default(), false).unwrap();
+        rename_chat_conversation(&conn, &project, "conv-b", "Mío").unwrap();
+        assert!(!conversation_awaits_title(&conn, &project, "conv-b").unwrap(), "renamed by hand");
+        assert!(!title_conversation_if_untitled(&conn, &project, "conv-b", "Escrito").unwrap());
+
+        let titles = list_chat_conversations(&conn, &project, None).unwrap();
+        let title_of = |id: &str| titles.iter().find(|c| c.session_id == id).map(|c| c.title.clone());
+        assert_eq!(title_of("conv-a").as_deref(), Some("Build roto"));
+        assert_eq!(title_of("conv-b").as_deref(), Some("Mío"));
+
+        add_activity_log(&conn, &project, "conv-c", None, "q1", "a1", None, TurnMeta::default(), false).unwrap();
+        add_activity_log(&conn, &project, "conv-c", None, "q2", "a2", None, TurnMeta::default(), false).unwrap();
+        assert!(!conversation_awaits_title(&conn, &project, "conv-c").unwrap(), "only the first answer asks");
+    }
+
+    /// A stored turn as the placement reads it: filed at `at`, after the engine took `took` ms.
+    fn turn_at(at: &str, took: i64, provider: &str, account: Option<&str>, session: Option<&str>) -> ActivityLogEntry {
+        ActivityLogEntry {
+            id: Uuid::new_v4().to_string(),
+            project_id: "p".into(),
+            session_id: Some("conv".into()),
+            engine_session_id: session.map(str::to_string),
+            question: "q".into(),
+            answer: "a".into(),
+            trace: None,
+            created_at: at.into(),
+            response_time_ms: Some(took),
+            is_error: false,
+            provider: Some(provider.into()),
+            model: None,
+            engine_version: None,
+            account_id: account.map(str::to_string),
+        }
+    }
+
+    /// A `/clear` falls before the first turn that *started* after it — one typed while a turn was
+    /// still running elsewhere is the next question's — and after the last turn it is still waiting.
+    #[test]
+    fn a_clear_falls_before_the_first_turn_that_started_after_it() {
+        let turns = [
+            turn_at("2026-10-01T10:00:10+00:00", 10_000, "claude", None, Some("s1")),
+            turn_at("2026-10-01T10:01:10+00:00", 10_000, "claude", None, Some("s2")),
+            turn_at("2026-10-01T10:02:30+00:00", 60_000, "claude", None, Some("s3")),
+        ];
+        let at = |t: &str| format!("2026-10-01T{t}+00:00");
+        // Between the first two turns: the line is drawn above the second.
+        assert_eq!(place_context_resets(&turns, &[at("10:00:30")]).turns, vec![1]);
+        // While the third was running (it started 10:01:30, was filed 10:02:30): it is not that
+        // turn's, which had already resumed its session — it waits for the next question.
+        let racing = place_context_resets(&turns, &[at("10:02:00")]);
+        assert_eq!(racing, ContextResets { turns: vec![], pending: true });
+        // Before anything was asked: nothing to start over.
+        assert_eq!(place_context_resets(&turns, &[at("09:00:00")]), ContextResets::default());
+        // Twice between the same two turns: one line.
+        assert_eq!(place_context_resets(&turns, &[at("10:00:20"), at("10:00:40")]).turns, vec![1]);
+        assert_eq!(place_context_resets(&turns, &["not a time".into()]), ContextResets::default());
+    }
+
+    /// The light check the send path makes agrees with the placement, and is cleared by the next
+    /// turn landing.
+    #[test]
+    fn a_pending_clear_is_honoured_once_and_only_once() {
+        let (conn, project) = fixture();
+        assert!(!conversation_reset_pending(&conn, &project, "conv").unwrap(), "no clear at all");
+        add_activity_log(&conn, &project, "conv", Some("s1"), "q1", "a1", None, TurnMeta::default(), false).unwrap();
+        add_conversation_reset(&conn, &project, "conv").unwrap();
+        assert!(conversation_reset_pending(&conn, &project, "conv").unwrap());
+        assert_eq!(conversation_resets(&conn, "conv").unwrap().len(), 1);
+
+        add_activity_log(&conn, &project, "conv", Some("s2"), "q2", "a2", None, TurnMeta::default(), false).unwrap();
+        assert!(!conversation_reset_pending(&conn, &project, "conv").unwrap(), "the next turn took it");
+        let placed = place_context_resets(
+            &get_conversation_messages(&conn, &project, "conv").unwrap(),
+            &conversation_resets(&conn, "conv").unwrap(),
+        );
+        assert_eq!(placed, ContextResets { turns: vec![1], pending: false });
+
+        delete_chat_conversation(&conn, &project, "conv").unwrap();
+        assert!(conversation_resets(&conn, "conv").unwrap().is_empty(), "deleted with its conversation");
+    }
+
+    /// The same rule the panel draws its account line by: same provider, another account, a session
+    /// to lose, and an answer.
+    #[test]
+    fn a_turn_on_another_account_breaks_the_session_like_the_panel_says() {
+        let mut failed = turn_at("2026-10-01T10:03:00+00:00", 1, "claude", Some("home"), None);
+        failed.is_error = true;
+        let turns = [
+            turn_at("2026-10-01T10:00:00+00:00", 1, "claude", None, Some("s1")),
+            turn_at("2026-10-01T10:01:00+00:00", 1, "claude", None, Some("s2")),
+            turn_at("2026-10-01T10:02:00+00:00", 1, "claude", Some("work"), Some("s3")),
+            failed,
+            turn_at("2026-10-01T10:04:00+00:00", 1, "claude", Some("work"), Some("s4")),
+        ];
+        // Turn 2 moves to `work`. Turn 3 failed and draws nothing, but it still ran as `home` — the
+        // backend compares with the last turn that named an engine, failed or not — so turn 4, back
+        // on `work`, could not resume either.
+        let work = || ("claude".to_string(), Some("work".to_string()));
+        assert_eq!(account_breaks(&turns), vec![(2, work().0, work().1), (4, work().0, work().1)]);
+        // The first turn has no session before it to lose.
+        let first = [turn_at("2026-10-01T10:00:00+00:00", 1, "claude", Some("work"), Some("s1"))];
+        assert!(account_breaks(&first).is_empty());
+    }
 
     /// A migrated database with foreign keys **on** and two workspaces.
     ///

@@ -462,6 +462,7 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   "repo-doc": "usage.task.repoDoc",
   "workspace-doc": "usage.task.workspaceDoc",
   "repair-json": "usage.task.repairJson",
+  "chat-title": "usage.task.chatTitle",
   other: "usage.task.other",
 };
 

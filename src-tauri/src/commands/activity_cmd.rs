@@ -72,6 +72,30 @@ pub fn rename_chat_conversation(db: State<'_, Db>, project_id: String, session_i
     queries::rename_chat_conversation(&conn, &project_id, &session_id, &title).map_err(|e| e.to_string())
 }
 
+/// The panel's `/clear`: the next question in this conversation starts a fresh engine session.
+///
+/// Written down rather than held in one window's memory, so the promise is kept by whoever asks
+/// next — this window after a restart, another window, a phone (`send_chat_message` reads it) — and
+/// by a move to the chat workspace, which carries it there. Not under the conversation's lease:
+/// typed while a turn runs elsewhere, it is placed by when that turn *started*
+/// (`queries::place_context_resets`), so it falls to the next question rather than to the one
+/// already under way.
+#[tauri::command]
+pub fn reset_chat_context(db: State<'_, Db>, project_id: String, session_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::add_conversation_reset(&conn, &project_id, &session_id).map_err(|e| e.to_string())
+}
+
+/// Where a conversation's `/clear`s fall among its turns — the lines a reopened transcript draws,
+/// and whether one is still waiting for its question.
+#[tauri::command]
+pub fn chat_context_resets(db: State<'_, Db>, project_id: String, session_id: String) -> Result<queries::ContextResets, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let turns = queries::get_conversation_messages_lite(&conn, &project_id, &session_id).map_err(|e| e.to_string())?;
+    let resets = queries::conversation_resets(&conn, &session_id).map_err(|e| e.to_string())?;
+    Ok(queries::place_context_resets(&turns, &resets))
+}
+
 /// One page of a project's Activity, newest first.
 ///
 /// `limit`/`offset` are optional so the shape that existed before paging — no limit, everything in

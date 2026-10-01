@@ -4,6 +4,7 @@ import { FolderGit2, MessagesSquare, Pencil, ShieldCheck } from "lucide-react";
 import { ChatTranscript } from "./ChatTranscript";
 import { ChatWelcome } from "./ChatWelcome";
 import { ChatComposer } from "./ChatComposer";
+import { ContinueThreadDialog } from "./ContinueThreadDialog";
 import type { ContextReading } from "./ContextMeter";
 import { ConversationSidebar } from "./ConversationSidebar";
 import { GroupView } from "./GroupView";
@@ -13,6 +14,7 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { openTerminal, writeFileBytes } from "../../lib/tauri/commands";
 import { chatAttachBytes, chatAttachFile, type ChatAttachment, type SkillPick } from "../../lib/tauri/chatCommands";
 import { EMPTY_CONVERSATION, effortKey, useConversationStore } from "../../state/conversationStore";
+import { useContinueThreadStore } from "../../state/continueThreadStore";
 import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
 import type { ComposerQueue } from "./QueuedMessages";
 import { estimateTokens } from "../../lib/contextWindow";
@@ -618,6 +620,9 @@ export function ChatView() {
    *   the backend would refuse it mid-turn anyway, and a refusal was silence.
    * - `/branch` runs now, from the last turn that *has* an answer — the question in flight has none
    *   yet, and a branch ending on a dangling question would be a copy of nothing.
+   * - `/continue` opens its dialog now — which model the new thread runs on is the whole question —
+   *   with the words after it as what the summary should keep. The summary itself waits for no
+   *   queue: it refuses a thread that is still answering, and says so in the dialog.
    * - `/new`, `/export` and `/caveman` run now: the first two act on the view, not on a turn, and a
    *   style applies to the next turn *sent* — queued ones included, which is what "from now on"
    *   means once the running answer has already been asked for.
@@ -670,6 +675,9 @@ export function ChatView() {
             });
           break;
         }
+        case "continue":
+          if (activeId) useContinueThreadStore.getState().open({ conversationId: activeId, guidance: args });
+          break;
         case "branch": {
           // From the last turn, which is what "branch this conversation" means with no turn picked.
           // The per-turn branch lives on the bubble's hover row. While a turn runs, the last message
@@ -844,6 +852,15 @@ export function ChatView() {
               effort={session.effort}
               effortSupported={effortSupported}
               onPickEngine={activeId ? (p, m, a) => setEngine(activeId, p, m, a) : undefined}
+              onContinueOn={
+                activeId
+                  ? (p, m, a) =>
+                      useContinueThreadStore.getState().open({
+                        conversationId: activeId,
+                        engine: { provider: p, model: m, account: a },
+                      })
+                  : undefined
+              }
               account={session.accountId}
               onPickEffort={activeId ? (e) => setEffort(activeId, e) : undefined}
               attachments={attachments}
@@ -878,6 +895,7 @@ export function ChatView() {
           </>
         )}
       </div>
+      <ContinueThreadDialog />
     </div>
   );
 }

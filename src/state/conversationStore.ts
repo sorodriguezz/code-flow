@@ -4,6 +4,7 @@ import {
   chatCavemanLevels,
   chatCavemanResolve,
   chatCompact,
+  chatContinueInNewThread,
   chatContextWindow,
   chatCreateConversation,
   chatDeleteConversation,
@@ -52,7 +53,7 @@ import {
   type SkillPick,
 } from "../lib/tauri/chatCommands";
 import { isRepoBusy, notifyStateChange, REPO_BUSY_MARKER } from "../lib/tauri/commands";
-import { onAiChatDelta, onAiDone, onStateInvalidate, type AiChatDeltaEvent } from "../lib/tauri/events";
+import { onAiChatDelta, onAiDone, onChatTitled, onStateInvalidate, type AiChatDeltaEvent } from "../lib/tauri/events";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { formatAgentLogLine, repeatsStatus } from "../lib/agentLog";
@@ -61,6 +62,7 @@ import { translate } from "./languageStore";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import type { ThreadEngine } from "./continueThreadStore";
 import {
   chatQueueKey,
   dropChatQueue,
@@ -835,6 +837,18 @@ interface ConversationState {
   /** Throws the summary away, so the whole transcript is replayed again. Instant and free. */
   uncompact: (conversationId: string) => Promise<void>;
 
+  /**
+   * "Continuar en un hilo nuevo": this thread's own engine summarises the whole of it, and a new
+   * thread on `engine` — any provider — starts from that summary and nothing else. See
+   * `chatContinueInNewThread`.
+   *
+   * A real turn under this thread's lease, so it waits for no queue and refuses a thread that is
+   * answering or compacting. It shows in the status bar and stops by `runId`, which the caller mints
+   * so its own Stop can reach it. Resolves with the new thread's id, opened; `null` when stopped.
+   * Rejects with the engine's error — and then nothing was created.
+   */
+  continueInNewThread: (conversationId: string, engine: ThreadEngine, guidance: string, runId: string) => Promise<string | null>;
+
   search: (query: string, limit?: number) => Promise<ChatSearchHit[]>;
   sessionFor: (conversationId: string | null) => ConversationSession;
 }
@@ -927,6 +941,21 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     subscribed = true;
     void onAiChatDelta((event) => {
       applyStream(event);
+    }).then((off) => {
+      offs.push(off);
+    });
+
+    // The title a model wrote from a thread's first question replaces the cut question it was
+    // called by — see `chat_title.rs`. The same write `rename` makes, without the round trip: the
+    // backend has filed it already.
+    void onChatTitled(({ surface, conversationId, title }) => {
+      if (surface !== "chat") return;
+      set((s) => ({
+        conversations: s.conversations.map((c) => (c.id === conversationId ? { ...c, title } : c)),
+        byConversation: s.byConversation[conversationId]
+          ? { ...s.byConversation, [conversationId]: { ...s.byConversation[conversationId], title } }
+          : s.byConversation,
+      }));
     }).then((off) => {
       offs.push(off);
     });
@@ -2131,6 +2160,34 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     if (outcome === "compacted") get().drainQueue(conversationId);
     else holdChatQueue(queueOf(conversationId), outcome === "stopped" ? "stopped" : "error");
     return outcome === "compacted";
+  },
+
+  continueInNewThread: async (conversationId, engine, guidance, runId) => {
+    // The backend refuses both as well (it takes the thread's lease), but its refusal is a marker,
+    // not a sentence.
+    if (get().compacting[conversationId] || get().byConversation[conversationId]?.sending) {
+      throw new Error(translate("chat.continueBusy"));
+    }
+    const title = get().conversations.find((c) => c.id === conversationId)?.title ?? "";
+    useAiRunStore.getState().start(runId, {
+      kindKey: "chat.continuing",
+      detail: title,
+      target: { view: "chat", select: { kind: "chatAppConversation", id: conversationId } },
+      workspaceId: get().byConversation[conversationId]?.workspaceId,
+    });
+    try {
+      const thread = await chatContinueInNewThread(conversationId, engine, guidance, runId);
+      set((s) => ({ conversations: [thread, ...s.conversations.filter((c) => c.id !== thread.id)] }));
+      await get().open(thread.id);
+      return thread.id;
+    } catch (e) {
+      // Stop pressed on the summary: nothing was created, so there is nothing to explain.
+      if (isCancellation(e)) return null;
+      if (isRepoBusy(e)) throw new Error(translate("chat.continueBusy"));
+      throw e;
+    } finally {
+      useAiRunStore.getState().finish(runId);
+    }
   },
 
   uncompact: async (conversationId) => {

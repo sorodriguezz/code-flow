@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Eraser,
+  Forward,
   GitBranch,
   MessageSquarePlus,
+  MessageSquareShare,
   Puzzle,
   Shrink,
   SpellCheck,
@@ -43,13 +45,13 @@ const SKILL_SOURCE_KEYS: Record<ProviderSkill["source"], TranslationKey> = {
 };
 
 /** The commands this app answers itself. Never sent to a CLI — see the component's note. */
-export type ChatAppCommand = "new" | "export" | "branch" | "compact" | "caveman" | "clear";
+export type ChatAppCommand = "new" | "export" | "branch" | "continue" | "compact" | "caveman" | "clear" | "move";
 
 /**
  * Which composer the menu belongs to — they offer different app commands.
  *
  * The free chat owns its compaction (`/compact`, summarised by the app, for every engine) and has
- * `/branch` and `/caveman`; a repository conversation in the panel has neither, so there `/compact`
+ * `/branch`, `/continue` and `/caveman`; a repository conversation in the panel has neither, so there `/compact`
  * is Claude's own and `/clear` is the app's — the next turn simply starts a fresh engine session,
  * which works on every engine rather than only the one whose CLI expands the command headlessly.
  */
@@ -67,10 +69,10 @@ interface AppCommand {
   /**
    * Whether text after the command belongs to it.
    *
-   * Only `/compact` takes any today, and the default matters more than the exception: without it,
-   * `/new empezar de cero` would silently run `/new` and throw the sentence away. For everything
-   * else an exact match is the only match, so a line that merely *starts* with a command name is
-   * an ordinary message and is sent as one.
+   * Only `/compact`, `/continue` and `/caveman` take any, and the default matters more than the
+   * exception: without it, `/new empezar de cero` would silently run `/new` and throw the sentence
+   * away. For everything else an exact match is the only match, so a line that merely *starts* with
+   * a command name is an ordinary message and is sent as one.
    */
   takesArgs?: boolean;
 }
@@ -79,15 +81,17 @@ const APP_COMMANDS: AppCommand[] = [
   { id: "new", name: "/new", icon: MessageSquarePlus, descriptionKey: "chat.cmdNew" },
   { id: "export", name: "/export", icon: Upload, descriptionKey: "chat.cmdExport" },
   { id: "branch", name: "/branch", icon: GitBranch, descriptionKey: "chat.cmdBranch" },
+  { id: "continue", name: "/continue", icon: Forward, descriptionKey: "chat.cmdContinue", takesArgs: true },
   { id: "compact", name: "/compact", icon: Shrink, descriptionKey: "chat.cmdCompact", takesArgs: true },
   { id: "caveman", name: "/caveman", icon: SpellCheck, descriptionKey: "chat.cmdCaveman", takesArgs: true },
   { id: "clear", name: "/clear", icon: Eraser, descriptionKey: "chat.cmdClear" },
+  { id: "move", name: "/move", icon: MessageSquareShare, descriptionKey: "chat.cmdMove" },
 ];
 
 /** Which app commands each composer offers — see `CommandSurface`. */
 const SURFACE_COMMANDS: Record<CommandSurface, ChatAppCommand[]> = {
-  chat: ["new", "export", "branch", "compact", "caveman"],
-  panel: ["new", "clear", "export"],
+  chat: ["new", "export", "branch", "continue", "compact", "caveman"],
+  panel: ["new", "clear", "export", "move"],
 };
 
 function appCommandsOf(surface: CommandSurface): AppCommand[] {

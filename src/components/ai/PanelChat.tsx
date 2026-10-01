@@ -1,16 +1,18 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ImagePlus, ListPlus, Square, Users, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ImagePlus, ListPlus, MessageSquareShare, Square, Users, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
 import { SkillChip } from "../chat/ChatComposer";
 import { AttachmentBar } from "../chat/AttachmentBar";
 import { useTextMenu } from "../common/TextMenu";
 import { useModelReadsImages } from "../../lib/useModelReadsImages";
+import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import type { ChatAttachment } from "../../lib/tauri/chatCommands";
 import { McpMenu } from "../chat/McpMenu";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
 import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
 import { openNewChat } from "../../lib/aiPanelNav";
+import { moveChatToApp } from "../../lib/moveChatToApp";
 import { openTerminal } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
 import { useIsQueued, repoHolder } from "../../lib/repoQueue";
@@ -52,8 +54,9 @@ const MAX_COMPOSER_HEIGHT = 180;
  * the behaviour the chat workspace already had and this panel lacked:
  *
  * - **Stop is in the composer**, where the hand is, and the run card above does not repeat it.
- * - **It follows the reply only while you are at the bottom.** Reading back no longer gets yanked
- *   down every time a turn lands; a "jump to latest" pill offers the way back instead.
+ * - **It opens on the newest turn, and follows the reply only while you are at the bottom.**
+ *   Coming back to the tab lands on the newest turn too, wherever it was left; reading back no
+ *   longer gets yanked down every time a turn lands, and a "jump to latest" pill offers the way back.
  * - **The draft belongs to the conversation** and outlives the tab switch — and a question stopped
  *   while it was queued comes back into the box rather than vanishing.
  * - **The engine belongs to the conversation.** The chip no longer rewrites the chat routing for
@@ -71,11 +74,15 @@ export function PanelChat({
   projectId,
   conversationId,
   fresh,
+  active,
 }: {
   tabKey: string;
   projectId: string;
   conversationId: string;
   fresh: boolean;
+  /** This tab is the one on screen. A tab left open stays mounted, hidden (`AiPanel`'s
+   *  `KEEP_ALIVE`), and coming back to it is entering the conversation again — see the scrolling. */
+  active: boolean;
 }) {
   const t = useT();
   const locale = useLanguageStore((s) => s.language) === "es" ? "es-ES" : "en-US";
@@ -156,6 +163,8 @@ export function PanelChat({
 
   // ── Scrolling ─────────────────────────────────────────────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** The turns inside the scroller, observed with it — see the last effect below. */
+  const contentRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   /** Whether the reader is away from the newest turn — the round ↓ shows for as long as they are,
    *  the way every AI chat does, not only when something new arrives. */
@@ -177,10 +186,16 @@ export function PanelChat({
     setShowJump(false);
     setNewBelow(false);
   };
-  // Opened at the newest turn.
+  // Opened at the newest turn, and entered at it again whenever the tab comes back to the front. A
+  // hidden tab cannot be scrolled: a reply that landed meanwhile was "followed" by a scroll that did
+  // nothing, and the tab came back wherever it had been left — above the answer, with no ↓ saying
+  // so. Entering a conversation is reading its newest turn, whatever was being read when it was
+  // left. In the commit that shows the tab, so the first frame on screen is already the newest.
   useLayoutEffect(() => {
-    toBottom();
-  }, [conversationId]);
+    if (active) toBottom();
+    // `toBottom` only touches refs and state setters, none of which change between renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId, active]);
   // Follows what is being written only while the reader is at the bottom.
   useLayoutEffect(() => {
     if (atBottom.current) toBottom();
@@ -189,15 +204,30 @@ export function PanelChat({
       setNewBelow(true);
     }
   }, [session.messages.length, session.streamText.length, session.sending]);
+  /**
+   * What the effects above cannot see: a size changing under a reader at the bottom, read from the
+   * boxes rather than from the store. The queue strip and the attachments grow the composer, which
+   * shrinks the scroller from below, and the newest lines went under it; a code block coloured or
+   * an image decoded after the render grows the turns without touching anything the effects above
+   * watch. Either way the view stays on the newest — and only then: someone reading back is left
+   * where they are.
+   */
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const content = contentRef.current;
+    if (!el || !content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      // A hidden tab measures nothing; the effect above lands it when it is shown.
+      if (atBottom.current && el.clientHeight > 0) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
 
   // ── Composer ──────────────────────────────────────────────────────────────────────────────
   const boxRef = useRef<HTMLTextAreaElement>(null);
-  useLayoutEffect(() => {
-    const el = boxRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, MAX_COMPOSER_HEIGHT)}px`;
-  }, [draft]);
+  useAutosizeTextarea(boxRef, draft, MAX_COMPOSER_HEIGHT);
   // The skill staged for the next question — dropped when the engine changes, since a skill is one
   // CLI's and the next engine may not have it.
   const [skill, setSkill] = useState<ChatSkillPick | null>(null);
@@ -220,6 +250,8 @@ export function PanelChat({
     } else if (command === "export" && session.persisted && session.messages.length > 0) {
       const rect = boxRef.current?.getBoundingClientRect();
       setExportMenu({ x: rect ? rect.left + 8 : 16, y: rect ? rect.top - 8 : 16 });
+    } else if (command === "move") {
+      void moveChatToApp(projectId, conversationId);
     }
   };
 
@@ -342,6 +374,20 @@ export function PanelChat({
               <Download size={12} />
             </button>
           )}
+          {/* To the chat workspace, for good — with everything it holds, still on this repository.
+              Not while a turn runs or messages wait: they belong to the session it is in. */}
+          {session.persisted && session.messages.length > 0 && (
+            <button
+              type="button"
+              onClick={() => void moveChatToApp(projectId, conversationId)}
+              disabled={session.sending || queuedMessages.length > 0}
+              title={session.sending || queuedMessages.length > 0 ? t("assistant.moveBusy") : t("assistant.moveToChat")}
+              aria-label={t("assistant.moveToChat")}
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40 disabled:hover:bg-transparent"
+            >
+              <MessageSquareShare size={12} />
+            </button>
+          )}
         </div>
         {exportMenu && (
           <ContextMenu
@@ -354,7 +400,7 @@ export function PanelChat({
           />
         )}
 
-        <div className="space-y-2.5">
+        <div ref={contentRef} className="space-y-2.5">
           {session.messages.map((message, i) => {
             const day = dayDivider(message, session.messages[i - 1], locale);
             return (

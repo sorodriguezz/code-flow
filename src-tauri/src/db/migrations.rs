@@ -1846,6 +1846,20 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- which is why the turn number matters here at all — it is the length of the prefix.
             parent_conversation_id TEXT REFERENCES chat_conversations(id) ON DELETE SET NULL,
             branched_at_turn INTEGER,
+            -- Set on a thread moved here from the assistant panel's repository chat
+            -- (`chat_queries::move_from_panel`): when, and the last turn it brought with it — the
+            -- transcript says so right under that turn. NULL on every thread that started here.
+            moved_at      TEXT,
+            moved_through_turn INTEGER,
+            -- JSON array of the turns the engine's context starts again at — the `/clear`s a thread
+            -- moved from the assistant brought with it (`chat_queries::move_from_panel`). Nothing
+            -- before the last one is replayed, and the transcript draws each. Empty for none.
+            context_resets TEXT NOT NULL DEFAULT '',
+            -- JSON object for a thread started from another with "continuar en un hilo nuevo": that
+            -- thread's id, title and engine as they were, how many turns the summary covers, and
+            -- the summary itself — which is all this thread's engine knows of it. Text only, frozen
+            -- (see `models::Continuation`). Empty on every other thread.
+            continued_from TEXT NOT NULL DEFAULT '',
             created_at    TEXT NOT NULL,
             updated_at    TEXT NOT NULL
         );
@@ -1963,6 +1977,59 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     // shadow a teammate's change to it — see `api_sync::split_current_values`.
     super::api_sync::migrate_variable_split(conn)?;
     add_mcp_registry(conn)?;
+    add_move_to_chat_conversations(conn)?;
+    add_context_resets(conn)?;
+    add_continued_from_to_chat_conversations(conn)?;
+    Ok(())
+}
+
+/// Gives an already-created `chat_conversations` the column a thread continued from another carries
+/// — see the table comment. Empty is what every thread that existed before this was: started on its
+/// own.
+fn add_continued_from_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "chat_conversations")? && !has_column(conn, "chat_conversations", "continued_from")? {
+        conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN continued_from TEXT NOT NULL DEFAULT '';")?;
+    }
+    Ok(())
+}
+
+/// The assistant panel's `/clear`, kept on disk — and the column a thread moved to the chat workspace
+/// carries them in.
+///
+/// `conversation_resets` is one row per `/clear` in a repository conversation, keyed like
+/// `conversation_titles` by the app's conversation id. It used to be a flag in one window's memory,
+/// so a restart, another window, a phone or a move to the chat workspace all resumed the session the
+/// user had asked to leave behind. The row is the promise; `queries::conversation_reset_pending`
+/// keeps it for whoever sends next.
+fn add_context_resets(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS conversation_resets (
+            id          TEXT PRIMARY KEY,
+            session_id  TEXT NOT NULL,
+            project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_conversation_resets_session ON conversation_resets(session_id);",
+    )?;
+    if table_exists(conn, "chat_conversations")? && !has_column(conn, "chat_conversations", "context_resets")? {
+        conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN context_resets TEXT NOT NULL DEFAULT '';")?;
+    }
+    Ok(())
+}
+
+/// Gives an already-created `chat_conversations` the two columns a thread moved in from the
+/// assistant panel carries — see the table comment. Nullable, and NULL is exactly what every thread
+/// that existed before this was: started here.
+fn add_move_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "chat_conversations")? {
+        return Ok(());
+    }
+    if !has_column(conn, "chat_conversations", "moved_at")? {
+        conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN moved_at TEXT;")?;
+    }
+    if !has_column(conn, "chat_conversations", "moved_through_turn")? {
+        conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN moved_through_turn INTEGER;")?;
+    }
     Ok(())
 }
 

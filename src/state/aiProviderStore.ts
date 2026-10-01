@@ -99,11 +99,13 @@ async function loadRouting(defaultProvider: string, prefetched?: Record<string, 
   for (const { key } of AI_TASKS) {
     const override = models[taskModelKey(providerFor[key], key)];
     const base = models[modelKey(providerFor[key])];
-    // Commits alone have a step between the two: the engine's own fast model, which is what
-    // `load_ai_config_in` runs one on when the row names none. Without it every chip for commits
-    // named the base model — Opus, say — over a run that went to Haiku.
+    // Commits and chat titles have a step between the two: the engine's own fast model, which is
+    // what `load_ai_config_in` runs them on when the row names none. Without it every chip for
+    // commits named the base model — Opus, say — over a run that went to Haiku.
     const dedicated =
-      key === "commit" ? AI_PROVIDERS.find((p) => p.id === providerFor[key])?.commitMessageModel : undefined;
+      key === "commit" || key === "chat_title"
+        ? AI_PROVIDERS.find((p) => p.id === providerFor[key])?.commitMessageModel
+        : undefined;
     taskModels[key] = override?.trim() || dedicated || base?.trim() || "";
   }
   // Handed back rather than read again by the caller: it rode along in the wave-two call, and
