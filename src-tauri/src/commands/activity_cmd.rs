@@ -56,8 +56,14 @@ pub fn get_turn_trace(db: State<'_, Db>, id: String) -> Result<Option<String>, S
 
 #[tauri::command]
 pub fn delete_chat_conversation(db: State<'_, Db>, project_id: String, session_id: String) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::delete_chat_conversation(&conn, &project_id, &session_id).map_err(|e| e.to_string())
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::delete_chat_conversation(&conn, &project_id, &session_id).map_err(|e| e.to_string())?;
+    }
+    // Its images go with it — best effort, and outside the lock; the startup sweep collects
+    // whatever this misses.
+    super::chat_attach::discard_repo_conversation_attachments(&session_id);
+    Ok(())
 }
 
 #[tauri::command]

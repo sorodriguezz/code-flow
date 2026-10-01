@@ -440,6 +440,20 @@ pub fn chat_conversation_attachments_dir(conversation_id: &str) -> PathBuf {
     chat_attachments_dir().join(conversation_id)
 }
 
+/// Where the images attached in the **repository chat** (the assistant panel) live.
+///
+/// A sibling root rather than a share of [`chat_attachments_dir`], for the sweep's sake again: that
+/// root's sweep keeps only the chat workspace's conversations, and a panel conversation is a row in
+/// `activity_log`, which it does not read — so its folder would be collected on the next launch.
+pub fn repo_chat_attachments_dir() -> PathBuf {
+    state_dir().join("repo-chat-attachments")
+}
+
+/// One repository conversation's images. Checked at the command boundary, like the others.
+pub fn repo_chat_conversation_attachments_dir(conversation_id: &str) -> PathBuf {
+    repo_chat_attachments_dir().join(conversation_id)
+}
+
 /// Where a *project's* shared context files live — the PDFs and documents attached to a group
 /// rather than to one conversation.
 ///

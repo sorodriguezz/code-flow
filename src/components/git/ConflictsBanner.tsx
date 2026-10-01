@@ -4,6 +4,7 @@ import { useConflictEditorStore } from "../../state/conflictEditorStore";
 import { AiSparkles } from "../common/AiGlyph";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
+import { actionButtonClass } from "./actionButton";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { OperationKind } from "../../types/domain";
@@ -120,16 +121,20 @@ export function ConflictsBanner() {
               {t("conflicts.keepTheirs")}
             </button>
             <button
+              type="button"
               title={t("conflicts.editManually")}
+              aria-label={t("conflicts.editManually")}
               onClick={() => openInEditor(c.path)}
-              className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+              className={actionButtonClass("accent", { className: "-my-0.5" })}
             >
               <Code2 size={13} />
             </button>
             <button
+              type="button"
               title={t("conflicts.markResolved")}
+              aria-label={t("conflicts.markResolved")}
               onClick={() => markConflictResolved(c.path)}
-              className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-success)]"
+              className={actionButtonClass("success", { className: "-my-0.5" })}
             >
               <Check size={13} />
             </button>

@@ -8,7 +8,7 @@ import {
   type AiEngineEvent,
   type AiOutputBatchEvent,
 } from "../lib/tauri/events";
-import { formatAgentLogLine } from "../lib/agentLog";
+import { formatAgentLogLine, repeatsStatus, trackSubagents, type SubagentState } from "../lib/agentLog";
 // Types only, so neither of these is a module this one depends on at runtime — `notificationStore`
 // in particular reaches back into half the app, and importing it for real here would close a cycle.
 import type { TranslationKey } from "../lib/i18n/translations";
@@ -54,6 +54,9 @@ export interface AiRunEngine {
   providerId: string;
   engine: string;
   model: string;
+  /** Seconds of silence the backend's watchdog allows before stopping the run (`null`: off, or a
+   *  backend that does not say). What a quiet card counts down to. */
+  idleLimitSecs: number | null;
 }
 
 /**
@@ -106,6 +109,9 @@ interface AiRunState {
    * would quietly blank a chip that is still on screen. Two short strings per run is a few hundred
    * bytes — the buffers next door are four hundred lines each, and they are the actual leak. */
   engineByRun: Record<string, AiRunEngine>;
+  /** The sub-agents each run has started and not heard back from, by task id — read off the same
+   *  output batches as the lines (see `trackSubagents`). Gone when the run settles. */
+  subagentsByRun: Record<string, Record<string, SubagentState>>;
   /** What each run is, for the status bar's list of everything in flight. Written by `start` and
    * evicted with the buffers; a run with no entry still counts as running, it is just unnamed. */
   aboutByRun: Record<string, AiRunAbout>;
@@ -145,6 +151,7 @@ interface AiRunState {
 }
 
 const EMPTY_LINES: AiRunLine[] = [];
+const NO_SUBAGENTS: Record<string, SubagentState> = {};
 
 /**
  * Whether [`init`] has already run, and the handles to undo it.
@@ -180,6 +187,7 @@ function without<T>(map: Record<string, T>, gone: Set<string>): Record<string, T
 export const useAiRunStore = create<AiRunState>((set, get) => ({
   linesByRun: {},
   engineByRun: {},
+  subagentsByRun: {},
   aboutByRun: {},
   active: {},
   cancelling: {},
@@ -217,10 +225,19 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
       // stored log is what the user actually saw — and the noise never takes up a slot. Done for
       // the whole batch first so the `set` below is a single, plain append.
       const added: AiRunLine[] = [];
+      const logged = get().linesByRun[event.run_id];
+      let last = logged?.[logged.length - 1]?.text;
+      const openBefore = get().subagentsByRun[event.run_id] ?? NO_SUBAGENTS;
+      let open = openBefore;
       for (const entry of event.lines) {
+        open = trackSubagents(open, entry.line);
         const text = formatAgentLogLine(entry.line);
-        if (text === null) continue;
+        if (text === null || repeatsStatus(last, text)) continue;
         added.push({ stream: entry.stream, text });
+        last = text;
+      }
+      if (open !== openBefore) {
+        set((s) => ({ subagentsByRun: { ...s.subagentsByRun, [event.run_id]: open } }));
       }
       // A batch of nothing but filtered noise must not re-render every subscriber of this store.
       if (added.length === 0) return;
@@ -244,7 +261,12 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
       set((s) => {
         const engineByRun = {
           ...s.engineByRun,
-          [event.run_id]: { providerId: event.provider, engine: event.engine, model: event.model },
+          [event.run_id]: {
+            providerId: event.provider,
+            engine: event.engine,
+            model: event.model,
+            idleLimitSecs: event.idle_limit_secs ?? null,
+          },
         };
         // A run this window never started.
         //
@@ -337,9 +359,11 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
       // Written before the process exists, so the status bar names the run from the frame it
       // starts rather than from whenever the engine gets round to announcing itself.
       const aboutByRun = without(s.aboutByRun, gone);
+      const { [runId]: _previousSubagents, ...subagentsByRun } = without(s.subagentsByRun, gone);
       return {
         linesByRun: { ...without(s.linesByRun, gone), [runId]: [] },
         engineByRun,
+        subagentsByRun,
         aboutByRun: about ? { ...aboutByRun, [runId]: about } : aboutByRun,
         active: { ...without(s.active, gone), [runId]: true },
         cancelling: { ...without(s.cancelling, gone), [runId]: false },
@@ -353,10 +377,15 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
   },
 
   settle: (runId) =>
-    set((s) => ({
-      active: { ...s.active, [runId]: false },
-      cancelling: { ...s.cancelling, [runId]: false },
-    })),
+    set((s) => {
+      // A run that is over has no sub-agent left working for it, whatever its last batch said.
+      const { [runId]: _ended, ...subagentsByRun } = s.subagentsByRun;
+      return {
+        active: { ...s.active, [runId]: false },
+        cancelling: { ...s.cancelling, [runId]: false },
+        subagentsByRun,
+      };
+    }),
 
   cancel: async (runId) => {
     set((s) => ({ cancelling: { ...s.cancelling, [runId]: true } }));

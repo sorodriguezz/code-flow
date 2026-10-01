@@ -611,11 +611,9 @@ pub async fn analyze_working_changes(
     };
     let workspace_id = project.workspace_id.clone();
 
-    // Analysis reads the tree rather than editing it, but it still spawns an engine against this
-    // working copy and still syncs skills into `<repo>/.claude/skills` — which an agent turn on the
-    // same folder deletes and recreates underneath it. One engine per repository, everywhere.
-    let _repo_lease = ai_locks::acquire(&project.local_path)
-        .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
+    // Listed in the repository so a chat or a fix running beside it is told an analysis is reading
+    // the tree. It reads, so it is not refused and it waits for nobody — see `ai_locks`.
+    let _presence = ai_locks::enter(&project.local_path, "un análisis de los cambios sin commitear (solo lee)");
 
     let (contexts, skills, config, analyze_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -709,10 +707,13 @@ pub async fn resolve_finding_with_ai(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Project not found".to_string())?
     };
-    // This one writes: it applies a fix to the working copy. Same lease as a chat turn, for the
-    // same reason — two engines editing one checkout take restore points over each other.
-    let _repo_lease = ai_locks::acquire(&project.local_path)
-        .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
+    // This one writes: it applies a fix to the working copy. Shared like every run (see `ai_locks`),
+    // and told who else is in the checkout, the way a chat turn is.
+    let presence = ai_locks::enter(&project.local_path, "una corrección automática de un hallazgo (edita archivos)");
+    let finding_prompt = match ai::parallel_work_note(&presence.others()) {
+        Some(note) => format!("{finding_prompt}{note}"),
+        None => finding_prompt,
+    };
 
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -799,6 +800,7 @@ pub async fn send_chat_message(
     agent_account: Option<String>,
     stream: Option<bool>,
     skill: Option<crate::provider_skills::SkillPick>,
+    attachments: Option<Vec<String>>,
 ) -> Result<ChatReply, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -808,12 +810,19 @@ pub async fn send_chat_message(
     };
     let workspace_id = project.workspace_id.clone();
 
-    // One engine per working copy, taken before anything else happens. Refusing here — rather than
-    // after the checkpoint, or once the CLI is already writing — is what makes a busy repository a
-    // free retry: no restore point is taken, no turn is recorded, nothing to undo. Held until this
-    // function returns, by any route (see `ai_locks`).
-    let _repo_lease = ai_locks::acquire(&project.local_path)
-        .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
+    // One turn per *conversation*, taken before anything else happens: a phone and the desk asking in
+    // the same thread at once would resume one engine session twice. Refusing here — before the
+    // checkpoint, before the CLI — is what makes it a free retry (the frontend waits on the marker).
+    // The repository itself is shared: other conversations, analyses and fixes run beside this one,
+    // and this turn is told about them below (see `ai_locks`).
+    let _turn_lease = match conversation_id.as_deref() {
+        Some(id) => Some(
+            ai_locks::acquire_key(&format!("panel::{id}"))
+                .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?,
+        ),
+        None => None,
+    };
+    let presence = ai_locks::enter(&project.local_path, &ai::chat_presence_label(&message));
 
     let (contexts, skills, config, session_id, analysis) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -872,6 +881,26 @@ pub async fn send_chat_message(
     }
 
 
+    // Images attached in the composer, resolved from ids to the copies this conversation owns —
+    // never a path from the frontend (see `chat_attach`). One that has gone missing is dropped
+    // rather than failing the turn, as in the chat workspace. They are named in the question itself,
+    // the same note `chat_send` writes, so a reopened conversation still shows what went with it,
+    // and the engine reads them with its own tool (Claude) or takes them as images (`codex -i`).
+    let attachments: Vec<ai::AiAttachment> = match (conversation_id.as_deref(), attachments) {
+        (Some(conversation), Some(ids)) if !ids.is_empty() => {
+            let stored = super::chat_attach::repo_conversation_attachments(conversation);
+            ids.iter()
+                .filter_map(|id| stored.iter().find(|file| &file.id == id))
+                .map(|file| ai::AiAttachment { path: file.path.clone(), name: file.name.clone(), is_image: file.is_image })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    let message = match attachments.is_empty() {
+        true => message,
+        false => format!("{message}{}", ai::attachment_note(&attachments)),
+    };
+
     // A skill picked in the composer goes to the engine, never into the stored question — see
     // `provider_skills::instruction`. An app skill is pointed at its copy synced into this checkout
     // above, which is always under `.claude/skills` in a repository.
@@ -884,6 +913,12 @@ pub async fn send_chat_message(
             )
         }
         None => message.clone(),
+    };
+    // Who else is working in this checkout right now — told to the engine, never stored. Read once,
+    // at the start: a run that starts later is told about this one instead.
+    let engine_message = match ai::parallel_work_note(&presence.others()) {
+        Some(note) => format!("{engine_message}{note}"),
+        None => engine_message,
     };
     // Claude Code denies, in `-p`, any tool nobody pre-approved, and `Skill` is the one that opens a
     // skill — so the panel's chat has it whatever the saved tool list says, as the free chat does.
@@ -942,6 +977,7 @@ pub async fn send_chat_message(
             analysis,
             turn_mcp.block.clone(),
             turn_mcp.app.clone(),
+            &attachments,
         )
         .await
     })

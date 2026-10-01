@@ -301,11 +301,9 @@ pub async fn analyze_pipeline_failure(
 ) -> Result<String, String> {
     let project = load_project(&db, &project_id)?;
 
-    // Before any work at all, and before the checkpoint or the history row: this run spawns an
-    // engine against the working copy and syncs skills into `<repo>/.claude/skills`, which another
-    // agent turn on the same folder deletes and recreates underneath it. One engine per repository.
-    let _repo_lease = crate::ai_locks::acquire(&project.local_path)
-        .ok_or_else(|| format!("{}{}", crate::ai_locks::BUSY_MARKER, project.name))?;
+    // Listed in the repository so a chat or a fix running beside it knows a pipeline failure is being
+    // investigated in the same checkout. Shared, never refused — see `ai_locks`.
+    let _presence = crate::ai_locks::enter(&project.local_path, "un análisis de un pipeline que falló");
 
     let (config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;

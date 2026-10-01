@@ -55,7 +55,7 @@ import { isRepoBusy, notifyStateChange, REPO_BUSY_MARKER } from "../lib/tauri/co
 import { onAiChatDelta, onAiDone, onStateInvalidate, type AiChatDeltaEvent } from "../lib/tauri/events";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
-import { formatAgentLogLine } from "../lib/agentLog";
+import { formatAgentLogLine, repeatsStatus } from "../lib/agentLog";
 import { providerCapabilities } from "../lib/aiProviders";
 import { translate } from "./languageStore";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
@@ -78,6 +78,9 @@ import {
 
 /** This workspace's queue for one conversation — see `chatQueueStore`. */
 const queueOf = (conversationId: string) => chatQueueKey("chat", conversationId);
+
+/** Conversations whose running turn was stopped to be asked again — see `retryTurn`. */
+const retryAfterStop = new Set<string>();
 
 /**
  * State for the `chat` workspace: the flat conversation list and the transcripts behind it.
@@ -183,7 +186,7 @@ export function traceOf(raw: unknown): AiRunLine[] | undefined {
     // Already-formatted entries (`text`) pass through; raw ones (`line`) are formatted here. The
     // formatter answers `null` for a line that renders as nothing, which must not take up a slot.
     const rendered = typeof text === "string" ? text : typeof line === "string" ? formatAgentLogLine(line) : null;
-    if (rendered === null) continue;
+    if (rendered === null || repeatsStatus(lines[lines.length - 1]?.text, rendered)) continue;
     lines.push({ stream: stream === "stderr" ? "stderr" : "stdout", text: rendered });
   }
   return lines.length > 0 ? lines : undefined;
@@ -645,6 +648,9 @@ interface ConversationState {
   /** Takes a message out of the queue for good. Its staged files are deleted, the same as removing
    *  their chips from the composer would have: they were never sent. */
   discardQueued: (conversationId: string, itemId: string) => void;
+  /** Stops the running turn and asks the same question again — engine, skill and files as it was
+   *  asked — once the stop has landed. What the run card offers a turn that has gone quiet. */
+  retryTurn: (conversationId: string) => void;
   /** Takes a message out of the queue and hands it back to be edited: its files go back on the
    *  composer, and the caller puts the text and the skill in the box. */
   editQueued: (conversationId: string, itemId: string) => QueuedChatMessage | null;
@@ -1608,8 +1614,25 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
             detail: title,
           });
         }
+        // A stop that was a retry: the same question again, as it was asked. The queue the stop just
+        // held is let go first — a retry is the user carrying on, not pausing.
+        if (retryAfterStop.delete(conversationId) && cancelled) {
+          releaseChatQueue(queueOf(conversationId));
+          get().send(conversationId, trimmed, { ...over, attachments: files });
+        }
       })
-      .finally(() => useAiRunStore.getState().finish(runId));
+      .finally(() => {
+        // A retry asked for as the turn finished on its own is not a retry of the next Stop.
+        retryAfterStop.delete(conversationId);
+        useAiRunStore.getState().finish(runId);
+      });
+  },
+
+  retryTurn: (conversationId) => {
+    const session = get().byConversation[conversationId];
+    if (!session?.sending || !session.runId) return;
+    retryAfterStop.add(conversationId);
+    void useAiRunStore.getState().cancel(session.runId);
   },
 
   submit: (conversationId, message, over) => {

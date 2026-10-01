@@ -916,10 +916,56 @@ pub struct AiInvocation<'a> {
 /// that enum is about *routing* (which provider answers), and several distinct features share one
 /// routing bucket — a PR review, a pre-commit review and a story review all route as `review` but
 /// are three different questions when you are asking where your tokens went.
+/// The note a turn's attachments ride in, appended to the question: the universal channel, since
+/// every one of these CLIs is an agent with a file-reading tool, so attaching a file to one is
+/// telling it where the file is. Both chats write it, word for word — the frontend reads it back
+/// out of a stored question to show the files as chips (`lib/attachmentNote.ts`), so its wording is
+/// a format, not prose to be polished in one place.
+pub fn attachment_note(attachments: &[AiAttachment]) -> String {
+    let list = attachments.iter().map(|a| format!("- {} ({})", a.name, a.path)).collect::<Vec<_>>().join("\n");
+    format!("\n\nArchivos adjuntos a este mensaje (léelos con tu herramienta de lectura de archivos):\n{list}")
+}
+
+/// What a turn is told when other agents are working in the same checkout right now. Appended to
+/// the engine's message and never stored, so the transcript keeps the user's own words — the same
+/// channel the attachments note and the caveman rules use. `None` when the turn is alone.
+///
+/// Repositories are shared (see `ai_locks`): instead of being kept apart, two agents are told about
+/// each other and given the rules that keep one from undoing the other — re-read a file right before
+/// editing it, never revert what you did not write, say so instead of taking over a file the other
+/// may be on, and leave the repository's global state (branch, stash, reset, dependencies) alone.
+/// The run already going is not told about the newcomer — a prompt cannot be amended mid-turn — but
+/// its next turn is, while the other is still there.
+pub fn parallel_work_note(others: &[String]) -> Option<String> {
+    if others.is_empty() {
+        return None;
+    }
+    let list = others.iter().map(|other| format!("- {other}")).collect::<Vec<_>>().join("\n");
+    let who = if others.len() == 1 { "otro agente de IA está" } else { "otros agentes de IA están" };
+    Some(format!(
+        "\n\n---\nNota del entorno (no la escribió el usuario; no la menciones salvo que afecte a tu respuesta): \
+         ahora mismo {who} trabajando en paralelo en este mismo repositorio:\n{list}\n\
+         Pueden estar leyendo o editando archivos mientras trabajas. Si vas a modificar un archivo, vuelve a \
+         leerlo justo antes de editarlo; no reviertas ni sobrescribas cambios que no hiciste tú; si tu tarea \
+         exige tocar algo que ese otro trabajo podría estar cambiando, díselo al usuario en tu respuesta en \
+         lugar de pisarlo. No cambies el estado global del repositorio (cambiar de rama, git checkout, stash, \
+         reset, rebase, borrar o reinstalar dependencias) salvo que el usuario lo pida explícitamente."
+    ))
+}
+
+/// How a run is named to the others in its repository: a chat by its question's first line.
+pub fn chat_presence_label(question: &str) -> String {
+    let first = question.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
+    let short: String = first.chars().take(80).collect();
+    let cut = if first.chars().count() > 80 { "…" } else { "" };
+    format!("un chat con la pregunta «{short}{cut}»")
+}
+
 /// One file attached to a turn.
 ///
-/// Always a copy under [`crate::paths::chat_attachments_dir`] by the time it gets here, never the
-/// path the user picked — see `commands::chat_attach` for why that distinction is load-bearing.
+/// Always a copy under [`crate::paths::chat_attachments_dir`] (or the repository chat's
+/// [`crate::paths::repo_chat_attachments_dir`]) by the time it gets here, never the path the user
+/// picked — see `commands::chat_attach` for why that distinction is load-bearing.
 #[derive(Debug, Clone)]
 pub struct AiAttachment {
     pub path: String,
@@ -1294,7 +1340,24 @@ pub trait AiEngine: Send + Sync {
     /// [`model_is_known_non_reasoning`], which is a *name* rule and is therefore wrong eventually —
     /// so it is written to be wrong in the harmless direction.
     fn model_supports_effort(&self, model: &str) -> bool {
-        self.supports_effort() && !model_is_known_non_reasoning(model)
+        self.supports_effort() && model_takes_effort(model)
+    }
+
+    /// Whether `model`, driven by this engine, looks at an image it is handed rather than reading it
+    /// as bytes — what decides whether the repository chat offers to attach one. No by default:
+    /// only Claude Code (its file tool returns images to the model) and Codex (`-i`) do today.
+    fn model_reads_images(&self, _model: &str) -> bool {
+        false
+    }
+
+    /// [`effort_args`](AiEngine::effort_args) for one model: the level it is actually sent at.
+    ///
+    /// The plain mapping unless the engine knows the model's own scale — Codex's catalog lists each
+    /// model's levels (`gpt-5.5` stops at `xhigh`), agy offers only the variants it lists. Such an
+    /// engine saturates at what the model has ([`fit_effort`]) rather than sending a level the CLI
+    /// refuses the whole run over.
+    fn effort_args_for(&self, effort: &str, _model: &str) -> Vec<String> {
+        self.effort_args(effort)
     }
 
     /// The account this engine runs as, when it is not the CLI's system account — only
@@ -1368,7 +1431,56 @@ pub fn model_is_known_non_reasoning(model: &str) -> bool {
     }
     // A plain instruction-tuned or chat build of anything, which is how a non-reasoning variant of
     // a family that also ships a reasoning one is usually named.
-    name.ends_with("-instruct") || name.ends_with("-chat")
+    name.ends_with("-instruct") || name.ends_with("-chat") || name.ends_with("-non-reasoning")
+}
+
+/// The reasoning level a model id already names, when it names one.
+///
+/// agy lists one id per level — `gemini-3.8-flash-high`, `-medium`, `-low` — and refuses a run whose
+/// `--effort` disagrees with the id ("--model gemini-3.8-flash-high conflicts with --effort=medium",
+/// agy 1.2.14). Routers name them the same way (`o3-mini-high`), and a `-thinking` build has its
+/// reasoning fixed by whoever serves it. The level was chosen with the model, so a dial beside it
+/// can only contradict the name: none is offered and no flag is sent.
+///
+/// A rule on the *shape* of the id, like the deny-list above, so the next model released under the
+/// same convention is covered without an edit. `max` is deliberately not a level here: it is a
+/// product tier as often as a level (`gpt-5.1-codex-max`, `qwen3-max`), and those keep their dial.
+pub fn pinned_effort(model: &str) -> Option<&str> {
+    const LEVELS: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "thinking"];
+    let id = model.split_whitespace().next().unwrap_or("");
+    let name = id.rsplit('/').next().unwrap_or(id);
+    let last = name.rsplit(['-', ':']).next().unwrap_or(name);
+    LEVELS.iter().any(|level| last.eq_ignore_ascii_case(level)).then_some(last)
+}
+
+/// Whether a model takes a reasoning level, by its name alone: it reasons, and its id does not
+/// already fix the level. What every engine without a catalog of its own answers with.
+pub fn model_takes_effort(model: &str) -> bool {
+    !model_is_known_non_reasoning(model) && pinned_effort(model).is_none()
+}
+
+/// Every reasoning level any of the CLIs names, weakest first — the order [`fit_effort`] steps down.
+const EFFORT_SCALE: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
+/// The level to send when a model only has `supported`: `wanted` itself if it is there, else the
+/// strongest supported level below it, else the weakest one it has. `None` when it has none.
+///
+/// Down rather than up, as everywhere else here: thinking one step less hard than asked costs less
+/// than a run the CLI refuses, and less than a bill the user did not choose.
+pub fn fit_effort(wanted: &str, supported: &[String]) -> Option<String> {
+    if supported.iter().any(|level| level == wanted) {
+        return Some(wanted.to_string());
+    }
+    let rank = |level: &str| EFFORT_SCALE.iter().position(|known| *known == level);
+    let wanted_rank = rank(wanted)?;
+    let mut ranked: Vec<(usize, &String)> = supported.iter().filter_map(|level| Some((rank(level)?, level))).collect();
+    ranked.sort_by_key(|(at, _)| *at);
+    ranked
+        .iter()
+        .rev()
+        .find(|(at, _)| *at <= wanted_rank)
+        .or_else(|| ranked.first())
+        .map(|(_, level)| (*level).clone())
 }
 /// The context window of a model in tokens, or `None` when this app does not know it.
 ///
@@ -1647,6 +1759,12 @@ impl AiEngine for AccountEngine {
     }
     fn model_supports_effort(&self, model: &str) -> bool {
         self.with(|e| e.model_supports_effort(model))
+    }
+    fn effort_args_for(&self, effort: &str, model: &str) -> Vec<String> {
+        self.with(|e| e.effort_args_for(effort, model))
+    }
+    fn model_reads_images(&self, model: &str) -> bool {
+        self.with(|e| e.model_reads_images(model))
     }
     fn account(&self) -> Option<&crate::ai_accounts::AccountEnv> {
         Some(&self.account)
@@ -2193,6 +2311,47 @@ fn emit_pumped(
     }
 }
 
+/// The silence the watchdog allows a run on `engine`: the setting, three times over for a CLI that is
+/// silent by design until it answers — see [`AiEngine::quiet_while_working`]. `None` is "no watchdog".
+/// One function because two places need the same figure: the watchdog, and the banner that tells the
+/// card when a quiet run will be stopped.
+fn run_idle_limit(engine: &dyn AiEngine) -> Option<std::time::Duration> {
+    ai_runs::idle_limit().map(|limit| if engine.quiet_while_working() { limit * 3 } else { limit })
+}
+
+/// Keeps `activity`'s list of open sub-agents from one line of Claude Code's stream.
+///
+/// What 2.1.266 prints, captured against a fake API: a `Task` call answers at once ("Async agent
+/// launched"), the sub-agent runs in the background, and the stream carries
+/// `{"type":"system","subtype":"task_started","task_id":…,"description":…}`, then `task_progress`
+/// as it works, and `task_notification` (`"status":"completed"`) or `task_updated` with a terminal
+/// `patch.status` when it is done. Between those the parent can be silent for minutes, which is the
+/// run working — see [`ai_runs::SUBAGENT_IDLE_FACTOR`]. A substring check first: this runs per line.
+fn track_subagent(line: &[u8], activity: &ai_runs::Activity) {
+    let has = |needle: &[u8]| line.windows(needle.len()).any(|window| window == needle);
+    if !has(b"\"task_started\"") && !has(b"\"task_notification\"") && !has(b"\"task_updated\"") {
+        return;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(line.trim_ascii()) else { return };
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("system") {
+        return;
+    }
+    let Some(task) = value.get("task_id").and_then(serde_json::Value::as_str) else { return };
+    let terminal = |status: Option<&str>| matches!(status, Some("completed" | "failed" | "killed" | "stopped" | "cancelled" | "error"));
+    match value.get("subtype").and_then(serde_json::Value::as_str) {
+        Some("task_started") => activity.subagent_started(task),
+        Some("task_notification") if terminal(value.get("status").and_then(serde_json::Value::as_str)) => {
+            activity.subagent_ended(task)
+        }
+        Some("task_updated")
+            if terminal(value.get("patch").and_then(|patch| patch.get("status")).and_then(serde_json::Value::as_str)) =>
+        {
+            activity.subagent_ended(task)
+        }
+        _ => {}
+    }
+}
+
 async fn pump<R: tokio::io::AsyncRead + Unpin>(
     pipe: Option<R>,
     stream: &'static str,
@@ -2222,6 +2381,7 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
         pending.extend_from_slice(&buf[..read]);
         while let Some(idx) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=idx).collect();
+            track_subagent(&line, &activity);
             emit_pumped(ctx, stream, &line, deltas.as_ref(), delta_engine.as_deref());
         }
         // A CLI drawing a progress bar rewrites one line forever with `\r` and never sends a
@@ -2324,7 +2484,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     // which is what keeps the answer honest — it is the invocation itself, not what a settings
     // screen elsewhere believes is configured.
     if let Some(ctx) = &ctx {
-        ai_runs::emit_engine(ctx, engine.id(), engine.label(), inv.model);
+        ai_runs::emit_engine(ctx, engine.id(), engine.label(), inv.model, run_idle_limit(engine));
     }
 
     // One attempt, and a second only for the engines that ask for it — see
@@ -2371,9 +2531,16 @@ async fn spawn_once(
     // rather than forwarded, because a CLI refuses the *entire run* over an argument it does not
     // recognise, and losing a turn to a stale setting is the failure mode a malformed model id
     // already taught this codebase once.
+    //
+    // And only where the model takes one. The composer hides the dial for a model that does not, but
+    // a conversation keeps the level it was last given, and agy refuses the run outright when that
+    // level meets a model that fixes its own ("--model gemini-3.8-flash-high conflicts with
+    // --effort=medium") or has none ("--effort is not supported for model claude-sonnet-4-6").
     if let Some(level) = inv.effort.filter(|l| effort::valid(l)) {
-        for arg in engine.effort_args(level) {
-            cmd.arg(arg);
+        if engine.model_supports_effort(inv.model) {
+            for arg in engine.effort_args_for(level, inv.model) {
+                cmd.arg(arg);
+            }
         }
     }
     // Same place, same reason. The paths are also named in the message itself, so an engine with no
@@ -2449,11 +2616,9 @@ async fn spawn_once(
     let stdout_task = tokio::spawn(pump(child.stdout.take(), "stdout", ctx.clone(), deltas, activity.clone()));
     let stderr_task = tokio::spawn(pump(child.stderr.take(), "stderr", ctx.clone(), None, activity.clone()));
 
-    // The watchdog's limit, read per run so a change in Settings applies to the next one. A CLI that
-    // is silent by design until it answers gets three times as long — see
-    // [`AiEngine::quiet_while_working`].
-    let idle_limit = ai_runs::idle_limit()
-        .map(|limit| if engine.quiet_while_working() { limit * 3 } else { limit });
+    // The watchdog's limit, read per run so a change in Settings applies to the next one — the same
+    // figure the run's banner announced. See [`run_idle_limit`].
+    let idle_limit = run_idle_limit(engine);
 
     // Three ways out, where there used to be two. The third is the watchdog: a CLI that hangs gives
     // neither an exit nor a Stop, and it held its repository's lease for as long as the app ran.
@@ -5852,6 +6017,7 @@ pub async fn chat_with_repo(
     read_only: bool,
     mcp_block: Vec<String>,
     app_mcp: Vec<crate::mcp_registry::LiveServer>,
+    attachments: &[AiAttachment],
 ) -> Result<AiRun, String> {
     let read_only_tools = if read_only { engine.read_only_tools() } else { Vec::new() };
     chat_turn(
@@ -5870,7 +6036,7 @@ pub async fn chat_with_repo(
             // The AI panel's repo chat has no per-conversation control, so it leaves every CLI on
             // its own configured default rather than inventing a level for it.
             effort: None,
-            attachments: &[],
+            attachments,
             read_only,
             mcp_block,
             app_mcp,
@@ -6917,6 +7083,72 @@ mod tests {
         assert!(model_is_known_non_reasoning("ollama/llama3"));
         assert!(!model_is_known_non_reasoning("ollama/qwen3:8b"));
         assert!(model_is_known_non_reasoning("LMSTUDIO/Mistral-7B-Instruct"), "case is not signal");
+    }
+
+    /// An id that names its own level fixes it: the dial would only contradict the name.
+    #[test]
+    fn a_model_that_names_its_level_takes_no_other() {
+        for id in [
+            "gemini-3.8-flash-high",
+            "gemini-3.1-pro-low",
+            "gpt-oss-120b-medium",
+            "claude-opus-4-6-thinking",
+            "openrouter/openai/o3-mini-high",
+            "anthropic/claude-3.7-sonnet:thinking",
+            "gemini-3.6-flash-high\tGemini 3.6 Flash (High)",
+        ] {
+            assert!(pinned_effort(id).is_some(), "{id} names its level");
+            assert!(!model_takes_effort(id), "{id} takes no dial");
+        }
+        // Product tiers and plain ids keep theirs — a release tomorrow included.
+        for id in ["gpt-5.1-codex-max", "qwen3-max", "claude-opus-4-8", "gemini-3.8-flash", "grok-4.7", "", "gpt-9-next"] {
+            assert!(pinned_effort(id).is_none(), "{id} does not name a level");
+            assert!(model_takes_effort(id), "{id} keeps its dial");
+        }
+        assert!(!model_takes_effort("grok-4-fast-non-reasoning"));
+    }
+
+    /// The lines Claude Code 2.1.266 printed around a background `Task`, trimmed.
+    #[test]
+    fn a_sub_agent_is_open_from_its_start_to_its_notification() {
+        let activity = ai_runs::Activity::new();
+        track_subagent(br#"{"type":"system","subtype":"task_started","task_id":"a2d4","tool_use_id":"toolu_task1","description":"Revisar archivos","is_backgrounded":true}"#, &activity);
+        assert!(activity.subagents_open());
+        track_subagent(br#"{"type":"system","subtype":"task_progress","task_id":"a2d4","description":"Running eco"}"#, &activity);
+        assert!(activity.subagents_open(), "progress is not an end");
+        track_subagent(br#"{"type":"assistant","message":{"content":[{"type":"text","text":"task_started"}]}}"#, &activity);
+        track_subagent(br#"{"type":"system","subtype":"task_notification","task_id":"a2d4","status":"completed","summary":"listo"}"#, &activity);
+        assert!(!activity.subagents_open());
+
+        track_subagent(br#"{"type":"system","subtype":"task_started","task_id":"b1","description":"x"}"#, &activity);
+        track_subagent(br#"{"type":"system","subtype":"task_updated","task_id":"b1","patch":{"status":"failed"}}"#, &activity);
+        assert!(!activity.subagents_open(), "a terminal update ends it too");
+    }
+
+    #[test]
+    fn a_turn_alone_in_its_repository_is_told_nothing() {
+        assert_eq!(parallel_work_note(&[]), None);
+    }
+
+    #[test]
+    fn a_turn_beside_others_is_told_who_they_are_and_how_to_share() {
+        let note = parallel_work_note(&[chat_presence_label("¿Por qué falla el login?\ndetalle"), "análisis de cambios".into()])
+            .expect("not alone");
+        assert!(note.contains("otros agentes de IA están"));
+        assert!(note.contains("- un chat con la pregunta «¿Por qué falla el login?»"), "first line only: {note}");
+        assert!(note.contains("- análisis de cambios"));
+        assert!(note.contains("vuelve a leerlo justo antes de editarlo"));
+        assert!(note.starts_with("\n\n---\n"), "kept apart from the user's words");
+    }
+
+    #[test]
+    fn a_level_a_model_lacks_steps_down_to_one_it_has() {
+        let levels = |list: &[&str]| list.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        assert_eq!(fit_effort("high", &levels(&["low", "high"])).as_deref(), Some("high"));
+        assert_eq!(fit_effort("medium", &levels(&["low", "high"])).as_deref(), Some("low"));
+        assert_eq!(fit_effort("max", &levels(&["low", "medium", "high", "xhigh"])).as_deref(), Some("xhigh"));
+        assert_eq!(fit_effort("low", &levels(&["medium", "high"])).as_deref(), Some("medium"), "nothing below: the weakest it has");
+        assert_eq!(fit_effort("low", &[]), None);
     }
 
     /// The window table is allowed to be incomplete and is not allowed to be wrong.

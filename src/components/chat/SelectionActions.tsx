@@ -14,7 +14,10 @@ const EDGE = 8;
 interface Picked {
   text: string;
   /** Viewport coordinates of the selection, for placing the bar. */
-  rect: { top: number; left: number; width: number };
+  rect: { top: number; bottom: number; left: number; width: number };
+  /** Where the pointer was let go, when a pointer made the selection — the one place the bar must
+   *  not appear, because the next click there is somebody clicking the text. */
+  pointer: { x: number; y: number } | null;
 }
 
 /**
@@ -35,6 +38,15 @@ interface Picked {
  * a scroll container and an absolutely-positioned child would be clipped by it. A fixed element
  * does not follow its anchor, so a scroll would strand it over unrelated text — the same trade
  * `ColorSwatchPicker` makes, and the same resolution: close, rather than track.
+ *
+ * # Why it appears in place, and ignores the clicks of a double or triple click
+ *
+ * It used to fade in with `cf-fade-in`, whose keyframes animate `transform` — and an animation
+ * beats the inline `translateY(-100%)` that lifts the bar above the text. So for its first 150 ms
+ * the bar sat *on* the selected line, right where the third click of a triple click lands, and that
+ * click sent the paragraph to another chat. Now the bar is placed from its measured height, shown
+ * once it is already where it belongs, and a click that is the second or third of a quick series is
+ * part of selecting, never a press of one of these buttons.
  */
 export function SelectionActions({
   scope,
@@ -52,12 +64,12 @@ export function SelectionActions({
   const t = useT();
   const [picked, setPicked] = useState<Picked | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
-  /** The bar's own width, once it exists. `0` means "not measured yet", which is what keeps it
-   *  invisible for the one frame before it can be placed. */
-  const [measured, setMeasured] = useState(0);
+  /** The bar's own size, once it exists. `null` means "not measured yet", which is what keeps it
+   *  invisible for the one layout pass before it can be placed — never painted. */
+  const [measured, setMeasured] = useState<{ width: number; height: number } | null>(null);
 
   useEffect(() => {
-    const read = () => {
+    const read = (pointer: Picked["pointer"]) => {
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
         setPicked(null);
@@ -84,17 +96,18 @@ export function SelectionActions({
         setPicked(null);
         return;
       }
-      setPicked({ text, rect: { top: rect.top, left: rect.left, width: rect.width } });
+      setPicked({ text, rect: { top: rect.top, bottom: rect.bottom, left: rect.left, width: rect.width }, pointer });
     };
 
     // `mouseup` and `keyup` rather than `selectionchange`: the question is "has the user *finished*
     // choosing", and `selectionchange` fires on every pixel of a drag — which would have the bar
     // chasing the pointer across the paragraph being selected.
-    const onUp = () => {
+    const onUp = (event?: MouseEvent) => {
+      const pointer = event ? { x: event.clientX, y: event.clientY } : null;
       // One frame late, deliberately. The selection is not final until the browser has processed
       // the same mouseup — reading it synchronously returns the state before the release, which on
       // a double-click word selection is the *previous* selection.
-      requestAnimationFrame(read);
+      requestAnimationFrame(() => read(pointer));
     };
     const onSelectionChange = () => {
       // The other half: a click that collapses the selection must take the bar away with it, and
@@ -139,27 +152,45 @@ export function SelectionActions({
 
   useLayoutEffect(() => {
     if (!picked) {
-      setMeasured(0);
+      setMeasured(null);
       return;
     }
     const bar = barRef.current;
-    if (bar) setMeasured(bar.offsetWidth);
+    if (bar) setMeasured({ width: bar.offsetWidth, height: bar.offsetHeight });
   }, [picked]);
 
   // Measured after mount rather than assumed, and hidden until it has been: the bar is centred on
   // the selection, so guessing its width puts it visibly off-centre on the first frame and then
   // never corrects — nothing re-renders to fix it. The same measure-then-place dance
-  // `ColorSwatchPicker` does, for the same reason.
-  const width = measured;
+  // `ColorSwatchPicker` does, for the same reason. A layout effect, so the measured pass replaces
+  // the hidden one before anything is painted: the bar is simply there.
+  const width = measured?.width ?? 0;
+  const height = measured?.height ?? 0;
   const centred = picked ? picked.rect.left + picked.rect.width / 2 - width / 2 : 0;
   const left = Math.max(EDGE, Math.min(centred, window.innerWidth - width - EDGE));
-  // Below the selection instead of above when there is no room above — a passage selected at the
-  // very top of the transcript would otherwise put the bar off-screen.
-  const above = (picked?.rect.top ?? 0) - GAP;
-  const flipped = above < 44;
-  const top = flipped ? (picked?.rect.top ?? 0) + GAP + 18 : above;
+  // Above the selection, or below its *last* line — never over the text it is about — when there is
+  // no room above (a passage at the very top of the transcript) or when above is where the pointer
+  // was let go: a drag that ended past the text would otherwise put a button under the next click.
+  const above = (picked?.rect.top ?? 0) - GAP - height;
+  const below = (picked?.rect.bottom ?? 0) + GAP;
+  const pointer = picked?.pointer ?? null;
+  const underPointer = (y: number) =>
+    pointer !== null &&
+    pointer.x >= left - GAP &&
+    pointer.x <= left + width + GAP &&
+    pointer.y >= y - GAP &&
+    pointer.y <= y + height + GAP;
+  const top = above >= 44 && !(underPointer(above) && !underPointer(below)) ? above : below;
 
   if (!picked) return null;
+
+  /** A press of one of the buttons — unless it is the second or third click of a quick series,
+   *  which is somebody selecting a word or a paragraph, not choosing what to do with it. */
+  const act = (event: React.MouseEvent, run: (passage: string) => void) => {
+    if (event.detail > 1) return;
+    run(picked.text);
+    setPicked(null);
+  };
 
   return createPortal(
     <div
@@ -167,22 +198,18 @@ export function SelectionActions({
       style={{
         top,
         left,
-        transform: flipped ? undefined : "translateY(-100%)",
-        visibility: width > 0 ? "visible" : "hidden",
+        visibility: measured ? "visible" : "hidden",
       }}
       // `onMouseDown` prevented on the container: pressing anywhere in the bar must not move focus
       // out of the document's selection, because on some browsers that collapses it *before* the
       // click fires — and the click handler would then run against nothing. The captured text
       // makes this belt-and-braces rather than load-bearing, which is how it should be.
       onMouseDown={(event) => event.preventDefault()}
-      className="cf-fade-in fixed z-[9999] flex items-center gap-0.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-0.5 shadow-[var(--cf-shadow)]"
+      className="fixed z-[9999] flex items-center gap-0.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-0.5 shadow-[var(--cf-shadow)]"
     >
       <button
         type="button"
-        onClick={() => {
-          onQuoteReply(picked.text);
-          setPicked(null);
-        }}
+        onClick={(event) => act(event, onQuoteReply)}
         className={buttonClass({ variant: "ghost", size: "sm" })}
       >
         <Quote size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
@@ -191,10 +218,7 @@ export function SelectionActions({
       <div className="h-4 w-px bg-[var(--cf-border)]" />
       <button
         type="button"
-        onClick={() => {
-          onQuoteNewChat(picked.text);
-          setPicked(null);
-        }}
+        onClick={(event) => act(event, onQuoteNewChat)}
         className={buttonClass({ variant: "ghost", size: "sm" })}
       >
         <MessageSquarePlus size={11} className="shrink-0 text-[var(--cf-text-muted)]" />

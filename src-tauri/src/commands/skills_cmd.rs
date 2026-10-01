@@ -688,6 +688,12 @@ fn tree_fingerprint(dir: &Path) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Copies a skill folder over its synced copy, writing **only the files whose bytes changed**.
+///
+/// The sync runs before every agent turn, and turns in one repository now run side by side (see
+/// `ai_locks`): a plain `copy` truncates and rewrites every file each time, so a run reading a
+/// `SKILL.md` could catch it empty while another run's sync was rewriting it. Skipping identical
+/// files makes the usual sync — nothing changed since the last turn — touch nothing at all.
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
@@ -696,7 +702,12 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
         if entry.file_type()?.is_dir() {
             copy_dir_recursive(&entry.path(), &dest_path)?;
         } else {
-            std::fs::copy(entry.path(), dest_path)?;
+            // `copy` rather than `write` when it does change: it carries the mode over, and a skill's
+            // script that lost its `+x` on sync would fail with nothing on screen to say why.
+            let same = std::fs::read(&dest_path).ok() == Some(std::fs::read(entry.path())?);
+            if !same {
+                std::fs::copy(entry.path(), &dest_path)?;
+            }
         }
     }
     Ok(())

@@ -1921,19 +1921,24 @@ const SchemaBox = memo(function SchemaBox({
         strokeWidth={selected ? 1.8 : related ? 1.15 : 1}
       />
 
-      {/* The header band. Two rectangles because SVG has no per-corner radius: the rounded one
-          gives the top two corners, the square one fills the join to the first row.
+      {/* The header: the band and everything printed on it, down to the column count.
 
           Double-clicking it renames the table, while double-clicking the body still jumps to the
           declaration. Splitting the gesture by *where* rather than giving rename its own button is
           what keeps the box a box: the name is the thing on the header, so the header is where you
-          go to change it — the same reasoning as the inspector's title. */}
-      <rect
-        width={node.width}
-        height={HEADER_H}
-        rx={12}
-        fill={accent}
-        fillOpacity={bandOpacity}
+          go to change it — the same reasoning as the inspector's title.
+
+          The handler is on this group, not on the band's rect where it used to be. The name, the
+          count, the pin and the bubble are drawn *over* the band, so the rect only heard the
+          double-clicks that landed in the gaps between them — on the name itself, the obvious
+          target, the click fell through to the box and jumped to the declaration instead. The
+          group is hit wherever any of its parts is, which is the whole header.
+
+          And no cursor of its own. This used to set `text`, on the rect only, so the I-beam came
+          and went as the pointer crossed the header — over the band, not over the name, not over
+          the band's bottom strip — and read as selectable text, which nothing on this canvas is.
+          The header takes the box's cursor like every other part of the box. */}
+      <g
         onDoubleClick={
           onRename
             ? (event) => {
@@ -1942,7 +1947,15 @@ const SchemaBox = memo(function SchemaBox({
               }
             : undefined
         }
-        style={onRename ? { cursor: "text" } : undefined}
+      >
+      {/* The band. Two rectangles because SVG has no per-corner radius: the rounded one gives the
+          top two corners, the square one fills the join to the first row. */}
+      <rect
+        width={node.width}
+        height={HEADER_H}
+        rx={12}
+        fill={accent}
+        fillOpacity={bandOpacity}
       />
       <rect
         y={HEADER_H - 12}
@@ -1965,7 +1978,10 @@ const SchemaBox = memo(function SchemaBox({
           and a bar at x=0 pokes out of the radius at both ends. A spine is the one mark that stays
           legible at the zoom where thirty tables fit on screen — at that size a header dot is two
           pixels and the strikethrough is gone, but a coloured edge still reads as a column of
-          decisions down the diagram. */}
+          decisions down the diagram.
+
+          Not a target: it sits inside the header group but runs the box's full height, and a
+          double-click on it below the header must not rename the table. */}
       {mark && (
         <rect
           x={1.5}
@@ -1974,6 +1990,7 @@ const SchemaBox = memo(function SchemaBox({
           height={Math.max(0, node.height - 20)}
           rx={1.75}
           fill={MARK_COLOUR[mark]}
+          pointerEvents="none"
         />
       )}
 
@@ -2131,6 +2148,7 @@ const SchemaBox = memo(function SchemaBox({
         {showRows ? `${rowsLabel} · ` : ""}
         {node.visible.length + node.hidden}
       </text>
+      </g>
 
       {node.visible.map((column, index) => (
         <Row
@@ -2294,6 +2312,24 @@ function Row({
       onPointerLeave={connect?.onLeave}
       onContextMenu={onContextMenu}
     >
+      {/* The row itself, as a target: what makes all of it answer rather than only its ink.
+
+          A `<g>` has no area of its own — it is hit only where one of its children paints. A plain
+          row paints its name, its type, its badges and a 1px rule, so a pointer in the padding, in
+          the gap between the name and the type or past the last badge fell through to the card's
+          backing rect, which belongs to the *box*: a right-click there opened the table's menu
+          instead of the column's, and the hover that lights the row and shows its connect handle
+          never fired until the pointer crossed a letter. A row that was washed — joined, marked,
+          already lit — worked everywhere, because the wash is full-width, which is why it only
+          failed some of the time.
+
+          First, so everything drawn on the row (the connect handle, the comment's target, the
+          mark's tooltip) still sits over it and keeps its own hit. `pointer-events: all` is what
+          makes it a target — it hit-tests the shape whatever its paint — so the paint can be
+          `none`: the export clones this SVG, and a row-sized `transparent` over every table body is
+          one keyword away from a black box in a viewer that does not know it. */}
+      <rect y={y} width={width} height={ROW_H} fill="none" pointerEvents="all" />
+
       {/* The mark, as a wash behind the whole row — *under* the two accent washes and weaker than
           either. A marked column that is also an end of the relationship you selected has to keep
           reading as the join, because that is the question you just asked the canvas; the rail

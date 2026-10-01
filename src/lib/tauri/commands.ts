@@ -1451,6 +1451,8 @@ export const sendChatMessage = (
   stream?: boolean,
   /** A skill picked in the composer — see `chatSend`. */
   skill?: { name: string; source: string; path: string | null } | null,
+  /** Ids of images staged for this turn (`repoChatAttachFile`/`Bytes`) — never paths. */
+  attachments?: string[] | null,
 ) =>
   invoke<ChatReply>("send_chat_message", {
     projectId,
@@ -1464,6 +1466,7 @@ export const sendChatMessage = (
     agentAccount: agent?.account ?? null,
     stream: stream ?? null,
     skill: skill ?? null,
+    attachments: attachments && attachments.length > 0 ? attachments : null,
   });
 
 // ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------

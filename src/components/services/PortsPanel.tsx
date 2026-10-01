@@ -27,7 +27,9 @@ export function PortsPanel({ onOpenService }: { onOpenService: (id: string) => v
   const stopService = useServicesStore((s) => s.stop);
   const [rows, setRows] = useState<ListeningPort[] | null>(null);
   const [query, setQuery] = useState("");
-  const [onlyServices, setOnlyServices] = useState(false);
+  // Ticked by default (the user's ask, 2026-10-01): the view opens on where *their* services
+  // listen, and the rest of the machine is one click away.
+  const [onlyServices, setOnlyServices] = useState(true);
   const [busy, setBusy] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 

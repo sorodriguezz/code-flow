@@ -970,11 +970,10 @@ pub async fn review_work_item(
         found
     };
 
-    // Taken as a batch: one busy repository refuses the whole review rather than half of it, and
-    // the same folder listed twice is one repository rather than a conflict with itself.
+    // Listed in every repository it reads (the same folder named twice counts once), so a chat
+    // running beside it is told. Shared, never refused — see `ai_locks`.
     let paths: Vec<String> = projects.iter().map(|p| p.local_path.clone()).collect();
-    let _repo_leases = ai_locks::acquire_all(&paths)
-        .map_err(|at| format!("{}{}", ai_locks::BUSY_MARKER, projects[at].name))?;
+    let _presence = ai_locks::enter_all(&paths, "una revisión de un work item (solo lee)");
 
     let prompt_kind = match (stage, kind) {
         (ai::WorkItemReviewStage::Analyze, ai::WorkItemKind::Bug) => "work_item_bug_analyze",
@@ -1442,8 +1441,7 @@ pub async fn generate_doc_page(
     };
 
     let paths: Vec<String> = projects.iter().map(|p| p.local_path.clone()).collect();
-    let _repo_leases = ai_locks::acquire_all(&paths)
-        .map_err(|at| format!("{}{}", ai_locks::BUSY_MARKER, projects[at].name))?;
+    let _presence = ai_locks::enter_all(&paths, "la generación de una página de documentación (solo lee)");
 
     let (contexts, skills, config, repo_template, workspace_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -2660,13 +2658,12 @@ pub async fn verify_stories(
     let label_repos = projects.len() > 1;
 
     // One run per repository, inside the scope so Stop reaches all of them. Sequential rather than
-    // concurrent on purpose: each run takes that repository's AI lease and reads it with an engine,
-    // and two engines answering at once would interleave into one log nobody can follow.
+    // concurrent on purpose: two engines answering at once would interleave into one log nobody can
+    // follow.
     let result = crate::ai_runs::scoped(app, run_id, async {
         let mut merged: BTreeMap<usize, ParsedVerification> = BTreeMap::new();
         for project in &projects {
-            let _repo_lease = ai_locks::acquire(&project.local_path)
-                .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
+            let _presence = ai_locks::enter(&project.local_path, "una verificación de historias contra el código (solo lee)");
             // Best-effort, like the analysis path: an unwritable skills directory shouldn't block a
             // run whose actual job is to read source files.
             let _ = sync_skills_into_project(&skills, &batch.workspace_id, &project.local_path);

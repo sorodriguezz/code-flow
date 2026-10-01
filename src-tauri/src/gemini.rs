@@ -239,6 +239,28 @@ impl AiEngine for GeminiEngine {
         vec!["--effort".into(), level.into()]
     }
 
+    /// agy's levels are **model variants**, and it says so by refusing everything else (1.2.13/14,
+    /// all refused before any model call): `--effort` on a listed id that names a level
+    /// (`gemini-3.8-flash-high`) "conflicts", and on one with no variants (`claude-sonnet-4-6`,
+    /// `claude-opus-4-6-thinking`) it "is not supported". What it takes is a family it lists
+    /// variants of — `--model gemini-3.8-flash --effort high` runs as `gemini-3.8-flash-high`.
+    ///
+    /// So the answer is read off agy's own `models` listing rather than a list kept here: a family
+    /// that ships tomorrow with `-low`/`-high` variants takes the dial the day agy lists it. With no
+    /// listing seen yet this says no — a missing dial costs a control, a wrong one costs the run.
+    fn model_supports_effort(&self, model: &str) -> bool {
+        !variant_levels(model_id(model)).is_empty()
+    }
+
+    /// The level among the variants agy lists for this family — `gemini-3.1-pro` has `-high` and
+    /// `-low` only, so `medium` runs as `low`.
+    fn effort_args_for(&self, effort: &str, model: &str) -> Vec<String> {
+        match crate::ai::fit_effort(effort, &variant_levels(model_id(model))) {
+            Some(level) => vec!["--effort".into(), level],
+            None => Vec::new(),
+        }
+    }
+
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
         interpret_output(success, status_label, stdout, stderr)
     }
@@ -254,7 +276,11 @@ impl AiEngine for GeminiEngine {
     }
 
     fn parse_models(&self, stdout: &str) -> Vec<String> {
-        parse_model_list(stdout)
+        let models = parse_model_list(stdout);
+        if let Ok(mut listed) = listing().lock() {
+            *listed = models.clone();
+        }
+        models
     }
 }
 
@@ -266,6 +292,33 @@ impl AiEngine for GeminiEngine {
 /// or not.
 fn parse_model_list(stdout: &str) -> Vec<String> {
     stdout.lines().map(model_id).filter(|id| !id.is_empty()).map(str::to_string).collect()
+}
+
+/// The last `agy models` listing this process read — what [`variant_levels`] answers from.
+fn listing() -> &'static std::sync::Mutex<Vec<String>> {
+    static LISTING: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    LISTING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The levels agy lists variants of `family` at — `low`, `medium`, `high` for `gemini-3.8-flash`.
+/// Empty for an id that already names its level and for one with no variants.
+fn variant_levels(family: &str) -> Vec<String> {
+    if family.is_empty() || crate::ai::pinned_effort(family).is_some() {
+        return Vec::new();
+    }
+    let listed = listing().lock().map(|listed| listed.clone()).unwrap_or_default();
+    levels_listed_for(family, &listed)
+}
+
+/// The pure half of [`variant_levels`]: the `<family>-<level>` ids among `listed`.
+fn levels_listed_for(family: &str, listed: &[String]) -> Vec<String> {
+    let prefix = format!("{family}-");
+    listed
+        .iter()
+        .filter_map(|id| id.strip_prefix(&prefix))
+        .filter(|level| matches!(*level, "minimal" | "low" | "medium" | "high" | "xhigh" | "max"))
+        .map(str::to_string)
+        .collect()
 }
 
 /// The id part of whatever a model setting holds.
@@ -661,5 +714,31 @@ mod tests {
         assert_eq!(model_id("gemini-3.1-pro-high"), "gemini-3.1-pro-high");
         assert_eq!(model_id("   "), "");
         assert_eq!(model_id(""), "");
+    }
+
+    /// `agy models` on 1.2.13, ids only.
+    const AGY_LISTING: [&str; 14] = [
+        "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+        "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+        "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
+        "gemini-3.1-pro-high", "gemini-3.1-pro-low",
+        "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium",
+    ];
+
+    /// What agy 1.2.13/14 accepted and refused, all before calling a model: a listed id never takes
+    /// `--effort` (its level is in the name, or it has none); a family it lists variants of does.
+    #[test]
+    fn effort_is_offered_only_on_a_family_agy_lists_levels_of() {
+        let listed: Vec<String> = AGY_LISTING.iter().map(|id| id.to_string()).collect();
+        for id in AGY_LISTING {
+            let family_levels = if crate::ai::pinned_effort(id).is_some() { Vec::new() } else { levels_listed_for(id, &listed) };
+            assert!(family_levels.is_empty(), "{id} is listed as it is and takes no --effort");
+        }
+        assert_eq!(levels_listed_for("gemini-3.8-flash", &listed), ["high", "medium", "low"]);
+        assert_eq!(levels_listed_for("gemini-3.1-pro", &listed), ["high", "low"]);
+        assert!(levels_listed_for("claude-opus-4-6", &listed).is_empty(), "-thinking is not a level agy takes");
+        let pro = levels_listed_for("gemini-3.1-pro", &listed);
+        assert_eq!(crate::ai::fit_effort("medium", &pro).as_deref(), Some("low"));
+        assert_eq!(crate::ai::fit_effort("max", &pro).as_deref(), Some("high"));
     }
 }

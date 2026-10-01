@@ -47,9 +47,12 @@ const still = (Icon: LucideIcon) => <Icon size={13} className="mt-[2px] shrink-0
 export function ServiceActions({
   onNew,
   onImport,
+  size,
 }: {
   onNew: (groupId: string | null) => void;
   onImport: () => void;
+  /** `sm`: the compact strip at the top of the services column. */
+  size?: "sm";
 }) {
   const t = useT();
   const addGroup = useServicesStore((s) => s.addGroup);
@@ -66,13 +69,13 @@ export function ServiceActions({
 
   return (
     <>
-      <HeaderButton onClick={onImport} label={t("services.detect")} description={t("services.detectHint")}>
+      <HeaderButton size={size} onClick={onImport} label={t("services.detect")} description={t("services.detectHint")}>
         <Radar size={11} />
       </HeaderButton>
-      <HeaderButton onClick={() => void newGroup()} label={t("services.newGroup")} description={t("services.newGroupHint")}>
+      <HeaderButton size={size} onClick={() => void newGroup()} label={t("services.newGroup")} description={t("services.newGroupHint")}>
         <FolderPlus size={11} />
       </HeaderButton>
-      <HeaderButton onClick={() => onNew(null)} label={t("services.newService")} description={t("services.newServiceHint")}>
+      <HeaderButton size={size} onClick={() => onNew(null)} label={t("services.newService")} description={t("services.newServiceHint")}>
         <Plus size={11} />
       </HeaderButton>
     </>
@@ -80,8 +83,11 @@ export function ServiceActions({
 }
 
 /**
- * The services list: groups of services, the Ports view, and whatever is still running in another
- * workspace.
+ * The services list: groups of services, and whatever is still running in another workspace.
+ *
+ * Services only. The machine's listening ports are {@link PortsRow}, which `ServicesDock` pins at the
+ * foot of the column, outside this list's scroll — so the top of it is the services and nothing
+ * else, however long the list gets (the user's ask).
  *
  * A group is a unit of work in both directions — it starts in dependency order and stops in the
  * reverse — so its header carries both verbs, drawn rather than hover-revealed: they are what the
@@ -93,18 +99,14 @@ export function ServiceActions({
  */
 export function ServiceList({
   selectedId,
-  portsSelected,
   onSelect,
-  onSelectPorts,
   onEdit,
   onNew,
   onImport,
   heading = true,
 }: {
   selectedId: string | null;
-  portsSelected: boolean;
   onSelect: (id: string) => void;
-  onSelectPorts: () => void;
   onEdit: (service: ServiceRow) => void;
   onNew: (groupId: string | null) => void;
   onImport: () => void;
@@ -191,23 +193,6 @@ export function ServiceList({
         />
       ))}
 
-      {/* Machine-wide, which is why it sits after the groups rather than in one: it answers "what
-          is on port 3000" whether or not a service of this workspace put it there. */}
-      <Tooltip side="right" label={t("services.ports.title")} description={t("services.ports.hint")}>
-        <button
-          onClick={onSelectPorts}
-          className={`mx-1 mt-1 flex items-center gap-1.5 rounded-md px-2 py-[3px] text-left text-[12px] ${
-            portsSelected
-              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
-              : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-          }`}
-        >
-          <Network size={11} className="shrink-0" />
-          <span className="min-w-0 flex-1 truncate">{t("services.ports.title")}</span>
-          <ChevronRight size={11} className="shrink-0 opacity-50" />
-        </button>
-      </Tooltip>
-
       {/* Still running, just not from here — a way *back*, not a remote control: it stops, or it
           takes you to where the service lives. */}
       {elsewhere.length > 0 && (
@@ -219,6 +204,34 @@ export function ServiceList({
         </>
       )}
     </>
+  );
+}
+
+/**
+ * The way into the machine's listening ports: one row that swaps the console for the ports view.
+ *
+ * Machine-wide, which is why it is not in a group: it answers "what is on port 3000" whether or not
+ * a service of this workspace put it there. Pinned under the list by `ServicesDock` — the user asked
+ * for it "always at the bottom", and then, when it came back as the whole table crammed into the
+ * column, for the row they could click, as it was.
+ */
+export function PortsRow({ selected, onSelect }: { selected: boolean; onSelect: () => void }) {
+  const t = useT();
+  return (
+    <Tooltip side="right" label={t("services.ports.title")} description={t("services.ports.hint")}>
+      <button
+        onClick={onSelect}
+        className={`mx-1 my-1 flex items-center gap-1.5 rounded-md px-2 py-[3px] text-left text-[12px] ${
+          selected
+            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
+            : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        }`}
+      >
+        <Network size={11} className="shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{t("services.ports.title")}</span>
+        <ChevronRight size={11} className="shrink-0 opacity-50" />
+      </button>
+    </Tooltip>
   );
 }
 
@@ -249,12 +262,15 @@ export function HeaderButton({
   label,
   description,
   disabled,
+  size,
   children,
 }: {
   onClick: () => void;
   label: string;
   description?: string;
   disabled?: boolean;
+  /** `sm`: an 18px square instead of 22px, for a strip that should not compete with the list. */
+  size?: "sm";
   children: ReactNode;
 }) {
   return (
@@ -263,7 +279,7 @@ export function HeaderButton({
         onClick={onClick}
         disabled={disabled}
         aria-label={label}
-        className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40"
+        className={`inline-flex ${size === "sm" ? "h-[18px] w-[18px] rounded" : "h-[22px] w-[22px] rounded-md"} items-center justify-center shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40`}
       >
         {children}
       </button>
@@ -510,64 +526,82 @@ function ServiceRowItem({
   }
 
   return (
-    <div
-      onClick={onSelect}
-      onDoubleClick={() => !active && void start(service.id)}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        onSelect();
-        setMenu({ x: e.clientX, y: e.clientY });
-      }}
-      // The glyph's shape says the state to someone who has learnt the shapes; this says it to
-      // everyone else, along with what the state is waiting on.
-      title={hint}
-      className={`group/row mx-1 flex cursor-pointer select-none items-center gap-1.5 rounded-md py-[3px] pl-4 pr-1 text-[12px] ${
-        selected
-          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
-          : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-      }`}
-    >
-      <StatusGlyph status={status} />
-      <span className={`min-w-0 flex-1 truncate ${active || selected ? "text-[var(--cf-text)]" : ""}`}>{service.name}</span>
-      <span className="sr-only">{statusLabel(status, t)}</span>
-      {runsContainers(service.command) && (
-        <Container size={10} className="shrink-0 opacity-50" aria-hidden />
-      )}
-      {meta}
-      {!meta && ports.length > 0 && (
-        <span className="flex shrink-0 items-center gap-0.5">
-          <PortChip port={ports[0]} dim={!live} />
-          {ports.length > 1 && <span className="text-[10.5px] tabular-nums opacity-60">+{ports.length - 1}</span>}
-        </span>
-      )}
-
-      <div className="flex shrink-0 items-center gap-0.5 opacity-0 focus-within:opacity-100 group-hover/row:opacity-100">
-        {active ? (
-          <>
-            <RowButton onClick={() => void restart(service.id)} label={t("services.restart")}>
-              <RotateCw size={10} />
-            </RowButton>
-            <RowButton onClick={() => void stop(service.id)} label={t("services.stop")} danger>
-              <Square size={9} />
-            </RowButton>
-          </>
-        ) : (
-          <RowButton onClick={() => void start(service.id)} label={t("services.start")}>
-            <CirclePlay size={11} />
-          </RowButton>
+    <>
+      <div
+        onClick={onSelect}
+        onDoubleClick={() => !active && void start(service.id)}
+        // Opening the menu is not choosing the row: the console on screen stays where it was, by
+        // the ⋯ button and by right-click alike (user, 2026-10-01: "no quiero que se autoseleccione,
+        // sino que abra el menú flotante nomás"). The row wears the hover tint while its menu is
+        // open, so which service the menu is about is still plain.
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+        // The glyph's shape says the state to someone who has learnt the shapes; this says it to
+        // everyone else, along with what the state is waiting on.
+        title={hint}
+        className={`group/row mx-1 flex cursor-pointer select-none items-center gap-1.5 rounded-md py-[3px] pl-4 pr-1 text-[12px] ${
+          selected
+            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
+            : menu
+              ? "bg-[var(--cf-hover)] text-[var(--cf-text)]"
+              : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        }`}
+      >
+        <StatusGlyph status={status} />
+        <span className={`min-w-0 flex-1 truncate ${active || selected ? "text-[var(--cf-text)]" : ""}`}>{service.name}</span>
+        <span className="sr-only">{statusLabel(status, t)}</span>
+        {runsContainers(service.command) && (
+          <Container size={10} className="shrink-0 opacity-50" aria-hidden />
         )}
-        <RowButton
-          onClick={(e) => {
-            onSelect();
-            const rect = e.currentTarget.getBoundingClientRect();
-            setMenu({ x: rect.left, y: rect.bottom, anchor: rect });
-          }}
-          label={t("services.moreActions")}
+        {meta}
+        {!meta && ports.length > 0 && (
+          <span className="flex shrink-0 items-center gap-0.5">
+            <PortChip port={ports[0]} dim={!live} />
+            {ports.length > 1 && <span className="text-[10.5px] tabular-nums opacity-60">+{ports.length - 1}</span>}
+          </span>
+        )}
+
+        {/* Held visible while the menu is open: the pointer has left the row for the menu, and the
+            ⋯ the menu hangs from would otherwise fade out from under it. */}
+        <div
+          className={`flex shrink-0 items-center gap-0.5 focus-within:opacity-100 group-hover/row:opacity-100 ${
+            menu ? "opacity-100" : "opacity-0"
+          }`}
         >
-          <MoreHorizontal size={11} />
-        </RowButton>
+          {active ? (
+            <>
+              <RowButton onClick={() => void restart(service.id)} label={t("services.restart")}>
+                <RotateCw size={10} />
+              </RowButton>
+              <RowButton onClick={() => void stop(service.id)} label={t("services.stop")} danger>
+                <Square size={9} />
+              </RowButton>
+            </>
+          ) : (
+            <RowButton onClick={() => void start(service.id)} label={t("services.start")}>
+              <CirclePlay size={11} />
+            </RowButton>
+          )}
+          <RowButton
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setMenu({ x: rect.left, y: rect.bottom, anchor: rect });
+            }}
+            label={t("services.moreActions")}
+            ariaHasPopup
+            expanded={!!menu}
+          >
+            <MoreHorizontal size={11} />
+          </RowButton>
+        </div>
       </div>
 
+      {/* A sibling of the row, not a child. The menu is portalled to the body, but React still
+          delivers its events through the component tree — rendered inside the row, a click on
+          "Start" bubbled on into the row's own `onClick` and selected it after all, and a quick
+          double click on an entry reached `onDoubleClick` and started the service. */}
       {menu && (
         <ContextMenu
           x={menu.x}
@@ -577,7 +611,7 @@ function ServiceRowItem({
           onClose={() => setMenu(null)}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -619,24 +653,35 @@ function ElsewhereRow({ run }: { run: RunningService }) {
   );
 }
 
-function RowButton({
+/** A row's own small action — start, stop, ⋯ — shared by the ports at the foot of the column, so
+ *  the two lists' actions look and behave alike. */
+export function RowButton({
   onClick,
   label,
   danger,
+  ariaHasPopup,
+  expanded,
   children,
 }: {
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   label: string;
   danger?: boolean;
+  /** For the ⋯ that opens the row's menu. */
+  ariaHasPopup?: boolean;
+  expanded?: boolean;
   children: ReactNode;
 }) {
   return (
     <button
+      // The row under it selects on click: the button's own press must stop here, whether it
+      // comes from the pointer or from Enter/Space, which a button turns into a click too.
       onClick={(e) => {
         e.stopPropagation();
         onClick(e);
       }}
       onDoubleClick={(e) => e.stopPropagation()}
+      aria-haspopup={ariaHasPopup ? "menu" : undefined}
+      aria-expanded={ariaHasPopup ? !!expanded : undefined}
       title={label}
       aria-label={label}
       className={`flex h-[18px] w-[18px] items-center justify-center rounded hover:bg-[var(--cf-press)] ${

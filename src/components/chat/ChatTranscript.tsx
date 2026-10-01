@@ -1,5 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, MessageSquarePlus, Quote } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
 import { AiRunLog } from "../ai/AiRunLog";
 import {
@@ -10,6 +10,7 @@ import {
 } from "./ChatMessageBubble";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { SelectionActions } from "./SelectionActions";
+import { useTextMenu } from "../common/TextMenu";
 import { CompactionMark } from "./CompactionMark";
 import { COLUMN_GUTTER, READING_COLUMN, useLocale } from "./chatChrome";
 import { providerCapabilities } from "../../lib/aiProviders";
@@ -85,6 +86,11 @@ export function ChatTranscript({
   const liveLines = useAiRunStore((s) => (session.runId ? s.linesByRun[session.runId] : undefined));
   const diagnosis = useMemo(() => diagnoseRun(liveLines), [liveLines]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** Right-click on a selected passage: Copy, and the two things the floating bar offers for it. */
+  const textMenu = useTextMenu((passage) => [
+    { label: t("chat.quoteReply"), icon: Quote, separated: true, onClick: () => onQuoteReply(passage) },
+    { label: t("chat.quoteNewChat"), icon: MessageSquarePlus, onClick: () => onQuoteNewChat(passage) },
+  ]);
   /** The scroller's single child, whose height IS the transcript's height — observed rather than
    *  derived, so a reveal that grows the text without changing any state still moves the view. */
   const contentRef = useRef<HTMLDivElement>(null);
@@ -193,7 +199,7 @@ export function ChatTranscript({
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto">
+      <div ref={scrollRef} onScroll={onScroll} onContextMenu={textMenu.onText} className="h-full overflow-y-auto">
         <div ref={contentRef} className={`${READING_COLUMN} ${COLUMN_GUTTER} space-y-5 py-8`}>
           {/* `session.loaded` and not just an empty array: a conversation whose transcript is
               still in flight also has no messages, and telling the reader "nothing asked yet" for
@@ -274,6 +280,7 @@ export function ChatTranscript({
                 running
                 startedAt={session.runStartedAt}
                 showStop={false}
+                onRetry={activeId ? () => useConversationStore.getState().retryTurn(activeId) : undefined}
                 expanded={logExpanded}
                 onToggle={() => setLogExpanded((v) => !v)}
               />
@@ -306,6 +313,7 @@ export function ChatTranscript({
           It portals to the body and positions itself from the viewport, which is why it can be a
           sibling here rather than inside the clipping scroll box. */}
       <SelectionActions scope={scrollRef} onQuoteReply={onQuoteReply} onQuoteNewChat={onQuoteNewChat} />
+      {textMenu.menu}
 
       {detached && (
         <button

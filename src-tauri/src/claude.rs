@@ -190,6 +190,12 @@ impl AiEngine for ClaudeEngine {
     /// Claude's scale is this app's scale — `--effort low|medium|high|xhigh|max`. The two extra
     /// steps it offers above `high` are why the neutral scale tops out at `max` rather than at
     /// `high`: this is the one CLI that would have lost a level to a three-step vocabulary.
+    /// Every Claude model takes images, and Claude Code's `Read` returns a PNG or a JPEG to the model
+    /// as an image — so a screenshot named in the message is one it looks at.
+    fn model_reads_images(&self, _model: &str) -> bool {
+        true
+    }
+
     fn effort_args(&self, effort: &str) -> Vec<String> {
         vec!["--effort".into(), effort.into()]
     }
@@ -774,30 +780,82 @@ fn interpret_output(
         });
     }
 
+    // A clean verdict with nothing to say is a command that *did* something instead of saying
+    // something: `/compact` compacts the session in place, `/clear` swaps it for a new one — whose
+    // id is the one the verdict carries. The reply is empty, which the chat shows as done. What it
+    // must never be is the stream around it: the fallback below handed every line of stdout back as
+    // the answer, init event and hooks included (`/compact` on 2.1.266, in the repository chat).
+    // `result` present but empty — the whole-buffer fallback in `result_payload` reads any lone JSON
+    // object as a verdict, and an `init` with nothing after it is not one.
+    if let Some(verdict) = parsed.as_ref().filter(|p| success && !p.is_error && p.result.is_some()) {
+        return Ok(AiRun {
+            text: String::new(),
+            session_id: verdict.session_id.clone(),
+            model: model_used(verdict),
+            usage: usage_of(verdict),
+            context_tokens: last_step_context(stdout),
+        });
+    }
+
+    let readable = readable_stdout(stdout);
     if !success {
         if quota_signal(stderr) {
             return Err(format!("{QUOTA_MARKER}{}", stderr.trim()));
         }
         if quota_signal(stdout) {
-            return Err(format!("{QUOTA_MARKER}{}", stdout.trim()));
+            let reason = if readable.is_empty() { stdout.trim() } else { readable.as_str() };
+            return Err(format!("{QUOTA_MARKER}{reason}"));
         }
         // Neither stream carried a usable message — report the exit status rather than an
         // error string that trails off into nothing.
-        let detail = [stderr.trim(), stdout.trim()]
+        let detail = [stderr.trim(), readable.as_str()]
             .into_iter()
             .find(|s| !s.is_empty())
             .unwrap_or("sin salida en stdout ni stderr");
         return Err(format!("claude exited with an error ({status_label}): {detail}"));
     }
 
-    let fallback = stdout.trim();
-    if fallback.is_empty() {
+    if readable.is_empty() {
         return Err("claude produced no output".to_string());
     }
-    if refusal_reply(fallback, None) {
-        return Err(format!("{QUOTA_MARKER}{fallback}"));
+    if refusal_reply(&readable, None) {
+        return Err(format!("{QUOTA_MARKER}{readable}"));
     }
-    Ok(AiRun { text: fallback.to_string(), session_id: None, model: None, usage: None, context_tokens: None })
+    Ok(AiRun { text: readable, session_id: None, model: None, usage: None, context_tokens: None })
+}
+
+/// What of stdout a person could read, for a run that left no verdict to read instead.
+///
+/// Plain text — a CLI that ignored the format flag — passes through as it is. An event stream is the
+/// CLI's protocol and never prose: from it only the text of the last `assistant` message survives
+/// (a synthetic refusal says what happened there), and nothing at all when there is none.
+fn readable_stdout(stdout: &str) -> String {
+    let first = stdout.lines().map(str::trim).find(|line| !line.is_empty());
+    let is_event_stream = first.is_some_and(|line| {
+        serde_json::from_str::<serde_json::Value>(line).is_ok_and(|value| str_field(&value, "type").is_some())
+    });
+    if !is_event_stream {
+        return stdout.trim().to_string();
+    }
+    for line in stdout.lines().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        if str_field(&value, "type") != Some("assistant") {
+            continue;
+        }
+        let Some(parts) = value.get("message").and_then(|m| m.get("content")).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let text = parts
+            .iter()
+            .filter(|part| str_field(part, "type") == Some("text"))
+            .filter_map(|part| str_field(part, "text"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.trim().is_empty() {
+            return text.trim().to_string();
+        }
+    }
+    String::new()
 }
 
 #[cfg(test)]
@@ -1017,6 +1075,72 @@ mod tests {
         assert_eq!(run.text, "plain text");
         assert_eq!(run.session_id, None);
         assert_eq!(run.model, None);
+    }
+
+    /// `claude -p /compact --resume … --output-format stream-json --verbose` on 2.1.266, trimmed:
+    /// the session's hooks, a `compacting` status for as long as the summary takes, the boundary,
+    /// the replayed summary — and a clean verdict whose `result` is empty. That empty string sent
+    /// the whole stream back to the repository chat as the answer.
+    #[test]
+    fn a_compaction_answers_with_nothing_rather_than_its_event_stream() {
+        let stdout = [
+            r#"{"type":"system","subtype":"hook_started","hook_id":"4f4a0a8d","hook_name":"SessionStart:resume","hook_event":"SessionStart","session_id":"cf5e83bd"}"#,
+            r#"{"type":"system","subtype":"hook_response","hook_id":"4f4a0a8d","hook_name":"SessionStart:resume","hook_event":"SessionStart","output":"","stdout":"","session_id":"cf5e83bd"}"#,
+            r#"{"type":"system","subtype":"status","status":"compacting","session_id":"cf5e83bd"}"#,
+            r#"{"type":"system","subtype":"status","status":"compacting","session_id":"cf5e83bd"}"#,
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"cf5e83bd"}"#,
+            r#"{"type":"system","subtype":"init","session_id":"cf5e83bd","model":"claude-opus-4-8","tools":["Read"]}"#,
+            r#"{"type":"system","subtype":"compact_boundary","session_id":"cf5e83bd","compact_metadata":{"trigger":"manual","pre_tokens":152000,"post_tokens":9100}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation."},"session_id":"cf5e83bd","isReplay":true}"#,
+            r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Compacted </local-command-stdout>"},"session_id":"cf5e83bd","isReplay":true}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"","session_id":"cf5e83bd","usage":{"input_tokens":0,"output_tokens":0},"modelUsage":{"claude-opus-4-8":{"inputTokens":152000,"outputTokens":2400}}}"#,
+        ]
+        .join("\n");
+        let run = interpret_output(true, "exit status: 0", &stdout, "").unwrap();
+        assert_eq!(run.text, "");
+        assert_eq!(run.session_id.as_deref(), Some("cf5e83bd"), "the compacted session goes on");
+        assert_eq!(run.model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    /// `/clear` is the same shape, and the session it hands on is the *new* one the verdict names —
+    /// resuming the old id would quietly bring back everything that was just cleared.
+    #[test]
+    fn a_clear_hands_on_the_new_session() {
+        let stdout = [
+            r#"{"type":"conversation_reset","new_conversation_id":"0b71bc5b","session_id":"9eeb7d1d"}"#,
+            r#"{"type":"system","subtype":"init","session_id":"ce0f1835"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"","session_id":"ce0f1835"}"#,
+        ]
+        .join("\n");
+        let run = interpret_output(true, "exit status: 0", &stdout, "").unwrap();
+        assert_eq!(run.text, "");
+        assert_eq!(run.session_id.as_deref(), Some("ce0f1835"));
+    }
+
+    #[test]
+    fn a_failure_with_no_reason_reports_the_status_and_not_the_stream() {
+        let stdout = [
+            r#"{"type":"system","subtype":"init","session_id":"s-3"}"#,
+            r#"{"type":"system","subtype":"status","status":"compacting","session_id":"s-3"}"#,
+        ]
+        .join("\n");
+        let err = interpret_output(false, "exit status: 1", &stdout, "").unwrap_err();
+        assert_eq!(err, "claude exited with an error (exit status: 1): sin salida en stdout ni stderr");
+    }
+
+    /// A stream cut off before its verdict keeps the answer it had already written, and is an error
+    /// when it had written none — never its own events read back as prose.
+    #[test]
+    fn a_stream_without_a_verdict_is_read_for_its_last_answer_only() {
+        let answered = [
+            r#"{"type":"system","subtype":"init","session_id":"s-4"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Listo, revisé el archivo."}]},"session_id":"s-4"}"#,
+        ]
+        .join("\n");
+        assert_eq!(interpret_output(true, "exit status: 0", &answered, "").unwrap().text, "Listo, revisé el archivo.");
+
+        let silent = r#"{"type":"system","subtype":"init","session_id":"s-5"}"#;
+        assert_eq!(interpret_output(true, "exit status: 0", silent, "").unwrap_err(), "claude produced no output");
     }
 
     /// The whole point of reading `modelUsage`: with no `--model` passed the CLI picks its own

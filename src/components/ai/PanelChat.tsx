@@ -1,7 +1,12 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ListPlus, Lock, Square, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ImagePlus, ListPlus, Square, Users, UsersRound } from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
 import { SkillChip } from "../chat/ChatComposer";
+import { AttachmentBar } from "../chat/AttachmentBar";
+import { useTextMenu } from "../common/TextMenu";
+import { useModelReadsImages } from "../../lib/useModelReadsImages";
+import type { ChatAttachment } from "../../lib/tauri/chatCommands";
 import { McpMenu } from "../chat/McpMenu";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
 import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
@@ -23,6 +28,16 @@ import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+
+/** Whether a question was Claude's own `/compact` — here it is the CLI's, not the app's (see
+ *  `CommandSurface`), and it answers with no text: the reply under it says what happened. */
+function isCompactCommand(message: { role: string; content: string } | undefined): boolean {
+  return message?.role === "user" && /^\/compact(\s|$)/i.test(message.content.trim());
+}
+
+/** What the repository chat attaches: images, by the extensions the backend calls images. */
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+const NO_FILES: ChatAttachment[] = [];
 
 /** How far from the bottom still counts as "reading the newest", for following a reply as it lands. */
 const STICK_PX = 48;
@@ -142,18 +157,25 @@ export function PanelChat({
   // ── Scrolling ─────────────────────────────────────────────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
+  /** Whether the reader is away from the newest turn — the round ↓ shows for as long as they are,
+   *  the way every AI chat does, not only when something new arrives. */
   const [showJump, setShowJump] = useState(false);
+  /** Something landed below while they were reading above — the ↓ carries a dot for it. */
+  const [newBelow, setNewBelow] = useState(false);
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
-    if (atBottom.current) setShowJump(false);
+    setShowJump(!atBottom.current);
+    if (atBottom.current) setNewBelow(false);
   };
-  const toBottom = () => {
+  /** `smooth` for the button — a jump the eye can follow — and instant for following a reply. */
+  const toBottom = (smooth = false) => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
     atBottom.current = true;
     setShowJump(false);
+    setNewBelow(false);
   };
   // Opened at the newest turn.
   useLayoutEffect(() => {
@@ -162,7 +184,10 @@ export function PanelChat({
   // Follows what is being written only while the reader is at the bottom.
   useLayoutEffect(() => {
     if (atBottom.current) toBottom();
-    else setShowJump(true);
+    else {
+      setShowJump(true);
+      setNewBelow(true);
+    }
   }, [session.messages.length, session.streamText.length, session.sending]);
 
   // ── Composer ──────────────────────────────────────────────────────────────────────────────
@@ -217,6 +242,36 @@ export function PanelChat({
     toBottom();
   };
 
+  // ── Images ────────────────────────────────────────────────────────────────────────────────
+  // Offered only where the model can look at one (`useModelReadsImages`): copied into this
+  // conversation's own folder when picked or pasted, sent with the next question.
+  const readsImages = useModelReadsImages(provider, model);
+  const staged = useChatStore((s) => s.attachments[conversationId]) ?? NO_FILES;
+  const attachImages = async () => {
+    const picked = await openDialog({ multiple: true, filters: [{ name: t("assistant.images"), extensions: IMAGE_EXTENSIONS }] });
+    const paths = typeof picked === "string" ? [picked] : Array.isArray(picked) ? picked : [];
+    for (const path of paths) await useChatStore.getState().attachImagePath(conversationId, path);
+    boxRef.current?.focus();
+  };
+  /** A screenshot pasted into the box becomes an attachment — or, for a model that cannot see one,
+   *  is said not to be rather than vanishing. Text pastes are left alone. */
+  const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const item = Array.from(event.clipboardData.items).find((entry) => entry.type.startsWith("image/"));
+    const file = item?.getAsFile();
+    if (!file) return;
+    event.preventDefault();
+    if (!readsImages) {
+      pushErrorToast(t("assistant.imagesUnsupported"));
+      return;
+    }
+    const extension = (file.type.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
+    void file.arrayBuffer().then((buffer) =>
+      useChatStore.getState().attachImageBytes(conversationId, `pegado.${extension}`, new Uint8Array(buffer)),
+    );
+  };
+  /** Right-click: Copy on a selected passage, Cut / Copy / Paste in the box. */
+  const textMenu = useTextMenu();
+
   /** This conversation's queue — the same strip, and the same rules, as the chat workspace's. Its
    *  names say "message" on purpose: `queued` above is the repository wait, a different thing. */
   const queueKey = chatQueueKey("panel", conversationId);
@@ -227,10 +282,10 @@ export function PanelChat({
       items: queuedMessages,
       held: queueHeld,
       busy: session.sending,
-      onRemove: (id) => void useChatStore.getState().takeQueued(conversationId, id),
+      onRemove: (id) => useChatStore.getState().discardQueued(conversationId, id),
       // Back into the box, in front of whatever is there: it was written first.
       onEdit: (id) => {
-        const item = useChatStore.getState().takeQueued(conversationId, id);
+        const item = useChatStore.getState().editQueued(conversationId, id);
         if (!item) return null;
         const current = useAiPanelStore.getState().drafts[tabKey] ?? "";
         useAiPanelStore.getState().setDraft(tabKey, current.trim() ? `${item.text}\n${current}` : item.text);
@@ -255,7 +310,12 @@ export function PanelChat({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div ref={scrollRef} onScroll={onScroll} className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5">
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        onContextMenu={textMenu.onText}
+        className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5"
+      >
         <div className="mb-2.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
           <span className="min-w-0 truncate">{repoName}</span>
           <span
@@ -322,6 +382,11 @@ export function PanelChat({
                 <ChatMessageBubble
                   message={message}
                   actions={message.isError ? { onPickModel: (next) => pickEngine(provider, next) } : undefined}
+                  emptyText={
+                    message.role === "assistant" && isCompactCommand(session.messages[i - 1])
+                      ? t("chat.compactedReply")
+                      : undefined
+                  }
                 />
                 {queued && i === lastUser && (
                   <p className="flex items-center justify-end gap-1 text-[10.5px] text-[var(--cf-warning)]">
@@ -340,6 +405,7 @@ export function PanelChat({
                 running
                 startedAt={session.runStartedAt}
                 showStop={false}
+                onRetry={() => useChatStore.getState().retryTurn(conversationId)}
                 expanded={logExpanded}
                 onToggle={() => setLogExpanded((v) => !v)}
               />
@@ -354,16 +420,22 @@ export function PanelChat({
       <div className="relative shrink-0 border-t border-[var(--cf-border)] px-2.5 pb-2.5 pt-2">
         {showJump && (
           <button
-            onClick={toBottom}
-            className="absolute bottom-full left-1/2 z-10 mb-2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
+            onClick={() => toBottom(true)}
+            title={t("chat.jumpToLatest")}
+            aria-label={t("chat.jumpToLatest")}
+            className="absolute bottom-full left-1/2 z-10 mb-2 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] text-[var(--cf-text)] shadow-[var(--cf-shadow)] transition-colors hover:bg-[var(--cf-hover)]"
           >
-            <ArrowDown size={11} />
-            {t("chat.jumpToLatest")}
+            <ArrowDown size={15} />
+            {newBelow && (
+              <span aria-hidden className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full bg-[var(--cf-accent-fill)]" />
+            )}
           </button>
         )}
+        {/* Not a wait any more: the repository is shared (see `ai_locks`). Said so the user knows
+            two agents are in the same checkout — each is told about the other in its prompt. */}
         {holder && !session.sending && (
-          <p className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11px] text-[var(--cf-warning)]" title={t("assistant.repoLeaseHint")}>
-            <Lock size={11} className="shrink-0" />
+          <p className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11px] text-[var(--cf-text-muted)]" title={t("assistant.repoLeaseHint")}>
+            <Users size={11} className="shrink-0" />
             <span className="min-w-0 truncate">{t("assistant.repoBusy", { holder })}</span>
           </p>
         )}
@@ -405,13 +477,21 @@ export function PanelChat({
           />
         )}
         <QueuedMessages queue={queue} />
+        {textMenu.menu}
         <div className="flex flex-col gap-1.5 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1.5 focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]">
+          <AttachmentBar
+            files={staged}
+            canSeeImages={readsImages}
+            onRemove={(id) => useChatStore.getState().removeAttachment(conversationId, id)}
+          />
           {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
           <textarea
             ref={boxRef}
             value={draft}
             rows={1}
             onChange={(e) => setDraft(e.target.value)}
+            onPaste={onPaste}
+            onContextMenu={textMenu.onField}
             onKeyDown={(e) => {
               // Enter sends; Shift+Enter breaks the line. Never mid-composition: an input method
               // uses Enter to accept a candidate, and sending then posts half a sentence.
@@ -433,6 +513,19 @@ export function PanelChat({
             />
             {/* The CLI's own MCP servers, switched for this repository. */}
             <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />
+            {/* Absent, not disabled, for a model that cannot look at an image — the same rule as the
+                chat workspace's controls: a button that cannot do anything is worse than none. */}
+            {readsImages && (
+              <button
+                type="button"
+                onClick={() => void attachImages()}
+                title={t("assistant.attachImage")}
+                aria-label={t("assistant.attachImage")}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+              >
+                <ImagePlus size={13} />
+              </button>
+            )}
             <span className="flex-1" />
             {session.sending ? (
               <>
@@ -461,11 +554,11 @@ export function PanelChat({
               <button
                 onClick={submit}
                 disabled={!draft.trim()}
-                title={holder ? t("assistant.sendQueued") : t("chat.send")}
+                title={t("chat.send")}
                 aria-label={t("chat.send")}
                 className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40"
               >
-                {holder ? <Clock size={12} /> : <ArrowUp size={13} />}
+                <ArrowUp size={13} />
               </button>
             )}
           </div>

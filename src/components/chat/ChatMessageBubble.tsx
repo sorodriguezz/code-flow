@@ -1,6 +1,7 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { Check, Copy, GitBranch, Pencil, Puzzle, RefreshCw, Square, type LucideIcon } from "lucide-react";
+import { Check, Copy, FileText, GitBranch, ImageIcon, Pencil, Puzzle, RefreshCw, Square, type LucideIcon } from "lucide-react";
+import { splitAttachmentNote } from "../../lib/attachmentNote";
 import { renderMarkdown } from "../../lib/markdown";
 import { parseClaudeError } from "../../lib/claudeError";
 import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
@@ -54,6 +55,9 @@ export interface ChatBubbleMessage {
   /** On a question: the skill it was sent with, picked in the composer. Told to the engine, never
    *  part of `content` — this is the one place the transcript says it was used. */
   skill?: string;
+  /** On a question: the files sent with it, while the turn is live. A stored question names them in
+   *  a note at the end of its text instead, which the bubble reads back (`lib/attachmentNote`). */
+  attachments?: { name: string; path: string; isImage: boolean }[];
 }
 
 /** The turn-level actions the chat workspace hangs off a bubble. All three are "fresh session,
@@ -114,6 +118,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   streamText,
   actions,
   outputs,
+  emptyText,
 }: {
   message: ChatBubbleMessage;
   variant?: ChatBubbleVariant;
@@ -137,6 +142,9 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
    * the same turns and have no working directory behind them.
    */
   outputs?: { conversationId: string; files: ChatOutput[] };
+  /** What an answer with no text says instead of the generic "done" — the caller knows which
+   *  command it answered (`/compact`), this bubble does not. */
+  emptyText?: string;
 }) {
   const t = useT();
   const [copied, copy] = useCopy();
@@ -167,18 +175,27 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     ) : null;
 
   const streaming = streamText !== undefined;
-  const body = streaming ? streamText : message.content;
+  // A question's files: carried by a live turn, read back out of the note a stored one ends with —
+  // shown as chips over the words rather than as a paragraph of absolute paths under them.
+  const noted = useMemo(
+    () => (message.role === "user" ? splitAttachmentNote(message.content) : null),
+    [message.role, message.content],
+  );
+  const sentFiles = message.role === "user" ? (message.attachments ?? noted?.files ?? []) : [];
+  const copyText = noted?.text ?? message.content;
+  const body = streaming ? streamText : copyText;
 
   // An answer with no text at all is what a CLI command replies with when it just *does* something —
-  // Claude's `/clear` answers with an empty result. Said as done rather than drawn as a blank bubble.
+  // Claude's `/clear` and `/compact` answer with an empty result. Said as done rather than drawn as a
+  // blank bubble.
   const emptyReply =
     message.role === "assistant" && !message.isError && !message.isCancelled && !streaming && !body.trim();
   const html = useMemo(
     () =>
       message.role === "assistant" && !message.isError && !streaming
-        ? renderMarkdown(emptyReply ? `*${t("chat.emptyReply")}*` : body)
+        ? renderMarkdown(emptyReply ? `*${emptyText ?? t("chat.emptyReply")}*` : body)
         : null,
-    [message.role, message.isError, streaming, body, emptyReply, t],
+    [message.role, message.isError, streaming, body, emptyReply, emptyText, t],
   );
   /**
    * What `dangerouslySetInnerHTML` is handed — one object for as long as the HTML is the same.
@@ -284,6 +301,20 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
             {message.skill}
           </span>
         )}
+        {isUser && sentFiles.length > 0 && (
+          <span className="mb-1 flex flex-wrap gap-1 whitespace-normal">
+            {sentFiles.map((file) => (
+              <span
+                key={file.path}
+                title={file.path}
+                className="flex min-w-0 max-w-full items-center gap-1 rounded border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)]"
+              >
+                {file.isImage ? <ImageIcon size={11} className="shrink-0" /> : <FileText size={11} className="shrink-0" />}
+                <span className="truncate">{file.name}</span>
+              </span>
+            ))}
+          </span>
+        )}
         {markup !== null ? (
           <div
             ref={bodyRef}
@@ -311,7 +342,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         {!reading && (
           <button
             type="button"
-            onClick={() => copy(message.content)}
+            onClick={() => copy(copyText)}
             title={t("chat.copyMessage")}
             className={`absolute -top-2 flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] opacity-0 shadow-sm group-hover:opacity-100 ${
               isUser ? "-left-2" : "-right-2"
@@ -359,7 +390,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
           <BubbleAction
             icon={copied ? Check : Copy}
             label={t("chat.copyMessage")}
-            onClick={() => copy(message.content)}
+            onClick={() => copy(copyText)}
             done={copied}
           />
           {actions?.onRegenerate && (

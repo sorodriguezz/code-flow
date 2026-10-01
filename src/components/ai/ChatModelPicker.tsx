@@ -38,8 +38,14 @@ const EDGE = 8;
  * ("Claude Code · Opus · Trabajo") and belongs in a composer. `tag` is `ModelTag`'s pill — the model,
  * and the account where there is a choice ("Haiku 4.5 · Sistema") — for a toolbar or a footer that
  * already had that pill. `icon` is the provider's mark
- * alone, beside a button whose run it routes (Commit, the 🛡). The two small ones put the whole route
+ * alone, beside a button whose run it routes (Commit). The two small ones put the whole route
  * in their tooltip, above `title`.
+ *
+ * `split` *is* the button whose run it routes: one outlined control, the run's own glyph (`action`)
+ * on the left and a chevron on the right — the 🛡 that analyzes the changes. The glyph starts the
+ * run, the chevron opens this menu, and both halves name the route in their tooltip (the glyph under
+ * the run's name, the chevron above `title`), so the engine is one hover away from either. The menu
+ * hangs from the whole control, dropping below it like any header dropdown.
  *
  * While a conversation is open (`chatActive`) only the *current* provider's versions can be picked.
  * Switching provider mid-chat can't work: each CLI keeps its own session store, so the turns so far
@@ -80,6 +86,8 @@ export function ChatModelPicker({
   size = "sm",
   className = "",
   children,
+  action,
+  tour,
 }: {
   liveModel: string | null;
   chatActive: boolean;
@@ -92,17 +100,23 @@ export function ChatModelPicker({
   /** The routing row this chip reads and, unbound, writes — an `AI_TASKS` key, the same string as
    *  Rust's `AiTask::key()`. */
   task?: string;
-  /** The chip's tooltip; on `tag` and `icon`, the line under the route. */
+  /** The chip's tooltip; on `tag`, `icon` and `split`'s chevron, the line under the route. */
   title?: string;
-  variant?: "chip" | "tag" | "icon";
-  /** `icon` only: `md` beside a full-size button (Commit), `sm` in a row of icon buttons (the 🛡's). */
+  variant?: "chip" | "tag" | "icon" | "split";
+  /** `icon` only: `md` beside a full-size button (Commit), `sm` in a row of icon buttons. */
   size?: "sm" | "md";
-  /** Added to the trigger's classes, for a place that has to match a neighbour (the Commit button's
-   *  border). Only for what the variant leaves unset — two utilities for one property do not stack. */
+  /** Added to the trigger's classes (on `split`, the whole control's), for a place that has to match
+   *  a neighbour (the Commit button's border). Only for what the variant leaves unset — two utilities
+   *  for one property do not stack. */
   className?: string;
   /** `icon` only: the mark to show in place of the provider's — the editor's inline edit keeps the
    *  ✨ it always had, which is the thing its user reaches for. */
   children?: ReactNode;
+  /** `split` only: the run the control starts — its glyph, its name (the accessible name and the
+   *  tooltip's first line, over the route) and what a click on it does. */
+  action?: { icon: ReactNode; label: string; onClick: () => void; disabled?: boolean };
+  /** `data-tour` for the guided tour, on the whole control. */
+  tour?: string;
 }) {
   const t = useT();
   const routedProvider = useTaskProvider(task);
@@ -135,6 +149,8 @@ export function ChatModelPicker({
   const [browsing, setBrowsing] = useState<string | null>(null);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  /** `split`'s whole control, which the menu hangs from rather than from the chevron alone. */
+  const splitRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const selectable = AI_PROVIDERS.filter((p) => p.available);
@@ -200,17 +216,26 @@ export function ChatModelPicker({
       setPos(null);
       return;
     }
-    const trigger = triggerRef.current;
+    const anchor = variant === "split" ? splitRef.current : triggerRef.current;
     const menu = menuRef.current;
-    if (!trigger || !menu) return;
-    const rect = trigger.getBoundingClientRect();
+    if (!anchor || !menu) return;
+    const rect = anchor.getBoundingClientRect();
     const { height } = menu.getBoundingClientRect();
-    // Opens upward by default — the chip lives at the bottom of the panel.
     const above = rect.top - height - GAP;
-    const top = above >= EDGE ? above : Math.min(rect.bottom + GAP, window.innerHeight - height - EDGE);
+    const below = rect.bottom + GAP;
+    const top =
+      variant === "split"
+        ? // A header dropdown: below it, unless only the space above can hold it.
+          below + height <= window.innerHeight - EDGE || above < EDGE
+          ? Math.min(below, window.innerHeight - height - EDGE)
+          : above
+        : // Opens upward by default — the chip lives at the bottom of the panel.
+          above >= EDGE
+          ? above
+          : Math.min(below, window.innerHeight - height - EDGE);
     const left = Math.max(EDGE, Math.min(rect.left, window.innerWidth - WIDTH - EDGE));
     setPos({ top, left });
-  }, [open, browsing, modelsByProvider]);
+  }, [open, browsing, modelsByProvider, variant]);
 
   useEffect(() => {
     if (!open) return;
@@ -280,6 +305,7 @@ export function ChatModelPicker({
       {variant === "tag" ? (
         <button
           {...trigger}
+          data-tour={tour}
           title={[routeLabel, title].filter(Boolean).join("\n")}
           className={`inline-flex min-w-0 max-w-[16rem] shrink items-center gap-1 rounded-full border bg-[var(--cf-surface)] px-1.5 py-px text-[10.5px] transition-colors ${
             open
@@ -299,9 +325,44 @@ export function ChatModelPicker({
           {accountLabel && <span className="max-w-[7rem] shrink-0 truncate font-mono">· {accountLabel}</span>}
           {chevron(9)}
         </button>
+      ) : variant === "split" ? (
+        // One control, two targets. Each half lights on its own hover inside the shared hairline,
+        // and the rule between them is what says there are two; the chevron's half stays lit while
+        // its menu is open.
+        <div
+          ref={splitRef}
+          data-tour={tour}
+          className={`group/split inline-flex h-[22px] shrink-0 items-stretch rounded-md border transition-colors duration-100 ${
+            open ? "border-[var(--cf-border-strong)]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"
+          } ${className}`}
+        >
+          <button
+            type="button"
+            onClick={action?.onClick}
+            disabled={action?.disabled}
+            title={[action?.label, routeLabel].filter(Boolean).join("\n")}
+            aria-label={action?.label}
+            className="flex w-[22px] items-center justify-center rounded-l-[5px] text-[var(--cf-text-muted)] transition-colors duration-100 enabled:hover:bg-[var(--cf-hover)] enabled:hover:text-[var(--cf-accent)] disabled:opacity-40"
+          >
+            {action?.icon}
+          </button>
+          <button
+            {...trigger}
+            title={[routeLabel, title].filter(Boolean).join("\n")}
+            aria-label={`${heading}: ${routeLabel}`}
+            className={`flex w-4 items-center justify-center rounded-r-[5px] border-l transition-colors duration-100 ${
+              open
+                ? "border-[var(--cf-border-strong)] bg-[var(--cf-hover)] text-[var(--cf-text)]"
+                : "border-[var(--cf-border)] text-[var(--cf-text-muted)] group-hover/split:border-[var(--cf-border-strong)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            }`}
+          >
+            {chevron(10)}
+          </button>
+        </div>
       ) : variant === "icon" ? (
         <button
           {...trigger}
+          data-tour={tour}
           title={[routeLabel, title].filter(Boolean).join("\n")}
           aria-label={routeLabel}
           className={`flex min-h-[22px] shrink-0 items-center justify-center rounded-md transition-colors ${
@@ -318,6 +379,7 @@ export function ChatModelPicker({
       ) : (
         <button
           {...trigger}
+          data-tour={tour}
           title={title ?? t("chat.changeModelTitle")}
           className={`flex h-[26px] max-w-full items-center gap-1.5 rounded-md px-2 text-[12px] transition-colors hover:bg-[var(--cf-hover)] ${
             open ? "bg-[var(--cf-hover)] text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"

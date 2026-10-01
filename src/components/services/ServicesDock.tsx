@@ -10,7 +10,7 @@ import { ServiceEditor } from "./ServiceEditor";
 import { ServiceImportModal } from "./ServiceImportModal";
 import { ServiceConsole } from "./ServiceConsole";
 import { PortsPanel } from "./PortsPanel";
-import { HeaderButton, SectionHeader, ServiceActions, ServiceList } from "./ServiceList";
+import { HeaderButton, PortsRow, SectionHeader, ServiceActions, ServiceList } from "./ServiceList";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
 import { STATUS_TONE, useServicesStore } from "../../state/servicesStore";
@@ -109,6 +109,9 @@ export function ServicesDock() {
   const view: DockView = showServices ? dockView : "terminal";
 
   const [selection, setSelection] = useState<ServiceSelection | null>(null);
+  /** The service whose console the pane shows, when that is what is picked. */
+  const selectedId = selection?.kind === "service" ? selection.id : null;
+  const setSelectedId = (id: string) => setSelection({ kind: "service", id });
   const [editing, setEditing] = useState<Editing | null>(null);
   const [importing, setImporting] = useState(false);
 
@@ -175,8 +178,7 @@ export function ServicesDock() {
     })),
   );
 
-  const selectedService =
-    selection?.kind === "service" ? (services.find((s) => s.id === selection.id) ?? null) : null;
+  const selectedService = selectedId ? (services.find((s) => s.id === selectedId) ?? null) : null;
   const servicesEmpty = services.length === 0 && groups.length === 0;
 
   /** The terminal panel's two ways in: a shell in the repository, or one of the other shells (and
@@ -264,7 +266,7 @@ export function ServicesDock() {
                 failed is where "why" is answered. */}
             {firstFailed && (
               <button
-                onClick={() => setSelection({ kind: "service", id: firstFailed })}
+                onClick={() => setSelectedId(firstFailed)}
                 title={t("services.summaryFailedHint")}
                 className="flex items-center gap-1 rounded px-1 text-[var(--cf-danger)] hover:bg-[color-mix(in_srgb,var(--cf-danger)_12%,transparent)]"
               >
@@ -277,14 +279,6 @@ export function ServicesDock() {
 
         <div className="flex-1" />
 
-        {/* Not while the list is empty, same as the list's heading used to: the empty list's two
-            buttons are the same choice with words on them. */}
-        {showServices && view === "services" && !servicesEmpty && (
-          <ServiceActions
-            onNew={(groupId) => setEditing({ service: null, groupId })}
-            onImport={() => setImporting(true)}
-          />
-        )}
         {showServices && view === "terminal" && terminalActions}
 
         <button
@@ -300,22 +294,41 @@ export function ServicesDock() {
         {/* The list. Vertical rather than the strip of tabs this panel used to have, because a
             service needs a status dot, a port and a group above it — none of which fit on a tab. */}
         <div
-          className="flex min-h-0 shrink-0 flex-col overflow-y-auto border-r border-[var(--cf-border)]"
+          className="flex min-h-0 shrink-0 flex-col border-r border-[var(--cf-border)]"
           style={{ width: listWidth }}
         >
           {view === "services" ? (
-            <ServiceList
-              heading={false}
-              selectedId={selection?.kind === "service" ? selection.id : null}
-              portsSelected={selection?.kind === "ports"}
-              onSelect={(id) => setSelection({ kind: "service", id })}
-              onSelectPorts={() => setSelection({ kind: "ports" })}
-              onEdit={(service) => setEditing({ service, groupId: service.group_id })}
-              onNew={(groupId) => setEditing({ service: null, groupId })}
-              onImport={() => setImporting(true)}
-            />
+            <>
+              {/* Detect, new group, new service: small, at the top of the column they act on — not in
+                  the panel's title row, where they sat over the console and read as its controls.
+                  Not while the list is empty: its two buttons are the same choice with words on them. */}
+              {!servicesEmpty && (
+                <div className="flex shrink-0 items-center justify-end gap-0.5 px-1.5 pt-1">
+                  <ServiceActions
+                    size="sm"
+                    onNew={(groupId) => setEditing({ service: null, groupId })}
+                    onImport={() => setImporting(true)}
+                  />
+                </div>
+              )}
+              {/* The services on top, scrolling on their own; the row into the machine's listening
+                  ports pinned under them, at the foot of the column, whatever the list's length. */}
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ServiceList
+                  heading={false}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                  onEdit={(service) => setEditing({ service, groupId: service.group_id })}
+                  onNew={(groupId) => setEditing({ service: null, groupId })}
+                  onImport={() => setImporting(true)}
+                />
+              </div>
+              <div className="flex shrink-0 flex-col border-t border-[var(--cf-border)]">
+                <PortsRow selected={selection?.kind === "ports"} onSelect={() => setSelection({ kind: "ports" })} />
+              </div>
+            </>
           ) : (
-            <div className={showServices ? "pt-1" : undefined}>
+            <div className={`min-h-0 flex-1 overflow-y-auto ${showServices ? "pt-1" : ""}`}>
               {!showServices && <SectionHeader icon={TerminalSquare} label={terminalsLabel} actions={terminalActions} />}
               {!project && (
                 <p className="px-2.5 py-2 text-[11px] text-[var(--cf-text-muted)]">
@@ -379,18 +392,14 @@ export function ServicesDock() {
             services on screen, a service's console or the ports mount on top of them. */}
         <div className="relative flex min-h-0 min-w-0 flex-1">
           {view === "services" ? (
-            selection?.kind === "service" ? (
-              selectedService ? (
-                <ServiceConsole
-                  key={selectedService.id}
-                  service={selectedService}
-                  onEdit={() => setEditing({ service: selectedService, groupId: selectedService.group_id })}
-                />
-              ) : (
-                <EmptyState icon={CirclePlay} title={t("services.pickOne")} />
-              )
-            ) : selection?.kind === "ports" ? (
-              <PortsPanel onOpenService={(id) => setSelection({ kind: "service", id })} />
+            selection?.kind === "ports" ? (
+              <PortsPanel onOpenService={setSelectedId} />
+            ) : selectedService ? (
+              <ServiceConsole
+                key={selectedService.id}
+                service={selectedService}
+                onEdit={() => setEditing({ service: selectedService, groupId: selectedService.group_id })}
+              />
             ) : services.length > 0 ? (
               <EmptyState icon={CirclePlay} title={t("services.pickOne")} />
             ) : null
@@ -427,14 +436,14 @@ export function ServicesDock() {
           service={editing.service}
           initialGroupId={editing.groupId}
           onClose={() => setEditing(null)}
-          onSaved={(saved) => setSelection({ kind: "service", id: saved.id })}
+          onSaved={(saved) => setSelectedId(saved.id)}
         />
       )}
       {importing && workspaceId && (
         <ServiceImportModal
           workspaceId={workspaceId}
           onClose={() => setImporting(false)}
-          onImported={(first) => first && setSelection({ kind: "service", id: first.id })}
+          onImported={(first) => first && setSelectedId(first.id)}
         />
       )}
     </div>

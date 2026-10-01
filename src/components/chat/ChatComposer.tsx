@@ -3,6 +3,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ArrowUp, ListPlus, Paperclip, Puzzle, Square, X } from "lucide-react";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { EffortPicker } from "./EffortPicker";
+import { useTextMenu } from "../common/TextMenu";
 import { AttachmentBar } from "./AttachmentBar";
 import { QueuedMessages, type ComposerQueue } from "./QueuedMessages";
 import { ChatCapabilities } from "./ChatCapabilities";
@@ -137,6 +138,8 @@ export function ChatComposer({
   queue?: ComposerQueue;
 }) {
   const t = useT();
+  /** The box's own Cut / Copy / Paste, in place of the webview's menu. */
+  const textMenu = useTextMenu();
   const boxRef = useRef<HTMLTextAreaElement>(null);
   const [imageNotice, setImageNotice] = useState<string | null>(null);
   // The skill staged for the next message. Dropped when the engine changes: a skill is one CLI's,
@@ -361,6 +364,7 @@ export function ChatComposer({
             disabled={disabled}
             onChange={(e) => onDraftChange(e.target.value)}
             onPaste={onPaste}
+            onContextMenu={textMenu.onField}
             onKeyDown={(e) => {
               // `isComposing` covers the IME case; `keyCode === 229` is the same condition for the
               // browsers that still report composition that way, and costs one comparison.
@@ -378,6 +382,7 @@ export function ChatComposer({
             }
             className="max-h-[260px] resize-none bg-transparent px-2 py-1 text-[14px] leading-[1.6] outline-none placeholder:text-[var(--cf-text-muted)] disabled:opacity-60"
           />
+          {textMenu.menu}
 
           <div className="flex items-center gap-1.5 px-0.5">
             {/* `bound` is what makes this chip tell the truth: the conversation's engine, not the

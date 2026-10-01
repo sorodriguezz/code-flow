@@ -115,6 +115,11 @@ struct AiEngineEvent {
     /// The model id this run forces. Empty when nothing was configured and the CLI picks its own
     /// default, which is a real state and shows as the engine alone rather than as a guess.
     model: String,
+    /// How much silence the watchdog allows this run before stopping it, in seconds — `None` when
+    /// the watchdog is off. The card counts down to it, so a quiet run says when it will end by
+    /// itself instead of leaving the user to guess. While a sub-agent is open the allowance is
+    /// [`SUBAGENT_IDLE_FACTOR`] times this; the frontend mirrors that.
+    idle_limit_secs: Option<u64>,
 }
 
 /// "That run is over." See the emit at the end of [`scoped_with_trace`] for why this exists at all
@@ -316,7 +321,7 @@ pub async fn cancelled(rx: &mut Option<watch::Receiver<bool>>) {
 
 /// Announces the engine and model a run is starting with. Fire-and-forget, like every other event
 /// here: a run whose banner never arrives still runs, it just shows as "working…" with no name.
-pub fn emit_engine(ctx: &RunCtx, provider: &str, engine: &str, model: &str) {
+pub fn emit_engine(ctx: &RunCtx, provider: &str, engine: &str, model: &str, idle_limit: Option<Duration>) {
     let _ = ctx.app.emit(
         "ai:engine",
         AiEngineEvent {
@@ -324,6 +329,7 @@ pub fn emit_engine(ctx: &RunCtx, provider: &str, engine: &str, model: &str) {
             provider: provider.to_string(),
             engine: engine.to_string(),
             model: model.to_string(),
+            idle_limit_secs: idle_limit.map(|limit| limit.as_secs()),
         },
     );
 }
@@ -606,18 +612,46 @@ pub fn idle_limit() -> Option<Duration> {
     idle_limit_from(crate::ai_usage::setting(IDLE_TIMEOUT_KEY).as_deref())
 }
 
-/// When a run last printed anything, on either stream. Cheap to clone and to touch: the pumps
-/// touch it on every read.
+/// How many times the usual silence a run is allowed while one of its sub-agents is working.
+///
+/// Claude Code runs a `Task` sub-agent in the background and the parent's stream says nothing until
+/// that sub-agent finishes a step — a long step, a long tool, or simply the wait for it to end. That
+/// silence is the run working, not hanging: the watchdog stopped such runs for being quiet. Three
+/// times, not forever, the same allowance [`crate::ai::AiEngine::quiet_while_working`] gets: a
+/// sub-agent can hang too. Mirrored by `SUBAGENT_IDLE_FACTOR` in `AiRunLog.tsx`.
+pub const SUBAGENT_IDLE_FACTOR: u32 = 3;
+
+/// When a run last printed anything, on either stream — and which of its sub-agents are still out.
+/// Cheap to clone and to touch: the pumps touch it on every read.
 #[derive(Clone)]
 pub struct Activity {
     started: Instant,
     /// Milliseconds after `started` of the last output.
     last_ms: Arc<AtomicU64>,
+    /// Sub-agents the run started and has not heard back from, by the CLI's task id.
+    subagents: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Activity {
     pub fn new() -> Self {
-        Activity { started: Instant::now(), last_ms: Arc::new(AtomicU64::new(0)) }
+        Activity { started: Instant::now(), last_ms: Arc::new(AtomicU64::new(0)), subagents: Arc::default() }
+    }
+
+    pub fn subagent_started(&self, task_id: &str) {
+        if let Ok(mut open) = self.subagents.lock() {
+            open.insert(task_id.to_string());
+        }
+    }
+
+    pub fn subagent_ended(&self, task_id: &str) {
+        if let Ok(mut open) = self.subagents.lock() {
+            open.remove(task_id);
+        }
+    }
+
+    /// Whether a sub-agent of this run is still working.
+    pub fn subagents_open(&self) -> bool {
+        self.subagents.lock().map(|open| !open.is_empty()).unwrap_or(false)
     }
 
     pub fn touch(&self) {
@@ -649,9 +683,13 @@ pub fn idle_remaining(limit: Duration, quiet_for: Duration) -> Option<Duration> 
 pub async fn gone_quiet(activity: &Activity, limit: Option<Duration>) -> Duration {
     let Some(limit) = limit else { return std::future::pending().await };
     loop {
-        match idle_remaining(limit, activity.quiet_for()) {
-            None => return limit,
-            Some(left) => tokio::time::sleep(left).await,
+        // Re-read each time round: a sub-agent opening or ending moves the deadline both ways.
+        let allowed = if activity.subagents_open() { limit * SUBAGENT_IDLE_FACTOR } else { limit };
+        match idle_remaining(allowed, activity.quiet_for()) {
+            None => return allowed,
+            // Capped, so a sub-agent that ends while this sleeps toward its longer deadline is
+            // noticed within half a minute rather than at that deadline.
+            Some(left) => tokio::time::sleep(left.min(Duration::from_secs(30))).await,
         }
     }
 }

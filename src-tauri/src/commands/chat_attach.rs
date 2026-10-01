@@ -428,6 +428,63 @@ fn adopt_into(from: &Path, to: &Path) -> Result<Vec<ChatAttachment>, String> {
     Ok(adopted)
 }
 
+// ===================== the repository chat =====================
+//
+// The assistant panel's conversation about a repository takes **images only** — what it lacked was
+// a way to show the model a screenshot; the repository itself is already the files it reads. Same
+// copy-under-our-root rule as the chat workspace, under a root of its own (see
+// `paths::repo_chat_attachments_dir` for why it cannot share one), offered by the composer only
+// where the model can look at an image.
+
+fn safe_repo_conversation_dir(conversation_id: &str) -> Result<PathBuf, String> {
+    safe_id(conversation_id)?;
+    Ok(crate::paths::repo_chat_conversation_attachments_dir(conversation_id))
+}
+
+/// Refuses anything that is not an image, by the same extension rule that decides `is_image`.
+fn image_only(name: &str) -> Result<(), String> {
+    if is_image(name) {
+        Ok(())
+    } else {
+        Err(format!("only images can be attached here ({})", IMAGE_EXTENSIONS.join(", ")))
+    }
+}
+
+#[tauri::command]
+pub fn repo_chat_attach_file(conversation_id: String, source_path: String) -> Result<ChatAttachment, String> {
+    image_only(&source_path)?;
+    store_file(&safe_repo_conversation_dir(&conversation_id)?, &source_path)
+}
+
+/// A pasted screenshot — bytes with no file behind them.
+#[tauri::command]
+pub fn repo_chat_attach_bytes(
+    conversation_id: String,
+    name: String,
+    data: Vec<u8>,
+) -> Result<ChatAttachment, String> {
+    image_only(&name)?;
+    store_bytes(&safe_repo_conversation_dir(&conversation_id)?, &name, data)
+}
+
+#[tauri::command]
+pub fn repo_chat_remove_attachment(conversation_id: String, attachment_id: String) -> Result<(), String> {
+    remove_from(&safe_repo_conversation_dir(&conversation_id)?, &attachment_id)
+}
+
+/// Every image a repository conversation has — what `send_chat_message` resolves a turn's ids
+/// against, so the frontend never names a path itself.
+pub fn repo_conversation_attachments(conversation_id: &str) -> Vec<ChatAttachment> {
+    safe_repo_conversation_dir(conversation_id).map(|dir| list_dir(&dir)).unwrap_or_default()
+}
+
+/// Removes a repository conversation's images. Called when the conversation is deleted.
+pub fn discard_repo_conversation_attachments(conversation_id: &str) {
+    if let Ok(dir) = safe_repo_conversation_dir(conversation_id) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// Removes a conversation's whole attachment directory. Called when the conversation is deleted.
 pub fn discard_conversation_attachments(conversation_id: &str) {
     if let Ok(dir) = safe_conversation_dir(conversation_id) {
@@ -485,6 +542,15 @@ pub fn chat_sweep_attachments(db: State<'_, Db>) -> Result<usize, String> {
     // rather than by owner, because the thing that owns a staging directory is an open composer.
     // See [`PENDING_ATTACHMENT_TTL`].
     removed += sweep_stale(&crate::paths::chat_pending_attachments_root(), PENDING_ATTACHMENT_TTL);
+
+    // And the repository chat's images, against the conversations `activity_log` still holds. A
+    // conversation whose first question was never sent has no rows yet, and its staged images go
+    // too — they only ever lived in a composer that a restart has already emptied.
+    let live_repo: std::collections::HashSet<String> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::db::queries::chat_conversation_ids(&conn).map_err(|e| e.to_string())?.into_iter().collect()
+    };
+    removed += sweep_root(&crate::paths::repo_chat_attachments_dir(), &live_repo);
 
     // And the dependency trees inside the directories that *do* have an owner.
     removed += sweep_dependency_trees(&crate::paths::chat_outputs_dir());

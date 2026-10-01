@@ -1,4 +1,4 @@
-import { formatAgentLogLine } from "./agentLog";
+import { formatAgentLogLine, repeatsStatus } from "./agentLog";
 import { getTurnTrace } from "./tauri/commands";
 import type { AiRunLine } from "../state/aiRunStore";
 
@@ -30,7 +30,7 @@ export function parseTrace(raw: string | null): AiRunLine[] | undefined {
       const { stream, line } = item as { stream?: unknown; line?: unknown };
       if (typeof line !== "string") continue;
       const text = formatAgentLogLine(line);
-      if (text === null) continue;
+      if (text === null || repeatsStatus(lines[lines.length - 1]?.text, text)) continue;
       lines.push({ stream: stream === "stderr" ? "stderr" : "stdout", text });
     }
     return lines.length > 0 ? lines : undefined;

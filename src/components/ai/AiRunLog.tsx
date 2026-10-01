@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Cpu, Square } from "lucide-react";
+import { ChevronDown, ChevronRight, Cpu, RotateCcw, Square } from "lucide-react";
 import { useAiRunStore, type AiRunLine } from "../../state/aiRunStore";
 import { buttonClass } from "../common/Button";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -39,6 +39,7 @@ export function AiRunLog({
   showStop = true,
   expanded,
   onToggle,
+  onRetry,
 }: {
   /** The live run to follow. Omit when passing `lines` — a stored trace has no live run to stop. */
   runId?: string;
@@ -62,6 +63,9 @@ export function AiRunLog({
    * different actions, so the chat passes `false` and keeps the one that is where you are typing.
    */
   showStop?: boolean;
+  /** Stop this run and ask the same thing again — offered when the run has gone quiet, beside Stop,
+   *  by the surfaces that know what "the same thing" is (the chats). */
+  onRetry?: () => void;
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -73,6 +77,8 @@ export function AiRunLog({
   const scrollRef = useRef<HTMLDivElement>(null);
   const elapsed = useElapsed(running, startedAt ?? null);
   const quietFor = useQuiet(running, lines?.length ?? 0, elapsed);
+  const subagents = useAiRunStore((s) => (runId ? s.subagentsByRun[runId] : undefined));
+  const idleLimit = useAiRunStore((s) => (runId ? (s.engineByRun[runId]?.idleLimitSecs ?? null) : null));
 
   // Follow the tail, the way a terminal does.
   useEffect(() => {
@@ -88,6 +94,15 @@ export function AiRunLog({
   // Not while stopping: a run being killed is expected to say nothing, and announcing that as a
   // stall would be the app worrying about something it is doing itself.
   const quiet = running && !cancelling && quietFor >= QUIET_AFTER_SECONDS;
+  // Silence with a sub-agent out is the run working — its own output waits for theirs — so it is
+  // said as that, in the ordinary colour, rather than as a stall.
+  const open = subagents ? Object.values(subagents) : [];
+  const delegating = open.length > 0;
+  const latest = open[open.length - 1];
+  // What the watchdog still allows, mirroring `gone_quiet`: three times the limit while a sub-agent
+  // is out. Said, so a quiet run reads as something that ends by itself — not a clock that runs on.
+  const allowed = idleLimit === null ? null : idleLimit * (delegating ? SUBAGENT_IDLE_FACTOR : 1);
+  const autoStopIn = allowed === null ? null : Math.max(0, allowed - quietFor);
 
   const chevron = expanded ? (
     <ChevronDown size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
@@ -142,22 +157,24 @@ export function AiRunLog({
 
         <button
           onClick={onToggle}
-          title={quiet ? t("ai.quietHint") : undefined}
+          title={quiet ? (delegating ? t("ai.subagentsHint") : t("ai.quietHint")) : undefined}
           aria-expanded={expanded}
           className="min-w-0 flex-1 text-left"
         >
           <span className="flex items-center gap-1.5">
             <span
               className={`shrink-0 text-[13px] font-semibold ${
-                quiet ? "text-[var(--cf-warning)]" : "text-[var(--cf-text)]"
+                quiet && !delegating ? "text-[var(--cf-warning)]" : "text-[var(--cf-text)]"
               }`}
             >
               {label ??
                 (cancelling
                   ? t("ai.stopping")
-                  : quiet
-                    ? t("ai.quietFor", { time: formatElapsed(quietFor) })
-                    : t("ai.working"))}
+                  : quiet && delegating
+                    ? t("ai.subagentsWorking", { n: open.length })
+                    : quiet
+                      ? t("ai.quietFor", { time: formatElapsed(quietFor) })
+                      : t("ai.working"))}
             </span>
             {/* "Working…" on its own never said *what* is working, and the answer isn't derivable
                 from the panel: the provider and model come from per-task routing, so the run in
@@ -180,7 +197,9 @@ export function AiRunLog({
                 one sentence, and "12 pasos Read src/…" is not one. */}
             <span className="shrink-0 text-[var(--cf-text-faint)]">|</span>
             <span className="min-w-0 flex-1 truncate">
-              {lastLine ?? t("ai.waitingForOutput")}
+              {delegating && latest
+                ? `${latest.description}${latest.progress ? ` · ${latest.progress}` : ""}`
+                : (lastLine ?? t("ai.waitingForOutput"))}
             </span>
           </span>
         </button>
@@ -197,6 +216,40 @@ export function AiRunLog({
           </button>
         )}
       </div>
+
+      {/* What can be done about a quiet run, where the question arises: when it ends by itself, and
+          the ways to end it now. Stop joins Retry here where the header has none (the chats, whose
+          composer has its own) — beside Retry it is a choice between the two, not a second copy of
+          one action. */}
+      {quiet && runId && (onRetry || !showStop || (autoStopIn !== null && autoStopIn > 0)) && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-[var(--cf-border)] px-3 py-2">
+          <span className="min-w-0 flex-1 text-[11px] text-[var(--cf-text-muted)]">
+            {autoStopIn !== null && autoStopIn > 0 ? t("ai.autoStopIn", { time: formatElapsed(autoStopIn) }) : null}
+          </span>
+          {onRetry && (
+            <button
+              onClick={onRetry}
+              disabled={cancelling}
+              title={t("ai.retryRunHint")}
+              className={buttonClass({ variant: "secondary", size: "sm" })}
+            >
+              <RotateCcw size={11} />
+              {t("ai.retryRun")}
+            </button>
+          )}
+          {!showStop && (
+            <button
+              onClick={() => void cancel(runId)}
+              disabled={cancelling}
+              title={t("ai.stopRun")}
+              className={buttonClass({ variant: "secondary", size: "sm" })}
+            >
+              <Square size={10} className="fill-current" />
+              {t("ai.stop")}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Indeterminate by design — see the note at the top. */}
       <div className="cf-run-track">
@@ -257,6 +310,10 @@ export function RunEngineChip({ runId }: { runId?: string }) {
  * cost of being early is crying stall on a model that was thinking.
  */
 const QUIET_AFTER_SECONDS = 240;
+
+/** `ai_runs::SUBAGENT_IDLE_FACTOR`: how many times the silence the watchdog allows while a sub-agent
+ *  is out. Mirrored so the countdown says what the backend will actually do. */
+const SUBAGENT_IDLE_FACTOR = 3;
 
 /**
  * Seconds since the run last printed a line.

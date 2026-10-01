@@ -160,17 +160,24 @@ pub fn detect_on(root: &Path, host: &Host) -> Vec<Candidate> {
     detect_dirs(root, host, project_dirs(root))
 }
 
-/// [`detect`], told which folder the person is pointing at — the subfolder picked in the editor.
+/// [`detect`], told which folder the person is pointing at — the subfolder picked in the editor —
+/// and answering for that folder alone: what runs in it or below it, nothing from beside or above.
+///
+/// It used to list the folder's finds first and the rest of the repository after them, which read
+/// as the subfolder being ignored: pick `PoC/poc-v3` and every other proof of concept was still
+/// offered (user report, 2026-10-01). The path is the question, from that folder down; the whole
+/// repository is what a blank subfolder asks for, and gets — `focus` empty is [`detect`].
 ///
 /// `focus` is relative to `root` and is read however deep it sits: past [`MAX_DEPTH`], past the
 /// budget, inside a project the walk would not have entered. Picking a folder is the plainest way
 /// there is of saying "this one", and answering "nothing detected" because the folder was one level
-/// too deep would be the detector overruling the person. What it finds is listed first; the rest of
-/// the repository still follows, so a pick in the wrong folder costs nothing.
+/// too deep would be the detector overruling the person. A folder that is not there holds nothing.
 ///
 /// The folders between the two are read too when they are projects: a Maven or Gradle build above
 /// the pick is what says the pick is one of its modules, and is run from there (`-pl api`) — see
-/// [`jvm_candidates`]. A focus that leaves `root` (`..`, an absolute path) is ignored.
+/// [`jvm_candidates`]. Such a candidate counts as the folder's by its `source`, the module's own
+/// build file, since its `cwd` is the build's root. A focus that leaves `root` (`..`, an absolute
+/// path) is ignored.
 pub fn detect_in(root: &Path, focus: &str) -> Vec<Candidate> {
     detect_focused(root, focus, &Host::current())
 }
@@ -180,9 +187,12 @@ fn detect_focused(root: &Path, focus: &str, host: &Host) -> Vec<Candidate> {
     let Some(focus) = clean_focus(focus) else { return detect_on(root, host) };
     let focus_dir = root.join(&focus);
     if !focus_dir.is_dir() {
-        return detect_on(root, host);
+        return Vec::new();
     }
-    let mut dirs = project_dirs(root);
+    // Only what can answer for the folder: the root (its compose places, a build whose modules
+    // these are), the projects between the two, and the folder's own tree. Nothing beside it can
+    // offer a command whose folder or file is inside it, so the rest of the repository goes unread.
+    let mut dirs = vec![root.to_path_buf()];
     dirs.extend(
         focus_dir
             .ancestors()
@@ -199,10 +209,11 @@ fn detect_focused(root: &Path, focus: &str, host: &Host) -> Vec<Candidate> {
     dirs.sort_by_key(|dir| dir.strip_prefix(root).map(|rel| rel.components().count()).unwrap_or(0));
 
     let mut out = detect_dirs(root, host, dirs);
+    // At a separator, so `poc-v3` does not take in `poc-v3-old` beside it.
     let inside = |path: &str| path == focus || path.strip_prefix(focus.as_str()).is_some_and(|rest| rest.starts_with('/'));
     // A module run from its build's root (`-pl api`) has its `cwd` there, but was read from the
     // module's own `pom.xml` — which is what makes it this folder's.
-    out.sort_by_key(|c| !(inside(&c.cwd) || inside(&c.source)));
+    out.retain(|c| inside(&c.cwd) || inside(&c.source));
     out
 }
 
@@ -1872,9 +1883,9 @@ mod tests {
         assert!(found.iter().all(|c| !c.cwd.starts_with("examples/") && !c.cwd.starts_with("api/tests")), "{found:#?}");
     }
 
-    /// The folder picked in the editor is read even past the walk's reach, and leads the list.
+    /// The folder picked in the editor is read even past the walk's reach, and is all that is listed.
     #[test]
-    fn a_picked_folder_is_read_however_deep_and_comes_first() {
+    fn a_picked_folder_is_read_however_deep_and_alone() {
         let dir = scratch(&[
             ("package.json", r#"{"scripts":{"dev":"turbo dev"}}"#),
             ("x/y/z/w/v/u/api/package.json", r#"{"name":"deep","scripts":{"dev":"node server.js"}}"#),
@@ -1883,20 +1894,56 @@ mod tests {
         assert!(detect(dir.path()).iter().all(|c| c.name != "deep"), "out of the walk's reach by itself");
 
         let found = detect_in(dir.path(), "x/y/z/w/v/u/api");
+        assert_eq!(found.len(), 1, "the repository's own `dev` is not the folder's: {found:#?}");
         let deep = &found[0];
         assert_eq!((deep.cwd.as_str(), deep.command.as_str()), ("x/y/z/w/v/u/api", "npm run dev"));
         assert_eq!(deep.source, "x/y/z/w/v/u/api/package.json");
         assert_eq!(deep.env_files, vec![".env".to_string()]);
-        find(&found, "", "npm run dev");
 
         // Backslashes and a trailing separator are the same folder; a way out of the root is ignored.
-        assert_eq!(detect_in(dir.path(), "x\\y\\z\\w\\v\\u\\api\\")[0].name, "deep");
+        assert_eq!(detect_in(dir.path(), "x\\y\\z\\w\\v\\u\\api\\"), found);
+        assert_eq!(detect_in(dir.path(), "./x/y/z/w/v/u/api/"), found);
         assert_eq!(detect_in(dir.path(), "../elsewhere"), detect(dir.path()));
         assert_eq!(detect_in(dir.path(), "/etc"), detect(dir.path()));
+        // Blank, or the root spelled out, is the whole repository.
+        assert_eq!(detect_in(dir.path(), ""), detect(dir.path()));
+        assert_eq!(detect_in(dir.path(), "./"), detect(dir.path()));
+    }
+
+    /// What the user picked is the question, from that folder down: the sibling proofs of concept
+    /// stay out, and so does one whose name merely starts the same.
+    #[test]
+    fn a_picked_folder_offers_only_what_is_inside_it() {
+        let dir = scratch(&[
+            ("package.json", r#"{"scripts":{"dev":"turbo dev"}}"#),
+            ("PoC/poc-v1/backend/package.json", r#"{"scripts":{"dev":"node --watch server.js"}}"#),
+            ("PoC/poc-v3/docker-compose.yml", "services:\n  sqlserver:\n    image: mssql\n  api:\n    build: .\n"),
+            ("PoC/poc-v3/frontend/package.json", r#"{"scripts":{"dev":"vite --port 5174"}}"#),
+            ("PoC/poc-v3-old/package.json", r#"{"scripts":{"dev":"vite"}}"#),
+        ]);
+        let all = detect(dir.path());
+        find(&all, "PoC/poc-v1/backend", "npm run dev");
+        find(&all, "PoC/poc-v3-old", "npm run dev");
+
+        let found = detect_in(dir.path(), "PoC/poc-v3");
+        find(&found, "PoC/poc-v3", "docker compose up");
+        find(&found, "PoC/poc-v3", "docker compose up sqlserver");
+        find(&found, "PoC/poc-v3/frontend", "npm run dev");
+        assert!(
+            found.iter().all(|c| c.cwd == "PoC/poc-v3" || c.cwd.starts_with("PoC/poc-v3/")),
+            "nothing from beside or above the folder: {found:#?}"
+        );
+        assert_eq!(found.len(), 4, "the stack, its two containers and the frontend: {found:#?}");
+
+        // A parent of the pick holds the pick and its siblings; a path that is not a folder holds
+        // nothing — not the whole repository.
+        assert_eq!(detect_in(dir.path(), "PoC").len(), all.len() - 1, "all but the root's own `dev`");
+        assert!(detect_in(dir.path(), "PoC/poc-v").is_empty());
+        assert!(detect_in(dir.path(), "PoC/poc-v3/docker-compose.yml").is_empty());
     }
 
     /// Picking a module of a multi-module build offers the module as its build runs it — from the
-    /// build's root, by module — not a second copy from inside the module folder.
+    /// build's root, by module — not a second copy from inside the module folder, and nothing else.
     #[test]
     fn a_picked_maven_module_is_run_from_its_build() {
         let dir = scratch(&[
@@ -1907,9 +1954,33 @@ mod tests {
             ("web/package.json", r#"{"scripts":{"dev":"vite"}}"#),
         ]);
         let found = detect_in(dir.path(), "plataforma/core/api");
+        assert_eq!(found.len(), 1, "{found:#?}");
         assert_eq!(found[0].command, "mvn -pl api spring-boot:run");
         assert_eq!(found[0].cwd, "plataforma/core", "run from the build's root");
-        assert!(found.iter().all(|c| c.cwd != "plataforma/core/api"), "no copy from inside the module: {found:#?}");
-        find(&found, "web", "npm run dev");
+        assert_eq!(found[0].source, "plataforma/core/api/pom.xml", "the module's own file is what makes it the folder's");
+        // The build's own folder answers for every app in it.
+        find(&detect_in(dir.path(), "plataforma/core"), "plataforma/core", "mvn -pl api spring-boot:run");
+        assert!(detect_in(dir.path(), "plataforma/core/common").is_empty(), "a library module runs nothing");
+    }
+
+    /// The same for a Gradle build at the repository's root, and for a compose stack the root keeps
+    /// in one of its usual folders — both read from the root, both the picked folder's.
+    #[test]
+    fn a_pick_keeps_what_the_root_runs_for_it() {
+        let dir = scratch(&[
+            ("settings.gradle.kts", "include(\"api\", \"worker\")\n"),
+            ("gradlew", ""),
+            ("api/build.gradle.kts", "plugins {\n  id(\"org.springframework.boot\")\n}\n"),
+            ("worker/build.gradle.kts", "plugins {\n  id(\"io.quarkus\")\n}\n"),
+            ("infra/docker-compose.yml", "services:\n  db:\n    image: postgres\n"),
+        ]);
+        let api = detect_in(dir.path(), "api");
+        assert_eq!(api.len(), 1, "{api:#?}");
+        assert_eq!((api[0].cwd.as_str(), api[0].command.as_str()), ("", "./gradlew :api:bootRun"));
+
+        let root_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+        let infra = detect_in(dir.path(), "infra");
+        assert_eq!(find(&infra, "infra", "docker compose up").name, format!("{root_name}-infra"), "named as the full scan names it");
+        assert!(infra.iter().all(|c| c.cwd == "infra"), "{infra:#?}");
     }
 }

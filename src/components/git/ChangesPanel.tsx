@@ -61,6 +61,7 @@ import { useMinimumSpin } from "../../lib/useMinimumSpin";
 import { useGitToolsStore } from "../../state/gitToolsStore";
 import { useConflictEditorStore } from "../../state/conflictEditorStore";
 import { RepoFeaturesBadge } from "./RepoFeaturesBadge";
+import { actionButtonClass } from "./actionButton";
 import type { DiffStaging } from "./StagingDiff";
 import type { SubmoduleInfo } from "../../lib/tauri/gitCommands";
 import type { FileDiffInfo, FileStatusEntry, SecretHit } from "../../types/domain";
@@ -138,14 +139,16 @@ function UnpushedCommitsSection() {
               <span className="flex-1 min-w-0 truncate">{c.summary}</span>
               <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">{c.short_id}</span>
               <button
+                type="button"
                 disabled={i !== 0 || busy}
                 title={i === 0 ? t("changes.undoThis") : t("changes.undoAboveFirst")}
+                aria-label={t("changes.undoThis")}
                 onClick={async () => {
                   if (await confirmAction(t("changes.undoConfirm", { summary: c.summary }))) {
                     void undoCommit(c.id);
                   }
                 }}
-                className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-30"
+                className={actionButtonClass("danger", { onRow: true, className: "-my-0.5" })}
               >
                 <RotateCcw size={12} />
               </button>
@@ -292,23 +295,28 @@ function FileRow({
           </span>
         )}
       </span>
+      {/* 22px squares edge to edge (`actionButtonClass`), and the strip keeps the clicks that land
+          on it — the rounded corners' slivers included — so no pixel among the actions belongs to
+          the row and opens the diff. `-my-0.5` lets the squares use the row's padding and keeps it
+          26px. Shown on hover, while one of them runs, and while one has keyboard focus. */}
       <span
-        className={`flex shrink-0 items-center gap-1 ${
-          actions.some((a) => a.pending) ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+        onClick={(e) => e.stopPropagation()}
+        className={`-my-0.5 flex shrink-0 items-center ${
+          actions.some((a) => a.pending) ? "opacity-100" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100"
         }`}
       >
         {actions.map((action, i) => (
           <button
             key={i}
+            type="button"
             title={action.title}
+            aria-label={action.title}
             disabled={action.disabled}
             onClick={(e) => {
               e.stopPropagation();
               action.onClick();
             }}
-            className={`text-[var(--cf-text-muted)] disabled:opacity-30 ${
-              action.danger ? "hover:text-[var(--cf-danger)]" : "hover:text-[var(--cf-accent)]"
-            }`}
+            className={actionButtonClass(action.danger ? "danger" : "accent", { onRow: true })}
           >
             {action.pending ? <Loader2 size={13} className="animate-spin" /> : <action.icon size={13} />}
           </button>
@@ -470,11 +478,6 @@ export function ChangesPanel({
    * `"commit"` is the key Rust's `AiTask::Commit` reports, which is what `generate_commit_message`
    * loads its config from; naming any other task here would put a confident lie in the tooltip. */
   const commitModel = useTaskModelLabel("commit");
-  /** Same, for the 🛡 button. `"analyze"` is `AiTask::Analyze`'s key — the task the change analysis
-   *  actually routes through. Worth the second line for the same reason the commit button's is, and
-   *  one more: when the run fails it fails as `failed to launch 'opencode'`, a sentence naming a
-   *  binary the user never chose by that name and cannot connect to anything on this screen. */
-  const analyzeModel = useTaskModelLabel("analyze");
 
   // Feedback for the row action buttons is otherwise invisible until refreshStatus() comes
   // back (stage/unstage/discard all trigger a full status+diff refresh) — set the pending
@@ -913,10 +916,12 @@ export function ChangesPanel({
               </span>
               {status.staged.length > 0 && (
                 <button
+                  type="button"
                   onClick={() => runAction("__unstage_all__", "all", () => unstageAll())}
                   disabled={pending !== null && pending.path !== "__unstage_all__"}
                   title={t("changes.unstageAll")}
-                  className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] disabled:opacity-30"
+                  aria-label={t("changes.unstageAll")}
+                  className={actionButtonClass("accent")}
                 >
                   {pending?.path === "__unstage_all__" ? (
                     <Loader2 size={13} className="animate-spin" />
@@ -957,33 +962,33 @@ export function ChangesPanel({
                 {t("changes.changes")} ({unstagedAndUntracked.length})
               </span>
               <div className="flex items-center gap-1">
-                {unstagedAndUntracked.length > 0 && (
-                  <button
-                    onClick={() => {
-                      // Its own tab in the assistant — whatever else is open there stays open.
-                      const projectId = useWorkspaceStore.getState().activeProjectId;
-                      if (projectId) openAnalysis(projectId, { run: true });
-                    }}
-                    data-tour="changes-analyze"
-                    title={[t("analyze.button"), analyzeModel].join("\n")}
-                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]"
-                  >
-                    <ShieldCheck size={13} />
-                  </button>
-                )}
-                {/* The 🛡's engine, right after it: the analysis routes through `analyze`, and this
-                    is where that row changes without a trip to Settings. */}
+                {/* The 🛡 and its engine as one control: the shield runs the analysis, the chevron
+                    beside it changes the `analyze` row of the routing (`AiTask::Analyze`'s key, the
+                    task the run actually goes through) without a trip to Settings. Both halves name
+                    that engine on hover — worth it because a failed run fails as `failed to launch
+                    'opencode'`, a binary the user never chose by that name. */}
                 {unstagedAndUntracked.length > 0 && (
                   <ChatModelPicker
                     task="analyze"
-                    variant="icon"
+                    variant="split"
                     liveModel={null}
                     chatActive={false}
                     title={t("changes.analyzeModelHint")}
+                    tour="changes-analyze"
+                    action={{
+                      icon: <ShieldCheck size={13} />,
+                      label: t("analyze.button"),
+                      onClick: () => {
+                        // Its own tab in the assistant — whatever else is open there stays open.
+                        const projectId = useWorkspaceStore.getState().activeProjectId;
+                        if (projectId) openAnalysis(projectId, { run: true });
+                      },
+                    }}
                   />
                 )}
                 {unstagedAndUntracked.length > 0 && (
                   <button
+                    type="button"
                     onClick={async () => {
                       // Conflicted rows are not counted: discarding all skips them (the banner
                       // owns them), and the number should be what actually goes.
@@ -1001,7 +1006,8 @@ export function ChangesPanel({
                     }}
                     disabled={pending !== null && pending.path !== "__discard_all__"}
                     title={t("changes.discardAll")}
-                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] disabled:opacity-30"
+                    aria-label={t("changes.discardAll")}
+                    className={actionButtonClass("danger")}
                   >
                     {pending?.path === "__discard_all__" ? (
                       <Loader2 size={13} className="animate-spin" />
@@ -1012,10 +1018,12 @@ export function ChangesPanel({
                 )}
                 {unstagedAndUntracked.length > 0 && (
                   <button
+                    type="button"
                     onClick={() => runAction("__stage_all__", "all", () => stageAll())}
                     disabled={pending !== null && pending.path !== "__stage_all__"}
                     title={t("changes.stageAll")}
-                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] disabled:opacity-30"
+                    aria-label={t("changes.stageAll")}
+                    className={actionButtonClass("accent")}
                   >
                     {pending?.path === "__stage_all__" ? (
                       <Loader2 size={13} className="animate-spin" />

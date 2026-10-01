@@ -1057,6 +1057,8 @@ pub async fn dispatch(
                 None,
                 // The phone has no skill picker.
                 None,
+                // Nor an attachment picker.
+                None,
             )
             .await?,
             Invalidate::Chat,

@@ -313,6 +313,11 @@ export const chatEffortSupport = () => invoke<string[]>("chat_effort_support");
 export const chatModelEffortSupport = (provider: string, model: string) =>
   invoke<boolean>("chat_model_effort_support", { provider, model });
 
+/** Whether this model looks at an attached image rather than reading it as bytes — what the
+ *  repository chat asks before it offers to attach one. Per model: Codex's catalog answers for each. */
+export const chatModelReadsImages = (provider: string, model: string) =>
+  invoke<boolean>("chat_model_reads_images", { provider, model });
+
 /** This model's context window in tokens, or `null` where the app will not name one — which is
  *  every locally-served model, since the name does not decide the window there. Asked of the
  *  backend rather than kept in a table here because `auto_compact_if_full` decides with the same
@@ -592,6 +597,17 @@ export const chatListStagedAttachments = (conversationId: string) =>
 
 export const chatRemoveAttachment = (conversationId: string, attachmentId: string) =>
   invoke<void>("chat_remove_attachment", { conversationId, attachmentId });
+
+/** The repository chat's images (the assistant panel) — a root of their own, images only. */
+export const repoChatAttachFile = (conversationId: string, sourcePath: string) =>
+  invoke<ChatAttachment>("repo_chat_attach_file", { conversationId, sourcePath });
+
+/** A pasted screenshot for the repository chat. */
+export const repoChatAttachBytes = (conversationId: string, name: string, data: number[]) =>
+  invoke<ChatAttachment>("repo_chat_attach_bytes", { conversationId, name, data });
+
+export const repoChatRemoveAttachment = (conversationId: string, attachmentId: string) =>
+  invoke<void>("repo_chat_remove_attachment", { conversationId, attachmentId });
 
 /** Collects attachment folders whose conversation is gone. Run once at startup: the per-delete
  *  cleanup cannot cover a crash, or a workspace deletion that cascaded rows away without passing

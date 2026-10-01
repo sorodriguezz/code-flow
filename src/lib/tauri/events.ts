@@ -264,6 +264,9 @@ export interface AiEngineEvent {
   engine: string;
   /** Model id forced for this run; empty when the CLI is picking its own default. */
   model: string;
+  /** Seconds of silence the watchdog allows before stopping the run; `null` when it is off. Absent
+   *  from a backend older than the field. */
+  idle_limit_secs?: number | null;
 }
 
 /** Which engine and model a run is using, announced as it starts — so "working…" can say what is

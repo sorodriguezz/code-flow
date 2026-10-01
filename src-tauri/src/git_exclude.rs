@@ -95,6 +95,11 @@ pub fn literal(segment: &str) -> String {
 /// Returns whether the line was written. Failures are the caller's to ignore: a read-only checkout
 /// costs the user an untracked entry in Changes, never a failed turn.
 pub fn exclude(repo: &Path, pattern: &str) -> std::io::Result<bool> {
+    // A read, a check and a rewrite: two agent turns syncing skills into one repository at once —
+    // they run side by side now — would each read the file without the other's line and the second
+    // write would drop the first's. One process-wide lock; the file is tiny and the section short.
+    static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialised = WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let pattern = pattern.trim();
     let Some(common) = common_git_dir(repo) else { return Ok(false) };
     if pattern.is_empty() {

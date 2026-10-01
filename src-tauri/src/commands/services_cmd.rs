@@ -146,8 +146,8 @@ pub fn service_clear_log(app: AppHandle, id: String) {
 }
 
 /// What a folder can run, best first. See [`crate::services::detect`]. With `focus` — the subfolder
-/// the editor has picked, relative to `path` — that folder is read however deep it is and what it
-/// holds comes first ([`detect::detect_in`]).
+/// the editor has picked, relative to `path` — only what runs in that folder or below it is listed,
+/// and the folder is read however deep it is ([`detect::detect_in`]).
 #[tauri::command]
 pub async fn service_detect(path: String, focus: Option<String>) -> Vec<Candidate> {
     tauri::async_runtime::spawn_blocking(move || {

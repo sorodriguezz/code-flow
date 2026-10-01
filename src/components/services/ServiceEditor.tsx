@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ChevronDown,
-  ChevronRight,
   CirclePlay,
   Flag,
   FolderOpen,
@@ -19,12 +18,15 @@ import {
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
+import { Tooltip } from "../common/Tooltip";
+import { fieldClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { promptAction } from "../../state/promptStore";
 import { useServicesStore } from "../../state/servicesStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { detectServices, listEnvFiles, servicePathExists } from "../../lib/tauri/services";
-import { relativeInside } from "../../lib/folderPath";
+import { folderName, relativeInside } from "../../lib/folderPath";
+import { scrollEdgeMask, useScrollEdges } from "../../lib/useScrollEdges";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import {
   isComposeCommand,
@@ -56,6 +58,17 @@ import { PortChip, StatusGlyph, readyDescription } from "./serviceBits";
  * The default gate watches the process tree for the port it opens (see `services::supervisor`), so
  * nobody has to know the port in advance, and a task that finishes is recognised as finished. The
  * specific gates are still here for what `auto` cannot see.
+ *
+ * # One grid, top to bottom
+ *
+ * The user found the form crowded and lopsided (2026-10-01: "demasiada información y no ordenada…
+ * todo asimétrico"): two columns of fields with hints of different lengths under each, a 2:1 pair,
+ * a checkbox with a paragraph, and section headings in three different shapes. It is one shape now.
+ * Every section — Where, What to run, Options, Advanced — is a heading over rows of the same
+ * label/field grid ({@link FormSection}, {@link FormRow}): the labels in one column, every control
+ * in the other, all of them 30px, so the edges line up from the first field to the last. What a
+ * field means went from a line under it to its label's tooltip (the dotted underline says there is
+ * one); only an error still takes a line, and only while it is true.
  */
 export function ServiceEditor({
   workspaceId,
@@ -133,14 +146,22 @@ export function ServiceEditor({
   const scanRoot = project ? project.local_path : cwd.trim();
   /**
    * The subfolder the detector is pointed at, inside a repository: what was typed or picked in the
-   * Subfolder field — **not** what a proposal filled in. The detector lists that folder first (and
-   * reads it however deep it is), so following the proposals too would re-order the list under the
-   * pointer on every click.
+   * Subfolder field — **not** what a proposal filled in. The detector answers for that folder alone,
+   * from it down (and reads it however deep it is), so following the proposals too would narrow the
+   * list under the pointer on every click: pick the one in `apps/api` and the others would vanish.
    */
   const [focus, setFocus] = useState(service?.cwd ?? "");
   const scanFocus = project ? focus.trim() : "";
+  /** The subfolder as the detector's paths spell it — `/`, no `./`, no trailing separator — so a
+   *  proposal's file can be shown from there rather than from the repository's root. */
+  const scope = tidyRelative(scanFocus);
+  /** Where the proposals on screen were read, for the tooltip that says so. */
+  const scopeName = project ? scope || project.name : folderName(cwd);
   /** The root the proposals on screen were read from — see the effect below. */
   const shownRoot = useRef<string | null>(null);
+  const proposalsRef = useRef<HTMLDivElement>(null);
+  const proposalEdges = useScrollEdges(proposalsRef, !!candidates?.length);
+  const fieldId = useId();
 
   useEffect(() => {
     if (!scanRoot) {
@@ -150,7 +171,7 @@ export function ServiceEditor({
     }
     let alive = true;
     // Another folder altogether starts from "reading…"; another subfolder of the same repository
-    // keeps the proposals on screen until the new order arrives, rather than blinking them away on
+    // keeps the proposals on screen until the new list arrives, rather than blinking them away on
     // every keystroke of a path.
     if (shownRoot.current !== scanRoot) setCandidates(null);
     const timer = setTimeout(() => {
@@ -382,368 +403,359 @@ export function ServiceEditor({
         </>
       }
     >
-      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4 text-[12px]">
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 text-[12px]">
         {/* ── Where ─────────────────────────────────────────────────────────────── */}
-        <Section title={t("services.section.where")}>
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-3">
-            <Labelled label={t("services.repository")} hint={t("services.repositoryHint")}>
-              <Select
-                value={projectId}
-                onChange={(value) => {
-                  setProjectId(value);
-                  setCwd("");
-                  setFocus("");
+        <FormSection title={t("services.section.where")}>
+          <FormRow label={t("services.repository")} hint={t("services.repositoryHint")}>
+            <Select
+              value={projectId}
+              onChange={(value) => {
+                setProjectId(value);
+                setCwd("");
+                setFocus("");
+              }}
+              size="field"
+              ariaLabel={t("services.repository")}
+              options={[
+                ...projects.map((p) => ({ value: p.id, label: p.name })),
+                { value: "", label: t("services.noRepository") },
+              ]}
+            />
+          </FormRow>
+          <FormRow
+            label={project ? t("services.subfolder") : t("services.cwd")}
+            hint={project ? t("services.cwdRelativeHint") : undefined}
+            htmlFor={`${fieldId}-cwd`}
+            error={cwdOk === false ? t("services.cwdMissing") : undefined}
+          >
+            <div className="flex gap-2">
+              <input
+                id={`${fieldId}-cwd`}
+                value={cwd}
+                onChange={(e) => {
+                  const value = literal(e.target.value);
+                  setCwd(value);
+                  setFocus(value);
                 }}
-                size="field"
-                options={[
-                  ...projects.map((p) => ({ value: p.id, label: p.name })),
-                  { value: "", label: t("services.noRepository") },
-                ]}
+                {...MACHINE_TEXT}
+                // Blank is the repository's root — said where it is blank, instead of under it.
+                placeholder={project ? t("services.subfolderRoot") : "/Users/…/api"}
+                className={fieldClass({
+                  // The placeholder is words, not a path: in the UI's face, so it cannot be read as one.
+                  className: `w-full flex-1 font-mono ${project ? "placeholder:font-sans" : ""} ${
+                    cwdOk === false ? "!border-[var(--cf-danger)]" : ""
+                  }`,
+                })}
               />
-            </Labelled>
-            <Labelled
-              label={project ? t("services.subfolder") : t("services.cwd")}
-              hint={project ? t("services.cwdRelativeHint") : undefined}
-              error={cwdOk === false ? t("services.cwdMissing") : undefined}
-            >
-              <div className="flex gap-1.5">
-                <input
-                  value={cwd}
-                  onChange={(e) => {
-                    const value = literal(e.target.value);
-                    setCwd(value);
-                    setFocus(value);
-                  }}
-                  {...MACHINE_TEXT}
-                  placeholder={project ? "apps/api" : "/Users/…/api"}
-                  className={`${INPUT} font-mono ${cwdOk === false ? "border-[var(--cf-danger)]" : ""}`}
-                />
-                {/* With a repository too: a subfolder can sit several folders down, and walking to
-                    it beats typing its path. */}
+              {/* With a repository too: a subfolder can sit several folders down, and walking to
+                  it beats typing its path. The field's own height, border and fill, so the pair
+                  reads as one control. */}
+              <Tooltip label={t("services.browse")}>
                 <button
+                  type="button"
                   onClick={() => void browse()}
-                  title={t("services.browse")}
                   aria-label={t("services.browse")}
-                  className="flex shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)] px-2 text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                  className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] text-[var(--cf-text-muted)] transition-colors duration-100 hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
                 >
-                  <FolderOpen size={13} />
+                  <FolderOpen size={14} />
                 </button>
-              </div>
-            </Labelled>
-          </div>
-        </Section>
+              </Tooltip>
+            </div>
+          </FormRow>
+        </FormSection>
 
         {/* ── What ──────────────────────────────────────────────────────────────── */}
-        <Section title={t("services.section.what")}>
-          <div className="mb-3">
-            <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
-              <Radar size={11} />
-              {candidates === null ? (
-                <span className="flex items-center gap-1">
-                  <LoaderCircle size={11} className="animate-spin" /> {t("services.detecting")}
-                </span>
-              ) : candidates.length ? (
-                <span>{t("services.detectedHere", { count: candidates.length })}</span>
-              ) : (
-                <span>{scanRoot ? t("services.nothingDetected") : t("services.pickFolderFirst")}</span>
-              )}
-            </div>
-            {candidates && candidates.length > 0 && (
-              <div className="grid max-h-[168px] grid-cols-2 gap-1.5 overflow-y-auto pr-1">
-                {/* More than the grid shows at once — it scrolls — because the detector now reads
-                    nested folders too, and the one the person came for may be the 13th. */}
-                {candidates.slice(0, 40).map((candidate) => {
-                  const key = `${project ? candidate.cwd : ""}\u0000${candidate.command}`;
-                  const chosen = key === pickedKey;
-                  return (
-                    <button
-                      key={`${candidate.cwd}:${candidate.command}`}
-                      onClick={() => pick(candidate)}
-                      className={`min-w-0 rounded-md border px-2 py-1.5 text-left transition-colors ${
-                        chosen
-                          ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]"
-                          : "border-[var(--cf-border)] hover:border-[color-mix(in_srgb,var(--cf-accent)_60%,transparent)] hover:bg-[var(--cf-hover)]"
-                      }`}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text)]">
-                          {candidate.command}
-                        </span>
-                        {candidate.readyKind === "exit" && (
-                          <span className="shrink-0 rounded bg-[var(--cf-hover)] px-1 text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-                            {t("services.oneShot")}
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-0.5 truncate text-[10.5px] text-[var(--cf-text-muted)]" title={candidate.detail}>
-                        {candidate.source}
-                        {candidate.detail ? ` · ${candidate.detail}` : ""}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-3">
-            <Labelled label={t("services.command")} hint={t("services.commandHint")}>
-              <input
-                value={command}
-                onChange={(e) => setCommand(literal(e.target.value))}
-                {...MACHINE_TEXT}
-                placeholder="pnpm dev"
-                autoFocus={!service}
-                className={`${INPUT} font-mono`}
-              />
-            </Labelled>
-            <Labelled label={t("services.name")}>
-              <input
-                value={name}
-                onChange={(e) => {
-                  setName(e.target.value);
-                  setNameTouched(true);
-                }}
-                {...MACHINE_TEXT}
-                placeholder="api"
-                className={INPUT}
-              />
-            </Labelled>
-          </div>
-        </Section>
-
-        {/* ── Waits for ─────────────────────────────────────────────────────────── */}
-        {/* Only once there is something to wait for. On the first service of a workspace the
-            section could only say that it had nothing to offer. */}
-        {others.length > 0 && (
-          <Section title={t("services.dependsOn")} hint={t("services.dependsOnHint")}>
-            <div className="flex flex-wrap gap-1.5">
-              {others.map((candidate) => {
-                const on = deps.includes(candidate.id);
-                const group = groups.find((g) => g.id === candidate.group_id);
-                return (
-                  <button
-                    key={candidate.id}
-                    onClick={() =>
-                      setDeps((prev) => (on ? prev.filter((id) => id !== candidate.id) : [...prev, candidate.id]))
-                    }
-                    aria-pressed={on}
-                    className={`flex items-center gap-1.5 rounded-full border py-0.5 pl-1.5 pr-2 text-[11px] transition-colors ${
-                      on
-                        ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                        : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)]"
-                    }`}
-                  >
-                    <StatusGlyph status={runtime[candidate.id]?.status ?? "stopped"} size={6} />
-                    {candidate.name}
-                    {group && <span className="opacity-60">· {group.name}</span>}
-                  </button>
-                );
-              })}
-            </div>
-          </Section>
-        )}
-
-        {/* ── Options ───────────────────────────────────────────────────────────── */}
-        <Section title={t("services.section.options")}>
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-start gap-3">
-            <Labelled label={t("services.group")}>
-              <Select
-                value={groupId}
-                onChange={(value) => {
-                  if (value === "__new__") void newGroup();
-                  else setGroupId(value);
-                }}
-                size="field"
-                options={[
-                  { value: "", label: t("services.ungrouped") },
-                  ...groups.map((group) => ({ value: group.id, label: group.name })),
-                  { value: "__new__", label: t("services.newGroupOption") },
-                ]}
-              />
-            </Labelled>
-            <label className="mt-5 flex cursor-pointer items-start gap-2">
-              <Checkbox checked={autorestart} onChange={setAutorestart} className="mt-0.5" />
-              <span className="min-w-0">
-                <span className="block text-[12px] text-[var(--cf-text)]">{t("services.autorestart")}</span>
-                <span className="block text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
-                  {t("services.autorestartHint")}
-                </span>
-              </span>
-            </label>
-          </div>
-        </Section>
-
-        {/* ── Advanced ──────────────────────────────────────────────────────────── */}
-        {/* Readiness lives here now. "Automatic" is right for nearly everything — it finds the port
-            by itself and recognises a task that finished — and a six-way choice in the middle of
-            the form made every new service look like it needed a decision it did not. The line
-            beside the toggle still says what is set, so nothing in here is hidden, only folded. */}
-        <div>
-          <button
-            onClick={() => setAdvanced((open) => !open)}
-            aria-expanded={advanced}
-            className="flex w-full min-w-0 items-center gap-1 text-left text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        <FormSection title={t("services.section.what")}>
+          <FormRow
+            label={t("services.suggestions")}
+            count={candidates?.length || undefined}
+            hint={candidates?.length ? t("services.suggestionsHint", { folder: scopeName }) : undefined}
           >
-            {advanced ? <ChevronDown size={11} className="shrink-0" /> : <ChevronRight size={11} className="shrink-0" />}
-            <span className="shrink-0">{t("services.section.advanced")}</span>
-            {!advanced && (
-              <span className="ml-2 min-w-0 truncate text-[10.5px] font-normal normal-case tracking-normal opacity-80">
-                {advancedSummary}
-              </span>
-            )}
-          </button>
-          {advanced && (
-            <div className="mt-3 space-y-4">
-              <Section title={t("services.readyWhen")} hint={t("services.readyWhenHint")}>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {readyOptions.map(({ kind: option, icon: Icon }) => {
-                    const on = readyKind === option;
+            {candidates === null ? (
+              <div className="flex h-[30px] items-center gap-1.5 text-[var(--cf-text-muted)]">
+                <LoaderCircle size={12} className="animate-spin" /> {t("services.detecting")}
+              </div>
+            ) : candidates.length === 0 ? (
+              <div className="flex min-h-[30px] items-center text-[var(--cf-text-muted)]">
+                {scanRoot ? t("services.nothingDetected") : t("services.pickFolderFirst")}
+              </div>
+            ) : (
+              // More than it shows at once — it scrolls, and fades at the edge it continues past —
+              // because a repository's root lists everything its folders run, and the one the
+              // person came for may be the 13th.
+              <div
+                ref={proposalsRef}
+                className="max-h-[164px] overflow-y-auto"
+                style={{ maskImage: scrollEdgeMask(proposalEdges, 20), WebkitMaskImage: scrollEdgeMask(proposalEdges, 20) }}
+              >
+                <div className="grid grid-cols-2 gap-1.5">
+                  {candidates.slice(0, 40).map((candidate) => {
+                    const key = `${project ? candidate.cwd : ""}\u0000${candidate.command}`;
+                    const chosen = key === pickedKey;
                     return (
                       <button
-                        key={option}
-                        onClick={() => setReadyKind(option)}
-                        aria-pressed={on}
-                        className={`flex min-w-0 items-start gap-2 rounded-md border px-2 py-1.5 text-left transition-colors ${
-                          on
+                        key={`${candidate.cwd}:${candidate.command}`}
+                        type="button"
+                        onClick={() => pick(candidate)}
+                        aria-pressed={chosen}
+                        title={`${candidate.source}${candidate.detail ? `\n${candidate.detail}` : ""}`}
+                        className={`min-w-0 rounded-md border px-2.5 py-[6px] text-left transition-colors duration-100 ${
+                          chosen
                             ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]"
-                            : "border-[var(--cf-border)] hover:border-[color-mix(in_srgb,var(--cf-accent)_60%,transparent)]"
+                            : "border-[var(--cf-border)] hover:border-[color-mix(in_srgb,var(--cf-accent)_60%,transparent)] hover:bg-[var(--cf-hover)]"
                         }`}
                       >
-                        <Icon size={13} className={`mt-px shrink-0 ${on ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`} />
-                        <span className="min-w-0">
-                          <span className="block truncate text-[11px] font-medium text-[var(--cf-text)]">
-                            {t(`services.ready.${option}` as TranslationKey)}
-                            {option === "auto" && (
-                              <span className="ml-1 text-[10.5px] font-normal uppercase tracking-wide text-[var(--cf-accent)]">
-                                {t("services.recommended")}
-                              </span>
-                            )}
+                        <span className="flex items-center gap-1.5">
+                          <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--cf-text)]">
+                            {candidate.command}
                           </span>
-                          <span className="block text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
-                            {t(`services.ready.${option}Hint` as TranslationKey)}
-                          </span>
+                          {candidate.readyKind === "exit" && (
+                            <span className="shrink-0 rounded bg-[var(--cf-hover)] px-1 text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+                              {t("services.oneShot")}
+                            </span>
+                          )}
+                        </span>
+                        {/* From the subfolder down — the part of the path the subfolder above
+                            does not already say. */}
+                        <span className="mt-0.5 block truncate text-[11px] text-[var(--cf-text-muted)]">
+                          {sourceFrom(scope, candidate.source)}
+                          {candidate.detail ? ` · ${candidate.detail}` : ""}
                         </span>
                       </button>
                     );
                   })}
                 </div>
-                {(readyKind === "port" || readyKind === "log" || readyKind === "http") && (
-                  <div className="mt-2">
-                    <input
-                      value={readyValue}
-                      onChange={(e) => setReadyValue(literal(e.target.value))}
-                      {...MACHINE_TEXT}
-                      placeholder={
-                        readyKind === "port" ? "5432" : readyKind === "http" ? "http://localhost:4001/health" : t("services.ready.logPlaceholder")
-                      }
-                      className={`${INPUT} font-mono`}
-                    />
-                    {readyKind === "log" && (
-                      <p className="mt-1 text-[10.5px] text-[var(--cf-text-muted)]">{t("services.ready.logHelp")}</p>
-                    )}
-                  </div>
-                )}
-                {readyKind === "auto" && learned.length > 0 && (
-                  <p className="mt-2 flex flex-wrap items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)]">
-                    {t("services.learnedPorts")}
-                    {learned.map((port) => (
-                      <PortChip key={port} port={port} dim />
-                    ))}
-                  </p>
-                )}
-              </Section>
-              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-3">
-                <Labelled label={t("services.pinnedPorts")} hint={t("services.pinnedPortsHint")}>
-                  <input
-                    value={pinned}
-                    onChange={(e) => setPinned(e.target.value)}
-                    {...MACHINE_TEXT}
-                    placeholder="5432, 6379"
-                    className={`${INPUT} font-mono`}
-                  />
-                </Labelled>
-                <Labelled label={t("services.env")} hint={t("services.envHint")}>
-                  <textarea
-                    value={envText}
-                    onChange={(e) => setEnvText(literal(e.target.value))}
-                    {...MACHINE_TEXT}
-                    placeholder={"PORT=4001\nNODE_ENV=development"}
-                    rows={3}
-                    className={`${INPUT} resize-y font-mono leading-snug`}
-                  />
-                  {vaultKeys.length > 0 && !dropVault && (
-                    <span className="mt-1 block text-[10.5px] leading-snug text-[var(--cf-danger)]">
-                      {t("services.vaultRefs", { keys: vaultKeys.join(", ") })}{" "}
-                      <button onClick={() => setDropVault(true)} className="underline hover:no-underline">
-                        {t("services.vaultRefsRemove")}
-                      </button>
-                    </span>
-                  )}
-                </Labelled>
               </div>
-              <Labelled label={t("services.envFiles")} hint={t("services.envFilesHint")}>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {envFiles.map((file) => (
-                    <span
-                      key={file}
-                      className="flex items-center gap-1 rounded-full border border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] py-0.5 pl-2 pr-1 font-mono text-[11px] text-[var(--cf-accent)]"
+            )}
+          </FormRow>
+          <FormRow label={t("services.command")} hint={t("services.commandHint")} htmlFor={`${fieldId}-command`}>
+            <input
+              id={`${fieldId}-command`}
+              value={command}
+              onChange={(e) => setCommand(literal(e.target.value))}
+              {...MACHINE_TEXT}
+              placeholder="pnpm dev"
+              autoFocus={!service}
+              className={fieldClass({ className: "w-full font-mono" })}
+            />
+          </FormRow>
+          <FormRow label={t("services.name")} htmlFor={`${fieldId}-name`}>
+            <input
+              id={`${fieldId}-name`}
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                setNameTouched(true);
+              }}
+              {...MACHINE_TEXT}
+              placeholder="api"
+              className={fieldClass({ className: "w-full" })}
+            />
+          </FormRow>
+        </FormSection>
+
+        {/* ── Options ───────────────────────────────────────────────────────────── */}
+        {/* How it lives among the others: the group it starts with, what it waits for, what
+            happens when it falls over. */}
+        <FormSection title={t("services.section.options")}>
+          <FormRow label={t("services.group")}>
+            <Select
+              value={groupId}
+              onChange={(value) => {
+                if (value === "__new__") void newGroup();
+                else setGroupId(value);
+              }}
+              size="field"
+              ariaLabel={t("services.group")}
+              options={[
+                { value: "", label: t("services.ungrouped") },
+                ...groups.map((group) => ({ value: group.id, label: group.name })),
+                { value: "__new__", label: t("services.newGroupOption") },
+              ]}
+            />
+          </FormRow>
+          {/* Only once there is something to wait for. On the first service of a workspace the
+              row could only say that it had nothing to offer. */}
+          {others.length > 0 && (
+            <FormRow label={t("services.dependsOn")} hint={t("services.dependsOnHint")}>
+              <div className="flex flex-wrap gap-1.5 py-1">
+                {others.map((candidate) => {
+                  const on = deps.includes(candidate.id);
+                  const group = groups.find((g) => g.id === candidate.group_id);
+                  return (
+                    <button
+                      key={candidate.id}
+                      type="button"
+                      onClick={() =>
+                        setDeps((prev) => (on ? prev.filter((id) => id !== candidate.id) : [...prev, candidate.id]))
+                      }
+                      aria-pressed={on}
+                      className={`flex h-[22px] items-center gap-1.5 rounded-full border pl-1.5 pr-2 text-[11px] transition-colors duration-100 ${
+                        on
+                          ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                          : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-text)]"
+                      }`}
                     >
-                      {file}
-                      <button
-                        onClick={() => {
-                          setEnvFilesTouched(true);
-                          setEnvFiles((current) => current.filter((other) => other !== file));
-                        }}
-                        title={t("services.envFileRemove", { file })}
-                        aria-label={t("services.envFileRemove", { file })}
-                        className="rounded-full p-0.5 hover:bg-[var(--cf-hover)]"
-                      >
-                        <X size={10} />
-                      </button>
-                    </span>
-                  ))}
-                  {availableEnvFiles
-                    .filter((file) => !envFiles.includes(file))
-                    .map((file) => (
-                      <button
-                        key={file}
-                        onClick={() => addEnvFile(file)}
-                        className="rounded-full border border-dashed border-[var(--cf-border)] px-2 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-                      >
-                        + {file}
-                      </button>
-                    ))}
-                  <input
-                    value={envFileDraft}
-                    onChange={(e) => setEnvFileDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key !== "Enter" || !envFileDraft.trim()) return;
-                      e.preventDefault();
-                      addEnvFile(envFileDraft);
-                      setEnvFileDraft("");
-                    }}
-                    onBlur={() => {
-                      if (!envFileDraft.trim()) return;
-                      addEnvFile(envFileDraft);
-                      setEnvFileDraft("");
-                    }}
-                    {...MACHINE_TEXT}
-                    placeholder={t("services.envFilesAdd")}
-                    className="min-w-[120px] flex-1 bg-transparent py-0.5 font-mono text-[11px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
-                  />
-                </div>
-              </Labelled>
-            </div>
+                      <StatusGlyph status={runtime[candidate.id]?.status ?? "stopped"} size={6} />
+                      {candidate.name}
+                      {group && <span className="opacity-60">· {group.name}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </FormRow>
           )}
-        </div>
+          <FormRow label="">
+            <label className="flex min-h-[30px] w-fit cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text)]">
+              <Checkbox checked={autorestart} onChange={setAutorestart} />
+              <HintedText hint={t("services.autorestartHint")}>{t("services.autorestart")}</HintedText>
+            </label>
+          </FormRow>
+        </FormSection>
+
+        {/* ── Advanced ──────────────────────────────────────────────────────────── */}
+        {/* Readiness lives here. "Automatic" is right for nearly everything — it finds the port by
+            itself and recognises a task that finished — and a six-way choice in the middle of the
+            form made every new service look like it needed a decision it did not. Folded, the
+            heading still says what is set, so nothing in here is hidden, only folded. */}
+        <FormSection
+          title={t("services.section.advanced")}
+          folded={!advanced}
+          onToggle={() => setAdvanced((open) => !open)}
+          aside={advanced ? undefined : advancedSummary}
+        >
+          <FormRow label={t("services.readyWhen")} hint={t("services.readyWhenHint")}>
+            <Select
+              value={readyKind}
+              onChange={(value) => setReadyKind(value as ReadyKind)}
+              size="field"
+              ariaLabel={t("services.readyWhen")}
+              options={readyOptions.map(({ kind: option, icon }) => ({
+                value: option,
+                icon,
+                label:
+                  option === "auto"
+                    ? `${t("services.ready.auto")} (${t("services.recommended")})`
+                    : t(`services.ready.${option}` as TranslationKey),
+              }))}
+            />
+            {(readyKind === "port" || readyKind === "log" || readyKind === "http") && (
+              <input
+                value={readyValue}
+                onChange={(e) => setReadyValue(literal(e.target.value))}
+                {...MACHINE_TEXT}
+                aria-label={t("services.readyWhen")}
+                placeholder={
+                  readyKind === "port" ? "5432" : readyKind === "http" ? "http://localhost:4001/health" : t("services.ready.logPlaceholder")
+                }
+                className={fieldClass({ className: "mt-2 w-full font-mono" })}
+              />
+            )}
+            {/* What the chosen gate does, in its one line — for a pattern, how to write one. */}
+            <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+              {readyKind === "log" ? t("services.ready.logHelp") : t(`services.ready.${readyKind}Hint` as TranslationKey)}
+            </p>
+            {readyKind === "auto" && learned.length > 0 && (
+              <p className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-[var(--cf-text-muted)]">
+                {t("services.learnedPorts")}
+                {learned.map((port) => (
+                  <PortChip key={port} port={port} dim />
+                ))}
+              </p>
+            )}
+          </FormRow>
+          <FormRow label={t("services.pinnedPorts")} hint={t("services.pinnedPortsHint")} htmlFor={`${fieldId}-pinned`}>
+            <input
+              id={`${fieldId}-pinned`}
+              value={pinned}
+              onChange={(e) => setPinned(e.target.value)}
+              {...MACHINE_TEXT}
+              placeholder="5432, 6379"
+              className={fieldClass({ className: "w-full font-mono" })}
+            />
+          </FormRow>
+          <FormRow label={t("services.env")} hint={t("services.envHint")} htmlFor={`${fieldId}-env`}>
+            <textarea
+              id={`${fieldId}-env`}
+              value={envText}
+              onChange={(e) => setEnvText(literal(e.target.value))}
+              {...MACHINE_TEXT}
+              placeholder={"PORT=4001\nNODE_ENV=development"}
+              rows={3}
+              className={AREA}
+            />
+            {vaultKeys.length > 0 && !dropVault && (
+              <p className="mt-1 text-[11px] leading-snug text-[var(--cf-danger)]">
+                {t("services.vaultRefs", { keys: vaultKeys.join(", ") })}{" "}
+                <button type="button" onClick={() => setDropVault(true)} className="underline hover:no-underline">
+                  {t("services.vaultRefsRemove")}
+                </button>
+              </p>
+            )}
+          </FormRow>
+          <FormRow label={t("services.envFiles")} hint={t("services.envFilesHint")} htmlFor={`${fieldId}-envfile`}>
+            {/* A field that holds its files as chips: the chosen ones, the ones the folder has
+                (dashed, one click to add) and a box for any other path. */}
+            <div className="flex min-h-[30px] flex-wrap items-center gap-1 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-1.5 py-1 transition-[border-color,box-shadow] duration-100 focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]">
+              {envFiles.map((file) => (
+                <span
+                  key={file}
+                  className="flex h-5 items-center gap-0.5 rounded-[5px] bg-[var(--cf-accent-soft)] pl-1.5 pr-0.5 font-mono text-[11px] text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent-line)]"
+                >
+                  {file}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEnvFilesTouched(true);
+                      setEnvFiles((current) => current.filter((other) => other !== file));
+                    }}
+                    title={t("services.envFileRemove", { file })}
+                    aria-label={t("services.envFileRemove", { file })}
+                    className="rounded p-0.5 hover:bg-[var(--cf-hover)]"
+                  >
+                    <X size={10} />
+                  </button>
+                </span>
+              ))}
+              {availableEnvFiles
+                .filter((file) => !envFiles.includes(file))
+                .map((file) => (
+                  <button
+                    key={file}
+                    type="button"
+                    onClick={() => addEnvFile(file)}
+                    className="flex h-5 items-center rounded-[5px] border border-dashed border-[var(--cf-border-strong)] px-1.5 font-mono text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                  >
+                    + {file}
+                  </button>
+                ))}
+              <input
+                id={`${fieldId}-envfile`}
+                value={envFileDraft}
+                onChange={(e) => setEnvFileDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter" || !envFileDraft.trim()) return;
+                  e.preventDefault();
+                  addEnvFile(envFileDraft);
+                  setEnvFileDraft("");
+                }}
+                onBlur={() => {
+                  if (!envFileDraft.trim()) return;
+                  addEnvFile(envFileDraft);
+                  setEnvFileDraft("");
+                }}
+                {...MACHINE_TEXT}
+                placeholder={t("services.envFilesAdd")}
+                className="h-5 min-w-[110px] flex-1 bg-transparent px-1 font-mono text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)]"
+              />
+            </div>
+          </FormRow>
+        </FormSection>
       </div>
     </ApiModal>
   );
 }
 
-const INPUT =
-  "w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]";
 
 /**
  * What every machine-read field here wears: a command, a path, a pattern, a variable.
@@ -775,41 +787,148 @@ function literal(text: string): string {
     .replace(/\u2026/g, "...");
 }
 
-function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+/** The env textarea: `fieldClass`'s border, fill, type and focus halo, at the height of its lines. */
+const AREA =
+  "block w-full min-w-0 resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-[6px] font-mono text-[13px] leading-[18px] text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]";
+
+/**
+ * Every section's grid: a column of labels and a column of controls, the same width in all of them
+ * — that is what makes the edges line up down the whole form, section after section.
+ */
+const GRID = "grid grid-cols-[128px_minmax(0,1fr)] items-start gap-x-4 gap-y-3";
+
+/** A label beside a 30px control: its first line sits on the control's middle, a second one wraps
+ *  under it rather than pushing the control away. */
+const LABEL = "py-[7px] text-[12px] leading-4 text-[var(--cf-text-muted)]";
+
+/**
+ * Text whose meaning is in its tooltip, which a dotted underline says is there: the label first,
+ * then what it means — the line that used to sit under the field, in a different length for each.
+ */
+function HintedText({ hint, children }: { hint: string; children: string }) {
   return (
-    <section>
-      <div className="mb-2 flex items-baseline gap-2">
-        <h3 className="text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{title}</h3>
-        {hint && <span className="min-w-0 truncate text-[10.5px] text-[var(--cf-text-muted)] opacity-80">{hint}</span>}
-      </div>
-      {children}
+    <Tooltip side="top" label={children} description={hint}>
+      <span className="cursor-help underline decoration-[color-mix(in_oklab,var(--cf-text-muted)_55%,transparent)] decoration-dotted underline-offset-[3px]">
+        {children}
+      </span>
+    </Tooltip>
+  );
+}
+
+/**
+ * One block of the form: its heading over rows on the shared grid.
+ *
+ * Every section's heading is the same shape — small caps, a hairline above it from the second one
+ * on — and `aside` is the one thing that may sit at its other end. With `onToggle` the heading is
+ * the fold's button too (Advanced), and its aside says what the folded rows hold.
+ */
+function FormSection({
+  title,
+  aside,
+  folded = false,
+  onToggle,
+  children,
+}: {
+  title: string;
+  aside?: string;
+  folded?: boolean;
+  onToggle?: () => void;
+  children: ReactNode;
+}) {
+  const heading = (
+    <>
+      <h3 className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+        {title}
+      </h3>
+      {aside && <span className="ml-auto min-w-0 truncate text-[11px] text-[var(--cf-text-muted)]">{aside}</span>}
+    </>
+  );
+  return (
+    <section className="border-t border-[var(--cf-border)] py-4 first:border-t-0">
+      {onToggle ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={!folded}
+          className="group/fold flex w-full min-w-0 items-center gap-3 text-left"
+        >
+          {heading}
+          <ChevronDown
+            size={12}
+            className={`shrink-0 text-[var(--cf-text-faint)] transition-transform duration-100 group-hover/fold:text-[var(--cf-text)] ${
+              aside ? "" : "ml-auto"
+            } ${folded ? "-rotate-90" : ""}`}
+          />
+        </button>
+      ) : (
+        <div className="flex min-w-0 items-center gap-3">{heading}</div>
+      )}
+      {!folded && <div className={`mt-3 ${GRID}`}>{children}</div>}
     </section>
   );
 }
 
-function Labelled({
+/**
+ * A label and its control, as two cells of the section's grid.
+ *
+ * `hint` is what the label means, in its tooltip. `htmlFor` makes the label a real one, so a click
+ * on it lands in the field. `count` rides after the label (the proposals). `error` is the one line a
+ * row may add under its control, and only while it is true.
+ */
+function FormRow({
   label,
   hint,
+  htmlFor,
+  count,
   error,
   children,
 }: {
   label: string;
   hint?: string;
+  htmlFor?: string;
+  count?: number;
   error?: string;
   children: ReactNode;
 }) {
-  return (
-    <div className="block min-w-0">
-      <span className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">{label}</span>
-      {children}
-      {/* The error replaces the hint rather than stacking under it: they answer the same question. */}
-      {error ? (
-        <span className="mt-1 block text-[10.5px] text-[var(--cf-danger)]">{error}</span>
-      ) : hint ? (
-        <span className="mt-1 block text-[10.5px] leading-snug text-[var(--cf-text-muted)]">{hint}</span>
-      ) : null}
-    </div>
+  const text = (
+    <>
+      {hint && label ? <HintedText hint={hint}>{label}</HintedText> : label}
+      {count !== undefined && <span className="ml-1.5 tabular-nums text-[var(--cf-text-faint)]">{count}</span>}
+    </>
   );
+  return (
+    <>
+      {htmlFor ? (
+        <label htmlFor={htmlFor} className={LABEL}>
+          {text}
+        </label>
+      ) : (
+        <div className={LABEL}>{text}</div>
+      )}
+      <div className="min-w-0">
+        {children}
+        {error && <p className="mt-1 text-[11px] leading-snug text-[var(--cf-danger)]">{error}</p>}
+      </div>
+    </>
+  );
+}
+
+/** A repo-relative path the way the detector writes one: `/` between folders, no `./` in front, no
+ *  separator at the end. `""` is the repository's root. */
+function tidyRelative(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^(\.\/)+/, "")
+    .replace(/\/+$/, "")
+    .replace(/^\.$/, "");
+}
+
+/** `source` from inside `scope`: `frontend/package.json` rather than `PoC/poc-v3/frontend/package.json`
+ *  once the subfolder above it says `PoC/poc-v3`. As it is at the root, and outside the scope. */
+function sourceFrom(scope: string, source: string): string {
+  return scope && source.startsWith(`${scope}/`) ? source.slice(scope.length + 1) : source;
 }
 
 /** The keys of a stored environment whose values are not plain — `{"vault": id}` keyring references. */

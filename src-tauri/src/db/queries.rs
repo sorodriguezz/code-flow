@@ -3648,6 +3648,15 @@ pub fn last_turn_engine(
     .optional()
 }
 
+/// Every repository conversation id `activity_log` holds, across projects — the live set the sweep of
+/// the repository chat's images is measured against. (`session_id` is the app's conversation id
+/// there; the engine's token is `engine_session_id`.)
+pub fn chat_conversation_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT session_id FROM activity_log WHERE session_id IS NOT NULL")?;
+    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?.collect();
+    ids
+}
+
 pub fn delete_chat_conversation(conn: &Connection, project_id: &str, session_id: &str) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM activity_log WHERE project_id = ?1 AND session_id = ?2",

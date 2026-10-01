@@ -244,8 +244,27 @@ impl AiEngine for CodexEngine {
             return false;
         }
         codex_home()
-            .and_then(|home| cached_model_reasons(&home, model))
-            .unwrap_or_else(|| !crate::ai::model_is_known_non_reasoning(model))
+            .and_then(|home| cached_model_levels(&home, model))
+            .map(|levels| !levels.is_empty())
+            .unwrap_or_else(|| crate::ai::model_takes_effort(model))
+    }
+
+    /// Every model Codex lists today takes images, and `codex exec -i` hands them over as images —
+    /// but the catalog says so per model, so a text-only one released later loses the attach
+    /// button by itself. A slug the catalog does not know is given the benefit of the doubt.
+    fn model_reads_images(&self, model: &str) -> bool {
+        codex_home().and_then(|home| cached_model_sees_images(&home, model)).unwrap_or(true)
+    }
+
+    /// The catalog's levels differ by model: `gpt-5.5` lists `low`…`xhigh`, the `gpt-6` family adds
+    /// `max`. Our top step is `max`, which `gpt-5.5` would refuse — so it is sent as `xhigh`, that
+    /// model's own top. A slug the catalog does not know gets the level as asked.
+    fn effort_args_for(&self, effort: &str, model: &str) -> Vec<String> {
+        let level = codex_home()
+            .and_then(|home| cached_model_levels(&home, model))
+            .and_then(|levels| crate::ai::fit_effort(effort, &levels))
+            .unwrap_or_else(|| effort.to_string());
+        self.effort_args(&level)
     }
 }
 
@@ -317,36 +336,46 @@ fn read_models_cache(codex_home: &std::path::Path) -> Option<Vec<String>> {
     (!slugs.is_empty()).then_some(slugs)
 }
 
-/// Whether the catalog says this model takes a reasoning level.
+/// One model's entry in the catalog, as it stands.
 ///
 /// `None` when the question cannot be answered here — no cache file, unparseable, or a slug the
-/// catalog has never heard of — which is different from "no", and the caller treats it that way.
+/// catalog has never heard of — which is different from "no", and the callers treat it that way.
 /// The slug is matched exactly: Codex's own `--model` takes exactly these strings, so anything else
 /// the user typed is a model this catalog cannot speak for.
-fn cached_model_reasons(codex_home: &std::path::Path, model: &str) -> Option<bool> {
-    #[derive(serde::Deserialize)]
-    struct Cache {
-        #[serde(default)]
-        models: Vec<Entry>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Entry {
-        slug: String,
-        #[serde(default)]
-        supported_reasoning_levels: Vec<serde_json::Value>,
-    }
-
+fn catalog_entry(codex_home: &std::path::Path, model: &str) -> Option<serde_json::Value> {
     let wanted = model.trim();
     if wanted.is_empty() {
         return None;
     }
     let raw = std::fs::read_to_string(codex_home.join("models_cache.json")).ok()?;
-    let cache: Cache = serde_json::from_str(&raw).ok()?;
-    cache
-        .models
-        .into_iter()
-        .find(|entry| entry.slug == wanted)
-        .map(|entry| !entry.supported_reasoning_levels.is_empty())
+    let mut cache: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let models = cache.get_mut("models")?.as_array_mut()?;
+    let at = models.iter().position(|entry| entry.get("slug").and_then(serde_json::Value::as_str) == Some(wanted))?;
+    Some(models.swap_remove(at))
+}
+
+/// The reasoning levels the catalog lists for this model, weakest first as the catalog orders them
+/// — empty for a model that takes none, `None` for one the catalog cannot speak for.
+fn cached_model_levels(codex_home: &std::path::Path, model: &str) -> Option<Vec<String>> {
+    let entry = catalog_entry(codex_home, model)?;
+    let levels = entry.get("supported_reasoning_levels").and_then(serde_json::Value::as_array);
+    // Each level is `{"effort": "low", "description": …}`; a bare string is read the same.
+    Some(
+        levels
+            .into_iter()
+            .flatten()
+            .filter_map(|level| level.get("effort").unwrap_or(level).as_str())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Whether the catalog says this model takes images — `input_modalities: ["text", "image"]` on every
+/// model of codex-cli 0.155. `None` for a slug it does not know, or an entry that does not say.
+fn cached_model_sees_images(codex_home: &std::path::Path, model: &str) -> Option<bool> {
+    let entry = catalog_entry(codex_home, model)?;
+    let modalities = entry.get("input_modalities")?.as_array()?;
+    Some(modalities.iter().any(|modality| modality.as_str() == Some("image")))
 }
 
 /// Pulls the rollout id out of `codex exec`'s stderr preamble, which prints one `key: value` per
@@ -729,5 +758,38 @@ mod tests {
         assert_eq!(read_models_cache(&CacheDir::new(None).0), None);
         let nothing_listed = CacheDir::new(Some(r#"{"models":[{"slug":"x","visibility":"hidden"}]}"#));
         assert_eq!(read_models_cache(&nothing_listed.0), None);
+    }
+
+    /// The shape of the real catalog (codex-cli 0.155): levels differ by model, and `gpt-5.5` has no
+    /// `max` — the step this app sends for its top level.
+    #[test]
+    fn each_model_is_asked_at_a_level_it_has() {
+        let dir = CacheDir::new(Some(
+            r#"{"models":[
+                {"slug":"gpt-5.5","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]},
+                {"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]},
+                {"slug":"plain","supported_reasoning_levels":[]}
+            ]}"#,
+        ));
+        let levels = |slug: &str| cached_model_levels(&dir.0, slug);
+        assert_eq!(crate::ai::fit_effort("max", &levels("gpt-5.5").unwrap()).as_deref(), Some("xhigh"));
+        assert_eq!(crate::ai::fit_effort("max", &levels("gpt-6-luna").unwrap()).as_deref(), Some("max"));
+        assert_eq!(levels("plain"), Some(Vec::new()), "listed with none: takes no level");
+        assert_eq!(levels("unknown-slug"), None, "not in the catalog: unanswerable, not \"none\"");
+    }
+
+    #[test]
+    fn the_catalog_says_which_models_take_images() {
+        let dir = CacheDir::new(Some(
+            r#"{"models":[
+                {"slug":"gpt-5.5","input_modalities":["text","image"]},
+                {"slug":"text-only","input_modalities":["text"]},
+                {"slug":"silent"}
+            ]}"#,
+        ));
+        assert_eq!(cached_model_sees_images(&dir.0, "gpt-5.5"), Some(true));
+        assert_eq!(cached_model_sees_images(&dir.0, "text-only"), Some(false));
+        assert_eq!(cached_model_sees_images(&dir.0, "silent"), None);
+        assert_eq!(cached_model_sees_images(&dir.0, "unknown"), None);
     }
 }

@@ -58,8 +58,8 @@ export const serviceLog = (id: string) =>
 
 export const clearServiceLog = (id: string) => invoke<void>("service_clear_log", { id });
 
-/** What a folder can run, best first. `focus` — a subfolder of `path`, relative to it — is read
- *  however deep it sits, and what it holds is listed first. */
+/** What a folder can run, best first. With `focus` — a subfolder of `path`, relative to it — only
+ *  what runs in that subfolder or below it, read however deep it sits; blank is all of `path`. */
 export const detectServices = (path: string, focus?: string) =>
   invoke<ServiceCandidate[]>("service_detect", { path, focus: focus?.trim() ? focus.trim() : null });
 

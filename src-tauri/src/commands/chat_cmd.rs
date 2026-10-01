@@ -695,6 +695,14 @@ pub fn chat_model_effort_support(provider: String, model: String) -> bool {
     ai::engine_for(&provider).model_supports_effort(&model)
 }
 
+/// Whether `(provider, model)` looks at an attached image — what the repository chat asks before it
+/// offers to attach one. Per model, for the same reason as the dial above: Codex's catalog answers
+/// for each of its models.
+#[tauri::command]
+pub fn chat_model_reads_images(provider: String, model: String) -> bool {
+    ai::engine_for(&provider).model_reads_images(&model)
+}
+
 /// Sets the compression style every future answer in this conversation comes back in.
 ///
 /// `""` turns it off; anything else must be one of [`crate::caveman::LEVELS`] and is refused
@@ -1038,12 +1046,7 @@ pub async fn chat_send(
     let message = if attachments.is_empty() {
         message
     } else {
-        let list = attachments
-            .iter()
-            .map(|a| format!("- {} ({})", a.name, a.path))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("{message}\n\nArchivos adjuntos a este mensaje (léelos con tu herramienta de lectura de archivos):\n{list}")
+        format!("{message}{}", ai::attachment_note(&attachments))
     };
 
     /*
@@ -1076,29 +1079,25 @@ pub async fn chat_send(
         None => None,
     };
 
-    // See the module note. Two units of exclusion because there are two things worth protecting:
-    // a working copy from a second engine, and a conversation from a second turn of its own.
+    // See the module note. One unit of exclusion: a conversation from a second turn of its own. A
+    // repository, when there is one, is shared — this turn is only listed in it, and told below who
+    // else is there (see `ai_locks`).
     //
-    // Both refusals carry [`ai_locks::BUSY_MARKER`], which the frontend already knows how to tell
+    // The refusal carries [`ai_locks::BUSY_MARKER`], which the frontend already knows how to tell
     // apart from a genuine engine failure — a refused turn never reached an engine, so filing it as
-    // a red bubble would be a lie about something that did not happen. For a conversation the
-    // marker's name is the thread's own title, which is a small stretch of a constant called
-    // `REPO_BUSY` and is worth it: one marker means one branch on the frontend rather than two, and
-    // this path is a backstop in the first place (the composer's own Send/Stop state holds the
-    // ordinary case; what gets here is a second *window* — the quick-ask box and the main sidebar
-    // pointed at the same thread).
-    let _lease = match project.as_ref() {
-        Some(project) => ai_locks::acquire(&project.local_path)
-            .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?,
-        None => ai_locks::acquire_key(&conversation_id).ok_or_else(|| {
-            // An untitled thread is the common case for the first few seconds of its life — the
-            // title is written from the first message — so the id stands in rather than leaving the
-            // toast naming nothing at all.
-            let name =
-                if conversation.title.trim().is_empty() { &conversation_id } else { &conversation.title };
-            format!("{}{name}", ai_locks::BUSY_MARKER)
-        })?,
-    };
+    // a red bubble would be a lie about something that did not happen. The marker's name is the
+    // thread's own title: one marker means one branch on the frontend rather than two, and this path
+    // is a backstop in the first place (the composer's own Send/Stop state holds the ordinary case;
+    // what gets here is a second *window* — the quick-ask box and the main sidebar pointed at the
+    // same thread).
+    let _lease = ai_locks::acquire_key(&conversation_id).ok_or_else(|| {
+        // An untitled thread is the common case for the first few seconds of its life — the title is
+        // written from the first message — so the id stands in rather than leaving the toast naming
+        // nothing at all.
+        let name = if conversation.title.trim().is_empty() { &conversation_id } else { &conversation.title };
+        format!("{}{name}", ai_locks::BUSY_MARKER)
+    })?;
+    let presence = project.as_ref().map(|project| ai_locks::enter(&project.local_path, &ai::chat_presence_label(&message)));
 
     // Routing, most specific first: what this turn asked for, then what the conversation was
     // opened on, then the global `chat` route. The middle step is what keeps a reopened
@@ -1413,6 +1412,11 @@ pub async fn chat_send(
         engine_message.push_str("\n\n");
         engine_message.push_str(&crate::provider_skills::instruction(&config.provider, pick, local.as_deref()));
     }
+    // Who else is working in this conversation's repository right now, if it has one — the same
+    // invisible note the repository chat sends (see `ai::parallel_work_note`).
+    if let Some(note) = presence.as_ref().and_then(|presence| ai::parallel_work_note(&presence.others())) {
+        engine_message.push_str(&note);
+    }
 
     let started = std::time::Instant::now();
 
@@ -1669,19 +1673,8 @@ pub async fn chat_compact(
     // The same exclusion a turn takes — and it has to be the *same* lease, not merely one of its
     // own, or the two would happily run at once. Compacting while an answer is being written would
     // summarise a conversation one turn shorter than the one on screen and then clear the session
-    // that answer is about to be written back into.
-    //
-    // Which lease that is depends on the conversation, exactly as it does in `chat_send`: a
-    // repo-bound thread is excluded through its working copy, an unbound one through its own id.
-    // Taking the wrong one here would be worse than taking none, because it would look like
-    // mutual exclusion.
-    let project = match conversation.project_id.as_deref() {
-        Some(project_id) => {
-            let conn = db.0.lock().map_err(|e| e.to_string())?;
-            queries::get_project(&conn, project_id).map_err(|e| e.to_string())?
-        }
-        None => None,
-    };
+    // that answer is about to be written back into. That lease is the conversation's own, as in
+    // `chat_send` — a repository is shared and excludes nobody (see `ai_locks`).
     let busy = || {
         let name = if conversation.title.trim().is_empty() {
             &conversation_id
@@ -1690,11 +1683,7 @@ pub async fn chat_compact(
         };
         format!("{}{name}", ai_locks::BUSY_MARKER)
     };
-    let _lease = match project.as_ref() {
-        Some(project) => ai_locks::acquire(&project.local_path)
-            .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?,
-        None => ai_locks::acquire_key(&conversation_id).ok_or_else(busy)?,
-    };
+    let _lease = ai_locks::acquire_key(&conversation_id).ok_or_else(busy)?;
 
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;

@@ -16,6 +16,7 @@ import {
 } from "../../lib/lineSelection";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { InlineContent } from "./DiffInline";
+import { actionButtonClass } from "./actionButton";
 
 /**
  * What the Changes screen hands `DiffView` to make its unified diff *stageable*: which side the file
@@ -372,7 +373,7 @@ function HunkBar({
             onClick={() => onAct("discard")}
             title={t("lines.discardHunk")}
             aria-label={t("lines.discardHunk")}
-            className={iconButtonClass({ size: "xs", className: "hover:text-[var(--cf-danger)]" })}
+            className={actionButtonClass("danger")}
           >
             <Undo2 size={12} />
           </button>

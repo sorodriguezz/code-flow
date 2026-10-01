@@ -10,6 +10,8 @@
  * verdict that's about to be rendered as the answer itself) are pure noise in a live log.
  */
 
+import { translate } from "../state/languageStore";
+
 /** Fields that usually hold the interesting argument of a tool call, in order of preference. */
 const TOOL_ARG_KEYS = ["file_path", "path", "notebook_path", "command", "pattern", "url", "query", "prompt"];
 
@@ -51,6 +53,93 @@ function assistantLines(message: unknown): string[] {
   return lines;
 }
 
+/** How a line about the run itself starts — as opposed to the model's words or a tool it called. */
+const STATUS_MARK = "· ";
+/** How a sub-agent's own step starts, so it does not read as the main agent's. */
+const SUBAGENT_MARK = "↳ ";
+
+/** The statuses a sub-agent ends with — mirrors `track_subagent` in `ai.rs`. */
+const SUBAGENT_DONE = new Set(["completed", "failed", "killed", "stopped", "cancelled", "error"]);
+
+/** One sub-agent still working: what it was asked to do, and the step it reported last. */
+export interface SubagentState {
+  description: string;
+  progress: string | null;
+}
+
+/**
+ * The run's open sub-agents after one raw line of its output — the same object when the line says
+ * nothing about them, so a caller can skip the write.
+ *
+ * Claude Code (2.1.266, captured against a fake API) runs a `Task` sub-agent in the background and
+ * says so in `system` events: `task_started` with its description, `task_progress` per step, and
+ * `task_notification` (or `task_updated` with a terminal `patch.status`) when it is done. Between
+ * them the main stream can be silent for minutes — which is the run working, and what the card has
+ * to say instead of "no output".
+ */
+export function trackSubagents(open: Record<string, SubagentState>, raw: string): Record<string, SubagentState> {
+  if (!raw.includes('"task_')) return open;
+  let event: unknown;
+  try {
+    event = JSON.parse(raw.trim());
+  } catch {
+    return open;
+  }
+  if (!isRecord(event) || event.type !== "system" || typeof event.task_id !== "string") return open;
+  const id = event.task_id;
+  const description = typeof event.description === "string" ? event.description : "";
+  switch (event.subtype) {
+    case "task_started":
+      return { ...open, [id]: { description, progress: null } };
+    case "task_progress":
+      return open[id] ? { ...open, [id]: { ...open[id], progress: description || open[id].progress } } : open;
+    case "task_notification":
+    case "task_updated": {
+      const status = event.subtype === "task_updated" && isRecord(event.patch) ? event.patch.status : event.status;
+      if (typeof status !== "string" || !SUBAGENT_DONE.has(status) || !open[id]) return open;
+      const { [id]: _done, ...rest } = open;
+      return rest;
+    }
+    default:
+      return open;
+  }
+}
+
+/**
+ * The few `system` events worth a line: which model answered, and Claude summarising the
+ * conversation — on `/compact`, or by itself when the window fills mid-turn. A summary can take a
+ * minute, and without these the log said nothing at all for that minute.
+ */
+function systemLine(event: Record<string, unknown>): string | null {
+  if (event.subtype === "init") return typeof event.model === "string" ? `${STATUS_MARK}${event.model}` : null;
+  if (event.subtype === "status" && event.status === "compacting") return `${STATUS_MARK}${translate("chat.compacting")}…`;
+  // A sub-agent starting and finishing; its steps arrive as its own `assistant` lines, marked `↳`.
+  if (event.subtype === "task_started" && typeof event.description === "string") {
+    return `${STATUS_MARK}${translate("ai.subagentStarted", { task: event.description })}`;
+  }
+  if (event.subtype === "task_notification" && typeof event.status === "string" && SUBAGENT_DONE.has(event.status)) {
+    return `${STATUS_MARK}${translate(event.status === "completed" ? "ai.subagentDone" : "ai.subagentFailed")}`;
+  }
+  if (event.subtype === "compact_boundary") {
+    const meta = isRecord(event.compact_metadata) ? event.compact_metadata : {};
+    const before = typeof meta.pre_tokens === "number" ? meta.pre_tokens : 0;
+    const after = typeof meta.post_tokens === "number" ? meta.post_tokens : 0;
+    // Only a real shrink is worth a figure: a short conversation's summary can outweigh it.
+    const percent = before > 0 && after > 0 && after < before ? Math.round((1 - after / before) * 100) : 0;
+    return `${STATUS_MARK}${percent > 0 ? translate("chat.compactedBy", { percent }) : translate("chat.compactedReply")}`;
+  }
+  return null;
+}
+
+/**
+ * Whether `text` only repeats the status line right before it. Claude says `compacting` again every
+ * few seconds while a summary is written; the log says it once. Lines from the model or a tool are
+ * never folded — the same command run twice ran twice.
+ */
+export function repeatsStatus(previous: string | undefined, text: string): boolean {
+  return text.startsWith(STATUS_MARK) && previous === text;
+}
+
 export function formatAgentLogLine(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed.startsWith("{")) return raw;
@@ -68,10 +157,14 @@ export function formatAgentLogLine(raw: string): string | null {
   switch (event.type) {
     case "assistant": {
       const lines = assistantLines(event.message);
-      return lines.length > 0 ? lines.join("\n") : null;
+      if (lines.length === 0) return null;
+      // A sub-agent's own steps carry the `Task` call they belong to; marked so they do not read as
+      // the main agent's.
+      const sub = typeof event.parent_tool_use_id === "string" && event.parent_tool_use_id !== "";
+      return (sub ? lines.map((line) => `${SUBAGENT_MARK}${line}`) : lines).join("\n");
     }
     case "system":
-      return event.subtype === "init" && typeof event.model === "string" ? `· ${event.model}` : null;
+      return systemLine(event);
     // The tool results the model reads back, and the final verdict, which the caller renders as
     // the actual answer a beat later.
     case "user":
