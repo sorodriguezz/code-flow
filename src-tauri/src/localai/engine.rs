@@ -307,11 +307,15 @@ impl Engine {
             .arg(UBATCH.to_string())
             .arg("--cache-reuse")
             .arg(CACHE_REUSE.to_string())
-            // Offload everything the GPU will take. A number rather than a probe: llama.cpp
-            // silently keeps on the CPU whatever does not fit, so "99" means "as much as
-            // possible" on a Mac with Metal and costs nothing on a machine with no GPU at all.
-            .arg("-ngl")
-            .arg("99")
+            // No `-ngl`, as in the `--fim-qwen-*` presets the flags above come from. llama.cpp's
+            // `--fit` (on by default) places as many layers as the GPU's free memory holds and keeps
+            // the rest on the CPU — but only while the layer count is left unset. Given `-ngl 99`,
+            // b10587 gives up the moment a model does not fit ("n_gpu_layers already set by user to
+            // 99, abort") and puts every layer on the GPU anyway, which on a card smaller than the
+            // model fails to allocate or pages VRAM through system memory. Measured on an M4 with
+            // these flags and a 7B: when it fits, both ways load 29/29 layers and answer `/health`
+            // in the same 0.65 s (the fit check takes 0.11 s either way); with 9 GB held back,
+            // `-ngl 99` still forced 29/29, while unset placed 17/29 and kept the rest on the CPU.
             // The bundled web UI is several megabytes of assets served to nobody — this server is
             // reachable only by this process.
             .arg("--no-webui")
@@ -504,6 +508,42 @@ pub(super) fn locate() -> Result<PathBuf, String> {
 /// only then discovering there is nothing to run them with.
 pub fn is_available() -> bool {
     locate().is_ok()
+}
+
+/// What `llama-server --list-devices` prints: every device this build can offload to, with the
+/// memory it reports — on a Mac, the share of unified memory Metal lets it wire, which is the
+/// figure its `--fit` places layers against. Measured on an M4: 51 ms, nothing loaded.
+///
+/// `None` when the engine is missing or has not answered within a few seconds (a GPU driver that
+/// hangs on enumeration must not hang the settings pane with it). Blocking: call it off the async
+/// runtime.
+#[cfg_attr(not(all(target_os = "macos", target_arch = "aarch64")), allow(dead_code))]
+pub fn list_devices() -> Option<String> {
+    use std::io::Read;
+    let binary = locate().ok()?;
+    let mut child = crate::proc::std_command(&binary)
+        .arg("--list-devices")
+        .stdin(std::process::Stdio::null())
+        // A few lines; the logs go to stderr, which is dropped so it can never fill a pipe.
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut listing = String::new();
+    child.stdout.take()?.read_to_string(&mut listing).ok()?;
+    Some(listing)
 }
 
 /// An unused loopback port.

@@ -129,6 +129,33 @@ fn client_for(url: &str) -> &'static reqwest::Client {
     }
 }
 
+/// How long discovery waits for a server on this machine to accept the connection.
+///
+/// A listening server accepts in well under a millisecond, and a port nobody listens on is refused
+/// at once on macOS and Linux — but Windows answers a refused connection by retrying it, and reports
+/// the refusal only about two seconds later (2,035 ms for 127.0.0.1 in a reported measurement). The
+/// settings pane asks every server it might use whether it is there, so on a Windows machine
+/// without LM Studio each look at the pane waited two seconds on an answer that was always "no".
+/// Discovery gives up well before that. Requests that do the work keep [`client_for`]'s limit: a
+/// server busy loading a model is slow to *answer*, never slow to accept.
+const LOOPBACK_DISCOVERY_CONNECT: Duration = Duration::from_millis(600);
+
+/// The client for asking whether a server is there and what it has — [`client_for`] with a short
+/// connect limit on loopback.
+fn discovery_client_for(url: &str) -> &'static reqwest::Client {
+    static LOOPBACK: OnceLock<reqwest::Client> = OnceLock::new();
+    if !is_loopback(url) {
+        return client_for(url);
+    }
+    LOOPBACK.get_or_init(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(LOOPBACK_DISCOVERY_CONNECT)
+            .build()
+            .unwrap_or_default()
+    })
+}
+
 fn with_auth(request: reqwest::RequestBuilder, endpoint: &Endpoint) -> reqwest::RequestBuilder {
     match endpoint.api_key.as_deref().filter(|key| !key.trim().is_empty()) {
         Some(key) => request.bearer_auth(key.trim()),
@@ -208,7 +235,7 @@ async fn error_body(response: reqwest::Response) -> LocalError {
 
 /// Whether a server answers at `endpoint`, and its version when it says one.
 pub async fn ping(endpoint: &Endpoint) -> Result<Option<String>, LocalError> {
-    let client = client_for(&endpoint.base_url);
+    let client = discovery_client_for(&endpoint.base_url);
     match endpoint.kind {
         BackendKind::Ollama => {
             let url = format!("{}/api/version", endpoint.base_url);
@@ -248,7 +275,7 @@ pub struct LocalModel {
 
 /// The models `endpoint` offers. Not for [`BackendKind::Bundled`], whose list is the catalogue.
 pub async fn list_models(endpoint: &Endpoint) -> Result<Vec<LocalModel>, LocalError> {
-    let client = client_for(&endpoint.base_url);
+    let client = discovery_client_for(&endpoint.base_url);
     let url = match endpoint.kind {
         BackendKind::Ollama => format!("{}/api/tags", endpoint.base_url),
         _ => format!("{}/v1/models", endpoint.base_url),
@@ -307,6 +334,9 @@ pub struct ModelDetails {
     pub kv_bytes_per_token: Option<u64>,
     pub params_b: Option<f32>,
     pub size_bytes: Option<u64>,
+    /// The share of the weights a mixture of experts reads per token (`None`: dense, or unknown).
+    /// What its writing speed is estimated from — see [`super::budget::Shape`].
+    pub active_share: Option<f32>,
     /// The model has a thinking phase that can be switched off (Ollama's `thinking` capability).
     pub thinking: bool,
 }
@@ -314,7 +344,7 @@ pub struct ModelDetails {
 /// Reads [`ModelDetails`] for `model`. Never fails: missing metadata is `None` fields, and the
 /// caller falls back to asking the user.
 pub async fn model_details(endpoint: &Endpoint, model: &str) -> ModelDetails {
-    let client = client_for(&endpoint.base_url);
+    let client = discovery_client_for(&endpoint.base_url);
     match endpoint.kind {
         BackendKind::Ollama => {
             let url = format!("{}/api/show", endpoint.base_url);
@@ -430,7 +460,22 @@ pub fn parse_ollama_show(body: &Value) -> ModelDetails {
         .get("capabilities")
         .and_then(Value::as_array)
         .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("thinking")));
-    ModelDetails { max_ctx, ctx_fixed_by_server: false, kv_bytes_per_token, params_b, size_bytes: None, thinking }
+    let active_share = mixture_share(
+        number(find(".expert_count")),
+        number(find(".expert_used_count")),
+        number(find(".expert_shared_count")),
+    );
+    ModelDetails { max_ctx, ctx_fixed_by_server: false, kv_bytes_per_token, params_b, size_bytes: None, active_share, thinking }
+}
+
+/// The share of a mixture of experts read per token, from the GGUF's expert counts: the experts a
+/// token is routed to (and any shared ones) over all of them, plus the part every token uses —
+/// attention, embeddings, the router — which is about 5% of these models (Qwen3-30B-A3B 4.9%,
+/// gpt-oss-20b 5.4%, Mixtral 8x7B 3.5%). `None` for a dense model.
+pub fn mixture_share(experts: Option<u64>, used: Option<u64>, shared: Option<u64>) -> Option<f32> {
+    let experts = experts.filter(|&count| count > 1)?;
+    let used = used.filter(|&count| count > 0)? + shared.unwrap_or(0);
+    Some((used as f32 / experts as f32 + 0.05).min(1.0))
 }
 
 /// "7.6B" → 7.6, "494.03M" → 0.494.
@@ -950,7 +995,23 @@ mod tests {
         assert_eq!(details.max_ctx, Some(32_768));
         assert_eq!(details.kv_bytes_per_token, Some(57_344));
         assert_eq!(details.params_b, Some(7.6));
+        assert_eq!(details.active_share, None, "a dense model reads all of itself");
         assert!(!details.thinking);
+    }
+
+    #[test]
+    fn a_mixture_reports_the_share_it_reads() {
+        // Qwen3-Coder 30B-A3B: 128 experts, 8 per token, 3.3B of 30.5B active (0.108).
+        let body = json!({
+            "model_info": { "qwen3moe.expert_count": 128, "qwen3moe.expert_used_count": 8, "qwen3moe.block_count": 48 }
+        });
+        let share = parse_ollama_show(&body).active_share.expect("a mixture");
+        assert!((share - 0.1125).abs() < 0.001, "{share}");
+        assert!((share - 3.3 / 30.5).abs() < 0.01, "within a point of the published active share");
+        // DeepSeek-style shared experts are read by every token too.
+        assert_eq!(mixture_share(Some(64), Some(6), Some(2)), Some(8.0 / 64.0 + 0.05));
+        assert_eq!(mixture_share(Some(0), Some(0), None), None, "llama-style `expert_count: 0` is dense");
+        assert_eq!(mixture_share(None, Some(8), None), None);
     }
 
     #[test]

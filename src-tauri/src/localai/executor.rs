@@ -214,8 +214,14 @@ impl ExecEngine {
             // budget every task was cut to would silently stop being true.
             .arg("-np")
             .arg("1")
-            .arg("-ngl")
-            .arg("99")
+            // No `-ngl`. llama.cpp's `--fit` (on by default) places as many layers as the GPU's free
+            // memory holds and keeps the rest on the CPU — mixture experts first — but only for
+            // the arguments left unset: given `-ngl 99`, b10587 gives up the moment a model does
+            // not fit ("n_gpu_layers already set by user to 99, abort") and puts every layer on the
+            // GPU anyway, which on a card smaller than the model fails to allocate or pages VRAM
+            // through system memory. Measured on an M4 with the 7B: unset, it still offloads 29/29
+            // layers when they fit (fitting took 0.11 s); with 9 GB held back, 18/29, the rest on
+            // the CPU.
             .arg("--no-webui");
         if launch.no_reasoning {
             command.arg("--reasoning-budget").arg("0");

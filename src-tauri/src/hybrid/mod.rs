@@ -27,13 +27,15 @@
 //! # Hardware
 //!
 //! Nothing here assumes the machine it was written on. The context, and therefore how much each
-//! task may carry, comes from the chosen model and the memory the machine has — see
-//! [`budget::machine`] and [`budget::suggest_ctx`].
+//! task may carry, comes from the chosen model and the memory the machine has; the model the
+//! settings pane points at, from how fast that memory reads — see [`hardware::machine`],
+//! [`budget::suggest_ctx`] and [`budget::recommend`].
 
 pub mod apply;
 pub mod budget;
 pub mod config;
 pub mod execute;
+pub mod hardware;
 pub mod local_llm;
 pub mod plan;
 pub mod prompts;

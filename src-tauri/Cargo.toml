@@ -436,6 +436,11 @@ keyring = { version = "3", features = ["windows-native"] }
 # and compiles nothing new.
 webview2-com = "0.38"
 windows-core = "0.61"
+# DXGI's adapter list, so the local model's settings know a graphics card from an integrated GPU and
+# how much memory it has, whatever the vendor — the bundled engine is the Vulkan build, which runs on
+# AMD and Intel cards as well as NVIDIA's, and `nvidia-smi` sees only the last (see
+# `hybrid::hardware`). The same version webview2-com already pulls in; this adds the DXGI module.
+windows = { version = "0.61", features = ["Win32_Graphics_Dxgi"] }
 # `GetProcessMemoryInfo` with `PROCESS_MEMORY_COUNTERS_EX2`, so the panel behind the status bar bills
 # this app for the same private working set Task Manager shows in its own rows — see
 # `sysload::footprint` for why the resident size sysinfo hands out cannot be reconciled with it. Also

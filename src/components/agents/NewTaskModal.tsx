@@ -285,7 +285,8 @@ export function NewTaskModal({
             ? t("chain.multiRepoUnsupported")
             : message,
       );
-      void useLocalExecStore.getState().refresh();
+      // Refused for a server that went away: ask the servers again, not what they said before.
+      void useLocalExecStore.getState().refresh(true);
       if (!first) return;
     }
     if (first) void chains.select(first);

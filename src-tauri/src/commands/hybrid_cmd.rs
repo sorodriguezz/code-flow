@@ -82,8 +82,8 @@ pub async fn hybrid_triage(db: State<'_, Db>, project_ids: Vec<String>, goal: St
         (config::read(&conn)?, repo)
     };
     let Some(repo) = repo.filter(|path| !path.trim().is_empty()) else { return Ok(Triage::no("not-found")) };
-    let detected = runtime::detect(&settings).await;
-    let resolved = runtime::resolve(&settings, &detected).await;
+    // Asked as the objective is typed: a server's answer from a moment ago is as good as a new one.
+    let resolved = runtime::resolve(&settings, runtime::Freshness::Recent).await;
     if !resolved.reachable || resolved.model.is_none() {
         return Ok(Triage::no("not-ready"));
     }
@@ -114,8 +114,7 @@ pub async fn create_hybrid_task(db: State<'_, Db>, task: NewHybridTask) -> Resul
             .map_err(|_| "chain.projectGone".to_string())?;
         (config::read(&conn)?, path)
     };
-    let detected = runtime::detect(&settings).await;
-    let resolved = runtime::resolve(&settings, &detected).await;
+    let resolved = runtime::resolve(&settings, runtime::Freshness::Now).await;
     let Some(model) = resolved.model.clone().filter(|_| resolved.reachable) else {
         return Err(NOT_READY.to_string());
     };

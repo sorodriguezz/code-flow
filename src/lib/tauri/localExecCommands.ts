@@ -21,7 +21,13 @@ export type LocalOnFail = "review" | "skip";
 /** `local`: the review hands its corrections back to the local model. Matches `config::ReviewMode`. */
 export type HybridReviewMode = "local" | "fix" | "report";
 
-export type LocalGpuKind = "unified" | "discrete" | "unknown";
+/** Where a model's weights would live. Matches `hybrid::hardware::GpuKind`; `integrated` is a GPU
+ *  that reads system RAM, judged like none at all. */
+export type LocalGpuKind = "unified" | "discrete" | "integrated" | "unknown";
+
+/** How an estimated writing speed reads. Matches `hybrid::budget::Pace`: `fast` ≥ 20 tok/s,
+ *  `usable` ≥ 10, `slow` ≥ 5, `crawl` below. */
+export type LocalPace = "fast" | "usable" | "slow" | "crawl" | "unknown";
 
 /** What a local-model `error` is. The sentence is English; the UI says the kind in the reader's
  *  language. Matches `LocalError::code` and `runtime::Resolved::error_code`. */
@@ -50,6 +56,12 @@ export interface LocalExecModelRow {
   tier: LocalAiTier | null;
   /** How it sits on this machine at 16k. Bundled catalogue only. */
   fit: LocalFit | null;
+  /** Tokens a second it would write here at 16k, estimated. Bundled catalogue only. */
+  write_tps: number | null;
+  pace: LocalPace;
+  /** The one the pane points at for this machine: the largest that fits with room and writes at a
+   *  usable pace (`budget::recommend`). */
+  recommended: boolean;
 }
 
 export interface LocalExecDetails {
@@ -71,6 +83,9 @@ export interface LocalExecPullable {
   params: string;
   size_bytes: number;
   fit: LocalFit;
+  write_tps: number | null;
+  pace: LocalPace;
+  recommended: boolean;
 }
 
 export interface LocalExecBudget {
@@ -81,9 +96,13 @@ export interface LocalExecBudget {
 
 export interface LocalExecMachine {
   ram_bytes: number;
+  /** Bytes a second the RAM reads at, measured on this machine. */
+  ram_bandwidth: number | null;
   gpu: LocalGpuKind;
   gpu_bytes: number | null;
   gpu_name: string | null;
+  /** Bytes a second the GPU reads its memory at: Apple's figure for the chip, a floor for a card. */
+  gpu_bandwidth: number | null;
 }
 
 export interface LocalExecProbe {
@@ -128,6 +147,9 @@ export interface LocalExecState {
   need_bytes: number | null;
   also_resident_bytes: number;
   fit: LocalFit;
+  /** Tokens a second the chosen model is estimated to write here, at `ctx`. */
+  write_tps: number | null;
+  pace: LocalPace;
   delegate: LocalDelegate;
   delegate_suggested: LocalDelegate;
   delegate_chosen: boolean;
@@ -171,8 +193,16 @@ export const modelKeyFor = (backend: LocalBackend) =>
       ? LOCAL_EXEC_KEYS.modelOllama
       : LOCAL_EXEC_KEYS.modelOpenai;
 
-/** Resolves the stored choices against what is running. A few short network checks. */
-export const localExecState = () => invoke<LocalExecState>("local_exec_state");
+/** The settings a server's answers depend on: writing one asks every server again. */
+export const isDiscoveryKey = (key: string) =>
+  key === LOCAL_EXEC_KEYS.backend || key === LOCAL_EXEC_KEYS.urlOllama || key === LOCAL_EXEC_KEYS.urlOpenai;
+
+/**
+ * Resolves the stored choices against what is running. `fresh` asks the servers again; without it
+ * an answer from the last few seconds stands, so a click that changes nothing about any server
+ * (a window, a model, a checkbox) costs no network at all.
+ */
+export const localExecState = (fresh = true) => invoke<LocalExecState>("local_exec_state", { fresh });
 
 /** One short real request: read and write speed, GPU share, and whether the server cuts prompts. */
 export const localExecProbe = () => invoke<LocalExecProbe>("local_exec_probe");

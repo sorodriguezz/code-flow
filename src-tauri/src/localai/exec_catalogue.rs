@@ -42,6 +42,10 @@ pub struct ExecModelSpec {
     /// Total parameters in billions. Read by the delegation suggestion, which hands the local model
     /// harder work the bigger it is.
     pub params_b: f32,
+    /// Parameters read for each token, in billions: all of them for a dense model, the routed
+    /// experts and the shared layers for a mixture. What the writing speed is estimated from — a
+    /// token costs the bytes it reads, not the bytes that are resident.
+    pub active_params_b: f32,
 }
 
 /// Everything on offer, smallest first — the first row a hesitant user reads is the one that
@@ -64,6 +68,7 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         // 28 layers · 4 KV heads · head_dim 128 (3584 / 28).
         kv_bytes_per_token: 2 * 28 * 4 * 128 * 2,
         params_b: 7.6,
+        active_params_b: 7.6,
     },
     ExecModelSpec {
         spec: ModelSpec {
@@ -82,6 +87,7 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         // 48 layers · 8 KV heads · head_dim 128 (5120 / 40).
         kv_bytes_per_token: 2 * 48 * 8 * 128 * 2,
         params_b: 14.8,
+        active_params_b: 14.8,
     },
     ExecModelSpec {
         spec: ModelSpec {
@@ -104,6 +110,8 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         // 48 layers · 4 KV heads · head_dim 128.
         kv_bytes_per_token: 2 * 48 * 4 * 128 * 2,
         params_b: 30.5,
+        // "30.5B in total and 3.3B activated" — the model card.
+        active_params_b: 3.3,
     },
     ExecModelSpec {
         spec: ModelSpec {
@@ -122,8 +130,16 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         // 64 layers · 8 KV heads · head_dim 128.
         kv_bytes_per_token: 2 * 64 * 8 * 128 * 2,
         params_b: 32.8,
+        active_params_b: 32.8,
     },
 ];
+
+impl ExecModelSpec {
+    /// The share of the weights read per token — see [`crate::hybrid::budget::Shape`].
+    pub fn active_share(&self) -> f64 {
+        f64::from(self.active_params_b / self.params_b).clamp(0.0, 1.0)
+    }
+}
 
 /// What a user who has chosen nothing is offered: the one model on the list that runs on a 16 GB
 /// laptop next to an IDE, a browser and the completion engine.
@@ -216,6 +232,17 @@ mod tests {
             assert!(entry.max_ctx >= 8_192, "{}: context below what a task needs", spec.id);
             assert!(entry.kv_bytes_per_token > 0);
         }
+    }
+
+    #[test]
+    fn active_parameters_are_part_of_the_total() {
+        for entry in EXEC_CATALOGUE {
+            assert!(entry.active_params_b > 0.0 && entry.active_params_b <= entry.params_b, "{}", entry.spec.id);
+        }
+        // Only the mixture reads less than all of itself.
+        let mixture = find("qwen3-coder-30b-a3b-instruct").unwrap();
+        assert!(mixture.active_share() < 0.2);
+        assert_eq!(find("qwen2.5-coder-32b-instruct").unwrap().active_share(), 1.0);
     }
 
     #[test]

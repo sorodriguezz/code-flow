@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { CircleStop, Download, FolderOpen, Gauge, HardDrive, Loader2, X } from "lucide-react";
 import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
@@ -21,8 +21,10 @@ import {
   type LocalBackend,
   type LocalDelegate,
   type LocalExecErrorCode,
+  type LocalExecMachine,
   type LocalExecState,
   type LocalFit,
+  type LocalPace,
 } from "../../lib/tauri/localExecCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -31,8 +33,9 @@ import type { TranslationKey } from "../../lib/i18n/translations";
  * part that makes this pane worth having, what that means on *this* machine.
  *
  * Nothing here assumes a machine. The memory line is the model's own size plus its KV cache at the
- * chosen context, measured against what this machine reports (macOS's GPU share on Apple Silicon, a
- * card's VRAM where `nvidia-smi` answers, RAM otherwise); **Probar** replaces estimates with
+ * chosen context, measured against what this machine reports (the GPU share Metal gives on Apple
+ * Silicon, a card's VRAM, RAM otherwise); the speeds are estimated from how fast that memory reads
+ * — RAM's bandwidth is measured on this machine — and **Probar** replaces estimates with
  * measurements. The same numbers become the budget the planner cuts tasks to.
  */
 
@@ -96,6 +99,87 @@ const FIT_KEY: Record<LocalFit, TranslationKey> = {
   unknown: "localexec.fitUnknown",
 };
 
+/** 6.64 → "6.6", 12.3 → "12": a decimal only where it changes the reading. */
+function tpsLabel(tps: number): string {
+  return tps < 10 ? tps.toFixed(1) : String(Math.round(tps));
+}
+
+/** Bytes a second → "45 GB/s". */
+function bandwidthLabel(bytesPerSecond: number): string {
+  return `${Math.round(bytesPerSecond / 1e9)} GB/s`;
+}
+
+/** Said in words where it is slow: a colour alone would not say it. */
+const PACE_WORD: Partial<Record<LocalPace, TranslationKey>> = {
+  slow: "localexec.paceSlow",
+  crawl: "localexec.paceCrawl",
+};
+
+const PACE_TONE: Record<LocalPace, "success" | "warning" | "muted"> = {
+  fast: "success",
+  usable: "success",
+  slow: "warning",
+  crawl: "warning",
+  unknown: "muted",
+};
+
+/** What a speed estimate rests on, for its tooltip: the memory the model would live in, and how
+ *  fast it reads. RAM's figure is measured here — the reason a PC with plenty of it can still be
+ *  told a model will crawl. */
+function estimateBasis(machine: LocalExecMachine, t: ReturnType<typeof useT>): string {
+  const ram = machine.ram_bandwidth ? bandwidthLabel(machine.ram_bandwidth) : null;
+  const gpu = machine.gpu_name ?? "GPU";
+  if (machine.gpu === "unified" && machine.gpu_bandwidth) {
+    return t("localexec.estimateUnified", { gpu, speed: bandwidthLabel(machine.gpu_bandwidth) });
+  }
+  if (machine.gpu === "discrete") {
+    return ram ? t("localexec.estimateCard", { gpu, ram }) : t("localexec.estimateCardOnly", { gpu });
+  }
+  return t("localexec.estimateRam", { ram: ram ?? "?" });
+}
+
+/** "≈ 12 tok/s", plus the word for a slow pace. */
+function speedText(tps: number, pace: LocalPace, t: ReturnType<typeof useT>): string {
+  const word = PACE_WORD[pace];
+  return `≈ ${tpsLabel(tps)} tok/s${word ? ` · ${t(word)}` : ""}`;
+}
+
+/**
+ * A catalogue row's verdict on this machine: how it fits and how fast it would write, as one line.
+ * The speed is what the fit alone never said — a model can fit in RAM and still write at two tokens
+ * a second.
+ */
+function RowVerdict({
+  fit,
+  tps,
+  pace,
+  machine,
+}: {
+  fit: LocalFit | null;
+  tps: number | null;
+  pace: LocalPace;
+  machine: LocalExecMachine;
+}) {
+  const t = useT();
+  const fits = fit !== null && fit !== "unknown" ? fit : null;
+  // A model that does not fit has no speed worth quoting.
+  const speed = tps !== null && fits !== "does-not-fit" ? speedText(tps, pace, t) : null;
+  if (!fits && !speed) return null;
+  // The worse of the two: a fit that warns, else the pace.
+  const tone =
+    fits && FIT_TONE[fits] === "warning" ? "warning" : speed ? PACE_TONE[pace] : fits ? FIT_TONE[fits] : "muted";
+  const line = (
+    <Status tone={tone}>{[fits && t(ROW_FIT_KEY[fits]), speed].filter(Boolean).join(" · ")}</Status>
+  );
+  return speed ? (
+    <Tooltip label={t("localexec.estimateLabel")} description={estimateBasis(machine, t)}>
+      {line}
+    </Tooltip>
+  ) : (
+    line
+  );
+}
+
 const FIT_BAR: Record<LocalFit, string> = {
   comfortable: "bg-[var(--cf-success)]",
   tight: "bg-[var(--cf-warning)]",
@@ -123,7 +207,10 @@ function roomPhrase(state: LocalExecState, t: ReturnType<typeof useT>): string {
   if (machine.gpu === "discrete" && machine.gpu_bytes) {
     return t("localexec.roomDiscrete", { gpu: formatBytes(machine.gpu_bytes), name: machine.gpu_name ?? "GPU" });
   }
-  return t("localexec.roomRam", { ram: formatBytes(machine.ram_bytes) });
+  // The model lives in RAM here, so how fast it reads is the other half of the answer.
+  return machine.ram_bandwidth
+    ? t("localexec.roomRamSpeed", { ram: formatBytes(machine.ram_bytes), speed: bandwidthLabel(machine.ram_bandwidth) })
+    : t("localexec.roomRam", { ram: formatBytes(machine.ram_bytes) });
 }
 
 function MemoryLine({ state }: { state: LocalExecState }) {
@@ -182,6 +269,7 @@ function ProbeLine({ state }: { state: LocalExecState }) {
   const probe = useLocalExecStore((s) => s.probe);
   const result = state.probe;
   const canProbe = state.reachable && state.model !== null;
+  const paceWord = PACE_WORD[state.pace];
   return (
     <div className="flex flex-col gap-1 pt-[2px]">
       <div className="flex flex-wrap items-center gap-2">
@@ -204,7 +292,15 @@ function ProbeLine({ state }: { state: LocalExecState }) {
               ` · ${t("localexec.probeGpu", { percent: String(Math.round(result.gpu_share * 100)) })}`}
           </span>
         )}
-        {!probing && !result && !probeError && (
+        {!probing && !result && !probeError && state.write_tps !== null && (
+          <Tooltip label={t("localexec.estimateLabel")} description={estimateBasis(state.machine, t)}>
+            <Status tone={PACE_TONE[state.pace]}>
+              {t("localexec.estimate", { tps: tpsLabel(state.write_tps) })}
+              {paceWord && ` · ${t(paceWord)}`}
+            </Status>
+          </Tooltip>
+        )}
+        {!probing && !result && !probeError && state.write_tps === null && (
           <span className="text-[11px] text-[var(--cf-text-muted)]">{t("localexec.probeNone")}</span>
         )}
       </div>
@@ -247,11 +343,14 @@ function OllamaPulls({ state }: { state: LocalExecState }) {
               <div key={row.id} className="border-b border-[var(--cf-border)] px-3 py-2 last:border-b-0">
                 <div className="flex items-center gap-2">
                   <div className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] text-[var(--cf-text)]">
-                      {row.label} <span className="font-mono text-[11px] text-[var(--cf-text-muted)]">{row.tag}</span>
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="min-w-0 truncate text-[13px] text-[var(--cf-text)]">
+                        {row.label} <span className="font-mono text-[11px] text-[var(--cf-text-muted)]">{row.tag}</span>
+                      </span>
+                      {row.recommended && <span className={chipClass("ok")}>{t("localexec.forThisMachine")}</span>}
+                    </div>
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-[var(--cf-text-muted)]">
-                      {row.fit !== "unknown" && <Status tone={FIT_TONE[row.fit]}>{t(ROW_FIT_KEY[row.fit])}</Status>}
+                      <RowVerdict fit={row.fit} tps={row.write_tps} pace={row.pace} machine={state.machine} />
                       <span>{formatBytes(row.size_bytes)}</span>
                     </div>
                   </div>
@@ -394,20 +493,13 @@ function KeyField({ hasKey }: { hasKey: boolean }) {
 
 export function LocalModelSettings() {
   const t = useT();
-  const { state, loading, refreshing, progress, load, set, download, cancelDownload, remove, stopEngine } =
+  const { state, loading, pendingBackend, progress, load, set, download, cancelDownload, remove, stopEngine } =
     useLocalExecStore();
   const ask = useConfirmStore((s) => s.ask);
 
   useEffect(() => {
     void load();
   }, [load]);
-
-  // The bundled catalogue row this machine runs most comfortably: the largest one that fits.
-  const forThisMachine = useMemo(() => {
-    if (state?.backend !== "bundled") return null;
-    const fitting = state.models.filter((m) => m.fit === "comfortable");
-    return fitting.length ? fitting[fitting.length - 1].id : null;
-  }, [state]);
 
   if (loading || !state) {
     return (
@@ -434,8 +526,12 @@ export function LocalModelSettings() {
     }
   })();
 
+  // Only a server switch dims the pane: what is below the switch is still the other server's until
+  // its answer lands. Every other click is drawn at once and re-read underneath.
+  const switching = pendingBackend !== null && pendingBackend !== state.backend;
+
   return (
-    <div className={`flex flex-col transition-opacity ${refreshing ? "opacity-80" : ""}`}>
+    <div className={`flex flex-col transition-opacity ${switching ? "opacity-60" : ""}`}>
       <Row label={t("localexec.server")}>
         <div className="flex flex-col gap-2">
           {/* `self-start`: a column stretches its children, and the track drew an empty strip to the
@@ -443,7 +539,7 @@ export function LocalModelSettings() {
               delegate control below, which sits in a row and never stretched. */}
           <Segmented
             options={backendOptions}
-            value={state.backend}
+            value={pendingBackend ?? state.backend}
             onChange={(value) => void set(LOCAL_EXEC_KEYS.backend, value)}
             layoutId="cf-local-exec-backend"
             size="sm"
@@ -507,13 +603,13 @@ export function LocalModelSettings() {
                   }}
                   active={model.id === state.model && model.installed === true}
                   badge={
-                    model.id === forThisMachine ? (
+                    model.recommended ? (
                       <span className={chipClass("ok")}>{t("localexec.forThisMachine")}</span>
                     ) : undefined
                   }
                   note={
                     model.fit && model.fit !== "unknown" ? (
-                      <Status tone={FIT_TONE[model.fit]}>{t(ROW_FIT_KEY[model.fit])}</Status>
+                      <RowVerdict fit={model.fit} tps={model.write_tps} pace={model.pace} machine={state.machine} />
                     ) : undefined
                   }
                   progress={progress[model.id]}

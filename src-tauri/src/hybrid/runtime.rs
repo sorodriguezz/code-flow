@@ -2,12 +2,137 @@
 //! the settings pane, **Probar** and the executor all share, so the three can never disagree about
 //! which model a task will reach.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::budget::{self, Budget, Delegate, Fit, Machine};
 use super::config::{self, Settings};
-use super::local_llm::{self, BackendKind, Endpoint, LocalModel, ModelDetails};
+use super::hardware;
+use super::local_llm::{self, BackendKind, Endpoint, LocalError, LocalModel, ModelDetails};
 use crate::localai::{catalogue, engine, exec_catalogue, executor, models};
+
+/// How old a server's answer may be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Freshness {
+    /// Ask now: the pane opening, a server or URL just chosen, a run about to start.
+    Now,
+    /// An answer from the last few seconds will do — everything else the pane re-resolves after (a
+    /// window, a model, a checkbox) changes nothing about what a server is running.
+    Recent,
+}
+
+/// A server's answer, kept for a moment.
+///
+/// The settings pane re-resolves after every click, and the new-task dialog every time the objective
+/// settles; neither changes what any server runs. Asking again each time made every click wait on
+/// two pings, a listing and `/api/show` — and on Windows, on two seconds for each port nobody
+/// listens on (see `local_llm::LOOPBACK_DISCOVERY_CONNECT`).
+struct Remembered<T> {
+    at: Instant,
+    value: T,
+}
+
+type Memo<T> = Mutex<HashMap<String, Remembered<T>>>;
+
+/// How long an answer stands. A server's silence stands for less: someone who has just started
+/// Ollama should not wait half a minute for the pane to notice.
+const ANSWER_FOR: Duration = Duration::from_secs(30);
+const SILENCE_FOR: Duration = Duration::from_secs(5);
+
+fn pings() -> &'static Memo<Result<Option<String>, LocalError>> {
+    static MEMO: OnceLock<Memo<Result<Option<String>, LocalError>>> = OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+fn listings() -> &'static Memo<Result<Vec<LocalModel>, LocalError>> {
+    static MEMO: OnceLock<Memo<Result<Vec<LocalModel>, LocalError>>> = OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+fn descriptions() -> &'static Memo<ModelDetails> {
+    static MEMO: OnceLock<Memo<ModelDetails>> = OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+fn recall<T: Clone>(memo: &Memo<T>, key: &str, lasts: impl Fn(&T) -> Duration) -> Option<T> {
+    let memo = memo.lock().ok()?;
+    let known = memo.get(key)?;
+    (known.at.elapsed() < lasts(&known.value)).then(|| known.value.clone())
+}
+
+fn remember<T>(memo: &Memo<T>, key: String, value: T) {
+    if let Ok(mut memo) = memo.lock() {
+        memo.insert(key, Remembered { at: Instant::now(), value });
+    }
+}
+
+fn lasts<T>(answer: &Result<T, LocalError>) -> Duration {
+    if answer.is_ok() {
+        ANSWER_FOR
+    } else {
+        SILENCE_FOR
+    }
+}
+
+/// What a request to `endpoint` is: its kind, its URL, and the key it carries — a different key can
+/// be the difference between a 401 and a listing. The key itself is hashed, never kept.
+fn endpoint_key(endpoint: &Endpoint) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    endpoint.api_key.hash(&mut hasher);
+    format!("{}|{}|{:x}", endpoint.kind.as_str(), endpoint.base_url, hasher.finish())
+}
+
+async fn ping(endpoint: &Endpoint, freshness: Freshness) -> Result<Option<String>, LocalError> {
+    let key = endpoint_key(endpoint);
+    if freshness == Freshness::Recent {
+        if let Some(known) = recall(pings(), &key, lasts) {
+            return known;
+        }
+    }
+    let answer = local_llm::ping(endpoint).await;
+    remember(pings(), key, answer.clone());
+    answer
+}
+
+async fn list_models(endpoint: &Endpoint, freshness: Freshness) -> Result<Vec<LocalModel>, LocalError> {
+    let key = endpoint_key(endpoint);
+    if freshness == Freshness::Recent {
+        if let Some(known) = recall(listings(), &key, lasts) {
+            return known;
+        }
+    }
+    let answer = local_llm::list_models(endpoint).await;
+    remember(listings(), key, answer.clone());
+    answer
+}
+
+async fn model_details(endpoint: &Endpoint, model: &str, freshness: Freshness) -> ModelDetails {
+    let key = format!("{}|{model}", endpoint_key(endpoint));
+    if freshness == Freshness::Recent {
+        if let Some(known) = recall(descriptions(), &key, |_| ANSWER_FOR) {
+            return known;
+        }
+    }
+    let details = local_llm::model_details(endpoint, model).await;
+    remember(descriptions(), key, details.clone());
+    details
+}
+
+/// Forgets what every server said: after this app changed what one holds (a pull, a delete) or how
+/// it is asked (a key).
+pub fn forget_servers() {
+    if let Ok(mut memo) = pings().lock() {
+        memo.clear();
+    }
+    if let Ok(mut memo) = listings().lock() {
+        memo.clear();
+    }
+    if let Ok(mut memo) = descriptions().lock() {
+        memo.clear();
+    }
+}
 
 /// Which servers answer on their default ports right now.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
@@ -19,10 +144,10 @@ pub struct Detected {
 
 /// Asks both well-known servers at once. Two short timeouts, run concurrently, so a machine with
 /// neither costs one timeout rather than two.
-pub async fn detect(settings: &Settings) -> Detected {
+pub async fn detect(settings: &Settings, freshness: Freshness) -> Detected {
     let ollama = Endpoint::new(BackendKind::Ollama, &settings.url_for(BackendKind::Ollama), None);
     let lmstudio = Endpoint::new(BackendKind::Openai, &settings.url_for(BackendKind::Openai), config::api_key());
-    let (ollama, lmstudio) = tokio::join!(local_llm::ping(&ollama), local_llm::ping(&lmstudio));
+    let (ollama, lmstudio) = tokio::join!(ping(&ollama, freshness), ping(&lmstudio, freshness));
     Detected {
         ollama: ollama.is_ok(),
         ollama_version: ollama.ok().flatten(),
@@ -67,6 +192,9 @@ pub fn pick_model(chosen: Option<&str>, available: &[LocalModel]) -> Option<Stri
 pub struct Resolved {
     pub kind: BackendKind,
     pub url: String,
+    /// Which servers answer on their own: asked when no server was chosen (it decides which), and
+    /// when the chosen one is silent (to say whether another one is there). Empty otherwise.
+    pub detected: Detected,
     pub reachable: bool,
     pub server_version: Option<String>,
     /// English, for logs and tooltips.
@@ -84,16 +212,20 @@ pub struct Resolved {
     pub need_bytes: Option<u64>,
     pub also_resident: u64,
     pub fit: Fit,
+    /// Tokens a second the model is estimated to write here, at `ctx`.
+    pub write_tps: Option<f64>,
     pub delegate: Delegate,
     pub delegate_suggested: Delegate,
 }
 
 /// Resolves `settings` against what is actually running. Network calls are short and bounded; a
 /// server that does not answer is a field (`reachable`, `error`), never an `Err`.
-pub async fn resolve(settings: &Settings, detected: &Detected) -> Resolved {
-    let kind = pick_backend(settings, detected);
+pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
+    let mut detected =
+        if settings.backend.is_none() { detect(settings, freshness).await } else { Detected::default() };
+    let kind = pick_backend(settings, &detected);
     let url = settings.url_for(kind);
-    let machine = budget::machine();
+    let machine = hardware::machine().await;
     let also_resident = completion_engine_bytes();
 
     let (reachable, server_version, error, available, model, details) = match kind {
@@ -127,6 +259,7 @@ pub async fn resolve(settings: &Settings, detected: &Detected) -> Resolved {
                     kv_bytes_per_token: Some(e.kv_bytes_per_token),
                     params_b: Some(e.params_b),
                     size_bytes: Some(e.spec.size_bytes),
+                    active_share: Some(e.active_share() as f32),
                     thinking: false,
                 })
                 .unwrap_or_default();
@@ -134,7 +267,7 @@ pub async fn resolve(settings: &Settings, detected: &Detected) -> Resolved {
         }
         BackendKind::Ollama | BackendKind::Openai => {
             let endpoint = Endpoint::new(kind, &url, if kind == BackendKind::Openai { config::api_key() } else { None });
-            match local_llm::ping(&endpoint).await {
+            match ping(&endpoint, freshness).await {
                 Err(failure) => (
                     false,
                     None,
@@ -144,7 +277,7 @@ pub async fn resolve(settings: &Settings, detected: &Detected) -> Resolved {
                     ModelDetails::default(),
                 ),
                 Ok(version) => {
-                    let (available, list_error) = match local_llm::list_models(&endpoint).await {
+                    let (available, list_error) = match list_models(&endpoint, freshness).await {
                         Ok(list) => (list, None),
                         Err(failure) => (Vec::new(), Some((failure.code(), failure.sentence()))),
                     };
@@ -157,7 +290,7 @@ pub async fn resolve(settings: &Settings, detected: &Detected) -> Resolved {
                         }
                     });
                     let mut details = match &model {
-                        Some(model) => local_llm::model_details(&endpoint, model).await,
+                        Some(model) => model_details(&endpoint, model, freshness).await,
                         None => ModelDetails::default(),
                     };
                     if details.size_bytes.is_none() {
@@ -198,6 +331,19 @@ pub async fn resolve(settings: &Settings, detected: &Detected) -> Resolved {
         _ => None,
     };
     let fit = need_bytes.map_or(Fit::Unknown, |need| budget::fit(need, also_resident, &machine));
+    // A server that lists no cache shape still has a size: the estimate then leaves the cache out.
+    // A model that does not fit at all has no speed worth quoting.
+    let write_tps = details.size_bytes.filter(|_| fit != Fit::DoesNotFit).and_then(|bytes| {
+        let shape = budget::Shape {
+            bytes,
+            kv_bytes_per_token: details.kv_bytes_per_token.unwrap_or(0),
+            active_share: f64::from(details.active_share.unwrap_or(1.0)),
+        };
+        budget::write_speed(&shape, ctx, also_resident, &machine)
+    });
+    if settings.backend.is_some() && kind != BackendKind::Bundled && !reachable {
+        detected = detect(settings, Freshness::Recent).await;
+    }
     let delegate_suggested = budget::suggest_delegate(details.params_b);
     let (error_code, error) = match error {
         Some((code, sentence)) => (Some(code), Some(sentence)),
@@ -206,6 +352,7 @@ pub async fn resolve(settings: &Settings, detected: &Detected) -> Resolved {
     Resolved {
         kind,
         url,
+        detected,
         reachable,
         server_version,
         error,
@@ -219,6 +366,7 @@ pub async fn resolve(settings: &Settings, detected: &Detected) -> Resolved {
         need_bytes,
         also_resident,
         fit,
+        write_tps,
         delegate: settings.delegate.unwrap_or(delegate_suggested),
         delegate_suggested,
         details,
