@@ -495,6 +495,8 @@ mod tests {
         Some(bytes)
     }
 
+    /// Only a Unix index records a mode worth asserting on; its one caller is gated the same way.
+    #[cfg(unix)]
     fn index_mode(dir: &Path, rel: &str) -> u32 {
         let repo = Repository::open(dir).unwrap();
         let index = repo.index().unwrap();

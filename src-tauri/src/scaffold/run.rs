@@ -340,6 +340,93 @@ mod tests {
         assert_eq!(scripts(), before, "the script file is removed when the session ends");
     }
 
+    /// The run is over when the script's shell exits — even when a step left a process behind that
+    /// is still attached to the terminal. That is the Angular Native case: the generator printed
+    /// "Done", PowerShell exited, and the dialog kept offering "Stop" because ConPTY's output pipe
+    /// stays open for as long as any process holds the console (see `terminal::watch_exit`). The
+    /// exit code and the last line printed before it must both still arrive.
+    #[test]
+    fn the_exit_is_reported_even_when_the_script_leaves_a_process_behind() {
+        use std::sync::mpsc;
+        use tauri::{Listener, Manager};
+
+        let app = tauri::test::mock_app();
+        app.manage(TerminalRegistry::default());
+        let registry = app.state::<TerminalRegistry>();
+        let (tx, rx) = mpsc::channel::<serde_json::Value>();
+        app.listen_any("terminal:exit", move |event| {
+            if let Ok(payload) = serde_json::from_str(event.payload()) {
+                let _ = tx.send(payload);
+            }
+        });
+        let printed = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = printed.clone();
+        app.listen_any("terminal:output", move |event| {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                if let Some(data) = payload["data"].as_str() {
+                    sink.lock().unwrap().push_str(data);
+                }
+            }
+        });
+
+        let cwd = std::env::temp_dir().join(format!("cf-linger-{}", uuid::Uuid::new_v4()));
+        // A process that keeps the terminal for half a minute, in the same console, and a script
+        // that does not wait for it.
+        let script = if cfg!(windows) {
+            "Start-Process -NoNewWindow -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30'\nWrite-Host 'LAST-LINE'\nexit 5\n"
+        } else {
+            "sleep 30 &\necho LAST-LINE\nexit 5\n"
+        };
+        let started = std::time::Instant::now();
+        let id = run_script(app.handle().clone(), &registry, &cwd.to_string_lossy(), script).unwrap();
+
+        let exit = rx.recv_timeout(std::time::Duration::from_secs(15)).expect("the exit arrives before the orphan ends");
+        assert_eq!(exit["id"], id.as_str());
+        assert_eq!(exit["code"], 5);
+        assert!(started.elapsed() < std::time::Duration::from_secs(15), "took {:?}", started.elapsed());
+        assert!(printed.lock().unwrap().contains("LAST-LINE"), "the last line printed before the exit was sent");
+        assert!(!crate::terminal::is_open(&registry, &id), "the session is struck from the registry");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// A hand-run check against a real generator, for when one is suspected of leaving the dialog
+    /// hanging: the script in `CODEFLOW_SCAFFOLD_SCRIPT` (a file, in the platform's shell — paste what
+    /// `lib/scaffold/script.ts` builds) runs from `CODEFLOW_SCAFFOLD_CWD`, and the test reports how
+    /// long after the shell's exit `terminal:exit` arrived, and with what code. Needs the network and
+    /// minutes, hence ignored:
+    ///
+    /// `CODEFLOW_SCAFFOLD_SCRIPT=... CODEFLOW_SCAFFOLD_CWD=... cargo test --lib a_real_generator -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn a_real_generator_reports_its_exit() {
+        use std::sync::mpsc;
+        use tauri::{Listener, Manager};
+
+        let script = std::fs::read_to_string(std::env::var("CODEFLOW_SCAFFOLD_SCRIPT").expect("CODEFLOW_SCAFFOLD_SCRIPT")).unwrap();
+        let cwd = std::env::var("CODEFLOW_SCAFFOLD_CWD").expect("CODEFLOW_SCAFFOLD_CWD");
+        let app = tauri::test::mock_app();
+        app.manage(TerminalRegistry::default());
+        let registry = app.state::<TerminalRegistry>();
+        let (tx, rx) = mpsc::channel::<serde_json::Value>();
+        app.listen_any("terminal:exit", move |event| {
+            if let Ok(payload) = serde_json::from_str(event.payload()) {
+                let _ = tx.send(payload);
+            }
+        });
+        app.listen_any("terminal:output", |event| {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                if let Some(data) = payload["data"].as_str() {
+                    print!("{data}");
+                }
+            }
+        });
+        let started = std::time::Instant::now();
+        let id = run_script(app.handle().clone(), &registry, &cwd, &script).unwrap();
+        let exit = rx.recv_timeout(std::time::Duration::from_secs(10 * 60)).expect("terminal:exit within 10 minutes");
+        assert_eq!(exit["id"], id.as_str());
+        println!("\n[exit {} after {:?}]", exit["code"], started.elapsed());
+    }
+
     /// "Delete and retry" deletes what the run made and nothing else: the folder it created, or the
     /// contents of the empty one it was given — never a folder no run of this session claimed.
     #[test]

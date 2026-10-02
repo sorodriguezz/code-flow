@@ -43,6 +43,14 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 /// win from coalescing is already banked and all that is left is latency.
 const FLUSH_MAX_BYTES: usize = 32 * 1024;
 
+/// How often a session's own process is asked whether it has exited. See [`watch_exit`].
+const EXIT_POLL: Duration = Duration::from_millis(200);
+
+/// Once the process has exited and its pty has been closed from this side, how long the reader is
+/// given to reach EOF on its own before the session is ended without it. Generous against the
+/// console's final flush; short against a dialog that is waiting to say "Done".
+const EXIT_GRACE: Duration = Duration::from_millis(1500);
+
 /// What the reader has read and the emitter has not yet sent.
 ///
 /// The two are separate threads for one reason: `Read::read` on a pty master blocks with no
@@ -118,7 +126,9 @@ impl Transcript {
 
 struct TerminalSession {
     writer: Box<dyn Write + Send>,
-    master: Box<dyn MasterPty + Send>,
+    /// `None` once the session's own process has exited and [`watch_exit`] has closed the pty from
+    /// this side — the row stays until the emitter has sent the last of the output.
+    master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
     /// `Some` for the agent console's bench and for a phone's session. The repository dock's
     /// terminals and the Remote workspace's `ssh` sessions are not recorded: neither has anywhere to
@@ -406,7 +416,7 @@ pub fn open_pty<R: Runtime>(
             id.clone(),
             TerminalSession {
                 writer,
-                master: pair.master,
+                master: Some(pair.master),
                 child,
                 transcript: transcript.clone(),
                 origin,
@@ -456,6 +466,8 @@ pub fn open_pty<R: Runtime>(
     });
 
     let emitter_id = id.clone();
+    let watcher_app = app.clone();
+    let watcher_outbox = Arc::clone(&outbox);
     let emitter_app = app;
     std::thread::spawn(move || {
         let (lock, ready) = &*outbox;
@@ -545,7 +557,63 @@ pub fn open_pty<R: Runtime>(
         );
     });
 
+    let watcher_id = id.clone();
+    std::thread::spawn(move || watch_exit(watcher_app, &watcher_id, &watcher_outbox));
+
     Ok(id)
+}
+
+/// Ends a session when **its own process** exits — not when the pty's output happens to run dry.
+///
+/// The reader thread learns that a session is over by reading EOF, and on every platform EOF means
+/// "nobody holds the other end any more", which is not the same as "the program you started has
+/// finished". The two coincide for a shell that exits with nothing left running, and part company
+/// for anything that leaves a process behind: a generator's telemetry helper, a language server a
+/// tool started and forgot, a daemon spawned without letting go of the terminal. On Windows the
+/// gap is total — ConPTY keeps its output pipe open for as long as *any* process is attached to the
+/// console — so one orphan was enough for `terminal:exit` never to come: the project initializer
+/// printed its green "Done", PowerShell exited, and the dialog went on offering "Stop" to a run
+/// that had finished. Every terminal emulator closes its tab when the shell exits, whatever else is
+/// still running; this is that rule.
+///
+/// When the process has exited, the pty master is dropped. On Windows that is `ClosePseudoConsole`,
+/// which flushes what the console still holds and then closes the pipe: the reader reaches EOF and
+/// the emitter's ordinary ending runs — transcript, registry, exit code, `terminal:exit` — with
+/// nothing printed on the way out lost. On Unix dropping the master only closes this side's copy of
+/// it, and a lingering holder of the slave keeps the reader blocked; after [`EXIT_GRACE`] the
+/// outbox is closed from here instead, the emitter finishes the same way, and the reader thread is
+/// left to end when the holder does. Output the orphan prints after that goes nowhere, which is
+/// what ending a session means.
+///
+/// Polled rather than waited on: the only handle to the child is the one in the registry, with no
+/// waitable clone to be had from it, and a `waitpid(WNOHANG)` every 200ms per live session costs
+/// nothing anyone can measure. The loop ends by itself once the session leaves the registry by any
+/// other route — closed from this side, or the reader's own EOF.
+fn watch_exit<R: Runtime>(app: AppHandle<R>, id: &str, outbox: &(Mutex<Outbox>, Condvar)) {
+    let master = loop {
+        std::thread::sleep(EXIT_POLL);
+        let Some(registry) = app.try_state::<TerminalRegistry>() else { return };
+        let Ok(mut sessions) = registry.0.lock() else { return };
+        let Some(session) = sessions.get_mut(id) else { return };
+        match session.child.try_wait() {
+            Ok(Some(_)) => break session.master.take(),
+            // Still running, or not answerable right now: the registry decides when to stop asking.
+            Ok(None) | Err(_) => continue,
+        }
+    };
+    // Outside the registry lock: `ClosePseudoConsole` waits for the console's own pump to drain,
+    // and every other terminal on the machine would wait with it.
+    drop(master);
+    let (lock, ready) = outbox;
+    let deadline = Instant::now() + EXIT_GRACE;
+    while Instant::now() < deadline {
+        if lock_outbox(lock).closed {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    lock_outbox(lock).closed = true;
+    ready.notify_one();
 }
 
 /// The exit code of a child whose pty has just closed.
@@ -604,8 +672,9 @@ pub fn write_terminal(registry: &TerminalRegistry, id: &str, data: &str) -> Resu
 pub fn resize_terminal(registry: &TerminalRegistry, id: &str, cols: u16, rows: u16) -> Result<(), String> {
     let sessions = registry.0.lock().map_err(|e| e.to_string())?;
     let session = sessions.get(id).ok_or("no such terminal session")?;
-    session
-        .master
+    // A session whose process has exited has no pty to resize; nothing is waiting to be drawn.
+    let Some(master) = session.master.as_ref() else { return Ok(()) };
+    master
         .resize(PtySize {
             rows,
             cols,
@@ -716,7 +785,7 @@ pub fn foreground_process(registry: &TerminalRegistry, id: &str) -> Option<Strin
         let session = sessions.get(id)?;
         let shell = session.child.process_id()?;
         #[cfg(unix)]
-        let foreground = session.master.process_group_leader().map(|pid| pid as u32);
+        let foreground = session.master.as_ref().and_then(|master| master.process_group_leader()).map(|pid| pid as u32);
         #[cfg(not(unix))]
         let foreground: Option<u32> = None;
         (shell, foreground)

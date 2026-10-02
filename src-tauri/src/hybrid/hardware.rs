@@ -40,6 +40,9 @@ const GB: u64 = 1_000_000_000;
 #[serde(rename_all = "kebab-case")]
 pub enum GpuKind {
     /// Apple Silicon: one pool shared by CPU and GPU, of which macOS lets the GPU wire a share.
+    /// Only an Apple Silicon build ever constructs it; the enum is the same wire shape everywhere,
+    /// so the variant stays in the other builds rather than being configured out of them.
+    #[cfg_attr(not(all(target_os = "macos", target_arch = "aarch64")), allow(dead_code))]
     Unified,
     /// A graphics card with memory of its own.
     Discrete,

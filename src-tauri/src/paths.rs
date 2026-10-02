@@ -538,6 +538,10 @@ pub fn remote_tls_dir() -> PathBuf {
 /// which is the definition of regenerable. It moved out of the state root when the roots split, and
 /// lost its leading dot on the way — inside a directory that exists only for caches there is
 /// nothing to hide it from.
+///
+/// Not on Windows: `shell_env` probes no login shell there and keeps no cache, so its one caller is
+/// configured out and this goes with it.
+#[cfg(not(target_os = "windows"))]
 pub fn shell_path_cache() -> PathBuf {
     cache_dir().join("shell-path")
 }
@@ -847,9 +851,10 @@ mod tests {
         ] {
             assert!(p.starts_with(&state), "{} is not under the state root", p.display());
         }
-        for p in [shell_path_cache(), pr_link_review_dir("github-a-b-1")] {
-            assert!(p.starts_with(&cache), "{} is not under the cache root", p.display());
-        }
+        #[cfg(not(target_os = "windows"))]
+        assert!(shell_path_cache().starts_with(&cache), "the shell PATH cache is not under the cache root");
+        let reviews = pr_link_review_dir("github-a-b-1");
+        assert!(reviews.starts_with(&cache), "{} is not under the cache root", reviews.display());
         for p in [clone_root(), backups_dir()] {
             assert!(p.starts_with(&user), "{} is not under the user root", p.display());
         }

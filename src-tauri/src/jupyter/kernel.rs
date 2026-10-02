@@ -29,7 +29,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use zeromq::{Socket, SocketRecv, SocketSend};
 
 use super::connection::{self, ConnectionInfo};
-use super::kernelspec::{InterruptMode, KernelChoice};
+use super::kernelspec::KernelChoice;
+// Read by `interrupt` on Unix, where a signal-mode kernel is interrupted with SIGINT; Windows has
+// no signal mode and only ever sends the `interrupt_request` message. The tests build kernelspecs.
+#[cfg(any(unix, test))]
+use super::kernelspec::InterruptMode;
 use super::wire::{self, Message, Signer};
 
 /// How long a kernel may take from spawn to answering `kernel_info` — a first import of a large
@@ -107,6 +111,9 @@ impl Tail {
 
 /// The process behind a kernel this app started. Absent for a kernel it only connected to.
 struct Process {
+    /// Read by `interrupt` on Unix, where it is the process group SIGINT goes to. Windows interrupts
+    /// by message and never looks, but the spawn records it on every platform all the same.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pid: Option<u32>,
     /// `Some(code)` once it has exited.
     exit: watch::Receiver<Option<Option<i32>>>,

@@ -1,3 +1,9 @@
+// The test harness links the same libgit2 the app does, and link.exe says the same thing about its
+// nine hundred exported `git_*` functions — see `main.rs` for the whole story. Under `test` only:
+// the lint can be controlled solely at the root of a crate that gets linked, which this one is as
+// a test harness and is not as the library, where rustc reports the attribute as unused.
+#![cfg_attr(all(windows, test), allow(linker_messages))]
+
 mod ado;
 mod ai;
 mod applog;

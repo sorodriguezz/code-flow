@@ -203,6 +203,7 @@ mod live {
         };
         let root = super::spring::generate(request, &parent, "demo-live").await.expect("spring zip");
         let mvnw = std::fs::metadata(root.join("mvnw")).expect("wrapper");
+        assert!(mvnw.is_file(), "mvnw is a file");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

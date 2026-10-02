@@ -1208,7 +1208,9 @@ mod tests {
     }
 
     /// The same, end to end on the real file system: the temp folder is a symlink on macOS, which
-    /// is exactly how the two live tests below were failing.
+    /// is exactly how the two live tests below were failing. Unix only: it is about symlinks, and
+    /// without them it would create a folder and assert nothing.
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_folder_is_learned_from_disk() {
         let base = std::env::temp_dir().join(format!("cf-paths-{}", uuid::Uuid::new_v4()));

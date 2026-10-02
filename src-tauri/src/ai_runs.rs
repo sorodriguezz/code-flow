@@ -775,6 +775,7 @@ mod tests {
     }
 
     /// The two tests below share the process-wide list, and one of them signals everything on it.
+    #[cfg(unix)]
     static LIST: Mutex<()> = Mutex::new(());
 
     /// A real process in a group of its own — never a made-up pid: `stop_all` signals the *group*
