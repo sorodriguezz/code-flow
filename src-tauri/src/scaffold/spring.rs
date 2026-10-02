@@ -230,29 +230,31 @@ pub async fn generate(request: SpringRequest, parent: &Path, folder: &str) -> Re
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let parent = parent.to_path_buf();
     let folder = folder.to_string();
-    tokio::task::spawn_blocking(move || unpack(&bytes, &parent, &folder))
+    tokio::task::spawn_blocking(move || unpack(&bytes, &parent, &folder, &folder))
         .await
         .map_err(|e| e.to_string())??;
     Ok(root)
 }
 
-/// Unpacks `bytes` into `parent`, refusing anything that would land outside `parent/folder`.
+/// Unpacks `bytes` — a project under one top-level folder, `archive_root` — as `parent/folder`,
+/// refusing anything that would land outside it.
 ///
 /// `enclosed_name` already rejects absolute paths and `..` — the classic zip-slip — and the prefix
 /// check on top of it holds the archive to the one folder it was asked for, so a service that
-/// changed its layout could not scatter files across the user's projects directory.
-fn unpack(bytes: &[u8], parent: &Path, folder: &str) -> Result<(), String> {
+/// changed its layout could not scatter files across the user's projects directory. The two names
+/// differ where a service names the folder itself: code.quarkus.io's is the Maven artifact id.
+pub(super) fn unpack(bytes: &[u8], parent: &Path, archive_root: &str, folder: &str) -> Result<(), String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
-    let expected = Path::new(folder);
+    let expected = Path::new(archive_root);
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
         let Some(relative) = entry.enclosed_name() else {
             return Err(format!("Refusing an unsafe path in the archive: {}", entry.name()));
         };
-        if !relative.starts_with(expected) {
+        let Ok(inside) = relative.strip_prefix(expected) else {
             return Err(format!("Unexpected path in the archive: {}", relative.display()));
-        }
-        let target = parent.join(&relative);
+        };
+        let target = parent.join(folder).join(inside);
         if entry.is_dir() {
             std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
             continue;
@@ -299,7 +301,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
         std::fs::create_dir_all(&parent).unwrap();
         let bytes = archive(&[("demo/pom.xml", "<project/>", 0o644), ("demo/mvnw", "#!/bin/sh", 0o755)]);
-        unpack(&bytes, &parent, "demo").unwrap();
+        unpack(&bytes, &parent, "demo", "demo").unwrap();
         assert_eq!(std::fs::read_to_string(parent.join("demo/pom.xml")).unwrap(), "<project/>");
         #[cfg(unix)]
         {
@@ -315,7 +317,7 @@ mod tests {
         let parent = std::env::temp_dir().join(format!("cf-spring-out-{}", std::process::id()));
         std::fs::create_dir_all(&parent).unwrap();
         let bytes = archive(&[("other/evil.txt", "x", 0o644)]);
-        assert!(unpack(&bytes, &parent, "demo").is_err());
+        assert!(unpack(&bytes, &parent, "demo", "demo").is_err());
         assert!(!parent.join("other").exists());
         std::fs::remove_dir_all(&parent).unwrap();
     }

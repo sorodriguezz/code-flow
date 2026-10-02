@@ -677,6 +677,7 @@ pub fn run() {
             scaffold::scaffold_versions,
             scaffold::scaffold_spring_metadata,
             scaffold::scaffold_spring_generate,
+            scaffold::scaffold_quarkus_generate,
             scaffold::scaffold_check_dest,
             scaffold::scaffold_write_files,
             scaffold::scaffold_run,

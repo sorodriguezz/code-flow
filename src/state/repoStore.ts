@@ -681,6 +681,83 @@ async function runPush(
   }
 }
 
+/**
+ * What each repository looked like when it was last left, so that coming back to it is instant.
+ *
+ * Switching used to wipe the store and read the next repository from nothing, every time: the graph
+ * went back to skeletons, the projects panel unfolded a placeholder, and only then did the
+ * repository arrive — the old one gone, a gap, the new one late ("se ve raro y feo la transición",
+ * user report, 2026-10-01). One visited this session now comes back as it was left and is re-read
+ * quietly underneath, the way a file-watcher tick updates it in place; only a first visit still
+ * loads from nothing.
+ *
+ * Kept only for a repository whose load had finished — a half-read one would come back as an empty
+ * graph with no skeleton saying it is still on its way — and dropped when re-reading it fails, so a
+ * repository that broke while it was away shows the failure rather than its old self. In memory and
+ * a handful at most, the longest-unvisited going first: a page of history is a few hundred rows.
+ */
+type RepoSnapshot = Pick<
+  RepoState,
+  | "status"
+  | "branches"
+  | "commits"
+  | "commitsHasMore"
+  | "unpushedCommits"
+  | "stashes"
+  | "remotes"
+  | "workingDiff"
+  | "stagedDiff"
+  | "operation"
+  | "operationSequenced"
+  | "operationMessage"
+  | "conflicts"
+>;
+
+const SNAPSHOT_LIMIT = 8;
+const snapshots = new Map<string, RepoSnapshot>();
+
+/** What a repository holds before anything has been read from it. */
+const UNREAD: RepoSnapshot = {
+  status: null,
+  branches: [],
+  commits: [],
+  commitsHasMore: false,
+  unpushedCommits: [],
+  stashes: [],
+  remotes: [],
+  workingDiff: [],
+  stagedDiff: [],
+  operation: null,
+  operationSequenced: false,
+  operationMessage: null,
+  conflicts: [],
+};
+
+function rememberRepo(state: RepoState): void {
+  const path = state.repoPath;
+  if (!path || state.projectLoading || state.commitsLoading || !state.status) return;
+  snapshots.delete(path);
+  snapshots.set(path, {
+    status: state.status,
+    branches: state.branches,
+    commits: state.commits,
+    commitsHasMore: state.commitsHasMore,
+    unpushedCommits: state.unpushedCommits,
+    stashes: state.stashes,
+    remotes: state.remotes,
+    workingDiff: state.workingDiff,
+    stagedDiff: state.stagedDiff,
+    operation: state.operation,
+    operationSequenced: state.operationSequenced,
+    operationMessage: state.operationMessage,
+    conflicts: state.conflicts,
+  });
+  for (const oldest of snapshots.keys()) {
+    if (snapshots.size <= SNAPSHOT_LIMIT) break;
+    snapshots.delete(oldest);
+  }
+}
+
 export const useRepoStore = create<RepoState>((set, get) => ({
   repoPath: null,
   status: null,
@@ -713,32 +790,46 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   projectLoading: false,
 
   setRepoPath: async (path) => {
+    const left = get();
+    // A real switch keeps the repository being left, for coming back to — see `snapshots`. The same
+    // path again (re-reading a repository just initialised) is a reload, and starts from nothing.
+    if (left.repoPath !== path) rememberRepo(left);
+    const kept = path && path !== left.repoPath ? snapshots.get(path) : undefined;
     set({
       repoPath: path,
-      projectLoading: Boolean(path),
-      status: null,
-      branches: [],
-      commits: [],
-      unpushedCommits: [],
-      stashes: [],
-      remotes: [],
+      ...(kept ?? UNREAD),
+      projectLoading: Boolean(path) && !kept,
+      // The repository being left owned these; whatever it still had in flight lands nowhere now.
+      commitsLoading: false,
+      commitsLoadingMore: false,
       selectedCommitId: null,
-      workingDiff: [],
-      stagedDiff: [],
       commitDiff: [],
       commitDiffLoading: false,
       selectedCommitPath: null,
       commitFileDiff: null,
       commitFileDiffLoading: false,
-      operation: null,
-      operationSequenced: false,
-      operationMessage: null,
-      conflicts: [],
     });
     if (path) {
       try {
-        await get().refreshAll();
+        if (kept) {
+          // Already on screen as it was left: re-read underneath, without a skeleton anywhere.
+          await get().refreshAll({ silent: true });
+        } else {
+          // The projects panel's own reads first. It used to wait for all seven, so the slow half —
+          // a page of history, the working tree's diffs — held the tree under the row on a
+          // placeholder long after branches, stashes and remotes had arrived.
+          const panel = Promise.all([
+            get().refreshBranches(),
+            get().refreshStashes(),
+            get().refreshRemotes(),
+            get().refreshMergeState(),
+          ]).finally(() => {
+            if (get().repoPath === path) set({ projectLoading: false });
+          });
+          await Promise.all([panel, get().refreshStatus(), get().refreshCommits(), get().refreshUnpushedCommits()]);
+        }
       } catch (e) {
+        snapshots.delete(path);
         // A listing that throws must not leave the panel showing skeletons forever — the same rule
         // `refreshCommits` states for its own table, which this half of the load was missing.
         //
@@ -802,6 +893,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const { repoPath } = get();
     if (!repoPath) return;
     const branches = await api.listBranches(repoPath);
+    // Every read below checks the same way: an answer for the repository just left lands nowhere.
+    if (get().repoPath !== repoPath) return;
     set({ branches });
   },
 
@@ -818,6 +911,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       // ten thousand commits either.
       const shown = Math.max(get().commits.length, COMMIT_PAGE);
       const page = await api.listCommitsPage(repoPath, true, 0, shown);
+      // `commitsLoading` is the next repository's now (the switch reset it), so it is left alone.
+      if (get().repoPath !== repoPath) return;
       const commits = page.commits;
       const commitsHasMore = page.has_more;
       // One write, not two. `commits` and `commitsLoading` used to land in separate `set()` calls
@@ -826,8 +921,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       set(silent ? { commits, commitsHasMore } : { commits, commitsHasMore, commitsLoading: false });
     } catch (e) {
       // The old `finally` cleared the flag on the failure path too, and it still has to: a listing
-      // that throws must not leave the table showing skeletons forever.
-      if (!silent) set({ commitsLoading: false });
+      // that throws must not leave the table showing skeletons forever — this repository's table.
+      if (!silent && get().repoPath === repoPath) set({ commitsLoading: false });
       throw e;
     }
   },
@@ -844,6 +939,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     set({ commitsLoadingMore: true });
     try {
       const page = await api.listCommitsPage(repoPath, true, commits.length, COMMIT_PAGE);
+      if (get().repoPath !== repoPath) return;
       set((state) => ({
         // Re-read from the store rather than closing over `commits`: a watcher refresh may have
         // replaced the list while this page was in flight, and concatenating onto the stale copy
@@ -864,6 +960,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const { repoPath } = get();
     if (!repoPath) return;
     const unpushedCommits = await api.listUnpushedCommits(repoPath);
+    if (get().repoPath !== repoPath) return;
     set({ unpushedCommits });
   },
 
@@ -871,6 +968,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const { repoPath } = get();
     if (!repoPath) return;
     const stashes = await api.listStashes(repoPath);
+    if (get().repoPath !== repoPath) return;
     set({ stashes });
   },
 
@@ -878,6 +976,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const { repoPath } = get();
     if (!repoPath) return;
     const remotes = await api.listRemotes(repoPath);
+    if (get().repoPath !== repoPath) return;
     set({ remotes });
   },
 

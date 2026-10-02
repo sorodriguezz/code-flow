@@ -64,9 +64,14 @@ const COLUMN_GAP = 10; // matches Tailwind gap-2.5
 /** Where lane 0 sits in from the table's left edge. The graph is the first column now, and a dot
  *  flush against the edge of the pane reads as clipped. */
 const GRAPH_PAD = 10;
-/** The narrowest the graph column gets: its own heading's width. A single-lane history needs about
- *  thirty pixels of lanes, and the heading squeezed into that spilled over the message's. */
-const GRAPH_MIN = 44;
+/** Where the graph's heading starts: over the left edge of lane 0's dot, the column's first ink —
+ *  the way every other heading starts where its column's text does. At the header's own `pl-2` it
+ *  sat six pixels short of the dots, over nothing in particular. */
+const GRAPH_HEADING_INSET = GRAPH_PAD + LANE_WIDTH / 2 - DOT_RADIUS;
+/** The graph heading's width until the header has been measured (see `graphHeadingWidth`): "Graph"
+ *  and "Grafo" in the heading voice — 11px semibold, 0.06em tracking — both come to a little over
+ *  42px in Instrument Sans. */
+const GRAPH_HEADING_FALLBACK = 43;
 /** The rows' right padding (`pr-3`). Part of the fixed width, so the slack stays a subtraction. */
 const ROW_PAD_RIGHT = 12;
 /** One file inside an expanded commit — shorter than a commit row, because it carries one line of
@@ -630,6 +635,33 @@ const CommitTable = memo(function CommitTable() {
   // Null on a detached HEAD, which is the right answer rather than a missing one: no branch is
   // checked out, so no chip should be claiming to be the one you are on.
   const currentBranch = status?.is_detached ? null : (status?.current_branch ?? null);
+  const hasRows = commits.length > 0;
+
+  /**
+   * The graph heading's own width — measured, because it is a word in the UI font and the user's
+   * language, and the graph column's narrowest size is made of it (see `graphWidth`). A fixed 44px
+   * guessed as "the heading's width" came out six pixels short of a heading that starts eight in,
+   * so on a one-lane history "Grafo" ran on into the seam and all but touched "Mensaje" (user
+   * report).
+   *
+   * Read before the first paint, then again whenever the word changes size — the font arriving
+   * after that paint, a change of language. Re-run on `hasRows` because the header only exists once
+   * there are rows: the empty and loading states return before it. A hidden view measures zero, and
+   * that reading is dropped rather than letting the column fold onto its lanes.
+   */
+  const graphHeadingRef = useRef<HTMLSpanElement>(null);
+  const [graphHeadingWidth, setGraphHeadingWidth] = useState(GRAPH_HEADING_FALLBACK);
+  useLayoutEffect(() => {
+    const el = graphHeadingRef.current;
+    if (!el) return;
+    const take = (width: number) => {
+      if (width > 0) setGraphHeadingWidth(Math.ceil(width));
+    };
+    take(el.getBoundingClientRect().width);
+    const observer = new ResizeObserver(([entry]) => take(entry.contentRect.width));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasRows]);
 
   /**
    * The lane graph's column — the *first* column now, and the reason for most of this geometry.
@@ -639,8 +671,18 @@ const CommitTable = memo(function CommitTable() {
    * on" meant carrying a row across the whole table by eye. Put first, lane and message read as one
    * thing, which is how every graph client people already know draws it. It also means the SVG sits
    * at a fixed `left: 0` instead of an offset `calc` that moved whenever a column was dragged.
+   *
+   * As wide as its lanes or as its heading, whichever needs more, and the heading is held to the
+   * lanes' own clearance: the last lane's dot ends ten pixels short of the column's edge (the `+ 6`
+   * past its slot), and the heading ends `COLUMN_GAP` short of it. So "Grafo" stands as far from
+   * "Mensaje" as a commit's dot stands from its summary, and a graph wider than its heading is sized
+   * by its lanes exactly as before. Header and rows both read this one number — the header's cell,
+   * the rows' spacer, the SVG and `messageLeft` — so the columns cannot drift apart.
    */
-  const graphWidth = Math.max(GRAPH_MIN, GRAPH_PAD + layout.laneCount * LANE_WIDTH + 6);
+  const graphWidth = Math.max(
+    GRAPH_PAD + layout.laneCount * LANE_WIDTH + 6,
+    GRAPH_HEADING_INSET + graphHeadingWidth + COLUMN_GAP,
+  );
   /** Every row plus whatever the open one added — the scroll height, and the height the lane graph
    *  has to span so an edge crossing the open row stretches over its files instead of stopping at
    *  them. */
@@ -671,7 +713,6 @@ const CommitTable = memo(function CommitTable() {
    * pane, until the first column drag.
    */
   const scrollRef = useRef<HTMLDivElement>(null);
-  const hasRows = commits.length > 0;
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -834,10 +875,14 @@ const CommitTable = memo(function CommitTable() {
         className="sticky top-0 z-10 flex h-[30px] min-w-full items-center gap-2.5 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] pr-3"
         style={{ width: tableWidth, willChange: "transform", contain: "paint" }}
       >
-        {/* Allowed to run past its column rather than truncate: on a one-lane history the column is
-            narrower than the word, and the gap after it is empty by construction. */}
-        <div style={{ width: graphWidth }} className="shrink-0 pl-2">
-          <span className={`${COLUMN_HEADING} whitespace-nowrap`}>{t("graph.colGraph")}</span>
+        {/* Starts over lane 0's dot, and is never truncated or squeezed (`shrink-0`): the column is
+            sized to hold this word, from this span's own measured width — see `graphHeadingWidth`.
+            A flex cell like the others, so it centres on its own line box and shares their
+            baseline. */}
+        <div style={{ width: graphWidth, paddingLeft: GRAPH_HEADING_INSET }} className="flex shrink-0 items-center">
+          <span ref={graphHeadingRef} className={`${COLUMN_HEADING} shrink-0 whitespace-nowrap`}>
+            {t("graph.colGraph")}
+          </span>
         </div>
         {/* No handle on the column that fills: dragging it would change a base width that the slack
             immediately gives back, so the grip would move and nothing else would. Its width is set by

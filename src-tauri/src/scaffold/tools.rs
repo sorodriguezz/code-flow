@@ -69,6 +69,10 @@ const PROBES: &[Probe] = &[
     Probe { id: "uv", bins: &["uv"], args: &["--version"], marker: Some("uv ") },
     Probe { id: "php", bins: &["php"], args: &["--version"], marker: Some("PHP ") },
     Probe { id: "composer", bins: &["composer"], args: &["--version"], marker: Some("Composer version ") },
+    // `ruby 4.0.7 (2026-09-15 revision 229531a6cf) +PRISM [arm64-darwin27]` — the date would read as a
+    // version without the marker. macOS's own /usr/bin/ruby (2.6) is found too, and is too old for
+    // anything current, which is the range check's to say.
+    Probe { id: "ruby", bins: &["ruby"], args: &["--version"], marker: Some("ruby ") },
     Probe { id: "dotnet", bins: &["dotnet"], args: &["--version"], marker: None },
     Probe { id: "cargo", bins: &["cargo"], args: &["--version"], marker: Some("cargo ") },
     Probe { id: "git", bins: &["git"], args: &["--version"], marker: Some("git version ") },
@@ -78,6 +82,7 @@ const PROBES: &[Probe] = &[
     Probe { id: "winget", bins: &["winget"], args: &["--version"], marker: None },
     Probe { id: "fnm", bins: &["fnm"], args: &["--version"], marker: Some("fnm ") },
     Probe { id: "volta", bins: &["volta"], args: &["--version"], marker: None },
+    Probe { id: "mise", bins: &["mise"], args: &["--version"], marker: None },
     Probe { id: "apt", bins: &["apt-get"], args: &["--version"], marker: Some("apt ") },
     Probe { id: "dnf", bins: &["dnf"], args: &["--version"], marker: None },
     Probe { id: "pacman", bins: &["pacman"], args: &["--version"], marker: Some("Pacman v") },

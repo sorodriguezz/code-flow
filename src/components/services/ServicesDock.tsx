@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, CirclePlay, Pencil, Plus, SplitSquareHorizontal, TerminalSquare, X } from "lucide-react";
+import { CirclePlay, Pencil, Plus, SplitSquareHorizontal, TerminalSquare, X } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { TerminalPane } from "../terminal/TerminalPane";
@@ -279,12 +279,15 @@ export function ServicesDock() {
 
         {showServices && view === "terminal" && terminalActions}
 
+        {/* A ×, not the ⌄ it used to be: right after the shell menu's own ⌄ the two read as the same
+            control twice (user report, 2026-10-01). × is how the assistant's header closes its
+            panel too, and what VS Code's "Hide Panel" draws. */}
         <button
           onClick={hidePanel}
           title={t("terminal.hide")}
           className="ml-1 flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
         >
-          <ChevronDown size={13} />
+          <X size={13} />
         </button>
       </div>
 

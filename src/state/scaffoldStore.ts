@@ -70,7 +70,8 @@ export interface ScaffoldPrefs {
 const PREFS_KEY = "scaffold_prefs";
 
 export function sourceKey(source: VersionSource): string {
-  return source.kind === "runtime" ? `runtime:${source.product}` : `${source.kind}:${source.package}`;
+  if (source.kind === "runtime") return `runtime:${source.product}`;
+  return "package" in source ? `${source.kind}:${source.package}` : source.kind;
 }
 
 interface ScaffoldState {

@@ -3,8 +3,11 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FIRST_TEMPLATE, TEMPLATES, gitSteps, type Options, type PackageManager, type TemplateContext } from "./catalog";
+import { FIRST_TEMPLATE, TEMPLATES, enginesFor, gitSteps, planFor, type Options, type PackageManager, type TemplateContext } from "./catalog";
+import { SCAFFOLD_LOGOS } from "./logos";
 import { buildScript } from "./script";
+import { translations } from "../i18n/translations";
+import { es } from "../i18n/translations.es";
 
 function context(opts: Options, extra: Partial<TemplateContext> = {}): TemplateContext {
   return {
@@ -112,6 +115,77 @@ describe("NestJS", () => {
   });
 });
 
+describe("pnpm's unapproved build scripts", () => {
+  const nest12 = { line: "12", version: "12.0.8", channel: "latest" } as TemplateContext["version"];
+  const opts = { language: "js", platform: "fastify", nestConfig: true, nestCache: true };
+
+  it("keeps every pnpm step from failing over them, then settles them in the project", () => {
+    const plan = planFor(template("nest"), context(opts, { version: nest12, pm: "pnpm" }));
+    const pnpmSteps = plan.steps.filter((step) => step.argv?.[0] === "pnpm");
+    expect(pnpmSteps.map((step) => step.title)).toEqual(["scaffold.step.generate", "scaffold.step.deps"]);
+    for (const step of pnpmSteps) expect(step.env?.pnpm_config_strict_dep_builds).toBe("false");
+    // The generator's own answer survives the merge.
+    expect(pnpmSteps[0].env?.NG_FORCE_TTY).toBe("false");
+    // Last, after everything that installs; optional, since the project is whole without it.
+    const settle = plan.steps[plan.steps.length - 1];
+    expect(settle).toMatchObject({ title: "scaffold.step.builds", cwd: "/tmp/projects/demo", optional: true });
+    expect(settle.argv?.slice(0, 2)).toEqual(["node", "-e"]);
+  });
+
+  it("leaves a plan that runs no pnpm exactly as the template made it", () => {
+    const nest = context(opts, { version: nest12, pm: "npm" });
+    expect(planFor(template("nest"), nest)).toEqual(template("nest").plan(nest));
+    // Picked pnpm, runs on Bun's tools.
+    const hono = context({ runtime: "bun" }, { pm: "pnpm" });
+    expect(planFor(template("hono"), hono)).toEqual(template("hono").plan(hono));
+  });
+
+  /** As the runner runs it, through the sh script, on the file pnpm 11+ writes: only its placeholders
+   *  are decided — a choice already made, by the user or in their global config, is left alone. */
+  it("writes `false` over pnpm's placeholders and nothing else", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pnpm-builds-"));
+    try {
+      const plan = planFor(template("nest"), context(opts, { version: nest12, pm: "pnpm", root: dir }));
+      const script = buildScript("sh", [plan.steps[plan.steps.length - 1]], { skipped: "skipped", done: "done" });
+      const run = () => execFileSync("sh", ["-c", script], { encoding: "utf8" });
+      const file = join(dir, "pnpm-workspace.yaml");
+
+      expect(run()).not.toContain("skipped");
+      expect(readdirSync(dir)).toEqual([]);
+
+      writeFileSync(
+        file,
+        [
+          "packages:",
+          "  - .",
+          "allowBuilds:",
+          "  esbuild: true",
+          "  core-js: set this to true or false",
+          "  '@scope/native': set this to true or false",
+          "  sharp: false",
+          "",
+        ].join("\n"),
+      );
+      const output = run();
+      expect(readFileSync(file, "utf8")).toBe(
+        ["packages:", "  - .", "allowBuilds:", "  esbuild: true", "  core-js: false", "  '@scope/native': false", "  sharp: false", ""].join("\n"),
+      );
+      expect(output).toContain("core-js: false");
+      expect(output).toContain("'@scope/native': false");
+      expect(output).not.toContain("esbuild");
+      // Settled, a second run has nothing to say.
+      expect(run()).not.toContain("allowBuilds");
+
+      // Windows line endings stay Windows line endings.
+      writeFileSync(file, "allowBuilds:\r\n  core-js: set this to true or false\r\n  unrs-resolver: set this to true or false\r\n");
+      run();
+      expect(readFileSync(file, "utf8")).toBe("allowBuilds:\r\n  core-js: false\r\n  unrs-resolver: false\r\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("Fastify", () => {
   it("writes one server file and adds the version picked", () => {
     const plan = template("fastify").plan(
@@ -121,6 +195,198 @@ describe("Fastify", () => {
     expect(server?.content).toContain('import Fastify from "fastify";');
     expect(plan.steps[0].argv).toEqual(["npm", "install", "fastify@^5.6.1"]);
     expect(plan.run).toBe("npm run dev");
+  });
+});
+
+describe("every template", () => {
+  it("has a mark and a description in both languages", () => {
+    for (const each of TEMPLATES) {
+      expect(SCAFFOLD_LOGOS[each.logo], each.id).toBeDefined();
+      expect(translations.en[each.descriptionKey], each.id).toBeTruthy();
+      expect((es as Record<string, string>)[each.descriptionKey], each.id).toBeTruthy();
+    }
+  });
+});
+
+describe("Solid", () => {
+  it("passes the kind, the starter and the language as flags, and drops the starter's lockfile", () => {
+    const plan = template("solid").plan(context({ kind: "solidstart", startTemplate: "with-tailwindcss", language: "ts" }, { pm: "pnpm" }));
+    expect(plan.steps[0].argv).toEqual(["pnpm", "dlx", "create-solid@latest", "demo", "--solidstart", "--v2", "-t", "with-tailwindcss", "--ts"]);
+    expect(plan.steps.map((step) => step.title)).toEqual([
+      "scaffold.step.generate",
+      "scaffold.step.lockfile",
+      "scaffold.step.name",
+      "scaffold.step.install",
+    ]);
+    expect(plan.steps[1].sh).toBe("rm -f pnpm-lock.yaml");
+    const vite = template("solid").plan(context({ kind: "vanilla", viteTemplate: "bare", language: "js" }));
+    expect(vite.steps[0].argv).toEqual(["npx", "--yes", "create-solid@latest", "demo", "--vanilla", "-t", "bare", "--js"]);
+  });
+
+  it("reads its Node requirement where the kind picked says", () => {
+    expect(enginesFor(template("solid"), {})).toEqual({ kind: "npm", package: "vite" });
+    expect(enginesFor(template("solid"), { kind: "solidstart" })).toEqual({ kind: "npm", package: "@solidjs/start" });
+    // A template with a fixed source is handed back as it is.
+    expect(enginesFor(template("nuxt"), {})).toEqual({ kind: "npm", package: "nuxt" });
+  });
+
+  /** As the runner runs it: the folder's name over the starter's own, whatever else is in the file. */
+  it("names the package after the folder", () => {
+    const dir = mkdtempSync(join(tmpdir(), "solid-name-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "example-basic", scripts: { dev: "vite" } }, null, 2));
+      const step = template("solid").plan(context({}, { name: "my-app", root: dir })).steps.find((each) => each.title === "scaffold.step.name");
+      execFileSync("sh", ["-c", buildScript("sh", [step!], { skipped: "skipped", done: "done" })], { stdio: "pipe" });
+      expect(JSON.parse(readFileSync(join(dir, "package.json"), "utf8"))).toEqual({ name: "my-app", scripts: { dev: "vite" } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Qwik", () => {
+  it("puts the starter before the folder, at the version picked, and reads Node from Vite", () => {
+    const plan = template("qwik").plan(
+      context({ starter: "playground" }, { version: { line: "1", version: "1.20.1", channel: "latest" } as TemplateContext["version"] }),
+    );
+    expect(plan.steps[0].argv).toEqual(["npx", "--yes", "create-qwik@1.20.1", "playground", "demo"]);
+    const engines = { line: "7", version: "7.3.1", channel: "latest", requires: "^20.19.0 || >=22.12.0" } as TemplateContext["engines"];
+    const version = { line: "1", version: "1.20.1", channel: "latest", requires: "^18.17.0" } as TemplateContext["version"];
+    expect(template("qwik").requirements(context({}, { engines, version }))[0].range).toBe("^20.19.0 || >=22.12.0");
+  });
+});
+
+describe("AdonisJS", () => {
+  it("tells create-adonisjs the kit and the manager, then checks what it says it did", () => {
+    const plan = template("adonis").plan(context({ kit: "api" }, { pm: "yarn" }));
+    expect(plan.steps[0].argv).toEqual(["npx", "--yes", "create-adonisjs@latest", "demo", "--kit=api", "--pkg=yarn", "--verbose"]);
+    expect(plan.steps[1].title).toBe("scaffold.step.verify");
+    expect(plan.run).toBe("yarn dev");
+  });
+
+  /** It exits 0 when it failed; the check is what fails the script — and only then. */
+  it("fails the script when the project has no .env, and passes when it does", () => {
+    const dir = mkdtempSync(join(tmpdir(), "adonis-check-"));
+    try {
+      const check = (kit: string) => {
+        const step = template("adonis").plan(context({ kit }, { root: dir })).steps[1];
+        return () => execFileSync("sh", ["-c", buildScript("sh", [step], { skipped: "skipped", done: "done" })], { stdio: "pipe" });
+      };
+      expect(check("api")).toThrow();
+      writeFileSync(join(dir, ".env"), "APP_KEY=x\n");
+      expect(check("api")).not.toThrow();
+      // The monorepo kit's backend keeps its own.
+      expect(check("api-monorepo")).toThrow();
+      mkdirSync(join(dir, "apps", "backend"), { recursive: true });
+      writeFileSync(join(dir, "apps", "backend", ".env"), "APP_KEY=x\n");
+      expect(check("api-monorepo")).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Angular Native", () => {
+  it("is Expo's generator with the ng-native template, quiet, and installs after", () => {
+    const plan = template("angularNative").plan(context({}, { pm: "pnpm" }));
+    expect(plan.steps[0].argv).toEqual([
+      "pnpm",
+      "dlx",
+      "create-expo-app@latest",
+      "demo",
+      "--template",
+      "@ng-native/template",
+      "--no-install",
+      "--no-agents-md",
+      "--yes",
+    ]);
+    expect(plan.steps[1].argv).toEqual(["pnpm", "install"]);
+    expect(plan.run).toBe("pnpm start");
+  });
+});
+
+describe("Ruby on Rails", () => {
+  const rails = { line: "8.1", version: "8.1.4", channel: "latest", requires: ">= 3.2.0" } as TemplateContext["version"];
+
+  it("installs the Rails picked, runs exactly that one, and checks the bundle it made", () => {
+    const plan = template("rails").plan(context({ database: "postgresql", api: false, tailwind: true }, { version: rails }));
+    expect(plan.steps.map((step) => step.title)).toEqual([
+      "scaffold.step.gems",
+      "scaffold.step.rails",
+      "scaffold.step.generate",
+      "scaffold.step.verify",
+    ]);
+    expect(plan.steps[1].argv).toEqual(["gem", "install", "rails", "-v", "8.1.4", "--no-document"]);
+    expect(plan.steps[2].argv).toEqual([
+      "ruby",
+      "-e",
+      "load Gem.activate_bin_path('railties', 'rails', ARGV.shift)",
+      "8.1.4",
+      "new",
+      "demo",
+      "--database=postgresql",
+      "--css=tailwind",
+    ]);
+    // Never `--skip-git`: it takes `.gitignore` with it, and `config/master.key` would be committed.
+    expect(plan.steps[2].argv).not.toContain("--skip-git");
+    expect(plan.steps[3].argv).toEqual(["bundle", "check"]);
+    expect(plan.run).toBe("bin/rails server");
+    expect(template("rails").requirements(context({}, { version: rails }))).toEqual([
+      { tool: "ruby", range: ">= 3.2.0", because: "Rails 8.1.4" },
+    ]);
+  });
+
+  it("is an API without Tailwind when asked, and moves GEM_HOME only on sh", () => {
+    const plan = template("rails").plan(context({ database: "sqlite3", api: true, tailwind: true }, { version: rails, platform: "windows" }));
+    expect(plan.steps[2].argv?.slice(-2)).toEqual(["--database=sqlite3", "--api"]);
+    expect(plan.steps[0].ps).toBeUndefined();
+    expect(buildScript("ps", plan.steps, { skipped: "s", done: "d" })).not.toContain("GEM_HOME");
+    expect(plan.run).toBe("ruby bin\\rails server");
+  });
+});
+
+describe("Quarkus", () => {
+  it("asks code.quarkus.io for the stream, build and extensions picked, and runs dev mode", () => {
+    const plan = template("quarkus").plan(
+      context(
+        { buildTool: "GRADLE", groupId: "com.acme", qRest: true, qHealth: true, qPanache: false },
+        { version: { line: "3.33", version: "3.33.4", channel: "lts", requires: ">=17" } as TemplateContext["version"] },
+      ),
+    );
+    expect(plan.quarkus).toEqual({
+      stream: "3.33",
+      groupId: "com.acme",
+      buildTool: "GRADLE",
+      extensions: ["io.quarkus:quarkus-rest", "io.quarkus:quarkus-smallrye-health"],
+    });
+    expect(plan.steps).toEqual([]);
+    expect(plan.run).toBe("./gradlew --console=plain quarkusDev");
+    expect(template("quarkus").plan(context({ buildTool: "MAVEN" }, { platform: "windows" })).run).toBe("mvnw.cmd quarkus:dev");
+  });
+});
+
+describe("Koa and hapi", () => {
+  it("Koa: one server file on @koa/router, the version picked, and Koa's types for TypeScript", () => {
+    const plan = template("koa").plan(
+      context({ language: "ts" }, { version: { line: "3", version: "3.2.1", channel: "latest" } as TemplateContext["version"] }),
+    );
+    const server = plan.files?.find((file) => file.path === "src/index.ts");
+    expect(server?.content).toContain('import Router from "@koa/router";');
+    expect(server?.content).toContain('ctx.body = { message: "Hello from demo!" };');
+    expect(plan.steps[0].argv).toEqual(["npm", "install", "koa@^3.2.1", "@koa/router"]);
+    // The router ships its own types; Koa does not.
+    expect(plan.steps[1].argv).toEqual(["npm", "install", "--save-dev", "typescript", "tsx", "@types/node", "@types/koa"]);
+    expect(plan.run).toBe("npm run dev");
+  });
+
+  it("hapi: its own types, so JavaScript and TypeScript differ only by the compiler", () => {
+    const js = template("hapi").plan(context({ language: "js" }, { pm: "pnpm" }));
+    expect(js.files?.map((file) => file.path)).toEqual(["package.json", ".gitignore", "src/index.js"]);
+    expect(js.files?.[2].content).toContain("await server.start();");
+    expect(js.steps.map((step) => step.argv)).toEqual([["pnpm", "add", "@hapi/hapi"]]);
+    expect(js.run).toBe("pnpm dev");
+    const typed = template("hapi").plan(context({ language: "ts" }));
+    expect(typed.steps[1].argv).toEqual(["npm", "install", "--save-dev", "typescript", "tsx", "@types/node"]);
   });
 });
 

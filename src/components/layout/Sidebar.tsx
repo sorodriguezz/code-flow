@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { ActiveMarker, ActivePill } from "../common/ActivePill";
+import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "framer-motion";
+import { ActiveMarker, ActivePill, SLIDE } from "../common/ActivePill";
 import {
   Archive,
   ArrowUpRight,
@@ -82,7 +82,7 @@ import type {
 } from "../../types/domain";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
-import { SkeletonRows } from "../common/Skeleton";
+import { Skeleton, SkeletonRows } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { monogram, monogramActiveStyle, monogramMarkColor, monogramStyle } from "../../lib/monogram";
@@ -153,9 +153,10 @@ function ShowMoreRow({ hidden, onClick }: { hidden: number; onClick: () => void 
   );
 }
 
-/** How the repository's tree unfolds. The same curve `cf-rise` uses, so a list arriving and a tree
- *  opening move alike; a touch slower, because this one travels a lot further. */
-const UNFOLD = { duration: 0.24, ease: [0.22, 1, 0.36, 1] } as const;
+/** The repository tree uncovered and covered from its top edge, on the selection pill's spring
+ *  (`SLIDE`) — see `ProjectRow`. */
+const TREE_SHOWN = "inset(0% 0% 0% 0%)";
+const TREE_HIDDEN = "inset(0% 0% 100% 0%)";
 
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 440;
@@ -1631,7 +1632,10 @@ function ProjectRow({
       }`;
 
   return (
-    <div>
+    // The row and its tree move as one block when a tree above them opens or closes: a transform from
+    // where the block was to where it lands (`layout="position"`), never a height — see the tree's
+    // note below. `relative` holds the tree this row is leaving while it closes.
+    <motion.div layout="position" transition={reduceMotion ? { duration: 0 } : SLIDE} className="relative">
       {/* The click target is the whole row, not just its label. The row is a strip of controls, so
           selecting the project lives on the container rather than on the name alone — which left
           the padding around the text, and the gaps between the chips, hovering as if clickable and
@@ -1911,12 +1915,18 @@ function ProjectRow({
 
       {showMoveModal && <MoveProjectModal project={project} onClose={() => setShowMoveModal(false)} />}
 
-      {/* The whole branch/stash/PR tree unfolds instead of appearing, and folds away on the row you
-          left instead of vanishing — which is what makes switching repository read as one movement
-          rather than two panels swapping. Height is animated from 0 to `auto`, so the rows below
-          slide down with it rather than being shoved. `initial={false}` keeps the app's first paint
-          from playing it: on launch there is no previous project to have come from. */}
-      <AnimatePresence initial={false}>
+      {/* The whole branch/stash/PR tree unfolds under the row you picked while the one under the row
+          you left folds away, both at once — one movement rather than two panels swapping. Nothing
+          is laid out per frame: the tree takes its full height at once and is uncovered from the
+          top by a clip, while the rows below slide down with transforms (`layout` above) on the
+          same curve, so each row's top rides the clip's edge and never crosses the tree. Leaving,
+          the tree is taken out of the flow at once (`popLayout`) and clipped away upwards while the
+          rows below slide up the same way. Faded in the flow instead, it held its full height,
+          empty, until the fade ended and the list jumped (user report, 2026-10-01: "el anterior
+          queda con un vacío"); tweening heights instead moved the rows under the sliding selection
+          pill every frame, which threw it off its target. `initial={false}` keeps the app's first
+          paint from playing it: on launch there is no previous project to have come from. */}
+      <AnimatePresence initial={false} mode="popLayout">
         {/* `!broken` for the same reason the pill above comes off: branches, stashes and pull
             requests read from `repoStore`, which is still pointed at the folder that vanished — or
             at the folder whose `.git` did — so what would unfold under one of these rows is the
@@ -1925,17 +1935,16 @@ function ProjectRow({
         {isActive && !broken && !detachedTo && (
           <motion.div
             key="project-tree"
-            initial={{ opacity: 0, y: -3 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            transition={reduceMotion ? { duration: 0 } : UNFOLD}
-            className="overflow-hidden"
+            initial={{ clipPath: TREE_HIDDEN, opacity: 0 }}
+            // No clip left behind once open: an inset of 0 still clips, and a focus ring at the
+            // tree's edge would be cut.
+            animate={{ clipPath: TREE_SHOWN, opacity: 1, transitionEnd: { clipPath: "none" } }}
+            exit={{ clipPath: [TREE_SHOWN, TREE_HIDDEN], opacity: 0 }}
+            // The rows' own spring (and the selection pill's): the clip's edge and the top of the row
+            // under it have to be at the same place on every frame.
+            transition={reduceMotion ? { duration: 0 } : SLIDE}
           >
-      {projectLoading && (
-        <div className="ml-6 mt-1 border-l border-[var(--cf-border)] pl-3">
-          <SkeletonRows count={5} className="p-0" />
-        </div>
-      )}
+      {projectLoading && <TreeSkeleton />}
 
       {!projectLoading && (
         <div className="ml-6 mt-1 space-y-3 border-l border-[var(--cf-border)] pl-3">
@@ -2137,6 +2146,33 @@ function ProjectRow({
           onClose={() => setMenu(null)}
         />
       )}
+    </motion.div>
+  );
+}
+
+/**
+ * The repository tree while its first read is on its way: the closed sections it is about to be,
+ * drawn as bars at their own heights and spacing — four headings with a "+" (22px), the pull
+ * requests' without one, `space-y-3` between them. Five generic rows were 40px shorter than the
+ * sections that replaced them, so the rows under the tree that had just unfolded jumped down when
+ * the repository arrived.
+ */
+const TREE_SKELETON: { height: string; width: string }[] = [
+  { height: "h-[22px]", width: "62%" },
+  { height: "h-[22px]", width: "46%" },
+  { height: "h-[22px]", width: "40%" },
+  { height: "h-[22px]", width: "44%" },
+  { height: "h-[16.5px]", width: "52%" },
+];
+
+function TreeSkeleton() {
+  return (
+    <div aria-hidden className="ml-6 mt-1 space-y-3 border-l border-[var(--cf-border)] pl-3">
+      {TREE_SKELETON.map(({ height, width }, at) => (
+        <div key={at} className={`flex items-center ${height}`}>
+          <Skeleton className="h-3 rounded" style={{ width }} />
+        </div>
+      ))}
     </div>
   );
 }
@@ -2540,7 +2576,9 @@ export function Sidebar() {
               <CollapsedProjects projects={projects} onAdd={handleAddProject} />
             </div>
           ) : (
-            <div data-tour="projects-panel" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+            // `layoutScroll`: the rows' slides are measured against this scroller, so a list scrolled
+            // down does not send them in from where they would be unscrolled.
+            <motion.div layoutScroll data-tour="projects-panel" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
               <div data-tour="projects-header" className="mb-1 flex items-center justify-between px-1">
                 {/* The list heading carries the hint, because the rows themselves cannot: a native
                     `title` surfaces after about a second and a half of hover, which lands squarely
@@ -2589,14 +2627,18 @@ export function Sidebar() {
               </div>
 
               <div ref={reorder.listRef} className="space-y-0.5">
-                {projects.map((project, at) => (
-                  <ProjectRow key={project.id} project={project} at={at} reorder={reorder} />
-                ))}
+                {/* One group, so a row whose own render did not change still slides when a tree
+                    above it opens or closes. */}
+                <LayoutGroup>
+                  {projects.map((project, at) => (
+                    <ProjectRow key={project.id} project={project} at={at} reorder={reorder} />
+                  ))}
+                </LayoutGroup>
                 {projects.length === 0 && (
                   <p className="px-1.5 py-1 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noProjects")}</p>
                 )}
               </div>
-            </div>
+            </motion.div>
           )}
 
           <SidebarFoot collapsed={collapsed} />

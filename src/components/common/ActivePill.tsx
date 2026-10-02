@@ -1,7 +1,9 @@
 import { motion, useReducedMotion } from "framer-motion";
 
-/** One spring for every selection indicator in the app, so they all move at the same speed. */
-const SLIDE = { type: "spring", stiffness: 520, damping: 40, mass: 0.7 } as const;
+/** One spring for every selection indicator in the app, so they all move at the same speed — and for
+ *  whatever moves *with* one: a pill riding inside a block that slides on another curve is pulled
+ *  off its own path by the difference (the projects panel, where the rows slide on this too). */
+export const SLIDE = { type: "spring", stiffness: 520, damping: 40, mass: 0.7 } as const;
 
 /**
  * The fill behind whichever item in a group is selected — shared between the group's buttons by

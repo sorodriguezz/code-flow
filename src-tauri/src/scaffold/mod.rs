@@ -7,9 +7,11 @@
 //!
 //! * [`tools`] — probes installed toolchains against a fresh login-shell `PATH`.
 //! * [`versions`] — version lines from npm, PyPI, Packagist and endoflife.date.
-//! * [`spring`] — start.spring.io's metadata and zip, the one template that is not a command.
+//! * [`spring`] — start.spring.io's metadata and zip, a template that is not a command.
+//! * [`quarkus`] — code.quarkus.io's streams and zip, the same shape for Quarkus.
 //! * [`run`] — destination checks, boilerplate files, and the pty the commands run in.
 
+pub mod quarkus;
 pub mod run;
 pub mod spring;
 pub mod tools;
@@ -65,6 +67,16 @@ pub async fn scaffold_spring_generate(
     Ok(root.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+pub async fn scaffold_quarkus_generate(
+    request: quarkus::QuarkusRequest,
+    parent: String,
+    folder: String,
+) -> Result<String, String> {
+    let root = quarkus::generate(request, &PathBuf::from(parent), &folder).await?;
+    Ok(root.to_string_lossy().into_owned())
+}
+
 #[tauri::command(async)]
 pub fn scaffold_check_dest(parent: String, name: String) -> run::DestCheck {
     run::check_dest(&parent, &name)
@@ -113,6 +125,40 @@ mod live {
         let ids = ["node", "npm", "pnpm", "bun", "java", "go", "python", "uv", "php", "cargo", "git", "brew", "fnm", "nvm"];
         for tool in super::tools::detect(ids.iter().map(|s| s.to_string()).collect(), true).await {
             println!("{:8} found={} version={:?} path={:?} detail={:?}", tool.id, tool.found, tool.version, tool.path, tool.detail);
+        }
+    }
+
+    /// code.quarkus.io for real: the streams, a project for the JDK found here, unpacked under a folder
+    /// name that is not a valid artifact id. `CF_LIVE_KEEP=1` leaves it in the temp dir, to build.
+    #[tokio::test]
+    #[ignore]
+    async fn generates_a_quarkus_project() {
+        for line in super::quarkus::lines().await.expect("streams") {
+            println!("quarkus {:6} {:12} {:7} requires={:?}", line.line, line.version, line.channel, line.requires);
+        }
+        let parent = std::env::temp_dir().join(format!("cf-quarkus-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        let request = super::quarkus::QuarkusRequest {
+            stream: String::new(),
+            group_id: "org.acme".into(),
+            build_tool: "MAVEN".into(),
+            extensions: vec!["io.quarkus:quarkus-rest".into(), "io.quarkus:quarkus-smallrye-health".into()],
+        };
+        let root = super::quarkus::generate(request, &parent, "Quarkus-Live").await.expect("quarkus zip");
+        assert_eq!(root, parent.join("Quarkus-Live"));
+        let pom = std::fs::read_to_string(root.join("pom.xml")).expect("pom");
+        assert!(pom.contains("<artifactId>quarkus-live</artifactId>"));
+        assert!(pom.contains("quarkus-smallrye-health"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(root.join("mvnw")).expect("wrapper").permissions().mode();
+            assert_eq!(mode & 0o100, 0o100, "mvnw is executable");
+        }
+        let release = pom.lines().find(|line| line.contains("maven.compiler.release")).unwrap_or_default().trim().to_string();
+        println!("quarkus project at {} — {release}", root.display());
+        if std::env::var("CF_LIVE_KEEP").is_err() {
+            let _ = std::fs::remove_dir_all(&parent);
         }
     }
 

@@ -2,8 +2,8 @@
 //!
 //! The initializer's version pickers are built from the registries themselves rather than from a list
 //! shipped in the app, because that list would be wrong within weeks: the npm registry for the
-//! JavaScript generators, PyPI for Django and friends, Packagist for Laravel, and
-//! [endoflife.date](https://endoflife.date) for the runtimes (Node, Python, PHP, Go, Java, .NET).
+//! JavaScript generators, PyPI for Django and friends, Packagist for Laravel, RubyGems for Rails, and
+//! [endoflife.date](https://endoflife.date) for the runtimes (Node, Python, PHP, Go, Java, .NET, Ruby).
 //!
 //! Every answer is folded into **lines** — one row per major (npm, Packagist, the runtimes) or per
 //! `major.minor` (PyPI, where Django's `5.2` *is* the release people ask for) — each carrying its
@@ -30,6 +30,10 @@ pub enum VersionSource {
     Npm { package: String },
     Pypi { package: String },
     Packagist { package: String },
+    /// A gem on rubygems.org: `rails`.
+    Rubygems { package: String },
+    /// code.quarkus.io's platform streams — see `quarkus`.
+    Quarkus,
     /// An endoflife.date product id: `nodejs`, `python`, `php`, `go`, `eclipse-temurin`, `dotnet`.
     Runtime { product: String },
 }
@@ -40,6 +44,8 @@ impl VersionSource {
             Self::Npm { package } => format!("npm:{package}"),
             Self::Pypi { package } => format!("pypi:{package}"),
             Self::Packagist { package } => format!("packagist:{package}"),
+            Self::Rubygems { package } => format!("rubygems:{package}"),
+            Self::Quarkus => "quarkus".into(),
             Self::Runtime { product } => format!("runtime:{product}"),
         }
     }
@@ -380,6 +386,73 @@ async fn packagist(package: &str) -> Result<Vec<VersionLine>, String> {
     Ok(packagist_lines(package, &body))
 }
 
+/// One release as rubygems.org lists it: every version ever pushed, newest first, each with the Ruby
+/// it needs in `Gem::Requirement` syntax (`>= 3.2.0`) — which reads like Composer's, `~>` included.
+#[derive(Deserialize)]
+struct GemVersion {
+    number: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    platform: String,
+    #[serde(default)]
+    ruby_version: Option<String>,
+}
+
+/// A gem's numbers, compared segment by segment. Not `parse_semver`: RubyGems releases can carry a
+/// fourth segment — Rails ships its security fixes as `8.1.3.1` — which semver has no room for.
+fn gem_segments(number: &str) -> Option<Vec<u64>> {
+    let segments: Option<Vec<u64>> = number.split('.').map(|part| part.parse().ok()).collect();
+    segments.filter(|s| s.len() >= 2)
+}
+
+/// Folded into `major.minor` lines — Rails' support policy is per minor (`8.1`, `8.0`, `7.2`), the way
+/// Django's is. Prereleases (`8.1.0.rc1`) and platform builds (`-java`) are left out.
+fn gem_lines(versions: Vec<GemVersion>) -> Vec<VersionLine> {
+    let mut releases: Vec<(Vec<u64>, GemVersion)> = versions
+        .into_iter()
+        .filter(|v| !v.prerelease && (v.platform.is_empty() || v.platform == "ruby"))
+        .filter_map(|v| gem_segments(&v.number).map(|segments| (segments, v)))
+        .collect();
+    releases.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut lines: Vec<VersionLine> = Vec::new();
+    for (segments, release) in releases {
+        let line = format!("{}.{}", segments[0], segments[1]);
+        if lines.iter().any(|existing| existing.line == line) {
+            continue;
+        }
+        lines.push(VersionLine {
+            channel: if lines.is_empty() { "latest".into() } else { String::new() },
+            // `>= 0` is RubyGems' way of saying nothing at all.
+            requires: release.ruby_version.filter(|r| !r.trim().is_empty() && r.trim() != ">= 0"),
+            eol: false,
+            version: release.number,
+            line,
+        });
+        if lines.len() == MAX_LINES {
+            break;
+        }
+    }
+    lines
+}
+
+async fn rubygems(package: &str) -> Result<Vec<VersionLine>, String> {
+    if package.is_empty() || !package.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+        return Err(format!("Not a gem name: {package}"));
+    }
+    let response = client()
+        .get(format!("https://rubygems.org/api/v1/versions/{package}.json"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("RubyGems answered {}", response.status()));
+    }
+    let versions: Vec<GemVersion> = response.json().await.map_err(|e| e.to_string())?;
+    Ok(gem_lines(versions))
+}
+
 /// One cycle as endoflife.date publishes it. `eol` and `lts` are each either a boolean or a date.
 #[derive(Deserialize)]
 struct Cycle {
@@ -462,6 +535,8 @@ pub async fn lines(source: VersionSource) -> Result<Vec<VersionLine>, String> {
         VersionSource::Npm { package } => npm(package).await,
         VersionSource::Pypi { package } => pypi(package).await,
         VersionSource::Packagist { package } => packagist(package).await,
+        VersionSource::Rubygems { package } => rubygems(package).await,
+        VersionSource::Quarkus => super::quarkus::lines().await,
         VersionSource::Runtime { product } => runtime(product).await,
     }?;
     if let Ok(mut cache) = CACHE.lock() {
@@ -564,6 +639,34 @@ mod tests {
         let summary: Vec<(&str, &str, Option<&str>)> =
             lines.iter().map(|l| (l.line.as_str(), l.version.as_str(), l.requires.as_deref())).collect();
         assert_eq!(summary, [("13", "13.1.0", Some("^8.3")), ("12", "12.4.0", Some("^8.2")), ("11", "11.6.1", None)]);
+    }
+
+    /// Four-segment security releases sort where they belong, prereleases and platform builds do not
+    /// count, and `>= 0` is no requirement.
+    #[test]
+    fn rubygems_folds_into_minors_with_the_ruby_each_needs() {
+        let versions: Vec<GemVersion> = serde_json::from_value(json!([
+            { "number": "8.1.0.rc1", "prerelease": true, "platform": "ruby", "ruby_version": ">= 3.2.0" },
+            { "number": "8.1.3", "prerelease": false, "platform": "ruby", "ruby_version": ">= 3.2.0" },
+            { "number": "8.1.3.1", "prerelease": false, "platform": "ruby", "ruby_version": ">= 3.2.0" },
+            { "number": "8.0.5", "prerelease": false, "platform": "ruby", "ruby_version": ">= 3.2.0" },
+            { "number": "7.2.9", "prerelease": false, "platform": "java", "ruby_version": ">= 3.1.0" },
+            { "number": "7.2.8", "prerelease": false, "platform": "ruby", "ruby_version": ">= 3.1.0" },
+            { "number": "2.3.18", "prerelease": false, "platform": "ruby", "ruby_version": ">= 0" }
+        ]))
+        .unwrap();
+        let lines = gem_lines(versions);
+        let summary: Vec<(&str, &str, Option<&str>, &str)> =
+            lines.iter().map(|l| (l.line.as_str(), l.version.as_str(), l.requires.as_deref(), l.channel.as_str())).collect();
+        assert_eq!(
+            summary,
+            [
+                ("8.1", "8.1.3.1", Some(">= 3.2.0"), "latest"),
+                ("8.0", "8.0.5", Some(">= 3.2.0"), ""),
+                ("7.2", "7.2.8", Some(">= 3.1.0"), ""),
+                ("2.3", "2.3.18", None, ""),
+            ]
+        );
     }
 
     #[test]

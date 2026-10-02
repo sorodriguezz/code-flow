@@ -105,7 +105,7 @@ import type { TabDrag, TabDropTarget } from "../../state/tabDragStore";
 import { useTreeDragStore } from "../../state/treeDragStore";
 import { chooseAction, confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
-import { ActivePill } from "../common/ActivePill";
+import { ActiveMarker, ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
 import { Tooltip } from "../common/Tooltip";
@@ -2035,25 +2035,36 @@ export function EditorView() {
               { id: "icons", shortcut: null, icon: Palette, label: t("icons.panelTitle") },
             ] as const
           ).map(({ id, icon: Icon, label, shortcut }) => (
-            <Tooltip key={id} side="right" label={label} trailing={shortcut ? keyCap(shortcut) : undefined}>
-              <button
-                onClick={() => setSidePanel(id)}
-                aria-label={label}
-                aria-pressed={sidePanel === id}
-                className={railButtonClass(sidePanel === id)}
-              >
-                {sidePanel === id && <ActivePill layoutId="cf-editor-rail-pill" />}
-                <Icon size={16} className="relative" />
-                {/* A live session is worth seeing from any panel — it's a running process. */}
-                {id === "debug" && debugStatus !== "idle" && (
-                  <span
-                    className={`absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ${
-                      debugStatus === "paused" ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-success)]"
-                    }`}
-                  />
-                )}
-              </button>
-            </Tooltip>
+            // A full-width row around the button, so the marker can stand on the rail's own left
+            // edge, where VS Code's activity bar marks the open view.
+            <div key={id} className="relative flex w-full justify-center">
+              {/* A bar in the accent beside the open panel, on top of its fill (user ask, 2026-10-01:
+                  a vertical bar saying which one is selected) — the mark the view tabs and the
+                  projects panel wear. Outside the tooltip: its `contents` wrapper takes its first
+                  child for the control. The one-shot actions below are never "open" and get none. */}
+              {sidePanel === id && (
+                <ActiveMarker layoutId="cf-editor-rail-mark" color="var(--cf-accent-fill)" className="left-0 inset-y-1.5" />
+              )}
+              <Tooltip side="right" label={label} trailing={shortcut ? keyCap(shortcut) : undefined}>
+                <button
+                  onClick={() => setSidePanel(id)}
+                  aria-label={label}
+                  aria-pressed={sidePanel === id}
+                  className={railButtonClass(sidePanel === id)}
+                >
+                  {sidePanel === id && <ActivePill layoutId="cf-editor-rail-pill" />}
+                  <Icon size={16} className="relative" />
+                  {/* A live session is worth seeing from any panel — it's a running process. */}
+                  {id === "debug" && debugStatus !== "idle" && (
+                    <span
+                      className={`absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ${
+                        debugStatus === "paused" ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-success)]"
+                      }`}
+                    />
+                  )}
+                </button>
+              </Tooltip>
+            </div>
           ))}
           {/* The actions, below the panels. `mt-auto` is on the first of them and nowhere else —
               it is what opens the gap that separates them from the five views above, and a second

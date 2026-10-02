@@ -1,6 +1,7 @@
 import type { TranslationKey } from "../i18n/translations";
-import type { FileSpec, ScaffoldPlatform, SpringRequest, VersionLine, VersionSource } from "./api";
-import type { Step } from "./script";
+import type { FileSpec, QuarkusRequest, ScaffoldPlatform, SpringRequest, VersionLine, VersionSource } from "./api";
+import { quote, type Step } from "./script";
+import { VALID_JAVA_PACKAGE } from "./spring";
 import type { ToolId } from "./tools";
 
 /**
@@ -114,6 +115,8 @@ export interface TemplateContext {
 export interface Plan {
   /** start.spring.io's zip, unpacked as the project before anything else runs. */
   spring?: SpringRequest;
+  /** code.quarkus.io's, the same way. */
+  quarkus?: QuarkusRequest;
   /** Written into the project folder before the steps run — which makes the folder, so an empty
    *  list is a plan asking for the folder alone (the empty template). */
   files?: FileSpec[];
@@ -141,8 +144,10 @@ export interface Template {
   versionFilter?: (line: VersionLine) => boolean;
   /** Which lines are LTS when the registry does not say — Django's `x.2`. */
   ltsLine?: (line: string) => boolean;
-  /** Where the runtime requirement lives when it is not the generator's: Nuxt's is `nuxt`'s. */
-  engines?: VersionSource;
+  /** Where the runtime requirement lives when it is not the generator's: Nuxt's is `nuxt`'s. A
+   *  function when the answer depends on what is picked — SolidStart needs a newer Node than a
+   *  plain Solid app on Vite. Given the choices and toggles only (see `enginesFor`). */
+  engines?: VersionSource | ((opts: Options) => VersionSource);
   defaultName: string;
   /** npm package-name rules on top of folder rules: lowercase, no spaces. */
   npmName?: boolean;
@@ -432,6 +437,147 @@ const NEST_FASTIFY_PATCH = [
   "code=(typed?'import { FastifyAdapter, type NestFastifyApplication } from \\'@nestjs/platform-fastify\\';\\n':'import { FastifyAdapter } from \\'@nestjs/platform-fastify\\';\\n')+code;",
   "fs.writeFileSync(file,code);",
 ].join("");
+
+/**
+ * Gives `package.json` the folder's name — for the starters that keep their own (`example-basic`,
+ * `my-qwik-empty-starter`), where every other generator names the project after its folder. The
+ * name goes in as an argument, never into the code; single quotes only, as in `NEST_FASTIFY_PATCH`.
+ */
+const NAME_PACKAGE = [
+  "const fs=require('fs');",
+  "const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));",
+  "pkg.name=process.argv[1];",
+  "fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\\n');",
+].join("");
+
+function namePackage(ctx: TemplateContext): Step {
+  return inRoot(ctx, "scaffold.step.name", ["node", "-e", NAME_PACKAGE, ctx.name]);
+}
+
+/** Solid's starters, by kind — `create-solid`'s own names for them (`-t`), the ones that work as
+ *  generated in both languages. Run in a pty, both kinds, npm and pnpm, 2026-10-01. */
+const SOLID_KIND: ChoiceOption = {
+  id: "kind",
+  kind: "choice",
+  labelKey: "scaffold.opt.kind",
+  choices: [
+    { value: "vanilla", label: "SolidJS + Vite" },
+    { value: "solidstart", label: "SolidStart" },
+  ],
+  default: "vanilla",
+};
+
+const SOLID_VITE_TEMPLATE: ChoiceOption = {
+  id: "viteTemplate",
+  kind: "choice",
+  labelKey: "scaffold.opt.template",
+  choices: [
+    { value: "basic", label: "Basic" },
+    { value: "bare", label: "Bare" },
+    { value: "with-solid-router", label: "Solid Router" },
+    { value: "with-tailwindcss", label: "Tailwind CSS" },
+    { value: "with-vitest", label: "Vitest" },
+  ],
+  default: "basic",
+  when: (opts) => opts.kind !== "solidstart",
+};
+
+const SOLID_START_TEMPLATE: ChoiceOption = {
+  id: "startTemplate",
+  kind: "choice",
+  labelKey: "scaffold.opt.template",
+  choices: [
+    { value: "basic", label: "Basic" },
+    { value: "bare", label: "Bare" },
+    { value: "with-tailwindcss", label: "Tailwind CSS" },
+    { value: "with-auth", label: "Auth" },
+    { value: "with-drizzle", label: "Drizzle" },
+    { value: "with-trpc", label: "tRPC" },
+    { value: "with-mdx", label: "MDX" },
+    { value: "with-vitest", label: "Vitest" },
+  ],
+  default: "basic",
+  when: (opts) => opts.kind === "solidstart",
+};
+
+/** AdonisJS 7's starter kits (`create-adonisjs` 3.x). Each comes with SQLite and auth already set
+ *  up — the database and auth-guard flags were AdonisJS 6's and are gone. */
+const ADONIS_KIT: ChoiceOption = {
+  id: "kit",
+  kind: "choice",
+  labelKey: "scaffold.opt.template",
+  choices: [
+    { value: "hypermedia", label: "Hypermedia" },
+    { value: "react", label: "React (Inertia)" },
+    { value: "vue", label: "Vue (Inertia)" },
+    { value: "api", label: "API" },
+    { value: "api-monorepo", label: "API (monorepo)" },
+  ],
+  default: "hypermedia",
+};
+
+/**
+ * `create-adonisjs` exits 0 whatever happens — a refused folder, a failed install — because its
+ * command framework records the exit code and never hands it to the process (checked 2026-10-01).
+ * The `.env` it copies from `.env.example` is only there once the install has gone through, so its
+ * absence is the failure, said in the terminal and failing the script before git makes a commit of
+ * half a project.
+ */
+function adonisCheck(ctx: TemplateContext, kit: string): Step {
+  const env = kit === "api-monorepo" ? "apps/backend/.env" : ".env";
+  const problem = ctx.label("scaffold.err.adonisIncomplete");
+  return {
+    title: ctx.label("scaffold.step.verify"),
+    cwd: ctx.root,
+    sh: `test -f ${quote("sh", env)} || { printf '%s\\n' ${quote("sh", problem)} >&2; exit 1; }`,
+    ps: `if (-not (Test-Path -LiteralPath ${quote("ps", env)})) { Write-Host ${quote("ps", problem)} -ForegroundColor Red; exit 1 }`,
+  };
+}
+
+/**
+ * Where RubyGems may write. Homebrew's Ruby links the rdoc plugin it bundles from its read-only
+ * Cellar into the gem directory, so installing a newer rdoc — which a new Rails app's bundle asks
+ * for — fails there with "Permission denied" (homebrew-core #261905), and `rails new` then exits 0
+ * with half its gems missing. On such a Ruby, this points `GEM_HOME` at the user's own gem
+ * directory for the rest of the script: it is on Ruby's default gem path, so the app runs from a
+ * plain terminal afterwards. Anywhere the gem directory can be written, nothing changes.
+ *
+ * sh only: RubyInstaller's gem directory on Windows has no such link, and the step is skipped there.
+ */
+const RUBY_GEM_HOME =
+  "CF_GEM_HOME=$(ruby -e 'd = Gem.dir; locked = !File.writable?(d) || " +
+  'Dir[File.join(d, "plugins", "*")].any? { |f| !File.writable?((File.realpath(f) rescue f)) }; ' +
+  "print(locked ? Gem.user_dir : \"\")'); " +
+  'if [ -n "$CF_GEM_HOME" ]; then export GEM_HOME="$CF_GEM_HOME"; printf \'GEM_HOME=%s\\n\' "$GEM_HOME"; fi';
+
+/**
+ * Runs the `rails` executable of exactly `version`, as the gem installed it — not whatever `rails` is
+ * first on `PATH`, which on macOS is the system's stub ("Rails is not currently installed") and with
+ * Homebrew's Ruby is never its gem binaries. Not `gem exec`, either: RubyGems 3.4 (Ruby 3.2, which
+ * Rails 8 still takes) has no such command, and with one it re-resolves and upgrades what it needs.
+ */
+const RAILS_BIN = "load Gem.activate_bin_path('railties', 'rails', ARGV.shift)";
+
+/**
+ * The extensions most projects start from, as checkboxes under "Extensions" — ids as code.quarkus.io
+ * takes them, present in every current stream (checked against 3.27, 3.33 and 3.40, 2026-10-01). With
+ * none ticked the service adds REST and a `/hello` resource on its own, so REST is ticked by default
+ * and the starter code is the same either way. There is no SQLite driver in the platform.
+ */
+const QUARKUS_EXTENSIONS: { id: string; label: string; extension: string; default?: boolean }[] = [
+  { id: "qRest", label: "REST", extension: "io.quarkus:quarkus-rest", default: true },
+  { id: "qRestJackson", label: "REST Jackson", extension: "io.quarkus:quarkus-rest-jackson" },
+  { id: "qRestClient", label: "REST Client", extension: "io.quarkus:quarkus-rest-client-jackson" },
+  { id: "qPanache", label: "Hibernate ORM with Panache", extension: "io.quarkus:quarkus-hibernate-orm-panache" },
+  { id: "qPostgres", label: "JDBC PostgreSQL", extension: "io.quarkus:quarkus-jdbc-postgresql" },
+  { id: "qMysql", label: "JDBC MySQL", extension: "io.quarkus:quarkus-jdbc-mysql" },
+  { id: "qFlyway", label: "Flyway", extension: "io.quarkus:quarkus-flyway" },
+  { id: "qValidator", label: "Hibernate Validator", extension: "io.quarkus:quarkus-hibernate-validator" },
+  { id: "qOpenapi", label: "SmallRye OpenAPI", extension: "io.quarkus:quarkus-smallrye-openapi" },
+  { id: "qHealth", label: "SmallRye Health", extension: "io.quarkus:quarkus-smallrye-health" },
+  { id: "qScheduler", label: "Scheduler", extension: "io.quarkus:quarkus-scheduler" },
+  { id: "qOidc", label: "OIDC", extension: "io.quarkus:quarkus-oidc" },
+];
 
 /** Hono's starters `create-hono` can make without a question, and what each one runs with. Vercel's
  *  has no scripts of its own — it needs Vercel's CLI — so it is left out. */
@@ -772,6 +918,100 @@ export const TEMPLATES: Template[] = [
     }),
   },
   {
+    id: "solid",
+    name: "Solid",
+    category: "frontend",
+    logo: "solid",
+    descriptionKey: "scaffold.tpl.solid",
+    // No picker: the starters come from Solid's templates repository whatever `create-solid` it is,
+    // so the generator is always `@latest`. What it needs underneath is Vite's for a plain app and
+    // SolidStart's own — a newer Node — for SolidStart.
+    engines: (opts) => ({ kind: "npm", package: opts.kind === "solidstart" ? "@solidjs/start" : "vite" }),
+    defaultName: "solid-app",
+    npmName: true,
+    pms: ALL_PMS,
+    options: [SOLID_KIND, SOLID_VITE_TEMPLATE, SOLID_START_TEMPLATE, LANGUAGE],
+    requirements: (ctx) => [nodeRequirement(ctx, ctx.opts.kind === "solidstart" ? "SolidStart" : "Solid"), ...pmRequirements(ctx)],
+    plan: (ctx) => {
+      const start = ctx.opts.kind === "solidstart";
+      const starter = String((start ? ctx.opts.startTemplate : ctx.opts.viteTemplate) || "basic");
+      return {
+        steps: [
+          // Asks nothing with the kind, the template and the language given; installs nothing and
+          // starts no repository. `--v2` is SolidStart 2's only flag — without it, it asks.
+          inParent(
+            ctx,
+            "scaffold.step.generate",
+            dlx(ctx.pm, "create-solid@latest", [
+              ctx.name,
+              ...(start ? ["--solidstart", "--v2"] : ["--vanilla"]),
+              "-t",
+              starter,
+              ts(ctx) ? "--ts" : "--js",
+            ]),
+          ),
+          // Every starter ships the `pnpm-lock.yaml` it was made with, whatever manager is picked:
+          // pnpm would install its older pins and bun would convert it, keeping both lockfiles.
+          {
+            title: ctx.label("scaffold.step.lockfile"),
+            cwd: ctx.root,
+            sh: "rm -f pnpm-lock.yaml",
+            ps: "Remove-Item -LiteralPath 'pnpm-lock.yaml' -Force -ErrorAction SilentlyContinue",
+          },
+          namePackage(ctx),
+          inRoot(ctx, "scaffold.step.install", installCmd(ctx.pm)),
+        ],
+        run: runCmd(ctx.pm, "dev"),
+      };
+    },
+  },
+  {
+    id: "qwik",
+    name: "Qwik",
+    category: "frontend",
+    logo: "qwik",
+    descriptionKey: "scaffold.tpl.qwik",
+    // `create-qwik` is versioned with Qwik itself, so its lines are Qwik's.
+    versions: { kind: "npm", package: "create-qwik" },
+    versionFilter: (line) => Number(line.line) >= 1,
+    // `create-qwik` says `^18.17.0`, but the project it makes runs on Vite, which needs more.
+    engines: { kind: "npm", package: "vite" },
+    defaultName: "qwik-app",
+    npmName: true,
+    pms: ALL_PMS,
+    options: [
+      {
+        id: "starter",
+        kind: "choice",
+        labelKey: "scaffold.opt.template",
+        choices: [
+          { value: "empty", labelKey: "scaffold.opt.blank" },
+          { value: "playground", label: "Playground" },
+          { value: "library", labelKey: "scaffold.opt.library" },
+        ],
+        default: "empty",
+      },
+    ],
+    requirements: (ctx) => [
+      {
+        tool: "node",
+        range: ctx.engines?.requires ?? ctx.version?.requires ?? null,
+        because: ctx.version ? `Qwik ${ctx.version.version}` : "Qwik",
+      },
+      ...pmRequirements(ctx),
+    ],
+    plan: (ctx) => ({
+      steps: [
+        // Starter first, folder second. Given any argument it runs as a command: no question, no
+        // install (`--installDeps` is off by default), no repository.
+        inParent(ctx, "scaffold.step.generate", dlx(ctx.pm, `create-qwik@${at(ctx)}`, [String(ctx.opts.starter || "empty"), ctx.name])),
+        namePackage(ctx),
+        inRoot(ctx, "scaffold.step.install", installCmd(ctx.pm)),
+      ],
+      run: runCmd(ctx.pm, "dev"),
+    }),
+  },
+  {
     id: "vite",
     name: "Vite",
     category: "frontend",
@@ -825,7 +1065,8 @@ export const TEMPLATES: Template[] = [
     category: "mobile",
     logo: "expo",
     descriptionKey: "scaffold.tpl.expo",
-    engines: { kind: "npm", package: "create-expo-app" },
+    // `create-expo-app` is a shim over `create-expo` now (5.x), and its own `>=20` is not what runs.
+    engines: { kind: "npm", package: "create-expo" },
     defaultName: "mobile-app",
     npmName: true,
     pms: ALL_PMS,
@@ -859,6 +1100,35 @@ export const TEMPLATES: Template[] = [
             "--yes",
           ]),
         ),
+        inRoot(ctx, "scaffold.step.install", installCmd(ctx.pm)),
+      ],
+      run: runCmd(ctx.pm, "start"),
+    }),
+  },
+  {
+    id: "angularNative",
+    name: "Angular Native",
+    category: "mobile",
+    logo: "angularNative",
+    descriptionKey: "scaffold.tpl.angularNative",
+    // An Expo template (ng-native.com): Expo's generator and its requirement, Angular's components.
+    engines: { kind: "npm", package: "create-expo" },
+    defaultName: "native-app",
+    npmName: true,
+    pms: ALL_PMS,
+    options: [],
+    requirements: (ctx) => [nodeRequirement(ctx, "Angular Native"), ...pmRequirements(ctx)],
+    plan: (ctx) => ({
+      steps: [
+        // Expo's flags, Expo's behaviour: it asks nothing and makes its own first commit, which the
+        // runner's commits after. The template brings its own AGENTS.md; `--no-agents-md` keeps
+        // create-expo from adding a `.claude/` settings file on top of it.
+        inParent(
+          ctx,
+          "scaffold.step.generate",
+          dlx(ctx.pm, "create-expo-app@latest", [ctx.name, "--template", "@ng-native/template", "--no-install", "--no-agents-md", "--yes"]),
+        ),
+        // pnpm needs no hoisted linker for it: iOS and Android bundles build on pnpm's own layout.
         inRoot(ctx, "scaffold.step.install", installCmd(ctx.pm)),
       ],
       run: runCmd(ctx.pm, "start"),
@@ -1061,6 +1331,125 @@ export const TEMPLATES: Template[] = [
     },
   },
   {
+    id: "koa",
+    name: "Koa",
+    category: "backend",
+    logo: "koa",
+    descriptionKey: "scaffold.tpl.koa",
+    versions: { kind: "npm", package: "koa" },
+    defaultName: "koa-api",
+    npmName: true,
+    pms: ALL_PMS,
+    options: [LANGUAGE],
+    requirements: (ctx) => [nodeRequirement(ctx, "Koa"), ...pmRequirements(ctx)],
+    // Express's shape on Koa: one server file and the packages, no generator — Koa has none. Routing
+    // is `@koa/router`, which Koa leaves out of its core; the router ships its own types, Koa does
+    // not (`@types/koa`). Run in JS and TS and answered on `/`, 2026-10-01.
+    plan: (ctx) => {
+      const typed = ts(ctx);
+      const pkg = {
+        name: ctx.name,
+        version: "0.1.0",
+        private: true,
+        type: "module",
+        scripts: typed
+          ? { dev: "tsx watch src/index.ts", build: "tsc", start: "node dist/index.js" }
+          : { dev: "node --watch src/index.js", start: "node src/index.js" },
+      };
+      const server = [
+        'import Koa from "koa";',
+        'import Router from "@koa/router";',
+        "",
+        "const app = new Koa();",
+        "const router = new Router();",
+        "const port = Number(process.env.PORT ?? 3000);",
+        "",
+        'router.get("/", (ctx) => {',
+        `  ctx.body = { message: ${JSON.stringify(`Hello from ${ctx.name}!`)} };`,
+        "});",
+        "",
+        "app.use(router.routes()).use(router.allowedMethods());",
+        "",
+        "app.listen(port, () => {",
+        "  console.log(`Listening on http://localhost:${port}`);",
+        "});",
+        "",
+      ].join("\n");
+      const files: FileSpec[] = [
+        { path: "package.json", content: `${JSON.stringify(pkg, null, 2)}\n` },
+        { path: ".gitignore", content: NODE_GITIGNORE },
+        { path: typed ? "src/index.ts" : "src/index.js", content: server },
+      ];
+      if (typed) files.push({ path: "tsconfig.json", content: TSCONFIG_NODE });
+      const koa = ctx.version ? `koa@^${ctx.version.version}` : "koa";
+      return {
+        files,
+        steps: [
+          inRoot(ctx, "scaffold.step.deps", addCmd(ctx.pm, [koa, "@koa/router"])),
+          ...(typed ? [inRoot(ctx, "scaffold.step.devDeps", addCmd(ctx.pm, ["typescript", "tsx", "@types/node", "@types/koa"], true))] : []),
+        ],
+        run: runCmd(ctx.pm, "dev"),
+      };
+    },
+  },
+  {
+    id: "hapi",
+    name: "hapi",
+    category: "backend",
+    logo: "hapi",
+    descriptionKey: "scaffold.tpl.hapi",
+    versions: { kind: "npm", package: "@hapi/hapi" },
+    defaultName: "hapi-api",
+    npmName: true,
+    pms: ALL_PMS,
+    options: [LANGUAGE],
+    requirements: (ctx) => [nodeRequirement(ctx, "hapi"), ...pmRequirements(ctx)],
+    // The same again on hapi, which has no generator either and ships its own types. Its routes are
+    // configuration rather than calls, and starting is awaited — at the top level, as an ES module.
+    plan: (ctx) => {
+      const typed = ts(ctx);
+      const pkg = {
+        name: ctx.name,
+        version: "0.1.0",
+        private: true,
+        type: "module",
+        scripts: typed
+          ? { dev: "tsx watch src/index.ts", build: "tsc", start: "node dist/index.js" }
+          : { dev: "node --watch src/index.js", start: "node src/index.js" },
+      };
+      const server = [
+        'import Hapi from "@hapi/hapi";',
+        "",
+        'const server = Hapi.server({ port: Number(process.env.PORT ?? 3000), host: "localhost" });',
+        "",
+        "server.route({",
+        '  method: "GET",',
+        '  path: "/",',
+        `  handler: () => ({ message: ${JSON.stringify(`Hello from ${ctx.name}!`)} }),`,
+        "});",
+        "",
+        "await server.start();",
+        "console.log(`Listening on ${server.info.uri}`);",
+        "",
+      ].join("\n");
+      const files: FileSpec[] = [
+        { path: "package.json", content: `${JSON.stringify(pkg, null, 2)}\n` },
+        { path: ".gitignore", content: NODE_GITIGNORE },
+        { path: typed ? "src/index.ts" : "src/index.js", content: server },
+      ];
+      if (typed) files.push({ path: "tsconfig.json", content: TSCONFIG_NODE });
+      const hapi = ctx.version ? `@hapi/hapi@^${ctx.version.version}` : "@hapi/hapi";
+      return {
+        files,
+        steps: [
+          inRoot(ctx, "scaffold.step.deps", addCmd(ctx.pm, [hapi])),
+          ...(typed ? [inRoot(ctx, "scaffold.step.devDeps", addCmd(ctx.pm, ["typescript", "tsx", "@types/node"], true))] : []),
+        ],
+        run: runCmd(ctx.pm, "dev"),
+      };
+    },
+  },
+  {
     id: "hono",
     name: "Hono",
     category: "backend",
@@ -1141,6 +1530,39 @@ export const TEMPLATES: Template[] = [
     },
   },
   {
+    id: "adonis",
+    name: "AdonisJS",
+    category: "backend",
+    logo: "adonis",
+    descriptionKey: "scaffold.tpl.adonis",
+    // No picker: the kits come from AdonisJS's repositories, and the generator's previous major takes
+    // other flags (`--db`, `--auth-guard`) — always the current one.
+    engines: { kind: "npm", package: "create-adonisjs" },
+    defaultName: "adonis-app",
+    npmName: true,
+    pms: ALL_PMS,
+    options: [ADONIS_KIT],
+    requirements: (ctx) => [nodeRequirement(ctx, "AdonisJS"), ...pmRequirements(ctx)],
+    plan: (ctx) => {
+      const kit = String(ctx.opts.kit || "hypermedia");
+      return {
+        steps: [
+          // Asks nothing with a folder and a kit. Installs with the manager it is told (`--pkg`: run
+          // through npx it would take npm), writes `.env`, generates the app key and migrates its
+          // SQLite database; starts no repository. `--verbose`, or a failure is one line under a spinner.
+          inParent(
+            ctx,
+            "scaffold.step.generate",
+            dlx(ctx.pm, "create-adonisjs@latest", [ctx.name, `--kit=${kit}`, `--pkg=${ctx.pm}`, "--verbose"]),
+          ),
+          adonisCheck(ctx, kit),
+        ],
+        // `node ace serve --hmr`, or turbo in the monorepo; on :3333.
+        run: runCmd(ctx.pm, "dev"),
+      };
+    },
+  },
+  {
     id: "spring",
     name: "Spring Boot",
     category: "backend",
@@ -1165,6 +1587,68 @@ export const TEMPLATES: Template[] = [
         spring: ctx.spring,
         steps: [],
         run: gradle ? `${windows ? "gradlew.bat" : "./gradlew"} bootRun` : `${windows ? "mvnw.cmd" : "./mvnw"} spring-boot:run`,
+      };
+    },
+  },
+  {
+    id: "quarkus",
+    name: "Quarkus",
+    category: "backend",
+    logo: "quarkus",
+    descriptionKey: "scaffold.tpl.quarkus",
+    versions: { kind: "quarkus" },
+    defaultName: "quarkus-app",
+    options: [
+      {
+        id: "buildTool",
+        kind: "choice",
+        labelKey: "scaffold.spring.build",
+        choices: [
+          { value: "MAVEN", label: "Maven" },
+          { value: "GRADLE", label: "Gradle" },
+          { value: "GRADLE_KOTLIN_DSL", label: "Gradle (Kotlin DSL)" },
+        ],
+        default: "MAVEN",
+      },
+      {
+        id: "groupId",
+        kind: "text",
+        labelKey: "scaffold.spring.group",
+        default: () => "org.acme",
+        validate: (value) => (VALID_JAVA_PACKAGE.test(value) ? null : "scaffold.err.javaPackage"),
+      },
+      ...QUARKUS_EXTENSIONS.map(
+        (extension): ToggleOption => ({
+          id: extension.id,
+          kind: "toggle",
+          label: extension.label,
+          default: extension.default === true,
+          group: "scaffold.opt.extensions",
+        }),
+      ),
+    ],
+    // The JDK is all it needs: the zip carries the Maven or Gradle wrapper. Which Java the project is
+    // built for is the backend's to decide, against the JDK found (see `scaffold/quarkus.rs`).
+    requirements: (ctx) => [
+      { tool: "java", range: ctx.version?.requires ?? null, because: ctx.version ? `Quarkus ${ctx.version.version}` : "Quarkus" },
+    ],
+    plan: (ctx) => {
+      const buildTool = String(ctx.opts.buildTool || "MAVEN") as QuarkusRequest["buildTool"];
+      const windows = ctx.platform === "windows";
+      return {
+        quarkus: {
+          stream: ctx.version?.line ?? "",
+          groupId: String(ctx.opts.groupId || "org.acme"),
+          buildTool,
+          extensions: QUARKUS_EXTENSIONS.filter((extension) => ctx.opts[extension.id] === true).map((extension) => extension.extension),
+        },
+        steps: [],
+        // Dev mode, with live reload. Its first start asks about anonymous build data and moves on by
+        // itself after ten seconds when nobody answers.
+        run:
+          buildTool === "MAVEN"
+            ? `${windows ? "mvnw.cmd" : "./mvnw"} quarkus:dev`
+            : `${windows ? "gradlew.bat" : "./gradlew"} --console=plain quarkusDev`,
       };
     },
   },
@@ -1311,6 +1795,68 @@ export const TEMPLATES: Template[] = [
     }),
   },
   {
+    id: "rails",
+    name: "Ruby on Rails",
+    category: "backend",
+    logo: "rails",
+    descriptionKey: "scaffold.tpl.rails",
+    versions: { kind: "rubygems", package: "rails" },
+    // 7.2 is the oldest line checked on the Rubies current today (4.0 included).
+    versionFilter: (line) => Number(line.line) >= 7.2,
+    defaultName: "rails-app",
+    options: [
+      {
+        id: "database",
+        kind: "choice",
+        labelKey: "scaffold.opt.database",
+        // MySQL through Trilogy, Rails' own client: `mysql` needs the MySQL client libraries
+        // installed to build its gem, and without them fails inside a `rails new` that exits 0.
+        choices: [
+          { value: "sqlite3", label: "SQLite" },
+          { value: "postgresql", label: "PostgreSQL" },
+          { value: "trilogy", label: "MySQL (Trilogy)" },
+        ],
+        default: "sqlite3",
+      },
+      { id: "api", kind: "toggle", labelKey: "scaffold.opt.apiOnly", default: false },
+      // With import maps, Tailwind needs no Node; the bundler-based CSS and JavaScript options all do
+      // (and fail without a word when yarn or bun is missing), so they are left out.
+      { id: "tailwind", kind: "toggle", label: "Tailwind CSS", default: false, when: (opts) => !opts.api },
+    ],
+    requirements: (ctx) => [
+      { tool: "ruby", range: ctx.version?.requires ?? null, because: ctx.version ? `Rails ${ctx.version.version}` : "Rails" },
+    ],
+    plan: (ctx) => {
+      const version = ctx.version?.version ?? null;
+      const api = ctx.opts.api === true;
+      return {
+        steps: [
+          { title: ctx.label("scaffold.step.gems"), cwd: ctx.parent, sh: RUBY_GEM_HOME },
+          inParent(ctx, "scaffold.step.rails", ["gem", "install", "rails", ...(version ? ["-v", version] : []), "--no-document"]),
+          // Not `--skip-git`: it also drops `.gitignore`, while `config/master.key` is still written
+          // — the first commit would carry the key. Rails' own `git init` makes no commit and the
+          // runner's re-initialises. Not `--skip-bundle` either: importmap, Solid and Kamal are set up
+          // after the bundle.
+          inParent(ctx, "scaffold.step.generate", [
+            "ruby",
+            "-e",
+            RAILS_BIN,
+            version ?? ">= 0",
+            "new",
+            ctx.name,
+            `--database=${String(ctx.opts.database || "sqlite3")}`,
+            ...(api ? ["--api"] : []),
+            ...(!api && ctx.opts.tailwind ? ["--css=tailwind"] : []),
+          ]),
+          // `rails new` exits 0 when its bundle failed, leaving an app with gems missing; this is
+          // what says so, and stops the script before git commits half a project.
+          inRoot(ctx, "scaffold.step.verify", ["bundle", "check"]),
+        ],
+        run: ctx.platform === "windows" ? "ruby bin\\rails server" : "bin/rails server",
+      };
+    },
+  },
+  {
     id: "dotnet",
     name: ".NET",
     category: "backend",
@@ -1435,6 +1981,17 @@ export const CATEGORY_LABELS: Record<Category, TranslationKey> = {
 
 export const CATEGORY_ORDER: Category[] = ["general", "frontend", "backend", "mobile"];
 
+/** Where `template`'s runtime requirement is read, for what has been picked so far: each choice and
+ *  toggle as chosen, or its default. Text and runtime answers never decide it. */
+export function enginesFor(template: Template, chosen: Options): VersionSource | undefined {
+  if (typeof template.engines !== "function") return template.engines;
+  const opts: Options = {};
+  for (const option of template.options) {
+    if (option.kind === "choice" || option.kind === "toggle") opts[option.id] = chosen[option.id] ?? option.default;
+  }
+  return template.engines(opts);
+}
+
 /** What a template is called on screen: its brand, or — for one named by a word — that word in the
  *  app's language. */
 export function templateName(template: Template, t: (key: TranslationKey) => string): string {
@@ -1444,6 +2001,55 @@ export function templateName(template: Template, t: (key: TranslationKey) => str
 /** Where the dialog opens: the top of its list, which is grouped by `CATEGORY_ORDER` — never the
  *  template used last, which sat mid-list with nothing on screen saying why. */
 export const FIRST_TEMPLATE = TEMPLATES.find((template) => template.category === CATEGORY_ORDER[0]) ?? TEMPLATES[0];
+
+/**
+ * pnpm runs no dependency's build script (`postinstall` and friends) that nobody approved, and from
+ * pnpm 11 on it also **fails the install** over each one it held back — `ERR_PNPM_IGNORED_BUILDS`,
+ * exit 1 — after writing it into `pnpm-workspace.yaml` as `allowBuilds: { core-js: set this to true
+ * or false }`. Every install after that fails the same way until each one is decided. A generator
+ * that installs its project itself fails mid-way (`nest new`: core-js and unrs-resolver on NestJS 12),
+ * and so does our own `pnpm add` after it.
+ *
+ * Measured 2026-10-01 against pnpm 10.33.2, 11.5.0 and 12.6.0:
+ * - `pnpm_config_strict_dep_builds=false` turns the failure back into pnpm 10's warning, inherited by
+ *   whatever `pnpm dlx` starts. The `npm_config_` spelling is no longer read from pnpm 11 on.
+ * - The placeholders are written either way, so the plan ends by settling them as `false` — the
+ *   scripts stay unrun, as pnpm already left them, but the project now installs (a clone, CI, the
+ *   next `pnpm add`). Approving one is the user's call: `pnpm approve-builds`, or `true` in the file.
+ * - Written by a script rather than `pnpm approve-builds !<name>`: pnpm 10 reads no names there, it
+ *   opens its menu instead — which, in a pty with nobody answering, never returns. pnpm 10 writes no
+ *   placeholders and never fails, so on it the step finds nothing to do.
+ *
+ * Single quotes only, as in `NEST_FASTIFY_PATCH`: one argument to `node -e` on both shells.
+ */
+const PNPM_SETTLE_BUILDS = [
+  "const fs=require('fs');",
+  "const file='pnpm-workspace.yaml';",
+  "if(!fs.existsSync(file))process.exit(0);",
+  "const held=[];",
+  "const text=fs.readFileSync(file,'utf8').replace(/^([ \\t]+)(.+?):[ \\t]*set this to true or false[ \\t]*$/gm,",
+  "(line,indent,name)=>{held.push(name);return indent+name+': false';});",
+  "if(held.length===0)process.exit(0);",
+  "fs.writeFileSync(file,text);",
+  "console.log(file+'  allowBuilds:');",
+  "for(const name of held)console.log('  '+name+': false');",
+].join("");
+
+/** A plan as the runner runs it: the template's own, plus what any plan that runs pnpm needs (see
+ *  `PNPM_SETTLE_BUILDS`) — keyed on the steps that call pnpm, not on the package manager picked, since
+ *  a template can run on Bun's tools whatever was picked (Hono on Bun). */
+export function planFor(template: Template, ctx: TemplateContext): Plan {
+  const plan = template.plan(ctx);
+  const pnpm = (step: Step) => step.argv?.[0] === "pnpm";
+  if (!plan.steps.some(pnpm)) return plan;
+  return {
+    ...plan,
+    steps: [
+      ...plan.steps.map((step) => (pnpm(step) ? { ...step, env: { ...step.env, pnpm_config_strict_dep_builds: "false" } } : step)),
+      { ...inRoot(ctx, "scaffold.step.builds", ["node", "-e", PNPM_SETTLE_BUILDS]), optional: true },
+    ],
+  };
+}
 
 /** The git steps every plan ends with. `commit` is optional-tolerant: a machine with no git identity
  *  still gets a repository, just without the first commit, and is told so in the terminal.

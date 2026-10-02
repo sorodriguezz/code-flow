@@ -195,26 +195,48 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
   const empty = needs.length === 0 && running.length === 0 && entries.length === 0;
 
   return (
-    // Three bands, and only the history scrolls. The actions, the live rows and Recent's heading with
-    // its search box and filters stay put; this used to be one scroller, so going down a long
-    // history carried the search and the filters away with it — the two things you want in hand
-    // exactly then (user report).
+    // Three bands, and only the history scrolls. The scope and the actions, the live rows and
+    // Recent's heading with its search box and filters stay put; this used to be one scroller, so
+    // going down a long history carried the search and the filters away with it — the two things
+    // you want in hand exactly then (user report).
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-3 pb-1 pt-3">
-        <InboxAction
-          icon={Plus}
-          label={t("assistant.chat")}
-          disabled={!activeProject}
-          onClick={() => activeProject && openNewChat(activeProject.id)}
-        />
-        {activeProject && <ReviewPrMenu projectId={activeProject.id} variant="button" />}
-        <InboxAction
-          icon={ShieldCheck}
-          label={t("assistant.analyze")}
-          disabled={!activeProject || changes === 0}
-          title={changes === 0 ? t("analyze.nothingToAnalyze") : undefined}
-          onClick={() => activeProject && openAnalysis(activeProject.id, { run: true })}
-        />
+      {/* The scope leads. "This repo or the whole workspace" is a bigger choice than any action or
+          filter under it, so it sits above them all (it narrows Recent only — what needs you and
+          what is running are the whole workspace's either way). It is also drawn whatever the
+          history holds: at the end of Recent's heading it went away with the heading whenever there
+          was nothing to list, so a repository with no activity left you on "This repo", looking at
+          nothing, with no way back to a workspace that had plenty (user report). With one
+          repository, or none open, both would show the same list, so there is nothing to choose. */}
+      <div className="flex shrink-0 flex-col gap-2 px-3 pb-1 pt-3">
+        {projects.length > 1 && activeProject && (
+          <Segmented
+            size="sm"
+            className="self-start"
+            layoutId={`inbox-scope-${workspaceId}`}
+            value={scope}
+            onChange={setScope}
+            options={[
+              { value: "repo", label: t("assistant.scopeRepo"), title: activeProject.name },
+              { value: "workspace", label: t("assistant.scopeWorkspace") },
+            ]}
+          />
+        )}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <InboxAction
+            icon={Plus}
+            label={t("assistant.chat")}
+            disabled={!activeProject}
+            onClick={() => activeProject && openNewChat(activeProject.id)}
+          />
+          {activeProject && <ReviewPrMenu projectId={activeProject.id} variant="button" />}
+          <InboxAction
+            icon={ShieldCheck}
+            label={t("assistant.analyze")}
+            disabled={!activeProject || changes === 0}
+            title={changes === 0 ? t("analyze.nothingToAnalyze") : undefined}
+            onClick={() => activeProject && openAnalysis(activeProject.id, { run: true })}
+          />
+        </div>
       </div>
 
       {(needs.length > 0 || running.length > 0) && (
@@ -244,21 +266,10 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
       {!empty && (
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="shrink-0 px-2">
-            <div className="flex items-center gap-2 pr-0.5">
+            {/* Still as tall as the scope toggle that sat at its end, so moving the toggle to the top
+                left this heading and the search box under it where they were. */}
+            <div className="flex min-h-[26px] items-center">
               <SectionLabel label={t("assistant.recent")} />
-              {projects.length > 1 && activeProject && (
-                <Segmented
-                  size="sm"
-                  className="ml-auto"
-                  layoutId={`inbox-scope-${workspaceId}`}
-                  value={scope}
-                  onChange={setScope}
-                  options={[
-                    { value: "repo", label: t("assistant.scopeRepo"), title: activeProject.name },
-                    { value: "workspace", label: t("assistant.scopeWorkspace") },
-                  ]}
-                />
-              )}
             </div>
             <div className="space-y-1.5 px-0.5 pb-1">
               <div className="relative">

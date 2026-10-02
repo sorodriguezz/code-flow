@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import {
   ChevronDown,
   Clock,
@@ -16,6 +16,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
+import { ActiveMarker } from "../common/ActivePill";
 import { Kbd, buttonClass, iconButtonClass } from "../common/Button";
 import { popoverClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
@@ -71,6 +72,11 @@ export function PanelTabStrip({
   const stripWidth = useElementWidth(stripRef);
   const [compact, setCompact] = useState(false);
   const holds = `${activeKey}|${tabs.map((tab) => tab.key).join(",")}`;
+  /** The active tab's marker slides between this strip's tabs by `layoutId`, so the id is this
+   *  strip's own: a second strip on screen sharing it would send the bar flying from one to the
+   *  other. */
+  const instance = useId();
+  const markId = `cf-assistant-tab-mark-${instance}`;
 
   // Names first, every time what the strip holds or its width changes; icons only if the names do
   // not fit. Both passes land before the browser paints, so neither is ever seen.
@@ -112,9 +118,9 @@ export function PanelTabStrip({
         aria-label={t("assistant.tabs")}
         className="relative flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
-        <InboxTab workspaceId={workspaceId} active={activeKey === INBOX_KEY} compact={compact && activeKey !== INBOX_KEY} />
+        <InboxTab workspaceId={workspaceId} active={activeKey === INBOX_KEY} compact={compact && activeKey !== INBOX_KEY} markId={markId} />
         {tabs.map((tab) => (
-          <TabButton key={tab.key} tab={tab} workspaceId={workspaceId} active={tab.key === activeKey} compact={compact && tab.key !== activeKey} />
+          <TabButton key={tab.key} tab={tab} workspaceId={workspaceId} active={tab.key === activeKey} compact={compact && tab.key !== activeKey} markId={markId} />
         ))}
       </div>
       <NewMenu workspaceId={workspaceId} onOpenCheckpoints={onOpenCheckpoints} />
@@ -164,7 +170,7 @@ function useNeedsCount(workspaceId: string): number {
   }, [tracked, unread, workspaceId]);
 }
 
-function InboxTab({ workspaceId, active, compact }: { workspaceId: string; active: boolean; compact: boolean }) {
+function InboxTab({ workspaceId, active, compact, markId }: { workspaceId: string; active: boolean; compact: boolean; markId: string }) {
   const t = useT();
   const count = useNeedsCount(workspaceId);
   const focus = useAiPanelStore((s) => s.focus);
@@ -175,6 +181,7 @@ function InboxTab({ workspaceId, active, compact }: { workspaceId: string; activ
   return (
     <TabShell
       active={active}
+      markId={markId}
       title={t("assistant.inbox")}
       onSelect={() => focus(INBOX_KEY, workspaceId)}
       icon={<Inbox size={14} className="shrink-0" />}
@@ -192,6 +199,7 @@ function InboxTab({ workspaceId, active, compact }: { workspaceId: string; activ
 
 function TabShell({
   active,
+  markId,
   title,
   onSelect,
   onClose,
@@ -201,6 +209,8 @@ function TabShell({
   trailing,
 }: {
   active: boolean;
+  /** The strip's `layoutId` for the active tab's marker — see `PanelTabStrip`. */
+  markId: string;
   title: string;
   onSelect: () => void;
   onClose?: () => void;
@@ -241,6 +251,10 @@ function TabShell({
             : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         }`}
       >
+        {/* The fill, and a short bar in the accent at the tab's start — the mark the window's view
+            tabs wear beside their pill (user ask, 2026-10-01). The Inbox wears it too when it is
+            the tab on screen. */}
+        {active && <ActiveMarker layoutId={markId} color="var(--cf-accent-fill)" className="left-0 inset-y-1.5" />}
         <span className="relative flex shrink-0 items-center">
           {icon}
           {/* Told apart by shape, not by colour — a rose accent and the danger red are one colour
@@ -282,7 +296,7 @@ function TabShell({
   );
 }
 
-function TabButton({ tab, workspaceId, active, compact }: { tab: PanelTab; workspaceId: string; active: boolean; compact: boolean }) {
+function TabButton({ tab, workspaceId, active, compact, markId }: { tab: PanelTab; workspaceId: string; active: boolean; compact: boolean; markId: string }) {
   const focus = useAiPanelStore((s) => s.focus);
   const close = useAiPanelStore((s) => s.close);
   const mark = useAiPanelStore((s) => s.unread[tab.key] ?? null);
@@ -313,6 +327,7 @@ function TabButton({ tab, workspaceId, active, compact }: { tab: PanelTab; works
   return (
     <TabShell
       active={active}
+      markId={markId}
       title={title}
       onSelect={() => focus(tab.key, workspaceId)}
       onClose={() => close(tab.key, workspaceId)}

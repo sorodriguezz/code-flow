@@ -19,6 +19,7 @@ import {
   claimRoot,
   discardRoot,
   fetchVersions,
+  quarkusGenerate,
   runScript,
   springGenerate,
   writeFiles,
@@ -30,8 +31,10 @@ import {
 import {
   FIRST_TEMPLATE,
   TEMPLATES,
+  enginesFor,
   gitSteps,
   npmNameProblem,
+  planFor,
   templateName,
   type Options,
   type OptionValue,
@@ -182,11 +185,16 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   }, []);
 
   // ── The chosen template's registries ──
+  // Where the runtime requirement is read can follow a choice (SolidStart's Node is not plain Solid's).
+  const enginesSource = enginesFor(template, optionsById[template.id] ?? {});
+  const enginesKey = enginesSource ? sourceKey(enginesSource) : null;
   useEffect(() => {
     if (template.versions) loadVersions(template.versions);
-    if (template.engines) loadVersions(template.engines);
+    if (enginesSource) loadVersions(enginesSource);
     if (template.spring) loadSpring();
-  }, [template, loadVersions, loadSpring, tick]);
+    // `enginesKey`, not `enginesSource`: a fresh object every render, the same registry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [template, enginesKey, loadVersions, loadSpring, tick]);
 
   const versionLoad = template.versions ? versions[sourceKey(template.versions)] : undefined;
   const lines = useMemo(() => {
@@ -196,7 +204,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       .map((line) => (template.ltsLine && !line.channel && template.ltsLine(line.line) ? { ...line, channel: "lts" as const } : line));
   }, [versionLoad, template]);
   const version = lines.find((line) => line.line === lineById[template.id]) ?? defaultLine(lines);
-  const enginesLoad = template.engines ? versions[sourceKey(template.engines)] : undefined;
+  const enginesLoad = enginesKey ? versions[enginesKey] : undefined;
   const engines = enginesLoad?.data?.[0] ?? null;
 
   // Python's interpreter lines, for the templates that let uv fetch one.
@@ -498,7 +506,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   /** The generation itself — `create` once the form allows it, and "retry" after a failure, when the
    *  form's own destination check would refuse the folder the failure left behind. */
   const generate = async () => {
-    const plan = template.plan(ctx);
+    const plan = planFor(template, ctx);
     savePrefs({
       parent: trimmedParent,
       pm: effectivePm,
@@ -538,6 +546,10 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       if (plan.spring) {
         patchRun({ stage: t("scaffold.run.spring") });
         await springGenerate(plan.spring, trimmedParent, name);
+      }
+      if (plan.quarkus) {
+        patchRun({ stage: t("scaffold.run.quarkus") });
+        await quarkusGenerate(plan.quarkus, trimmedParent, name);
       }
       // Writing makes the folder, so a plan with no files at all (the empty template) still has one.
       if (plan.files) {

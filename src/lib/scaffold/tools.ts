@@ -29,6 +29,7 @@ export type ToolId =
   | "uv"
   | "php"
   | "composer"
+  | "ruby"
   | "dotnet"
   | "cargo"
   | "git";
@@ -92,6 +93,16 @@ export const TOOLS: Record<ToolId, ToolInfo> = {
     homepage: "https://php.new",
   },
   composer: { id: "composer", name: "Composer", dialect: "composer", homepage: "https://getcomposer.org/download/" },
+  ruby: {
+    id: "ruby",
+    name: "Ruby",
+    logo: "ruby",
+    // A gem's `required_ruby_version` is a `Gem::Requirement` (`>= 3.2.0`, `~> 3.1`, comma for "and"),
+    // which reads exactly as Composer's constraints do — `~>` included.
+    dialect: "composer",
+    versions: { kind: "runtime", product: "ruby" },
+    homepage: "https://www.ruby-lang.org/en/documentation/installation/",
+  },
   dotnet: {
     id: "dotnet",
     name: ".NET SDK",
@@ -105,7 +116,7 @@ export const TOOLS: Record<ToolId, ToolInfo> = {
 };
 
 /** The managers a recipe can go through. Probed with the tools, never required by a template. */
-export const MANAGER_IDS = ["brew", "winget", "fnm", "nvm", "volta", "apt", "dnf", "pacman"] as const;
+export const MANAGER_IDS = ["brew", "winget", "fnm", "nvm", "volta", "mise", "apt", "dnf", "pacman"] as const;
 
 /** Everything one detection pass asks about. */
 export const DETECT_IDS: string[] = [...(Object.keys(TOOLS) as ToolId[]), ...MANAGER_IDS];
@@ -382,6 +393,29 @@ export function recipesFor(tool: ToolId, ctx: InstallContext): Recipe[] {
             pacman: tool === "php" ? "php composer" : "composer",
           }),
         );
+      break;
+    }
+    case "ruby": {
+      const line = safeLine(ctx.line);
+      // mise first when it is here: it is the version manager already in use, and it installs a
+      // precompiled Ruby rather than building one.
+      if (has("mise"))
+        recipes.push({
+          id: "mise",
+          label: "mise",
+          steps: [{ title: `mise ruby@${line ?? "latest"}`, argv: ["mise", "use", "--global", `ruby@${line ?? "latest"}`] }],
+        });
+      // Homebrew's `ruby` is linked again (no longer keg-only, checked 2026-10-01); the older lines
+      // (`ruby@3.4`…) are keg-only and get linked by the helper.
+      if (unix && has("brew"))
+        recipes.push({
+          id: "brew",
+          label: "Homebrew",
+          steps: [line ? brewVersioned("ruby", line) : { title: "brew ruby", argv: ["brew", "install", "ruby"] }],
+        });
+      // RubyInstaller, with the DevKit that native gems are built with.
+      if (!unix && has("winget") && line) recipes.push({ id: "winget", label: "winget", steps: [winget(`RubyInstallerTeam.RubyWithDevKit.${line}`)] });
+      if (platform === "linux") recipes.push(...sudoLinux(present, { apt: "ruby-full", dnf: "ruby ruby-devel", pacman: "ruby" }));
       break;
     }
     case "dotnet": {

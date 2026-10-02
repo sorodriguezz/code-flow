@@ -27,7 +27,11 @@ export type VersionSource =
   | { kind: "npm"; package: string }
   | { kind: "pypi"; package: string }
   | { kind: "packagist"; package: string }
-  /** An endoflife.date product: `nodejs`, `python`, `php`, `go`, `eclipse-temurin`, `dotnet`. */
+  /** A gem on rubygems.org (`rails`), folded into `major.minor` lines. */
+  | { kind: "rubygems"; package: string }
+  /** code.quarkus.io's platform streams (`3.40`), each needing the oldest Java it takes. */
+  | { kind: "quarkus" }
+  /** An endoflife.date product: `nodejs`, `python`, `php`, `go`, `eclipse-temurin`, `dotnet`, `ruby`. */
   | { kind: "runtime"; product: string };
 
 export interface VersionLine {
@@ -82,6 +86,17 @@ export interface SpringRequest {
   dependencies: string[];
 }
 
+/** What code.quarkus.io is asked for. The Java version is not here: the backend picks the newest the
+ *  stream takes that the JDK on this machine can build — see `scaffold/quarkus.rs`. */
+export interface QuarkusRequest {
+  /** The stream's line, `3.40`; empty for the recommended one. */
+  stream: string;
+  groupId: string;
+  buildTool: "MAVEN" | "GRADLE" | "GRADLE_KOTLIN_DSL";
+  /** Extension ids, `io.quarkus:quarkus-rest`. */
+  extensions: string[];
+}
+
 export interface DestCheck {
   path: string;
   problem: string | null;
@@ -103,6 +118,9 @@ export const springMetadata = () => invoke<SpringMeta>("scaffold_spring_metadata
 
 export const springGenerate = (request: SpringRequest, parent: string, folder: string) =>
   invoke<string>("scaffold_spring_generate", { request, parent, folder });
+
+export const quarkusGenerate = (request: QuarkusRequest, parent: string, folder: string) =>
+  invoke<string>("scaffold_quarkus_generate", { request, parent, folder });
 
 export const checkDest = (parent: string, name: string) => invoke<DestCheck>("scaffold_check_dest", { parent, name });
 
