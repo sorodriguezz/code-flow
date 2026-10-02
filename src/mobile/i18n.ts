@@ -284,6 +284,11 @@ const es = {
   "chain.pausedQuota": "en pausa — el motor se quedó sin cuota",
   "chain.pausedAuth": "en pausa — la CLI del motor no tiene sesión iniciada",
   "chain.pausedCliMissing": "en pausa — no se encontró la CLI del motor",
+  "chain.pausedLocalModel": "en pausa — el modelo local no responde",
+  "chain.planUnreadable": "el plan no se pudo leer — se le pidió de nuevo al planificador",
+  "chain.hybridPending": "terminó, pero la revisión dejó cosas pendientes",
+  "chain.reviewUnreadable": "la respuesta de la revisión no se pudo leer; se le pidió de nuevo",
+  "chain.localModel": "Modelo local",
   // No es un `last_reason` como los diez anteriores: se rechaza *antes* de escribir nada, así que
   // es una frase para una persona y no una nota sobre una fila. Se lee como tal.
   "chain.gateMoved": "Esta pausa ya fue respondida — la cadena siguió adelante.",
@@ -646,6 +651,11 @@ const en: Record<MobileKey, string> = {
   "chain.pausedQuota": "paused — the engine is out of quota",
   "chain.pausedAuth": "paused — the engine's CLI is signed out",
   "chain.pausedCliMissing": "paused — the engine's CLI was not found",
+  "chain.pausedLocalModel": "paused — the local model is not answering",
+  "chain.planUnreadable": "the plan couldn't be read — the planner was asked again",
+  "chain.hybridPending": "finished, but the review left things undone",
+  "chain.reviewUnreadable": "the review's answer couldn't be read — it was asked again",
+  "chain.localModel": "Local model",
   "chain.gateMoved": "This gate was already answered — the chain has moved on.",
 
   "settings.title": "Settings",

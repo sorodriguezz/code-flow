@@ -156,6 +156,9 @@ pub const TABLES: &[&str] = &[
     "agent_chains",
     "agent_chain_repos",
     "agent_chain_steps",
+    // A hybrid run's configuration and its plan, both hanging off the chain they belong to.
+    "hybrid_runs",
+    "hybrid_items",
 ];
 
 /// Tables that are deliberately *not* in a backup, and the only sanctioned way to be absent from
@@ -326,7 +329,14 @@ pub const GROUPS: &[Group] = &[
     Group { key: "reviews", tables: &["review_runs"] },
     Group {
         key: "agentWork",
-        tables: &["agent_tasks", "agent_chains", "agent_chain_repos", "agent_chain_steps"],
+        tables: &[
+            "agent_tasks",
+            "agent_chains",
+            "agent_chain_repos",
+            "agent_chain_steps",
+            "hybrid_runs",
+            "hybrid_items",
+        ],
     },
     Group {
         // Its own switch rather than riding with `notes` or `diagrams`, and the reason is the

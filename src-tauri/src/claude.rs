@@ -169,6 +169,17 @@ impl AiEngine for ClaudeEngine {
         if let Some(id) = inv.resume_session_id {
             cmd.arg("--resume").arg(id);
         }
+        // The CLI validates the final answer against the schema and retries the model itself until
+        // it conforms; the object arrives as the verdict's `structured_output`, which
+        // `interpret_output` prefers over the prose `result`. Verified on 2.1.287's binary.
+        if let Some(schema) = inv.json_schema {
+            cmd.arg("--json-schema").arg(schema);
+        }
+        // `--add-dir` takes several values, so each one is attached with `=`: a bare value would let
+        // the option swallow whatever positional argument came next as one more directory.
+        for dir in inv.extra_dirs {
+            cmd.arg(format!("--add-dir={dir}"));
+        }
         if let Some(dir) = inv.cwd {
             cmd.current_dir(dir);
         }
@@ -183,6 +194,10 @@ impl AiEngine for ClaudeEngine {
 
     /// Enforced by the CLI: `--tools` leaves the write and shell tools out of the run entirely, and
     /// `--strict-mcp-config` loads no MCP server whose tools could write instead.
+    fn supports_extra_dirs(&self) -> bool {
+        true
+    }
+
     fn enforces_read_only(&self) -> bool {
         true
     }
@@ -621,6 +636,10 @@ struct ClaudeCliResult {
     usage: Option<ClaudeUsage>,
     #[serde(default)]
     total_cost_usd: Option<f64>,
+    /// The answer as an object, when the run was given `--json-schema`. Already validated by the
+    /// CLI; `null` or absent on every other run.
+    #[serde(default)]
+    structured_output: Option<serde_json::Value>,
 }
 
 /// The `usage` object of a `--output-format json` result.
@@ -746,11 +765,21 @@ fn interpret_output(
     stderr: &str,
 ) -> Result<AiRun, String> {
     let parsed = result_payload(stdout);
-    let result_text = parsed
+    // A schema-constrained run's answer is the object, not the prose beside it. Only on a clean
+    // verdict: a failed run's `result` is its reason, and that is what has to be reported.
+    let structured = parsed
         .as_ref()
-        .and_then(|p| p.result.as_deref())
-        .map(str::trim)
-        .filter(|t| !t.is_empty());
+        .filter(|p| success && !p.is_error)
+        .and_then(|p| p.structured_output.as_ref())
+        .filter(|value| !value.is_null())
+        .map(|value| value.to_string());
+    let result_text = structured.as_deref().or_else(|| {
+        parsed
+            .as_ref()
+            .and_then(|p| p.result.as_deref())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+    });
 
     if let Some(text) = result_text {
         let failed = !success || parsed.as_ref().is_some_and(|p| p.is_error);
@@ -861,6 +890,32 @@ fn readable_stdout(stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `--json-schema` run of 2.1.287 in `-p` mode, captured against a fake API on
+    /// 2026-10-02 and trimmed to the fields read: the CLI has the model call its `StructuredOutput`
+    /// tool and hands the validated object back as `structured_output` (and, as text, in `result`).
+    #[test]
+    fn a_schema_bound_run_answers_with_its_structured_output() {
+        let stdout = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"99960bd9"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"stop_reason":"tool_use","session_id":"99960bd9","result":"{\"summary\":\"CSV helper\",\"tasks\":[]}","structured_output":{"summary":"CSV helper","tasks":[{"id":"t1","title":"csv","file":"src/csv.ts","action":"create","regions":[],"instruction":"Create toCsv.","context":[],"acceptance":["exports toCsv"],"depends_on":[],"difficulty":"easy"}],"checks":[],"risks":[]},"usage":{"input_tokens":120,"output_tokens":80},"modelUsage":{"claude-sonnet-4-5":{"outputTokens":80}}}"#,
+            "\n",
+        );
+        let run = interpret_output(true, "exit 0", stdout, "").expect("an answer");
+        // The object wins over the prose `result`, which here was deliberately made to differ.
+        let plan = crate::hybrid::plan::parse(&run.text).expect("a plan");
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].file, "src/csv.ts");
+        assert_eq!(run.session_id.as_deref(), Some("99960bd9"));
+    }
+
+    #[test]
+    fn a_failed_schema_run_reports_its_reason_not_a_stale_object() {
+        let stdout = r#"{"type":"result","subtype":"error_max_structured_output_retries","is_error":true,"result":"structured output did not match the schema","structured_output":{"summary":"half"},"usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let error = interpret_output(false, "exit 1", stdout, "").expect_err("a failure");
+        assert!(error.contains("did not match"), "{error}");
+    }
 
     #[test]
     fn a_single_line_ask_stays_on_the_command_line() {

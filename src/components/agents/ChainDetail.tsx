@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  Blend,
   Check,
   ChevronRight,
   ExternalLink,
@@ -22,6 +23,9 @@ import { AiWand } from "../common/AiGlyph";
 import { areaClass } from "./areaClass";
 import { chainStatusOf, reasonText } from "./chainStatus";
 import { StoryPlanGate } from "./StoryPlanGate";
+import { HybridPlanGate } from "./HybridPlanGate";
+import { HybridRunPanel } from "./HybridRunPanel";
+import { agentName } from "./agentName";
 import { AiRunLog } from "../ai/AiRunLog";
 import { buttonClass, iconButtonClass, type ButtonVariant } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
@@ -37,7 +41,8 @@ import { aiClassifyFailure, openExternalUrl, type AiFailure } from "../../lib/ta
 import { isEnginePause, resumeInstant } from "../../lib/chainPause";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import type { AgentChain, AgentChainStep, ChainRepo, ChainStepStatus } from "../../types/domain";
+import type { AgentChain, AgentChainStep, ChainRepo, ChainStepPhase, ChainStepStatus } from "../../types/domain";
+import type { TranslationKey } from "../../lib/i18n/translations";
 
 /**
  * One chain, open: the plan, where it has got to, and the one decision it is waiting on.
@@ -69,6 +74,9 @@ export function ChainDetail({ chainId }: { chainId: string }) {
   /** Whether this gate is the story review — the one decision the plain "here is the message"
    * textarea cannot express, because it is about N repositories rather than one message. */
   const planGate = gated && chain?.kind === "story" && waiting?.phase === "implement";
+  /** A hybrid run parked before its local execution: the plan's tasks are the decision, not a
+   *  message — it carries its own approve, like the story review. */
+  const hybridGate = gated && chain?.kind === "hybrid" && waiting?.phase === "execute";
 
   useEffect(() => {
     setDraft(gated ? (waiting?.pending_input ?? "") : null);
@@ -121,6 +129,8 @@ export function ChainDetail({ chainId }: { chainId: string }) {
       <div className={toolbarClass}>
         {chain.kind === "story" ? (
           <AiWand size={16} className="shrink-0" />
+        ) : chain.kind === "hybrid" ? (
+          <Blend size={16} className="shrink-0 text-[var(--cf-accent)]" />
         ) : (
           <Link2 size={16} className="shrink-0 text-[var(--cf-accent)]" />
         )}
@@ -254,7 +264,7 @@ export function ChainDetail({ chainId }: { chainId: string }) {
                     write some of it — is the whole point of the feature. */}
                 {step.phase !== "" && step.phase !== steps[at - 1]?.phase && (
                   <p className="mb-2 mt-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)] after:h-px after:flex-1 after:bg-[var(--cf-border)] after:content-['']">
-                    {t(step.phase === "analyze" ? "agents.storyPhaseAnalyze" : "agents.storyPhaseImplement")}
+                    {t(PHASE_LABEL[step.phase] ?? "agents.storyPhaseImplement")}
                   </p>
                 )}
                 <StepRow
@@ -273,11 +283,16 @@ export function ChainDetail({ chainId }: { chainId: string }) {
               </div>
             );
           })}
+          {chain.kind === "hybrid" && (
+            <HybridRunPanel chain={chain} steps={steps} idle={idle} />
+          )}
         </div>
       </div>
 
       {planGate ? (
         <StoryPlanGate chain={chain} steps={steps} />
+      ) : hybridGate ? (
+        <HybridPlanGate chain={chain} steps={steps} />
       ) : (
         gated && (
           <div className="shrink-0 border-t border-[var(--cf-border)] px-4 py-2.5">
@@ -341,7 +356,7 @@ export function ChainDetail({ chainId }: { chainId: string }) {
         )}
         {/* The story review carries its own approve — it approves N repositories at once, and a
             second button beside it that approved only the next one would be a trap. */}
-        {gated && !planGate && (
+        {gated && !planGate && !hybridGate && (
           <>
             {/* `waiting` is the step this gate was drawn from, and it goes with the approval as a
                 precondition: the pane can be minutes old (a phone may have answered the same gate
@@ -391,6 +406,16 @@ export function ChainDetail({ chainId }: { chainId: string }) {
 }
 
 const EMPTY_STEPS: AgentChainStep[] = [];
+
+/** The heading each generated run's parts are drawn under. Every phase needs its own: the one map
+ *  that used to stand here knew only the story's two, and labelled anything else "Implement". */
+const PHASE_LABEL: Partial<Record<ChainStepPhase, TranslationKey>> = {
+  analyze: "agents.storyPhaseAnalyze",
+  implement: "agents.storyPhaseImplement",
+  plan: "agents.hybridPhasePlan",
+  execute: "agents.hybridPhaseExecute",
+  review: "agents.hybridPhaseReview",
+};
 const EMPTY_REPOS: ChainRepo[] = [];
 
 /** How each step paints its cell in the progress strip. `pending` is the bare track, so it has no
@@ -661,7 +686,7 @@ function StepRow({
           title={step.instruction}
         >
           <span className="block truncate text-[13px] font-semibold text-[var(--cf-text)]">
-            {step.agent_name || t("settings.sddNewAgent")}
+            {agentName(step.agent_name, step.provider, t) || t("settings.sddNewAgent")}
           </span>
           <span className="block truncate text-[12px] text-[var(--cf-text-muted)]">{step.instruction}</span>
         </button>

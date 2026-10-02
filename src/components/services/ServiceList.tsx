@@ -21,7 +21,7 @@ import { Tooltip } from "../common/Tooltip";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useT } from "../../state/languageStore";
-import { deriveRunning, isActive, useServicesStore, type RunningService } from "../../state/servicesStore";
+import { UNGROUPED_KEY, deriveRunning, isActive, useServicesStore, type RunningService } from "../../state/servicesStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { runsContainers, serviceDetectedPorts, type ServiceRow, type ServiceRuntime } from "../../types/services";
 import { PortChip, StatusGlyph, portsFor, rowHint, shortDuration, statusLabel, useElapsed } from "./serviceBits";
@@ -34,6 +34,10 @@ import { PortChip, StatusGlyph, portsFor, rowHint, shortDuration, statusLabel, u
  * on it reads as work happening when none is. `leading` is drawn as given, so it goes through that.
  */
 const still = (Icon: LucideIcon) => <Icon size={13} className="mt-[2px] shrink-0 opacity-70" />;
+
+/** A stable "no folds" for a workspace not read yet — a selector that built `[]` would hand back a
+ *  new reference on every call, which `useSyncExternalStore` reads as a change. */
+const NOTHING_FOLDED: string[] = [];
 
 /**
  * The list's three ways to add something: detect, a group, a service by hand.
@@ -117,7 +121,10 @@ export function ServiceList({
   const groups = useServicesStore((s) => s.groups);
   const runtime = useServicesStore((s) => s.runtime);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // In the store, not in this component: the list unmounts every time the dock closes or another
+  // app takes the window, and the folds have to be where the user left them on the way back.
+  const collapsed = useServicesStore((s) => (workspaceId ? s.collapsedByWorkspace[workspaceId] : undefined) ?? NOTHING_FOLDED);
+  const toggleCollapsed = useServicesStore((s) => s.toggleCollapsed);
 
   const ungrouped = services.filter((s) => !s.group_id);
   const sections = [
@@ -129,14 +136,6 @@ export function ServiceList({
     })),
   ];
   const elsewhere = deriveRunning(runtime, workspaceId).filter((r) => r.foreign);
-
-  const toggle = (key: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
 
   return (
     <>
@@ -153,8 +152,8 @@ export function ServiceList({
           name={section.name}
           services={section.services}
           runtime={runtime}
-          collapsed={collapsed.has(section.id ?? "ungrouped")}
-          onToggle={() => toggle(section.id ?? "ungrouped")}
+          collapsed={collapsed.includes(section.id ?? UNGROUPED_KEY)}
+          onToggle={() => workspaceId && toggleCollapsed(workspaceId, section.id ?? UNGROUPED_KEY)}
           selectedId={selectedId}
           onSelect={onSelect}
           onEdit={onEdit}

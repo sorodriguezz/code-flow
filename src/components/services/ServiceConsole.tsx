@@ -15,7 +15,10 @@ import { TerminalPane } from "../terminal/TerminalPane";
 import { Tooltip } from "../common/Tooltip";
 import { useT } from "../../state/languageStore";
 import { isActive, useServicesStore } from "../../state/servicesStore";
+import { useTerminalStore } from "../../state/terminalStore";
+import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { joinFolder } from "../../lib/folderPath";
 import { clearServiceLog, serviceLog } from "../../lib/tauri/services";
 import { serviceDeps, serviceDetectedPorts, type ServiceRow } from "../../types/services";
 import {
@@ -50,6 +53,8 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
   const stop = useServicesStore((s) => s.stop);
   const restart = useServicesStore((s) => s.restart);
   const projects = useWorkspaceStore((s) => s.projectsByWorkspace[service.workspace_id]);
+  /** The repository on screen, which is where a shell opened from here is filed — see `openShell`. */
+  const shelf = useWorkspaceStore((s) => s.activeProject());
   /** Bumped to remount the pane after the log is cleared, so it replays the now-empty record. */
   const [clearedAt, setClearedAt] = useState(0);
 
@@ -72,6 +77,29 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
   const where = project
     ? `${project.name}${service.cwd.trim() ? `/${service.cwd.trim()}` : ""}`
     : service.cwd.trim() || "~";
+  /** It names a repository the workspace no longer has, so there is nothing to resolve its folder
+   *  against — the supervisor refuses to start it for the same reason. */
+  const repoGone = !!service.project_id && !project;
+  /** The folder it runs in, worked out the way the supervisor does (`resolve_cwd`). Blank — no
+   *  repository and no folder — is the home directory, for the service and the shell alike. */
+  const folder = project ? joinFolder(project.local_path, service.cwd) : service.cwd.trim();
+
+  /**
+   * A shell standing where the service runs, in the terminal panel: for the command that goes with
+   * it — a migration, an install, a `git status` — without a `cd` to get there first.
+   *
+   * Filed under the repository on screen, like every shell the dock opens, because the terminal
+   * panel lists that repository's shells and no others: filed under the service's own repository
+   * while another is on screen, it would open out of sight. A new shell each time, as the explorer's
+   * "Open in Integrated Terminal" does; `openNew` turns the dock to the terminals.
+   */
+  const openShell = () => {
+    if (!shelf || repoGone) return;
+    void useTerminalStore
+      .getState()
+      .openNew(shelf.id, folder)
+      .catch((e: unknown) => pushErrorToast(String(e)));
+  };
 
   // Edited after this process started: what is running is not what the form says any more.
   const stale =
@@ -120,6 +148,35 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
             {t("services.applyChanges")}
           </button>
         )}
+        {/* Beside start (or restart and stop), where the user asked for it — and in either state:
+            the shell is for the service's folder, running or not. The tooltip says which folder.
+            Dressed as its neighbours, bordered like restart and stop while it runs and the quiet
+            sibling of start while it does not, so the group is one row of one height. */}
+        <Tooltip
+          label={
+            repoGone
+              ? t("services.openTerminalRepoGone")
+              : shelf
+                ? t("services.openTerminalHint")
+                : t("terminal.noProject")
+          }
+          description={shelf && !repoGone ? folder || "~" : undefined}
+        >
+          {active ? (
+            <ToolbarButton onClick={openShell} label={t("services.openTerminal")} disabled={!shelf || repoGone}>
+              <TerminalSquare size={12} />
+            </ToolbarButton>
+          ) : (
+            <button
+              onClick={openShell}
+              disabled={!shelf || repoGone}
+              className={buttonClass({ variant: "secondary", size: "sm" })}
+            >
+              <TerminalSquare size={12} />
+              {t("services.openTerminal")}
+            </button>
+          )}
+        </Tooltip>
         {active ? (
           <>
             <ToolbarButton

@@ -1,4 +1,4 @@
-import { Bookmark, Pencil, Play, Trash2 } from "lucide-react";
+import { Blend, Bookmark, Pencil, Play, Trash2 } from "lucide-react";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useChainStore } from "../../state/chainStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -41,24 +41,55 @@ export function TemplateDetail({
     });
   };
 
+  const hybrid = template.kind === "hybrid" ? template.hybrid : null;
+  const planner = hybrid ? (roster.find((candidate) => candidate.id === hybrid.planner_agent_id) ?? null) : null;
+
   return (
     <>
       {/* Same 29px as the rails either side — see the note on the task header. */}
       <div className="flex h-[29px] shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
-        <Bookmark size={14} className="shrink-0 text-[var(--cf-accent)]" />
+        {hybrid ? (
+          <Blend size={14} className="shrink-0 text-[var(--cf-accent)]" />
+        ) : (
+          <Bookmark size={14} className="shrink-0 text-[var(--cf-accent)]" />
+        )}
         <span className="min-w-0 flex-1 truncate text-[13px] font-semibold" title={template.description || template.name}>
           {template.name}
         </span>
         <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
-          {t("agents.templateStepsN", { n: template.steps.length })}
+          {hybrid ? t("agents.modeHybrid") : t("agents.templateStepsN", { n: template.steps.length })}
         </span>
       </div>
 
       <p className="shrink-0 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-        {t("agents.templateDetailSubtitle")}
+        {t(hybrid ? "agents.hybridTemplateSubtitle" : "agents.templateDetailSubtitle")}
       </p>
 
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-3">
+      {hybrid && (
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-3">
+          <div className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-2">
+            <span className={`min-w-0 flex-1 truncate text-[13px] ${planner ? "text-[var(--cf-text)]" : "text-[var(--cf-warning)]"}`}>
+              {planner?.name || t("agents.templateAgentGone")}
+            </span>
+            <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{t("agents.hybridPlannerLabel")}</span>
+          </div>
+          {hybrid.goal.trim() !== "" && (
+            <p className="whitespace-pre-wrap rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
+              {hybrid.goal}
+            </p>
+          )}
+          <ul className="space-y-1 text-[12px] text-[var(--cf-text-muted)]">
+            <li>{t(hybrid.gate ? "agents.hybridTemplateGated" : "agents.hybridTemplateUngated")}</li>
+            {hybrid.checks.map((check) => (
+              <li key={check}>
+                <code className="font-mono text-[11.5px] text-[var(--cf-text)]">{check}</code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className={hybrid ? "hidden" : "min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-3"}>
         {template.description.trim() !== "" && (
           <p className="whitespace-pre-wrap rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
             {template.description}
@@ -97,7 +128,7 @@ export function TemplateDetail({
       </div>
 
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-[var(--cf-border)] px-3 py-2">
-        <Action primary icon={Play} label={t("agents.useTemplate")} onClick={() => onUse(template.id)} />
+        <Action primary icon={Play} label={t(hybrid ? "agents.useHybridTemplate" : "agents.useTemplate")} onClick={() => onUse(template.id)} />
         <Action icon={Pencil} label={t("agents.editTemplate")} onClick={() => onUse(template.id)} />
         <span className="ml-auto">
           <Action danger icon={Trash2} label={t("agents.deleteTemplate")} onClick={remove} />

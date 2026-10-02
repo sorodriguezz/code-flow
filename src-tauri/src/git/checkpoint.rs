@@ -279,6 +279,159 @@ pub fn remove_if_unchanged(path: &str, id: &str) -> Result<bool, String> {
     Ok(false)
 }
 
+// ---------------------------------------------------------------------------
+// The hybrid task's baseline
+// ---------------------------------------------------------------------------
+//
+// A hybrid run writes many files over many minutes, and the review that follows it — and the undo
+// the user may ask for after that — both need to know exactly what the tree looked like before the
+// first write. That is a checkpoint, with two differences that make it a ref family of its own:
+//
+// * **It is never pruned.** The twenty-checkpoint cap counts every chat turn in the repository; a
+//   busy afternoon of panel chat beside a long hybrid run would rotate its baseline out from under
+//   it, and with it the review's diff and the run's undo.
+// * **It is per chain**, named by the chain's id, so the run that owns it finds it without keeping
+//   a list, and deleting the chain can delete it.
+
+const BASELINE_PREFIX: &str = "refs/codeflow/hybrid/";
+
+fn baseline_ref(chain_id: &str) -> String {
+    format!("{BASELINE_PREFIX}{chain_id}")
+}
+
+/// Snapshots the working tree as `chain_id`'s baseline and returns the commit id. Taken once, on the
+/// run's first write; a later call finds the existing ref and returns it untouched, so a resumed run
+/// keeps measuring against the tree as it was before the *first* attempt.
+pub fn create_baseline(path: &str, chain_id: &str) -> Result<String, String> {
+    let repo = open(path)?;
+    if let Ok(existing) = repo.find_reference(&baseline_ref(chain_id)) {
+        if let Ok(commit) = existing.peel_to_commit() {
+            return Ok(commit.id().to_string());
+        }
+    }
+    let tree_oid = snapshot_tree(&repo)?;
+    let tree = repo.find_tree(tree_oid).map_err(|e| e.message().to_string())?;
+    let sig = signature(&repo)?;
+    let parents: Vec<git2::Commit> = repo.head().ok().and_then(|h| h.peel_to_commit().ok()).into_iter().collect();
+    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+    let oid = repo
+        .commit(Some(&baseline_ref(chain_id)), &sig, &sig, "hybrid", &tree, &parent_refs)
+        .map_err(|e| e.message().to_string())?;
+    Ok(oid.to_string())
+}
+
+fn read_baseline<'r>(repo: &'r Repository, chain_id: &str) -> Result<git2::Commit<'r>, String> {
+    repo.find_reference(&baseline_ref(chain_id))
+        .map_err(|_| "this run's baseline no longer exists".to_string())?
+        .peel_to_commit()
+        .map_err(|e| e.message().to_string())
+}
+
+/// Paths that differ from the baseline right now — what the run (and anything else since) changed.
+pub fn baseline_changed_paths(path: &str, chain_id: &str) -> Result<Vec<String>, String> {
+    let repo = open(path)?;
+    let commit = read_baseline(&repo, chain_id)?;
+    diff_paths(&repo, &commit)
+}
+
+/// Puts paths back as they were in the baseline: all of them with `only = None`, or just the ones
+/// listed. Returns the paths it touched.
+pub fn restore_baseline(path: &str, chain_id: &str, only: Option<&[String]>) -> Result<Vec<String>, String> {
+    let repo = open(path)?;
+    let commit = read_baseline(&repo, chain_id)?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let workdir = repo.workdir().ok_or_else(|| "bare repository".to_string())?.to_path_buf();
+    let mut touched = Vec::new();
+    for rel in diff_paths(&repo, &commit)? {
+        if only.is_some_and(|wanted| !wanted.iter().any(|w| w == &rel)) {
+            continue;
+        }
+        let target = workdir.join(&rel);
+        match tree.get_path(Path::new(&rel)) {
+            Ok(entry) => {
+                let blob = repo.find_blob(entry.id()).map_err(|e| format!("{rel}: {}", e.message()))?;
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("{rel}: {e}"))?;
+                }
+                std::fs::write(&target, blob.content()).map_err(|e| format!("{rel}: {e}"))?;
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(&target);
+            }
+        }
+        touched.push(rel);
+    }
+    Ok(touched)
+}
+
+/// The working tree against the baseline as a unified diff, at most `max_chars` long.
+///
+/// Whole files are kept or dropped, never cut mid-hunk: a reviewer handed half a hunk reasons about
+/// code that is not there. What did not fit is listed by name at the end, so the reviewer knows to
+/// open it rather than assuming it is unchanged.
+pub fn baseline_diff(path: &str, chain_id: &str, max_chars: usize) -> Result<String, String> {
+    let repo = open(path)?;
+    let commit = read_baseline(&repo, chain_id)?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let mut opts = DiffOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true).context_lines(3);
+    let diff = repo
+        .diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))
+        .map_err(|e| e.message().to_string())?;
+
+    let mut per_file: Vec<(String, String)> = Vec::new();
+    diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if per_file.last().map(|(p, _)| p != &path).unwrap_or(true) {
+            per_file.push((path, String::new()));
+        }
+        if let Some((_, text)) = per_file.last_mut() {
+            let content = String::from_utf8_lossy(line.content());
+            match line.origin() {
+                '+' | '-' | ' ' => {
+                    text.push(line.origin());
+                    text.push_str(&content);
+                }
+                _ => text.push_str(&content),
+            }
+        }
+        true
+    })
+    .map_err(|e| e.message().to_string())?;
+
+    let mut out = String::new();
+    let mut omitted: Vec<String> = Vec::new();
+    for (path, text) in per_file {
+        if out.len() + text.len() <= max_chars {
+            out.push_str(&text);
+        } else {
+            omitted.push(path);
+        }
+    }
+    if !omitted.is_empty() {
+        out.push_str(&format!(
+            "\n[Diff of {} more file(s) omitted for length — open them directly: {}]\n",
+            omitted.len(),
+            omitted.join(", ")
+        ));
+    }
+    Ok(out)
+}
+
+/// Forgets a run's baseline. Best effort, for when the chain is deleted.
+pub fn remove_baseline(path: &str, chain_id: &str) {
+    if let Ok(repo) = open(path) {
+        if let Ok(mut reference) = repo.find_reference(&baseline_ref(chain_id)) {
+            let _ = reference.delete();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +452,43 @@ mod tests {
             repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
         (dir, repo)
+    }
+
+    #[test]
+    fn a_baseline_survives_pruning_restores_by_path_and_diffs_whole_files() {
+        let (dir, _repo) = fixture();
+        let path = dir.to_str().unwrap();
+        let first = create_baseline(path, "chain-1").unwrap();
+        // A second call is the resumed run: it must keep the original snapshot.
+        assert_eq!(create_baseline(path, "chain-1").unwrap(), first);
+
+        fs::write(dir.join("tracked.txt"), "rewritten by the local model\n").unwrap();
+        fs::write(dir.join("new.txt"), "created\n").unwrap();
+        // Twenty-five chat checkpoints later the baseline is still there.
+        for _ in 0..(MAX_CHECKPOINTS + 5) {
+            create(path, "chat").unwrap();
+        }
+        assert_eq!(baseline_changed_paths(path, "chain-1").unwrap(), vec!["new.txt", "tracked.txt"]);
+
+        let diff = baseline_diff(path, "chain-1", 10_000).unwrap();
+        assert!(diff.contains("+rewritten by the local model"), "{diff}");
+        assert!(diff.contains("-original"), "{diff}");
+        assert!(diff.contains("+created"), "{diff}");
+        let short = baseline_diff(path, "chain-1", 10).unwrap();
+        assert!(short.contains("omitted for length"), "{short}");
+
+        // Undo one file only.
+        let only = vec!["tracked.txt".to_string()];
+        assert_eq!(restore_baseline(path, "chain-1", Some(&only)).unwrap(), only);
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap(), "original\n");
+        assert!(dir.join("new.txt").exists());
+        // Then everything.
+        assert_eq!(restore_baseline(path, "chain-1", None).unwrap(), vec!["new.txt"]);
+        assert!(!dir.join("new.txt").exists());
+
+        remove_baseline(path, "chain-1");
+        assert!(baseline_changed_paths(path, "chain-1").is_err());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

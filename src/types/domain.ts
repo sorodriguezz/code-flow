@@ -572,10 +572,12 @@ export type ChainStatus = "queued" | "running" | "gated" | "paused" | "failed" |
 export type ChainStepStatus = "pending" | "running" | "done" | "error" | "interrupted" | "skipped";
 
 /** What a chain was made by. Both run through the same scheduler; only the panes differ. */
-export type ChainKind = "chain" | "story";
+export type ChainKind = "chain" | "story" | "hybrid";
 
-/** Which half of a story run a step belongs to. `""` on every step of an ordinary chain. */
-export type ChainStepPhase = "" | "analyze" | "implement";
+/** Which part of a generated run a step belongs to: a story's two halves, or a hybrid run's three
+ * (`plan` by the subscription, `execute` by the local model, `review` by the subscription again).
+ * `""` on every step of an ordinary chain. */
+export type ChainStepPhase = "" | "analyze" | "implement" | "plan" | "execute" | "review";
 
 /** An ordered plan of agent steps across one or more repositories. */
 export interface AgentChain {
@@ -633,6 +635,9 @@ export interface ChainRepo {
 export interface HarvestOutcome {
   chain: AgentChain | null;
   gone: boolean;
+  /** The step's run is still going in the backend — a hybrid run's local execution can outlast any
+   *  timeout a poller would pick. Absent from older builds, which read as not alive. */
+  alive?: boolean;
 }
 
 /**
@@ -818,6 +823,21 @@ export interface ChainTemplate {
   created_at: string;
   updated_at: string;
   steps: ChainTemplateStep[];
+  /** `chain`: a list of steps. `hybrid`: a hybrid task's setup, in `hybrid`, with no steps. */
+  kind: "chain" | "hybrid";
+  hybrid: HybridTemplateConfig | null;
+}
+
+/** A hybrid task kept as a template. Mirrors `hybrid_queries::HybridTemplateConfig`. */
+export interface HybridTemplateConfig {
+  planner_agent_id: string;
+  goal: string;
+  gate: boolean;
+  /** Empty: Settings decide. */
+  review_mode: "" | "local" | "fix" | "report";
+  delegate: "" | "easy" | "medium" | "all";
+  /** Commands the template's author typed, run on every run made from it. */
+  checks: string[];
 }
 
 export interface ChainTemplateStep {

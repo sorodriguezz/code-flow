@@ -25,6 +25,19 @@ export function relativeInside(root: string, path: string): string | null {
   return null;
 }
 
+/**
+ * `path` resolved against `root` the way Rust's `Path::join` does it, so a folder worked out here is
+ * the one the backend would use: below the root when relative, the root itself when blank, and
+ * `path` as it is when absolute — an absolute path *replaces* the root rather than being appended to
+ * it. Joined with `/`, which Windows accepts as well.
+ */
+export function joinFolder(root: string, path: string): string {
+  const tail = path.trim();
+  if (!tail) return root;
+  if (/^(?:[\\/]|[A-Za-z]:(?:[\\/]|$))/.test(tail)) return tail;
+  return `${root.replace(/[\\/]+$/, "")}/${tail}`;
+}
+
 /** The last folder of `path`, whatever its separators — what a row can say about a folder that is
  *  not inside the repository it belongs to. */
 export function folderName(path: string): string {

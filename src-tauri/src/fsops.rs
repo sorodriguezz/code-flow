@@ -21,6 +21,21 @@ pub struct FileEntry {
 /// itself as [`resolve_entry`] places it. Except a link to nothing, which is refused: the write
 /// would follow it to wherever it points, and no check here has seen that.
 fn resolve_within_repo(repo_path: &str, rel_path: &str) -> Result<PathBuf, String> {
+    resolve_within_repo_inner(repo_path, rel_path)
+}
+
+/// The guard every save goes through, for a writer outside this module: the hybrid task's executor,
+/// which writes files a model produced and must never be talked into writing outside the repository.
+pub(crate) fn resolve_existing_for_write(repo_path: &str, rel_path: &str) -> Result<PathBuf, String> {
+    resolve_within_repo_inner(repo_path, rel_path)
+}
+
+/// The guard every "new file" goes through — see [`resolve_new_path`] — for the same writer.
+pub(crate) fn resolve_path_for_create(repo_path: &str, rel_path: &str) -> Result<PathBuf, String> {
+    resolve_new_path(repo_path, rel_path)
+}
+
+fn resolve_within_repo_inner(repo_path: &str, rel_path: &str) -> Result<PathBuf, String> {
     let entry = resolve_entry(repo_path, rel_path)?;
     let Ok(resolved) = entry.canonicalize() else {
         if std::fs::symlink_metadata(&entry).is_ok() {

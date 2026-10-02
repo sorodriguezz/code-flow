@@ -154,6 +154,17 @@ impl AiEngine for CodexEngine {
         // the plain final message when nothing parses, so a build that drops or renames the flag
         // loses the token counts and keeps working.
         cmd.arg("--json");
+        // The final message must satisfy this schema — `codex exec` takes it as a file. A run whose
+        // file could not be written goes ahead without it; the caller parses leniently anyway.
+        if let Some(schema) = inv.json_schema {
+            if let Some(path) = inv.prompt_files.write("codex-schema", "json", schema) {
+                cmd.arg("--output-schema").arg(path);
+            }
+        }
+        // More working copies alongside `--cd` (verified on 0.155.0's `codex exec --help`).
+        for dir in inv.extra_dirs {
+            cmd.arg("--add-dir").arg(dir);
+        }
         if let Some(dir) = inv.cwd {
             // `--cd` sets the workspace root the sandbox is scoped to, so it must be set even
             // though `current_dir` below already points there.
@@ -219,6 +230,10 @@ impl AiEngine for CodexEngine {
 
     /// `--sandbox read-only`, enforced by the operating system — verified against `codex exec
     /// --help` on 0.155.0.
+    fn supports_extra_dirs(&self) -> bool {
+        true
+    }
+
     fn enforces_read_only(&self) -> bool {
         true
     }

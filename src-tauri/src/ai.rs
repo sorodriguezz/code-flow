@@ -908,6 +908,16 @@ pub struct AiInvocation<'a> {
     /// CLI in its own terms by its engine (Claude `--mcp-config`, Codex `-c mcp_servers.cf_*`).
     /// Only the chats set it; see `crate::mcp_registry`.
     pub app_mcp: Vec<crate::mcp_registry::LiveServer>,
+    /// A JSON Schema the final answer must satisfy, for an engine whose CLI can enforce one:
+    /// Claude Code's `--json-schema` (the object comes back as `structured_output`) and Codex's
+    /// `--output-schema`. Every other engine ignores it, so a caller must still parse leniently —
+    /// the instruction says the same thing in words. Only the hybrid task's plan sets it.
+    pub json_schema: Option<&'a str>,
+    /// More working copies the run may read (and, unless read-only, write) besides `cwd`: Claude's
+    /// and agy's `--add-dir`, Codex's `--add-dir`. An engine without the flag ignores them — see
+    /// [`AiEngine::supports_extra_dirs`], which a caller checks before relying on them. Only a
+    /// hybrid run across several repositories sets it.
+    pub extra_dirs: &'a [String],
 }
 
 /// The feature labels recorded against a run's usage.
@@ -1049,6 +1059,10 @@ pub mod task {
     pub const NOTEBOOK: &str = "notebook";
     /// A conversation named after its first question — see [`super::chat_title`].
     pub const CHAT_TITLE: &str = "chat-title";
+    /// A hybrid task's local execution — see [`crate::hybrid`] — recorded at no cost under the
+    /// `local-exec` provider. Its plan and review are chain turns like any other and count as chat;
+    /// the run itself keeps what each of those spent, for the summary it ends with.
+    pub const HYBRID_EXECUTE: &str = "hybrid-execute";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -1073,6 +1087,8 @@ impl<'a> AiInvocation<'a> {
             prompt_files: crate::ai_prompt_files::PromptFiles::default(),
             mcp_block: Vec::new(),
             app_mcp: Vec::new(),
+            json_schema: None,
+            extra_dirs: &[],
         }
     }
 }
@@ -1273,6 +1289,12 @@ pub trait AiEngine: Send + Sync {
     /// mode. The UI reads this (`ai_read_only_engines`) to say plainly where "text only" is a
     /// request rather than a guarantee.
     fn enforces_read_only(&self) -> bool {
+        false
+    }
+
+    /// Whether [`AiInvocation::extra_dirs`] reaches the CLI — what lets one run plan or review a
+    /// change across several repositories. Where it does not, a hybrid run is one per repository.
+    fn supports_extra_dirs(&self) -> bool {
         false
     }
 
@@ -1743,6 +1765,9 @@ impl AiEngine for AccountEngine {
     }
     fn enforces_read_only(&self) -> bool {
         self.with(|e| e.enforces_read_only())
+    }
+    fn supports_extra_dirs(&self) -> bool {
+        self.with(|e| e.supports_extra_dirs())
     }
     fn reported_usage(&self, stdout: &str, stderr: &str) -> Option<AiUsage> {
         self.with(|e| e.reported_usage(stdout, stderr))
@@ -5963,6 +5988,10 @@ pub struct ChatTurn<'a> {
     pub mcp_block: Vec<String>,
     /// The app's MCP servers this turn runs with — see [`AiInvocation::app_mcp`].
     pub app_mcp: Vec<crate::mcp_registry::LiveServer>,
+    /// The shape the answer must take — see [`AiInvocation::json_schema`].
+    pub json_schema: Option<&'a str>,
+    /// Other working copies the turn may use — see [`AiInvocation::extra_dirs`].
+    pub extra_dirs: &'a [String],
 }
 
 /// Runs one [`ChatTurn`].
@@ -6016,6 +6045,8 @@ pub async fn chat_turn(
     inv.task = task::CHAT;
     inv.mcp_block = turn.mcp_block;
     inv.app_mcp = turn.app_mcp;
+    inv.json_schema = turn.json_schema;
+    inv.extra_dirs = turn.extra_dirs;
     run(engine, binary, inv).await
 }
 
@@ -6048,6 +6079,8 @@ pub async fn chat_with_repo(
     mcp_block: Vec<String>,
     app_mcp: Vec<crate::mcp_registry::LiveServer>,
     attachments: &[AiAttachment],
+    json_schema: Option<&str>,
+    extra_dirs: &[String],
 ) -> Result<AiRun, String> {
     let read_only_tools = if read_only { engine.read_only_tools() } else { Vec::new() };
     chat_turn(
@@ -6070,6 +6103,8 @@ pub async fn chat_with_repo(
             read_only,
             mcp_block,
             app_mcp,
+            json_schema,
+            extra_dirs,
         },
     )
     .await

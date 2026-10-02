@@ -142,6 +142,17 @@ pub fn attach(app: tauri::AppHandle) {
 /// The event name the frontend listens on.
 pub const STATUS_EVENT: &str = "localai:engine";
 
+/// Announces `payload` on `event` through the handle [`attach`] stored.
+///
+/// For [`super::executor`], the second engine slot: it has its own status and its own event, but
+/// no reason to be handed an `AppHandle` of its own when this module already holds one.
+pub(super) fn emit<T: serde::Serialize + Clone>(event: &str, payload: T) {
+    if let Some(app) = EMITTER.get() {
+        use tauri::Emitter;
+        let _ = app.emit(event, payload);
+    }
+}
+
 /// The current status. Never blocks for long — see [`STATUS`].
 pub fn status() -> Status {
     status_cell().lock().map(|s| s.clone()).unwrap_or(Status::Off)
@@ -405,7 +416,7 @@ impl Engine {
 /// Detached rather than awaited: the point is to have the lines *if* something goes wrong, and a
 /// healthy server writes to stderr for as long as it lives. The task ends when the pipe closes,
 /// which is when the process dies.
-fn collect_diagnostics(stderr: tokio::process::ChildStderr, sink: Arc<Mutex<Vec<String>>>) {
+pub(super) fn collect_diagnostics(stderr: tokio::process::ChildStderr, sink: Arc<Mutex<Vec<String>>>) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
@@ -460,7 +471,7 @@ fn spawn_reaper() {
 /// picking up whatever `llama-server` a developer happens to have installed means completions come
 /// from a build nobody chose, with flags this code did not write, and a bug report that cannot be
 /// reproduced. When it is missing, the honest answer is that this install does not have it.
-fn locate() -> Result<PathBuf, String> {
+pub(super) fn locate() -> Result<PathBuf, String> {
     let name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
 
     // A packaged app. `resource_dir()` is `None` under `cargo test` and in some dev runs, which is
@@ -505,7 +516,7 @@ pub fn is_available() -> bool {
 /// port before the server binds it. That race is real and is handled where it shows up: a server
 /// that cannot bind exits immediately, `await_ready` notices within a poll, and the next completion
 /// request starts a fresh one on a fresh port.
-fn free_port() -> Result<u16, String> {
+pub(super) fn free_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| format!("Couldn't find a free local port for the completion engine: {e}"))?;
     let port = listener
@@ -547,7 +558,14 @@ fn clear_pidfile() {
 /// Called once from `run()` at startup. Safe on every normal launch, where the file is absent
 /// because the last run cleared it.
 pub fn sweep_stale() {
-    let path = pidfile();
+    sweep_pidfile(pidfile());
+}
+
+/// The sweep itself, for any pidfile this module's engines write.
+///
+/// [`super::executor`] keeps its own pidfile — two slots, two processes — and goes through here so
+/// the identity check below exists once.
+pub(super) fn sweep_pidfile(path: PathBuf) {
     let Ok(contents) = std::fs::read_to_string(&path) else { return };
     let _ = std::fs::remove_file(&path);
 
@@ -575,7 +593,7 @@ pub fn sweep_stale() {
     }
 }
 
-fn now_millis() -> u64 {
+pub(super) fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

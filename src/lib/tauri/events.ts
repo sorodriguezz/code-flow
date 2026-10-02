@@ -65,6 +65,11 @@ export type LocalAiEngineEvent =
 export const onLocalAiEngine = (handler: (event: LocalAiEngineEvent) => void) =>
   listen<LocalAiEngineEvent>("localai:engine", (e) => handler(e.payload));
 
+/** The hybrid task's executor — the second, bundled `llama-server`. Same payload as the completion
+ *  engine's; see `localai::executor`. */
+export const onLocalExecEngine = (handler: (event: LocalAiEngineEvent) => void) =>
+  listen<LocalAiEngineEvent>("localai:executor", (e) => handler(e.payload));
+
 export const onRepoFsChanged = (handler: (event: { repo_path: string }) => void) =>
   listen<{ repo_path: string }>("repo:fs-changed", (e) => handler(e.payload));
 

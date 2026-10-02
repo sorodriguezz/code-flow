@@ -33,6 +33,13 @@ import {
   upsertChainTemplate,
 } from "../lib/tauri/commands";
 import { isEnginePause } from "../lib/chainPause";
+import {
+  approveHybridPlan,
+  createHybridTask,
+  upsertHybridTemplate,
+  type HybridCheck,
+  type HybridItemEdit,
+} from "../lib/tauri/hybridCommands";
 import { onTurnSettled } from "./agentEvents";
 import { useAgentsStore } from "./agentsStore";
 import { newRunId, useAiRunStore } from "./aiRunStore";
@@ -48,6 +55,7 @@ import type {
   ChainStepBrief,
   GatedChain,
   ChainTemplate,
+  HybridTemplateConfig,
   NewChainStep,
   NewStoryWorkItem,
 } from "../types/domain";
@@ -158,6 +166,20 @@ interface ChainState {
     workItem: NewStoryWorkItem;
     start: boolean;
   }) => Promise<ChainDetail>;
+  /** A hybrid run: a subscription agent plans and reviews, the local model writes. Several
+   * repositories make one plan across them; `directFiles` a direct run (no plan, no review). The
+   * steps and the frozen configuration are built in Rust — see `create_hybrid_task`. */
+  createHybrid: (input: {
+    projectIds: string[];
+    title: string;
+    goal: string;
+    plannerAgentId: string;
+    agentProjectId: string;
+    gate: boolean;
+    start: boolean;
+    directFiles?: string[] | null;
+    overrides?: { review_mode?: string; delegate?: string; checks?: string[] } | null;
+  }) => Promise<ChainDetail>;
   /**
    * Approves a story run's plan: which repositories go ahead, and with what written into each.
    *
@@ -192,6 +214,9 @@ interface ChainState {
    * disk — see `approvePlan`.
    */
   approve: (chainId: string, input: string, stepId?: string) => Promise<void>;
+  /** A hybrid run's plan gate: the edits, the ticked checks and the note in one atomic answer, then
+   *  the same refresh-and-move `approve` does. False when the gate had moved or the call failed. */
+  approveHybrid: (input: { chainId: string; stepId: string; edits: HybridItemEdit[]; checks: HybridCheck[]; note: string }) => Promise<boolean>;
   skip: (chainId: string) => Promise<void>;
   retry: (chainId: string) => Promise<void>;
   /** "Do that again, but…" — back to one step, carrying the user's own words, and moving. */
@@ -224,6 +249,13 @@ interface ChainState {
     name: string;
     description: string;
     steps: NewChainStep[];
+  }) => Promise<ChainTemplate | null>;
+  /** Saves a hybrid task's setup as a template — `null` when there is no workspace to save into. */
+  saveHybridTemplate: (input: {
+    id?: string;
+    name: string;
+    description: string;
+    config: HybridTemplateConfig;
   }) => Promise<ChainTemplate | null>;
   removeTemplate: (id: string) => Promise<void>;
   /** Seeds a chain from a finished task: step 1 is that task, already done. */
@@ -519,6 +551,26 @@ export const useChainStore = create<ChainState>((set, get) => ({
     return detail;
   },
 
+  createHybrid: async ({ projectIds, title, goal, plannerAgentId, agentProjectId, gate, start, directFiles, overrides }) => {
+    const startedIn = get().workspaceId;
+    const detail = await createHybridTask({
+      project_ids: projectIds,
+      title,
+      goal,
+      planner_agent_id: plannerAgentId,
+      agent_project_id: agentProjectId,
+      gate,
+      direct_files: directFiles ?? null,
+      overrides: overrides ?? null,
+    });
+    adoptDetail(detail, startedIn, set);
+    if (start) {
+      await resumeChain(detail.chain.id).then((chain) => chain && applyChain(chain, set));
+      void get().pump(detail.chain.id);
+    }
+    return detail;
+  },
+
   approvePlan: async (chainId, decisions) => {
     // Sequential, and dropped before kept: `approve_chain_gate` reads "the next pending step", so
     // every no has to be off the board before the yes is recorded.
@@ -677,6 +729,20 @@ export const useChainStore = create<ChainState>((set, get) => ({
     if (chain) void get().pump(chainId);
   },
 
+  approveHybrid: async (input) => {
+    release(input.chainId);
+    // Refused the same way, and for the same reason, as `approve` above.
+    const chain = await approveHybridPlan(input).catch((e: unknown) => {
+      const message = e instanceof Error ? e.message : String(e);
+      pushErrorToast(message === GATE_MOVED ? translate("chain.gateMoved") : message);
+      return null;
+    });
+    if (chain) applyChain(chain, set);
+    await get().refresh(input.chainId);
+    if (chain) void get().pump(input.chainId);
+    return chain !== null;
+  },
+
   skip: async (chainId) => {
     release(chainId);
     const chain = await skipChainStep(chainId);
@@ -829,6 +895,14 @@ export const useChainStore = create<ChainState>((set, get) => ({
     const workspaceId = get().workspaceId;
     if (!workspaceId) return null;
     const saved = await upsertChainTemplate(id, workspaceId, name, description, steps);
+    await get().reloadTemplates();
+    return saved;
+  },
+
+  saveHybridTemplate: async ({ id, name, description, config }) => {
+    const workspaceId = get().workspaceId;
+    if (!workspaceId) return null;
+    const saved = await upsertHybridTemplate(id, workspaceId, name, description, config);
     await get().reloadTemplates();
     return saved;
   },
@@ -1130,9 +1204,20 @@ async function adoptRunningSteps(
   for (const step of detail.steps) {
     if (step.status !== "running" || harvesting.has(step.id)) continue;
     if (useAiRunStore.getState().active[step.run_id]) continue;
+    // Measured from the last moment the backend said the run was alive, not from the step's
+    // `updated_at`, which is as old as the claim: a hybrid run's local execution can legitimately
+    // outlast the timeout, and it is not stuck for being long.
+    let lastAlive = Date.parse(step.updated_at);
+    /** Polls in a row that found the run neither alive nor landed. */
+    let quietPolls = 0;
     const timer = setInterval(() => {
       void (async () => {
         const outcome = await harvestChainStep(step.id).catch(() => null);
+        if (outcome?.alive) {
+          lastAlive = Date.now();
+          quietPolls = 0;
+          return;
+        }
         // Nothing left to wait for: the step was deleted with its chain, or cascaded away with the
         // repository the chain was filed under — from any workspace, by anyone, including a phone.
         // This is the only stop that does not need somebody to come and ask for it, which is what
@@ -1151,11 +1236,17 @@ async function adoptRunningSteps(
           if (chain.status === "queued") void get().pump(chainId);
           return;
         }
-        if (Date.now() - Date.parse(step.updated_at) > STEP_TIMEOUT_MS) {
+        // Neither running nor landed, twice in a row: the run ended without a turn to collect — it was
+        // stopped. Once is not enough, because the turn's row is written just after the run ends.
+        if (outcome) quietPolls += 1;
+        if (quietPolls >= 2 || Date.now() - lastAlive > STEP_TIMEOUT_MS) {
           clearInterval(timer);
           harvesting.delete(step.id);
-          if (step.run_id) await useAiRunStore.getState().cancel(step.run_id);
-          const parked = await completeChainStep(step.id, "cancelled", "", "chain.timedOut").catch(() => null);
+          const ended = quietPolls >= 2;
+          if (step.run_id && !ended) await useAiRunStore.getState().cancel(step.run_id);
+          const parked = await completeChainStep(step.id, "cancelled", "", ended ? "chain.stopped" : "chain.timedOut").catch(
+            () => null,
+          );
           if (parked) applyChain(parked, set);
           await get().refresh(chainId);
         }

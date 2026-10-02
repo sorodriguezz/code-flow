@@ -45,12 +45,16 @@ export function chainStatusOf(chain: AgentChain) {
  */
 export function chainRollup(
   chain: AgentChain,
-  steps: { status: ChainStepStatus }[],
+  steps: { status: ChainStepStatus; phase?: string }[],
 ): { icon: LucideIcon; color: string; labelKey: TranslationKey; done: number; total: number; spinner: boolean } {
+  // A hybrid run that skipped its review did so on purpose — a direct run, or a small plan whose
+  // checks passed — so that step is neither a gap nor part of what was left to do.
+  const intended = (step: { status: ChainStepStatus; phase?: string }) =>
+    chain.kind === "hybrid" && step.phase === "review" && step.status === "skipped";
   const done = steps.filter((step) => step.status === "done").length;
   // `step_count` is the plan as authored; `steps.length` is what has been loaded. The larger of the
   // two is the honest denominator — a chain whose briefs have not arrived yet must not read "0/0".
-  const total = Math.max(steps.length, chain.step_count);
+  const total = Math.max(steps.length, chain.step_count) - steps.filter(intended).length;
   const base = { done, total, spinner: false };
 
   if (chain.status === "running" || steps.some((step) => step.status === "running")) {
@@ -68,7 +72,7 @@ export function chainRollup(
     return { ...base, icon: CircleAlert, color: "text-[var(--cf-danger)]", labelKey: "agents.chainStatusFailed" };
   }
   if (chain.status === "done") {
-    const gaps = steps.some((step) => step.status === "skipped" || step.status === "interrupted");
+    const gaps = steps.some((step) => (step.status === "skipped" && !intended(step)) || step.status === "interrupted");
     return gaps
       ? { ...base, icon: CircleCheck, color: "text-[var(--cf-warning)]", labelKey: "agents.chainRollupPartial" }
       : { ...base, ...CHAIN_STATUS.done };
@@ -105,6 +109,10 @@ const REASON_KEYS = new Set<string>([
   "chain.pausedQuota",
   "chain.pausedAuth",
   "chain.pausedCliMissing",
+  "chain.pausedLocalModel",
+  "chain.planUnreadable",
+  "chain.hybridPending",
+  "chain.reviewUnreadable",
   "chain.noSteps",
   "chain.tooManySteps",
 ]);

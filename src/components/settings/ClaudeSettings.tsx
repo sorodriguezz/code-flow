@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef } from "react";
 import { AiAccountsSettings } from "./AiAccountsSettings";
 import { AiCompletionSettings } from "./AiCompletionSettings";
 import { AiTasksSettings } from "./AiTasksSettings";
+import { LocalModelSettings } from "./LocalModelSettings";
 import { useT } from "../../state/languageStore";
 import { ProvidersSection } from "./ProvidersSection";
 import { QuotaSection } from "./QuotaSection";
@@ -21,6 +22,8 @@ import { Panel, SettingsHeader } from "../api/settingsChrome";
  *      **Accounts** follows it: the logins each of those engines has, and which one runs where.
  *   2. **Tasks and prompts** — which engine runs each action, and what it is told to do.
  *   3. **Autocomplete** — the model that runs on this machine and finishes what you type.
+ *      **Local model** follows it: the model that writes the code in a hybrid task, and what that
+ *      model costs this machine in memory and context.
  *      **Thinking design** follows it: how the mark that means "a model is working" is drawn,
  *      everywhere it is drawn.
  *   4. **Limits** — how far through each provider's plan you are, as the provider reports it.
@@ -98,6 +101,7 @@ export function ClaudeSettings() {
             {tab === "accounts" && <AiAccountsSettings />}
             {tab === "tasks" && <AiTasksSettings />}
             {tab === "completion" && <AiCompletionSettings />}
+            {tab === "localModel" && <LocalModelSettings />}
             {tab === "thinking" && <ThinkingDesignSettings />}
             {tab === "limits" && <QuotaSection />}
             {tab === "usage" && <UsageStatsSection />}

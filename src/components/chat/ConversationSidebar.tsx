@@ -787,17 +787,22 @@ function FolderSection({
         dropActive ? "bg-[var(--cf-accent-soft)] ring-1 ring-[var(--cf-accent)]" : ""
       }`}
     >
-      {/* Three affordances on one row, and the split matters: the chevron folds the list, the name
-          opens the project's own page, the folder is its colour. A project is a place you go — it
-          holds instructions and shared documents — so its name must lead somewhere, and collapsing
-          must stay reachable without leaving where you are. Nested buttons are invalid HTML, so
-          this is a row of buttons rather than a button containing them.
+      {/* Three affordances on one row, and the split matters: the chevron folds the list, the rest
+          of the bar opens the project's own page, the folder is its colour. A project is a place
+          you go — it holds instructions and shared documents — so its bar must lead somewhere, and
+          collapsing must stay reachable without leaving where you are. Nested buttons are invalid
+          HTML, so this is a row of buttons rather than a button containing them.
 
           The folder earns its click by being the thing it changes: it *is* the colour, so pressing
           it to pick another is direct rather than a second control standing next to it explaining
           what the first one means. The colour has been in the row's model since folders shipped and
           nothing ever drew it — a stored value nobody could see or set. */}
       <div
+        // The whole bar opens the project, like a conversation row — not only its name: the gaps
+        // and the padding around the controls were dead to a click (user report, 2026-10-02). The
+        // name's button has no handler of its own and bubbles here; the chevron, the colour and the
+        // menu stop their clicks, because folding, recolouring and the menu are not "go there".
+        onClick={() => void store.openGroup(group.id)}
         // Same rule as the conversation rows: the right-click lands on the project *and* opens its
         // menu, so the actions in it are visibly about the row you pressed.
         onContextMenu={(event) => {
@@ -805,13 +810,19 @@ function FolderSection({
           void store.openGroup(group.id);
           setMenu({ x: event.clientX, y: event.clientY });
         }}
-        className={`mt-3 flex w-full items-center gap-1 px-1.5 pb-1 text-[10.5px] uppercase tracking-wide ${
+        // Lit under the pointer for the same reason the conversation rows are: a bar that answers
+        // a click has to look like one. `mt-2` + `py-1` keep the old `mt-3` + `pb-1` spacing, with
+        // the hover reaching above the text as well as below it.
+        className={`mt-2 flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-[10.5px] uppercase tracking-wide transition-colors hover:bg-[var(--cf-hover)] ${
           active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
         } ${group.archivedAt ? "opacity-55" : ""}`}
       >
         <button
           type="button"
-          onClick={() => void store.toggleGroup(group.id)}
+          onClick={(event) => {
+            event.stopPropagation();
+            void store.toggleGroup(group.id);
+          }}
           aria-label={group.collapsed ? t("chat.groupExpand") : t("chat.groupCollapse")}
           className="shrink-0 rounded hover:text-[var(--cf-text)]"
         >
@@ -845,7 +856,6 @@ function FolderSection({
             you can point at but not press is a target the app appears to have missed. */}
         <button
           type="button"
-          onClick={() => void store.openGroup(group.id)}
           title={t("chat.groupOpen")}
           className="flex min-w-0 flex-1 items-center gap-1 text-left uppercase hover:text-[var(--cf-text)]"
         >
@@ -861,6 +871,7 @@ function FolderSection({
           type="button"
           onClick={(event) => {
             event.preventDefault();
+            event.stopPropagation();
             setMenu({ x: event.clientX, y: event.clientY });
           }}
           title={t("chat.rowMenu")}
@@ -988,6 +999,11 @@ const ConversationRow = memo(function ConversationRow({
     // HTML — the same shape the folder header above uses, and for the same reason.
     <div
       onPointerDown={(event) => onPressRow?.(event, conversation)}
+      // The whole bar opens the conversation, not only the glyphs and the title: the padding around
+      // the button lit up under the pointer like the rest of the row and then did nothing when
+      // pressed (user report, 2026-10-02). The button below has no handler of its own — its click,
+      // from the pointer or from Enter/Space, bubbles here, so a press opens the conversation once.
+      onClick={() => void onSelect(conversation.id)}
       // A right-click selects the row as well as opening its menu, the way a file manager does.
       // A menu of six verbs floating over a list of twenty rows does not say which row it is about
       // unless that row is lit, and "delete" is not a verb to get wrong by one line.
@@ -1003,11 +1019,7 @@ const ConversationRow = memo(function ConversationRow({
           pointer, and a click on "hace 3 horas" did nothing at all — which reads as the app having
           missed the click rather than as an area that was never a target. Everything on this row
           except the menu button means the same thing, so it should all do the same thing. */}
-      <button
-        type="button"
-        onClick={() => void onSelect(conversation.id)}
-        className="flex min-w-0 flex-1 items-center gap-2 text-left"
-      >
+      <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left">
         <StatusDot status={status} />
         <ProviderGlyph providerId={conversation.provider} size={12} className="shrink-0 opacity-70" />
         <span className="cf-fade-edge min-w-0 flex-1">{conversation.title || t("chat.untitled")}</span>

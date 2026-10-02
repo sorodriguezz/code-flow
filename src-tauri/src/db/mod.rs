@@ -8,6 +8,7 @@ pub mod api_trust;
 pub mod chat_queries;
 pub mod datasource_queries;
 pub mod diagram_queries;
+pub mod hybrid_queries;
 pub mod keyvault_queries;
 pub mod migrations;
 pub mod models;

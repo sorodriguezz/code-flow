@@ -39,6 +39,7 @@ mod gitlab;
 mod jupyter;
 mod npm;
 mod localai;
+mod hybrid;
 mod mcp_registry;
 mod lsp;
 mod migrate;
@@ -318,6 +319,9 @@ pub fn run() {
     // destructors kills the child and clears the note. See the comment block in `localai::engine`
     // for why this checks the executable path before it kills a pid.
     localai::engine::sweep_stale();
+    // The hybrid task's executor is a second `llama-server` with a pidfile of its own, and the
+    // same reasoning applies to it — with a model that can be twenty gigabytes.
+    localai::executor::sweep_stale();
 
     // And the prompt files a session that never ran its destructors left behind — every brief a
     // killed run wrote for its CLI, diffs included. Only a dead process's are touched, which is
@@ -1472,6 +1476,23 @@ pub fn run() {
             commands::localai_cmd::localai_stop_engine,
             commands::localai_cmd::localai_complete,
             commands::localai_cmd::localai_cancel_completion,
+            commands::localexec_cmd::local_exec_state,
+            commands::localexec_cmd::local_exec_probe,
+            commands::localexec_cmd::local_exec_download_model,
+            commands::localexec_cmd::local_exec_cancel_download,
+            commands::localexec_cmd::local_exec_delete_model,
+            commands::localexec_cmd::local_exec_stop_engine,
+            commands::localexec_cmd::local_exec_set_key,
+            commands::localexec_cmd::local_exec_ollama_pull,
+            commands::localexec_cmd::local_exec_ollama_cancel_pull,
+            commands::localexec_cmd::local_exec_ollama_delete,
+            commands::hybrid_cmd::create_hybrid_task,
+            commands::hybrid_cmd::hybrid_triage,
+            commands::hybrid_cmd::upsert_hybrid_template,
+            commands::hybrid_cmd::hybrid_view,
+            commands::hybrid_cmd::approve_hybrid_plan,
+            commands::hybrid_cmd::hybrid_changed_paths,
+            commands::hybrid_cmd::hybrid_undo,
             commands::lsp_cmd::lsp_start,
             commands::lsp_cmd::lsp_stop,
             commands::lsp_cmd::lsp_stop_project,

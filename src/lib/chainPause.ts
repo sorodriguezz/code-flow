@@ -8,7 +8,13 @@ import type { AiFailure } from "./tauri/commands";
  * wrong, the attempt was handed back, and what the user fixes outside the app (the window reopening,
  * a sign-in, an install) is exactly what "Resume" then continues from.
  */
-export const ENGINE_PAUSE_REASONS = ["chain.pausedQuota", "chain.pausedAuth", "chain.pausedCliMissing"] as const;
+export const ENGINE_PAUSE_REASONS = [
+  "chain.pausedQuota",
+  "chain.pausedAuth",
+  "chain.pausedCliMissing",
+  // A hybrid run whose local model server is not answering — see `hybrid::execute`.
+  "chain.pausedLocalModel",
+] as const;
 
 export function isEnginePause(reason: string): boolean {
   return (ENGINE_PAUSE_REASONS as readonly string[]).includes(reason.trim());

@@ -58,6 +58,12 @@ const REASON_KEYS: Record<string, MobileKey> = {
   "chain.pausedQuota": "chain.pausedQuota",
   "chain.pausedAuth": "chain.pausedAuth",
   "chain.pausedCliMissing": "chain.pausedCliMissing",
+  // A hybrid run: its local model is not answering, its plan could not be read, its review left
+  // something undone.
+  "chain.pausedLocalModel": "chain.pausedLocalModel",
+  "chain.planUnreadable": "chain.planUnreadable",
+  "chain.hybridPending": "chain.hybridPending",
+  "chain.reviewUnreadable": "chain.reviewUnreadable",
 };
 
 /**
@@ -109,7 +115,9 @@ function StepRow({ step }: { step: AgentChainStep }) {
           {step.step_index + 1}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-base">{step.agent_name || step.prompt}</span>
+          <span className="block truncate text-base">
+            {step.provider === "local-exec" ? t("chain.localModel") : step.agent_name || step.prompt}
+          </span>
           <span className="block truncate text-xs text-[var(--cf-text-muted)]">
             {step.project_name}
             {error ? ` · ${error}` : ""}

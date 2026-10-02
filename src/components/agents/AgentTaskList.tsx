@@ -49,6 +49,7 @@ import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { AgentProject, AgentTask } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { agentName } from "./agentName";
 
 const GROUPINGS: { id: TaskGrouping; labelKey: TranslationKey }[] = [
   { id: "tree", labelKey: "agents.groupTree" },
@@ -648,7 +649,7 @@ function FlatTaskRow({
       title={task.goal || task.title}
       glyph={status === "running" ? <ThinkingOrb size="sm" /> : <Icon size={14} className={color} />}
       label={task.title || t("agents.newTask")}
-      meta={[task.agent_name, projectName, when].filter(Boolean).join(" · ")}
+      meta={[agentName(task.agent_name, task.provider, t), projectName, when].filter(Boolean).join(" · ")}
       menuLabel={t("api.moreActions")}
     />
   );

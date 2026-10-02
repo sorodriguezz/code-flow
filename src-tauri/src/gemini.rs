@@ -108,6 +108,10 @@ impl AiEngine for GeminiEngine {
         DEFAULT_BINARY
     }
 
+    fn supports_extra_dirs(&self) -> bool {
+        true
+    }
+
     fn commit_message_model(&self) -> &'static str {
         COMMIT_MESSAGE_MODEL
     }
@@ -225,6 +229,10 @@ impl AiEngine for GeminiEngine {
             // wrote it *next to the brief*, in `/var/folders/.../codeflow-agy-…`, where nothing
             // looks for it and the OS eventually deletes it. The working directory has to be in
             // the scope for a file written there to be a file anybody sees.
+            cmd.arg("--add-dir").arg(dir);
+        }
+        // And the run's other working copies, the same way (repeatable on agy 1.2.14).
+        for dir in inv.extra_dirs {
             cmd.arg("--add-dir").arg(dir);
         }
         cmd

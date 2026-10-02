@@ -277,6 +277,9 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
 function AgentComposer({ taskId }: { taskId: string }) {
   const t = useT();
   const task = useAgentsStore((s) => s.tasks.find((candidate) => candidate.id === taskId) ?? null);
+  // A hybrid run's execute step: this app runs it from the chain, against the local model, and there
+  // is no engine here anyone could follow up with — so the box and the model menu are not offered.
+  const localExec = task?.provider === "local-exec";
   const live = useAgentsStore((s) => s.live[taskId]);
   const runId = live?.runId ?? null;
   const cancelling = useAiRunStore((s) => (runId ? (s.cancelling[runId] ?? false) : false));
@@ -329,7 +332,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
   if (!task) return null;
 
   const submit = () => {
-    if (!input.trim() || sending || blockedBy || chainLocked) return;
+    if (!input.trim() || sending || blockedBy || chainLocked || localExec) return;
     // Cleared only for a send the store took: its guards are read fresh and can refuse one that
     // `blockedBy` — a render behind — waved through, and emptying the box then lost the message.
     if (useAgentsStore.getState().send(taskId, input)) setInput("");
@@ -343,7 +346,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
         <textarea
           value={input}
           rows={3}
-          disabled={chainLocked}
+          disabled={chainLocked || localExec}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             // Not while an IME is composing: that Enter confirms a candidate (Japanese, Chinese,
@@ -355,12 +358,18 @@ function AgentComposer({ taskId }: { taskId: string }) {
               submit();
             }
           }}
-          placeholder={chainLocked ? t("agents.chainComposerLocked") : t("agents.followUpPlaceholder")}
+          placeholder={
+            localExec
+              ? t("agents.localExecComposerLocked")
+              : chainLocked
+                ? t("agents.chainComposerLocked")
+                : t("agents.followUpPlaceholder")
+          }
           aria-label={t("agents.followUpPlaceholder")}
           className="block w-full resize-none bg-transparent text-[13px] leading-relaxed text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)] disabled:opacity-50"
         />
         <div className="mt-1.5 flex items-center gap-2">
-          <AgentModelMenu taskId={taskId} />
+          {!localExec && <AgentModelMenu taskId={taskId} />}
           {blockedBy && (
             <span className="min-w-0 truncate text-[11px] text-[var(--cf-warning)]">
               {t("agents.busyInRepo", { name: repoName })}
@@ -381,7 +390,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
               <button
                 type="button"
                 onClick={submit}
-                disabled={!input.trim() || blockedBy !== null || chainLocked}
+                disabled={!input.trim() || blockedBy !== null || chainLocked || localExec}
                 aria-label={t("agents.send")}
                 className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:pointer-events-none disabled:opacity-40"
               >

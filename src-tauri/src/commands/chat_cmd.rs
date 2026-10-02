@@ -1486,6 +1486,8 @@ pub async fn chat_send(
                 read_only: !write_access,
                 mcp_block: turn_mcp.block.clone(),
                 app_mcp: turn_mcp.app.clone(),
+                json_schema: None,
+                extra_dirs: &[],
             },
         )
         .await
@@ -2156,6 +2158,8 @@ async fn summarize(
                 read_only: true,
                 mcp_block: Vec::new(),
                 app_mcp: Vec::new(),
+                json_schema: None,
+                extra_dirs: &[],
             },
         )
         .await

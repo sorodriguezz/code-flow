@@ -1385,6 +1385,12 @@ pub const MAX_CHAIN_DISPATCHES: i64 = 128;
 /// Keys rather than prose, like every other `last_reason`: the reader's client renders them in the
 /// reader's language. The provider's own words stay on the step's `last_error`, untouched.
 pub fn chain_pause_reason(error: &str) -> Option<&'static str> {
+    // The hybrid task's local model could not be reached at all — the server is not running, the
+    // model is not downloaded. Same shape as a CLI that is not installed: retrying spends attempts on
+    // a wall, starting the server is the fix, and "Reanudar" carries on from the task it stopped at.
+    if error.starts_with(crate::hybrid::execute::LOCAL_UNAVAILABLE_MARKER) {
+        return Some("chain.pausedLocalModel");
+    }
     match crate::ai::classify_failure(error).kind {
         crate::ai::AiFailureKind::Quota => Some("chain.pausedQuota"),
         crate::ai::AiFailureKind::AuthRequired => Some("chain.pausedAuth"),
@@ -1489,6 +1495,53 @@ enough to open without searching. If you needed something that was not in memory
 found it so nobody has to look twice.\n\n"
     ));
     out
+}
+
+/// The message a claimed step opens with — one place, for the gate's frozen preview and for the
+/// dispatch alike.
+///
+/// A hybrid run differs twice: its execute step's "message" is the plan as a person reads it (what
+/// the gate shows, what the step's transcript records — the executor itself reads the plan's rows),
+/// and none of its steps gets the shared-memory block, whose standing instruction asks for a prose
+/// handoff the plan's JSON answer and the review's verdict line both contradict.
+fn compose_step_message(conn: &Connection, chain: &AgentChain, step: &AgentChainStep) -> rusqlite::Result<String> {
+    if chain.kind == "hybrid" && step.phase == "execute" {
+        return hybrid_plan_text(conn, &chain.id);
+    }
+    let previous = previous_output(conn, &chain.id, step.step_index, &step.project_id)?;
+    // A hybrid review is told what *this* round is — the same step runs once per correction round,
+    // and what it may write, and in what shape it answers, change between them.
+    if chain.kind == "hybrid" && step.phase == "review" {
+        if let Some(run) = crate::db::hybrid_queries::get_run(conn, &chain.id)? {
+            let items = crate::db::hybrid_queries::list_items(conn, &chain.id)?;
+            let repos = crate::db::hybrid_queries::chain_repo_refs(conn, &chain.id)?;
+            let for_you = crate::hybrid::prompts::for_review(&run, &items).len();
+            let instruction = crate::hybrid::prompts::review_instruction(&run, for_you, &repos);
+            return Ok(compose_chain_input(
+                &chain.goal,
+                &instruction,
+                previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
+                &step.feedback,
+                "",
+            ));
+        }
+    }
+    let memory = if chain.kind == "hybrid" {
+        String::new()
+    } else {
+        compose_memory_block(
+            &chain.id,
+            &memory_notes(conn, &chain.id, step.step_index)?,
+            &crate::chain_memory::note_name(step.step_index, &step.agent_name),
+        )
+    };
+    Ok(compose_chain_input(
+        &chain.goal,
+        &step.instruction,
+        previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
+        &step.feedback,
+        &memory,
+    ))
 }
 
 fn compose_chain_input(
@@ -2273,6 +2326,366 @@ pub fn create_story_chain(
     )
 }
 
+// ---------- the hybrid task ----------
+//
+// Three steps over one repository — plan, execute, review — and, like a story run, no third
+// concept: a hybrid run is a chain, so it parks at its gate, survives a restart and reports its
+// steps through the code every chain goes through. What is its own lives in `crate::hybrid` and in
+// `hybrid_queries`: the frozen configuration, and the plan's tasks, walked inside the execute step
+// rather than added as steps (a chain is a list fixed at creation; the plan does not exist yet).
+
+/// The agent name a hybrid run's execute step is stored under — an identifier the UI recognises and
+/// draws in the reader's language, not copy. Matches `agentName.ts`.
+pub const LOCAL_EXEC_AGENT_NAME: &str = "Local model";
+
+/// Creates a hybrid run. `run` is the configuration it is frozen with; its `chain_id` is filled in.
+///
+/// The plan and review steps are ordinary roster-agent steps, snapshotted by `create_chain_inner`.
+/// The execute step has no agent: it is rewritten afterwards to name the local model, the way
+/// [`create_continuation_chain`] rewrites its seed — `claim_next_chain_step` needs a provider and a
+/// model on every step, and `local-exec` is what `send_chat_message` recognises.
+///
+/// `project_ids` are the run's repositories, first one first: every step runs in the first, and the
+/// planner and the reviewer are given the others as extra directories (see `send_chat_message`).
+///
+/// `direct_files` makes it a direct run — a change small enough that the plan would cost more than
+/// it saves: no plan step, one task per file carrying the objective, and the review skipped unless
+/// somebody asks for it afterwards.
+#[allow(clippy::too_many_arguments)]
+pub fn create_hybrid_chain(
+    conn: &Connection,
+    project_ids: &[String],
+    title: &str,
+    goal: &str,
+    planner_agent_id: &str,
+    reviewer_agent_id: &str,
+    agent_project_id: &str,
+    gate: bool,
+    run: &crate::db::hybrid_queries::HybridRun,
+    direct_files: Option<&[String]>,
+) -> rusqlite::Result<ChainDetail> {
+    let mut repos = Vec::new();
+    for id in project_ids {
+        let found: Option<(String, String)> = conn
+            .query_row("SELECT name, local_path FROM projects WHERE id = ?1", params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        if let Some((name, path)) = found {
+            repos.push(crate::hybrid::plan::RepoRef { project_id: id.clone(), name, path });
+        }
+    }
+    let plan_step = NewChainStep {
+        agent_id: planner_agent_id.to_string(),
+        instruction: crate::hybrid::prompts::planner_instruction(run, &repos),
+        gate: false,
+        project_id: String::new(),
+        phase: "plan".to_string(),
+        ..Default::default()
+    };
+    let execute_step = NewChainStep {
+        agent_id: planner_agent_id.to_string(),
+        instruction: if direct_files.is_some() {
+            "Write the change on the local model, straight from the objective.".to_string()
+        } else {
+            "Run the approved plan on the local model.".to_string()
+        },
+        // A direct run has no plan to approve.
+        gate: gate && direct_files.is_none(),
+        project_id: String::new(),
+        phase: "execute".to_string(),
+        ..Default::default()
+    };
+    let review_step = NewChainStep {
+        agent_id: reviewer_agent_id.to_string(),
+        instruction: crate::hybrid::prompts::REVIEW_STEP_LABEL.to_string(),
+        gate: false,
+        project_id: String::new(),
+        phase: "review".to_string(),
+        ..Default::default()
+    };
+    let steps = if direct_files.is_some() {
+        vec![execute_step, review_step]
+    } else {
+        vec![plan_step, execute_step, review_step]
+    };
+    let detail = create_chain_inner(conn, project_ids, title, goal, &steps, agent_project_id, "hybrid", None)?;
+    conn.execute(
+        "UPDATE agent_chain_steps SET agent_id = '', agent_name = ?4, provider = 'local-exec',
+            model = ?2, prompt = '', account_id = NULL, updated_at = ?3
+         WHERE chain_id = ?1 AND phase = 'execute'",
+        params![detail.chain.id, run.model, now(), LOCAL_EXEC_AGENT_NAME],
+    )?;
+    let mut run = run.clone();
+    run.chain_id = detail.chain.id.clone();
+    run.direct = direct_files.is_some();
+    let primary = project_ids.first().cloned().unwrap_or_default();
+    if direct_files.is_some() {
+        // No plan proposes checks here, and no gate asks: what runs is what this repository has
+        // approved before, and whatever a template brought.
+        for command in crate::db::hybrid_queries::trusted_checks(conn, &primary) {
+            let check = crate::hybrid::plan::PlanCheck { repo: primary.clone(), command };
+            if !run.checks.contains(&check) {
+                run.checks.push(check.clone());
+            }
+            if !run.approved_checks.contains(&check) {
+                run.approved_checks.push(check);
+            }
+        }
+    }
+    crate::db::hybrid_queries::insert_run(conn, &run)?;
+    if let Some(files) = direct_files {
+        crate::db::hybrid_queries::insert_direct_items(conn, &run.chain_id, &primary, files, goal)?;
+        crate::db::hybrid_queries::skip_review_step(conn, &run.chain_id, "direct")?;
+        set_hybrid_checks(conn, &run.chain_id, &run.approved_checks)?;
+    }
+    get_chain_detail(conn, &detail.chain.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+/// The plan as a person reads it: what the gate shows and what the execute step's transcript keeps.
+fn hybrid_plan_text(conn: &Connection, chain_id: &str) -> rusqlite::Result<String> {
+    let run = crate::db::hybrid_queries::get_run(conn, chain_id)?;
+    let items = crate::db::hybrid_queries::list_items(conn, chain_id)?;
+    let mut out = String::from("## Plan\n");
+    if let Some(run) = &run {
+        if !run.plan_summary.trim().is_empty() {
+            out.push_str(run.plan_summary.trim());
+            out.push_str("\n");
+        }
+        out.push_str(&format!("\nLocal model: {} · context {}\n", run.model, run.ctx));
+    }
+    out.push('\n');
+    let repos = crate::db::hybrid_queries::chain_repo_refs(conn, chain_id)?;
+    let shown = |project_id: &str, file: &str| match repos.iter().find(|r| r.project_id == project_id) {
+        Some(repo) if repos.len() > 1 => format!("{}/{file}", repo.name),
+        _ => file.to_string(),
+    };
+    for item in &items {
+        out.push_str(&format!(
+            "- [{}] {} `{}` ({}, {}) → {} — {}\n",
+            if item.enabled { "x" } else { " " },
+            item.task_key,
+            shown(&item.project_id, &item.file),
+            item.action,
+            item.difficulty,
+            if item.assignee == "sub" { "subscription" } else { "local" },
+            item.title
+        ));
+    }
+    if let Some(run) = &run {
+        let checks = if run.approved_checks.is_empty() { &run.checks } else { &run.approved_checks };
+        if !checks.is_empty() {
+            let list: Vec<String> = checks
+                .iter()
+                .map(|check| match repos.iter().find(|r| r.project_id == check.repo) {
+                    Some(repo) if repos.len() > 1 => format!("{}: {}", repo.name, check.command),
+                    _ => check.command.clone(),
+                })
+                .collect();
+            out.push_str(&format!("\nChecks: {}\n", list.join(" · ")));
+        }
+        if !run.gate_note.trim().is_empty() {
+            out.push_str(&format!("\nNote: {}\n", run.gate_note.trim()));
+        }
+    }
+    Ok(out)
+}
+
+/// The plan step's answer, read into the run's tasks — or the note that sends it back to the
+/// planner. `Ok(Err(note))` is a plan that could not be used, which is the planner's to fix, not
+/// a failure of the database.
+fn absorb_hybrid_plan(conn: &Connection, step: &AgentChainStep, answer: &str) -> rusqlite::Result<Result<(), String>> {
+    use crate::hybrid::plan;
+    let Some(run) = crate::db::hybrid_queries::get_run(conn, &step.chain_id)? else {
+        return Ok(Err("This hybrid run has no configuration.".to_string()));
+    };
+    let repos = crate::db::hybrid_queries::chain_repo_refs(conn, &step.chain_id)?;
+    if repos.is_empty() || repos.iter().any(|repo| repo.path.trim().is_empty()) {
+        return Ok(Err("The repository is gone.".to_string()));
+    }
+    let parsed = match plan::parse(answer) {
+        Ok(parsed) => parsed,
+        Err(problem) => return Ok(Err(plan::rejection_note(&[problem]))),
+    };
+    match plan::validate(parsed, &repos) {
+        Ok(valid) => {
+            let delegate = crate::hybrid::budget::Delegate::from_setting(&run.delegate)
+                .unwrap_or(crate::hybrid::budget::Delegate::Medium);
+            crate::db::hybrid_queries::store_plan(conn, &step.chain_id, &valid, delegate)?;
+            // With no gate nobody ticks anything, so what runs is what the user already approved:
+            // a template's own checks, and proposals this repository has trusted before.
+            let gated: bool = conn
+                .query_row(
+                    "SELECT gate FROM agent_chain_steps WHERE chain_id = ?1 AND phase = 'execute'",
+                    params![step.chain_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !gated {
+                if let Some(run) = crate::db::hybrid_queries::get_run(conn, &step.chain_id)? {
+                    let approved: Vec<plan::PlanCheck> = run
+                        .checks
+                        .iter()
+                        .filter(|check| {
+                            run.approved_checks.contains(check)
+                                || crate::db::hybrid_queries::trusted_checks(conn, &check.repo).contains(&check.command)
+                        })
+                        .cloned()
+                        .collect();
+                    set_hybrid_checks(conn, &step.chain_id, &approved)?;
+                }
+            }
+            Ok(Ok(()))
+        }
+        Err(problems) => Ok(Err(plan::rejection_note(&problems))),
+    }
+}
+
+/// Records the checks that run, and gives the review step its check — the commands themselves,
+/// as a label: `chain_step_check` runs a hybrid run's checks from the run, each in its repository.
+fn set_hybrid_checks(conn: &Connection, chain_id: &str, approved: &[crate::hybrid::plan::PlanCheck]) -> rusqlite::Result<()> {
+    crate::db::hybrid_queries::set_approved_checks(conn, chain_id, approved)?;
+    let label = approved.iter().map(|check| check.command.as_str()).collect::<Vec<_>>().join(" && ");
+    conn.execute(
+        "UPDATE agent_chain_steps SET check_command = ?2, on_fail = -1, updated_at = ?3
+         WHERE chain_id = ?1 AND phase = 'review'",
+        params![chain_id, label, now()],
+    )?;
+    Ok(())
+}
+
+/// What a hybrid review's answer does to the run, decided before the step is called done.
+enum ReviewStep {
+    /// Not a round of the local fix loop: kept as the answer it is.
+    AsIs,
+    /// The loop ends here; the step keeps this readable version of the answer.
+    Finish(String),
+    /// Corrections were handed to the local model: back to the execute step.
+    Loop(String),
+    /// The answer could not be read; the reviewer gets this note.
+    Unreadable(String),
+}
+
+/// Reads a review's answer. In the `local` mode, before its last round, the answer is the JSON of
+/// [`crate::hybrid::plan::REVIEW_SCHEMA`]: corrections become the next round's tasks. Every mode that
+/// lets the review write also marks the tasks it was handed as done by it, so a later round's report
+/// does not hand them over twice.
+fn absorb_hybrid_review(conn: &Connection, step: &AgentChainStep, answer: &str) -> rusqlite::Result<ReviewStep> {
+    use crate::hybrid::{plan, prompts};
+    let Some(run) = crate::db::hybrid_queries::get_run(conn, &step.chain_id)? else { return Ok(ReviewStep::AsIs) };
+    if run.review_mode == "report" {
+        return Ok(ReviewStep::AsIs);
+    }
+    let items = crate::db::hybrid_queries::list_items(conn, &step.chain_id)?;
+    let took_over: Vec<String> = prompts::for_review(&run, &items).iter().map(|item| item.id.clone()).collect();
+    if run.review_mode != "local" || run.fix_round >= prompts::MAX_FIX_ROUNDS {
+        crate::db::hybrid_queries::mark_reviewed(conn, &took_over)?;
+        return Ok(ReviewStep::AsIs);
+    }
+    let review = match plan::parse_review(answer) {
+        Ok(review) => review,
+        // An engine that cannot be held to a schema may still have said its verdict in words.
+        Err(problem) => {
+            return Ok(match prompts::parse_verdict(answer) {
+                Some(_) => {
+                    crate::db::hybrid_queries::mark_reviewed(conn, &took_over)?;
+                    ReviewStep::AsIs
+                }
+                None => ReviewStep::Unreadable(plan::review_rejection_note(&[problem])),
+            });
+        }
+    };
+    let repos = crate::db::hybrid_queries::chain_repo_refs(conn, &step.chain_id)?;
+    let fixes = if review.verdict == "fix" {
+        match plan::validate_fixes(review.fixes.clone(), &repos) {
+            Ok(fixes) => fixes,
+            Err(problems) => return Ok(ReviewStep::Unreadable(plan::review_rejection_note(&problems))),
+        }
+    } else {
+        Vec::new()
+    };
+    crate::db::hybrid_queries::mark_reviewed(conn, &took_over)?;
+    let did_work = !took_over.is_empty();
+    if review.verdict == "fix" && !fixes.is_empty() {
+        let delegate = crate::hybrid::budget::Delegate::from_setting(&run.delegate)
+            .unwrap_or(crate::hybrid::budget::Delegate::Medium);
+        crate::db::hybrid_queries::add_fix_items(conn, &step.chain_id, run.fix_round + 1, &fixes, delegate)?;
+        let list: Vec<String> = fixes
+            .iter()
+            .map(|fix| match repos.iter().find(|r| r.project_id == fix.repo) {
+                Some(repo) if repos.len() > 1 => format!("{}/{} — {}", repo.name, fix.file, fix.title),
+                _ => format!("{} — {}", fix.file, fix.title),
+            })
+            .collect();
+        return Ok(ReviewStep::Loop(prompts::review_text(&review, did_work, &list)));
+    }
+    // A `fix` with nothing to fix is an `ok`.
+    let review = if review.verdict == "fix" { plan::Review { verdict: "ok".to_string(), ..review } } else { review };
+    Ok(ReviewStep::Finish(prompts::review_text(&review, did_work, &[])))
+}
+
+/// Sends a hybrid run back to its execute step for a round of corrections: the steps from there on
+/// are pending again with their attempts restored (a round is the plan working, not a retry), and the
+/// execute step does not stop at its gate a second time — the user approved the plan, and the
+/// corrections are its consequence.
+fn loop_back_to_execute(conn: &Connection, chain_id: &str) -> rusqlite::Result<()> {
+    let index_of = |phase: &str| -> rusqlite::Result<Option<i64>> {
+        conn.query_row(
+            "SELECT step_index FROM agent_chain_steps WHERE chain_id = ?1 AND phase = ?2",
+            params![chain_id, phase],
+            |row| row.get(0),
+        )
+        .optional()
+    };
+    let (Some(execute), Some(review)) = (index_of("execute")?, index_of("review")?) else { return Ok(()) };
+    jump_to(conn, chain_id, review, execute, "")?;
+    conn.execute(
+        "UPDATE agent_chain_steps SET gate_cleared = 1, attempts = 0, updated_at = ?3
+         WHERE chain_id = ?1 AND step_index >= ?2",
+        params![chain_id, execute, now()],
+    )?;
+    Ok(())
+}
+
+/// Approves a hybrid run's plan as edited at the gate, in one step: the edits, the checks the user
+/// ticked (which become the review step's check — the only place a command ever runs), the note,
+/// and the gate itself. Refused with [`GateApproval::Moved`] when the chain is no longer parked
+/// where the caller saw it, exactly as [`approve_chain_gate`] is.
+pub fn approve_hybrid_plan(
+    conn: &Connection,
+    chain_id: &str,
+    expected_step_id: &str,
+    edits: &[crate::db::hybrid_queries::ItemEdit],
+    checks: &[crate::hybrid::plan::PlanCheck],
+    note: &str,
+) -> rusqlite::Result<GateApproval> {
+    let Some(step) = next_pending_step(conn, chain_id)? else {
+        return Ok(GateApproval::Moved);
+    };
+    if step.id != expected_step_id || step.phase != "execute" {
+        return Ok(GateApproval::Moved);
+    }
+    let tx = conn.unchecked_transaction()?;
+    crate::db::hybrid_queries::apply_edits(&tx, chain_id, edits)?;
+    let run = crate::db::hybrid_queries::get_run(&tx, chain_id)?;
+    // Only commands listed for the run can be approved — the planner's proposals and a template's
+    // own: the gate ticks, it does not type.
+    let proposed = run.map(|run| run.checks).unwrap_or_default();
+    let approved: Vec<crate::hybrid::plan::PlanCheck> = checks.iter().filter(|check| proposed.contains(check)).cloned().collect();
+    set_hybrid_checks(&tx, chain_id, &approved)?;
+    crate::db::hybrid_queries::set_gate_note(&tx, chain_id, note)?;
+    let message = hybrid_plan_text(&tx, chain_id)?;
+    tx.execute(
+        "UPDATE agent_chain_steps SET gate_cleared = 1, pending_input = ?2, updated_at = ?3 WHERE id = ?1",
+        params![step.id, message, now()],
+    )?;
+    tx.execute(
+        "UPDATE agent_chains SET status = 'queued', last_reason = '', resume_at = 0, updated_at = ?2 WHERE id = ?1",
+        params![chain_id, now()],
+    )?;
+    tx.commit()?;
+    chain_row(conn, chain_id).map(GateApproval::Approved)
+}
+
 /// Freezes the message one particular step will be sent.
 ///
 /// [`approve_chain_gate`] does this for the step the chain is parked at; this does it for the ones
@@ -2286,31 +2699,6 @@ pub fn set_chain_step_input(conn: &Connection, step_id: &str, input: &str) -> ru
         params![step_id, input, now()],
     )?;
     Ok(())
-}
-
-/// The phase of the story-realizer step a run is executing, if the run is one — `"analyze"` or
-/// `"implement"`.
-///
-/// Asked by the turn itself (`claude_cmd::send_chat_message`), which is what makes a story's
-/// analysis pass read-only on the server's word rather than the client's: the claim recorded this
-/// run id on the step before the run existed, so nothing the webview sends can move a turn out of
-/// the phase its step is in.
-///
-/// **Story runs only** (`kind = 'story'`, which only [`create_story_chain`] makes). A hand-authored
-/// chain can carry the same phase words — templates keep them — and it is deliberately left free:
-/// its instructions are the user's, and the read-only guarantee is the realizer's reason to exist
-/// beside it. `None` for every turn that is not a running realizer step.
-pub fn running_story_step_phase(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<String>> {
-    if run_id.trim().is_empty() {
-        return Ok(None);
-    }
-    conn.query_row(
-        "SELECT s.phase FROM agent_chain_steps s JOIN agent_chains c ON c.id = s.chain_id
-         WHERE s.run_id = ?1 AND s.status = 'running' AND c.kind = 'story' LIMIT 1",
-        params![run_id],
-        |row| row.get(0),
-    )
-    .optional()
 }
 
 /// Takes one step out of the plan, or puts it back.
@@ -2375,19 +2763,7 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
     // the user approves is byte-for-byte what runs, however long they take to look at it.
     if step.gate && !step.gate_cleared {
         if step.pending_input.is_empty() {
-            let previous = previous_output(conn, chain_id, step.step_index, &step.project_id)?;
-            let memory = compose_memory_block(
-                chain_id,
-                &memory_notes(conn, chain_id, step.step_index)?,
-                &crate::chain_memory::note_name(step.step_index, &step.agent_name),
-            );
-            let message = compose_chain_input(
-                &chain.goal,
-                &step.instruction,
-                previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
-                &step.feedback,
-                &memory,
-            );
+            let message = compose_step_message(conn, &chain, &step)?;
             conn.execute(
                 "UPDATE agent_chain_steps SET pending_input = ?2, updated_at = ?3 WHERE id = ?1",
                 params![step.id, message, now()],
@@ -2461,19 +2837,7 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
     };
 
     let message = if step.pending_input.is_empty() {
-        let previous = previous_output(&tx, chain_id, step.step_index, &step.project_id)?;
-        let memory = compose_memory_block(
-            chain_id,
-            &memory_notes(&tx, chain_id, step.step_index)?,
-            &crate::chain_memory::note_name(step.step_index, &step.agent_name),
-        );
-        compose_chain_input(
-            &chain.goal,
-            &step.instruction,
-            previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
-            &step.feedback,
-            &memory,
-        )
+        compose_step_message(&tx, &chain, &step)?
     } else {
         step.pending_input.clone()
     };
@@ -2638,24 +3002,41 @@ pub fn chain_summary_sections(
 /// already stopped would run a test suite nobody will read the verdict of.
 ///
 /// Answers `(chain id, command, working copy)`: the chain is what an abort finds the check by.
-pub fn chain_step_check(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<(String, String, String)>> {
-    let row: Option<(String, String, Option<String>, String)> = conn
+pub fn chain_step_check(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<(String, Vec<(String, String)>)>> {
+    let row: Option<(String, String, Option<String>, String, String, String)> = conn
         .query_row(
-            "SELECT s.chain_id, s.check_command, p.local_path, COALESCE(c.status, '')
+            "SELECT s.chain_id, s.check_command, p.local_path, COALESCE(c.status, ''), COALESCE(c.kind, ''), s.phase
                FROM agent_chain_steps s
                LEFT JOIN projects p ON p.id = s.project_id
                LEFT JOIN agent_chains c ON c.id = s.chain_id
               WHERE s.id = ?1",
             params![step_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         )
         .optional()?;
-    Ok(match row {
-        Some((chain_id, command, Some(path), status))
-            if !command.trim().is_empty() && !path.trim().is_empty() && status != "aborted" =>
-        {
-            Some((chain_id, command.trim().to_string(), path))
-        }
+    let Some((chain_id, command, path, status, kind, phase)) = row else { return Ok(None) };
+    if command.trim().is_empty() || status == "aborted" {
+        return Ok(None);
+    }
+    // A hybrid run's review runs the run's own checks, each in its own repository — in a round of
+    // the local fix loop too, where what a failure means is decided by the answer: corrections handed
+    // back are the loop going on, while an "ok" over a failing check is not taken at its word (see
+    // `complete_chain_step`).
+    if kind == "hybrid" && phase == "review" {
+        let Some(run) = crate::db::hybrid_queries::get_run(conn, &chain_id)? else { return Ok(None) };
+        let repos = crate::db::hybrid_queries::chain_repo_refs(conn, &chain_id)?;
+        let checks: Vec<(String, String)> = run
+            .approved_checks
+            .iter()
+            .filter_map(|check| {
+                let repo = if check.repo.is_empty() { repos.first() } else { repos.iter().find(|r| r.project_id == check.repo) }?;
+                (!repo.path.trim().is_empty()).then(|| (check.command.clone(), repo.path.clone()))
+            })
+            .collect();
+        return Ok((!checks.is_empty()).then_some((chain_id, checks)));
+    }
+    Ok(match path {
+        Some(path) if !path.trim().is_empty() => Some((chain_id, vec![(command.trim().to_string(), path)])),
         _ => None,
     })
 }
@@ -2700,6 +3081,84 @@ pub fn complete_chain_step(
         }
         return chain_row(conn, &chain_id);
     }
+
+    // A hybrid run's plan is read here, before the step is called done: a plan that cannot be used
+    // sends the planner back with what was wrong, through the same move a failed check makes, so
+    // the note actually reaches it (an `error` would resend the frozen message without it).
+    let kind = chain_row(conn, &chain_id)?.map(|chain| chain.kind).unwrap_or_default();
+    if outcome == "done" && kind == "hybrid" && step.phase == "plan" {
+        if let Err(note) = absorb_hybrid_plan(conn, &step, output_text)? {
+            let (clamped, truncated) = clamp_handoff(output_text.trim());
+            conn.execute(
+                "UPDATE agent_chain_steps SET output_text = ?2, output_truncated = ?3, run_id = '',
+                    last_error = 'chain.planUnreadable', updated_at = ?4
+                 WHERE id = ?1",
+                params![step.id, clamped, truncated, now()],
+            )?;
+            jump_to(conn, &chain_id, step.step_index, step.step_index, &note)?;
+            set_chain_state(conn, &chain_id, "queued", "chain.planUnreadable")?;
+            return chain_row(conn, &chain_id);
+        }
+    }
+    // A hybrid review is read here too, for the same reason: in the local fix loop its answer is the
+    // next round's tasks — which sends the run back to its execute step — or a note back to it.
+    let reviewed: String;
+    let output_text: &str = if outcome == "done" && kind == "hybrid" && step.phase == "review" {
+        match absorb_hybrid_review(conn, &step, output_text)? {
+            ReviewStep::AsIs => output_text,
+            ReviewStep::Finish(text) => {
+                reviewed = text;
+                &reviewed
+            }
+            ReviewStep::Loop(text) => {
+                let (clamped, truncated) = clamp_handoff(text.trim());
+                conn.execute(
+                    "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3,
+                        run_id = '', last_error = '', feedback = '', updated_at = ?4
+                     WHERE id = ?1",
+                    params![step.id, clamped, truncated, now()],
+                )?;
+                loop_back_to_execute(conn, &chain_id)?;
+                set_chain_state(conn, &chain_id, "queued", "")?;
+                return chain_row(conn, &chain_id);
+            }
+            ReviewStep::Unreadable(note) => {
+                let (clamped, truncated) = clamp_handoff(output_text.trim());
+                conn.execute(
+                    "UPDATE agent_chain_steps SET output_text = ?2, output_truncated = ?3, run_id = '',
+                        last_error = 'chain.reviewUnreadable', updated_at = ?4
+                     WHERE id = ?1",
+                    params![step.id, clamped, truncated, now()],
+                )?;
+                jump_to(conn, &chain_id, step.step_index, step.step_index, &note)?;
+                set_chain_state(conn, &chain_id, "queued", "chain.reviewUnreadable")?;
+                return chain_row(conn, &chain_id);
+            }
+        }
+    } else {
+        output_text
+    };
+    // A check that failed under a review that handed corrections back is the loop working — the
+    // corrections are what will fix it. Under any other answer the failure stands, and the review is
+    // sent back with the check's output, as every step with a check is.
+    if outcome == "check_failed" && kind == "hybrid" && step.phase == "review" {
+        if let ReviewStep::Loop(text) = absorb_hybrid_review(conn, &step, output_text)? {
+            let (clamped, truncated) = clamp_handoff(text.trim());
+            conn.execute(
+                "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3,
+                    run_id = '', last_error = '', feedback = '', updated_at = ?4
+                 WHERE id = ?1",
+                params![step.id, clamped, truncated, now()],
+            )?;
+            loop_back_to_execute(conn, &chain_id)?;
+            set_chain_state(conn, &chain_id, "queued", "")?;
+            return chain_row(conn, &chain_id);
+        }
+    }
+    let pending_verdict = outcome == "done"
+        && kind == "hybrid"
+        && step.phase == "review"
+        && crate::hybrid::prompts::parse_verdict(output_text) == Some(crate::hybrid::prompts::Verdict::Pending);
 
     match outcome {
         "done" => {
@@ -2828,6 +3287,13 @@ pub fn complete_chain_step(
         }
         _ => return Ok(chain_row(conn, &chain_id)?),
     }
+    // The review said something is still wrong: the run is over, and says so.
+    if pending_verdict {
+        conn.execute(
+            "UPDATE agent_chains SET last_reason = 'chain.hybridPending', updated_at = ?2 WHERE id = ?1 AND status = 'done'",
+            params![chain_id, now()],
+        )?;
+    }
     chain_row(conn, &chain_id)
 }
 
@@ -2881,7 +3347,15 @@ pub fn approve_chain_gate(
     if expected_step_id.is_some_and(|expected| expected != step.id) {
         return Ok(GateApproval::Moved);
     }
-    let message = if input.trim().is_empty() { step.pending_input.clone() } else { input.to_string() };
+    // A hybrid run's execute step never reads its message — the executor reads the plan's rows — so
+    // what somebody typed at its gate (the phone has a box for it) is kept as a note the executor
+    // and the review both see, instead of overwriting a message nothing reads.
+    let hybrid_execute = step.phase == "execute"
+        && chain_row(conn, chain_id)?.is_some_and(|chain| chain.kind == "hybrid");
+    if hybrid_execute && !input.trim().is_empty() {
+        crate::db::hybrid_queries::set_gate_note(conn, chain_id, input)?;
+    }
+    let message = if input.trim().is_empty() || hybrid_execute { step.pending_input.clone() } else { input.to_string() };
     conn.execute(
         "UPDATE agent_chain_steps SET gate_cleared = 1, pending_input = ?2, updated_at = ?3 WHERE id = ?1",
         params![step.id, message, now()],
@@ -3102,8 +3576,8 @@ fn harvest_row(conn: &Connection, step: &AgentChainStep) -> rusqlite::Result<Opt
 /// [`HarvestOutcome`]. The caller is a timer, and a timer that cannot tell "not yet" from "never"
 /// keeps asking.
 pub fn harvest_chain_step(conn: &Connection, step_id: &str) -> rusqlite::Result<HarvestOutcome> {
-    let waiting = HarvestOutcome { chain: None, gone: false };
-    let gone = HarvestOutcome { chain: None, gone: true };
+    let waiting = HarvestOutcome { chain: None, gone: false, alive: false };
+    let gone = HarvestOutcome { chain: None, gone: true, alive: false };
     let Some(step) = step_row(conn, step_id)? else { return Ok(gone) };
     if step.status != "running" {
         // Settled by something else — another window, a phone, `recover_after_restart`. The chain
@@ -3111,7 +3585,7 @@ pub fn harvest_chain_step(conn: &Connection, step_id: &str) -> rusqlite::Result<
         // "stop polling" as a missing step.
         let chain = chain_row(conn, &step.chain_id)?;
         return Ok(match chain {
-            Some(chain) => HarvestOutcome { chain: Some(chain), gone: false },
+            Some(chain) => HarvestOutcome { chain: Some(chain), gone: false, alive: false },
             None => gone,
         });
     }
@@ -3121,7 +3595,7 @@ pub fn harvest_chain_step(conn: &Connection, step_id: &str) -> rusqlite::Result<
         // The turn is still out there. This is the one honest "ask me again".
         None => return Ok(waiting),
     };
-    Ok(HarvestOutcome { chain: settled, gone: false })
+    Ok(HarvestOutcome { chain: settled, gone: false, alive: false })
 }
 
 /// Run once per launch, from `db::finish` — the last step of opening the database in `setup` (see
@@ -3145,6 +3619,47 @@ pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
     };
     for step in &running {
         match harvest_row(conn, step)? {
+            // A hybrid plan that landed is read now, as `complete_chain_step` would have; one that
+            // cannot be used goes back to the planner with the note, waiting for "Reanudar".
+            Some((answer, false))
+                if step.phase == "plan"
+                    && chain_row(conn, &step.chain_id)?.is_some_and(|chain| chain.kind == "hybrid") =>
+            {
+                let (clamped, truncated) = clamp_handoff(answer.trim());
+                conn.execute(
+                    "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3,
+                        run_id = '', updated_at = ?4
+                     WHERE id = ?1",
+                    params![step.id, clamped, truncated, now()],
+                )?;
+                if let Err(note) = absorb_hybrid_plan(conn, step, &answer)? {
+                    jump_to(conn, &step.chain_id, step.step_index, step.step_index, &note)?;
+                }
+            }
+            // A review that landed is read too: a round of corrections it handed back is kept, and
+            // waits for "Reanudar" like everything else here.
+            Some((answer, false))
+                if step.phase == "review"
+                    && chain_row(conn, &step.chain_id)?.is_some_and(|chain| chain.kind == "hybrid") =>
+            {
+                let outcome = absorb_hybrid_review(conn, step, &answer)?;
+                let kept = match &outcome {
+                    ReviewStep::Finish(text) | ReviewStep::Loop(text) => text.as_str(),
+                    ReviewStep::AsIs | ReviewStep::Unreadable(_) => answer.as_str(),
+                };
+                let (clamped, truncated) = clamp_handoff(kept.trim());
+                conn.execute(
+                    "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3,
+                        run_id = '', updated_at = ?4
+                     WHERE id = ?1",
+                    params![step.id, clamped, truncated, now()],
+                )?;
+                match outcome {
+                    ReviewStep::Loop(_) => loop_back_to_execute(conn, &step.chain_id)?,
+                    ReviewStep::Unreadable(note) => jump_to(conn, &step.chain_id, step.step_index, step.step_index, &note)?,
+                    ReviewStep::AsIs | ReviewStep::Finish(_) => {}
+                }
+            }
             // The turn landed before the process died: keep the work rather than throwing it away.
             Some((answer, false)) => {
                 let (clamped, truncated) = clamp_handoff(answer.trim());
@@ -3175,6 +3690,8 @@ pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     conn.execute("UPDATE agent_tasks SET status = 'idle' WHERE status = 'running'", [])?;
+    // A hybrid task that was mid-request is simply pending again; its run resumes from it.
+    crate::db::hybrid_queries::requeue_running_items(conn, None)?;
     // `queued` is demoted along with `running`: a queued chain with nobody pumping it is a chain
     // that looks like it is about to start and never will.
     conn.execute(
@@ -3229,10 +3746,12 @@ fn template_steps(conn: &Connection, template_id: &str) -> rusqlite::Result<Vec<
 
 pub fn list_chain_templates(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<ChainTemplate>> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, name, description, sort_order, created_at, updated_at
+        "SELECT id, workspace_id, name, description, sort_order, created_at, updated_at, kind, config
          FROM workspace_chain_templates WHERE workspace_id = ?1 ORDER BY sort_order, created_at",
     )?;
     let rows = stmt.query_map(params![workspace_id], |row| {
+        let kind: String = row.get(7)?;
+        let config: String = row.get(8)?;
         Ok(ChainTemplate {
             id: row.get(0)?,
             workspace_id: row.get(1)?,
@@ -3242,6 +3761,9 @@ pub fn list_chain_templates(conn: &Connection, workspace_id: &str) -> rusqlite::
             created_at: row.get(5)?,
             updated_at: row.get(6)?,
             steps: Vec::new(),
+            // A config that no longer reads opens as the defaults rather than hiding the template.
+            hybrid: (kind == "hybrid").then(|| serde_json::from_str(&config).unwrap_or_default()),
+            kind,
         })
     })?;
     let mut templates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3311,6 +3833,52 @@ pub fn upsert_chain_template(
         created_at,
         updated_at: stamp,
         steps: template_steps(conn, &template_id)?,
+        kind: "chain".to_string(),
+        hybrid: None,
+    })
+}
+
+/// Saves a hybrid task's setup as a template — a row with `kind = 'hybrid'`, its settings in
+/// `config` and no steps — or replaces the one `id` names. Lives in the same list as the chain
+/// templates because that is where a user goes looking for "the thing I keep doing".
+pub fn upsert_hybrid_template(
+    conn: &Connection,
+    id: Option<String>,
+    workspace_id: &str,
+    name: &str,
+    description: &str,
+    config: &crate::db::hybrid_queries::HybridTemplateConfig,
+) -> rusqlite::Result<ChainTemplate> {
+    let stamp = now();
+    let existing = id.as_ref().and_then(|existing_id| {
+        conn.query_row(
+            "SELECT sort_order, created_at FROM workspace_chain_templates WHERE id = ?1",
+            params![existing_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok()
+    });
+    let (sort_order, created_at) = existing.unwrap_or((0, stamp.clone()));
+    let template_id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let config_json = serde_json::to_string(config).unwrap_or_default();
+    conn.execute(
+        "INSERT INTO workspace_chain_templates (id, workspace_id, name, description, sort_order, created_at, updated_at, kind, config)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'hybrid', ?8)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description,
+            updated_at = excluded.updated_at, kind = 'hybrid', config = excluded.config",
+        params![template_id, workspace_id, name, description, sort_order, created_at, stamp, config_json],
+    )?;
+    Ok(ChainTemplate {
+        id: template_id,
+        workspace_id: workspace_id.to_string(),
+        name: name.to_string(),
+        description: description.to_string(),
+        sort_order,
+        created_at,
+        updated_at: stamp,
+        steps: Vec::new(),
+        kind: "hybrid".to_string(),
+        hybrid: Some(config.clone()),
     })
 }
 
@@ -5279,6 +5847,498 @@ mod tests {
         assert!(gone.chain.is_none());
     }
 
+    /// A hybrid run end to end through the scheduler's own calls: its shape, its plan read on
+    /// completion (or sent back with what was wrong), its gate approved as edited, and its review's
+    /// verdict — everything except the engines themselves.
+    #[test]
+    fn a_hybrid_run_plans_gates_executes_and_reviews_through_the_chain() {
+        use crate::db::hybrid_queries;
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, project) = workspace_with_project(&conn, "hybrid");
+        // The plan is validated against the files on disk, so the repository has to exist.
+        let repo = std::env::temp_dir().join(format!("cf-hybrid-chain-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/api.ts"), "export function list() {}\n").unwrap();
+        conn.execute("UPDATE projects SET local_path = ?2 WHERE id = ?1", params![project, repo.to_string_lossy()]).unwrap();
+        let agent =
+            upsert_workspace_agent(&conn, None, &ws, "Arquitecto", "role", "claude", "opus", "", true, None).unwrap();
+        let run = hybrid_queries::HybridRun {
+            chain_id: String::new(),
+            backend: "ollama".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "qwen2.5-coder:7b".into(),
+            ctx: 16_384,
+            budget_input: 11_776,
+            budget_output: 4_096,
+            delegate: "medium".into(),
+            on_fail: "review".into(),
+            review_mode: "fix".into(),
+            unload: true,
+            thinking: false,
+            plan_summary: String::new(),
+            plan_risks: vec![],
+            checks: vec![],
+            approved_checks: vec![],
+            gate_note: String::new(),
+            baseline_commit: String::new(),
+            plan_input_tokens: 0,
+            plan_output_tokens: 0,
+            review_input_tokens: 0,
+            review_output_tokens: 0,
+            direct: false,
+            fix_round: 0,
+            review_skip: String::new(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        let detail = create_hybrid_chain(&conn, &[project.clone()], "Export", "Add CSV export", &agent.id, &agent.id, "", true, &run, None)
+            .unwrap();
+        let chain_id = detail.chain.id.clone();
+        assert_eq!(detail.chain.kind, "hybrid");
+        let phases: Vec<&str> = detail.steps.iter().map(|s| s.phase.as_str()).collect();
+        assert_eq!(phases, ["plan", "execute", "review"]);
+        assert_eq!(detail.steps[1].provider, "local-exec");
+        assert_eq!(detail.steps[1].model, "qwen2.5-coder:7b");
+        assert!(detail.steps[1].gate, "the execute step waits for approval");
+        assert!(detail.steps[0].instruction.contains("11776 tokens"), "the planner is told the budget");
+
+        // The plan: read-only, schema-bound, and no shared-memory block (it answers in JSON).
+        resume_chain(&conn, &chain_id).unwrap();
+        let claim = claim_next_chain_step(&conn, &chain_id, "run-plan").unwrap();
+        assert!(!claim.message.contains("Shared memory"), "{}", claim.message);
+        let running = hybrid_queries::running_step(&conn, "run-plan").unwrap().unwrap();
+        assert_eq!((running.kind.as_str(), running.phase.as_str()), ("hybrid", "plan"));
+        let plan_step = claim.step.unwrap();
+
+        // An unusable plan goes back to the planner with the reason, not with the same message.
+        let chain = complete_chain_step(&conn, &plan_step.id, "done", "I could not decide.", "").unwrap().unwrap();
+        assert_eq!((chain.status.as_str(), chain.last_reason.as_str()), ("queued", "chain.planUnreadable"));
+        let retry = claim_next_chain_step(&conn, &chain_id, "run-plan-2").unwrap();
+        assert!(retry.message.contains("could not be used"), "{}", retry.message);
+
+        let plan = r#"{"summary":"CSV export","tasks":[
+            {"id":"t1","title":"csv util","file":"src/csv.ts","action":"create","regions":[],"instruction":"Create toCsv.","context":[],"acceptance":["exports toCsv"],"depends_on":[],"difficulty":"easy"},
+            {"id":"t2","title":"endpoint","file":"src/api.ts","action":"modify","regions":[],"instruction":"Accept format=csv.","context":[],"acceptance":[],"depends_on":["t1"],"difficulty":"hard"}],
+            "checks":["pnpm tsc --noEmit","rm -rf /"],"risks":[]}"#;
+        complete_chain_step(&conn, &retry.step.unwrap().id, "done", plan, "").unwrap();
+        let items = hybrid_queries::list_items(&conn, &chain_id).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!((items[0].assignee.as_str(), items[1].assignee.as_str()), ("local", "sub"), "hard goes to the review");
+
+        // The gate freezes a readable plan, not JSON — it is what a phone shows.
+        let parked = claim_next_chain_step(&conn, &chain_id, "run-x").unwrap();
+        assert_eq!(parked.chain.status, "gated");
+        let execute = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps[1].clone();
+        assert!(execute.pending_input.contains("`src/csv.ts`"), "{}", execute.pending_input);
+        assert!(!execute.pending_input.contains("\"tasks\""));
+
+        // Approval as edited: one task moved, one check ticked (an unproposed one is ignored).
+        let edits = vec![hybrid_queries::ItemEdit {
+            id: items[1].id.clone(),
+            instruction: "Accept format=csv and keep the filter.".into(),
+            assignee: "local".into(),
+            enabled: true,
+        }];
+        let moved = approve_hybrid_plan(&conn, &chain_id, "not-the-step", &edits, &[], "").unwrap();
+        assert!(matches!(moved, GateApproval::Moved));
+        let check = |command: &str| crate::hybrid::plan::PlanCheck { repo: project.clone(), command: command.into() };
+        let approved = approve_hybrid_plan(&conn, &chain_id, &execute.id, &edits, &[check("pnpm tsc --noEmit"), check("curl evil")], "keep it small")
+            .unwrap();
+        assert!(matches!(approved, GateApproval::Approved(Some(ref chain)) if chain.status == "queued"));
+        let stored = hybrid_queries::get_run(&conn, &chain_id).unwrap().unwrap();
+        assert_eq!(stored.approved_checks, vec![check("pnpm tsc --noEmit")]);
+        assert_eq!(stored.gate_note, "keep it small");
+        let review_step = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps[2].clone();
+        assert_eq!(review_step.check_command, "pnpm tsc --noEmit", "approved checks run on the review");
+        assert_eq!(hybrid_queries::list_items(&conn, &chain_id).unwrap()[1].assignee, "local");
+
+        // Execute: dispatched like any step; its report is what the review opens with.
+        let exec_claim = claim_next_chain_step(&conn, &chain_id, "run-exec").unwrap();
+        assert_eq!(hybrid_queries::running_step(&conn, "run-exec").unwrap().unwrap().phase, "execute");
+        complete_chain_step(&conn, &exec_claim.step.unwrap().id, "done", "## Local execution report\nall done", "").unwrap();
+        let review = claim_next_chain_step(&conn, &chain_id, "run-review").unwrap();
+        assert!(review.message.contains("Local execution report"), "{}", review.message);
+        assert!(review.message.contains("VERDICT"), "the review's instruction asks for a verdict");
+
+        // A pending verdict ends the run and says so.
+        let done = complete_chain_step(&conn, &review.step.unwrap().id, "done", "Still broken.\nVERDICT: PENDING", "")
+            .unwrap()
+            .unwrap();
+        assert_eq!((done.status.as_str(), done.last_reason.as_str()), ("done", "chain.hybridPending"));
+
+        // Deleting the chain takes the run and its plan with it.
+        delete_chain(&conn, &chain_id).unwrap();
+        assert!(hybrid_queries::get_run(&conn, &chain_id).unwrap().is_none());
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    /// A restart while the plan's answer had landed reads it, as completion would have.
+    #[test]
+    fn a_restart_reads_a_landed_hybrid_plan_and_requeues_running_tasks() {
+        use crate::db::hybrid_queries;
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, project) = workspace_with_project(&conn, "hybrid-restart");
+        let repo = std::env::temp_dir().join(format!("cf-hybrid-restart-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        conn.execute("UPDATE projects SET local_path = ?2 WHERE id = ?1", params![project, repo.to_string_lossy()]).unwrap();
+        let agent = upsert_workspace_agent(&conn, None, &ws, "A", "", "claude", "opus", "", true, None).unwrap();
+        let run = hybrid_queries::HybridRun {
+            chain_id: String::new(),
+            backend: "bundled".into(),
+            base_url: String::new(),
+            model: "qwen2.5-coder-7b-instruct".into(),
+            ctx: 8_192,
+            budget_input: 5_632,
+            budget_output: 2_048,
+            delegate: "all".into(),
+            on_fail: "review".into(),
+            review_mode: "fix".into(),
+            unload: true,
+            thinking: false,
+            plan_summary: String::new(),
+            plan_risks: vec![],
+            checks: vec![],
+            approved_checks: vec![],
+            gate_note: String::new(),
+            baseline_commit: String::new(),
+            plan_input_tokens: 0,
+            plan_output_tokens: 0,
+            review_input_tokens: 0,
+            review_output_tokens: 0,
+            direct: false,
+            fix_round: 0,
+            review_skip: String::new(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        let detail = create_hybrid_chain(&conn, &[project.clone()], "T", "goal", &agent.id, &agent.id, "", false, &run, None).unwrap();
+        resume_chain(&conn, &detail.chain.id).unwrap();
+        let claim = claim_next_chain_step(&conn, &detail.chain.id, "run-p").unwrap();
+        let task = claim.task.unwrap();
+        // The turn landed (its row is in activity_log) and then the app died.
+        add_activity_log(
+            &conn,
+            &task.project_id,
+            &task.conversation_id,
+            Some("sess"),
+            &claim.message,
+            r#"{"summary":"s","tasks":[{"id":"t1","title":"a","file":"a.ts","action":"create","regions":[],"instruction":"make a","context":[],"acceptance":[],"depends_on":[],"difficulty":"easy"}],"checks":[],"risks":[]}"#,
+            None,
+            TurnMeta { provider: Some("claude"), account_id: None, model: None, engine_version: None, response_time_ms: None },
+            false,
+        )
+        .unwrap();
+        recover_after_restart(&conn).unwrap();
+        let items = hybrid_queries::list_items(&conn, &detail.chain.id).unwrap();
+        assert_eq!(items.len(), 1, "the landed plan was read into tasks");
+        hybrid_queries::mark_item_running(&conn, &items[0].id).unwrap();
+        recover_after_restart(&conn).unwrap();
+        assert_eq!(hybrid_queries::list_items(&conn, &detail.chain.id).unwrap()[0].status, "pending");
+        // The review resumes the planner's session when it can.
+        assert_eq!(
+            hybrid_queries::plan_session(&conn, &detail.chain.id).unwrap(),
+            Some(("sess".to_string(), "claude".to_string(), None))
+        );
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    fn hybrid_run(review_mode: &str) -> crate::db::hybrid_queries::HybridRun {
+        crate::db::hybrid_queries::HybridRun {
+            chain_id: String::new(),
+            backend: "ollama".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "qwen2.5-coder:7b".into(),
+            ctx: 16_384,
+            budget_input: 11_776,
+            budget_output: 4_096,
+            delegate: "medium".into(),
+            on_fail: "review".into(),
+            review_mode: review_mode.into(),
+            unload: true,
+            thinking: false,
+            plan_summary: String::new(),
+            plan_risks: vec![],
+            checks: vec![],
+            approved_checks: vec![],
+            gate_note: String::new(),
+            baseline_commit: String::new(),
+            plan_input_tokens: 0,
+            plan_output_tokens: 0,
+            review_input_tokens: 0,
+            review_output_tokens: 0,
+            direct: false,
+            fix_round: 0,
+            review_skip: String::new(),
+            created_at: now(),
+            updated_at: now(),
+        }
+    }
+
+    fn hybrid_repo(conn: &Connection, project: &str, tag: &str) -> std::path::PathBuf {
+        let repo = std::env::temp_dir().join(format!("cf-hybrid-{tag}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/api.ts"), (1..=30).map(|i| format!("export const v{i} = {i};\n")).collect::<String>()).unwrap();
+        conn.execute("UPDATE projects SET local_path = ?2 WHERE id = ?1", params![project, repo.to_string_lossy()]).unwrap();
+        repo
+    }
+
+    /// The local fix loop end to end: the review hands corrections back as tasks, the run goes back
+    /// to the local model without stopping at its gate again, and after the last round the review
+    /// finishes the work itself — with its check, which the rounds before it skip.
+    #[test]
+    fn a_local_review_hands_corrections_back_until_its_rounds_are_spent() {
+        use crate::db::hybrid_queries;
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, project) = workspace_with_project(&conn, "hybrid-loop");
+        let repo = hybrid_repo(&conn, &project, "loop");
+        let agent = upsert_workspace_agent(&conn, None, &ws, "A", "", "claude", "opus", "", true, None).unwrap();
+        let detail =
+            create_hybrid_chain(&conn, &[project.clone()], "T", "Add totals", &agent.id, &agent.id, "", true, &hybrid_run("local"), None).unwrap();
+        let chain_id = detail.chain.id.clone();
+        resume_chain(&conn, &chain_id).unwrap();
+
+        let plan_claim = claim_next_chain_step(&conn, &chain_id, "r-plan").unwrap();
+        let plan = r#"{"summary":"s","tasks":[{"id":"t1","title":"totals","repo":"x","file":"src/api.ts","action":"modify","regions":[],"instruction":"Add total().","context":[],"acceptance":[],"depends_on":[],"difficulty":"easy"}],"checks":[{"repo":"x","command":"true"}],"risks":[]}"#;
+        complete_chain_step(&conn, &plan_claim.step.unwrap().id, "done", plan, "").unwrap();
+        let gated = claim_next_chain_step(&conn, &chain_id, "r-gate").unwrap();
+        assert_eq!(gated.chain.status, "gated");
+        let execute = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps[1].clone();
+        let check = crate::hybrid::plan::PlanCheck { repo: project.clone(), command: "true".into() };
+        approve_hybrid_plan(&conn, &chain_id, &execute.id, &[], &[check], "").unwrap();
+
+        let fix = |file: &str| {
+            format!(
+                r#"{{"verdict":"fix","summary":"total() is off by one.","fixes":[{{"id":"f1","title":"fix total","repo":"x","file":"{file}","action":"modify","regions":[],"instruction":"Start the sum at 0.","context":[],"acceptance":[],"depends_on":[],"difficulty":"easy"}}]}}"#
+            )
+        };
+        for round in 1..=crate::hybrid::prompts::MAX_FIX_ROUNDS {
+            let exec_claim = claim_next_chain_step(&conn, &chain_id, &format!("r-exec-{round}")).unwrap();
+            assert_eq!(exec_claim.kind, "run", "round {round}: no second stop at the gate");
+            complete_chain_step(&conn, &exec_claim.step.unwrap().id, "done", "## Local execution report
+ok", "").unwrap();
+            let review = claim_next_chain_step(&conn, &chain_id, &format!("r-review-{round}")).unwrap();
+            assert!(review.message.contains("Do NOT correct the local model's mistakes yourself"), "{}", review.message);
+            let review_step = review.step.unwrap();
+            assert!(chain_step_check(&conn, &review_step.id).unwrap().is_some(), "a correction round's review is checked too");
+            // Its check failing is the loop going on: the corrections are what will fix it.
+            let chain = complete_chain_step(&conn, &review_step.id, "check_failed", &fix("src/api.ts"), "1 failing").unwrap().unwrap();
+            assert_eq!(chain.status, "queued");
+            let stored = hybrid_queries::get_run(&conn, &chain_id).unwrap().unwrap();
+            assert_eq!(stored.fix_round, round);
+            let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+            assert_eq!((steps[1].status.as_str(), steps[1].attempts, steps[1].gate_cleared), ("pending", 0, true));
+            assert!(steps[2].output_text.ends_with("VERDICT: FIX"), "{}", steps[2].output_text);
+            let items = hybrid_queries::list_items(&conn, &chain_id).unwrap();
+            assert_eq!(items.iter().filter(|item| item.round == round).count(), 1);
+        }
+
+        // The rounds are spent: the next review finishes the work itself, and its check runs.
+        let exec_claim = claim_next_chain_step(&conn, &chain_id, "r-exec-last").unwrap();
+        complete_chain_step(&conn, &exec_claim.step.unwrap().id, "done", "## Local execution report
+ok", "").unwrap();
+        let last = claim_next_chain_step(&conn, &chain_id, "r-review-last").unwrap();
+        assert!(last.message.contains("this is the last review"), "{}", last.message);
+        let last_step = last.step.unwrap();
+        let (_, checks) = chain_step_check(&conn, &last_step.id).unwrap().expect("the last review's check runs");
+        assert_eq!(checks, vec![("true".to_string(), repo.to_string_lossy().into_owned())]);
+        let done = complete_chain_step(&conn, &last_step.id, "done", "Fixed the off-by-one.
+VERDICT: FIXED", "").unwrap().unwrap();
+        assert_eq!(done.status, "done");
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    /// A review that says everything is right ends the loop, and its JSON is kept readable.
+    #[test]
+    fn a_local_review_that_finds_nothing_ends_the_run_with_a_readable_verdict() {
+        use crate::db::hybrid_queries;
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, project) = workspace_with_project(&conn, "hybrid-ok");
+        let repo = hybrid_repo(&conn, &project, "ok");
+        let agent = upsert_workspace_agent(&conn, None, &ws, "A", "", "claude", "opus", "", true, None).unwrap();
+        let detail =
+            create_hybrid_chain(&conn, &[project.clone()], "T", "Add totals", &agent.id, &agent.id, "", false, &hybrid_run("local"), None).unwrap();
+        let chain_id = detail.chain.id.clone();
+        resume_chain(&conn, &chain_id).unwrap();
+        let plan_claim = claim_next_chain_step(&conn, &chain_id, "o-plan").unwrap();
+        let plan = r#"{"summary":"s","tasks":[{"id":"t1","title":"t","repo":"","file":"src/api.ts","action":"modify","regions":[],"instruction":"Add total().","context":[],"acceptance":[],"depends_on":[],"difficulty":"easy"}],"checks":[],"risks":[]}"#;
+        complete_chain_step(&conn, &plan_claim.step.unwrap().id, "done", plan, "").unwrap();
+        let exec_claim = claim_next_chain_step(&conn, &chain_id, "o-exec").unwrap();
+        complete_chain_step(&conn, &exec_claim.step.unwrap().id, "done", "## Local execution report
+ok", "").unwrap();
+        let review = claim_next_chain_step(&conn, &chain_id, "o-review").unwrap().step.unwrap();
+
+        // Unreadable first: back to the reviewer with what was wrong.
+        let chain = complete_chain_step(&conn, &review.id, "done", "Looks fine to me.", "").unwrap().unwrap();
+        assert_eq!((chain.status.as_str(), chain.last_reason.as_str()), ("queued", "chain.reviewUnreadable"));
+        let again = claim_next_chain_step(&conn, &chain_id, "o-review-2").unwrap();
+        assert!(again.message.contains("could not be used"), "{}", again.message);
+
+        let done = complete_chain_step(&conn, &again.step.unwrap().id, "done", r#"{"verdict":"ok","summary":"Checked total().","fixes":[]}"#, "")
+            .unwrap()
+            .unwrap();
+        assert_eq!((done.status.as_str(), done.last_reason.as_str()), ("done", ""));
+        let answer = &get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps[2].output_text;
+        assert_eq!(answer, "Checked total().\n\nVERDICT: OK");
+        assert_eq!(hybrid_queries::get_run(&conn, &chain_id).unwrap().unwrap().fix_round, 0);
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    /// An "ok" over a failing check is not taken at its word: the review goes back with the output.
+    #[test]
+    fn a_local_reviews_ok_over_a_failing_check_is_sent_back_with_its_output() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, project) = workspace_with_project(&conn, "hybrid-check");
+        let repo = hybrid_repo(&conn, &project, "check");
+        let agent = upsert_workspace_agent(&conn, None, &ws, "A", "", "claude", "opus", "", true, None).unwrap();
+        let check = crate::hybrid::plan::PlanCheck { repo: project.clone(), command: "npm test".into() };
+        let run = crate::db::hybrid_queries::HybridRun { checks: vec![check.clone()], approved_checks: vec![check], ..hybrid_run("local") };
+        let detail = create_hybrid_chain(&conn, &[project.clone()], "T", "Add totals", &agent.id, &agent.id, "", false, &run, None).unwrap();
+        let chain_id = detail.chain.id.clone();
+        resume_chain(&conn, &chain_id).unwrap();
+        let plan_claim = claim_next_chain_step(&conn, &chain_id, "c-plan").unwrap();
+        let plan = r#"{"summary":"s","tasks":[{"id":"t1","title":"t","repo":"","file":"src/api.ts","action":"modify","regions":[],"instruction":"Add total().","context":[],"acceptance":[],"depends_on":[],"difficulty":"medium"}],"checks":[],"risks":[]}"#;
+        complete_chain_step(&conn, &plan_claim.step.unwrap().id, "done", plan, "").unwrap();
+        let exec_claim = claim_next_chain_step(&conn, &chain_id, "c-exec").unwrap();
+        complete_chain_step(&conn, &exec_claim.step.unwrap().id, "done", "## Local execution report\nok", "").unwrap();
+        let review = claim_next_chain_step(&conn, &chain_id, "c-review").unwrap().step.unwrap();
+        assert!(chain_step_check(&conn, &review.id).unwrap().is_some());
+
+        let chain = complete_chain_step(&conn, &review.id, "check_failed", r#"{"verdict":"ok","summary":"Fine.","fixes":[]}"#, "FAIL tests/api.test.ts > total")
+            .unwrap()
+            .unwrap();
+        assert_eq!((chain.status.as_str(), chain.last_reason.as_str()), ("queued", "chain.checkFailed"));
+        let again = claim_next_chain_step(&conn, &chain_id, "c-review-2").unwrap();
+        assert_eq!(again.step.unwrap().phase, "review");
+        assert!(again.message.contains("FAIL tests/api.test.ts > total"), "{}", again.message);
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    /// A direct run: no plan step, a task per named file carrying the objective, the checks the
+    /// repository already trusts, and the review skipped — until somebody asks for it.
+    #[test]
+    fn a_direct_run_skips_the_plan_and_the_review() {
+        use crate::db::hybrid_queries;
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, project) = workspace_with_project(&conn, "hybrid-direct");
+        let repo = hybrid_repo(&conn, &project, "direct");
+        set_setting(&conn, &format!("hybrid_checks:{project}"), r#"["npm test"]"#).unwrap();
+        let agent = upsert_workspace_agent(&conn, None, &ws, "A", "", "claude", "opus", "", true, None).unwrap();
+        let files = vec!["src/api.ts".to_string()];
+        let detail = create_hybrid_chain(
+            &conn,
+            &[project.clone()],
+            "T",
+            "In api.ts, rename v1 to one.",
+            &agent.id,
+            &agent.id,
+            "",
+            true,
+            &hybrid_run("local"),
+            Some(&files),
+        )
+        .unwrap();
+        let chain_id = detail.chain.id.clone();
+        let phases: Vec<(&str, &str)> = detail.steps.iter().map(|s| (s.phase.as_str(), s.status.as_str())).collect();
+        assert_eq!(phases, [("execute", "pending"), ("review", "skipped")]);
+        assert!(!detail.steps[0].gate, "a direct run has no plan to approve");
+        let run = hybrid_queries::get_run(&conn, &chain_id).unwrap().unwrap();
+        assert!(run.direct);
+        assert_eq!(run.review_skip, "direct");
+        assert_eq!(run.approved_checks.iter().map(|c| c.command.as_str()).collect::<Vec<_>>(), ["npm test"]);
+        assert_eq!(detail.steps[1].check_command, "npm test");
+        let items = hybrid_queries::list_items(&conn, &chain_id).unwrap();
+        assert_eq!((items.len(), items[0].file.as_str(), items[0].instruction.as_str()), (1, "src/api.ts", "In api.ts, rename v1 to one."));
+
+        resume_chain(&conn, &chain_id).unwrap();
+        let claim = claim_next_chain_step(&conn, &chain_id, "d-exec").unwrap();
+        assert_eq!(claim.kind, "run");
+        let chain = complete_chain_step(&conn, &claim.step.unwrap().id, "done", "## Local execution report
+ok", "").unwrap().unwrap();
+        assert_eq!(chain.status, "done", "the skipped review is not waited for");
+
+        // "Pedir revisión" is a re-run of the review step.
+        let chain = rerun_chain_from(&conn, &chain_id, 1, "").unwrap().unwrap();
+        assert_eq!(chain.status, "queued");
+        let review = claim_next_chain_step(&conn, &chain_id, "d-review").unwrap();
+        assert_eq!(review.step.unwrap().phase, "review");
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    /// One plan across two repositories: every step runs in the first, the planner is told about
+    /// both, and each task lands in the repository it names.
+    #[test]
+    fn a_plan_across_repositories_lands_each_task_in_its_own() {
+        use crate::db::hybrid_queries;
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, api) = workspace_with_project(&conn, "hybrid-api");
+        let web = create_project(
+            &conn,
+            crate::db::models::NewProject {
+                workspace_id: ws.clone(),
+                name: "hybrid-web".into(),
+                local_path: "/tmp/hybrid-web".into(),
+                remote_url: None,
+                color: "#fff".into(),
+                icon: "folder".into(),
+                ado_org: None,
+                ado_project: None,
+                ado_repo_id: None,
+                github_owner: None,
+                github_repo: None,
+                github_host: None,
+                gitlab_project: None,
+                gitlab_host: None,
+            },
+        )
+        .unwrap()
+        .id;
+        let api_repo = hybrid_repo(&conn, &api, "api");
+        let web_repo = hybrid_repo(&conn, &web, "web");
+        std::fs::write(web_repo.join("src/page.tsx"), "export const Page = () => null;\n").unwrap();
+        let agent = upsert_workspace_agent(&conn, None, &ws, "A", "", "claude", "opus", "", true, None).unwrap();
+        let detail = create_hybrid_chain(&conn, &[api.clone(), web.clone()], "T", "Show totals", &agent.id, &agent.id, "", false, &hybrid_run("fix"), None)
+            .unwrap();
+        let chain_id = detail.chain.id.clone();
+        assert!(detail.steps.iter().all(|step| step.project_id == api), "every step runs in the first repository");
+        assert!(detail.steps[0].instruction.contains("This run spans 2 repositories"), "{}", detail.steps[0].instruction);
+        assert!(detail.steps[0].instruction.contains("hybrid-web"));
+        let repos = hybrid_queries::chain_repo_refs(&conn, &chain_id).unwrap();
+        assert_eq!(repos.iter().map(|r| r.project_id.as_str()).collect::<Vec<_>>(), [api.as_str(), web.as_str()]);
+
+        resume_chain(&conn, &chain_id).unwrap();
+        let plan_claim = claim_next_chain_step(&conn, &chain_id, "m-plan").unwrap();
+        let plan = r#"{"summary":"s","tasks":[
+            {"id":"t1","title":"api","repo":"hybrid-api-proj","file":"src/api.ts","action":"modify","regions":[],"instruction":"Add total().","context":[],"acceptance":[],"depends_on":[],"difficulty":"easy"},
+            {"id":"t2","title":"web","repo":"hybrid-web","file":"src/page.tsx","action":"modify","regions":[],"instruction":"Render the total.","context":[{"repo":"hybrid-api-proj","file":"src/api.ts","start_line":null,"end_line":null,"first_line":null,"why":"the function"}],"acceptance":[],"depends_on":["t1"],"difficulty":"easy"}],
+            "checks":[{"repo":"hybrid-web","command":"npm test"}],"risks":[]}"#;
+        complete_chain_step(&conn, &plan_claim.step.unwrap().id, "done", plan, "").unwrap();
+        let items = hybrid_queries::list_items(&conn, &chain_id).unwrap();
+        assert_eq!(items.iter().map(|i| i.project_id.as_str()).collect::<Vec<_>>(), [api.as_str(), web.as_str()]);
+        assert_eq!(items[1].context[0].repo.as_deref(), Some(api.as_str()));
+        let run = hybrid_queries::get_run(&conn, &chain_id).unwrap().unwrap();
+        assert_eq!(run.checks, vec![crate::hybrid::plan::PlanCheck { repo: web.clone(), command: "npm test".into() }]);
+        let shown = claim_next_chain_step(&conn, &chain_id, "m-exec").unwrap().message;
+        assert!(shown.contains("`hybrid-web/src/page.tsx`"), "{shown}");
+        std::fs::remove_dir_all(api_repo).ok();
+        std::fs::remove_dir_all(web_repo).ok();
+    }
+
+    /// The phase a run is executing when it is a story run's step — what `send_chat_message` reads,
+    /// through [`crate::db::hybrid_queries::running_step`], to make a story's analysis read-only.
+    fn story_phase(conn: &Connection, run_id: &str) -> Option<String> {
+        crate::db::hybrid_queries::running_step(conn, run_id)
+            .unwrap()
+            .filter(|step| step.kind == "story")
+            .map(|step| step.phase)
+    }
+
     /// What makes a story's analysis pass read-only on the server's word: the run id the claim
     /// bound to the step names its phase, only while the step is running, and only for a story run
     /// — a hand-authored chain carrying the same phase word is left as free as it always was.
@@ -5299,15 +6359,15 @@ mod tests {
         let story =
             create_story_chain(&conn, &[project.clone()], "Historia", "", &agent.id, &agent.id, "", &item).unwrap();
         resume_chain(&conn, &story.chain.id).unwrap();
-        assert_eq!(running_story_step_phase(&conn, "run-story").unwrap(), None, "nothing claimed yet");
+        assert_eq!(story_phase(&conn, "run-story"), None, "nothing claimed yet");
 
         let step = claim_next_chain_step(&conn, &story.chain.id, "run-story").unwrap().step.unwrap();
-        assert_eq!(running_story_step_phase(&conn, "run-story").unwrap().as_deref(), Some("analyze"));
-        assert_eq!(running_story_step_phase(&conn, "some-other-run").unwrap(), None);
-        assert_eq!(running_story_step_phase(&conn, "").unwrap(), None, "a blank id names no step");
+        assert_eq!(story_phase(&conn, "run-story").as_deref(), Some("analyze"));
+        assert_eq!(story_phase(&conn, "some-other-run"), None);
+        assert_eq!(story_phase(&conn, ""), None, "a blank id names no step");
 
         complete_chain_step(&conn, &step.id, "done", "VERDICT: TOUCHES", "").unwrap();
-        assert_eq!(running_story_step_phase(&conn, "run-story").unwrap(), None, "a finished step is no longer running");
+        assert_eq!(story_phase(&conn, "run-story"), None, "a finished step is no longer running");
 
         // A hand-authored chain whose step says "analyze" is not a story run.
         let chain = create_agent_chain(
@@ -5321,7 +6381,7 @@ mod tests {
         .unwrap();
         resume_chain(&conn, &chain.chain.id).unwrap();
         claim_next_chain_step(&conn, &chain.chain.id, "run-chain").unwrap();
-        assert_eq!(running_story_step_phase(&conn, "run-chain").unwrap(), None);
+        assert_eq!(story_phase(&conn, "run-chain"), None);
     }
 
     /// A workspace with one repository, for the cross-workspace tests below — `fixture` makes one
@@ -6492,9 +7552,10 @@ mod tests {
         conn.execute("UPDATE projects SET local_path = '/tmp' WHERE id = ?1", params![project]).unwrap();
         let chain_id = queued_plan(&conn, &project, &[("true", -1)]).chain.id;
         let step = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
-        let (owner, command, _) = chain_step_check(&conn, &step.id).unwrap().expect("a check to run");
+        let (owner, checks) = chain_step_check(&conn, &step.id).unwrap().expect("a check to run");
         assert_eq!(owner, chain_id);
-        assert_eq!(command, "true");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].0, "true");
         abort_chain(&conn, &chain_id).unwrap();
         assert!(chain_step_check(&conn, &step.id).unwrap().is_none());
     }

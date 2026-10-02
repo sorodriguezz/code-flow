@@ -30,6 +30,7 @@ import {
   Briefcase,
   ChartColumn,
   Compass,
+  Cpu,
   Database,
   DatabaseBackup,
   Download,
@@ -300,6 +301,15 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         // user, 2026-10-01 — the AI gradient "no tiene nada que ver" outside one).
         icon: Sparkles,
         searchKey: "settings.searchTermsCompletion",
+      },
+      // The hybrid task's executor: the second local model, beside the first. Plain icon, like the
+      // rest of the rail — a settings row is a place, not a model at work.
+      {
+        id: "localModel",
+        labelKey: "localexec.title",
+        hintKey: "localexec.hint",
+        icon: Cpu,
+        searchKey: "settings.searchTermsLocalModel",
       },
       // How the "a model is thinking" mark is drawn. Last of the panes that set something up, before
       // the two that only report — and in this section rather than Appearance because the mark is

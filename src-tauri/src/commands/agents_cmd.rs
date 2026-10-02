@@ -28,7 +28,7 @@ use crate::db::{
 /// bound that cut those short would push people towards checks that prove nothing. Bounded at all
 /// because a command that hangs is a chain that hangs: there is no user watching an autonomous run
 /// to notice that `npm test` is sitting on a prompt it will never be answered.
-const CHECK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// How long the output pipes are waited on once the check itself is over. A background process the
 /// check left behind holds them open for as long as it lives, and a verdict must not wait on that.
@@ -78,7 +78,7 @@ fn stop_checks_for_chain(chain_id: &str) {
 
 /// How a check's process ended.
 #[derive(Debug)]
-enum CheckEnd {
+pub(crate) enum CheckEnd {
     Exited { success: bool, output: String },
     TimedOut { output: String },
     /// Stopped from outside — the plan was aborted or deleted.
@@ -122,7 +122,7 @@ fn kill_group(pid: Option<u32>) {
 /// shell — so a hung suite kept its workers, its ports and its CPU for as long as it cared to, with
 /// the chain long since moved on. Now a timeout or a stop takes the whole group down
 /// ([`crate::ai_runs::kill_tree`]), and a check that exits on its own has its leftovers reaped too.
-async fn run_check_process(command: &str, cwd: &str, timeout: Duration, stop: &Notify) -> CheckEnd {
+pub(crate) async fn run_check_process(command: &str, cwd: &str, timeout: Duration, stop: &Notify) -> CheckEnd {
     let mut cmd = if cfg!(windows) {
         let mut c = crate::proc::command("cmd");
         c.arg("/C").arg(command);
@@ -208,13 +208,35 @@ pub async fn run_chain_step_check(db: State<'_, Db>, step_id: String) -> Result<
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::chain_step_check(&conn, &step_id).map_err(|e| e.to_string())?
     };
-    let Some((chain_id, command, cwd)) = target else {
+    let Some((chain_id, checks)) = target else {
         return Ok(StepCheck { ran: false, passed: false, output: String::new() });
     };
 
     let stop = Arc::new(Notify::new());
     let _registered = CheckRegistration::new(&step_id, &chain_id, stop.clone());
-    Ok(match run_check_process(&command, &cwd, CHECK_TIMEOUT, &stop).await {
+    // One command almost always. A hybrid run's review has one per check the user approved, each in
+    // its own repository: they run in order and the first failure is the verdict, with the output of
+    // the ones before it kept so the next attempt sees everything that ran.
+    let mut transcript = String::new();
+    let last = checks.len().saturating_sub(1);
+    for (at, (command, cwd)) in checks.iter().enumerate() {
+        let several = checks.len() > 1;
+        let verdict = single_check(command, cwd, &stop).await;
+        let output = if several { format!("$ {command}\n{}", verdict.output) } else { verdict.output };
+        if !transcript.is_empty() && !output.is_empty() {
+            transcript.push_str("\n\n");
+        }
+        transcript.push_str(&output);
+        if !verdict.ran || !verdict.passed || at == last {
+            return Ok(StepCheck { ran: verdict.ran, passed: verdict.passed, output: transcript });
+        }
+    }
+    Ok(StepCheck { ran: false, passed: false, output: transcript })
+}
+
+/// One check command in one working copy, as [`run_chain_step_check`] reports it.
+async fn single_check(command: &str, cwd: &str, stop: &Arc<Notify>) -> StepCheck {
+    match run_check_process(command, cwd, CHECK_TIMEOUT, stop).await {
         CheckEnd::Exited { success, output } => StepCheck { ran: true, passed: success, output },
         // What it printed before it hung goes with the verdict: "where did it stop" is the first
         // thing the next attempt needs to know.
@@ -235,7 +257,7 @@ pub async fn run_chain_step_check(db: State<'_, Db>, step_id: String) -> Result<
         // cannot be taken has not been verified, and silently passing it is the one outcome that
         // would make the whole mechanism worse than not having it.
         CheckEnd::Failed(output) => StepCheck { ran: true, passed: false, output },
-    })
+    }
 }
 
 #[tauri::command]
@@ -608,6 +630,10 @@ pub fn delete_chain(db: State<Db>, chain_id: String) -> Result<Vec<String>, Stri
     queries::delete_chain(&conn, &chain_id).map_err(|e| e.to_string())?;
     stop_checks_for_chain(&chain_id);
     crate::chain_memory::forget(&chain_id, &repos);
+    // A hybrid run's baseline ref goes with it; on any other chain there is none to find.
+    for repo in &repos {
+        crate::git::checkpoint::remove_baseline(repo, &chain_id);
+    }
     // Handed back so the frontend can drop the same tasks out of its own list, rather than
     // discovering them missing on the next workspace load.
     Ok(orphans)
@@ -617,7 +643,15 @@ pub fn delete_chain(db: State<Db>, chain_id: String) -> Result<Vec<String>, Stri
 #[tauri::command]
 pub fn harvest_chain_step(db: State<Db>, step_id: String) -> Result<HarvestOutcome, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::harvest_chain_step(&conn, &step_id).map_err(|e| e.to_string())
+    // Read before the harvest, which clears it when the turn has landed.
+    let run_id: Option<String> = conn
+        .query_row("SELECT run_id FROM agent_chain_steps WHERE id = ?1", [&step_id], |row| row.get(0))
+        .ok();
+    let mut outcome = queries::harvest_chain_step(&conn, &step_id).map_err(|e| e.to_string())?;
+    outcome.alive = outcome.chain.is_none()
+        && !outcome.gone
+        && run_id.is_some_and(|id| !id.is_empty() && crate::ai_runs::active().contains(&id));
+    Ok(outcome)
 }
 
 /// "Carry on from here" — a chain seeded with a finished task as its first, already-done step.

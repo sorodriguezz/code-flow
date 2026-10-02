@@ -11,8 +11,8 @@
 //
 // **The weights are not here and never will be.** They are gigabytes, they are optional, and the
 // app downloads the one the user picks at runtime into `paths::models_dir()`. This script ships
-// only the ~22 MB (macOS) / ~38 MB (Windows) of engine — for comparison, the JRE next door is
-// 36 MB.
+// only the ~22 MB (macOS) / ~92 MB (Windows, 54 of them the Vulkan GPU backend) of engine — for
+// comparison, the JRE next door is 36 MB.
 //
 // Run it directly (`pnpm llama:runtime`) or let `tauri build` do it. `--force` re-fetches;
 // `--optional` downgrades every failure to a warning, which is what `tauri dev` passes so that
@@ -61,9 +61,15 @@ const ASSETS = {
     file: `llama-${BUILD}-bin-macos-arm64.tar.gz`,
     sha256: "7695344d6f4d09296fb7f0d75ebcb722cf6cc92a2d052de867b75b5bbc3eeb3c",
   },
+  // The Vulkan build, not the CPU one. Same files, byte for byte, plus `ggml-vulkan.dll`: ggml's
+  // backend loader opens it at runtime and uses any GPU with a Vulkan driver — NVIDIA, AMD and Intel
+  // alike — and skips it on a machine without one, so the CPU variants below still carry those.
+  // Measured for b10587: the zip is 34.5 MB against 18.1 MB, and the DLL is 54 MB unpacked. Worth it
+  // since the hybrid task's executor runs 7–32B models here, where the CPU alone is several times
+  // slower than the card most of these machines have.
   "win32-x64": {
-    file: `llama-${BUILD}-bin-win-cpu-x64.zip`,
-    sha256: "1abb244f21f00192e75eaf04b2a133202d309d1e7525ea8a58a18f31dfcca693",
+    file: `llama-${BUILD}-bin-win-vulkan-x64.zip`,
+    sha256: "6508f21e31cff8208c7b203e5d63eb7afee8b2a47a919acb1b69fcc9e6e4fce2",
   },
 };
 
@@ -74,11 +80,11 @@ const ASSETS = {
  * the PE import table of `llama-server.exe` closed over itself, which is why `ggml-rpc` appears on
  * one platform and not the other — the macOS build links it and the Windows build does not.
  *
- * `ggml-cpu-*` on Windows is the exception to "only what it resolves": those fourteen files are
- * *not* imported, they are opened at runtime by ggml's backend loader, which scores each against
- * the CPU it finds itself on and takes the best. They cost 16.5 MB and they are the difference
- * between AVX-512 and a baseline build on the machines that have it — on Windows, where this
- * engine has no GPU backend at all, that is the whole of the feature's speed. All fourteen stay.
+ * `ggml-cpu-*` and `ggml-vulkan.dll` on Windows are the exception to "only what it resolves": they
+ * are *not* imported, they are opened at runtime by ggml's backend loader, which scores each CPU
+ * variant against the CPU it finds itself on and takes the best, and adds the Vulkan backend when
+ * the machine has a Vulkan driver. The CPU variants cost 16.5 MB and are the difference between
+ * AVX-512 and a baseline build on machines without a usable GPU. All fourteen stay.
  *
  * `LICENSE` is deliberately not here even though it ships: the macOS tarball carries one and the
  * Windows zip does not, so it is not a property of the archive to assert. `installLicense` handles
@@ -115,6 +121,9 @@ const KEEP = {
       "ggml.dll",
       "ggml-base.dll",
       "libomp.dll",
+      // Exact, so a release that renamed or dropped it fails the build instead of shipping a
+      // Windows engine that quietly lost its GPU.
+      "ggml-vulkan.dll",
     ],
     prefixes: ["ggml-cpu-"],
     executable: [],
@@ -244,8 +253,10 @@ async function main() {
 }
 
 /** What the stamp holds, so a stale platform or build is detected rather than reused. */
+// The asset is part of the stamp: switching a platform from one archive to another at the same
+// BUILD (Windows went from the CPU zip to the Vulkan one) must re-extract, not report "in place".
 function stampFor(platform) {
-  return `${BUILD} ${platform}\n`;
+  return `${BUILD} ${platform} ${ASSETS[platform]?.file ?? ""}\n`;
 }
 
 async function currentStamp(path) {

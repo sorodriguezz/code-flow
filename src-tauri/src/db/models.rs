@@ -532,6 +532,11 @@ pub struct HarvestOutcome {
     pub chain: Option<AgentChain>,
     /// The step is gone, and so is anything there was to collect. Stop polling.
     pub gone: bool,
+    /// The step's run is still going in this process. A hybrid run's local execution can last
+    /// longer than the poller's patience, and it is no less alive for it — so while this is true the
+    /// frontend keeps waiting instead of giving up on a run that is plainly still working.
+    #[serde(default)]
+    pub alive: bool,
 }
 
 /// A plan parked on a human decision, named from **outside** any one workspace.
@@ -691,6 +696,15 @@ pub struct ChainTemplate {
     pub updated_at: String,
     /// Always loaded with the template: a plan with its steps withheld is not a plan.
     pub steps: Vec<ChainTemplateStep>,
+    /// `chain` (a list of steps) or `hybrid` (a hybrid task's setup, in `hybrid`, with no steps).
+    #[serde(default = "chain_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub hybrid: Option<crate::db::hybrid_queries::HybridTemplateConfig>,
+}
+
+fn chain_kind() -> String {
+    "chain".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -13,6 +13,7 @@ import { isProviderReady, useProviderStatusStore } from "../../state/providerSta
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { blankChainStep } from "../../types/domain";
+import { agentName } from "./agentName";
 
 /**
  * "Carry on from here" — the smallest useful chain, and the one people actually reach for.
@@ -98,7 +99,7 @@ export function ContinueWithModal({ taskId, onClose }: { taskId: string; onClose
 
         <Field label={t("agents.continueSource")}>
           <p className="rounded-md border border-dashed border-[var(--cf-border)] px-2 py-1.5 text-[12px] text-[var(--cf-text-muted)]">
-            {task.agent_name || t("settings.sddNewAgent")} · {task.title}
+            {agentName(task.agent_name, task.provider, t) || t("settings.sddNewAgent")} · {task.title}
           </p>
         </Field>
 

@@ -98,6 +98,10 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // own — that is what lets Stop reach what it started — so it would outlive this process,
         // quite possibly paused at a breakpoint for ever, holding whatever port it had opened.
         tauri::async_runtime::block_on(crate::commands::debug_cmd::stop_all());
+        // The hybrid task's local model, if one is loaded. A child process does not die with its
+        // parent, and this one can be holding twenty gigabytes; the sweep at the next launch would
+        // find it, but only after it had sat in memory for however long the app was closed.
+        tauri::async_runtime::block_on(crate::localai::executor::shutdown());
         // Last, once everything above has actually finished: the marker's whole meaning is
         // "the previous session did not get this far", so clearing it early would call a
         // shutdown clean that a hang in any of the steps above could still spoil.

@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Blend,
   ChevronRight,
   CircleCheck,
   Copy,
@@ -41,6 +42,7 @@ import type {
   ChainTemplate,
 } from "../../types/domain";
 import { blankChainStep } from "../../types/domain";
+import { agentName } from "./agentName";
 
 /**
  * A row of the tree, before it is drawn.
@@ -255,19 +257,21 @@ export function TaskTree({
         onCancel={() => setRenaming(null)}
         onCommit={(name) => {
           if (name.trim()) {
-            void useChainStore
-              .getState()
-              .saveTemplate({
-                id: template.id,
-                name: name.trim(),
-                description: template.description,
-                // A template carries no repositories — it is applied wherever it is opened, and an
-                // id from another workspace resolves to nothing there.
-                steps: template.steps.map(({ agent_id, instruction, gate, check_command, on_pass, on_fail }) =>
-                  blankChainStep({ agent_id, instruction, gate, check_command, on_pass, on_fail }),
-                ),
-              })
-              .catch((e: unknown) => pushErrorToast(String(e)));
+            const store = useChainStore.getState();
+            const saved =
+              template.kind === "hybrid" && template.hybrid
+                ? store.saveHybridTemplate({ id: template.id, name: name.trim(), description: template.description, config: template.hybrid })
+                : store.saveTemplate({
+                    id: template.id,
+                    name: name.trim(),
+                    description: template.description,
+                    // A template carries no repositories — it is applied wherever it is opened, and
+                    // an id from another workspace resolves to nothing there.
+                    steps: template.steps.map(({ agent_id, instruction, gate, check_command, on_pass, on_fail }) =>
+                      blankChainStep({ agent_id, instruction, gate, check_command, on_pass, on_fail }),
+                    ),
+                  });
+            saved.catch((e: unknown) => pushErrorToast(String(e)));
           }
           setRenaming(null);
         }}
@@ -280,6 +284,7 @@ export function TaskTree({
         name={template.name}
         description={template.description}
         steps={template.steps.length}
+        hybrid={template.kind === "hybrid"}
         onMenu={(x, y) => setMenu({ x, y, kind: "template", id: template.id })}
       />
     );
@@ -636,7 +641,15 @@ function ChainGroup({
         pinned={chain.pinned}
         title={chain.goal || chain.title}
         label={goal || chain.title}
-        meta={[t(labelKey), t("agents.chainProgress", { done, total }), repoName].filter(Boolean).join(" · ")}
+        meta={[
+          // A hybrid run reads like any chain but works differently; its kind is the first thing said.
+          chain.kind === "hybrid" ? t("agents.modeHybrid") : "",
+          t(labelKey),
+          t("agents.chainProgress", { done, total }),
+          repoName,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
         glyph={spinner ? <ThinkingOrb size="sm" /> : <Icon size={14} className={color} />}
         leading={<Chevron expanded={expanded} onClick={onToggle} />}
         menuLabel={t("api.moreActions")}
@@ -675,7 +688,7 @@ function ChainGroup({
                 depth={depth + 1}
                 at={step}
                 title={brief.instruction}
-                label={brief.agent_name || t("settings.sddNewAgent")}
+                label={agentName(brief.agent_name, undefined, t) || t("settings.sddNewAgent")}
                 meta={brief.task_id ? t("agents.stepTaskGone") : t("agents.stepGone")}
                 glyph={<span className="h-1.5 w-1.5 rounded-full bg-[var(--cf-text-faint)]" />}
                 menuLabel={t("api.moreActions")}
@@ -741,7 +754,7 @@ function TaskRowBase({
       pinned={task.pinned}
       title={task.goal || task.title}
       label={task.title || t("agents.newTask")}
-      meta={[task.agent_name, repoName, when].filter(Boolean).join(" · ")}
+      meta={[agentName(task.agent_name, task.provider, t), repoName, when].filter(Boolean).join(" · ")}
       glyph={status === "running" && orb ? <ThinkingOrb size="sm" /> : <Icon size={14} className={color} />}
       menuLabel={t("api.moreActions")}
       onClick={() => {
@@ -763,6 +776,7 @@ function TemplateRow({
   name,
   description,
   steps,
+  hybrid,
   onMenu,
 }: {
   templateId: string;
@@ -770,6 +784,8 @@ function TemplateRow({
   name: string;
   description: string;
   steps: number;
+  /** A hybrid task's setup rather than a list of steps. */
+  hybrid: boolean;
   onMenu: (x: number, y: number) => void;
 }) {
   const t = useT();
@@ -780,8 +796,14 @@ function TemplateRow({
       at={at}
       title={description || name}
       label={name}
-      meta={t("agents.templateStepsN", { n: steps })}
-      glyph={<Link2 size={14} className="text-[var(--cf-text-faint)]" />}
+      meta={hybrid ? t("agents.modeHybrid") : t("agents.templateStepsN", { n: steps })}
+      glyph={
+        hybrid ? (
+          <Blend size={14} className="text-[var(--cf-text-faint)]" />
+        ) : (
+          <Link2 size={14} className="text-[var(--cf-text-faint)]" />
+        )
+      }
       menuLabel={t("api.moreActions")}
       onClick={() => useChainStore.getState().selectTemplate(templateId)}
       onMenu={onMenu}

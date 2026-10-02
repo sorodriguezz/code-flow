@@ -3,7 +3,7 @@ import { Coins, Gauge, Layers, Loader2, Zap } from "lucide-react";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { aiUsageStats } from "../../lib/tauri/commands";
 import { compactTokens, formatCost } from "../../lib/usageFormat";
-import { useLanguageStore, useT } from "../../state/languageStore";
+import { translate, useLanguageStore, useT } from "../../state/languageStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import type { AccountNamer } from "../../lib/aiAccounts";
 import type { AccountStat, ModelStat, ProviderStat, TaskStat, UsageStats } from "../../types/domain";
@@ -42,6 +42,9 @@ function colourFor(provider: string): string {
 }
 
 function providerLabel(provider: string): string {
+  // The hybrid task's local execution: not an engine of the list (nothing to install or sign in
+  // to), but spend this screen should still name rather than print as an id.
+  if (provider === "local-exec") return translate("localexec.title");
   return AI_PROVIDERS.find((candidate) => candidate.id === provider)?.label ?? provider;
 }
 

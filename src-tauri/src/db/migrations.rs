@@ -1980,6 +1980,117 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_move_to_chat_conversations(conn)?;
     add_context_resets(conn)?;
     add_continued_from_to_chat_conversations(conn)?;
+    add_hybrid_tables(conn)?;
+    add_kind_to_chain_templates(conn)?;
+    Ok(())
+}
+
+/// The hybrid task's two tables — see `crate::hybrid`.
+///
+/// `hybrid_runs` is the configuration a run was created with, frozen: changing the local model in
+/// Settings must not move a run that is already planned against the old one's budget. The API key
+/// is never here — only whether one is used, and the keychain holds it.
+///
+/// `hybrid_items` is the plan, one row per task the planner wrote, walked by the execute step. Not
+/// chain steps, on purpose: a chain is a list fixed at creation, and the plan does not exist until
+/// the first step has run.
+///
+/// Both cascade from `agent_chains`, which is what `delete_chain` relies on.
+pub(crate) fn add_hybrid_tables(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS hybrid_runs (
+            chain_id        TEXT PRIMARY KEY REFERENCES agent_chains(id) ON DELETE CASCADE,
+            backend         TEXT NOT NULL,
+            base_url        TEXT NOT NULL DEFAULT '',
+            model           TEXT NOT NULL,
+            ctx             INTEGER NOT NULL,
+            budget_input    INTEGER NOT NULL,
+            budget_output   INTEGER NOT NULL,
+            delegate        TEXT NOT NULL,
+            on_fail         TEXT NOT NULL,
+            review_mode     TEXT NOT NULL,
+            unload          INTEGER NOT NULL DEFAULT 1,
+            thinking        INTEGER NOT NULL DEFAULT 0,
+            plan_summary    TEXT NOT NULL DEFAULT '',
+            plan_risks      TEXT NOT NULL DEFAULT '[]',
+            checks_json     TEXT NOT NULL DEFAULT '[]',
+            approved_checks TEXT NOT NULL DEFAULT '[]',
+            gate_note       TEXT NOT NULL DEFAULT '',
+            baseline_commit TEXT NOT NULL DEFAULT '',
+            plan_input_tokens    INTEGER NOT NULL DEFAULT 0,
+            plan_output_tokens   INTEGER NOT NULL DEFAULT 0,
+            review_input_tokens  INTEGER NOT NULL DEFAULT 0,
+            review_output_tokens INTEGER NOT NULL DEFAULT 0,
+            direct          INTEGER NOT NULL DEFAULT 0,
+            fix_round       INTEGER NOT NULL DEFAULT 0,
+            review_skip     TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS hybrid_items (
+            id              TEXT PRIMARY KEY,
+            chain_id        TEXT NOT NULL REFERENCES agent_chains(id) ON DELETE CASCADE,
+            ord             INTEGER NOT NULL,
+            task_key        TEXT NOT NULL,
+            title           TEXT NOT NULL,
+            file            TEXT NOT NULL,
+            action          TEXT NOT NULL,
+            regions_json    TEXT NOT NULL DEFAULT '[]',
+            instruction     TEXT NOT NULL,
+            context_json    TEXT NOT NULL DEFAULT '[]',
+            acceptance_json TEXT NOT NULL DEFAULT '[]',
+            depends_on_json TEXT NOT NULL DEFAULT '[]',
+            difficulty      TEXT NOT NULL,
+            assignee        TEXT NOT NULL,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            error           TEXT NOT NULL DEFAULT '',
+            error_code      TEXT NOT NULL DEFAULT '',
+            tokens_in       INTEGER NOT NULL DEFAULT 0,
+            tokens_out      INTEGER NOT NULL DEFAULT 0,
+            ms              INTEGER NOT NULL DEFAULT 0,
+            lines_added     INTEGER NOT NULL DEFAULT 0,
+            lines_removed   INTEGER NOT NULL DEFAULT 0,
+            hash_before     TEXT NOT NULL DEFAULT '',
+            hash_after      TEXT NOT NULL DEFAULT '',
+            project_id      TEXT NOT NULL DEFAULT '',
+            round           INTEGER NOT NULL DEFAULT 0,
+            updated_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hybrid_items_chain ON hybrid_items(chain_id, ord);
+        "#,
+    )?;
+    // Tables created before a column existed get it here.
+    for (table, column, ddl) in [
+        ("hybrid_items", "error_code", "ALTER TABLE hybrid_items ADD COLUMN error_code TEXT NOT NULL DEFAULT '';"),
+        ("hybrid_items", "project_id", "ALTER TABLE hybrid_items ADD COLUMN project_id TEXT NOT NULL DEFAULT '';"),
+        ("hybrid_items", "round", "ALTER TABLE hybrid_items ADD COLUMN round INTEGER NOT NULL DEFAULT 0;"),
+        ("hybrid_runs", "direct", "ALTER TABLE hybrid_runs ADD COLUMN direct INTEGER NOT NULL DEFAULT 0;"),
+        ("hybrid_runs", "fix_round", "ALTER TABLE hybrid_runs ADD COLUMN fix_round INTEGER NOT NULL DEFAULT 0;"),
+        ("hybrid_runs", "review_skip", "ALTER TABLE hybrid_runs ADD COLUMN review_skip TEXT NOT NULL DEFAULT '';"),
+    ] {
+        if !has_column(conn, table, column)? {
+            conn.execute_batch(ddl)?;
+        }
+    }
+    Ok(())
+}
+
+/// Lets a saved template be a hybrid task rather than a list of steps: `kind` says which, and a
+/// hybrid one keeps its settings in `config` (JSON — see `hybrid_queries::HybridTemplateConfig`)
+/// and has no step rows. Every template that existed before is a chain.
+fn add_kind_to_chain_templates(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "workspace_chain_templates")? {
+        return Ok(());
+    }
+    if !has_column(conn, "workspace_chain_templates", "kind")? {
+        conn.execute_batch("ALTER TABLE workspace_chain_templates ADD COLUMN kind TEXT NOT NULL DEFAULT 'chain';")?;
+    }
+    if !has_column(conn, "workspace_chain_templates", "config")? {
+        conn.execute_batch("ALTER TABLE workspace_chain_templates ADD COLUMN config TEXT NOT NULL DEFAULT '';")?;
+    }
     Ok(())
 }
 

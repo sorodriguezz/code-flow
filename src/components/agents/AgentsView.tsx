@@ -69,6 +69,8 @@ export function AgentsView() {
   /** The folder a new task should land in, or `null` when the dialog is closed. A string and not a
    * boolean because "which folder" is part of what the dialog was opened *for*. */
   const [composing, setComposing] = useState<string | null>(null);
+  /** A hybrid template the task dialog opens as — set only by "use"/"edit" on one. */
+  const [composingTemplate, setComposingTemplate] = useState<string | null>(null);
   const [chaining, setChaining] = useState<ChainDraft | null>(null);
   /** The folder a new story run should land in, or `null` when the dialog is closed. Same
    * convention as `composing` — a string, because "which folder" is part of what it was opened for. */
@@ -131,6 +133,7 @@ export function AgentsView() {
         return;
       }
       e.preventDefault();
+      setComposingTemplate(null);
       setComposing("");
     };
     window.addEventListener("keydown", handler);
@@ -149,6 +152,12 @@ export function AgentsView() {
    * updates the template instead of leaving a near-identical copy beside it. */
   const openTemplate = (templateId: string) => {
     const template = useChainStore.getState().templates.find((candidate) => candidate.id === templateId) ?? null;
+    // A hybrid template is a task's setup, so it opens the task dialog — which saves it back.
+    if (template?.kind === "hybrid") {
+      setComposingTemplate(template.id);
+      setComposing("");
+      return;
+    }
     setChaining({ agentProjectId: "", templateId: template ? template.id : null });
   };
 
@@ -162,7 +171,10 @@ export function AgentsView() {
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <AgentTaskList
             width={listWidth}
-            onNewTask={(agentProjectId) => setComposing(agentProjectId)}
+            onNewTask={(agentProjectId) => {
+              setComposingTemplate(null);
+              setComposing(agentProjectId);
+            }}
             onNewChain={(agentProjectId) => setChaining({ agentProjectId, templateId: null })}
             onNewStory={setStorying}
             onNewAgent={() => setEditing("new")}
@@ -244,7 +256,11 @@ export function AgentsView() {
         <NewTaskModal
           suspended={editing !== null}
           initialAgentProjectId={composing}
-          onClose={() => setComposing(null)}
+          templateId={composingTemplate}
+          onClose={() => {
+            setComposing(null);
+            setComposingTemplate(null);
+          }}
           onManageAgents={() => setEditing("new")}
         />
       )}

@@ -14,7 +14,7 @@ use crate::ai::{self, AiEngine};
 use crate::ai_locks;
 use crate::ai_runs;
 use crate::commands::skills_cmd::sync_skills_into_project;
-use crate::db::{queries, Db};
+use crate::db::{hybrid_queries, queries, Db};
 use crate::git;
 
 #[derive(Serialize)]
@@ -836,18 +836,62 @@ pub async fn send_chat_message(
         ),
         None => None,
     };
+    // The chain step this run id is bound to, if any. The claim recorded it on the step before the
+    // run existed, so nothing a webview sends can move a turn out of its step's phase.
+    let step = match run_id.as_deref() {
+        Some(id) => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            hybrid_queries::running_step(&conn, id).map_err(|e| e.to_string())?
+        }
+        None => None,
+    };
+    // A hybrid run's execute step is not an engine turn: this app walks the plan on the local model.
+    // Same lease, same run id, one `activity_log` row — see `run_hybrid_execute`.
+    if let Some(step) = step.as_ref().filter(|s| s.kind == "hybrid" && s.phase == "execute") {
+        return run_hybrid_execute(app, &db, &project, conversation_id, run_id, message, step).await;
+    }
+    // `local-exec` names that step, never an engine anybody can talk to.
+    if agent_provider.as_deref() == Some("local-exec") {
+        return Err("This task is a step of a hybrid run; it runs from its chain.".to_string());
+    }
     let presence = ai_locks::enter(&project.local_path, &ai::chat_presence_label(&message));
+    // What a hybrid plan or review takes from its run: the run's other repositories, handed to the
+    // CLI as extra directories, and whether this review round answers in the review's JSON.
+    let (extra_dirs, review_json) = match step.as_ref().filter(|s| s.kind == "hybrid" && s.phase != "execute") {
+        Some(s) => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let repos = hybrid_queries::chain_repo_refs(&conn, &s.chain_id).unwrap_or_default();
+            let extra: Vec<String> = repos.iter().skip(1).map(|repo| repo.path.clone()).filter(|path| !path.is_empty()).collect();
+            let review_json = s.phase == "review"
+                && hybrid_queries::get_run(&conn, &s.chain_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|run| run.review_mode == "local" && run.fix_round < crate::hybrid::prompts::MAX_FIX_ROUNDS);
+            (extra, review_json)
+        }
+        None => (Vec::new(), false),
+    };
 
     let (contexts, skills, config, session_id, analysis) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        // A story's analysis pass promises to write nothing until the user has approved the plan,
-        // and that promise used to be a sentence in its instruction: it ran here like any panel
-        // turn, with edits auto-approved. The step's phase is read from the step the claim bound
-        // to this run id, so a webview cannot talk its way out of it. See `chat_with_repo`.
-        let analysis = run_id
-            .as_deref()
-            .and_then(|id| queries::running_story_step_phase(&conn, id).ok().flatten())
-            .is_some_and(|phase| phase == "analyze");
+        // Read-only wherever the step promises to write nothing: a story's analysis pass, a hybrid
+        // run's plan, its review when the run asked for a report only, and a round of the local fix
+        // loop with no task of the review's own to implement. Each promise used to be a sentence in
+        // an instruction; here the CLI enforces it. See `chat_with_repo`.
+        let analysis = match step.as_ref() {
+            Some(s) if s.kind == "story" => s.phase == "analyze",
+            Some(s) if s.kind == "hybrid" && s.phase == "plan" => true,
+            Some(s) if s.kind == "hybrid" && s.phase == "review" => hybrid_queries::get_run(&conn, &s.chain_id)
+                .ok()
+                .flatten()
+                .is_some_and(|run| {
+                    run.review_mode == "report"
+                        || (review_json
+                            && hybrid_queries::list_items(&conn, &s.chain_id)
+                                .is_ok_and(|items| crate::hybrid::prompts::for_review(&run, &items).is_empty()))
+                }),
+            _ => false,
+        };
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         // An active agent runs on its own provider + model — and its own account, when it names
@@ -873,6 +917,17 @@ pub async fn send_chat_message(
         let session_id = match conversation_id.as_deref() {
             Some(id) if queries::conversation_reset_pending(&conn, &project_id, id).unwrap_or(false) => None,
             _ => session_id,
+        };
+        // A hybrid review resumes the planner's own session — the one that already read the
+        // repository — when it runs on the same engine and account. Read here rather than handed in,
+        // because the frontend's copy of a task's session does not survive a reload.
+        let session_id = match (session_id, step.as_ref()) {
+            (None, Some(s)) if s.kind == "hybrid" && s.phase == "review" => hybrid_queries::plan_session(&conn, &s.chain_id)
+                .ok()
+                .flatten()
+                .filter(|(_, provider, account)| provider == &config.provider && account.as_deref() == config.account_id())
+                .map(|(session, _, _)| session),
+            (session, _) => session,
         };
         // Shadows the argument on purpose: nothing below should see the unvalidated token, and the
         // turn is recorded against the session it actually ran under.
@@ -1003,6 +1058,14 @@ pub async fn send_chat_message(
             turn_mcp.block.clone(),
             turn_mcp.app.clone(),
             &attachments,
+            // A hybrid plan's answer must be the plan's JSON, and a round of the local fix loop the
+            // review's; the CLIs that can enforce a schema do.
+            step.as_ref().filter(|s| s.kind == "hybrid").and_then(|s| match s.phase.as_str() {
+                "plan" => Some(crate::hybrid::plan::PLAN_SCHEMA),
+                "review" if review_json => Some(crate::hybrid::plan::REVIEW_SCHEMA),
+                _ => None,
+            }),
+            &extra_dirs,
         )
         .await
     })
@@ -1059,6 +1122,19 @@ pub async fn send_chat_message(
         }
     };
 
+    // A hybrid run counts what its subscription turns spent, for the summary it ends with.
+    if let (Some(s), Some(usage)) = (step.as_ref().filter(|s| s.kind == "hybrid"), run.usage.as_ref()) {
+        if let Ok(conn) = db.0.lock() {
+            let _ = hybrid_queries::add_step_usage(
+                &conn,
+                &s.chain_id,
+                &s.phase,
+                usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens,
+                usage.output_tokens,
+            );
+        }
+    }
+
     let (created_at, wants_title) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let created_at = queries::add_activity_log(
@@ -1111,6 +1187,114 @@ pub async fn send_chat_message(
         account_id,
         account_changed,
     })
+}
+
+/// A hybrid run's execute step, as the turn it is to everything around it: run under the claimed run
+/// id (so Stop, the run card and the status bar work), filed as exactly one `activity_log` row —
+/// the report when it finishes, the error when it fails, nothing when it is stopped — because that
+/// row, found by its position, is how a restart learns how the step ended. See `crate::hybrid`.
+async fn run_hybrid_execute(
+    app: AppHandle,
+    db: &State<'_, Db>,
+    project: &crate::db::models::Project,
+    conversation_id: Option<String>,
+    run_id: Option<String>,
+    message: String,
+    step: &hybrid_queries::RunningStep,
+) -> Result<ChatReply, String> {
+    let (model, repos) = db
+        .0
+        .lock()
+        .ok()
+        .map(|conn| {
+            let model = hybrid_queries::get_run(&conn, &step.chain_id).ok().flatten().map(|run| run.model).unwrap_or_default();
+            let repos = hybrid_queries::chain_repo_refs(&conn, &step.chain_id).unwrap_or_default();
+            (model, repos)
+        })
+        .unwrap_or_default();
+    // A run created before chains kept their repositories still has the step's own.
+    let repos = if repos.is_empty() {
+        vec![crate::hybrid::plan::RepoRef {
+            project_id: project.id.clone(),
+            name: project.name.clone(),
+            path: project.local_path.clone(),
+        }]
+    } else {
+        repos
+    };
+    let started = std::time::Instant::now();
+    let job_app = app.clone();
+    let (result, trace) = ai_runs::scoped_with_trace(app, run_id, async {
+        crate::hybrid::execute::run(crate::hybrid::execute::Job {
+            app: &job_app,
+            db,
+            chain_id: &step.chain_id,
+            repos: &repos,
+        })
+        .await
+    })
+    .await;
+    let response_time_ms = started.elapsed().as_millis() as i64;
+    let trace_json = (!trace.is_empty()).then(|| serde_json::to_string(&trace).unwrap_or_default());
+    let conversation_id = conversation_id.unwrap_or_else(|| format!("conv-{}", uuid::Uuid::new_v4()));
+    fn meta(model: &str, response_time_ms: i64) -> queries::TurnMeta<'_> {
+        queries::TurnMeta {
+            provider: Some("local-exec"),
+            account_id: None,
+            model: (!model.is_empty()).then_some(model),
+            engine_version: None,
+            response_time_ms: Some(response_time_ms),
+        }
+    }
+    match result {
+        Err(e) => {
+            if !e.starts_with(ai_runs::CANCELLED_MARKER) {
+                if let Ok(conn) = db.0.lock() {
+                    let _ = queries::add_activity_log(
+                        &conn,
+                        &project.id,
+                        &conversation_id,
+                        None,
+                        &message,
+                        &e,
+                        trace_json.as_deref(),
+                        meta(&model, response_time_ms),
+                        true,
+                    );
+                }
+            }
+            Err(e)
+        }
+        Ok(report) => {
+            let created_at = {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                queries::add_activity_log(
+                    &conn,
+                    &project.id,
+                    &conversation_id,
+                    None,
+                    &message,
+                    &report,
+                    trace_json.as_deref(),
+                    meta(&model, response_time_ms),
+                    false,
+                )
+                .map(|entry| entry.created_at)
+                .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339())
+            };
+            Ok(ChatReply {
+                text: report,
+                session_id: None,
+                model: (!model.is_empty()).then_some(model),
+                provider: "local-exec".to_string(),
+                engine_version: None,
+                created_at,
+                response_time_ms,
+                account_id: None,
+                account_changed: false,
+            })
+        }
+    }
 }
 
 /// Rewrites the selected code according to a natural-language instruction, for the editor's

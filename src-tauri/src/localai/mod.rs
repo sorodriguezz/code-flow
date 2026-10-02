@@ -36,6 +36,8 @@ pub mod catalogue;
 pub mod complete;
 pub mod download;
 pub mod engine;
+pub mod exec_catalogue;
+pub mod executor;
 pub mod models;
 
 use std::collections::HashMap;

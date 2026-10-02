@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/services";
+import { getSetting, setSetting } from "../lib/tauri/commands";
 import { isMainWindow } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
 import { disownTerminalBacklog } from "./terminalStore";
@@ -35,14 +36,32 @@ import type { ServiceGroup, ServiceRow, ServiceRuntime, ServiceStatus } from "..
  * there is simply nothing to draw.
  */
 
+/** How the list remembers its ungrouped section folded. Every other section is remembered by its
+ *  group's id, a UUID, which this cannot collide with. */
+export const UNGROUPED_KEY = "ungrouped";
+
+const collapsedKey = (workspaceId: string) => `services_collapsed_groups:${workspaceId}`;
+
 interface ServicesState {
   services: ServiceRow[];
   groups: ServiceGroup[];
   /** Live state per service id, every workspace. Absent means stopped and never started. */
   runtime: Record<string, ServiceRuntime>;
   loading: boolean;
+  /**
+   * The sections of the list folded away, per workspace: a group's id, or {@link UNGROUPED_KEY}.
+   *
+   * Here and persisted rather than in the list's own state, because the list unmounts whenever the
+   * dock closes, shows the terminals or another app takes the window — and every group coming back
+   * unfolded was the complaint (2026-10-02). Read from settings on a workspace's first `load` and
+   * never again that session: a later `load` (a delete re-reads the list) would otherwise race the
+   * write of a fold made a moment before it.
+   */
+  collapsedByWorkspace: Record<string, string[]>;
 
   load: (workspaceId: string) => Promise<void>;
+  /** Folds one section of a workspace's list, or unfolds it. */
+  toggleCollapsed: (workspaceId: string, key: string) => void;
 
   add: (service: ServiceRow) => Promise<ServiceRow | null>;
   save: (service: ServiceRow) => Promise<boolean>;
@@ -109,6 +128,17 @@ function startSync(): void {
     .catch((err: unknown) => pushErrorToast(String(err)));
 }
 
+/** A workspace's folded sections as last saved. Nothing saved, or a row that does not parse, is
+ *  "everything open" — the list's state before anyone folded anything. */
+async function loadCollapsed(workspaceId: string): Promise<string[]> {
+  try {
+    const parsed: unknown = JSON.parse((await getSetting(collapsedKey(workspaceId))) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((key): key is string => typeof key === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Runs one of the supervisor's verbs, turning a refusal into a toast rather than an unhandled
  *  rejection. */
 async function attempt(work: Promise<void>): Promise<void> {
@@ -128,28 +158,51 @@ export const useServicesStore = create<ServicesState>((set, get) => {
     get().services.find((s) => s.id === id)?.workspace_id ??
     get().runtime[id]?.workspaceId ??
     useWorkspaceStore.getState().activeWorkspaceId;
+  /** Applied at once, saved behind it: a fold has to feel instant, and the worst a failed write
+   *  costs is a group that comes back open next launch — not worth a toast. */
+  const writeCollapsed = (workspaceId: string, keys: string[]) => {
+    set((s) => ({ collapsedByWorkspace: { ...s.collapsedByWorkspace, [workspaceId]: keys } }));
+    void setSetting(collapsedKey(workspaceId), JSON.stringify(keys)).catch(() => {});
+  };
 
   return {
     services: [],
     groups: [],
     runtime: {},
     loading: false,
+    collapsedByWorkspace: {},
 
     load: async (workspaceId) => {
       startSync();
       set({ loading: true });
       try {
-        const [services, groups] = await Promise.all([
+        const known = get().collapsedByWorkspace[workspaceId];
+        const [services, groups, collapsed] = await Promise.all([
           api.listServices(workspaceId),
           api.listServiceGroups(workspaceId),
+          known ? Promise.resolve(known) : loadCollapsed(workspaceId),
         ]);
         // A load for a workspace the user has already left must not overwrite the one they are in.
-        if (useWorkspaceStore.getState().activeWorkspaceId === workspaceId) set({ services, groups });
+        const current = useWorkspaceStore.getState().activeWorkspaceId === workspaceId;
+        // In one write with the list, so the groups never paint open for a frame and then fold.
+        // Filed by workspace, so keeping it for one the user has left is harmless — but never over
+        // a fold made while this was reading, which is newer than the row it read.
+        set((s) => ({
+          ...(current ? { services, groups } : {}),
+          ...(s.collapsedByWorkspace[workspaceId]
+            ? {}
+            : { collapsedByWorkspace: { ...s.collapsedByWorkspace, [workspaceId]: collapsed } }),
+        }));
       } catch (err) {
         pushErrorToast(String(err));
       } finally {
         set({ loading: false });
       }
+    },
+
+    toggleCollapsed: (workspaceId, key) => {
+      const folded = get().collapsedByWorkspace[workspaceId] ?? [];
+      writeCollapsed(workspaceId, folded.includes(key) ? folded.filter((k) => k !== key) : [...folded, key]);
     },
 
     add: async (service) => {
@@ -216,12 +269,16 @@ export const useServicesStore = create<ServicesState>((set, get) => {
     },
 
     removeGroup: async (id) => {
+      const owner = get().groups.find((g) => g.id === id)?.workspace_id;
       try {
         await api.deleteServiceGroup(id);
       } catch (err) {
         pushErrorToast(String(err));
         return;
       }
+      // A fold remembered for a group that is gone would sit in its settings row forever.
+      const folded = owner ? get().collapsedByWorkspace[owner] : undefined;
+      if (owner && folded?.includes(id)) writeCollapsed(owner, folded.filter((k) => k !== id));
       // Its services survive, ungrouped — so the list has to be re-read rather than filtered.
       const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
       if (workspaceId) await get().load(workspaceId);
