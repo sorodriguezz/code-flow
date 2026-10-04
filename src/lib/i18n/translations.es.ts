@@ -5147,7 +5147,7 @@ export const es = {
   "tabbar.notes": "Notas",
   "tabbar.notesDescription": "Notas en Markdown, libros, etiquetas y plantillas \u2014 lo que se escribe alrededor del c\u00f3digo de este espacio de trabajo",
   "tabbar.diagrams": "Diagramas",
-  "tabbar.diagramsDescription": "Diagramas de flujo, arquitectura y ER en carpetas \u2014 lo que se dibuja alrededor del c\u00f3digo de este espacio de trabajo",
+  "tabbar.diagramsDescription": "Diagramas de flujo, arquitectura, ER y pizarras en carpetas \u2014 lo que se dibuja alrededor del c\u00f3digo de este espacio de trabajo",
   "tabbar.chat": "Chat",
   "tabbar.chatDescription": "Conversaciones con tus CLI de IA — una sola lista, con o sin repositorio detrás",
   "tabbar.reorderHint": "Mant\u00e9n presionado para arrastrarlo a otra posici\u00f3n",
@@ -5288,6 +5288,7 @@ export const es = {
   "diagrams.exportAs.svg": "Exportar como SVG…",
   "diagrams.exportAs.pdf": "Exportar como PDF…",
   "diagrams.exportAs.drawio": "Exportar como .drawio",
+  "diagrams.exportAs.excalidraw": "Exportar como .excalidraw",
   "diagrams.exportOptions.title": "Opciones de imagen",
   "diagrams.exportOptions.subtitle": "Se aplican a este {format} y se recuerdan para la próxima vez.",
   "diagrams.exportOptions.zoom": "Zoom (%)",
@@ -5308,9 +5309,10 @@ export const es = {
   "diagrams.exportOptions.onlyVector": "Sólo en SVG y PDF",
   "diagrams.exportOptions.onlyRaster": "Solo PNG y PDF",
   "diagrams.exportOptions.onlySvg": "Solo SVG",
+  "diagrams.exportOptions.notWhiteboard": "No aplica a pizarras",
   "diagrams.exportOptions.confirm": "Exportar",
   "diagrams.exportOptions.reset": "Restaurar valores",
-  "diagrams.import": "Abrir un archivo .drawio o .dbml",
+  "diagrams.import": "Abrir un archivo .drawio, .dbml o .excalidraw",
   "diagrams.imported": "Importado {name}",
   "diagrams.undoGeneration": "Deshacer lo generado",
   "color.none": "Sin color",
@@ -5334,6 +5336,11 @@ export const es = {
   "diagrams.exportAs.dbml": "Exportar como .dbml",
   "diagrams.tpl.dbml.name": "Esquema de base de datos",
   "diagrams.tpl.dbml.desc": "Dos tablas y la clave que las une, en DBML.",
+  "diagrams.newExcalidraw": "Nueva pizarra",
+  "diagrams.newExcalidrawHere": "Nueva pizarra aquí",
+  "diagrams.format.excalidraw": "Pizarra",
+  "diagrams.tpl.excalidraw.name": "Pizarra",
+  "diagrams.tpl.excalidraw.desc": "Bocetos a mano alzada en Excalidraw, sobre un lienzo infinito.",
   "dbml.title": "Esquema",
   "dbml.tab.diagram": "Diagrama",
   "dbml.tab.convert": "Generar código",
@@ -5519,6 +5526,13 @@ export const es = {
   "dbml.editorChars": "{count} caracteres",
   "dbml.zen": "Solo el diagrama",
   "dbml.zenExit": "Mostrar los paneles",
+  "diagrams.laser": "Puntero láser",
+  "diagrams.laserHow": "Mantén presionado para dibujar sobre el diagrama; al soltar, desaparece",
+  "diagrams.laserColour": "Color del láser",
+  "diagrams.laserColour.red": "Rojo",
+  "diagrams.laserColour.green": "Verde",
+  "diagrams.laserColour.blue": "Azul",
+  "diagrams.laserColour.yellow": "Amarillo",
   "dbml.collapseEditor": "Ocultar el editor",
   "dbml.expandEditor": "Mostrar el editor",
   "dbml.collapseInspector": "Ocultar el inspector",
@@ -8741,13 +8755,13 @@ export const es = {
 
   "tour.diagrams.intro.title": "El dibujo que rodea al código",
   "tour.diagrams.intro.body":
-    "Diagramas de flujo, arquitectura, secuencias —y esquemas de base de datos— guardados en el espacio de trabajo y no dentro de un repositorio, porque el dibujo de cómo encajan cuatro servicios no pertenece a ninguno de ellos. Un dibujo se abre en draw.io entero, incluido dentro de la app y ejecutándose en tu máquina: sin cuenta, sin red, y funciona en un avión. Un esquema es DBML y se abre en su propio editor —el código junto a un diagrama que editas a mano, y una vista Datos que arma con él una base SQLite de verdad— y un archivo `.dbml` de un repositorio se puede abrir aquí y queda sincronizado. El árbol de la izquierda es lo que has hecho; se guarda mientras trabajas y no hay botón de guardar.",
+    "Diagramas de flujo, arquitectura, secuencias —y esquemas de base de datos— guardados en el espacio de trabajo y no dentro de un repositorio, porque el dibujo de cómo encajan cuatro servicios no pertenece a ninguno de ellos. Un dibujo se abre en draw.io entero, incluido dentro de la app y ejecutándose en tu máquina: sin cuenta, sin red, y funciona en un avión. Una pizarra se abre en Excalidraw —bocetos a mano alzada sobre un lienzo infinito, con puntero láser incluido—. Un esquema es DBML y se abre en su propio editor —el código junto a un diagrama que editas a mano, y una vista Datos que arma con él una base SQLite de verdad— y un archivo `.dbml` de un repositorio se puede abrir aquí y queda sincronizado. El árbol de la izquierda es lo que has hecho; se guarda mientras trabajas y no hay botón de guardar.",
   "tour.diagrams.tree.title": "Carpetas, y qué se lleva por delante borrar una",
   "tour.diagrams.tree.body":
     "Las carpetas se anidan tanto como quieras, toman color desde su menú contextual, y los diagramas se arrastran entre ellas —o sobre el borde de una fila, para ordenarlos a mano—. Lee esto dos veces: **borrar una carpeta borra todos los diagramas que hay dentro**, y sus subcarpetas con ellos —la misma regla que un libro en Notas—. Se te pregunta antes, y no tiene vuelta atrás. El menú de una carpeta también crea ahí mismo un dibujo o un esquema de base de datos, y el menú de cada diagrama lo fija arriba del árbol.",
   "tour.diagrams.new.title": "Empieza por una forma, no por una hoja en blanco",
   "tour.diagrams.new.body":
-    "Esto abre un selector en vez de crear un diagrama vacío directamente, y su primera elección es la que queda: un dibujo en blanco o un esquema de base de datos nuevo —en qué editor se abre un diagrama se decide aquí y nunca más—. Vienen seis plantillas: cinco dibujos —diagrama de flujo, contenedores C4, secuencia, entidad-relación y red— y un esquema de dos tablas en DBML, cada uno un documento de verdad que editas, no una plantilla rígida. Cualquier cosa tuya se convierte en plantilla desde la barra de su editor, y los diagramas nuevos se archivan en la carpeta que el árbol esté mostrando.",
+    "Esto abre un selector en vez de crear un diagrama vacío directamente, y su primera elección es la que queda: un dibujo en blanco, una pizarra o un esquema de base de datos nuevo —en qué editor se abre un diagrama se decide aquí y nunca más—. Vienen seis plantillas: cinco dibujos —diagrama de flujo, contenedores C4, secuencia, entidad-relación y red— y un esquema de dos tablas en DBML, cada uno un documento de verdad que editas, no una plantilla rígida. Cualquier cosa tuya se convierte en plantilla desde la barra de su editor, y los diagramas nuevos se archivan en la carpeta que el árbol esté mostrando.",
   "tour.diagrams.search.title": "Títulos y etiquetas",
   "tour.diagrams.search.body":
     "Filtra mientras escribes, por títulos y etiquetas. **No** lee lo que hay dentro de los dibujos — a diferencia del buscador de Notas, que sí lee los cuerpos. Así que nombra las cosas como las buscarías después, y apóyate en las etiquetas para el corte que las carpetas no pueden hacer: un diagrama está en una carpeta, pero puede llevar `onboarding` y `pagos` a la vez.",
@@ -8756,7 +8770,7 @@ export const es = {
     "Sin nada abierto tienes tarjetas en lugar de un lienzo vacío, y cada una muestra el diagrama real — la imagen se vuelve a exportar cada vez que editas, así que una tarjeta nunca es un dibujo de la semana pasada. Cambia entre cuadrícula y lista, filtra por carpeta o etiqueta, y ordena por «Mi orden» —el que armas arrastrando en el árbol— si el orden significa algo. Abrir una tarjeta es lo que pone el editor en pantalla.",
   "tour.diagrams.canvas.title": "Todo draw.io, y se guarda solo",
   "tour.diagrams.canvas.body":
-    "Para un dibujo: la paleta de formas, el panel de formato, el menú contextual, todas las librerías de formas incluidas las de nube —nada de esto es una versión recortada—. Lo que añade esta app está al final de la barra del propio editor: guardar como plantilla, exportar, una chispa y el historial de versiones. Los cambios se escriben solos un momento después de que dejes de mover cosas, y la cabecera te dice cuándo entró el último. Un esquema trae esas mismas cuatro en su propia barra, más el cambio entre Diagrama y Datos y tres herramientas: generar código para diez destinos, importar SQL y comparar.",
+    "Para un dibujo: la paleta de formas, el panel de formato, el menú contextual, todas las librerías de formas incluidas las de nube —nada de esto es una versión recortada—. Lo que añade esta app está al final de la barra del propio editor: guardar como plantilla, exportar, una chispa, el historial de versiones y un puntero láser. Los cambios se escriben solos un momento después de que dejes de mover cosas, y la cabecera te dice cuándo entró el último. Un esquema trae esas mismas cuatro en su propia barra, más el cambio entre Diagrama y Datos y tres herramientas: generar código para diez destinos, importar SQL y comparar. Una pizarra es Excalidraw entero, con esos mismos cuatro botones en su esquina superior derecha.",
   "tour.diagrams.ai.title": "Describe el diagrama y lo dibuja",
   "tour.diagrams.ai.body":
     "La chispa abre esta ventana sobre el lienzo — arrástrala por su cabecera si tapa lo que estás mirando. Escribe lo que quieres en una frase: *«el pipeline de revisión: traer el diff, escanear secretos, mandarlo al motor, comentar en la PR»*. Enter envía, Shift+Enter salta de línea, y mientras piensa el botón pasa a ser Detener — es una ejecución normal, así que aparece junto al resto de tu trabajo con IA y se puede abandonar. Qué motor responde es el chip al pie de la ventana — cámbialo ahí mismo; es el mismo ajuste que «Dibujar un diagrama» en Configuración → Asistente de IA → Tareas y prompts. En un esquema, la misma ventana pide DBML en vez de formas.",
@@ -8771,7 +8785,7 @@ export const es = {
     "Entregarle un documento a draw.io reinicia su pila de deshacer, así que su propio deshacer no puede sacar una generación — esta flecha, junto al título, es la que sí. Aparece en cuanto se ha generado algo y **desaparece con tu siguiente edición real**: para entonces, volver atrás sería tirar lo que dibujaste encima y no lo que dibujó el motor. Si una generación no es lo que querías, quítala antes de construir sobre ella.",
   "tour.diagrams.export.title": "Salir, y volver a entrar",
   "tour.diagrams.export.body":
-    "El botón de descarga de la barra del editor ofrece PNG, SVG o PDF —cada uno abre antes un diálogo corto con las opciones que admite ese formato: zoom (200 % por defecto), borde, transparencia, sombra, cuadrícula, página o solo el dibujo, claro u oscuro— y una copia `.drawio` que sale todavía editable. Un esquema exporta PNG, SVG o `.dbml` desde su propia barra, y además genera código. En el otro sentido, un archivo `.drawio` o `.dbml` de donde sea —un compañero, diagrams.net en el navegador, un repositorio viejo— se abre desde la barra del árbol como un diagrama normal. Por debajo es el mismo formato, que es lo que evita que esto sea un lugar al que los dibujos entran y del que no salen.",
+    "El botón de descarga de la barra del editor ofrece PNG, SVG o PDF —cada uno abre antes un diálogo corto con las opciones que admite ese formato: zoom (200 % por defecto), borde, transparencia, sombra, cuadrícula, página o solo el dibujo, claro u oscuro— y una copia `.drawio` que sale todavía editable (en una pizarra, `.excalidraw`). Un esquema exporta PNG, SVG o `.dbml` desde su propia barra, y además genera código. En el otro sentido, un archivo `.drawio`, `.dbml` o `.excalidraw` de donde sea —un compañero, diagrams.net en el navegador, un repositorio viejo— se abre desde la barra del árbol como un diagrama normal. Por debajo es el mismo formato, que es lo que evita que esto sea un lugar al que los dibujos entran y del que no salen.",
   "tour.diagrams.done.title": "Eso es Diagramas",
   "tour.diagrams.done.body":
     "Todo se guarda en el espacio de trabajo y viaja con tus copias de seguridad. La costumbre que vale la pena adoptar: cuando un dibujo vaya a tomar rato, descríbelo primero y corrige lo que vuelva — empezar con doce cajas más o menos bien es más rápido que empezar sin ninguna. Este tour está siempre en el birrete al pie de la franja de apps.",

@@ -16,6 +16,15 @@ import { DrawioFrame } from "./DrawioFrame";
 const DbmlWorkbench = lazy(() =>
   import("../dbml/DbmlWorkbench").then((module) => ({ default: module.DbmlWorkbench })),
 );
+/**
+ * The whiteboard editor, behind the same boundary and for a bigger version of the same reason:
+ * Excalidraw is a few megabytes of editor, and nobody who never opens a whiteboard should load it.
+ */
+const ExcalidrawEditor = lazy(() => {
+  // Before the import starts, never after: see `pointExcalidrawAtBundledFonts`.
+  pointExcalidrawAtBundledFonts();
+  return import("./ExcalidrawEditor").then((module) => ({ default: module.ExcalidrawEditor }));
+});
 import { DiagramAiPanel } from "./DiagramAiPanel";
 import { ExportImageModal } from "./ExportImageModal";
 import { VersionHistoryModal } from "../common/VersionHistoryModal";
@@ -28,7 +37,8 @@ import {
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CARD, ICON_BUTTON } from "./diagramsChrome";
 import { relativeTime } from "../notes/notesChrome";
-import { FORMAT_DBML } from "../../lib/diagrams/doc";
+import { FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
+import { pointExcalidrawAtBundledFonts } from "../../lib/diagrams/excalidrawAssets";
 import { ensureDiagramsStoreLoaded, useDiagramsStore } from "../../state/diagramsStore";
 import type { ImageExportFormat } from "../../lib/diagrams/exportOptions";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -110,6 +120,7 @@ export function DiagramsView() {
     (s) => s.diagrams.find((d) => d.id === s.activeId)?.format ?? "",
   );
   const isSchema = openFormat === FORMAT_DBML;
+  const isWhiteboard = openFormat === FORMAT_EXCALIDRAW;
 
   const sidebarWidth = useLayoutStore((s) => s.sizes.diagramsSidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
@@ -194,21 +205,24 @@ export function DiagramsView() {
   /** `at` is in window coordinates — see `injectToolbarButtons`, which translates them out of the
    *  iframe so the menu lands under the pointer. */
   const openExportMenu = (at: { x: number; y: number }) => {
+    // The editor's own file last, after the three pictures: it is the one that leaves with the
+    // diagram still editable — `.drawio` for a drawing, `.excalidraw` for a whiteboard — so it reads
+    // as "or take the whole thing elsewhere" rather than as a fourth image. It is also the only one
+    // that exports on the click, which is why it is the only label without an ellipsis — the three
+    // pictures open the options dialog first, and the file has nothing to ask about because nothing
+    // is rendered for it. `ContextMenu` closes itself before running this, so the menu is not left
+    // hanging behind the dialog.
+    const own = isWhiteboard ? ("excalidraw" as const) : ("drawio" as const);
     setExportMenu({
       x: at.x,
       y: at.y,
-      // `.drawio` last, after the three pictures: it is the one that leaves with the diagram still
-      // editable, so it reads as "or take the whole thing elsewhere" rather than as a fourth image.
-      // It is also the only one that exports on the click, which is why it is the only label
-      // without an ellipsis — the three pictures open the options dialog first, and `.drawio` has
-      // nothing to ask about because nothing is rendered for it. TypeScript narrows the other
-      // branch to `ImageExportFormat` on its own, so `ExportImageModal` needs no cast to be sure
-      // of that. `ContextMenu` closes itself before running this, so the menu is not left hanging
-      // behind the dialog.
-      items: (["png", "svg", "pdf", "drawio"] as const).map((format) => ({
-        label: t(`diagrams.exportAs.${format}`),
-        onClick: () => (format === "drawio" ? requestExport({ format }) : setOptionsFor(format)),
-      })),
+      items: [
+        ...(["png", "svg", "pdf"] as const).map((format) => ({
+          label: t(`diagrams.exportAs.${format}`),
+          onClick: () => setOptionsFor(format),
+        })),
+        { label: t(`diagrams.exportAs.${own}`), onClick: () => requestExport({ format: own }) },
+      ],
     });
   };
 
@@ -326,11 +340,12 @@ export function DiagramsView() {
                 pane — rather than against the window. Dragging it can then be clamped to the canvas
                 it is written about. */}
             <div className="relative min-h-0 flex-1">
-              {/* The one place the format decides anything. Both editors take the same two
+              {/* The one place the format decides anything. The three editors take the same
                   callbacks and write through the same store; what differs is the dialect they
                   read — see `types/diagrams.ts`. The schema workbench carries its own toolbar, so
-                  it needs no `onExport`: draw.io's export lives in draw.io's toolbar, and this
-                  one's lives in its own. */}
+                  it needs no `onExport`; draw.io's and Excalidraw's open this view's menu from a
+                  button in their own toolbars. Anything not a schema or a whiteboard is a drawing:
+                  that was the only format before there were two. */}
               {isSchema ? (
                 <Suspense fallback={<ViewSkeleton />}>
                   <DbmlWorkbench
@@ -339,6 +354,17 @@ export function DiagramsView() {
                     onSaveAsTemplate={saveAsTemplate}
                     onAskAi={() => setAiOpen(true)}
                     onOlderVersions={() => setHistoryOpen(true)}
+                  />
+                </Suspense>
+              ) : isWhiteboard ? (
+                <Suspense fallback={<ViewSkeleton />}>
+                  <ExcalidrawEditor
+                    key={activeId}
+                    diagramId={activeId}
+                    onSaveAsTemplate={saveAsTemplate}
+                    onExport={openExportMenu}
+                    onAskAi={() => setAiOpen(true)}
+                    onHistory={() => setHistoryOpen(true)}
                   />
                 </Suspense>
               ) : (

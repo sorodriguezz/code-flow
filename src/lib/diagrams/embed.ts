@@ -486,25 +486,27 @@ export function forwardFramePresses(frame: HTMLIFrameElement | null): () => void
   const doc = frame?.contentDocument;
   if (!frame || !doc) return () => {};
 
-  const echo = (event: PointerEvent) => {
-    const box = frame.getBoundingClientRect();
-    frame.dispatchEvent(
-      new MouseEvent("mousedown", {
-        bubbles: true,
-        cancelable: false,
-        button: event.button,
-        buttons: event.buttons,
-        // A real press, as far as anything counting clicks is concerned — the editor only ever
-        // reaches this window through a press that genuinely landed on it.
-        detail: 1,
-        clientX: box.left + event.clientX,
-        clientY: box.top + event.clientY,
-      }),
-    );
-  };
-
+  const echo = (event: PointerEvent) => echoPress(frame, event);
   doc.addEventListener("pointerdown", echo, true);
   return () => doc.removeEventListener("pointerdown", echo, true);
+}
+
+/** One press inside the editor, repeated on the iframe element — see `forwardFramePresses`. */
+function echoPress(frame: HTMLIFrameElement, event: PointerEvent): void {
+  const box = frame.getBoundingClientRect();
+  frame.dispatchEvent(
+    new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: false,
+      button: event.button,
+      buttons: event.buttons,
+      // A real press, as far as anything counting clicks is concerned — the editor only ever
+      // reaches this window through a press that genuinely landed on it.
+      detail: 1,
+      clientX: box.left + event.clientX,
+      clientY: box.top + event.clientY,
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +541,13 @@ const ICONS = {
     '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>' +
     '<path d="M3 3v5h5"/>' +
     '<path d="M12 7v5l4 2"/>',
+  // The laser pointer's pen, transcribed from `LaserGlyph` (`components/diagrams/Laser`). The spot it
+  // throws is drawn by `spot`, because that part is coloured — see `ToolbarButton.spot`.
+  laser:
+    '<path d="M18.586 2.586 11.586 9.586a2 2 0 0 0 2.828 2.828l7-7a2 2 0 0 0-2.828-2.828z"/>' +
+    '<path d="m10 14-1.5 1.5"/>',
+  // The small arrow of a split button, for a `narrow` one.
+  chevron: '<path d="m8 10 4 4 4-4"/>',
 } as const;
 
 export type ToolbarIcon = keyof typeof ICONS;
@@ -584,14 +593,80 @@ export interface ToolbarButton {
   icon: ToolbarIcon;
   /** Stroked with the logo's flowing gradient rather than the toolbar's ink — the AI button. */
   flowing?: boolean;
+  /**
+   * A spot of colour at the glyph's lower left — the ink the laser is loaded with. A literal: the
+   * editor's document has none of this app's custom properties. Change it with `updateToolbarButton`.
+   */
+  spot?: string;
+  /** A toggle's state, drawn as pressed. Leave it out for a plain action. */
+  pressed?: boolean;
+  /** Half width — the arrow half of a split button. */
+  narrow?: boolean;
+  /** Starts a group of its own: a separator is drawn before it. */
+  separated?: boolean;
   title: string;
-  /** `at` is in the **parent document's** coordinates, so a menu opened from here lands under the
-   *  pointer rather than offset by the iframe's position. */
-  onClick: (at: { x: number; y: number }) => void;
+  /**
+   * `at` is where the click landed and `anchor` is the button's own box, both in the **parent
+   * document's** coordinates, so a menu opened from here lands under the pointer — or hangs off the
+   * button, given the box — rather than offset by the iframe's position.
+   */
+  onClick: (at: { x: number; y: number }, anchor: ToolbarAnchor) => void;
+}
+
+/** A button's box in the parent document, the shape `ContextMenu`'s `anchor` takes. */
+export interface ToolbarAnchor {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
 }
 
 /** Marks what this module put there, so re-injecting replaces rather than accumulates. */
 const INJECTED = "data-cf-toolbar";
+
+/** The stylesheet below, by id, so a second injection into the same document finds it there. */
+const STYLE_ID = "cf-toolbar-style";
+
+/** Marks the coloured parts of an injected glyph — see the first rule of `TOOLBAR_STYLE`. */
+const KEEP_COLOUR = "data-cf-keep-colour";
+
+/** Set on the editor's root while the laser is on — see `captureLaser`. */
+const LASER_ON = "data-cf-laser";
+
+/**
+ * The rules this app adds to the editor's document. A stylesheet in that document rather than
+ * styles on the nodes, because two of the three key off state that changes after injection — the
+ * dark-mode class flips live (`setEditorDarkMode` switches the running editor without a reload), and
+ * the laser comes and goes.
+ *
+ * 1. **Undoes draw.io's dark-mode inversion on coloured glyphs, and only on them.** draw.io lightens
+ *    its toolbar in dark mode by inverting every button whole — `.geDarkMode .geButton { filter:
+ *    invert(1) }` — because its own icons are dark images. That suits a glyph drawn in
+ *    `currentColor`, and it is what keeps the plain injected buttons legible beside them. A
+ *    *coloured* glyph it turns into its complement: the AI sparkle's violet came out green and its
+ *    cyan orange, a sparkle in no colour this app uses anywhere — and the laser's red spot would come
+ *    out cyan. Inverting those parts a second time cancels the first exactly, and the button around
+ *    them keeps the treatment its neighbours get: the hover wash and the resting opacity are still
+ *    the editor's.
+ * 2. **A pressed toggle.** A wash and full opacity, against the editor's resting 0.65. The wash is a
+ *    translucent black, which the dark mode's inversion turns into a translucent white — a pressed
+ *    look on either toolbar from one value. Specific enough to beat draw.io's resting-opacity rule.
+ * 3. **No cursor over the drawing while the laser is on**: the laser's dot is the cursor, and
+ *    mxGraph's own — `move` over a shape, set inline on every node — would sit on top of it.
+ */
+const TOOLBAR_STYLE =
+  `.geDarkMode [${INJECTED}] [${KEEP_COLOUR}] { filter: invert(1); }\n` +
+  `.geEditor .geButton[${INJECTED}][aria-pressed="true"] { opacity: 1; background-color: rgb(0 0 0 / 0.1); }\n` +
+  `html[${LASER_ON}] .geDiagramContainer, html[${LASER_ON}] .geDiagramContainer * { cursor: none !important; }`;
+
+/** Puts `TOOLBAR_STYLE` into the editor's document, once. */
+function ensureToolbarStyle(doc: Document): void {
+  if (doc.getElementById(STYLE_ID)) return;
+  const style = doc.createElement("style");
+  style.id = STYLE_ID;
+  style.textContent = TOOLBAR_STYLE;
+  (doc.head ?? doc.documentElement).appendChild(style);
+}
 
 /**
  * Adds this app's buttons to the end of draw.io's toolbar, after its own last one.
@@ -619,31 +694,229 @@ export function injectToolbarButtons(
 
   for (const stale of toolbar.querySelectorAll(`[${INJECTED}]`)) stale.remove();
 
-  const separator = doc.createElement("div");
-  separator.className = "geSeparator";
-  separator.setAttribute(INJECTED, "separator");
-  toolbar.appendChild(separator);
+  ensureToolbarStyle(doc);
+
+  const separate = (id: string) => {
+    const separator = doc.createElement("div");
+    separator.className = "geSeparator";
+    separator.setAttribute(INJECTED, id);
+    toolbar.appendChild(separator);
+  };
+  separate("separator");
 
   const offset = () => frame?.getBoundingClientRect() ?? { left: 0, top: 0 };
 
   for (const button of buttons) {
+    if (button.separated) separate(`${button.id}-separator`);
     const element = doc.createElement("a");
     element.className = "geButton";
     element.title = button.title;
     element.setAttribute(INJECTED, button.id);
+    if (button.pressed !== undefined) element.setAttribute("aria-pressed", String(button.pressed));
     const paint = button.flowing ? flowingStroke() : { stroke: "currentColor", defs: "" };
+    const glyph =
+      `<svg ${button.narrow ? 'width="7.5" height="18" viewBox="7 0 10 24"' : 'width="18" height="18" viewBox="0 0 24 24"'} ` +
+      `fill="none" stroke="${paint.stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"` +
+      // The hook the first rule of `TOOLBAR_STYLE` counter-inverts by, in dark mode.
+      `${button.flowing ? ` ${KEEP_COLOUR}` : ""}`;
+    const margin = button.narrow ? "5px 1px" : "5px";
     element.innerHTML =
-      `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${paint.stroke}" ` +
-      `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ` +
-      `style="margin:5px">${paint.defs}${ICONS[button.icon]}</svg>`;
+      button.spot === undefined
+        ? `${glyph} style="margin:${margin}">${paint.defs}${ICONS[button.icon]}</svg>`
+        : // The spot is a second drawing laid exactly over the first, in a box of its own, so it can
+          // keep its colour in dark mode while the pen beside it is inverted with the button like
+          // every other glyph here.
+          `<span style="position:relative;display:inline-flex;margin:${margin}">` +
+          `${glyph}>${paint.defs}${ICONS[button.icon]}</svg>` +
+          `<svg ${KEEP_COLOUR} data-cf-spot width="18" height="18" viewBox="0 0 24 24" ` +
+          `style="position:absolute;left:0;top:0"><circle cx="5.5" cy="18.5" r="3" fill="${button.spot}"/></svg>` +
+          `</span>`;
     element.addEventListener("click", (event) => {
       event.preventDefault();
       const box = offset();
+      const own = element.getBoundingClientRect();
       // Translated out of the iframe's coordinate space, or a menu opened from here appears
       // shifted left and up by however far the editor sits from the window's corner.
-      button.onClick({ x: box.left + event.clientX, y: box.top + event.clientY });
+      button.onClick(
+        { x: box.left + event.clientX, y: box.top + event.clientY },
+        {
+          top: box.top + own.top,
+          bottom: box.top + own.bottom,
+          left: box.left + own.left,
+          right: box.left + own.right,
+        },
+      );
     });
     toolbar.appendChild(element);
   }
   return true;
+}
+
+/**
+ * Changes an injected button in place — a toggle's state, the laser's ink — without re-injecting the
+ * toolbar, which would replace the node under the pointer and drop its hover.
+ */
+export function updateToolbarButton(
+  frame: HTMLIFrameElement | null,
+  id: string,
+  state: { pressed?: boolean; spot?: string },
+): void {
+  const element = frame?.contentDocument?.querySelector(`[${INJECTED}="${id}"]`);
+  if (!element) return;
+  if (state.pressed !== undefined) element.setAttribute("aria-pressed", String(state.pressed));
+  if (state.spot !== undefined) element.querySelector("[data-cf-spot] circle")?.setAttribute("fill", state.spot);
+}
+
+// ---------------------------------------------------------------------------
+// The laser pointer
+// ---------------------------------------------------------------------------
+
+/** A point in the iframe's own pixels — which is the overlay's, since it lies exactly on the frame. */
+export type FramePoint = [number, number];
+
+/** What `captureLaser` reports. Every point is in the iframe's own pixels. */
+export interface LaserCapture {
+  down: (point: FramePoint, pointerId: number) => void;
+  move: (points: FramePoint[], pointerId: number) => void;
+  up: (pointerId: number) => void;
+  /** Where the dot belongs — `null` once the pointer is off the drawing. */
+  hover: (point: FramePoint | null) => void;
+  /** Escape, pressed inside the editor while nothing of the editor's own wanted it. */
+  escape: () => void;
+}
+
+/**
+ * Takes the presses that land on the drawing for the laser, and nothing else.
+ *
+ * **Inside the editor's document, in the capture phase of its window**, which is the first thing to
+ * see any event there — before mxGraph's listeners on the canvas, and before `forwardFramePresses`
+ * on the document, so this repeats the press to the app itself (`echoPress`). Laying a surface over
+ * the iframe would have been simpler and wrong: draw.io's menus and dialogs open *across* the
+ * drawing, and a surface over the frame would lie over them too and draw where the user meant to
+ * click. Here a press is taken only when its target is inside the drawing, so the toolbar, the
+ * panels, every menu and dialog work as before, and the wheel is left alone entirely — scrolling and
+ * zooming still do what they do, laser or not.
+ *
+ * Both event families are taken, because draw.io binds one or the other by platform — mouse events
+ * on macOS, pointer events elsewhere (see `forwardFramePresses`) — plus the clicks a press still
+ * produces and the context menu. Moves over the drawing are taken even with no button down, so its
+ * hover affordances (the blue connection arrows, the tooltips) do not light up under the laser.
+ *
+ * Returns the release, which also lets go of a stroke still being drawn.
+ */
+export function captureLaser(frame: HTMLIFrameElement | null, laser: LaserCapture): () => void {
+  const win = frame?.contentWindow;
+  const doc = frame?.contentDocument;
+  const drawing = doc?.querySelector(".geDiagramContainer");
+  if (!frame || !win || !doc || !drawing) return () => {};
+
+  ensureToolbarStyle(doc);
+  doc.documentElement.setAttribute(LASER_ON, "");
+
+  /** The pointer drawing a stroke, or `null`. */
+  let live: number | null = null;
+  const onDrawing = (target: EventTarget | null) =>
+    target !== null && "nodeType" in target && drawing.contains(target as Node);
+  const at = (event: { clientX: number; clientY: number }): FramePoint => [event.clientX, event.clientY];
+  const swallow = (event: Event) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  const release = (pointerId: number) => {
+    if (live !== pointerId) return;
+    live = null;
+    laser.up(pointerId);
+  };
+
+  const onDown = (event: PointerEvent) => {
+    if (!onDrawing(event.target)) return;
+    swallow(event);
+    echoPress(frame, event);
+    if (event.button !== 0 || live !== null) return;
+    live = event.pointerId;
+    // Captured, so a stroke that wanders over the toolbar — or out of the frame — keeps drawing,
+    // and its release is heard wherever it happens.
+    try {
+      drawing.setPointerCapture(event.pointerId);
+    } catch {
+      // A pointer the browser no longer knows. The stroke still draws while it stays on the canvas.
+    }
+    laser.hover(at(event));
+    laser.down(at(event), event.pointerId);
+  };
+  const onMove = (event: PointerEvent) => {
+    if (event.pointerId === live) {
+      event.stopImmediatePropagation();
+      // Every sample the browser merged into this event — see `LaserLayer`.
+      const merged = event.getCoalescedEvents?.() ?? [];
+      laser.move((merged.length > 0 ? merged : [event]).map(at), event.pointerId);
+      laser.hover(at(event));
+      return;
+    }
+    if (!onDrawing(event.target)) {
+      laser.hover(null);
+      return;
+    }
+    event.stopImmediatePropagation();
+    laser.hover(at(event));
+  };
+  const onUp = (event: PointerEvent) => {
+    if (event.pointerId !== live) {
+      if (onDrawing(event.target)) swallow(event);
+      return;
+    }
+    swallow(event);
+    release(event.pointerId);
+  };
+  const onMouse = (event: Event) => {
+    if (live !== null || onDrawing(event.target)) swallow(event);
+  };
+  const onKey = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || event.defaultPrevented) return;
+    // A menu or a dialog of the editor's own is nearer, and answers it first.
+    const open = doc.querySelectorAll(".mxPopupMenu, .geDialog");
+    if ([...open].some((node) => node.getClientRects().length > 0)) return;
+    swallow(event);
+    laser.escape();
+  };
+  const onOut = (event: PointerEvent) => {
+    // Out of the frame altogether. Mid-stroke the capture keeps the events coming, and the dot with
+    // them.
+    if (event.relatedTarget === null && live === null) laser.hover(null);
+  };
+  const onLost = (event: PointerEvent) => release(event.pointerId);
+
+  const listeners: [string, EventListener][] = [
+    ["pointerdown", onDown as EventListener],
+    ["pointermove", onMove as EventListener],
+    ["pointerup", onUp as EventListener],
+    ["pointercancel", onUp as EventListener],
+    ["pointerout", onOut as EventListener],
+    ["mousedown", onMouse],
+    ["mousemove", onMouse],
+    ["mouseup", onMouse],
+    ["click", onMouse],
+    ["dblclick", onMouse],
+    ["contextmenu", onMouse],
+    ["keydown", onKey as EventListener],
+  ];
+  for (const [type, listener] of listeners) win.addEventListener(type, listener, true);
+  // A capture can end without a `pointerup` reaching here — the window losing focus mid-stroke —
+  // and a stroke nobody releases is one that never fades.
+  drawing.addEventListener("lostpointercapture", onLost as EventListener);
+
+  return () => {
+    for (const [type, listener] of listeners) win.removeEventListener(type, listener, true);
+    drawing.removeEventListener("lostpointercapture", onLost as EventListener);
+    doc.documentElement.removeAttribute(LASER_ON);
+    if (live !== null) {
+      try {
+        drawing.releasePointerCapture(live);
+      } catch {
+        // Already gone with the pointer.
+      }
+      release(live);
+    }
+    laser.hover(null);
+  };
 }

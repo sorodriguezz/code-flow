@@ -40,10 +40,13 @@ const FOLDER_COLUMNS: &str = "id, workspace_id, parent_id, name, color, origin_p
 const TEMPLATE_COLUMNS: &str = "id, workspace_id, name, description, icon, doc, format, tags, \
                                 sort_order, created_at, updated_at";
 
-/// The dialect an embedded draw.io reads and writes. The only one [`derive`] knows how to count.
+/// The dialect an embedded draw.io reads and writes.
 const FORMAT_MXGRAPH: &str = "mxgraph";
 /// The schema dialect. Mirrors `FORMAT_DBML` in `lib/diagrams/doc.ts`.
 const FORMAT_DBML: &str = "dbml";
+/// The whiteboard dialect: an Excalidraw scene, stored as its `.excalidraw` file. Mirrors
+/// `FORMAT_EXCALIDRAW` in `lib/diagrams/doc.ts`.
+const FORMAT_EXCALIDRAW: &str = "excalidraw";
 
 fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<DiagramFolderRow> {
     Ok(DiagramFolderRow {
@@ -126,17 +129,44 @@ fn map_template(row: &rusqlite::Row) -> rusqlite::Result<DiagramTemplateRow> {
 /// **Counted by substring, not by parsing.** An mxGraph document marks its cells with `vertex="1"`
 /// and `edge="1"`, and a DBML one opens a block with `Table` or `Enum` at the start of a line and
 /// declares a relationship with `Ref:` or an inline `ref:`. This layer has no business holding
-/// either an XML parser or a DBML one for a single integer. A format it does not recognise counts
-/// zero rather than guessing — a wrong number in a caption is worse than none, and the gallery
-/// hides the caption when the count is zero.
+/// either an XML parser or a DBML one for a single integer. A whiteboard is the exception, because
+/// it is JSON and `serde_json` is already here — see [`count_excalidraw`]. A format it does not
+/// recognise counts zero rather than guessing — a wrong number in a caption is worse than none, and
+/// the gallery hides the caption when the count is zero.
 fn derive(doc: &str, format: &str) -> i64 {
     match format {
         FORMAT_MXGRAPH => {
             (doc.matches("vertex=\"1\"").count() + doc.matches("edge=\"1\"").count()) as i64
         }
         FORMAT_DBML => count_dbml(doc),
+        FORMAT_EXCALIDRAW => count_excalidraw(doc),
         _ => 0,
     }
+}
+
+/// The shapes on a whiteboard: every element still on it, minus the text that sits *inside*
+/// another one.
+///
+/// A labelled box is one element for the box and one for its words (`containerId` names the box),
+/// and counting both would make every labelled shape two — the same reason draw.io's count above
+/// is cells, not cells plus their labels. Deleted elements are left out too: the editor keeps them
+/// in the scene for undo and collaboration until the file is saved, and none of them is on screen.
+fn count_excalidraw(doc: &str) -> i64 {
+    let Ok(scene) = serde_json::from_str::<serde_json::Value>(doc) else {
+        return 0;
+    };
+    let Some(elements) = scene.get("elements").and_then(|value| value.as_array()) else {
+        return 0;
+    };
+    elements
+        .iter()
+        .filter(|element| element.get("isDeleted").and_then(|value| value.as_bool()) != Some(true))
+        .filter(|element| {
+            element
+                .get("containerId")
+                .map_or(true, |container| container.is_null())
+        })
+        .count() as i64
 }
 
 /// Tables, enums and relationships in a DBML document.
@@ -841,7 +871,19 @@ mod tests {
         // Two tables, one enum, one inline reference and one standalone: five.
         assert_eq!(derive(schema, FORMAT_DBML), 5);
 
-        // A document in neither dialect counts nothing rather than guessing — the gallery hides a
+        // A box with words in it, an arrow, a deleted note: two shapes. The words are the box's
+        // label, not a third shape, and the deleted one is not on the board.
+        let whiteboard = r#"{"type":"excalidraw","version":2,"elements":[
+            {"id":"box","type":"rectangle","isDeleted":false},
+            {"id":"words","type":"text","containerId":"box","isDeleted":false},
+            {"id":"line","type":"arrow","isDeleted":false},
+            {"id":"gone","type":"text","containerId":null,"isDeleted":true}
+            ],"appState":{},"files":{}}"#;
+        assert_eq!(derive(whiteboard, FORMAT_EXCALIDRAW), 2);
+        // A scene that does not parse is a scene with nothing countable in it, not an error.
+        assert_eq!(derive("{not json", FORMAT_EXCALIDRAW), 0);
+
+        // A document in no dialect counts nothing rather than guessing — the gallery hides a
         // zero, and a wrong number is worse than none.
         assert_eq!(derive(drawing, "something-else"), 0);
         assert_eq!(derive("", FORMAT_DBML), 0);

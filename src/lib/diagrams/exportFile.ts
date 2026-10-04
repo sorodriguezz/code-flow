@@ -1,6 +1,6 @@
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeFileBytes } from "../tauri/commands";
-import { FORMAT_DBML, FORMAT_MXGRAPH } from "./doc";
+import { FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MXGRAPH } from "./doc";
 import type { DiagramFormat } from "../../types/diagrams";
 
 /**
@@ -21,7 +21,7 @@ import type { DiagramFormat } from "../../types/diagrams";
  * mxGraph dialect and `.dbml` is the schema one. A diagram can only ever be offered the one its own
  * format is written in — see `DiagramsView`'s export menu, which is built per format.
  */
-export type ExportFormat = "png" | "svg" | "pdf" | "drawio" | "dbml";
+export type ExportFormat = "png" | "svg" | "pdf" | "drawio" | "dbml" | "excalidraw";
 
 /** The dialog's filter and the extension, per format. */
 const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
@@ -30,6 +30,7 @@ const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
   pdf: { name: "PDF", extensions: ["pdf"] },
   drawio: { name: "draw.io", extensions: ["drawio", "xml"] },
   dbml: { name: "DBML", extensions: ["dbml"] },
+  excalidraw: { name: "Excalidraw", extensions: ["excalidraw"] },
 };
 
 /**
@@ -76,23 +77,25 @@ export async function saveBytes(
 }
 
 /**
- * The one filter the import dialog offers: both dialects, in one entry.
+ * The one filter the import dialog offers: every dialect, in one entry.
  *
- * One entry rather than two, because a picker with a *format dropdown* is a question the user
- * should not have to answer — they have a file, and which of the two editors opens it is a fact
- * about the file rather than a choice. The extension decides it; see `formatOf`.
+ * One entry rather than three, because a picker with a *format dropdown* is a question the user
+ * should not have to answer — they have a file, and which of the editors opens it is a fact about
+ * the file rather than a choice. The extension decides it; see `formatOf`.
  */
-const IMPORT_FILTER = { name: "Diagram", extensions: ["drawio", "xml", "dbml"] };
+const IMPORT_FILTER = { name: "Diagram", extensions: ["drawio", "xml", "dbml", "excalidraw"] };
 
 /**
  * Which editor a picked file belongs to, from its extension.
  *
- * Extension and not content sniffing. The two dialects are not ambiguous in practice, and a guess
+ * Extension and not content sniffing. The dialects are not ambiguous in practice, and a guess
  * that reads the first line would be wrong in exactly the case that matters — an empty file, or a
  * DBML document that happens to open with a comment — while being invisible when it went wrong.
  */
 function formatOf(path: string): DiagramFormat {
-  return /\.dbml$/i.test(path) ? FORMAT_DBML : FORMAT_MXGRAPH;
+  if (/\.dbml$/i.test(path)) return FORMAT_DBML;
+  if (/\.excalidraw$/i.test(path)) return FORMAT_EXCALIDRAW;
+  return FORMAT_MXGRAPH;
 }
 
 /**
@@ -116,7 +119,7 @@ export async function openDiagramFile(): Promise<
   const { diagramsReadImport } = await import("../tauri/diagramsCommands");
   const doc = await diagramsReadImport(picked);
   const name = picked.split(/[\\/]/).pop() ?? "diagram";
-  return { name: name.replace(/\.(drawio|xml|dbml)$/i, ""), doc, format: formatOf(picked) };
+  return { name: name.replace(/\.(drawio|xml|dbml|excalidraw)$/i, ""), doc, format: formatOf(picked) };
 }
 
 /**

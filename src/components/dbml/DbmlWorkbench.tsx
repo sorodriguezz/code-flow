@@ -15,6 +15,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Columns3,
   Download,
   Expand,
@@ -47,6 +48,14 @@ import { DbmlConvertPanel } from "./DbmlConvertPanel";
 import { DbmlDiffPanel } from "./DbmlDiffPanel";
 import { DbmlImportPanel } from "./DbmlImportPanel";
 import { DbmlDataPanel } from "./DbmlDataPanel";
+import {
+  LaserGlyph,
+  laserColourItems,
+  laserInk,
+  loadLaserColour,
+  saveLaserColour,
+  type LaserColour,
+} from "../diagrams/Laser";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -315,6 +324,17 @@ export function DbmlWorkbench({
    */
   const [chromeHot, setChromeHot] = useState(false);
   const [searchHot, setSearchHot] = useState(false);
+  /**
+   * The laser pointer, and which of its four inks is loaded.
+   *
+   * Off whenever a schema opens: while it is on a press draws instead of selecting or panning, and a
+   * diagram that opens refusing to move because the last one was being presented is a trap. The ink
+   * is the half that is remembered — see `loadLaserColour`.
+   */
+  const [laser, setLaser] = useState(false);
+  const [laserColour, setLaserColour] = useState<LaserColour>(loadLaserColour);
+  /** The colour button's rect while its menu is open — a rect for the reason `viewAt` is one. */
+  const [laserAt, setLaserAt] = useState<DOMRect | null>(null);
 
   const canvas = useRef<DbmlCanvasHandle>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -1157,9 +1177,22 @@ export function DbmlWorkbench({
    * inspector's editors) treats it as "abandon what I am typing". Hence the guards on the
    * subscription rather than inside the handler: while any of those is open this listener is not
    * bound at all.
+   *
+   * The laser is nearer too. Full screen is where you present, so it is where the laser gets used,
+   * and the first Escape has to put the pointer down rather than throw the presenter out of full
+   * screen with it still on.
    */
   useEffect(() => {
-    if (!zen || history || reference || viewAt !== null || exportAt !== null || tool !== null) {
+    if (
+      !zen ||
+      laser ||
+      history ||
+      reference ||
+      viewAt !== null ||
+      exportAt !== null ||
+      laserAt !== null ||
+      tool !== null
+    ) {
       return;
     }
     const onKey = (event: KeyboardEvent) => {
@@ -1169,7 +1202,32 @@ export function DbmlWorkbench({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [zen, history, reference, viewAt, exportAt, tool, leaveZen]);
+  }, [zen, laser, history, reference, viewAt, exportAt, laserAt, tool, leaveZen]);
+
+  /**
+   * Escape puts the laser down — under the same guards as the listener above, so whatever is
+   * nearer still wins the press, and exactly one of the two is bound while the laser is on.
+   */
+  useEffect(() => {
+    if (
+      !laser ||
+      history ||
+      reference ||
+      viewAt !== null ||
+      exportAt !== null ||
+      laserAt !== null ||
+      tool !== null
+    ) {
+      return;
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (isTypingTarget(event.target)) return;
+      setLaser(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [laser, history, reference, viewAt, exportAt, laserAt, tool]);
 
   /**
    * Escape closes the tools drawer.
@@ -1683,6 +1741,7 @@ export function DbmlWorkbench({
                       marks={marks}
                       pinnedId={pinned ? selected : null}
                       focusRef={hoveredRef}
+                      laser={laser ? laserInk(laserColour) : null}
                       editing={{
                         blocked: editing.blocked,
                         // A drawn relationship is a foreign key until told otherwise, which is what
@@ -1805,8 +1864,42 @@ export function DbmlWorkbench({
                       where the boxes of a left-to-right layout end up. */}
                   <div
                     className={`absolute bottom-3 right-4 flex items-center gap-1.5 ${CHROME_FADE}`}
-                    style={{ opacity: chromeHot || viewAt ? 1 : DIMMED }}
+                    style={{ opacity: chromeHot || viewAt || laserAt ? 1 : DIMMED }}
                   >
+                    {/* The laser, as a split: the pointer itself, and beside it the narrow half that
+                        picks its ink. Here rather than in the toolbar because the toolbar is for the
+                        document and is gone in full screen — which is exactly where a laser is
+                        wanted. The glyph's spot is drawn in the loaded colour, so the button says
+                        which one it is without a swatch of its own. */}
+                    <div className={FLOAT_BAR}>
+                      <Tooltip label={t("diagrams.laser")} description={t("diagrams.laserHow")}>
+                        <button
+                          type="button"
+                          onClick={() => setLaser((on) => !on)}
+                          aria-pressed={laser}
+                          aria-label={t("diagrams.laser")}
+                          className={iconButtonClass({ size: "sm", active: laser })}
+                        >
+                          <LaserGlyph colour={laserInk(laserColour)} />
+                        </button>
+                      </Tooltip>
+                      <Tooltip label={t("diagrams.laserColour")}>
+                        <button
+                          type="button"
+                          onClick={(event) =>
+                            setLaserAt(laserAt ? null : event.currentTarget.getBoundingClientRect())
+                          }
+                          aria-expanded={Boolean(laserAt)}
+                          aria-haspopup="menu"
+                          aria-label={t("diagrams.laserColour")}
+                          // Up, not down: the menu opens upwards from the canvas's bottom edge.
+                          className="flex h-[26px] w-4 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] aria-expanded:bg-[var(--cf-press)] aria-expanded:text-[var(--cf-text)]"
+                        >
+                          <ChevronUp size={12} />
+                        </button>
+                      </Tooltip>
+                    </div>
+
                     <div className={FLOAT_BAR}>
                       <button
                         type="button"
@@ -1909,6 +2002,31 @@ export function DbmlWorkbench({
                         },
                         { label: t("dbml.fit"), icon: Maximize2, onClick: () => canvas.current?.fit() },
                       ]}
+                    />
+                  )}
+
+                  {laserAt && (
+                    <ContextMenu
+                      x={laserAt.left}
+                      y={laserAt.top}
+                      anchor={{
+                        top: laserAt.top,
+                        bottom: laserAt.bottom,
+                        left: laserAt.left,
+                        right: laserAt.right,
+                        align: "end",
+                      }}
+                      heading={t("diagrams.laserColour")}
+                      onClose={() => setLaserAt(null)}
+                      items={laserColourItems(
+                        laserColour,
+                        (colour) => {
+                          setLaserColour(colour);
+                          saveLaserColour(colour);
+                          setLaser(true);
+                        },
+                        t,
+                      )}
                     />
                   )}
 

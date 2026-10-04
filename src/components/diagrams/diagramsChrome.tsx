@@ -1,4 +1,7 @@
+import { PencilLine, Table2, Workflow, type LucideIcon } from "lucide-react";
 import { iconButtonClass } from "../common/Button";
+import { FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
+import type { DiagramFormat } from "../../types/diagrams";
 
 /**
  * The Diagrams workspace's shared visual vocabulary, the counterpart of `notesChrome`.
@@ -41,6 +44,20 @@ export const PANE_TITLE =
  */
 export const PANE_HEAD =
   "flex h-10 shrink-0 items-center gap-1 border-b border-[var(--cf-border)] pl-3 pr-2";
+
+/**
+ * The glyph that stands for a diagram's format — on a card with no picture yet, and on its row in
+ * the tree.
+ *
+ * One per editor, because which editor a diagram opens in is decided by its format, and a list that
+ * draws them identically makes that a surprise. Here rather than in each list, which is how the two
+ * of them used to drift: a third format added to one and not the other.
+ */
+export function formatGlyph(format: DiagramFormat): LucideIcon {
+  if (format === FORMAT_DBML) return Table2;
+  if (format === FORMAT_EXCALIDRAW) return PencilLine;
+  return Workflow;
+}
 
 /**
  * A folder's colour, pulled toward the theme's text colour so it stays legible on both.

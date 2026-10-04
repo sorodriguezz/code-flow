@@ -26,7 +26,13 @@ import {
 } from "../lib/tauri/diagramsCommands";
 import { onRepoFsChanged } from "../lib/tauri/events";
 import { builtInTemplates, toTemplate } from "../lib/diagrams/builtinTemplates";
-import { DEFAULT_FORMAT, emptyDoc, FORMAT_DBML, FORMAT_MXGRAPH } from "../lib/diagrams/doc";
+import {
+  DEFAULT_FORMAT,
+  emptyDoc,
+  FORMAT_DBML,
+  FORMAT_EXCALIDRAW,
+  FORMAT_MXGRAPH,
+} from "../lib/diagrams/doc";
 // The schema dialect's half of `appendCells`. Light — `lib/dbml`'s index deliberately does not
 // reach the parser, so importing it here costs nothing at startup. See `lib/dbml/index.ts`.
 import { mergeDbml } from "../lib/dbml/merge";
@@ -37,6 +43,7 @@ import {
   type PendingExport,
 } from "../lib/diagrams/exportOptions";
 import { appendCells } from "../lib/diagrams/mxgraph";
+import { appendScene } from "../lib/diagrams/excalidraw";
 import { descendantIds } from "../lib/diagrams/tree";
 // Reused rather than copied: these take `string[]` and `{ tags: string[] }[]`, so nothing about
 // them is note-shaped except which file they were first needed in. Two implementations of "how a
@@ -1106,8 +1113,14 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     // and the frame has to be *told* — it holds the document, not the store. A schema workbench
     // renders `draft.doc` directly, so writing it here is the whole of putting it on screen; a
     // `pendingLoad` set for it would sit there uncleared and be posted into the next drawing opened.
+    // A whiteboard's scene gets the generation beside what is drawn (`appendScene`), and its editor
+    // notices a document it did not write itself, so it needs no `pendingLoad` either.
     const isDrawing = draft.format === FORMAT_MXGRAPH;
-    const combined = isDrawing ? appendCells(draft.doc, doc) : mergeDbml(draft.doc, doc);
+    const combined = isDrawing
+      ? appendCells(draft.doc, doc)
+      : draft.format === FORMAT_EXCALIDRAW
+        ? appendScene(draft.doc, doc)
+        : mergeDbml(draft.doc, doc);
     if (combined === draft.doc) return false;
     set({
       draft: { ...draft, doc: combined, dirty: true },

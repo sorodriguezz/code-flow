@@ -17,11 +17,11 @@ component's own licence wins — which is what section 6 says.
 
 | What ships | Count |
 |---|---|
-| npm packages (production tree) | 102 resolved versions of 98 packages |
+| npm packages (production tree) | 340 resolved versions of 311 packages |
 | Rust crates (resolved for macOS and Windows) | 685 resolved versions of 599 crates |
 | C libraries compiled into the app | 5, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 2 |
-| Fonts | 4 |
+| Fonts | 10 |
 | Icon sets | 2 |
 
 A package resolved at two versions gets one row carrying both, which is why the first two counts
@@ -157,10 +157,24 @@ macOS's zlib, and on Windows the CNG cryptography libssh2 uses in place of OpenS
 | Instrument Sans | 5.3.0 (upstream v4) | OFL-1.1 | the interface | `@fontsource-variable/instrument-sans` | Copyright 2022 The Instrument Sans Project Authors (https://github.com/Instrument/instrument-sans) |
 | JetBrains Mono | 5.3.0 (upstream v24) | OFL-1.1 | the editor, terminal and code | `@fontsource-variable/jetbrains-mono` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) |
 | Roboto | 3.014 | OFL-1.1 | text in exported PDFs | inside `pdfmake` 0.3.11 (`build/vfs_fonts.js`) | Copyright 2011 The Roboto Project Authors (https://github.com/googlefonts/roboto-classic) |
+| Excalifont | 1.000 | MIT | hand-drawn text on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Excalifont`) | Copyright (c) 2024 by Excalidraw. All rights reserved. |
+| Virgil | 001.001 | OFL-1.1 | hand-drawn text in older whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Virgil`) | Copyright (c) 2011 by Your Own Font Foundry. All rights reserved. |
+| Nunito ExtraLight Medium | 3.602 | MIT | plain text on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Nunito`) | Copyright 2014 The Nunito Project Authors (https://github.com/googlefonts/nunito) |
+| Comic Shanns Regular | 1.3.0 | MIT | code on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/ComicShanns`) | Copyright (c) 2018 Shannon Miwa; Copyright (c) 2023 Jesus Gonzalez; Copyright (c) 2023 Rodrigo Batista de Moraes; Copyright (c) 2024 Fini Jastrow; Copyright (c) 2024 Kyle Beechly |
+| Lilita One | 1.002 | MIT | headings on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Lilita`) | Copyright (c) 2011 Juan Montoreano (juan@remolacha.biz), with Reserved Font Names "Lilita One" |
+| Assistant | 3.000 | OFL-1.1 | the whiteboard editor's own controls | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Assistant/Assistant-Regular.woff2`) | Copyright 2020 The Assistant Project Authors (https://github.com/hafontia/Assistant). Copyright 2010 The Source Sans Pro Authors (https://github.com/adobe-fonts/source-sans-pro), with Reserved Font Name 'Source'. Source is a trademark of Adobe Systems Incorporated in the United States and/or other countries. |
 | codicon | 1.15 | MIT | the editor's own icons | inside `monaco-editor` 0.56.0 (`esm/vs/base/browser/ui/codicons/codicon/codicon.ttf`) | — |
 
 Each OFL font carries its copyright notice and licence in its own metadata, which is where the
 SIL Open Font License allows them to travel; they are repeated here.
+The Excalifont font declares no licence of its own and ships as part of `@excalidraw/excalidraw`, under
+that package's (MIT).
+The Nunito ExtraLight Medium font declares no licence of its own and ships as part of `@excalidraw/excalidraw`, under
+that package's (MIT).
+The Comic Shanns Regular font declares no licence of its own and ships as part of `@excalidraw/excalidraw`, under
+that package's (MIT).
+The Lilita One font declares no licence of its own and ships as part of `@excalidraw/excalidraw`, under
+that package's (MIT).
 The codicon font declares no licence of its own and ships as part of `monaco-editor`, under
 that package's (MIT).
 
@@ -213,82 +227,318 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### MIT — 72 packages
+### MIT — 230 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
+| `@antfu/install-pkg` | 2.1.0 | MIT | <https://github.com/antfu-collective/install-pkg> |
+| `@babel/runtime` | 7.29.7 | MIT | <https://babel.dev/docs/en/next/babel-runtime> |
+| `@braintree/sanitize-url` | 6.0.2, 7.1.2 | MIT | <https://github.com/braintree/sanitize-url> |
+| `@excalidraw/excalidraw` | 0.18.1 | MIT | <https://github.com/excalidraw/excalidraw/tree/master/packages/excalidraw> |
+| `@excalidraw/laser-pointer` | 1.3.1 | MIT | <https://www.npmjs.com/package/@excalidraw/laser-pointer> |
+| `@excalidraw/markdown-to-text` | 0.1.2 | MIT | <https://github.com/danestves/markdown-to-text> |
+| `@excalidraw/mermaid-to-excalidraw` | 2.2.2 | MIT | <https://www.npmjs.com/package/@excalidraw/mermaid-to-excalidraw> |
+| `@excalidraw/random-username` | 1.1.0 | MIT | <https://github.com/excalidraw/random-username> |
+| `@floating-ui/core` | 1.8.0 | MIT | <https://floating-ui.com> |
+| `@floating-ui/dom` | 1.8.0 | MIT | <https://floating-ui.com> |
+| `@floating-ui/react-dom` | 2.1.9 | MIT | <https://floating-ui.com/docs/react-dom> |
+| `@floating-ui/utils` | 0.2.12 | MIT | <https://floating-ui.com> |
 | `@glideapps/ts-necessities` | 2.2.3 | MIT | <https://github.com/glideapps/ts-necessities> |
 | `@iconify-json/vscode-icons` | 1.2.69 | MIT | <https://icon-sets.iconify.design/vscode-icons> |
 | `@iconify/types` | 2.0.0 | MIT | <https://github.com/iconify/iconify> |
+| `@iconify/utils` | 3.1.7 | MIT | <https://iconify.design/docs/libraries/utils> |
+| `@mermaid-js/parser` | 0.6.3, 1.2.1 | MIT | <https://github.com/mermaid-js/mermaid/tree/develop/packages/mermaid/parser> |
 | `@monaco-editor/loader` | 1.7.0 | MIT | <https://github.com/suren-atoyan/monaco-loader> |
 | `@monaco-editor/react` | 4.7.0 | MIT | <https://github.com/suren-atoyan/monaco-react> |
 | `@noble/ciphers` | 1.3.0 | MIT | <https://paulmillr.com/noble> |
 | `@noble/hashes` | 1.8.0 | MIT | <https://paulmillr.com/noble> |
+| `@radix-ui/primitive` | 1.0.0, 1.1.1 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-arrow` | 1.1.2 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-collection` | 1.0.1 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-compose-refs` | 1.0.0, 1.1.1 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-context` | 1.0.0, 1.1.1 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-direction` | 1.0.0 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-dismissable-layer` | 1.1.5 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-focus-guards` | 1.1.1 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-focus-scope` | 1.1.2 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-id` | 1.0.0, 1.1.0 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-popover` | 1.1.6 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-popper` | 1.2.2 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-portal` | 1.1.4 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-presence` | 1.0.0, 1.1.2 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-primitive` | 1.0.1, 2.0.2 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-roving-focus` | 1.0.2 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-slot` | 1.0.1, 1.1.2 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-tabs` | 1.0.2 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-use-callback-ref` | 1.0.0, 1.1.0 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-use-controllable-state` | 1.0.0, 1.1.0 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-use-escape-keydown` | 1.1.0 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-use-layout-effect` | 1.0.0, 1.1.0 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-use-rect` | 1.1.0 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/react-use-size` | 1.1.0 | MIT | <https://radix-ui.com/primitives> |
+| `@radix-ui/rect` | 1.1.0 | MIT | <https://radix-ui.com/primitives> |
+| `@types/d3` | 7.4.3 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3> |
+| `@types/d3-array` | 3.2.2 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-array> |
+| `@types/d3-axis` | 3.0.6 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-axis> |
+| `@types/d3-brush` | 3.0.6 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-brush> |
+| `@types/d3-chord` | 3.0.6 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-chord> |
+| `@types/d3-color` | 3.1.3 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-color> |
+| `@types/d3-contour` | 3.0.6 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-contour> |
+| `@types/d3-delaunay` | 6.0.4 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-delaunay> |
+| `@types/d3-dispatch` | 3.0.7 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-dispatch> |
+| `@types/d3-drag` | 3.0.7 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-drag> |
+| `@types/d3-dsv` | 3.0.7 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-dsv> |
+| `@types/d3-ease` | 3.0.2 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-ease> |
+| `@types/d3-fetch` | 3.0.7 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-fetch> |
+| `@types/d3-force` | 3.0.10 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-force> |
+| `@types/d3-format` | 3.0.4 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-format> |
+| `@types/d3-geo` | 3.1.1 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-geo> |
+| `@types/d3-hierarchy` | 3.1.7 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-hierarchy> |
+| `@types/d3-interpolate` | 3.0.4 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-interpolate> |
+| `@types/d3-path` | 3.1.1 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-path> |
+| `@types/d3-polygon` | 3.0.2 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-polygon> |
+| `@types/d3-quadtree` | 3.0.6 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-quadtree> |
+| `@types/d3-random` | 3.0.4 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-random> |
+| `@types/d3-scale` | 4.0.9 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-scale> |
+| `@types/d3-scale-chromatic` | 3.1.0 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-scale-chromatic> |
+| `@types/d3-selection` | 3.0.12 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-selection> |
+| `@types/d3-shape` | 3.2.0 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-shape> |
+| `@types/d3-time` | 3.0.4 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-time> |
+| `@types/d3-time-format` | 4.0.3 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-time-format> |
+| `@types/d3-timer` | 3.0.2 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-timer> |
+| `@types/d3-transition` | 3.0.9 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-transition> |
+| `@types/d3-zoom` | 3.0.9 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-zoom> |
+| `@types/geojson` | 7946.0.16 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/geojson> |
 | `@types/node` | 26.2.0 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/node> |
 | `@types/react` | 19.2.17 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/react> |
+| `@types/react-dom` | 19.2.3 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/react-dom> |
 | `@types/readable-stream` | 4.0.10 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/readable-stream> |
 | `@types/trusted-types` | 2.0.7 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/trusted-types> |
 | `@types/urijs` | 1.19.26 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/urijs> |
+| `@upsetjs/venn.js` | 2.0.0 | MIT | <https://github.com/upsetjs/venn.js> |
 | `@xterm/addon-fit` | 0.11.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/addon-search` | 0.16.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/addon-web-links` | 0.12.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/addon-webgl` | 0.19.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/xterm` | 6.0.0 | MIT | <https://github.com/xtermjs/xterm.js> |
 | `abort-controller` | 3.0.0 | MIT | <https://github.com/mysticatea/abort-controller> |
+| `aria-hidden` | 1.2.6 | MIT | <https://github.com/theKashey/aria-hidden> |
 | `base64-js` | 0.0.8, 1.5.1 | MIT | <https://github.com/beatgammit/base64-js> |
+| `binary-extensions` | 2.3.0 | MIT | <https://github.com/sindresorhus/binary-extensions> |
+| `braces` | 3.0.3 | MIT | <https://github.com/micromatch/braces> |
 | `brotli` | 1.3.3 | MIT | <https://github.com/devongovett/brotli.js> |
 | `browser-or-node` | 3.0.0 | MIT | <https://github.com/flexdinesh/browser-or-node> |
 | `browserify-zlib` | 0.2.0 | MIT | <https://github.com/devongovett/browserify-zlib> |
 | `buffer` | 6.0.3 | MIT | <https://github.com/feross/buffer> |
+| `canvas-roundrect-polyfill` | 0.0.1 | MIT | <https://github.com/Kaiido/roundRect> |
+| `chevrotain-allstar` | 0.3.1 | MIT | <https://github.com/langium/chevrotain-allstar> |
+| `chokidar` | 3.6.0 | MIT | <https://github.com/paulmillr/chokidar> |
 | `clone` | 2.1.2 | MIT | <https://github.com/pvorb/node-clone> |
-| `commander` | 2.20.3 | MIT | <https://github.com/tj/commander.js> |
+| `clsx` | 1.1.1 | MIT | <https://github.com/lukeed/clsx> |
+| `commander` | 2.20.3, 7.2.0, 8.3.0 | MIT | <https://github.com/tj/commander.js> |
+| `cose-base` | 1.0.3, 2.2.0 | MIT | <https://github.com/iVis-at-Bilkent/cose-base> |
+| `cross-env` | 7.0.3 | MIT | <https://github.com/kentcdodds/cross-env> |
+| `cross-spawn` | 7.0.6 | MIT | <https://github.com/moxystudio/node-cross-spawn> |
 | `csstype` | 3.2.3 | MIT | <https://github.com/frenic/csstype> |
+| `cytoscape` | 3.34.3 | MIT | <http://js.cytoscape.org> |
+| `cytoscape-cose-bilkent` | 4.1.0 | MIT | <https://github.com/cytoscape/cytoscape.js-cose-bilkent> |
+| `cytoscape-fcose` | 2.2.0 | MIT | <https://github.com/iVis-at-Bilkent/cytoscape.js-fcose> |
+| `dagre-d3-es` | 7.0.14 | MIT | <https://github.com/tbo47/dagre-es> |
+| `dayjs` | 1.11.23 | MIT | <https://day.js.org> |
+| `detect-node-es` | 1.1.0 | MIT | <https://github.com/thekashey/detect-node> |
 | `dfa` | 1.2.0 | MIT | <https://github.com/devongovett/dfa> |
 | `discontinuous-range` | 1.0.0 | MIT | <https://github.com/dtudury/discontinuous-range> |
+| `es-toolkit` | 1.52.0 | MIT | <https://es-toolkit.dev> |
+| `es6-promise-pool` | 2.5.0 | MIT | <https://github.com/timdp/es6-promise-pool> |
 | `event-target-shim` | 5.0.1 | MIT | <https://github.com/mysticatea/event-target-shim> |
 | `events` | 3.3.0 | MIT | <https://github.com/Gozala/events> |
 | `fast-deep-equal` | 3.1.3 | MIT | <https://github.com/epoberezkin/fast-deep-equal> |
+| `fastdom` | 1.0.12 | MIT | <https://github.com/wilsonpage/fastdom> |
+| `fill-range` | 7.1.1 | MIT | <https://github.com/jonschlinkert/fill-range> |
 | `fontkit` | 2.0.4 | MIT | <https://github.com/foliojs/fontkit> |
 | `framer-motion` | 12.42.2 | MIT | <https://github.com/motiondivision/motion> |
+| `fsevents` | 2.3.3 | MIT | <https://github.com/fsevents/fsevents> |
+| `fuzzy` | 0.1.3 | MIT | <https://github.com/mattyork/fuzzy> |
+| `get-nonce` | 1.0.1 | MIT | <https://github.com/theKashey/get-nonce> |
+| `glur` | 1.1.2 | MIT | <https://github.com/andr83/glur/issues> |
+| `hachure-fill` | 0.5.2 | MIT | <https://github.com/pshihn/hachure-fill> |
+| `iconv-lite` | 0.6.3 | MIT | <https://github.com/ashtuchkin/iconv-lite> |
+| `image-blob-reduce` | 3.0.1 | MIT | <https://github.com/nodeca/image-blob-reduce> |
+| `immutable` | 4.3.9 | MIT | <https://immutable-js.com> |
+| `import-meta-resolve` | 4.2.0 | MIT | <https://github.com/wooorm/import-meta-resolve> |
+| `is-binary-path` | 2.1.0 | MIT | <https://github.com/sindresorhus/is-binary-path> |
+| `is-extglob` | 2.1.1 | MIT | <https://github.com/jonschlinkert/is-extglob> |
+| `is-glob` | 4.0.3 | MIT | <https://github.com/micromatch/is-glob> |
+| `is-number` | 7.0.0 | MIT | <https://github.com/jonschlinkert/is-number> |
 | `is-url` | 1.2.4 | MIT | <https://github.com/segmentio/is-url> |
+| `jotai` | 2.11.0 | MIT | <https://github.com/pmndrs/jotai> |
+| `jotai-scope` | 0.7.2 | MIT | <https://github.com/jotaijs/jotai-scope> |
 | `js-md5` | 0.8.3 | MIT | <https://github.com/emn178/js-md5> |
+| `katex` | 0.16.47 | MIT | <https://katex.org> |
+| `khroma` | 2.1.0 | MIT | <https://github.com/fabiospampinato/khroma> |
+| `langium` | 3.3.1 | MIT | <https://langium.org> |
+| `layout-base` | 1.0.2, 2.0.1 | MIT | <https://github.com/iVis-at-Bilkent/layout-base> |
 | `linebreak` | 1.1.0 | MIT | <https://github.com/devongovett/linebreaker> |
 | `lodash` | 4.18.1 | MIT | <https://lodash.com> |
-| `lodash-es` | 4.18.1 | MIT | <https://lodash.com/custom-builds> |
+| `lodash-es` | 4.17.21, 4.18.1 | MIT | <https://lodash.com/custom-builds> |
+| `lodash.debounce` | 4.0.8 | MIT | <https://lodash.com> |
+| `lodash.throttle` | 4.1.1 | MIT | <https://lodash.com> |
 | `luxon` | 3.7.2 | MIT | <https://github.com/moment/luxon> |
-| `marked` | 14.0.0, 18.0.7 | MIT | <https://marked.js.org> |
+| `marked` | 14.0.0, 16.4.2, 18.0.7 | MIT | <https://marked.js.org> |
+| `mermaid` | 11.17.2 | MIT | <https://github.com/mermaid-js/mermaid> |
 | `monaco-editor` | 0.56.0 | MIT | <https://github.com/microsoft/monaco-editor> |
 | `motion-dom` | 12.42.2 | MIT | <https://github.com/motiondivision/motion> |
 | `motion-utils` | 12.39.0 | MIT | <https://github.com/motiondivision/motion> |
+| `multimath` | 2.0.0 | MIT | <https://github.com/nodeca/multimath> |
+| `nanoid` | 3.3.3, 4.0.2 | MIT | <https://github.com/ai/nanoid> |
 | `nearley` | 2.20.1 | MIT | <https://github.com/hardmath123/nearley> |
+| `normalize-path` | 3.0.0 | MIT | <https://github.com/jonschlinkert/normalize-path> |
+| `object-assign` | 4.1.1 | MIT | <https://github.com/sindresorhus/object-assign> |
+| `open-color` | 1.9.1 | MIT | <https://github.com/yeun/open-color> |
+| `package-manager-detector` | 1.8.0 | MIT | <https://github.com/antfu-collective/package-manager-detector> |
 | `pako` | 0.2.9 | MIT | <https://github.com/nodeca/pako> |
 | `parsimmon` | 1.18.1 | MIT | <https://github.com/jneen/parsimmon> |
+| `path-data-parser` | 0.1.0 | MIT | <https://github.com/pshihn/path-data-parser> |
+| `path-key` | 3.1.1 | MIT | <https://github.com/sindresorhus/path-key> |
 | `pathe` | 2.0.3 | MIT | <https://github.com/unjs/pathe> |
 | `pdfkit` | 0.19.1 | MIT | <http://pdfkit.org> |
 | `pdfmake` | 0.3.11 | MIT | <http://pdfmake.org> |
+| `perfect-freehand` | 1.2.0 | MIT | <https://github.com/steveruizok/perfect-freehand> |
+| `pica` | 7.1.1 | MIT | <https://github.com/nodeca/pica> |
+| `picomatch` | 2.3.2 | MIT | <https://github.com/micromatch/picomatch> |
 | `pluralize` | 8.0.0 | MIT | <https://github.com/blakeembrey/pluralize> |
+| `png-chunk-text` | 1.0.0 | MIT | <https://github.com/hughsk/png-chunk-text> |
+| `png-chunks-encode` | 1.0.0 | MIT | <https://github.com/hughsk/png-chunks-encode> |
+| `png-chunks-extract` | 1.0.0 | MIT | <https://github.com/hughsk/png-chunks-extract> |
 | `png-js` | 1.1.0 | MIT | <https://github.com/devongovett/png.js> |
+| `points-on-curve` | 0.2.0, 1.0.1 | MIT | <https://github.com/pshihn/bezier-points> |
+| `points-on-path` | 0.2.1 | MIT | <https://github.com/pshihn/points-on-path> |
 | `process` | 0.11.10 | MIT | <https://github.com/shtylman/node-process> |
 | `qrcode-generator` | 2.0.4 | MIT | <https://github.com/kazuhikoarase/qrcode-generator> |
 | `randexp` | 0.4.6 | MIT | <http://fent.github.io/randexp.js> |
 | `react` | 19.2.8 | MIT | <https://react.dev> |
 | `react-dom` | 19.2.8 | MIT | <https://react.dev> |
+| `react-remove-scroll` | 2.7.2 | MIT | <https://github.com/theKashey/react-remove-scroll> |
+| `react-remove-scroll-bar` | 2.3.8 | MIT | <https://github.com/theKashey/react-remove-scroll-bar> |
+| `react-style-singleton` | 2.2.3 | MIT | <https://github.com/theKashey/react-style-singleton> |
 | `readable-stream` | 4.5.2 | MIT | <https://github.com/nodejs/readable-stream> |
+| `readdirp` | 3.6.0 | MIT | <https://github.com/paulmillr/readdirp> |
 | `restructure` | 3.0.2 | MIT | <https://github.com/devongovett/restructure> |
 | `ret` | 0.1.15 | MIT | <https://github.com/fent/ret.js> |
+| `roughjs` | 4.6.4, 4.6.6 | MIT | <https://roughjs.com> |
 | `safe-buffer` | 5.1.2, 5.2.1 | MIT | <https://github.com/feross/safe-buffer> |
+| `safer-buffer` | 2.1.2 | MIT | <https://github.com/ChALkeR/safer-buffer> |
+| `sass` | 1.51.0 | MIT | <https://github.com/sass/dart-sass> |
 | `scheduler` | 0.27.0 | MIT | <https://react.dev> |
+| `shebang-command` | 2.0.0 | MIT | <https://github.com/kevva/shebang-command> |
+| `shebang-regex` | 3.0.0 | MIT | <https://github.com/sindresorhus/shebang-regex> |
+| `sliced` | 1.0.1 | MIT | <https://github.com/aheckmann/sliced> |
 | `sql-formatter` | 15.9.0 | MIT | <https://github.com/sql-formatter-org/sql-formatter> |
 | `state-local` | 1.0.7 | MIT | <https://github.com/suren-atoyan/state-local> |
+| `strictdom` | 1.0.1 | MIT | <https://github.com/wilsonpage/strictdom> |
 | `string_decoder` | 1.3.0 | MIT | <https://github.com/nodejs/string_decoder> |
+| `stylis` | 4.4.0 | MIT | <https://github.com/thysultan/stylis.js> |
 | `tiny-inflate` | 1.0.3 | MIT | <https://github.com/devongovett/tiny-inflate> |
+| `tinyexec` | 1.3.1 | MIT | <https://github.com/tinylibs/tinyexec> |
+| `to-regex-range` | 5.0.1 | MIT | <https://github.com/micromatch/to-regex-range> |
+| `ts-dedent` | 2.3.0 | MIT | <https://github.com/tamino-martinius/node-ts-dedent> |
+| `tunnel-rat` | 0.1.2 | MIT | <https://github.com/pmndrs/tunnel-rat> |
 | `undici-types` | 8.3.0 | MIT | <https://undici.nodejs.org> |
 | `unicode-properties` | 1.4.1 | MIT | <https://github.com/devongovett/unicode-properties> |
 | `unicode-trie` | 2.0.0 | MIT | <https://github.com/devongovett/unicode-trie> |
 | `urijs` | 1.19.11 | MIT | <http://medialize.github.io/URI.js> |
+| `use-callback-ref` | 1.3.3 | MIT | <https://github.com/theKashey/use-callback-ref> |
+| `use-sidecar` | 1.1.3 | MIT | <https://github.com/theKashey/use-sidecar> |
+| `use-sync-external-store` | 1.7.0 | MIT | <https://github.com/react/react> |
+| `uuid` | 14.0.2 | MIT | <https://github.com/uuidjs/uuid> |
+| `vscode-jsonrpc` | 8.2.0 | MIT | <https://github.com/Microsoft/vscode-languageserver-node> |
+| `vscode-languageserver` | 9.0.1 | MIT | <https://github.com/Microsoft/vscode-languageserver-node> |
+| `vscode-languageserver-protocol` | 3.17.5 | MIT | <https://github.com/Microsoft/vscode-languageserver-node> |
+| `vscode-languageserver-textdocument` | 1.0.15 | MIT | <https://github.com/Microsoft/vscode-languageserver-node> |
+| `vscode-languageserver-types` | 3.17.5 | MIT | <https://github.com/Microsoft/vscode-languageserver-node> |
+| `vscode-uri` | 3.0.8 | MIT | <https://github.com/microsoft/vscode-uri> |
+| `webworkify` | 1.5.0 | MIT | <https://github.com/substack/webworkify> |
 | `wordwrap` | 1.0.0 | MIT | <https://github.com/substack/node-wordwrap> |
 | `xmldoc` | 2.0.3 | MIT | <https://github.com/nfarina/xmldoc> |
-| `zustand` | 5.0.14 | MIT | <https://github.com/pmndrs/zustand> |
+| `zustand` | 4.5.7, 5.0.14 | MIT | <https://github.com/pmndrs/zustand> |
+
+### ISC — 39 packages
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `anymatch` | 3.1.3 | ISC | <https://github.com/micromatch/anymatch> |
+| `d3` | 7.9.0 | ISC | <https://d3js.org> |
+| `d3-array` | 3.2.4 | ISC | <https://d3js.org/d3-array> |
+| `d3-axis` | 3.0.0 | ISC | <https://d3js.org/d3-axis> |
+| `d3-brush` | 3.0.0 | ISC | <https://d3js.org/d3-brush> |
+| `d3-chord` | 3.0.1 | ISC | <https://d3js.org/d3-chord> |
+| `d3-color` | 3.1.0 | ISC | <https://d3js.org/d3-color> |
+| `d3-contour` | 4.0.2 | ISC | <https://d3js.org/d3-contour> |
+| `d3-delaunay` | 6.0.4 | ISC | <https://github.com/d3/d3-delaunay> |
+| `d3-dispatch` | 3.0.1 | ISC | <https://d3js.org/d3-dispatch> |
+| `d3-drag` | 3.0.0 | ISC | <https://d3js.org/d3-drag> |
+| `d3-dsv` | 3.0.1 | ISC | <https://d3js.org/d3-dsv> |
+| `d3-fetch` | 3.0.1 | ISC | <https://d3js.org/d3-fetch> |
+| `d3-force` | 3.0.0 | ISC | <https://d3js.org/d3-force> |
+| `d3-format` | 3.1.2 | ISC | <https://d3js.org/d3-format> |
+| `d3-geo` | 3.1.1 | ISC | <https://d3js.org/d3-geo> |
+| `d3-hierarchy` | 3.1.2 | ISC | <https://d3js.org/d3-hierarchy> |
+| `d3-interpolate` | 3.0.1 | ISC | <https://d3js.org/d3-interpolate> |
+| `d3-path` | 3.1.0 | ISC | <https://d3js.org/d3-path> |
+| `d3-polygon` | 3.0.1 | ISC | <https://d3js.org/d3-polygon> |
+| `d3-quadtree` | 3.0.1 | ISC | <https://d3js.org/d3-quadtree> |
+| `d3-random` | 3.0.1 | ISC | <https://d3js.org/d3-random> |
+| `d3-scale` | 4.0.2 | ISC | <https://d3js.org/d3-scale> |
+| `d3-scale-chromatic` | 3.1.0 | ISC | <https://d3js.org/d3-scale-chromatic> |
+| `d3-selection` | 3.0.0 | ISC | <https://d3js.org/d3-selection> |
+| `d3-shape` | 3.2.0 | ISC | <https://d3js.org/d3-shape> |
+| `d3-time` | 3.1.0 | ISC | <https://d3js.org/d3-time> |
+| `d3-time-format` | 4.1.0 | ISC | <https://d3js.org/d3-time-format> |
+| `d3-timer` | 3.0.1 | ISC | <https://d3js.org/d3-timer> |
+| `d3-transition` | 3.0.1 | ISC | <https://d3js.org/d3-transition> |
+| `d3-zoom` | 3.0.0 | ISC | <https://d3js.org/d3-zoom> |
+| `delaunator` | 5.1.0 | ISC | <https://github.com/mapbox/delaunator> |
+| `glob-parent` | 5.1.2 | ISC | <https://github.com/gulpjs/glob-parent> |
+| `inherits` | 2.0.4 | ISC | <https://github.com/isaacs/inherits> |
+| `internmap` | 1.0.1, 2.0.3 | ISC | <https://github.com/mbostock/internmap> |
+| `isexe` | 2.0.0 | ISC | <https://github.com/isaacs/isexe> |
+| `lucide-react` | 1.25.0 | ISC | <https://lucide.dev> |
+| `which` | 2.0.2 | ISC | <https://github.com/isaacs/node-which> |
+| `yaml` | 2.9.0 | ISC | <https://eemeli.org/yaml> |
+
+### Apache-2.0 — 14 packages
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `@chevrotain/cst-dts-gen` | 11.0.3 | Apache-2.0 | <https://github.com/Chevrotain/chevrotain> |
+| `@chevrotain/gast` | 11.0.3 | Apache-2.0 | <https://github.com/Chevrotain/chevrotain> |
+| `@chevrotain/regexp-to-ast` | 11.0.3 | Apache-2.0 | <https://github.com/Chevrotain/chevrotain> |
+| `@chevrotain/types` | 11.0.3, 11.1.2 | Apache-2.0 | <https://chevrotain.io/documentation> |
+| `@chevrotain/utils` | 11.0.3 | Apache-2.0 | <https://github.com/Chevrotain/chevrotain> |
+| `@dbml/core` | 8.3.1 | Apache-2.0 | <https://dbml.dbdiagram.io> |
+| `@dbml/parse` | 8.3.1 | Apache-2.0 | <https://dbml.dbdiagram.io> |
+| `@swc/helpers` | 0.5.23 | Apache-2.0 | <https://swc.rs> |
+| `browser-fs-access` | 0.29.1 | Apache-2.0 | <https://github.com/GoogleChromeLabs/browser-fs-access> |
+| `chevrotain` | 11.0.3 | Apache-2.0 | <https://chevrotain.io/docs> |
+| `collection-utils` | 1.0.1 | Apache-2.0 | <https://github.com/quicktype/collection-utils> |
+| `crc-32` | 0.3.0 | Apache-2.0 | <https://github.com/SheetJS/js-crc32> |
+| `pwacompat` | 2.0.17 | Apache-2.0 | <https://github.com/GoogleChrome/pwacompat> |
+| `quicktype-core` | 26.0.0 | Apache-2.0 | <https://github.com/glideapps/quicktype> |
+
+### BSD-3-Clause — 10 packages
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `antlr4` | 4.13.2 | BSD-3-Clause | <https://github.com/antlr/antlr4> |
+| `d3-array` | 2.12.1 | BSD-3-Clause | <https://d3js.org/d3-array> |
+| `d3-ease` | 3.0.1 | BSD-3-Clause | <https://d3js.org/d3-ease> |
+| `d3-path` | 1.0.9 | BSD-3-Clause | <https://d3js.org/d3-path> |
+| `d3-sankey` | 0.12.3 | BSD-3-Clause | <https://github.com/d3/d3-sankey> |
+| `d3-shape` | 1.3.7 | BSD-3-Clause | <https://d3js.org/d3-shape> |
+| `ieee754` | 1.2.1 | BSD-3-Clause | <https://github.com/feross/ieee754> |
+| `moo` | 0.5.3 | BSD-3-Clause | <https://github.com/tjvr/moo> |
+| `rw` | 1.3.3 | BSD-3-Clause | <https://github.com/mbostock/rw> |
+| `source-map-js` | 1.2.1 | BSD-3-Clause | <https://github.com/7rulnik/source-map-js> |
 
 ### Apache-2.0 OR MIT — 6 packages
 
@@ -301,37 +551,13 @@ because there the order carries meaning.
 | `@tauri-apps/plugin-process` | 2.3.1 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
 | `@tauri-apps/plugin-updater` | 2.10.1 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
 
-### Apache-2.0 — 5 packages
-
-| Component | Version | Licence (SPDX) | Project |
-|---|---|---|---|
-| `@dbml/core` | 8.3.1 | Apache-2.0 | <https://dbml.dbdiagram.io> |
-| `@dbml/parse` | 8.3.1 | Apache-2.0 | <https://dbml.dbdiagram.io> |
-| `@swc/helpers` | 0.5.23 | Apache-2.0 | <https://swc.rs> |
-| `collection-utils` | 1.0.1 | Apache-2.0 | <https://github.com/quicktype/collection-utils> |
-| `quicktype-core` | 26.0.0 | Apache-2.0 | <https://github.com/glideapps/quicktype> |
-
-### BSD-3-Clause — 3 packages
-
-| Component | Version | Licence (SPDX) | Project |
-|---|---|---|---|
-| `antlr4` | 4.13.2 | BSD-3-Clause | <https://github.com/antlr/antlr4> |
-| `ieee754` | 1.2.1 | BSD-3-Clause | <https://github.com/feross/ieee754> |
-| `moo` | 0.5.3 | BSD-3-Clause | <https://github.com/tjvr/moo> |
-
-### CC0-1.0 — 2 packages
+### CC0-1.0 — 3 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `@iconify-json/logos` | 1.2.12 | CC0-1.0 | <https://icon-sets.iconify.design/logos> |
+| `fractional-indexing` | 3.2.0 | CC0-1.0 | <https://github.com/rocicorp/fractional-indexing> |
 | `railroad-diagrams` | 1.0.0 | CC0-1.0 | <https://github.com/tabatkins/railroad-diagrams> |
-
-### ISC — 2 packages
-
-| Component | Version | Licence (SPDX) | Project |
-|---|---|---|---|
-| `lucide-react` | 1.25.0 | ISC | <https://lucide.dev> |
-| `yaml` | 2.9.0 | ISC | <https://eemeli.org/yaml> |
 
 ### OFL-1.1 — 2 packages
 
@@ -362,7 +588,7 @@ because there the order carries meaning.
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
-| `pako` | 1.0.11 | MIT AND Zlib | <https://github.com/nodeca/pako> |
+| `pako` | 1.0.11, 2.0.3 | MIT AND Zlib | <https://github.com/nodeca/pako> |
 
 ### MPL-2.0 — 1 package
 
@@ -375,6 +601,12 @@ because there the order carries meaning.
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `argparse` | 2.0.1 | Python-2.0 | <https://github.com/nodeca/argparse> |
+
+### Unlicense — 1 package
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `robust-predicates` | 3.0.3 | Unlicense | <https://github.com/mourner/robust-predicates> |
 
 ## Rust crates
 
@@ -1142,10 +1374,16 @@ the version listed, and they are the authoritative record of what they cover.
 | Component | Version | Kind | File |
 |---|---|---|---|
 | `cfg_aliases` | 0.2.2 | crate | `NOTICES.md` |
+| `es-toolkit` | 1.52.0 | npm | `NOTICE` |
 | `moka` | 0.12.15 | crate | `NOTICE` |
 | `monaco-editor` | 0.56.0 | npm | `ThirdPartyNotices.txt` |
 | `security-framework` | 2.11.1 | crate | `THIRD_PARTY` |
 | `security-framework` | 3.7.0 | crate | `THIRD_PARTY` |
+| `vscode-jsonrpc` | 8.2.0 | npm | `thirdpartynotices.txt` |
+| `vscode-languageserver` | 9.0.1 | npm | `thirdpartynotices.txt` |
+| `vscode-languageserver-protocol` | 3.17.5 | npm | `thirdpartynotices.txt` |
+| `vscode-languageserver-textdocument` | 1.0.15 | npm | `thirdpartynotices.txt` |
+| `vscode-languageserver-types` | 3.17.5 | npm | `thirdpartynotices.txt` |
 
 ## Models downloaded at runtime
 

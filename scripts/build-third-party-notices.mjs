@@ -49,6 +49,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { brotliDecompressSync } from "node:zlib";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "THIRD-PARTY-NOTICES.md");
@@ -249,15 +250,26 @@ const LINKS_REVIEWED = [
 /**
  * The fonts the frontend ships, and where each one's licence is read from.
  *
- * `fontsource` packages describe themselves in `metadata.json`. The other two are fonts *inside* a
+ * `fontsource` packages describe themselves in `metadata.json`. The others are fonts *inside* a
  * package whose own licence is not the font's — pdfmake embeds Roboto as base64 in the file the app
  * imports — so their licence is read out of the font's `name` table instead. A font that carries
  * no licence of its own ships under its package's, which is said so rather than inferred.
+ *
+ * Excalidraw's are WOFF2 (`kind: "woff2"`), served by `excalidrawFonts` in `vite.config.ts` — every
+ * family in the package but the three that plugin leaves out (Xiaolai, Cascadia, Liberation). Where
+ * `file` is a folder, the family is split into subsets and the first is read: they share one `name`
+ * table. Their names are the files' own, odd ones included — the subsetter renamed Nunito.
  */
 const FONTS = [
   { family: "Instrument Sans", use: "the interface", package: "@fontsource-variable/instrument-sans", kind: "fontsource" },
   { family: "JetBrains Mono", use: "the editor, terminal and code", package: "@fontsource-variable/jetbrains-mono", kind: "fontsource" },
   { family: "Roboto", use: "text in exported PDFs", package: "pdfmake", kind: "vfs", file: "build/vfs_fonts.js", entry: "Roboto-Regular.ttf" },
+  { family: "Excalifont", use: "hand-drawn text on whiteboards", package: "@excalidraw/excalidraw", kind: "woff2", file: "dist/prod/fonts/Excalifont" },
+  { family: "Virgil", use: "hand-drawn text in older whiteboards", package: "@excalidraw/excalidraw", kind: "woff2", file: "dist/prod/fonts/Virgil" },
+  { family: "Nunito ExtraLight Medium", use: "plain text on whiteboards", package: "@excalidraw/excalidraw", kind: "woff2", file: "dist/prod/fonts/Nunito" },
+  { family: "Comic Shanns Regular", use: "code on whiteboards", package: "@excalidraw/excalidraw", kind: "woff2", file: "dist/prod/fonts/ComicShanns" },
+  { family: "Lilita One", use: "headings on whiteboards", package: "@excalidraw/excalidraw", kind: "woff2", file: "dist/prod/fonts/Lilita" },
+  { family: "Assistant", use: "the whiteboard editor's own controls", package: "@excalidraw/excalidraw", kind: "woff2", file: "dist/prod/fonts/Assistant/Assistant-Regular.woff2" },
   { family: "codicon", use: "the editor's own icons", package: "monaco-editor", kind: "ttf", file: "esm/vs/base/browser/ui/codicons/codicon/codicon.ttf" },
 ];
 
@@ -284,6 +296,28 @@ const ELECTIONS = {
     why: "the other branch is MPL-2.0; electing Apache-2.0 keeps DOMPurify out of the source-disclosure block above, and it ships unmodified either way",
   },
 };
+
+/**
+ * Packages whose `package.json` names no licence — `pnpm licenses list` reports them as "Unknown" —
+ * and the licence their own licence file grants. Read back from that file on every run, so a release
+ * that changes it stops the script instead of being listed under a licence it no longer carries.
+ */
+const UNDECLARED = {
+  // Mermaid's colour library, here through Excalidraw's Mermaid import.
+  khroma: { licence: "MIT", text: /^The MIT License/i },
+};
+
+/** The licence of a package that declares none — see `UNDECLARED`. "Unknown" when nobody has read it. */
+function undeclared(pkg) {
+  const known = UNDECLARED[pkg.name];
+  if (!known) return "Unknown";
+  for (const dir of pkg.paths) {
+    const file = readdirSync(dir).find((name) => /^licen[cs]e(?:\.(?:md|txt))?$/i.test(name));
+    const text = file ? readFileSync(join(dir, file), "utf8").trim() : "";
+    if (!known.text.test(text)) fail(`${pkg.name}'s licence file no longer reads as ${known.licence} — read it, then update UNDECLARED`);
+  }
+  return known.licence;
+}
 
 /** How an `A OR B` licence resolves when no explicit election covers it. First match wins. */
 const PREFERENCE = [
@@ -483,7 +517,7 @@ function collectNpm() {
   const dirs = new Map();
   for (const packages of Object.values(grouped)) {
     for (const pkg of packages) {
-      const declared = normalise(pkg.license);
+      const declared = pkg.license === "Unknown" ? undeclared(pkg) : normalise(pkg.license);
       components.push({
         name: pkg.name,
         versions: [...new Set(pkg.versions)].sort(byText),
@@ -680,7 +714,14 @@ function collectFonts(npmDirs) {
     }
 
     let bytes;
-    if (font.kind === "vfs") {
+    if (font.kind === "woff2") {
+      const path = join(dir, font.file);
+      const file = statSync(path).isDirectory()
+        ? join(path, readdirSync(path).filter((name) => name.endsWith(".woff2")).sort()[0] ?? "")
+        : path;
+      if (!existsSync(file)) fail(`${font.package}/${font.file} holds no .woff2 any more — update FONTS`);
+      bytes = sfntFromWoff2(readFileSync(file), `${font.package}/${font.file}`);
+    } else if (font.kind === "vfs") {
       const source = readFileSync(join(dir, font.file), "utf8");
       const quoted = font.entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const match = source.match(new RegExp(`"${quoted}"\\s*:\\s*"([A-Za-z0-9+/=]+)"`));
@@ -700,7 +741,7 @@ function collectFonts(npmDirs) {
       licence: own ?? packageLicence,
       ships: `inside \`${font.package}\` ${version} (\`${font.file}\`)`,
       use: font.use,
-      copyright: names[0] ?? null,
+      copyright: copyrightLine(names[0]),
       inherited: own === null,
       package: font.package,
     });
@@ -1588,6 +1629,68 @@ function fontFiles(dir) {
   };
   walk(dir);
   return count;
+}
+
+/**
+ * A font's copyright notice as one table cell. Most fonts keep a line there; Comic Shanns keeps its
+ * whole MIT licence, which would run the table into a page of prose — so a notice spanning lines is
+ * cut down to the lines that are copyright statements.
+ */
+function copyrightLine(text) {
+  if (!text) return null;
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const statements = lines.filter((line) => /^(?:copyright|©)/i.test(line));
+  return (lines.length > 1 && statements.length > 0 ? statements.join("; ") : lines.join(" ")) || null;
+}
+
+/**
+ * A WOFF2 font's `name` table, wrapped as the smallest TrueType file `fontNames` can read.
+ *
+ * WOFF2 is a directory of tables followed by one Brotli stream holding all of them back to back. The
+ * `name` table is never transformed, so finding it is summing the stored lengths of the tables
+ * before it; nothing else in the font is decoded.
+ */
+function sfntFromWoff2(buffer, what) {
+  if (buffer.toString("latin1", 0, 4) !== "wOF2") fail(`${what} is not a WOFF2 font`);
+  if (buffer.toString("latin1", 4, 8) === "ttcf") fail(`${what} is a font collection, which this script does not read`);
+  const known = [
+    "cmap", "head", "hhea", "hmtx", "maxp", "name", "OS/2", "post", "cvt ", "fpgm", "glyf", "loca", "prep",
+    "CFF ", "VORG", "EBDT", "EBLC", "gasp", "hdmx", "kern", "LTSH", "PCLT", "VDMX", "vhea", "vmtx", "BASE",
+    "GDEF", "GPOS", "GSUB", "EBSC", "JSTF", "MATH", "CBDT", "CBLC", "COLR", "CPAL", "SVG ", "sbix", "acnt",
+    "avar", "bdat", "bloc", "bsln", "cvar", "fdsc", "feat", "fmtx", "fvar", "gvar", "hsty", "just", "lcar",
+    "mort", "morx", "opbd", "prop", "trak", "Zapf", "Silf", "Glat", "Gloc", "Feat", "Sill",
+  ];
+  let at = 48;
+  const base128 = () => {
+    let value = 0;
+    for (let i = 0; i < 5; i += 1) {
+      const byte = buffer[at++];
+      value = value * 128 + (byte & 0x7f);
+      if (!(byte & 0x80)) return value;
+    }
+    fail(`${what} has a malformed table directory`);
+  };
+  let offset = 0;
+  let name = null;
+  for (let i = 0; i < buffer.readUInt16BE(12); i += 1) {
+    const flags = buffer[at++];
+    const tag = (flags & 0x3f) === 63 ? buffer.toString("latin1", at, (at += 4)) : known[flags & 0x3f];
+    const stored = base128();
+    // `glyf` and `loca` are transformed unless flagged otherwise; every other table, only if flagged.
+    const transformed = tag === "glyf" || tag === "loca" ? flags >> 6 === 0 : flags >> 6 !== 0;
+    const length = transformed ? base128() : stored;
+    if (tag === "name") name = { offset, length };
+    offset += length;
+  }
+  if (!name) fail(`${what} has no name table`);
+  const tables = brotliDecompressSync(buffer.subarray(at, at + buffer.readUInt32BE(20)));
+  const header = Buffer.alloc(28);
+  header.writeUInt32BE(0x00010000, 0);
+  header.writeUInt16BE(1, 4);
+  header.write("name", 12, "latin1");
+  header.writeUInt32BE(28, 20);
+  header.writeUInt32BE(name.length, 24);
+  return Buffer.concat([header, tables.subarray(name.offset, name.offset + name.length)]);
 }
 
 /** `17.0.2` -> `17`, for the Adoptium repository name. */

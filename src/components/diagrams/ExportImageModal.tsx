@@ -13,6 +13,7 @@ import {
   type ImageExportOptions,
 } from "../../lib/diagrams/exportOptions";
 import { useT } from "../../state/languageStore";
+import { FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
 
 /**
  * What the picture should look like, asked once, before the file dialog.
@@ -48,6 +49,10 @@ export function ExportImageModal({
   onClose: () => void;
 }) {
   const t = useT();
+  /** What is being exported — a whiteboard's export takes fewer of these options. */
+  const diagram = useDiagramsStore(
+    (s) => s.diagrams.find((entry) => entry.id === s.activeId)?.format ?? "",
+  );
   const setExportOptions = useDiagramsStore((s) => s.setExportOptions);
   const requestExport = useDiagramsStore((s) => s.requestExport);
 
@@ -74,13 +79,15 @@ export function ExportImageModal({
 
   /** The reason a row is off, or `undefined` when it is on and the row shows its own hint. */
   const unavailable = (option: ExportOptionKey): string | undefined =>
-    supportsOption(format, option)
+    supportsOption(format, option, diagram)
       ? undefined
-      : option === "appearance"
-        ? t("diagrams.exportOptions.onlySvg")
-        : t("diagrams.exportOptions.onlyRaster");
+      : diagram === FORMAT_EXCALIDRAW
+        ? t("diagrams.exportOptions.notWhiteboard")
+        : option === "appearance"
+          ? t("diagrams.exportOptions.onlySvg")
+          : t("diagrams.exportOptions.onlyRaster");
 
-  const off = (option: ExportOptionKey) => !supportsOption(format, option);
+  const off = (option: ExportOptionKey) => !supportsOption(format, option, diagram);
 
   const restore = () => {
     setDraft(DEFAULT_EXPORT_OPTIONS);

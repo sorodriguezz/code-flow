@@ -1,5 +1,7 @@
 import type { EmbedAction } from "./embed";
 import type { ExportFormat } from "./exportFile";
+import { FORMAT_EXCALIDRAW } from "./doc";
+import type { DiagramFormat } from "../../types/diagrams";
 
 /**
  * What the user gets to decide about a picture of a diagram, and how that becomes a message.
@@ -55,7 +57,7 @@ import type { ExportFormat } from "./exportFile";
  */
 
 /** The formats that produce a picture, which is to say every one that is not a document. */
-export type ImageExportFormat = Exclude<ExportFormat, "drawio" | "dbml">;
+export type ImageExportFormat = Exclude<ExportFormat, "drawio" | "dbml" | "excalidraw">;
 
 /** The choices the export dialog collects. */
 export interface ImageExportOptions {
@@ -110,6 +112,7 @@ export type ExportOptionKey = keyof ImageExportOptions;
  */
 export type PendingExport =
   | { format: "drawio" }
+  | { format: "excalidraw" }
   | { format: ImageExportFormat; options: ImageExportOptions };
 
 /**
@@ -125,8 +128,23 @@ const RESTRICTED_TO: Partial<Record<ExportOptionKey, readonly ImageExportFormat[
   appearance: ["svg"],
 };
 
-/** Whether an option means anything for this format. Anything not in the table applies to all. */
-export function supportsOption(format: ImageExportFormat, option: ExportOptionKey): boolean {
+/**
+ * What a whiteboard's export has no counterpart for. Excalidraw draws no shadows, no grid and no
+ * page into a picture — and its dark rendering reaches all three formats, not only SVG, which is
+ * why the table above does not apply to it at all.
+ */
+const NOT_ON_WHITEBOARDS: readonly ExportOptionKey[] = ["shadow", "grid", "size"];
+
+/**
+ * Whether an option means anything for this format, from this kind of diagram. Anything not in the
+ * table applies to all. The diagram's own format defaults to a drawing, the only kind there was.
+ */
+export function supportsOption(
+  format: ImageExportFormat,
+  option: ExportOptionKey,
+  diagram?: DiagramFormat,
+): boolean {
+  if (diagram === FORMAT_EXCALIDRAW) return !NOT_ON_WHITEBOARDS.includes(option);
   const only = RESTRICTED_TO[option];
   return only === undefined || only.includes(format);
 }

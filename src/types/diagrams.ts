@@ -28,11 +28,13 @@
  * branches on it must have a default arm; code that only stores and forwards it — which is most of
  * the app — should not look at it at all.
  *
- * Two dialects exist. `mxgraph` is the drawing one, edited by the embedded draw.io; `dbml` is a
- * database schema as text, edited by `components/dbml/DbmlWorkbench`. The branch between them is in
- * exactly one place — `DiagramsView` picks the editor — which is what the column was for.
+ * Three dialects exist. `mxgraph` is the drawing one, edited by the embedded draw.io; `dbml` is a
+ * database schema as text, edited by `components/dbml/DbmlWorkbench`; `excalidraw` is a hand-drawn
+ * whiteboard, stored as its `.excalidraw` file and edited by `components/diagrams/ExcalidrawEditor`.
+ * The branch between them is in exactly one place — `DiagramsView` picks the editor — which is what
+ * the column was for.
  */
-export type DiagramFormat = "mxgraph" | "dbml" | (string & {});
+export type DiagramFormat = "mxgraph" | "dbml" | "excalidraw" | (string & {});
 
 /** A diagram without its document, as it comes off the IPC boundary. `tags` is a JSON array. */
 export interface DiagramMetaRow {

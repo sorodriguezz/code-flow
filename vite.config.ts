@@ -1,3 +1,5 @@
+import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, resolve, sep } from "node:path";
 import type { Plugin } from "vite";
 // `vitest/config` re-exports vite's own `defineConfig` — the only thing it adds is the `test`
 // key below and the defaults that key has to be spread onto.
@@ -97,9 +99,64 @@ function contentSecurityPolicyMeta(): Plugin {
   };
 }
 
+/**
+ * Serves Excalidraw's fonts from the app itself, at `/excalidraw/fonts/…`.
+ *
+ * The editor loads its hand-drawn faces at runtime, from `window.EXCALIDRAW_ASSET_PATH` and then from
+ * esm.sh — a CDN this app's policy refuses (`font-src 'self'`, see `src/lib/csp.ts`) and a desktop
+ * app should not need in the first place. `ExcalidrawEditor` points the path here; this puts the
+ * files there: read straight out of `node_modules` by the dev server, and emitted into `dist` by
+ * the build, so nothing about them is vendored into the tree or added to a release step.
+ *
+ * Three families are left out. Xiaolai, the CJK face, is 12 MB of the 13 — two hundred subset files
+ * — for a script this app's users are not writing. Cascadia and Liberation are faces the editor
+ * itself has retired (it only draws them for text in old files), and their files name no licence
+ * the third-party notices could record; see `FONTS` in `scripts/build-third-party-notices.mjs`,
+ * which lists the ones that do ship. Text in any of the three falls back to the system's face.
+ */
+function excalidrawFonts(): Plugin {
+  const root = resolve("node_modules/@excalidraw/excalidraw/dist/prod/fonts");
+  const SKIPPED = new Set(["Xiaolai", "Cascadia", "Liberation"]);
+  const served = (rel: string) => !SKIPPED.has(rel.split(/[\\/]/)[0]);
+  const walk = (dir: string): string[] =>
+    readdirSync(dir).flatMap((name) => {
+      const path = join(dir, name);
+      return statSync(path).isDirectory() ? walk(path) : [path];
+    });
+  return {
+    name: "codeflow-excalidraw-fonts",
+    configureServer(server) {
+      server.middlewares.use("/excalidraw/fonts", (req, res, next) => {
+        const rel = decodeURIComponent((req.url ?? "").split("?")[0]).replace(/^\/+/, "");
+        const file = resolve(root, rel);
+        if (!file.startsWith(root + sep) || !served(rel) || !existsSync(file)) return next();
+        res.setHeader("Content-Type", "font/woff2");
+        createReadStream(file).pipe(res);
+      });
+    },
+    generateBundle() {
+      for (const file of walk(root)) {
+        const rel = relative(root, file);
+        if (!served(rel)) continue;
+        this.emitFile({
+          type: "asset",
+          fileName: `excalidraw/fonts/${rel.split(sep).join("/")}`,
+          source: readFileSync(file),
+        });
+      }
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss(), assertNoChunkCycles(), contentSecurityPolicyMeta()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    excalidrawFonts(),
+    assertNoChunkCycles(),
+    contentSecurityPolicyMeta(),
+  ],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -120,6 +177,15 @@ export default defineConfig(async () => ({
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
+    },
+  },
+
+  resolve: {
+    alias: {
+      // Excalidraw's Mermaid converter, swapped for a stub that says it is not included: the real
+      // one brings all of Mermaid, and bundling it took the build past the release workflow's 4 GB
+      // heap. Why that trade is the right one is in `src/lib/diagrams/mermaidStub.ts`.
+      "@excalidraw/mermaid-to-excalidraw": resolve("src/lib/diagrams/mermaidStub.ts"),
     },
   },
 
@@ -242,11 +308,16 @@ export default defineConfig(async () => ({
           ) {
             return "motion";
           }
+          // Package roots, not any folder of that name. A bare `/react/` also matched
+          // `jotai/esm/react/` — the state library of the whiteboard editor, which is lazy — and put
+          // 34 KB of it on the boot path of every launch. For the same reason the zustand 4 that the
+          // editor's `tunnel-rat` brings stays out: the app's own is 5, and only 5 boots with it.
+          if (file.includes("/.pnpm/zustand@4.")) return;
           if (
-            file.includes("/react/") ||
-            file.includes("/react-dom/") ||
-            file.includes("/scheduler/") ||
-            file.includes("/zustand/")
+            file.includes("/node_modules/react/") ||
+            file.includes("/node_modules/react-dom/") ||
+            file.includes("/node_modules/scheduler/") ||
+            file.includes("/node_modules/zustand/")
           ) {
             return "vendor";
           }

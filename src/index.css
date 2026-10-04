@@ -137,6 +137,17 @@
   --cf-control: var(--cf-surface);
   --cf-accent-fill: var(--cf-accent);
   --cf-danger-fill: var(--cf-danger);
+  /* The Diagrams app's laser pointer (`diagrams/Laser`): four inks for a stroke that lives only while
+     the button is held. Saturated rather than the legend's text shades — a laser is read as light,
+     not as a label — and paired like every hue above: these are pulled deep enough to carry on the
+     white canvas (yellow most of all), the dark block has the bright versions. `-core` is the pale
+     line down the middle of the beam, and only the dark theme has one: on black it is what makes
+     the stroke glow, on white it splits the stroke into two thin lines. */
+  --cf-laser-red: #f2233b;
+  --cf-laser-green: #12a84a;
+  --cf-laser-blue: #1f6bff;
+  --cf-laser-yellow: #dca200;
+  --cf-laser-core: transparent;
   /* The brand stroke: the logo's violet → indigo → cyan. A model at work (the orb, the run beam) —
      the mark people already read as "the AI is running" — and, flowing, every AI icon (`AiGlyph`). */
   --cf-ai-a: #8b5cf6;
@@ -180,6 +191,11 @@
   --cf-bson-id: #fbbf5c;
   --cf-bson-date: #c4a2fb;
   --cf-bson-literal: #d8a2fb;
+  --cf-laser-red: #ff4d5e;
+  --cf-laser-green: #3ee675;
+  --cf-laser-blue: #5b9bff;
+  --cf-laser-yellow: #ffd426;
+  --cf-laser-core: rgb(255 255 255 / 0.6);
   --cf-titlebar-gradient: linear-gradient(
     120deg,
     color-mix(in oklab, #163a3a 50%, var(--cf-surface)) 0%,
@@ -228,6 +244,11 @@
     --cf-bson-id: #fbbf5c;
     --cf-bson-date: #c4a2fb;
     --cf-bson-literal: #d8a2fb;
+    --cf-laser-red: #ff4d5e;
+    --cf-laser-green: #3ee675;
+    --cf-laser-blue: #5b9bff;
+    --cf-laser-yellow: #ffd426;
+    --cf-laser-core: rgb(255 255 255 / 0.6);
     --cf-titlebar-gradient: linear-gradient(
       120deg,
       color-mix(in oklab, #163a3a 50%, var(--cf-surface)) 0%,

@@ -5279,7 +5279,7 @@ const en = {
   "tabbar.notes": "Notes",
   "tabbar.notesDescription": "Markdown notes, books, tags and templates — the writing that surrounds this workspace's code",
   "tabbar.diagrams": "Diagrams",
-  "tabbar.diagramsDescription": "Flowcharts, architecture and ER diagrams in folders — the drawing that surrounds this workspace's code",
+  "tabbar.diagramsDescription": "Flowcharts, architecture, ER diagrams and whiteboards in folders — the drawing that surrounds this workspace's code",
   "tabbar.chat": "Chat",
   "tabbar.chatDescription": "Conversations with your AI CLIs — one flat list, with or without a repository behind them",
   "tabbar.reorderHint": "Hold to drag it into a new position",
@@ -5422,6 +5422,7 @@ const en = {
   "diagrams.exportAs.svg": "Export as SVG…",
   "diagrams.exportAs.pdf": "Export as PDF…",
   "diagrams.exportAs.drawio": "Export as .drawio",
+  "diagrams.exportAs.excalidraw": "Export as .excalidraw",
   "diagrams.exportOptions.title": "Image options",
   "diagrams.exportOptions.subtitle": "Applied to this {format}, and remembered for next time.",
   "diagrams.exportOptions.zoom": "Zoom (%)",
@@ -5442,9 +5443,10 @@ const en = {
   "diagrams.exportOptions.onlyVector": "SVG and PDF only",
   "diagrams.exportOptions.onlyRaster": "PNG and PDF only",
   "diagrams.exportOptions.onlySvg": "SVG only",
+  "diagrams.exportOptions.notWhiteboard": "Not for whiteboards",
   "diagrams.exportOptions.confirm": "Export",
   "diagrams.exportOptions.reset": "Restore defaults",
-  "diagrams.import": "Open a .drawio or .dbml file",
+  "diagrams.import": "Open a .drawio, .dbml or .excalidraw file",
   "diagrams.imported": "Imported {name}",
   "diagrams.undoGeneration": "Undo the generated shapes",
   "color.none": "No colour",
@@ -5467,6 +5469,11 @@ const en = {
   "diagrams.exportAs.dbml": "Export as .dbml",
   "diagrams.tpl.dbml.name": "Database schema",
   "diagrams.tpl.dbml.desc": "Two tables and the key that joins them, in DBML.",
+  "diagrams.newExcalidraw": "New whiteboard",
+  "diagrams.newExcalidrawHere": "New whiteboard here",
+  "diagrams.format.excalidraw": "Whiteboard",
+  "diagrams.tpl.excalidraw.name": "Whiteboard",
+  "diagrams.tpl.excalidraw.desc": "Hand-drawn sketches in Excalidraw, on an endless canvas.",
   "dbml.title": "Schema",
   "dbml.tab.diagram": "Diagram",
   "dbml.tab.convert": "Generate code",
@@ -5662,6 +5669,13 @@ const en = {
   "dbml.editorChars": "{count} chars",
   "dbml.zen": "Just the diagram",
   "dbml.zenExit": "Show the panels again",
+  "diagrams.laser": "Laser pointer",
+  "diagrams.laserHow": "Hold to draw on the diagram; let go and it fades",
+  "diagrams.laserColour": "Laser colour",
+  "diagrams.laserColour.red": "Red",
+  "diagrams.laserColour.green": "Green",
+  "diagrams.laserColour.blue": "Blue",
+  "diagrams.laserColour.yellow": "Yellow",
   "dbml.collapseEditor": "Hide the editor",
   "dbml.expandEditor": "Show the editor",
   "dbml.collapseInspector": "Hide the inspector",
@@ -8912,13 +8926,13 @@ const en = {
 
   "tour.diagrams.intro.title": "The drawing that goes around the code",
   "tour.diagrams.intro.body":
-    "Flowcharts, architecture, sequences — and database schemas — kept in the workspace rather than in any one repository, because the picture of how four services fit together does not belong inside one of them. A drawing opens in the whole of draw.io, shipped inside the app and running on your machine: no account, no network, and it works on a plane. A schema is DBML and opens in an editor of its own — the code beside a diagram you can edit by hand, and a Data view that builds a real SQLite database from it — and a `.dbml` file in a repository can be opened here and kept in step with it. The tree on the left is what you have made; it saves as you go, and there is no save button.",
+    "Flowcharts, architecture, sequences — and database schemas — kept in the workspace rather than in any one repository, because the picture of how four services fit together does not belong inside one of them. A drawing opens in the whole of draw.io, shipped inside the app and running on your machine: no account, no network, and it works on a plane. A whiteboard opens in Excalidraw — hand-drawn sketches on an endless canvas, laser pointer included. A schema is DBML and opens in an editor of its own — the code beside a diagram you can edit by hand, and a Data view that builds a real SQLite database from it — and a `.dbml` file in a repository can be opened here and kept in step with it. The tree on the left is what you have made; it saves as you go, and there is no save button.",
   "tour.diagrams.tree.title": "Folders, and what deleting one takes with it",
   "tour.diagrams.tree.body":
     "Folders nest as deep as you like, take a colour from their right-click menu, and diagrams can be dragged between them — or onto the edge of a row, to order them by hand. Read this twice: **deleting a folder deletes every diagram inside it**, and its subfolders with it — the same rule as a book in Notes. You are asked first, and it cannot be undone. A folder's menu also starts a drawing or a database schema right inside it, and a diagram's own menu pins it to the top of the tree.",
   "tour.diagrams.new.title": "Start from a shape, not a blank sheet",
   "tour.diagrams.new.body":
-    "This opens a picker rather than making an empty diagram outright, and its first choice is the one that sticks: a blank drawing or a new database schema — which editor a diagram opens in is decided here and never again. Six templates ship with it: five drawings — flowchart, C4 containers, sequence, entity relationship and network — and a two-table schema in DBML, each a real document you edit rather than a stencil. Anything of your own becomes a template from its editor's toolbar, and new diagrams are filed into whichever folder the tree is showing.",
+    "This opens a picker rather than making an empty diagram outright, and its first choice is the one that sticks: a blank drawing, a whiteboard or a new database schema — which editor a diagram opens in is decided here and never again. Six templates ship with it: five drawings — flowchart, C4 containers, sequence, entity relationship and network — and a two-table schema in DBML, each a real document you edit rather than a stencil. Anything of your own becomes a template from its editor's toolbar, and new diagrams are filed into whichever folder the tree is showing.",
   "tour.diagrams.search.title": "Titles and tags",
   "tour.diagrams.search.body":
     "Filters as you type, across titles and tags. It does **not** read what is inside the drawings — unlike the search in Notes, which does read bodies. So name things the way you would look for them later, and lean on tags for the cut that folders cannot make: one diagram is in one folder, but it can carry `onboarding` and `payments` at once.",
@@ -8927,7 +8941,7 @@ const en = {
     "With nothing open you get cards instead of an empty canvas, each showing the diagram itself — the picture is re-exported every time you edit, so a card is never a drawing from last week. Switch between grid and list, filter by folder or tag, and sort by “My order” — the one you set by dragging in the tree — if the order means something. Opening a card is what puts the editor on screen.",
   "tour.diagrams.canvas.title": "All of draw.io, and it saves itself",
   "tour.diagrams.canvas.body":
-    "For a drawing: the shape palette, the format panel, the right-click menu, every shape library including the cloud sets — none of it is a reduced version. What this app adds is at the far end of the editor's own toolbar: save as template, export, a sparkle, and version history. Edits are written for you a moment after you stop moving things, and the header tells you when the last one landed. A schema carries the same four in its own toolbar, plus a Diagram/Data switch and three tools: generate code for ten targets, import SQL, and compare.",
+    "For a drawing: the shape palette, the format panel, the right-click menu, every shape library including the cloud sets — none of it is a reduced version. What this app adds is at the far end of the editor's own toolbar: save as template, export, a sparkle, version history and a laser pointer. Edits are written for you a moment after you stop moving things, and the header tells you when the last one landed. A schema carries the same four in its own toolbar, plus a Diagram/Data switch and three tools: generate code for ten targets, import SQL, and compare. A whiteboard is the whole of Excalidraw, with the same four buttons in its top-right corner.",
   "tour.diagrams.ai.title": "Describe the diagram, and it draws it",
   "tour.diagrams.ai.body":
     "The sparkle opens this window over the canvas — drag it by its header if it covers what you are looking at. Write what you want in a sentence: *\"the review pipeline: fetch the diff, scan for secrets, send it to the engine, comment on the PR\"*. Enter sends, Shift+Enter breaks the line, and while it is thinking the button becomes Stop — it is a normal run, so it shows up with your other AI work and can be abandoned. Which engine answers is the chip at the bottom of the window — switch it right there; it is the same setting as “Draw a diagram” in Settings → AI assistant → Tasks and prompts. On a schema the same window asks for DBML instead of shapes.",
@@ -8942,7 +8956,7 @@ const en = {
     "Handing a document to draw.io resets its undo stack, so its own undo cannot take a generation back out — this arrow, next to the title, is what does. It appears once something has been generated and **disappears on your next real edit**: by then, going back would be throwing away what you drew on top rather than what the engine drew. If a generation is not what you wanted, take it back before you build on it.",
   "tour.diagrams.export.title": "Out, and back in",
   "tour.diagrams.export.body":
-    "The download button in the editor's toolbar offers PNG, SVG or PDF — each opens a short dialog with the options that format allows: zoom (200% by default), border, transparency, shadow, grid, page or just the drawing, light or dark — and a `.drawio` copy that leaves still editable. A schema exports PNG, SVG or `.dbml` from its own toolbar, and generates code besides. In the other direction, a `.drawio` or `.dbml` file from anywhere — a colleague, diagrams.net in a browser, an old repository — is opened from the tree's toolbar as an ordinary diagram. It is the same format underneath, which is what keeps any of this from being a place drawings go and do not come back from.",
+    "The download button in the editor's toolbar offers PNG, SVG or PDF — each opens a short dialog with the options that format allows: zoom (200% by default), border, transparency, shadow, grid, page or just the drawing, light or dark — and a `.drawio` copy that leaves still editable (a whiteboard's is `.excalidraw`). A schema exports PNG, SVG or `.dbml` from its own toolbar, and generates code besides. In the other direction, a `.drawio`, `.dbml` or `.excalidraw` file from anywhere — a colleague, diagrams.net in a browser, an old repository — is opened from the tree's toolbar as an ordinary diagram. It is the same format underneath, which is what keeps any of this from being a place drawings go and do not come back from.",
   "tour.diagrams.done.title": "That's Diagrams",
   "tour.diagrams.done.body":
     "Everything is stored in the workspace and travels with your backups. The one habit worth forming: when a drawing is going to take a while, describe it first and correct what comes back — starting from twelve roughly-right boxes is faster than starting from none. This tour is always in the graduation cap at the foot of the app rail.",

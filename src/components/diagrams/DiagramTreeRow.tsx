@@ -6,14 +6,11 @@ import {
   FolderOpen,
   GitBranch,
   Pin,
-  Table2,
-  Workflow,
   type LucideIcon,
 } from "lucide-react";
 import { isLinked } from "../../types/diagrams";
 import type { DiagramTreeRow as Row } from "../../types/diagrams";
-import { folderInk, ROW, ROW_ACTIVE, ROW_IDLE } from "./diagramsChrome";
-import { FORMAT_DBML } from "../../lib/diagrams/doc";
+import { folderInk, formatGlyph, ROW, ROW_ACTIVE, ROW_IDLE } from "./diagramsChrome";
 
 /** Which part of a row a drop would land in. `null` is "not this row". */
 type DropEdge = "into" | "before" | "after" | null;
@@ -109,15 +106,13 @@ export const DiagramTreeRow = memo(
     // level would be a map of arbitrary size, and the arbitrary bit is exactly what a style handles.
     const indent = 6 + row.depth * 12;
 
-    // A schema and a drawing get different glyphs, so the tree says which editor a row opens
-    // before it is opened. Same rule as the gallery's cards — see `DiagramGallery`.
+    // Each format gets its own glyph, so the tree says which editor a row opens before it is
+    // opened. Same glyphs as the gallery's cards — see `formatGlyph`.
     const Glyph: LucideIcon = isFolder
       ? collapsed
         ? Folder
         : FolderOpen
-      : row.diagram.format === FORMAT_DBML
-        ? Table2
-        : Workflow;
+      : formatGlyph(row.diagram.format);
     const tint = isFolder ? folderInk(row.folder.color) : undefined;
 
     return (

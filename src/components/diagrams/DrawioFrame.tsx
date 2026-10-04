@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Workflow } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ViewSkeleton } from "../common/ViewSkeleton";
+import { ContextMenu } from "../common/ContextMenu";
 import {
+  captureLaser,
   editorConfig,
   embedUrl,
   forwardFramePresses,
@@ -13,7 +15,20 @@ import {
   setEditorDarkMode,
   THUMBNAIL_EXPORT,
   THUMBNAIL_MAX_CHARS,
+  updateToolbarButton,
+  type ToolbarAnchor,
 } from "../../lib/diagrams/embed";
+import {
+  LaserCanvas,
+  laserColourItems,
+  laserInk,
+  loadLaserColour,
+  resolveLaserInk,
+  saveLaserColour,
+  type LaserCanvasHandle,
+  type LaserColour,
+} from "./Laser";
+import { isTypingTarget } from "../../lib/keys";
 import { bytesFromDataUri, saveBytes, type ExportFormat } from "../../lib/diagrams/exportFile";
 import { pngToPdf } from "../../lib/diagrams/pdf";
 import { exportMessage } from "../../lib/diagrams/exportOptions";
@@ -81,6 +96,27 @@ export function DrawioFrame({
    */
   const actions = useRef({ onSaveAsTemplate, onExport, onAskAi, onHistory });
   actions.current = { onSaveAsTemplate, onExport, onAskAi, onHistory };
+
+  /**
+   * The laser pointer — the same one the schema canvas has (see `Laser`), on and off from a pair of
+   * buttons injected into draw.io's own toolbar: the pointer, and the arrow that picks its ink.
+   *
+   * Off whenever a diagram opens, for the reason the schema canvas gives: while it is on a press on
+   * the drawing draws instead of selecting, and a diagram that opens refusing to be edited is a trap.
+   */
+  const [laser, setLaser] = useState(false);
+  const [laserColour, setLaserColour] = useState<LaserColour>(loadLaserColour);
+  /** The arrow's box while the colour menu is open. */
+  const [laserAt, setLaserAt] = useState<ToolbarAnchor | null>(null);
+  const laserCanvas = useRef<LaserCanvasHandle>(null);
+  /** What the buttons are injected with at boot — a ref, because the boot handler is registered once. */
+  const laserState = useRef({ laser, laserColour });
+  laserState.current = { laser, laserColour };
+  const laserActions = useRef({
+    toggle: () => setLaser((on) => !on),
+    colours: (anchor: ToolbarAnchor) => setLaserAt((open) => (open ? null : anchor)),
+  });
+  useEffect(() => setLaser(false), [diagramId]);
   /** The editor has booted and will accept messages — it has been sent its document. */
   const [ready, setReady] = useState(false);
   /** Which boot of the editor — see `frameKey` — has a drawing on its canvas. */
@@ -160,12 +196,15 @@ export function DrawioFrame({
    */
   const painted = paintedFrame === frameKey;
 
-  const labels = useRef({ template: "", export: "", ai: "", history: "" });
+  const labels = useRef({ template: "", export: "", ai: "", history: "", laser: "", laserColour: "" });
   labels.current = {
     template: t("diagrams.saveAsTemplate"),
     export: t("diagrams.export"),
     ai: t("diagrams.ai.title"),
     history: t("versions.open"),
+    // The editor's tooltips are the platform's `title`, which takes a second line as well as one.
+    laser: `${t("diagrams.laser")}\n${t("diagrams.laserHow")}`,
+    laserColour: t("diagrams.laserColour"),
   };
 
   /**
@@ -206,6 +245,53 @@ export function DrawioFrame({
     if (!ready) return;
     return forwardFramePresses(frame.current);
   }, [ready, frameKey]);
+
+  /**
+   * The injected pair, kept in step: pressed while the laser is on, the spot in the loaded ink.
+   *
+   * `theme` is a dependency for the spot: the ink is a literal resolved from the app's tokens, and a
+   * token has a light and a dark value. `ready` and `frameKey`, because a reboot injects the buttons
+   * afresh — with what `laserState` held at that moment, which this then corrects if it has moved.
+   */
+  useEffect(() => {
+    if (!ready) return;
+    updateToolbarButton(frame.current, "laser", {
+      pressed: laser,
+      spot: resolveLaserInk(laserColour),
+    });
+  }, [ready, frameKey, laser, laserColour, theme]);
+
+  /**
+   * While the laser is on, presses on the drawing are the laser's — see `captureLaser` for why they
+   * are caught inside the editor rather than by a surface over it. The strokes go to the overlay
+   * below, which lies exactly on the frame, so the editor's pixels are the overlay's.
+   */
+  useEffect(() => {
+    if (!laser || !ready) return;
+    return captureLaser(frame.current, {
+      down: (point, pointerId) => laserCanvas.current?.begin(point, pointerId),
+      move: (points, pointerId) => laserCanvas.current?.extend(points, pointerId),
+      up: (pointerId) => laserCanvas.current?.end(pointerId),
+      hover: (point) => laserCanvas.current?.dot(point),
+      escape: () => setLaser(false),
+    });
+  }, [laser, ready, frameKey]);
+
+  /**
+   * Escape puts the laser down from this side of the frame too — after a press on the colour menu,
+   * say, the focus is out here and the editor never hears the key. Unbound while that menu is open,
+   * which answers Escape itself.
+   */
+  useEffect(() => {
+    if (!laser || laserAt !== null) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (isTypingTarget(event.target)) return;
+      setLaser(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [laser, laserAt]);
 
   useEffect(() => {
     if (!painted || wearing.current === theme) return;
@@ -285,6 +371,25 @@ export function DrawioFrame({
                   icon: "history",
                   title: labels.current.history,
                   onClick: () => actions.current.onHistory(),
+                },
+                // A group of its own, last: the others are things done *to* the drawing, and this is
+                // a way of talking over it. A split, like the schema canvas's — the pointer, then the
+                // arrow that picks its ink, the loaded one shown as the pen's spot.
+                {
+                  id: "laser",
+                  icon: "laser",
+                  separated: true,
+                  pressed: laserState.current.laser,
+                  spot: resolveLaserInk(laserState.current.laserColour),
+                  title: labels.current.laser,
+                  onClick: () => laserActions.current.toggle(),
+                },
+                {
+                  id: "laserColour",
+                  icon: "chevron",
+                  narrow: true,
+                  title: labels.current.laserColour,
+                  onClick: (_at, anchor) => laserActions.current.colours(anchor),
                 },
               ]);
             });
@@ -414,7 +519,8 @@ export function DrawioFrame({
    */
   const pendingExport = useDiagramsStore((s) => s.pendingExport);
   useEffect(() => {
-    if (!pendingExport || !ready) return;
+    // A `.excalidraw` request is the whiteboard editor's, which is never mounted beside this one.
+    if (!pendingExport || !ready || pendingExport.format === "excalidraw") return;
     awaitingFile.current = pendingExport.format;
     awaitingScale.current = pendingExport.format === "drawio" ? 1 : pendingExport.options.zoom / 100;
     useDiagramsStore.getState().clearPendingExport();
@@ -547,6 +653,28 @@ export function DrawioFrame({
         // into an opaque origin is precisely what would break the same-origin `postMessage` the
         // whole integration is built on.
       />
+      {/* The laser's strokes and dot, over the whole frame and taking no press — those are caught
+          inside the editor (`captureLaser`). Over the frame rather than injected into it because
+          the editor's document has none of this app's styles, and the strokes are its colours. */}
+      {laser && <LaserCanvas ref={laserCanvas} colour={laserInk(laserColour)} />}
+      {laserAt && (
+        <ContextMenu
+          x={laserAt.left}
+          y={laserAt.bottom}
+          anchor={{ ...laserAt, align: "end" }}
+          heading={t("diagrams.laserColour")}
+          onClose={() => setLaserAt(null)}
+          items={laserColourItems(
+            laserColour,
+            (colour) => {
+              setLaserColour(colour);
+              saveLaserColour(colour);
+              setLaser(true);
+            },
+            t,
+          )}
+        />
+      )}
     </div>
   );
 }

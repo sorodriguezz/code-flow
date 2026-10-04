@@ -8,7 +8,9 @@ import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { diagramsDrawWithAi } from "../../lib/tauri/diagramsCommands";
 import { documentOutline, graphToMxGraph, parseAiGraph } from "../../lib/diagrams/aiLayout";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
-import { FORMAT_DBML } from "../../lib/diagrams/doc";
+import { FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
+import { sceneOutline } from "../../lib/diagrams/excalidraw";
+import { pointExcalidrawAtBundledFonts } from "../../lib/diagrams/excalidrawAssets";
 import { readLayout } from "../../lib/dbml/layout";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
 import { useDiagramsStore, type DiagramAiResult } from "../../state/diagramsStore";
@@ -70,6 +72,8 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
   /** The dialect this diagram is written in, which decides what is asked for and how it is shown. */
   const format = useDiagramsStore((s) => s.diagrams.find((d) => d.id === diagramId)?.format ?? "");
   const isSchema = format === FORMAT_DBML;
+  /** A whiteboard is asked for the same graph a drawing is; only how it is written out differs. */
+  const isWhiteboard = format === FORMAT_EXCALIDRAW;
   const t = useT();
 
   const [instruction, setInstruction] = useState("");
@@ -211,10 +215,14 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
     try {
       const raw = await diagramsDrawWithAi({
         title,
-        // For a drawing: labels, never the document — see `documentOutline`. For a schema: the DBML
-        // itself, minus the layout comment, because DBML *is* names and there is no geometry in it
-        // to spend the engine's context on.
-        outline: isSchema ? readLayout(draft.doc).source : documentOutline(draft.doc),
+        // For a drawing: labels, never the document — see `documentOutline`, and `sceneOutline` for
+        // a whiteboard. For a schema: the DBML itself, minus the layout comment, because DBML *is*
+        // names and there is no geometry in it to spend the engine's context on.
+        outline: isSchema
+          ? readLayout(draft.doc).source
+          : isWhiteboard
+            ? sceneOutline(draft.doc)
+            : documentOutline(draft.doc),
         instruction: instruction.trim(),
         format,
         runId: id,
@@ -274,20 +282,26 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
     }
   };
 
-  const apply = () => {
+  const apply = async () => {
     if (run?.status !== "ready" || !canApply) return;
     // Each dialect is handed the document its own merge understands. For a drawing, the id prefix
     // is what keeps a generated shape from landing on a hand-drawn one with the same name —
     // draw.io's merge matches on id, and a collision replaces silently. Timestamped rather than
     // counted, so two generations in one session cannot collide with each other either. A schema
     // needs no such prefix: `mergeDbml` matches on declared *names*, and a name that already exists
-    // is a table the user has already written, which is exactly the one not to overwrite.
-    const landed = applyGenerated(
-      diagramId,
-      run.result.format === "dbml"
-        ? run.result.dbml
-        : graphToMxGraph(run.result.graph, `ai${Date.now().toString(36)}_`),
-    );
+    // is a table the user has already written, which is exactly the one not to overwrite. A
+    // whiteboard needs none either: Excalidraw gives every converted element a fresh id, and the
+    // converter is loaded here rather than with this panel because it brings the editor with it —
+    // already in memory by now, since a whiteboard is open.
+    const result = run.result;
+    if (isWhiteboard) pointExcalidrawAtBundledFonts();
+    const doc =
+      result.format === "dbml"
+        ? result.dbml
+        : isWhiteboard
+          ? (await import("../../lib/diagrams/excalidrawGraph")).graphToExcalidraw(result.graph)
+          : graphToMxGraph(result.graph, `ai${Date.now().toString(36)}_`);
+    const landed = applyGenerated(diagramId, doc);
     // Nothing is consumed until it is actually on the canvas. This window can be up over a diagram
     // whose document has not arrived yet — `openDiagram` sets `activeId` at once and fetches the
     // row afterwards, which is precisely the state following one of these notifications in from
@@ -447,7 +461,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
               </button>
               <button
                 type="button"
-                onClick={apply}
+                onClick={() => void apply()}
                 // Off while the document it would draw into has not arrived. `openDiagram` sets
                 // `activeId` at once and fetches the row afterwards, and following one of these
                 // notifications in from another workspace lands squarely in that gap — where

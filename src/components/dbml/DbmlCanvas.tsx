@@ -44,6 +44,7 @@ import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 // a fourth colour family beside the badge legend above, and the reason they may reuse the semantic
 // tokens the badges could not is written out there.
 import { LEGEND, MARK_COLOUR, markMenuItems, markNamesOf } from "./markChrome";
+import { LaserLayer } from "../diagrams/Laser";
 import { useT } from "../../state/languageStore";
 import type { DbDiagramColumn } from "../../types/database";
 import type { DiagramColumnMode, DiagramDensity, DiagramNode } from "../../lib/db/erLayout";
@@ -277,6 +278,14 @@ export const DbmlCanvas = forwardRef<
      */
     focusRef?: string | null;
     /**
+     * The pointer as a laser, in this colour — or `null` for the ordinary canvas.
+     *
+     * While it is set a press draws instead of selecting, dragging or panning, and the stroke fades
+     * when the button is let go (see `diagrams/Laser`). The wheel still zooms: the layer sits inside the
+     * frame, so its wheel events reach the frame's listener like any other.
+     */
+    laser?: string | null;
+    /**
      * Turns the canvas into something you can build a schema on. Omitted by the read-only callers
      * (`DiagramAiPanel`, `editor/DbmlDiagram`), which then get exactly the canvas they had.
      *
@@ -363,6 +372,7 @@ export const DbmlCanvas = forwardRef<
     marks = {},
     pinnedId = null,
     focusRef = null,
+    laser = null,
     editing,
     className,
   },
@@ -510,6 +520,21 @@ export const DbmlCanvas = forwardRef<
   useEffect(() => {
     onNodeCount?.(layout.nodes.length);
   }, [layout.nodes.length, onNodeCount]);
+
+  /**
+   * The laser covers the drawing, so whatever the pointer had lit goes out as it arrives.
+   *
+   * Not left to the boundary events: the layer is mounted under a pointer that has not moved, and
+   * until it does the box or line it was resting on would stay lit — a neighbourhood highlighted
+   * for no reason while somebody is pointing at something else.
+   */
+  useEffect(() => {
+    if (!laser) return;
+    setHovered(null);
+    setHoveredLink(null);
+    setHoveredRow(null);
+    setNoteTip(null);
+  }, [laser]);
 
   /** A client point in the diagram's own coordinates — the inverse of the group's transform. */
   const toDiagram = useCallback((clientX: number, clientY: number) => {
@@ -1358,6 +1383,16 @@ export const DbmlCanvas = forwardRef<
           )}
         </g>
       </svg>
+
+      {/* Over the drawing and under everything the workbench floats on it — no `z-index`, so it
+          stacks by document order: after the `<svg>`, before the search box and the zoom cluster,
+          which stay pressable while the laser is on. */}
+      {laser && (
+        <LaserLayer
+          colour={laser}
+          onPress={() => frameRef.current?.focus({ preventScroll: true })}
+        />
+      )}
 
       {/* Renaming happens in an HTML input over the box rather than in the SVG. `foreignObject` is
           the SVG-native answer and it is the wrong one here: it inherits the panned group's

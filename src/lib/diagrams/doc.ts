@@ -22,6 +22,12 @@ export const FORMAT_MXGRAPH: DiagramFormat = "mxgraph";
  */
 export const FORMAT_DBML: DiagramFormat = "dbml";
 
+/**
+ * The dialect the whiteboard editor reads and writes: an Excalidraw scene, stored exactly as its
+ * `.excalidraw` file. Mirrors `FORMAT_EXCALIDRAW` in Rust. See `ExcalidrawEditor`.
+ */
+export const FORMAT_EXCALIDRAW: DiagramFormat = "excalidraw";
+
 /** The format a new diagram is created in when nothing says otherwise — the drawing one. */
 export const DEFAULT_FORMAT = FORMAT_MXGRAPH;
 
@@ -43,14 +49,33 @@ export const EMPTY_MXGRAPH_DOC =
   'shadow="0"><root><mxCell id="0" /><mxCell id="1" parent="0" /></root></mxGraphModel>';
 
 /**
+ * An empty Excalidraw scene, as the editor would save one.
+ *
+ * Not the empty string, for the reason the mxGraph blank above is not: a whiteboard created from
+ * the gallery can be exported as `.excalidraw` before anyone opens it, and an empty file is not
+ * one Excalidraw will open.
+ */
+export const EMPTY_EXCALIDRAW_DOC = JSON.stringify({
+  type: "excalidraw",
+  version: 2,
+  source: "codeflow",
+  elements: [],
+  appState: { gridSize: 20, viewBackgroundColor: "#ffffff" },
+  files: {},
+});
+
+/**
  * The blank document for a format.
  *
- * mxGraph needs its two skeleton cells to be a *graph* at all; DBML's blank is genuinely the empty
- * string, and the canvas says so in words rather than showing an empty grid. An unknown format gets
- * the empty string too — a document this app cannot write is one it should not invent.
+ * mxGraph needs its two skeleton cells to be a *graph* at all, and an Excalidraw file its envelope;
+ * DBML's blank is genuinely the empty string, and the canvas says so in words rather than showing
+ * an empty grid. An unknown format gets the empty string too — a document this app cannot write is
+ * one it should not invent.
  */
 export function emptyDoc(format: DiagramFormat = DEFAULT_FORMAT): string {
-  return format === FORMAT_MXGRAPH ? EMPTY_MXGRAPH_DOC : "";
+  if (format === FORMAT_MXGRAPH) return EMPTY_MXGRAPH_DOC;
+  if (format === FORMAT_EXCALIDRAW) return EMPTY_EXCALIDRAW_DOC;
+  return "";
 }
 
 /** Whether a diagram's document is a schema rather than a drawing. The one branch on `format`. */

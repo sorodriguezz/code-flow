@@ -12,11 +12,9 @@ import {
   Pin,
   PinOff,
   Trash2,
-  Table2,
-  Workflow,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
-import { folderInk, ICON_BUTTON } from "./diagramsChrome";
+import { folderInk, formatGlyph, ICON_BUTTON } from "./diagramsChrome";
 // Reused rather than reimplemented: "how long ago" is not a notes idea, and two implementations of
 // it is how one workspace starts saying "2 days ago" while the other says the date.
 import { relativeTime, TagPill } from "../notes/notesChrome";
@@ -26,7 +24,6 @@ import { filterDiagrams, useDiagramsStore } from "../../state/diagramsStore";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import { FORMAT_DBML } from "../../lib/diagrams/doc";
 import { isLinked } from "../../types/diagrams";
 import type { Diagram, DiagramFormat, DiagramSort } from "../../types/diagrams";
 
@@ -487,17 +484,6 @@ function Crumb({
       {label}
     </button>
   );
-}
-
-/**
- * The glyph that stands for a diagram when there is no picture of it.
- *
- * Two, because the workspace holds two kinds of document and telling them apart matters *before*
- * you open one: which editor a card leads to is decided by its format, and a gallery that draws
- * them identically makes that a surprise. See `types/diagrams.ts`.
- */
-function formatGlyph(format: DiagramFormat) {
-  return format === FORMAT_DBML ? Table2 : Workflow;
 }
 
 /**
