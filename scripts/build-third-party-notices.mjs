@@ -708,6 +708,48 @@ function collectFonts(npmDirs) {
   return rows;
 }
 
+/**
+ * Brand marks copied into the source one at a time, from sets or artwork this app does not install —
+ * so no package in the tree carries their licence, and nothing above would list them. Kept by hand:
+ * the files that hold them (`src/lib/icons/brandLogos.ts`, `src/lib/db/logos.ts`) note the same
+ * source on every entry, and a mark added there from somewhere new belongs in a row here.
+ */
+const COPIED_MARKS = [
+  {
+    source: "[Devicon](https://github.com/devicons/devicon)",
+    licence: "MIT",
+    marks: "Azure DevOps; SQL Server, Azure SQL Database, SQLite, Cassandra, Spark, ClickHouse, Ignite, Firebird",
+  },
+  { source: "[theSVG](https://github.com/glincker/thesvg)", licence: "MIT", marks: "CockroachDB, TiDB, H2, Trino, Teradata" },
+  { source: "[Simple Icons](https://github.com/simple-icons/simple-icons)", licence: "CC0-1.0", marks: "Oracle" },
+  {
+    source: "[Carbon](https://github.com/carbon-design-system/carbon/tree/main/packages/icons) (IBM)",
+    licence: "Apache-2.0",
+    marks: "Db2",
+  },
+  { source: "Google Cloud Icons", licence: "Apache-2.0", marks: "BigQuery, Cloud Spanner" },
+  { source: "[Tabler Icons](https://github.com/tabler/tabler-icons)", licence: "MIT", marks: "Denodo" },
+  { source: "SVG Logos, from a newer release than the package above", licence: "CC0-1.0", marks: "Databricks" },
+  {
+    source: "[MTSWebServices/data-rentgen-ui](https://github.com/MTSWebServices/data-rentgen-ui)",
+    licence: "Apache-2.0",
+    marks: "Greenplum",
+  },
+  { source: "[vertica/integrators-guide](https://github.com/vertica/integrators-guide)", licence: "Apache-2.0", marks: "Vertica" },
+  { source: "Wikimedia Commons, \"Apache Phoenix logo.svg\"", licence: "Apache-2.0", marks: "Apache Phoenix" },
+  { source: "Wikimedia Commons, \"Tibero database logo.png\"", licence: "CC0-1.0", marks: "Tibero" },
+  {
+    source: "[The ASF's logo index](https://www.apache.org/logos/)",
+    licence: "ASF trademark policy",
+    marks: "Apache Hive",
+  },
+  {
+    source: "The vendors' and projects' own artwork, at the user's request",
+    licence: "none stated",
+    marks: "Exasol, Mimer SQL, Tarantool, Apache Derby, HyperSQL",
+  },
+];
+
 /** Every `@iconify-json/*` set in the production tree, described by its own `info.json`. */
 function collectIconSets(npmDirs) {
   const rows = [];
@@ -1186,6 +1228,15 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, m
       const version = set.upstream ? `${set.version} (upstream ${set.upstream})` : set.version;
       w(`| ${set.name} | \`${set.package}\` | ${version} | ${set.licence} | ${author} | ${set.total ?? "—"} |`);
     }
+    w(
+      "",
+      "Single marks copied into the source from sets and artwork the app does not install, for the",
+      "AI engines and platforms it integrates with and the databases it connects to:",
+      "",
+      "| Source | Licence | Marks |",
+      "|---|---|---|",
+    );
+    for (const row of COPIED_MARKS) w(`| ${row.source} | ${row.licence} | ${row.marks} |`);
     w(
       "",
       "A licence on a logo set covers the drawings, not the brands: the marks remain their owners'",

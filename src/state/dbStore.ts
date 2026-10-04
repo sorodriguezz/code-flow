@@ -2187,13 +2187,6 @@ export const useDbStore = create<DbState>((set, get) => ({
       ui: DEFAULT_DATA_UI,
     });
     void get().loadData(id);
-    // Alongside the rows rather than before them: the grid is useful without this, and a catalog
-    // query that is slow or refused must not be what decides whether the data appears.
-    void dbForeignKeys(connectionId, node)
-      .then((foreignKeys) =>
-        patchTab<DbDataTab>(set, id, "data", (tab) => ({ ...tab, foreignKeys })),
-      )
-      .catch(() => {});
   },
 
   /**
@@ -2312,6 +2305,21 @@ export const useDbStore = create<DbState>((set, get) => ({
     // long after the user has walked to another workspace, and the log entry has to say which estate
     // it was actually run against rather than which one is on screen when it arrives.
     const runWorkspaceId = get().workspaceId;
+    // The tab's foreign keys, once: on the first page it loads, which is its opening — or, for a tab
+    // restored at start-up, the first time it is looked at. They used to be asked for only when a
+    // tab was opened, so every restored tab (after a restart, or any reload) had none, and the
+    // header's arrow and the cells' "open the related row" were simply gone (user report: "perdí
+    // la redirección que había"). "First page" is "no columns yet", the test the columns use below,
+    // so a table without foreign keys isn't asked again on every page. Alongside the rows rather
+    // than before them: the grid is useful without these, and a catalog query that is slow or
+    // refused must not be what decides whether the data appears.
+    if (tab.columns.length === 0) {
+      void dbForeignKeys(tab.connectionId, tab.node)
+        .then((foreignKeys) =>
+          patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, foreignKeys })),
+        )
+        .catch(() => {});
+    }
     try {
       const result = await dbTableData(
         tab.connectionId,

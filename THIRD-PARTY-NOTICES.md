@@ -174,6 +174,25 @@ loaded on demand. Each set's licence is the one its own `info.json` declares.
 | SVG Logos | `@iconify-json/logos` | 1.2.12 | CC0-1.0 | [Gil Barbara](https://github.com/gilbarbara/logos) | 1861 |
 | VSCode Icons | `@iconify-json/vscode-icons` | 1.2.69 (upstream 12.19.0) | MIT | [Roberto Huertas](https://github.com/vscode-icons/vscode-icons) | 1566 |
 
+Single marks copied into the source from sets and artwork the app does not install, for the
+AI engines and platforms it integrates with and the databases it connects to:
+
+| Source | Licence | Marks |
+|---|---|---|
+| [Devicon](https://github.com/devicons/devicon) | MIT | Azure DevOps; SQL Server, Azure SQL Database, SQLite, Cassandra, Spark, ClickHouse, Ignite, Firebird |
+| [theSVG](https://github.com/glincker/thesvg) | MIT | CockroachDB, TiDB, H2, Trino, Teradata |
+| [Simple Icons](https://github.com/simple-icons/simple-icons) | CC0-1.0 | Oracle |
+| [Carbon](https://github.com/carbon-design-system/carbon/tree/main/packages/icons) (IBM) | Apache-2.0 | Db2 |
+| Google Cloud Icons | Apache-2.0 | BigQuery, Cloud Spanner |
+| [Tabler Icons](https://github.com/tabler/tabler-icons) | MIT | Denodo |
+| SVG Logos, from a newer release than the package above | CC0-1.0 | Databricks |
+| [MTSWebServices/data-rentgen-ui](https://github.com/MTSWebServices/data-rentgen-ui) | Apache-2.0 | Greenplum |
+| [vertica/integrators-guide](https://github.com/vertica/integrators-guide) | Apache-2.0 | Vertica |
+| Wikimedia Commons, "Apache Phoenix logo.svg" | Apache-2.0 | Apache Phoenix |
+| Wikimedia Commons, "Tibero database logo.png" | CC0-1.0 | Tibero |
+| [The ASF's logo index](https://www.apache.org/logos/) | ASF trademark policy | Apache Hive |
+| The vendors' and projects' own artwork, at the user's request | none stated | Exasol, Mimer SQL, Tarantool, Apache Derby, HyperSQL |
+
 A licence on a logo set covers the drawings, not the brands: the marks remain their owners'
 trademarks, and CodeFlow uses them only to identify the tools and services they stand for.
 The interface's own icons are Lucide (`lucide-react`), listed with the npm packages below.

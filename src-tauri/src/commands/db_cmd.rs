@@ -1153,6 +1153,17 @@ pub fn db_drivers_overview() -> drivers::DriversOverview {
     drivers::overview()
 }
 
+/// Opens the folder the drivers' files and the runtime live in — creating it first, because until
+/// the first download it does not exist, and the file manager refuses a missing path. The Drivers
+/// list's "show files" link used to hand `reveal_in_file_manager` the bare path and drop the
+/// error, so on a machine that had never downloaded a driver the click did nothing at all.
+#[tauri::command(async)]
+pub fn db_drivers_reveal() -> Result<(), String> {
+    let root = drivers::root();
+    std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+    crate::fsops::reveal_in_file_manager(&root.to_string_lossy())
+}
+
 /// Downloads what a driver still lacks — the Java runtime first, then its jars — reporting progress
 /// on `db:driver-download` and answering with the driver's status once it is complete.
 #[tauri::command]

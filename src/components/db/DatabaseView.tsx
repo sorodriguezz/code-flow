@@ -31,7 +31,8 @@ import { ImportCsvModal } from "./ImportCsvModal";
 import { ObjectFilterModal } from "./TableFilterModal";
 import { DriverMenu, menuAnchor } from "./DriverMenu";
 import { DriverDownloadDialog } from "./DriverDownloadDialog";
-import { CARD, EngineBadge, IdentityBadge, ToolbarButton, nodeIcon } from "./dbChrome";
+import { CARD, IdentityBadge, ToolbarButton, nodeIcon } from "./dbChrome";
+import { EngineBadge } from "./DbLogo";
 import {
   ensureDbStoreLoaded,
   pendingCount,

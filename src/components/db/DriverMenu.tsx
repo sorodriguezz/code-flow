@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, Download, Search, Settings2 } from "lucide-react";
-import { DriverGlyph } from "./dbChrome";
+import { DriverGlyph } from "./DbLogo";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import {
   availableHere,

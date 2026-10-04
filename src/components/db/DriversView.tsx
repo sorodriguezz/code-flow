@@ -15,13 +15,16 @@ import {
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { GhostButton } from "../api/ApiModal";
-import { DriverGlyph, INPUT, Row, dangerIconButtonClass } from "./dbChrome";
+import { INPUT, Row, dangerIconButtonClass } from "./dbChrome";
+import { DriverGlyph } from "./DbLogo";
 import { GROUP_LABELS } from "./DriverMenu";
 import { Select } from "../common/Select";
 import { buttonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 import { confirmAction } from "../../state/confirmStore";
-import { openExternalUrl, revealInFileManager } from "../../lib/tauri/commands";
+import { pushErrorToast } from "../../state/toastStore";
+import { openExternalUrl } from "../../lib/tauri/commands";
+import { dbDriversReveal } from "../../lib/tauri/dbCommands";
 import {
   DRIVER_CATALOG,
   JAVA_RELEASE,
@@ -55,7 +58,6 @@ import { engineInfo, type DbDriverSettings, type DbUrlTemplate } from "../../typ
  * at once.
  */
 export function DriversView({
-  switcher,
   selected,
   onSelect,
   drafts,
@@ -63,8 +65,6 @@ export function DriversView({
   onCreateDataSource,
   usage,
 }: {
-  /** The Data Sources ⇄ Drivers control, drawn at the head of the list. */
-  switcher: ReactNode;
   selected: string | null;
   onSelect: (driverId: string) => void;
   /** Unsaved changes, by driver id. */
@@ -123,7 +123,6 @@ export function DriversView({
   return (
     <>
       <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--cf-border)]">
-        <div className="shrink-0 border-b border-[var(--cf-border)] px-2 py-1.5">{switcher}</div>
         <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1.5">
           <div className="relative min-w-0 flex-1">
             <Search
@@ -193,16 +192,20 @@ export function DriversView({
           )}
         </div>
 
-        {overview && (
-          <button
-            type="button"
-            onClick={() => void revealInFileManager(overview.root).catch(() => undefined)}
-            className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-3 py-1.5 text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          >
-            <FolderOpen size={11} />
-            {t("db.drivers.showFolder")}
-          </button>
-        )}
+        {/* The backend creates the folder before opening it: until the first download there is
+            none, and this used to hand the file manager a missing path and drop the refusal. */}
+        <button
+          type="button"
+          onClick={() =>
+            void dbDriversReveal().catch((error) =>
+              pushErrorToast(t("db.drivers.showFolderFailed", { error: String(error) })),
+            )
+          }
+          className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-3 py-1.5 text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        >
+          <FolderOpen size={11} />
+          {t("db.drivers.showFolder")}
+        </button>
       </aside>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">

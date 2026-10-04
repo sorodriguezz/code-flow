@@ -360,6 +360,10 @@ export const dbAiAssist = (
  * file — cheap enough to ask again whenever the Drivers list is shown. */
 export const dbDriversOverview = () => invoke<DbDriversOverview>("db_drivers_overview");
 
+/** Opens the drivers' folder in the file manager, creating it first: it does not exist until the
+ * first download, and a missing path is something the file manager refuses. */
+export const dbDriversReveal = () => invoke<void>("db_drivers_reveal");
+
 /** Downloads what a driver still lacks — the runtime first, then its files — reporting on
  * `db:driver-download` (see `onDbDriverDownload`). Answers with the driver's status after. */
 export const dbDriverDownload = (driverId: string) =>

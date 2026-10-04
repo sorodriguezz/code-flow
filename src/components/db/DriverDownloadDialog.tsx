@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { CheckCircle2, Coffee, Download, ExternalLink, FileArchive, Loader2, RotateCw, TriangleAlert } from "lucide-react";
-import { DriverGlyph } from "./dbChrome";
+import { DriverGlyph } from "./DbLogo";
 import { buttonClass } from "../common/Button";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 import { openExternalUrl } from "../../lib/tauri/commands";

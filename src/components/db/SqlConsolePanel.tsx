@@ -41,7 +41,8 @@ import { DocumentsView } from "./DocumentsView";
 import { ResultGrid } from "./ResultGrid";
 import { cellMenuItems } from "./cellMenu";
 import { ScopePicker } from "./ScopePicker";
-import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
+import { ToolbarButton, formatCount, formatDuration } from "./dbChrome";
+import { EngineBadge } from "./DbLogo";
 import {
   nodeKey,
   transactionKey,

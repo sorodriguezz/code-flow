@@ -45,7 +45,8 @@ import {
   rowClass,
   sectionLabelClass,
 } from "../common/recipes";
-import { ConnectionDot, EngineBadge, ToolbarButton, nodeIcon } from "./dbChrome";
+import { ConnectionDot, ToolbarButton, nodeIcon } from "./dbChrome";
+import { EngineBadge } from "./DbLogo";
 import { DbHistoryList } from "./DbHistoryList";
 import { DriverMenu, menuAnchor } from "./DriverMenu";
 import { DRIVER_CATALOG, driverEngineInfo, effectiveDriver, limitedSelect, rowDriverId } from "../../lib/db/drivers";

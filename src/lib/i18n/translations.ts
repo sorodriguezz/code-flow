@@ -7885,6 +7885,7 @@ const en = {
   "db.drivers.downloaded": "Downloaded",
   "db.drivers.notYetDownloaded": "Not downloaded",
   "db.drivers.showFolder": "Show driver files",
+  "db.drivers.showFolderFailed": "Couldn't open the drivers folder: {error}",
   "db.drivers.name": "Driver name",
   "db.drivers.usedBy": "used by {n} data sources",
   "db.drivers.usedByOne": "used by 1 data source",

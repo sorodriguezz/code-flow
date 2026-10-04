@@ -62,7 +62,6 @@ const custom: DbDriverSettings = {
 const render = (selected: string, drafts = {}) =>
   renderToStaticMarkup(
     <DriversView
-      switcher={<span>switcher</span>}
       selected={selected}
       onSelect={() => {}}
       drafts={drafts}

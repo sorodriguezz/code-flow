@@ -56,6 +56,16 @@ const DEFAULT_COLUMN_WIDTH = 160;
  * unreadable, and laying it out costs more than reading it. */
 export const CELL_PREVIEW_LIMIT = 300;
 
+/**
+ * The icon buttons a cell reveals on hover — expand the value, follow its foreign key. Each is a 14px
+ * target around its 10px glyph, and the cell keeps a 2px gap between its children: bare glyphs with
+ * no gap sat flush against each other and against the value (user report: "esos iconos juntos").
+ * Shown on hover, and on keyboard focus; their space stays reserved either way, so nothing shifts.
+ * Shared with the record layout, which draws the same two buttons.
+ */
+export const CELL_ACTION =
+  "inline-flex shrink-0 items-center justify-center rounded-[3px] p-0.5 text-[var(--cf-text-muted)] opacity-0 transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] focus-visible:opacity-100 group-hover/cell:opacity-100";
+
 export interface GridEdit {
   row: number;
   column: string;
@@ -636,7 +646,7 @@ export function ResultGrid({
                           e.preventDefault();
                           onFollowForeignKey(key, value);
                         }}
-                        className={`group/cell relative flex shrink-0 items-center border-r border-[var(--cf-border)] px-2 ${
+                        className={`group/cell relative flex shrink-0 items-center gap-0.5 border-r border-[var(--cf-border)] px-2 ${
                           isChanged && !inserted ? "bg-[var(--cf-warning)]/[0.12]" : ""
                         } ${deleted ? "line-through decoration-[var(--cf-danger)] opacity-70" : ""}`}
                       >
@@ -679,7 +689,7 @@ export function ResultGrid({
                                   })
                                 }
                                 title={t("db.expandCell")}
-                                className="shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-accent)] group-hover/cell:opacity-100"
+                                className={CELL_ACTION}
                               >
                                 <Maximize2 size={10} />
                               </button>
@@ -695,7 +705,7 @@ export function ResultGrid({
                                 title={t("db.followForeignKey", {
                                   table: referenceLabel(foreignKeys.get(column.name)!),
                                 })}
-                                className="shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-accent)] group-hover/cell:opacity-100"
+                                className={CELL_ACTION}
                               >
                                 <ExternalLink size={10} />
                               </button>

@@ -51,7 +51,8 @@ export interface DriverDef {
   engine: DbKind;
   /** The brand hue its glyph and dot are drawn in. */
   color: string;
-  /** Two letters for its tile, where it has no glyph of its own. Not a logo: see `DriverGlyph`. */
+  /** Two letters for its tile — what a driver the user added is drawn with. Every catalogue driver
+   *  wears its logo instead (`lib/db/logos.ts`); this is only its fallback. */
   mark: string;
   /** 0 when the driver has none (a file, a cloud endpoint). */
   defaultPort: number;

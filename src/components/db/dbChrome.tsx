@@ -1,31 +1,23 @@
 import {
   Braces,
-  CircleDot,
   Columns3,
   Database,
-  Feather,
   FileCode2,
-  Fish,
   Folder,
   Hash,
   KeyRound,
-  KeySquare,
   Layers,
   Leaf,
   ListOrdered,
-  Plug,
   Server,
   Table2,
   View,
-  Waves,
-  Zap,
   type LucideIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Kbd, iconButtonClass, type IconButtonSize } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
-import { monogramStyle } from "../../lib/monogram";
-import { defaultDriverId, type DriverDef } from "../../lib/db/drivers";
+import type { DriverDef } from "../../lib/db/drivers";
 import type { DbKind, DbNodeKind } from "../../types/database";
 
 /**
@@ -34,7 +26,9 @@ import type { DbKind, DbNodeKind } from "../../types/database";
  *
  * In its own module because the explorer, the tab strip, the console toolbar and the result grid all
  * need to draw the same table the same way — a tree icon that disagrees with the tab icon for the
- * same object reads as two different things.
+ * same object reads as two different things. The engines' and drivers' own marks are in
+ * `DbLogo.tsx`: they weigh ~115 KB, and the Agents and Stories views import this module for its
+ * toolbar button.
  */
 
 /**
@@ -114,7 +108,8 @@ export function nodeIcon(kind: DbNodeKind): LucideIcon {
 }
 
 /**
- * A tint per engine, so a tab strip mixing two connections stays readable.
+ * A tint per engine — the dot beside a connection in the explorer, and a driver's colour when it has
+ * none of its own.
  *
  * These are the engines' own brand hues rather than the app's accent: the point is to tell
  * PostgreSQL from SQL Server at a glance, which an accent-derived palette can't do because every
@@ -140,120 +135,10 @@ export function engineColor(kind: DbKind): string {
 }
 
 /**
- * A glyph per engine, for the lists where the engine is the thing being chosen.
- *
- * Deliberately not brand logos: lucide ships none of them, and five trademarks redrawn by hand is a
- * licensing question rather than a design one. These are the shapes each engine's own mark suggests
- * — Mongo's leaf, Supabase's bolt — or what the engine plainly is: a server for SQL Server, layers
- * for IRIS's multi-model store, a key for Redis. Six distinct silhouettes is all a list of six
- * rows needs.
- *
- * Drawn in `engineInk` wherever they appear, so the glyph in the picker, the tile on a tab and the
- * dot beside a connection in the explorer are the same hue for the same engine.
- */
-const ENGINE_ICONS: Record<DbKind, LucideIcon> = {
-  postgres: Database,
-  supabase: Zap,
-  sqlserver: Server,
-  iris: Layers,
-  mongodb: Leaf,
-  // A key, because that is plainly what Redis is — and every shape closer to "fast store"
-  // (`Database`, `Zap`, `Server`, `Layers`, `Leaf`) is already taken by one of the five above.
-  redis: KeySquare,
-  // MySQL's mark is a dolphin and MariaDB's a sea lion; lucide has neither, and a fish and the sea
-  // are the nearest two shapes that still tell the siblings apart.
-  mysql: Fish,
-  mariadb: Waves,
-  // SQLite's own logo is a feather.
-  sqlite: Feather,
-  // Oracle's is the red "O".
-  oracle: CircleDot,
-  // The fallback for a JDBC driver with no tile of its own — see `DriverGlyph`.
-  jdbc: Plug,
-};
-
-export function engineIcon(kind: DbKind): LucideIcon {
-  return ENGINE_ICONS[kind] ?? Database;
-}
-
-/**
- * The engine's colour as *ink*: the brand hue pulled toward the theme's text, which is what
- * `monogramStyle` gives a tile's letters.
- *
- * The raw brand colours are tuned to be told apart, not to be read — Supabase's green and Mongo's
- * leaf green sat under 2:1 on the light sheet as a 14px glyph. Mixed toward the text they keep their
- * hue on both themes and gain the contrast.
- */
-export function engineInk(kind: DbKind): string {
-  return String(monogramStyle(engineColor(kind)).color);
-}
-
-/** The engine's glyph in the engine's own ink. */
-export function EngineGlyph({ kind, size = 14 }: { kind: DbKind; size?: number }) {
-  const Icon = engineIcon(kind);
-  return <Icon size={size} className="shrink-0" style={{ color: engineInk(kind) }} />;
-}
-
-/**
  * A driver's colour: its own brand hue, or its engine's for a connection that names none.
  */
 export function driverColor(driver: DriverDef | null | undefined, kind: DbKind): string {
   return driver?.color ?? engineColor(kind);
-}
-
-/**
- * Whether a driver is drawn as a tile of its own rather than as its engine's glyph.
- *
- * The engines this app has always had keep their glyphs, so nothing about an existing connection
- * changes. Every other driver — sixty of them, a dozen of which share an engine — gets two letters
- * on its brand colour: not logos, for the reason `ENGINE_ICONS` gives, but enough to tell
- * Snowflake from Trino in a list where they would otherwise all be the same plug.
- */
-function ownTile(driver: DriverDef | null | undefined): DriverDef | null {
-  return driver && (driver.engine === "jdbc" || driver.id !== defaultDriverId(driver.engine)) ? driver : null;
-}
-
-/** A driver's two letters on a wash of its colour — the same recipe as the projects' monograms. */
-function DriverTile({ driver, size, label }: { driver: DriverDef; size: number; label?: string }) {
-  return (
-    <span
-      title={label}
-      role={label ? "img" : undefined}
-      aria-label={label}
-      aria-hidden={label ? undefined : true}
-      className="inline-flex shrink-0 select-none items-center justify-center rounded-[4px] font-semibold leading-none tracking-[-0.02em]"
-      style={{
-        width: size,
-        height: size,
-        fontSize: Math.max(7, Math.round(size * 0.5)),
-        ...monogramStyle(driver.color),
-      }}
-    >
-      {driver.mark}
-    </span>
-  );
-}
-
-/**
- * The glyph a driver is listed with: its engine's, for the engines that have one, its tile
- * otherwise. Always a `size` square, so a list mixing the two keeps its names aligned.
- */
-export function DriverGlyph({
-  driver,
-  kind,
-  size = 16,
-}: {
-  driver: DriverDef | null | undefined;
-  kind?: DbKind;
-  size?: number;
-}) {
-  const tile = ownTile(driver);
-  if (tile) return <DriverTile driver={tile} size={size} />;
-  return (
-    <span className="inline-flex shrink-0 items-center justify-center" style={{ width: size, height: size }}>
-      <EngineGlyph kind={driver?.engine ?? kind ?? "postgres"} size={size - 2} />
-    </span>
-  );
 }
 
 /**
@@ -302,46 +187,6 @@ export function ConnectionDot({
         style={{ backgroundColor: color }}
       />
       {dot}
-    </span>
-  );
-}
-
-/**
- * The engine's tile — the connection's identity on a tab, a toolbar and a tree row.
- *
- * It used to be a 16px square of the raw brand colour with the engine's initial in white, which
- * failed contrast on half the engines (white on Supabase's light green measured under 2:1) and put a
- * letter where every other place in the workspace draws the engine's glyph. Now it is the glyph on a
- * wash of the brand colour, in the brand colour's ink, with a ring of it — the same mix the projects'
- * monograms use, so a tinted tile means "this thing's own colour" everywhere in the app.
- */
-export function EngineBadge({
-  kind,
-  driver,
-  label,
-  size = 16,
-}: {
-  kind: DbKind;
-  /** The connection's driver: one with a tile of its own is drawn as that tile. */
-  driver?: DriverDef | null;
-  label: string;
-  /** 16 on a tab, 18 on a toolbar or a tree row. */
-  size?: number;
-}) {
-  const tile = ownTile(driver);
-  if (tile) {
-    return <DriverTile driver={tile} size={size} label={label} />;
-  }
-  const Icon = engineIcon(kind);
-  return (
-    <span
-      title={label}
-      role="img"
-      aria-label={label}
-      className="inline-flex shrink-0 items-center justify-center rounded-[5px]"
-      style={{ width: size, height: size, ...monogramStyle(engineColor(kind)) }}
-    >
-      <Icon size={size >= 18 ? 12 : 11} aria-hidden />
     </span>
   );
 }

@@ -22,10 +22,12 @@ import {
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ApiModal, GhostButton } from "../api/ApiModal";
-import { DriverGlyph, INPUT, Row } from "./dbChrome";
+import { INPUT, Row } from "./dbChrome";
+import { DriverGlyph } from "./DbLogo";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
 import { Select } from "../common/Select";
+import { Segmented } from "../common/Segmented";
 import { DriverMenu, menuAnchor } from "./DriverMenu";
 import { DriversView } from "./DriversView";
 import { UNGROUPED, parseSpec, redactUrl, urlHasPassword, useDbStore } from "../../state/dbStore";
@@ -684,28 +686,6 @@ export function ConnectionModal({
     return counts;
   }, [connections]);
 
-  /** Data Sources ⇄ Drivers, at the head of whichever list is showing. */
-  const switcher = (
-    <div className="flex gap-0.5 rounded-lg bg-[var(--cf-hover)] p-[3px] dark:bg-black/25" role="tablist">
-      {(["sources", "drivers"] as const).map((id) => (
-        <button
-          key={id}
-          type="button"
-          role="tab"
-          aria-selected={view === id}
-          onClick={() => setView(id)}
-          className={`flex-1 rounded-md px-2 py-[3px] text-[11.5px] font-medium transition-colors ${
-            view === id
-              ? "bg-[var(--cf-surface-raised)] text-[var(--cf-text)] shadow-sm ring-1 ring-inset ring-[var(--cf-border)]"
-              : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          }`}
-        >
-          {t(id === "sources" ? "db.view.dataSources" : "db.view.drivers")}
-        </button>
-      ))}
-    </div>
-  );
-
   return (
     <ApiModal
       icon={Database}
@@ -719,6 +699,24 @@ export function ConnectionModal({
       // be what throws it away. Close, Cancel and Escape stay.
       dismissOnBackdrop={false}
       onClose={onClose}
+      // Data Sources ⇄ Drivers: two halves of the same dialog, so the header's segmented control, the
+      // way the runner switches between its setup and its results. It used to be the first row of the
+      // list column, and there it took the column's whole width whatever its shape — first as equal
+      // halves in which "Orígenes de datos" wrapped onto two lines ("muy anchos y muy cuadrados"),
+      // then as tabs whose two labels still filled the row ("ocupa todo el espacio"). One dialog is
+      // open at a time, so the fixed `layoutId` never meets a second copy of itself.
+      toolbar={
+        <Segmented
+          size="sm"
+          layoutId="cf-db-sources-view"
+          value={view}
+          onChange={setView}
+          options={[
+            { value: "sources", label: t("db.view.dataSources") },
+            { value: "drivers", label: t("db.view.drivers") },
+          ]}
+        />
+      }
       footer={
         <div className="flex w-full items-center gap-2">
           {view === "sources" && (
@@ -749,7 +747,6 @@ export function ConnectionModal({
       <div className="flex min-h-0 flex-1">
         {view === "drivers" ? (
           <DriversView
-            switcher={switcher}
             selected={driverSelected}
             onSelect={setDriverSelected}
             drafts={driverDrafts}
@@ -770,7 +767,6 @@ export function ConnectionModal({
             {/* The set of connections, which is what makes this a dialog about the workspace's
                 databases rather than about one of them. */}
             <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--cf-border)]">
-              <div className="shrink-0 border-b border-[var(--cf-border)] px-2 py-1.5">{switcher}</div>
               <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1.5">
                 <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
                   {t("db.connectionsHeading")}

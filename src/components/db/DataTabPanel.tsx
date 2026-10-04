@@ -40,13 +40,13 @@ import { ResultGrid, type GridRowAction } from "./ResultGrid";
 import { cellMenuItems } from "./cellMenu";
 import { nodeLabel } from "./SqlConsolePanel";
 import {
-  EngineBadge,
   ToolbarButton,
   ToolbarSeparator,
   dangerIconButtonClass,
   formatCount,
   formatDuration,
 } from "./dbChrome";
+import { EngineBadge } from "./DbLogo";
 import {
   buildEdits,
   displayCell,

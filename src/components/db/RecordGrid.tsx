@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, Maximize2 } from "lucide-react";
 import {
+  CELL_ACTION,
   CellEditor,
   MIN_COLUMN_WIDTH,
   preview,
@@ -283,7 +284,7 @@ export function RecordGrid({
                     onFollowForeignKey(facts.reference, value);
                   }}
                   style={{ width: recordWidth }}
-                  className={`group/cell flex shrink-0 items-center border-b border-r border-[var(--cf-border)] px-2 ${
+                  className={`group/cell flex shrink-0 items-center gap-0.5 border-b border-r border-[var(--cf-border)] px-2 ${
                     isChanged && !inserted
                       ? "bg-[var(--cf-warning)]/[0.12]"
                       : inserted
@@ -326,7 +327,7 @@ export function RecordGrid({
                             })
                           }
                           title={t("db.expandCell")}
-                          className="shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-accent)] group-hover/cell:opacity-100"
+                          className={CELL_ACTION}
                         >
                           <Maximize2 size={10} />
                         </button>
@@ -340,7 +341,7 @@ export function RecordGrid({
                           title={t("db.followForeignKey", {
                             table: referenceLabel(facts.reference),
                           })}
-                          className="shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-accent)] group-hover/cell:opacity-100"
+                          className={CELL_ACTION}
                         >
                           <ExternalLink size={10} />
                         </button>

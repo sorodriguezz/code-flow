@@ -1550,6 +1550,7 @@ pub fn run() {
             commands::db_cmd::db_object_ddl,
             commands::db_cmd::db_cancel,
             commands::db_cmd::db_drivers_overview,
+            commands::db_cmd::db_drivers_reveal,
             commands::db_cmd::db_driver_download,
             commands::db_cmd::db_driver_delete_files,
             commands::db_cmd::db_driver_delete_runtime,

@@ -7723,6 +7723,7 @@ export const es = {
   "db.drivers.downloaded": "Descargado",
   "db.drivers.notYetDownloaded": "Sin descargar",
   "db.drivers.showFolder": "Mostrar archivos de drivers",
+  "db.drivers.showFolderFailed": "No se pudo abrir la carpeta de drivers: {error}",
   "db.drivers.name": "Nombre del driver",
   "db.drivers.usedBy": "lo usan {n} orígenes de datos",
   "db.drivers.usedByOne": "lo usa 1 origen de datos",
