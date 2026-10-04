@@ -29,7 +29,8 @@ import { SchemaPanel } from "./SchemaPanel";
 import { ConnectionModal } from "./ConnectionModal";
 import { ImportCsvModal } from "./ImportCsvModal";
 import { ObjectFilterModal } from "./TableFilterModal";
-import { EngineMenu, menuAnchor } from "./EngineMenu";
+import { DriverMenu, menuAnchor } from "./DriverMenu";
+import { DriverDownloadDialog } from "./DriverDownloadDialog";
 import { CARD, EngineBadge, IdentityBadge, ToolbarButton, nodeIcon } from "./dbChrome";
 import {
   ensureDbStoreLoaded,
@@ -46,7 +47,9 @@ import { confirmAction } from "../../state/confirmStore";
 import { translate, useT } from "../../state/languageStore";
 import { referenceLabel } from "./ResultGrid";
 import { fieldFacts, recordModel } from "../../lib/db/engineModel";
-import { engineInfo, type DbColumn, type DbForeignKey, type DbKind } from "../../types/database";
+import { type DbColumn, type DbForeignKey, type DbKind } from "../../types/database";
+import { driverEngineInfo, effectiveDriver, rowDriverId } from "../../lib/db/drivers";
+import { useDriverStore } from "../../state/driverStore";
 
 /**
  * The database workspace's shell: explorer, tab strip, and whichever panel the active tab wants.
@@ -67,6 +70,9 @@ export function DatabaseView() {
 
   useEffect(() => {
     void ensureDbStoreLoaded();
+    // The drivers too: a connection made with a driver of the user's own is named and drawn from
+    // its settings, and the explorer shows it before any dialog has had a reason to read them.
+    void useDriverStore.getState().load();
   }, []);
 
   // The backend owns the sessions and opens and closes them without asking: every command dials
@@ -131,17 +137,22 @@ export function DatabaseView() {
 
       {(modal?.kind === "newConnection" ||
         modal?.kind === "connection" ||
-        modal?.kind === "connections") && (
+        modal?.kind === "connections" ||
+        modal?.kind === "drivers") && (
         <ConnectionModal
           connectionId={modal.kind === "connection" ? modal.connectionId : null}
-          newEngine={modal.kind === "newConnection" ? modal.engine : null}
+          newDriver={modal.kind === "newConnection" ? modal.driver : null}
           newGroup={modal.kind === "newConnection" ? modal.group ?? "" : ""}
+          initialDriver={modal.kind === "drivers" ? modal.driverId ?? "" : undefined}
           onClose={closeModal}
         />
       )}
       {/* Outside the modal slot on purpose: it opens *over* the connection dialog, from a failed
           test, and that dialog has to still be there when the key is trusted and the test reruns. */}
       <HostKeyDialog />
+      {/* The same, for "this driver's files aren't downloaded": the test that asked reruns once
+          they are. */}
+      <DriverDownloadDialog />
       {modal?.kind === "objectFilter" && (
         <ObjectFilterModal
           connectionId={modal.connectionId}
@@ -224,6 +235,7 @@ function DbTabStrip() {
   const tabs = useDbStore((s) => s.tabs);
   const activeTabId = useDbStore((s) => s.activeTabId);
   const connections = useDbStore((s) => s.connections);
+  const driverSettings = useDriverStore((s) => s.settings);
   const store = useDbStore.getState();
 
   // Which connection a tab belongs to is only ambiguous when more than one is open — and then it
@@ -247,7 +259,8 @@ function DbTabStrip() {
     <div className={docStripClass}>
       {tabs.map((tab) => {
         const connection = connections.find((c) => c.id === tab.connectionId);
-        const engine = connection ? engineInfo(connection.kind) : null;
+        const driver = connection ? effectiveDriver(rowDriverId(connection), driverSettings) : null;
+        const engine = connection ? driverEngineInfo(driver, connection.kind) : null;
         const active = tab.id === activeTabId;
         const Icon =
           tab.kind === "console"
@@ -279,7 +292,7 @@ function DbTabStrip() {
             }}
             className={docTabClass(active, `${width} cursor-default`)}
           >
-            {connection && engine && <EngineBadge kind={connection.kind} label={engine.label} />}
+            {connection && engine && <EngineBadge kind={connection.kind} driver={driver} label={engine.label} />}
             <Icon size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
             {/* Italic as well as the dot: unsaved is never said by a colour alone. */}
             <span className={`min-w-0 flex-1 truncate ${dirty ? "italic" : ""}`}>{tab.name}</span>
@@ -341,7 +354,7 @@ function DbEmptyState() {
   const connections = useDbStore((s) => s.connections);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const store = useDbStore.getState();
-  const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
+  const [driverMenu, setDriverMenu] = useState<{ x: number; y: number } | null>(null);
   const newConsoleChord = chord("db.newConsole");
   const connectionsChord = chord("db.connections");
 
@@ -350,7 +363,7 @@ function DbEmptyState() {
       {connections.length === 0 ? (
         <Tooltip label={t("db.newConnection")} description={t("db.noConnectionsInWorkspace")}>
           <button
-            onClick={(e) => setEngineMenu(menuAnchor(e))}
+            onClick={(e) => setDriverMenu(menuAnchor(e))}
             className={buttonClass({ variant: "primary" })}
           >
             <Plus size={14} />
@@ -373,7 +386,7 @@ function DbEmptyState() {
             </button>
           </Tooltip>
           <button
-            onClick={(e) => setEngineMenu(menuAnchor(e))}
+            onClick={(e) => setDriverMenu(menuAnchor(e))}
             className={buttonClass({ variant: "secondary" })}
           >
             <Plus size={14} />
@@ -396,12 +409,13 @@ function DbEmptyState() {
         </>
       )}
 
-      {engineMenu && (
-        <EngineMenu
-          x={engineMenu.x}
-          y={engineMenu.y}
-          onPick={(engine) => openModal({ kind: "newConnection", engine })}
-          onClose={() => setEngineMenu(null)}
+      {driverMenu && (
+        <DriverMenu
+          x={driverMenu.x}
+          y={driverMenu.y}
+          onPick={(driver) => openModal({ kind: "newConnection", driver })}
+          onManage={() => openModal({ kind: "drivers" })}
+          onClose={() => setDriverMenu(null)}
         />
       )}
     </div>

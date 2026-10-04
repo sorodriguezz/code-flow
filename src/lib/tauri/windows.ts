@@ -21,9 +21,17 @@ export interface SatelliteInfo {
  *
  * `workspaceId` is the workspace of the window doing the opening, and the new window opens on it.
  * A window that is already open keeps its own.
+ *
+ * `at` is where its top-left corner goes, in logical screen pixels — a tab dragged out of the
+ * editor opens where it was let go. Without it the window cascades off the others.
  */
-export const openSatellite = (kind: DetachableKind, refId: string, title: string, workspaceId: string | null) =>
-  invoke<string>("open_satellite", { kind, refId, title, workspaceId });
+export const openSatellite = (
+  kind: DetachableKind,
+  refId: string,
+  title: string,
+  workspaceId: string | null,
+  at?: { x: number; y: number },
+) => invoke<string>("open_satellite", { kind, refId, title, workspaceId, x: at?.x ?? null, y: at?.y ?? null });
 
 export const focusSatellite = (label: string) => invoke<void>("focus_satellite", { label });
 

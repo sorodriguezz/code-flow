@@ -5,11 +5,16 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 import {
   applyEditPlan,
   applyTextEdits,
+  applyToOpenTabs,
   editCount,
   lineText,
+  mergeOutcomes,
+  mergePlans,
   planLspEdit,
+  planTsFileEdits,
   planTsRename,
   positionsAfter,
+  remapPlan,
   type ApplyDeps,
   type TextEdit,
 } from "./workspaceEdit";
@@ -77,6 +82,58 @@ describe("planning an edit", () => {
       { path: "src/user.ts", edits: [at(1, 14, 1, 18, "fullName"), at(5, 10, 5, 14, "name: fullName")] },
     ]);
     expect(plan.outside).toEqual(["/repo/node_modules/x/index.d.ts"]);
+  });
+
+  it("reads tsserver's file edits — a refactoring, organize imports, a move's imports", () => {
+    const plan = planTsFileEdits(
+      [
+        {
+          fileName: "/repo/src/app.ts",
+          textChanges: [{ start: { line: 2, offset: 21 }, end: { line: 2, offset: 30 }, newText: "./lib/user" }],
+        },
+        { fileName: "/elsewhere/x.ts", textChanges: [{ start: { line: 1, offset: 1 }, end: { line: 1, offset: 1 }, newText: "y" }] },
+        { fileName: "/repo/src/untouched.ts", textChanges: [] },
+      ],
+      (file) => (file.startsWith(`${ROOT}/`) ? file.slice(ROOT.length + 1) : null),
+    );
+    expect(plan.files).toEqual([{ path: "src/app.ts", edits: [at(2, 21, 2, 30, "./lib/user")] }]);
+    expect(plan.outside).toEqual(["/elsewhere/x.ts"]);
+  });
+
+  it("merges two answers about the same move, keeping both servers' edits to a shared file", () => {
+    const merged = mergePlans([
+      { files: [{ path: "a.ts", edits: [at(1, 1, 1, 2, "x")] }], outside: ["/lib.d.ts"], unsupported: 0 },
+      {
+        files: [
+          { path: "a.ts", edits: [at(3, 1, 3, 2, "y")] },
+          { path: "b.rs", edits: [at(1, 5, 1, 8, "net")] },
+        ],
+        outside: ["/lib.d.ts"],
+        unsupported: 1,
+      },
+    ]);
+    expect(merged.files).toEqual([
+      { path: "a.ts", edits: [at(1, 1, 1, 2, "x"), at(3, 1, 3, 2, "y")] },
+      { path: "b.rs", edits: [at(1, 5, 1, 8, "net")] },
+    ]);
+    expect(merged.outside).toEqual(["/lib.d.ts"]);
+    expect(merged.unsupported).toBe(1);
+  });
+
+  it("moves a plan's paths, and only the ones that moved", () => {
+    const moved = remapPlan(
+      {
+        files: [
+          { path: "src/old/user.ts", edits: [at(1, 1, 1, 2, "x")] },
+          { path: "src/app.ts", edits: [at(2, 1, 2, 2, "y")] },
+        ],
+        outside: [],
+        unsupported: 0,
+      },
+      (path) => (path.startsWith("src/old/") ? `src/new/${path.slice("src/old/".length)}` : path),
+    );
+    expect(moved.files.map((file) => file.path)).toEqual(["src/new/user.ts", "src/app.ts"]);
+    expect(moved.files[0].edits).toEqual([at(1, 1, 1, 2, "x")]);
   });
 });
 
@@ -214,5 +271,39 @@ describe("applying a plan", () => {
     const outcome = await applyEditPlan({ files: [{ path: "open.ts", edits: [at(1, 1, 1, 2, "x")] }], outside: [], unsupported: 0 }, d);
     expect(outcome.failed).toEqual([{ path: "open.ts", error: "read-only" }]);
     expect(d.writes).toEqual([]);
+  });
+
+  it("edits the open tabs synchronously and leaves every other file for the disk", () => {
+    const d = deps();
+    const outcome = applyToOpenTabs(
+      {
+        files: [
+          { path: "open.ts", edits: [at(1, 5, 1, 8, "bar")] },
+          { path: "closed.ts", edits: [at(1, 1, 1, 4, "bar")] },
+        ],
+        outside: [],
+        unsupported: 0,
+      },
+      d,
+    );
+    // Not a promise: the move flow re-points the tabs on the very next line.
+    expect(outcome.applied).toEqual([
+      { path: "open.ts", inBuffer: true, at: [{ lineNumber: 1, column: 5, text: "let bar;" }] },
+    ]);
+    expect(outcome.changes).toBe(1);
+    expect(d.writes).toEqual([]);
+    expect(d.checkpoint).not.toHaveBeenCalled();
+  });
+
+  it("adds two halves of an edit into one outcome", () => {
+    const buffers = { applied: [{ path: "a.ts", inBuffer: true, at: [] }], changes: 2, conflicts: [], failed: [], checkpointId: null };
+    const disk = { applied: [{ path: "b.ts", inBuffer: false, at: [] }], changes: 1, conflicts: ["c.ts"], failed: [], checkpointId: "cp-2" };
+    expect(mergeOutcomes(buffers, disk)).toEqual({
+      applied: [...buffers.applied, ...disk.applied],
+      changes: 3,
+      conflicts: ["c.ts"],
+      failed: [],
+      checkpointId: "cp-2",
+    });
   });
 });

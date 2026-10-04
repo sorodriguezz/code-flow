@@ -4,6 +4,7 @@ import type {
   StreamMessage as ApiStreamMessage,
   StreamStatusEvent as ApiStreamStatusEvent,
 } from "../../types/api";
+import type { DbDriverProgress } from "../../types/database";
 import type { StackFrame } from "./commands";
 import { WINDOW } from "../windowIdentity";
 
@@ -53,6 +54,10 @@ export interface LocalAiDownloadEvent {
 
 export const onLocalAiDownload = (handler: (event: LocalAiDownloadEvent) => void) =>
   listen<LocalAiDownloadEvent>("localai:download", (e) => handler(e.payload));
+
+/** A database driver's download — its files, or the Java runtime first. See `datasource/drivers.rs`. */
+export const onDbDriverDownload = (handler: (event: DbDriverProgress) => void) =>
+  listen<DbDriverProgress>("db:driver-download", (e) => handler(e.payload));
 
 /** Every move the local completion engine makes: off → warming → ready, or a failure.
  *  Mirrors `localai::engine::Status`, which serializes with `#[serde(tag = "kind")]`. */
@@ -359,3 +364,11 @@ export const onLspProgress = (handler: (event: { session_id: string; params: unk
  *  now answering nothing. */
 export const onLspExited = (handler: (event: { session_id: string }) => void) =>
   listen<{ session_id: string }>("lsp:exited", (e) => handler(e.payload));
+
+/**
+ * A server saying something it drew is stale and should be asked for again — the
+ * `workspace/<feature>/refresh` requests. Only inlay hints are acted on: rust-analyzer sends this one
+ * once it has finished indexing, which is when its first real hints exist.
+ */
+export const onLspRefresh = (handler: (event: { session_id: string; what: string }) => void) =>
+  listen<{ session_id: string; what: string }>("lsp:refresh", (e) => handler(e.payload));

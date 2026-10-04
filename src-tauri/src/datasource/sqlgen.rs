@@ -265,7 +265,12 @@ pub fn edit_statement(
     dialect: SqlDialect,
     edit: &DbRowEdit,
 ) -> Result<String, String> {
-    let target = qualify(node, dialect)?;
+    edit_statement_for(&qualify(node, dialect)?, dialect, edit)
+}
+
+/// [`edit_statement`] against a name the caller has already written — for the generic JDBC driver,
+/// whose tables can need a catalog in front of the schema, which [`qualify`] knows nothing about.
+pub fn edit_statement_for(target: &str, dialect: SqlDialect, edit: &DbRowEdit) -> Result<String, String> {
     // A document edit has no SQL spelling — see `DbRowEdit::document`. It only ever comes from the
     // Mongo document views, so reaching a SQL dialect with one means something is routed wrong, and
     // saying so beats writing a statement out of the cells it deliberately left empty.

@@ -3,12 +3,13 @@ import type {
   CancellationToken,
   editor as MonacoEditorNS,
   IDisposable,
+  IRange,
   languages,
   Position,
 } from "monaco-editor";
 import type { Monaco } from "@monaco-editor/react";
 import { listDir } from "../../lib/tauri/commands";
-import { onLspDiagnostics, onLspExited } from "../../lib/tauri/events";
+import { onLspDiagnostics, onLspExited, onLspRefresh } from "../../lib/tauri/events";
 import { relPathFromModelUri } from "../../lib/editorModel";
 import { LANGUAGE_SERVERS } from "../../lib/lsp/servers";
 import {
@@ -30,6 +31,7 @@ import {
   modelUriFor,
   relPathFromFileUri,
   toLspPosition,
+  toLspRange,
   toMarkdown,
   toMonacoCompletionKind,
   toMonacoRange,
@@ -40,6 +42,7 @@ import {
   type LspCompletionList,
   type LspDiagnostic,
   type LspHover,
+  type LspInlayHint,
   type LspLocation,
   type LspLocationLink,
   type LspRange,
@@ -279,6 +282,89 @@ function installProviders(monaco: Monaco): void {
     },
   });
 
+  /**
+   * Go to Implementations (⌘F12) and Go to Type Definition — declared in `client_capabilities` for
+   * as long as this client has existed, and never asked for until now. Merged across servers the
+   * way definition is, and asked only of the servers that said they answer them.
+   */
+  const locationsAt =
+    (method: "textDocument/implementation" | "textDocument/typeDefinition", capability: string) =>
+    async (model: MonacoEditorNS.ITextModel, position: Position, token: CancellationToken) => {
+      const file = fileOf(model);
+      if (!file) return null;
+      const answers = await askAll<unknown>(file.language, method, at(file.uri, position), capability);
+      if (token.isCancellationRequested) return null;
+      const locations = toLocations(answers);
+      return locations.length > 0 ? locations : null;
+    };
+  monaco.languages.registerImplementationProvider(CLAIMED_LANGUAGES, {
+    provideImplementation: locationsAt("textDocument/implementation", "implementationProvider"),
+  });
+  monaco.languages.registerTypeDefinitionProvider(CLAIMED_LANGUAGES, {
+    provideTypeDefinition: locationsAt("textDocument/typeDefinition", "typeDefinitionProvider"),
+  });
+
+  /**
+   * Inlay hints, from every server that offers them — rust-analyzer's types and chained calls,
+   * clangd's parameter names, gopls's (switched on in its catalogue entry). Whether any are drawn
+   * is the Editor's switch (`editorDisplayStore`).
+   *
+   * Asked again when the servers change — one that has just started answered nothing for the
+   * buffers already on screen — and when a server says its hints went stale
+   * (`workspace/inlayHint/refresh`, which rust-analyzer sends once it has finished indexing).
+   */
+  const hintsChanged = new monaco.Emitter<void>();
+  onSessionsChanged(() => hintsChanged.fire());
+  void onLspRefresh((event) => {
+    if (event.what === "inlayHint") hintsChanged.fire();
+  });
+  monaco.languages.registerInlayHintsProvider(CLAIMED_LANGUAGES, {
+    onDidChangeInlayHints: hintsChanged.event,
+    provideInlayHints: async (model: MonacoEditorNS.ITextModel, range: IRange, token: CancellationToken) => {
+      const none = { hints: [], dispose: () => {} };
+      const file = fileOf(model);
+      if (!file) return none;
+      const answers = await askAll<LspInlayHint[]>(
+        file.language,
+        "textDocument/inlayHint",
+        { textDocument: { uri: file.uri }, range: toLspRange(range) },
+        "inlayHintProvider",
+      );
+      if (token.isCancellationRequested) return none;
+      const projectId = currentProjectId();
+      const repoPath = currentRepoPath();
+      const linkOf = (location: LspLocation | undefined) => {
+        if (!location || !projectId || !repoPath) return undefined;
+        const uri = modelUriFor(monaco, projectId, repoPath, location.uri);
+        return uri ? { uri, range: toMonacoRange(location.range) } : undefined;
+      };
+      const hints = answers.flat().map(
+        (hint): languages.InlayHint => ({
+          label:
+            typeof hint.label === "string"
+              ? hint.label
+              : hint.label.map((part) => ({
+                  label: part.value,
+                  tooltip: toMarkdown(part.tooltip),
+                  location: linkOf(part.location),
+                })),
+          tooltip: toMarkdown(hint.tooltip),
+          position: { lineNumber: hint.position.line + 1, column: hint.position.character + 1 },
+          kind:
+            hint.kind === 1
+              ? monaco.languages.InlayHintKind.Type
+              : hint.kind === 2
+                ? monaco.languages.InlayHintKind.Parameter
+                : undefined,
+          textEdits: hint.textEdits?.map((edit) => ({ range: toMonacoRange(edit.range), text: edit.newText })),
+          paddingLeft: hint.paddingLeft,
+          paddingRight: hint.paddingRight,
+        }),
+      );
+      return { hints, dispose: () => {} };
+    },
+  });
+
   monaco.languages.registerReferenceProvider(CLAIMED_LANGUAGES, {
     provideReferences: async (
       model: MonacoEditorNS.ITextModel,
@@ -478,6 +564,27 @@ export async function lspReferences(
     "textDocument/references",
     { ...at(file.uri, position), context: { includeDeclaration: true } },
     "referencesProvider",
+  );
+  return answers.flatMap(locationsOf).flatMap((hit) => {
+    const path = relPathFromFileUri(repoPath, hit.uri);
+    return path ? [{ path, range: toMonacoRange(hit.range) }] : [];
+  });
+}
+
+/** `lspReferences`' twin for implementations — "Find All Implementations" in the results panel. */
+export async function lspImplementations(
+  model: MonacoEditorNS.ITextModel,
+  position: Position,
+): Promise<{ path: string; range: import("monaco-editor").IRange }[] | null> {
+  const file = fileOf(model);
+  const repoPath = currentRepoPath();
+  if (!file || !repoPath) return null;
+  if (!sessionsForLanguage(file.language).some((session) => session.capabilities?.implementationProvider)) return null;
+  const answers = await askAll<unknown>(
+    file.language,
+    "textDocument/implementation",
+    at(file.uri, position),
+    "implementationProvider",
   );
   return answers.flatMap(locationsOf).flatMap((hit) => {
     const path = relPathFromFileUri(repoPath, hit.uri);

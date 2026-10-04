@@ -164,6 +164,62 @@ export function planTsRename(
   );
 }
 
+/** One file's edits as tsserver spells them everywhere but `rename`: a refactoring, organize
+ *  imports, the imports a moved file needs. */
+export interface TsFileEdits {
+  /** Absolute path, as tsserver spells it. */
+  fileName: string;
+  textChanges: {
+    start: { line: number; offset: number };
+    end: { line: number; offset: number };
+    newText: string;
+  }[];
+}
+
+/** tsserver's `FileCodeEdits[]` as a plan. Positions are already Monaco's, as in `planTsRename`. */
+export function planTsFileEdits(changes: readonly TsFileEdits[], relPathOf: (file: string) => string | null): EditPlan {
+  return collect(
+    changes.map((change) => ({
+      target: change.fileName,
+      path: relPathOf(change.fileName),
+      edits: change.textChanges.map((edit) => ({
+        range: {
+          startLineNumber: edit.start.line,
+          startColumn: edit.start.offset,
+          endLineNumber: edit.end.line,
+          endColumn: edit.end.offset,
+        },
+        text: edit.newText,
+      })),
+    })),
+    0,
+  );
+}
+
+/** Two plans as one — the compiler's and the language servers' answers to the same move. A file
+ *  both name keeps both lists, so edits that collide are refused when they are applied rather than
+ *  one answer quietly winning. */
+export function mergePlans(plans: EditPlan[]): EditPlan {
+  const merged = collect(
+    plans.flatMap((plan) => plan.files.map((file) => ({ target: file.path, path: file.path, edits: file.edits }))),
+    plans.reduce((sum, plan) => sum + plan.unsupported, 0),
+  );
+  return { ...merged, outside: [...new Set(plans.flatMap((plan) => plan.outside))] };
+}
+
+/**
+ * The same plan with its paths moved — `remap` answers where each file is now. What a plan made
+ * before a file or folder moved needs once it has: the edits are still right, but the files they
+ * are for may have a new name.
+ */
+export function remapPlan(plan: EditPlan, remap: (path: string) => string): EditPlan {
+  const moved = collect(
+    plan.files.map((file) => ({ target: file.path, path: remap(file.path), edits: file.edits })),
+    plan.unsupported,
+  );
+  return { ...moved, outside: plan.outside };
+}
+
 /** Where each line of `text` starts, as offsets — broken on `\r\n`, `\n` and `\r` alike, which is
  *  how both LSP and Monaco count lines. */
 function lineStarts(text: string): number[] {
@@ -345,24 +401,48 @@ export function defaultApplyDeps(repoPath: string): ApplyDeps {
 }
 
 /**
- * Applies a plan: open tabs in their buffers, every other file on disk through the checked write,
- * after a checkpoint. One file failing never stops the rest — a rename that could not reach one
- * file is reported with that file named, and the others keep their change.
+ * The half of `applyEditPlan` that never waits: every file of `plan` that is open in a tab, edited
+ * in its buffer, and every other file left alone.
+ *
+ * Its own function because it is synchronous, and one caller needs exactly that. A file moved in the
+ * explorer is still open under its old path until the editor re-points its tab, and the imports it
+ * needs have to land in that buffer *before* the tab moves — `moveImports` runs this, then re-points
+ * the tabs, in one tick, with nothing in between that could let either happen out of order.
  */
-export async function applyEditPlan(plan: EditPlan, deps: ApplyDeps): Promise<ApplyOutcome> {
+export function applyToOpenTabs(plan: EditPlan, deps: Pick<ApplyDeps, "host">): ApplyOutcome {
   const outcome: ApplyOutcome = { applied: [], changes: 0, conflicts: [], failed: [], checkpointId: null };
-  const open = plan.files.filter((file) => deps.host?.isOpen(file.path));
-  const closed = plan.files.filter((file) => !deps.host?.isOpen(file.path));
-
-  for (const file of open) {
+  for (const file of plan.files) {
+    if (!deps.host?.isOpen(file.path)) continue;
     try {
-      const text = deps.host!.applyToOpen(file.path, file.edits);
+      const text = deps.host.applyToOpen(file.path, file.edits);
       outcome.applied.push(appliedFile(file.path, file.edits, text, true));
       outcome.changes += file.edits.length;
     } catch (e) {
       outcome.failed.push({ path: file.path, error: e instanceof Error ? e.message : String(e) });
     }
   }
+  return outcome;
+}
+
+/** Two outcomes as one — the buffers' half and the disk's half of the same edit. */
+export function mergeOutcomes(a: ApplyOutcome, b: ApplyOutcome): ApplyOutcome {
+  return {
+    applied: [...a.applied, ...b.applied],
+    changes: a.changes + b.changes,
+    conflicts: [...a.conflicts, ...b.conflicts],
+    failed: [...a.failed, ...b.failed],
+    checkpointId: a.checkpointId ?? b.checkpointId,
+  };
+}
+
+/**
+ * Applies a plan: open tabs in their buffers, every other file on disk through the checked write,
+ * after a checkpoint. One file failing never stops the rest — a rename that could not reach one
+ * file is reported with that file named, and the others keep their change.
+ */
+export async function applyEditPlan(plan: EditPlan, deps: ApplyDeps): Promise<ApplyOutcome> {
+  const closed = plan.files.filter((file) => !deps.host?.isOpen(file.path));
+  const outcome = applyToOpenTabs(plan, deps);
 
   if (closed.length > 0) outcome.checkpointId = await deps.checkpoint();
   for (const file of closed) {

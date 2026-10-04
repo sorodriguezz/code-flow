@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
+  ChevronDown,
   Copy,
   Database,
+  Download,
   FolderOpen,
   KeyRound,
   Link2,
@@ -15,34 +17,51 @@ import {
   Server,
   SlidersHorizontal,
   Trash2,
+  TriangleAlert,
   XCircle,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ApiModal, GhostButton } from "../api/ApiModal";
-import { INPUT, Row } from "./dbChrome";
+import { DriverGlyph, INPUT, Row } from "./dbChrome";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
-import { Select, type SelectItems } from "../common/Select";
-import { EngineGlyph } from "./dbChrome";
-import { EngineMenu, menuAnchor } from "./EngineMenu";
+import { Select } from "../common/Select";
+import { DriverMenu, menuAnchor } from "./DriverMenu";
+import { DriversView } from "./DriversView";
 import { UNGROUPED, parseSpec, redactUrl, urlHasPassword, useDbStore } from "../../state/dbStore";
 import { dbHasPassword, dbSchemaCatalog } from "../../lib/tauri/dbCommands";
 import { isUnknownHostKeyError } from "../../lib/hostKey";
 import { useHostKeyStore } from "../../state/hostKeyStore";
 import { confirmAction } from "../../state/confirmStore";
-import { useToastStore } from "../../state/toastStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { VaultPicker } from "../vault/VaultPicker";
 import { dbFillFrom } from "../../lib/vault/fill";
 import type { VaultItem, VaultSecret } from "../../types/vault";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import {
-  DB_ENGINES,
+  catalogDriver,
+  connectionDriverId,
+  driverEngineInfo,
+  driverErrorText,
+  driverFilesError,
+  driverForm,
+  effectiveDriver,
+  fieldValue,
+  jdbcUrlPreview,
+  newConnectionConfig,
+  rowDriverId,
+  withUrlValue,
+  type DriverDef,
+  type DriverForm,
+} from "../../lib/db/drivers";
+import { driverReadiness, offerDriverDownload, useDriverDef, useDriverStore } from "../../state/driverStore";
+import {
   defaultConnectionConfig,
-  engineInfo,
   type DbAuthMethod,
   type DbConnectionConfig,
   type DbConnectionRow,
+  type DbDriverSettings,
   type DbKind,
   type DbSchemaGroup,
   type DbServerInfo,
@@ -63,10 +82,16 @@ import { fieldClass } from "../common/recipes";
  *
  * What it is careful about, beyond the layout:
  *
- * **The engine is chosen before this opens.** It decides what every field below it means — the
- * default port, the word for "database", the shape of the URL — so it is asked by the menu the `+`
- * expands (see `EngineMenu`) and the dialog opens already dressed for the answer. The picker stays
- * on the General tab, because changing your mind about an existing connection is a real edit.
+ * **The driver is chosen before this opens.** It decides what every field below it means — the
+ * default port, the word for "database", the shape of the URL, for a JDBC driver which fields its
+ * URL template asks for at all — so it is asked by the menu the `+` expands (see `DriverMenu`) and
+ * the dialog opens already dressed for the answer. The picker stays above the tabs, because changing
+ * your mind about an existing connection is a real edit.
+ *
+ * **Data sources and drivers.** The list on the left has two halves, as DataGrip's does: the
+ * connections, and the drivers they are made with (`DriversView`) — where a JDBC driver's files are
+ * downloaded, its class and URL templates changed, and its JVM configured. A test or a connect that
+ * finds a driver's files missing asks to download them (`DriverDownloadDialog`) and tries again.
  *
  * **Fields or URL, never both.** They are alternatives — a pasted URI overrides every field — so
  * they are a two-mode switch rather than two sections where one silently wins. The old version
@@ -85,16 +110,32 @@ import { fieldClass } from "../common/recipes";
 
 type Mode = "fields" | "url";
 type Tab = "general" | "options" | "ssh" | "schemas" | "advanced";
+type View = "sources" | "drivers";
+
+/** A driver by id, as the user has it — falling back to PostgreSQL for one nobody knows, which is
+ *  what a blank form has always opened on. */
+function driverFor(id: string | null): DriverDef {
+  const settings = useDriverStore.getState().settings;
+  return (id ? effectiveDriver(id, settings) : null) ?? catalogDriver("postgresql")!;
+}
+
+/** The blank form a new connection with this driver starts from. */
+function blankConfig(driverId: string | null): DbConnectionConfig {
+  return newConnectionConfig(driverFor(driverId));
+}
 
 /** The three states the right-hand pane loads from an entry in the list. */
-function editorState(row: DbConnectionRow | null, engine: DbKind | null) {
+function editorState(row: DbConnectionRow | null, driverId: string | null) {
   const spec = row ? parseSpec(row) : null;
+  const config = spec ?? blankConfig(driverId);
+  const def = effectiveDriver(connectionDriverId(config), useDriverStore.getState().settings);
   return {
     name: row?.name ?? "",
-    config: spec ?? defaultConnectionConfig(engine ?? "postgres"),
+    config,
     // Opens on whichever half is actually in use, so editing a URL-based connection doesn't start
-    // on a form of empty fields that aren't being used.
-    mode: (spec?.url ? "url" : "fields") as Mode,
+    // on a form of empty fields that aren't being used. A driver with no URL template can only be
+    // reached by URL.
+    mode: (spec?.url || (config.kind === "jdbc" && !def?.urls?.length) ? "url" : "fields") as Mode,
   };
 }
 
@@ -108,6 +149,10 @@ function editorState(row: DbConnectionRow | null, engine: DbKind | null) {
 function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
   return (
     a.kind === b.kind &&
+    connectionDriverId(a) === connectionDriverId(b) &&
+    a.url_template === b.url_template &&
+    a.url_values.length === b.url_values.length &&
+    a.url_values.every(([key, value], i) => b.url_values[i]?.[0] === key && b.url_values[i]?.[1] === value) &&
     a.host === b.host &&
     a.port === b.port &&
     a.database === b.database &&
@@ -151,17 +196,20 @@ function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
 
 export function ConnectionModal({
   connectionId,
-  newEngine,
+  newDriver,
   newGroup = "",
+  initialDriver,
   onClose,
 }: {
-  /** The connection to open on. Ignored when `newEngine` is set. */
+  /** The connection to open on. Ignored when `newDriver` is set. */
   connectionId: string | null;
-  /** Set when the dialog was opened to create a connection, holding the engine already chosen. */
-  newEngine: DbKind | null;
+  /** Set when the dialog was opened to create a connection, holding the driver already chosen. */
+  newDriver: string | null;
   /** Which folder a connection created here lands in — set when the dialog was opened from a
    * group's own menu. Empty is ungrouped, which is where every other entry point puts one. */
   newGroup?: string;
+  /** Opens on the Drivers list, on this driver — `""` for the list with the first one. */
+  initialDriver?: string;
   onClose: () => void;
 }) {
   const t = useT();
@@ -170,14 +218,34 @@ export function ConnectionModal({
 
   /** The row being edited. `null` means the draft — the unsaved new connection, when one exists. */
   const [selected, setSelected] = useState<string | null>(
-    newEngine ? null : connectionId ?? connections[0]?.id ?? null,
+    newDriver ? null : connectionId ?? connections[0]?.id ?? null,
   );
-  /** Non-null while an unsaved new connection sits at the bottom of the list. */
-  const [draftEngine, setDraftEngine] = useState<DbKind | null>(newEngine);
-  const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
+  /** Non-null while an unsaved new connection sits at the bottom of the list: its driver. */
+  const [draftDriver, setDraftDriver] = useState<string | null>(newDriver);
+  const [driverMenu, setDriverMenu] = useState<{ x: number; y: number; change: boolean } | null>(null);
+  const [view, setView] = useState<View>(initialDriver !== undefined ? "drivers" : "sources");
+  /** The driver the Drivers half shows. */
+  const [driverSelected, setDriverSelected] = useState<string | null>(initialDriver || "postgresql");
+  /** Unsaved changes to drivers, by id — applied with the dialog's Apply and Save, like the rest. */
+  const [driverDrafts, setDriverDrafts] = useState<Record<string, DbDriverSettings>>({});
+  const driversDirty = Object.keys(driverDrafts).length > 0;
+
+  useEffect(() => {
+    void useDriverStore.getState().load();
+  }, []);
+
+  // "Open driver settings" from a download prompt raised by this dialog's own test. Only a request
+  // made after the dialog opened counts — the store keeps the last one.
+  const focus = useDriverStore((s) => s.focus);
+  const focusAtOpen = useRef(focus?.nonce);
+  useEffect(() => {
+    if (!focus || focus.nonce === focusAtOpen.current) return;
+    setView("drivers");
+    setDriverSelected(focus.driverId);
+  }, [focus]);
 
   const first = useMemo(
-    () => editorState(connections.find((c) => c.id === selected) ?? null, draftEngine),
+    () => editorState(connections.find((c) => c.id === selected) ?? null, draftDriver),
     // Once, for the initial selection. Every later load goes through `load`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -190,9 +258,6 @@ export function ConnectionModal({
   /** Whether the keychain already holds one. Decides the placeholder and whether "clear" is shown. */
   const [hasStored, setHasStored] = useState(false);
   const [passwordTouched, setPasswordTouched] = useState(false);
-  /** Whether the URL on screen already carries a password, which is what makes the separate box
-   *  redundant rather than optional — see the box's own comment below. */
-  const passwordInUrl = mode === "url" && urlHasPassword(config.url, config.kind);
   const [testing, setTesting] = useState(false);
   const [outcome, setOutcome] = useState<
     { ok: true; info: DbServerInfo } | { ok: false; error: string } | null
@@ -204,7 +269,25 @@ export function ConnectionModal({
   /** The SSH host-key dialog, opened over this one by a failed test — `busy` for the same reason. */
   const hostKeyOpen = useHostKeyStore((s) => s.target !== null);
 
-  const engine = engineInfo(config.kind);
+  const driverId = connectionDriverId(config);
+  const driverDef = useDriverDef(driverId);
+  const engine = driverEngineInfo(driverDef, config.kind);
+  /** What a JDBC driver's URL template asks for; `null` for the engines with fields of their own. */
+  const jdbc: DriverForm | null =
+    config.kind === "jdbc" && driverDef ? driverForm(driverDef, config.url_template) : null;
+  /**
+   * A file on this machine rather than a server: SQLite, or a JDBC template with no host in it
+   * (DuckDB, an embedded H2). No tunnel, no TLS, no host in the name.
+   */
+  const local = jdbc ? !jdbc.host : engine.file;
+  /** Whether the URL is what connects: the URL half chosen, or a driver with no template to fill. */
+  const urlMode = mode === "url" || Boolean(jdbc && !jdbc.template);
+  /** Whether the URL on screen already carries a password, which is what makes the separate box
+   *  redundant rather than optional — see the box's own comment below. */
+  const passwordInUrl = urlMode && urlHasPassword(config.url, config.kind);
+  const driverOverview = useDriverStore((s) => s.overview);
+  const driverSettings = useDriverStore((s) => s.settings);
+  const readiness = driverDef ? driverReadiness(driverDef, driverOverview, driverSettings) : null;
   const row = connections.find((c) => c.id === selected) ?? null;
   const savedSpec = row ? parseSpec(row) : null;
 
@@ -234,7 +317,7 @@ export function ConnectionModal({
    * The engine is never changed — see `DbFill.engineMismatch` for why.
    */
   const applyVaultEntry = async (secret: VaultSecret, item: VaultItem) => {
-    const fill = dbFillFrom(secret, config.kind, mode);
+    const fill = dbFillFrom(secret, config.kind, urlMode ? "url" : "fields");
     const toast = useToastStore.getState().pushToast;
     if (fill.filled === 0) {
       toast(t("vault.pick.nothing", { name: item.title }), "info");
@@ -244,7 +327,7 @@ export function ConnectionModal({
     // Against the engine's defaults rather than against "empty", because several of these fields
     // have a non-empty default — `ssl` always holds one of three values, and a port of 0 is this
     // app's word for "the engine's own". Anything still at its default was never answered.
-    const base = defaultConnectionConfig(config.kind);
+    const base = driverDef ? newConnectionConfig(driverDef) : defaultConnectionConfig(config.kind);
     const keys = Object.keys(fill.patch) as (keyof DbConnectionConfig)[];
     const clashes = keys.some(
       (key) => config[key] !== base[key] && config[key] !== fill.patch[key],
@@ -271,14 +354,37 @@ export function ConnectionModal({
     }
   };
 
-  /** Switching engine keeps what is engine-independent — a host and user typed before the switch. */
-  const setKind = (kind: DbKind) => {
-    const defaults = defaultConnectionConfig(kind);
+  /**
+   * Switching driver keeps what is driver-independent — a host and user typed before the switch.
+   * The driver's own defaults (its port, its conventional user) come with it.
+   */
+  const setDriver = (nextId: string) => {
+    const defaults = blankConfig(nextId);
+    const sameEngine = defaults.kind === config.kind;
     setConfig((current) => ({
       ...defaults,
       id: current.id,
-      host: current.host,
+      // A host means nothing to a driver addressed by an account or a file, and an empty one to a
+      // driver that has a host means "localhost" again.
+      host: defaults.host === "" ? "" : current.host || defaults.host,
       user: current.user || defaults.user,
+      // A sibling on the same session — CockroachDB for PostgreSQL — keeps the filters and options
+      // that were set; they still mean the same thing.
+      ...(sameEngine
+        ? {
+            visible_schemas: current.visible_schemas,
+            schemas_filtered: current.schemas_filtered,
+            schema_filter: current.schema_filter,
+            schema_filter_enabled: current.schema_filter_enabled,
+            object_filter: current.object_filter,
+            object_filter_enabled: current.object_filter_enabled,
+            schema_object_filters: current.schema_object_filters,
+            startup_script: current.startup_script,
+            ssl: current.ssl,
+            auth_method: current.auth_method,
+            tenant_id: current.tenant_id,
+          }
+        : {}),
       url: current.url,
       options: current.options,
       read_only: current.read_only,
@@ -300,6 +406,9 @@ export function ConnectionModal({
       port: current.port,
       database: current.database || defaults.database,
     }));
+    // A driver without a URL template can only be reached by URL.
+    const next = driverFor(nextId);
+    if (next.engine === "jdbc" && !next.urls?.length) setMode("url");
     setOutcome(null);
   };
 
@@ -313,11 +422,11 @@ export function ConnectionModal({
   const derivedName = useMemo(() => {
     // A file is named by its file name — `shop.db` — which is what tells two SQLite connections
     // apart; "localhost" would be the same for all of them.
-    if (engine.file) {
+    if (local && !urlMode) {
       const file = config.database.trim().split(/[\\/]/).pop() ?? "";
       return file || engine.label;
     }
-    if (mode === "url" && config.url.trim()) {
+    if (urlMode && config.url.trim()) {
       try {
         const url = new URL(config.url.trim().replace(/^jdbc:/, ""));
         return url.hostname || engine.label;
@@ -325,10 +434,16 @@ export function ConnectionModal({
         return engine.label;
       }
     }
+    // A driver addressed by something else — a Snowflake account, an Athena region — is named by
+    // the first thing it asks for, with the driver's name for context.
+    if (jdbc && !jdbc.host) {
+      const first = jdbc.extra.map((field) => fieldValue(config, driverDef!, field.name)).find(Boolean);
+      return first ? `${engine.label} · ${first}` : engine.label;
+    }
     const host = config.host.trim() || "localhost";
     const where = config.database.trim() ? `${host}/${config.database.trim()}` : host;
     return config.user.trim() ? `${config.user.trim()}@${where}` : where;
-  }, [mode, config.url, config.host, config.database, config.user, engine.label, engine.file]);
+  }, [mode, urlMode, config, engine.label, local, jdbc, driverDef]);
 
   /** What a connect will actually address, once defaults are filled in. */
   const target = useMemo(() => {
@@ -338,8 +453,14 @@ export function ConnectionModal({
     const via = config.ssh_enabled
       ? ` ${t("db.viaTunnel", { host: config.ssh_host.trim() || "ssh" })}`
       : "";
-    if (engine.file) return config.database.trim();
-    if (mode === "url" && config.url.trim()) return `${redactUrl(config.url.trim())}${via}`;
+    if (engine.file && !jdbc) return config.database.trim();
+    if (urlMode && config.url.trim()) return `${redactUrl(config.url.trim())}${via}`;
+    // A JDBC driver's URL, rendered the way the backend renders it — the one line that shows a
+    // template's optional parts falling away, or a field still empty.
+    if (jdbc && driverDef) {
+      const url = jdbcUrlPreview({ ...config, url: "" }, driverDef);
+      return url ? `${redactUrl(url)}${local ? "" : via}` : "";
+    }
     const port = config.port || engine.defaultPort;
     const where = `${config.host || "localhost"}:${port}`;
     const path = config.database ? `/${config.database}` : "";
@@ -347,12 +468,12 @@ export function ConnectionModal({
     // pointed at the old REST port (52773) obvious before it is saved rather than after it fails.
     if (config.kind === "iris") return `jdbc:IRIS://${where}${path}${via}`;
     return `${where}${path}${via}`;
-  }, [mode, config, engine.defaultPort, engine.file, t]);
+  }, [urlMode, config, engine.defaultPort, engine.file, jdbc, driverDef, local, t]);
 
   /** What `save` would write, which is what "has this changed?" has to be asked about. */
   const pending = useMemo(
-    () => ({ ...config, url: mode === "url" ? config.url : "" }),
-    [config, mode],
+    () => ({ ...config, url: urlMode ? config.url : "" }),
+    [config, urlMode],
   );
 
   const dirty = useMemo(() => {
@@ -360,16 +481,16 @@ export function ConnectionModal({
     // A draft counts as dirty once it stops being the blank form its engine came with — so
     // clicking away from one you opened by accident doesn't ask about nothing.
     if (!row || !savedSpec) {
-      return name.trim() !== "" || !sameConfig(pending, defaultConnectionConfig(config.kind));
+      return name.trim() !== "" || !sameConfig(pending, blankConfig(draftDriver));
     }
     return name.trim() !== row.name || !sameConfig(pending, savedSpec);
-  }, [passwordTouched, row, savedSpec, name, pending, config.kind]);
+  }, [passwordTouched, row, savedSpec, name, pending, draftDriver]);
 
   /** Points the right-hand pane at another entry, discarding whatever the old one held. */
-  const load = (id: string | null, engineForDraft: DbKind | null) => {
-    const next = editorState(connections.find((c) => c.id === id) ?? null, engineForDraft);
+  const load = (id: string | null, driverForDraft: string | null) => {
+    const next = editorState(connections.find((c) => c.id === id) ?? null, driverForDraft);
     setSelected(id);
-    setDraftEngine(engineForDraft);
+    setDraftDriver(driverForDraft);
     setName(next.name);
     setConfig(next.config);
     setMode(next.mode);
@@ -385,13 +506,13 @@ export function ConnectionModal({
   };
 
   /** `load`, but it asks first when the pane holds work that isn't saved anywhere. */
-  const select = async (id: string | null, engineForDraft: DbKind | null) => {
-    if (id === selected && engineForDraft === draftEngine) return;
+  const select = async (id: string | null, driverForDraft: string | null) => {
+    if (id === selected && driverForDraft === draftDriver) return;
     if (dirty && !(await confirmAction(t("db.discardConnectionChanges")))) return;
-    load(id, engineForDraft);
+    load(id, driverForDraft);
   };
 
-  const test = async () => {
+  const test = async (): Promise<void> => {
     setTesting(true);
     setOutcome(null);
     try {
@@ -403,11 +524,25 @@ export function ConnectionModal({
         password: passwordTouched ? password : "",
         // The inactive half must not leak into the attempt: testing has to try exactly what the
         // dialog is showing.
-        url: mode === "url" ? config.url : "",
+        url: urlMode ? config.url : "",
       });
       setOutcome({ ok: true, info });
     } catch (e) {
-      setOutcome({ ok: false, error: String(e) });
+      // The driver's files aren't here yet: DataGrip's "Incomplete configuration". Asked over this
+      // dialog, and the test runs again by itself once they are downloaded.
+      const missing = driverFilesError(e);
+      if (missing) {
+        setTesting(false);
+        setOutcome({ ok: false, error: missing.message });
+        if (missing.kind === "missing") {
+          // Awaited, so the `finally` below runs after the rerun rather than clearing its spinner.
+          if (await useDriverStore.getState().ask(missing)) await test();
+        } else {
+          void useDriverStore.getState().ask(missing);
+        }
+        return;
+      }
+      setOutcome({ ok: false, error: driverErrorText(e) });
       // The first connection through a tunnel to a new bastion: ask about its key here, and test
       // again once it is trusted.
       if (config.ssh_enabled && config.ssh_host.trim() && isUnknownHostKeyError(e)) {
@@ -445,12 +580,32 @@ export function ConnectionModal({
     }
   };
 
+  /**
+   * Writes the driver drafts. `false` when one was refused — a custom driver with no class — which
+   * keeps the dialog open on it rather than closing over a change that didn't land.
+   */
+  const saveDrivers = async (): Promise<boolean> => {
+    const drivers = useDriverStore.getState();
+    for (const draft of Object.values(driverDrafts)) {
+      if (!(await drivers.saveSettings(draft))) {
+        pushErrorToast(useDriverStore.getState().errors[draft.id] ?? t("db.drivers.saveFailed"));
+        setView("drivers");
+        setDriverSelected(draft.id);
+        return false;
+      }
+    }
+    setDriverDrafts({});
+    return true;
+  };
+
   /** Save and stay, so a session of edits doesn't cost a reopen per connection. */
   const apply = async () => {
+    if (driversDirty && !(await saveDrivers())) return;
+    if (nothingSelected || !dirty) return;
     const id = await save();
     if (!id) return;
     setSelected(id);
-    setDraftEngine(null);
+    setDraftDriver(null);
     setName(name.trim() || derivedName);
     // What was saved can differ from what was typed: a password in the URL was lifted into the
     // keychain on the way (see `saveConnection`). Showing the stored version is what keeps the form
@@ -467,7 +622,18 @@ export function ConnectionModal({
   };
 
   const saveAndClose = async () => {
-    if (await save()) onClose();
+    if (driversDirty && !(await saveDrivers())) return;
+    // Nothing selected — a dialog opened on the Drivers list — has no connection to write.
+    if (nothingSelected || (await save())) onClose();
+  };
+
+  /** "Create Data Source" from a driver: a new connection with it, on the Data Sources half. */
+  const createFromDriver = async (id: string) => {
+    // A driver still being edited — one just added, above all — has to exist before a connection
+    // can name it, so its changes are applied first, as DataGrip's own button does.
+    if (driverDrafts[id] && !(await saveDrivers())) return;
+    setView("sources");
+    await select(null, id);
   };
 
   /**
@@ -487,7 +653,7 @@ export function ConnectionModal({
   /** `−`: drops the draft, or deletes the saved connection after asking. */
   const remove = async () => {
     if (!row) {
-      if (draftEngine === null) return;
+      if (draftDriver === null) return;
       if (dirty && !(await confirmAction(t("db.discardConnectionChanges")))) return;
       load(connections[0]?.id ?? null, null);
       return;
@@ -506,16 +672,48 @@ export function ConnectionModal({
     [t],
   );
 
-  const nothingSelected = !row && draftEngine === null;
+  const nothingSelected = !row && draftDriver === null;
+
+  /** How many connections each driver serves, for the Drivers list. */
+  const usage = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const entry of connections) {
+      const id = rowDriverId(entry);
+      counts[id] = (counts[id] ?? 0) + 1;
+    }
+    return counts;
+  }, [connections]);
+
+  /** Data Sources ⇄ Drivers, at the head of whichever list is showing. */
+  const switcher = (
+    <div className="flex gap-0.5 rounded-lg bg-[var(--cf-hover)] p-[3px] dark:bg-black/25" role="tablist">
+      {(["sources", "drivers"] as const).map((id) => (
+        <button
+          key={id}
+          type="button"
+          role="tab"
+          aria-selected={view === id}
+          onClick={() => setView(id)}
+          className={`flex-1 rounded-md px-2 py-[3px] text-[11.5px] font-medium transition-colors ${
+            view === id
+              ? "bg-[var(--cf-surface-raised)] text-[var(--cf-text)] shadow-sm ring-1 ring-inset ring-[var(--cf-border)]"
+              : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          }`}
+        >
+          {t(id === "sources" ? "db.view.dataSources" : "db.view.drivers")}
+        </button>
+      ))}
+    </div>
+  );
 
   return (
     <ApiModal
       icon={Database}
       title={t("db.dataSources")}
-      subtitle={nothingSelected ? undefined : engine.label}
+      subtitle={view === "drivers" ? t("db.view.drivers") : nothingSelected ? undefined : engine.label}
       tourAnchor="db-data-sources"
-      width="max-w-4xl"
-      height="h-[78vh]"
+      width="max-w-5xl"
+      height="h-[80vh]"
       busy={saving || picking || hostKeyOpen}
       // A dozen fields and a password, none of it drafted anywhere: a click on the backdrop must not
       // be what throws it away. Close, Cancel and Escape stay.
@@ -523,18 +721,23 @@ export function ConnectionModal({
       onClose={onClose}
       footer={
         <div className="flex w-full items-center gap-2">
-          <GhostButton onClick={() => void test()} disabled={testing || nothingSelected}>
-            {testing ? <Loader2 size={12} className="animate-spin" /> : <Plug size={12} />}
-            {t("db.testConnection")}
-          </GhostButton>
+          {view === "sources" && (
+            <GhostButton onClick={() => void test()} disabled={testing || nothingSelected}>
+              {testing ? <Loader2 size={12} className="animate-spin" /> : <Plug size={12} />}
+              {t("db.testConnection")}
+            </GhostButton>
+          )}
           <div className="ml-auto flex items-center gap-2">
             <GhostButton onClick={onClose}>{t("common.cancel")}</GhostButton>
-            <GhostButton onClick={() => void apply()} disabled={saving || nothingSelected || !dirty}>
+            <GhostButton
+              onClick={() => void apply()}
+              disabled={saving || (!driversDirty && (nothingSelected || !dirty))}
+            >
               {t("db.apply")}
             </GhostButton>
             <button
               onClick={() => void saveAndClose()}
-              disabled={saving || nothingSelected}
+              disabled={saving || (nothingSelected && !driversDirty && view === "sources")}
               className={buttonClass({ variant: "primary" })}
             >
               {t("common.save")}
@@ -544,562 +747,639 @@ export function ConnectionModal({
       }
     >
       <div className="flex min-h-0 flex-1">
-        {/* The set of connections, which is what makes this a dialog about the workspace's
-            databases rather than about one of them. */}
-        <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--cf-border)]">
-          <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1.5">
-            <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("db.connectionsHeading")}
-            </span>
-            <IconButton
-              onClick={(e) => setEngineMenu(menuAnchor(e))}
-              title={t("db.newConnection")}
-            >
-              <Plus size={13} />
-            </IconButton>
-            <IconButton onClick={() => void remove()} title={t("db.removeConnection")}>
-              <Minus size={13} />
-            </IconButton>
-            <IconButton onClick={() => void clone()} title={t("db.duplicate")}>
-              <Copy size={12} />
-            </IconButton>
-            {/* No ordering controls here. This list is flat and the estate is not — since
-                connections were filed into groups, a pair of arrows acting on a flat list could
-                only ever move a row within its own folder while appearing to skip the neighbours
-                filed elsewhere. Ordering is the tree's gesture now: dragging a row is the one act
-                that both reorders it and moves it between folders, which is a thing two arrows
-                cannot express. The tree also keeps its context menu and `Alt`+arrows for a single
-                nudge within a folder. */}
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-auto p-1">
-            {connections.map((entry) => (
-              <ConnectionRow
-                key={entry.id}
-                glyph={<EngineGlyph kind={entry.kind} />}
-                name={entry.name}
-                // The folder rides the host line, and only when there is one. This list is flat
-                // while the tree is not, so the folder is the only thing on the row that says where
-                // the connection will actually appear once the dialog closes.
-                detail={[parseSpec(entry)?.host ?? "", entry.group_name.trim()]
-                  .filter((part) => part !== UNGROUPED)
-                  .join(" · ")}
-                active={entry.id === selected}
-                onClick={() => void select(entry.id, null)}
-              />
-            ))}
-            {draftEngine !== null && (
-              <ConnectionRow
-                glyph={<EngineGlyph kind={draftEngine} />}
-                name={name.trim() || derivedName}
-                detail={t("db.draftConnection")}
-                active={selected === null}
-                onClick={() => void select(null, draftEngine)}
-              />
-            )}
-          </div>
-        </aside>
-
-        {nothingSelected ? (
-          <div className="min-h-0 flex-1">
-            <EmptyState
-              icon={Database}
-              title={t("db.noConnections")}
-              subtitle={t("db.noConnectionsHint")}
-            />
-          </div>
+        {view === "drivers" ? (
+          <DriversView
+            switcher={switcher}
+            selected={driverSelected}
+            onSelect={setDriverSelected}
+            drafts={driverDrafts}
+            onDraft={(next) =>
+              setDriverDrafts((current) => {
+                if ("discard" in next) {
+                  const { [next.id]: _dropped, ...rest } = current;
+                  return rest;
+                }
+                return { ...current, [next.id]: next };
+              })
+            }
+            onCreateDataSource={(id) => void createFromDriver(id)}
+            usage={usage}
+          />
         ) : (
-          // `min-w-0` for the same reason the panel needs it: the pane holds the pasted URL and the
-          // target line, and without it their width becomes the pane's floor.
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {/* Name and engine sit above the tabs: both are true of the connection whichever tab is
-                open, and burying the engine in one of them would hide what the other one means. */}
-            <div className="shrink-0 border-b border-[var(--cf-border)] px-4 py-3">
-              <div className="grid grid-cols-[1fr_180px] gap-3">
-                <Row label={t("db.name")}>
-                  <input
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder={derivedName}
-                    className={INPUT}
-                  />
-                </Row>
-                <Row label={t("db.engine")}>
-                  <EnginePicker active={config.kind} onSelect={setKind} />
-                </Row>
-              </div>
-            </div>
-
-            <div className="flex shrink-0 gap-0.5 border-b border-[var(--cf-border)] px-2 pt-1.5">
-              {(
-                [
-                  { id: "general", label: t("db.tab.general") },
-                  { id: "options", label: t("db.tab.options") },
-                  { id: "ssh", label: t("db.tab.ssh") },
-                  { id: "schemas", label: t("db.tab.schemas") },
-                  { id: "advanced", label: t("db.advanced") },
-                ] as { id: Tab; label: string }[]
-              )
-                // A file on this machine has nothing to tunnel to.
-                .filter((entry) => !(engine.file && entry.id === "ssh"))
-                .map((entry) => (
-                <button
-                  key={entry.id}
-                  type="button"
-                  onClick={() => setTab(entry.id)}
-                  aria-selected={tab === entry.id}
-                  className={`-mb-px border-b-2 px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
-                    tab === entry.id
-                      ? "border-[var(--cf-accent)] text-[var(--cf-text)]"
-                      : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                  }`}
+          <>
+            {/* The set of connections, which is what makes this a dialog about the workspace's
+                databases rather than about one of them. */}
+            <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--cf-border)]">
+              <div className="shrink-0 border-b border-[var(--cf-border)] px-2 py-1.5">{switcher}</div>
+              <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1.5">
+                <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                  {t("db.connectionsHeading")}
+                </span>
+                <IconButton
+                  onClick={(e) => setDriverMenu({ ...menuAnchor(e), change: false })}
+                  title={t("db.newConnection")}
                 >
-                  {entry.label}
-                </button>
-              ))}
-            </div>
+                  <Plus size={13} />
+                </IconButton>
+                <IconButton onClick={() => void remove()} title={t("db.removeConnection")}>
+                  <Minus size={13} />
+                </IconButton>
+                <IconButton onClick={() => void clone()} title={t("db.duplicate")}>
+                  <Copy size={12} />
+                </IconButton>
+                {/* No ordering controls here. This list is flat and the estate is not — since
+                    connections were filed into groups, a pair of arrows acting on a flat list could
+                    only ever move a row within its own folder while appearing to skip the neighbours
+                    filed elsewhere. Ordering is the tree's gesture now: dragging a row is the one act
+                    that both reorders it and moves it between folders, which is a thing two arrows
+                    cannot express. The tree also keeps its context menu and `Alt`+arrows for a single
+                    nudge within a folder. */}
+              </div>
 
-            <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
-              {tab === "general" && engine.file ? (
-                // A file is its own address: no URL, no host, no credentials — the one question is
-                // which file.
-                <FileRow
-                  label={engine.databaseLabel}
-                  hint={t("db.sqliteFileHint")}
-                  value={config.database}
-                  onChange={(database) => {
-                    patch({ database });
-                    setOutcome(null);
-                  }}
-                  filters={[{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "db3"] }]}
-                />
-              ) : tab === "general" ? (
-                <>
-                  {/* Fields or URL — alternatives, so only one is on screen. */}
-                  <div>
-                    {/* The keyring sits on the row that starts the credentials, because that is the
-                        question it answers. It fills whichever half is on screen: the two are
-                        alternatives where the URL silently wins, so writing both would leave the
-                        visible fields not being the ones used. */}
-                    <div className="flex items-center justify-between gap-2">
-                      <ModeSwitch
-                        mode={mode}
-                        onChange={(next) => {
-                          setMode(next);
-                          setOutcome(null);
-                        }}
+              <div className="min-h-0 flex-1 overflow-auto p-1">
+                {connections.map((entry) => (
+                  <ConnectionRow
+                    key={entry.id}
+                    glyph={
+                      <DriverGlyph
+                        driver={effectiveDriver(rowDriverId(entry), driverSettings)}
+                        kind={entry.kind}
                       />
-                      <GhostButton onClick={() => setPicking(true)} title={t("vault.pick.action")}>
-                        <KeyRound size={12} />
-                        {t("vault.pick.action")}
-                      </GhostButton>
-                    </div>
-
-                    {mode === "url" ? (
-                      <div className="mt-2">
-                        <input
-                          value={config.url}
-                          onChange={(e) => patch({ url: e.target.value })}
-                          placeholder={engine.urlPlaceholder}
-                          spellCheck={false}
-                          autoComplete="off"
-                          className={`${INPUT} font-mono`}
-                        />
-                        <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">
-                          {t("db.urlOverrides")}
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="mt-2 space-y-2.5">
-                        <div className="grid grid-cols-[1fr_104px] gap-2">
-                          <Row label={t("db.host")}>
-                            <input
-                              value={config.host}
-                              onChange={(e) => patch({ host: e.target.value })}
-                              spellCheck={false}
-                              autoComplete="off"
-                              className={INPUT}
-                            />
-                          </Row>
-                          <Row label={t("db.port")}>
-                            <NumberInput
-                              value={config.port}
-                              onChange={(port) => patch({ port })}
-                              placeholder={String(engine.defaultPort)}
-                            />
-                          </Row>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-2">
-                          <Row label={engine.databaseLabel}>
-                            <input
-                              value={config.database}
-                              onChange={(e) => patch({ database: e.target.value })}
-                              placeholder={engine.databaseLabel}
-                              spellCheck={false}
-                              autoComplete="off"
-                              className={INPUT}
-                            />
-                          </Row>
-                          {/* Under a service principal this box is the application (client) ID —
-                              the same question, so the same field rather than a second one that
-                              would have to be kept in step with it. */}
-                          <Row
-                            label={
-                              config.auth_method === "entra_service_principal"
-                                ? t("db.clientId")
-                                : t("db.user")
-                            }
-                          >
-                            {/* Under the Azure CLI, SQL Server takes the account from the token
-                                alone; Postgres still logs in as a named role, which defaults to
-                                the token's account when the box is left empty. */}
-                            <input
-                              value={config.user}
-                              onChange={(e) => patch({ user: e.target.value })}
-                              disabled={config.auth_method === "entra_cli" && config.kind !== "postgres"}
-                              placeholder={
-                                config.auth_method === "entra_cli" ? t("db.userFromAzureCli") : ""
-                              }
-                              spellCheck={false}
-                              autoComplete="off"
-                              className={INPUT}
-                            />
-                          </Row>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* SQL Server and PostgreSQL: the two engines here that take a Microsoft Entra
-                      ID token — Azure SQL over TDS, Azure Database for PostgreSQL as the password.
-                      An Azure server set to Entra-only refuses other logins outright, so for those
-                      users this control is the difference between the engine working and being
-                      unreachable. */}
-                  {(config.kind === "sqlserver" || config.kind === "postgres") && (
-                    <Row
-                      label={t("db.authMethod")}
-                      hint={
-                        config.kind === "postgres" && config.auth_method === "entra_service_principal"
-                          ? t("db.authEntraPgAppHint")
-                          : authHint(config.auth_method, t)
-                      }
-                    >
-                      <Select
-                        value={config.auth_method}
-                        onChange={(auth_method) => {
-                          patch({ auth_method: auth_method as DbAuthMethod });
-                          setOutcome(null);
-                        }}
-                        options={[
-                          { value: "password", label: t("db.authPassword") },
-                          { value: "entra_cli", label: t("db.authEntraCli") },
-                          { value: "entra_service_principal", label: t("db.authEntraApp") },
-                        ]}
-                        size="field"
-                      />
-                    </Row>
-                  )}
-
-                  {config.auth_method !== "password" && (
-                    <Row
-                      label={t("db.tenantId")}
-                      hint={
-                        config.auth_method === "entra_cli"
-                          ? t("db.tenantIdOptionalHint")
-                          : t("db.tenantIdHint")
-                      }
-                    >
-                      <input
-                        value={config.tenant_id}
-                        onChange={(e) => patch({ tenant_id: e.target.value })}
-                        placeholder="00000000-0000-0000-0000-000000000000"
-                        spellCheck={false}
-                        autoComplete="off"
-                        className={`${INPUT} font-mono`}
-                      />
-                    </Row>
-                  )}
-
-                  {/* Two ways this box is absent, and they are different absences.
-                      The CLI path stores nothing — the whole point is that the credential stays
-                      with `az`. And a URL that already carries a password has answered the
-                      question: saving moves that password into the keychain slot this box writes,
-                      so the box would be a field you fill for nothing. What is left — a URL with a
-                      user and no password — is exactly when it matters. */}
-                  {passwordInUrl && (
-                    <p className="text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-                      {t("db.passwordFromUrl")}
-                    </p>
-                  )}
-                  {config.auth_method !== "entra_cli" && !passwordInUrl && (
-                  <Row
-                    label={
-                      config.auth_method === "entra_service_principal"
-                        ? t("db.clientSecret")
-                        : t("db.password")
                     }
-                    hint={hasStored && !passwordTouched ? t("db.passwordStored") : t("db.passwordHint")}
-                  >
-                    {/* No reveal button. It could never show the saved password — that one lives in
-                        the OS keychain and is never read back into this dialog; the field holds
-                        either nothing or what you are typing right now. So the eye offered to
-                        uncover a row of dots that stood for a value the app deliberately does not
-                        have, and on a connection you had just opened it did nothing at all. */}
-                    <div className="relative flex items-center">
-                      <input
-                        type="password"
-                        value={password}
-                        onChange={(e) => {
-                          setPassword(e.target.value);
-                          setPasswordTouched(true);
-                          setOutcome(null);
-                        }}
-                        placeholder={hasStored && !passwordTouched ? "••••••••" : ""}
-                        autoComplete="new-password"
-                        className={`${INPUT} ${hasStored ? "pr-8" : ""}`}
-                      />
-                      {hasStored && (
-                        <div className="absolute right-1.5 flex items-center">
-                          <IconButton
-                            onClick={() => {
-                              setPassword("");
-                              setPasswordTouched(true);
-                            }}
-                            title={t("db.clearPassword")}
-                          >
-                            <Trash2 size={12} />
-                          </IconButton>
-                        </div>
-                      )}
-                    </div>
-                  </Row>
-                  )}
-                </>
-              ) : tab === "options" ? (
-                <>
-                  <Toggle
-                    checked={config.read_only}
-                    onChange={(read_only) => patch({ read_only })}
-                    label={t("db.readOnly")}
-                    hint={t("db.readOnlyHint")}
+                    name={entry.name}
+                    // The folder rides the host line, and only when there is one. This list is flat
+                    // while the tree is not, so the folder is the only thing on the row that says where
+                    // the connection will actually appear once the dialog closes.
+                    detail={[parseSpec(entry)?.host ?? "", entry.group_name.trim()]
+                      .filter((part) => part !== UNGROUPED)
+                      .join(" · ")}
+                    active={entry.id === selected}
+                    onClick={() => void select(entry.id, null)}
                   />
-                  <Toggle
-                    checked={config.show_all_databases}
-                    onChange={(show_all_databases) => patch({ show_all_databases })}
-                    label={t("db.showAllDatabases")}
-                    hint={t("db.showAllDatabasesHint")}
+                ))}
+                {draftDriver !== null && (
+                  <ConnectionRow
+                    glyph={<DriverGlyph driver={driverFor(draftDriver)} />}
+                    name={name.trim() || derivedName}
+                    detail={t("db.draftConnection")}
+                    active={selected === null}
+                    onClick={() => void select(null, draftDriver)}
                   />
+                )}
+              </div>
+            </aside>
 
-                  <div className="grid grid-cols-3 gap-2">
-                    <Row label={t("db.timeout")}>
-                      <NumberInput
-                        value={config.connect_timeout_ms}
-                        onChange={(connect_timeout_ms) => patch({ connect_timeout_ms })}
-                        placeholder="15000"
+            {nothingSelected ? (
+              <div className="min-h-0 flex-1">
+                <EmptyState
+                  icon={Database}
+                  title={t("db.noConnections")}
+                  subtitle={t("db.noConnectionsHint")}
+                />
+              </div>
+            ) : (
+              // `min-w-0` for the same reason the panel needs it: the pane holds the pasted URL and the
+              // target line, and without it their width becomes the pane's floor.
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                {/* Name and driver sit above the tabs: both are true of the connection whichever tab is
+                    open, and burying the driver in one of them would hide what the other one means. */}
+                <div className="shrink-0 border-b border-[var(--cf-border)] px-4 py-3">
+                  <div className="grid grid-cols-[1fr_220px] gap-3">
+                    <Row label={t("db.name")}>
+                      <input
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder={derivedName}
+                        className={INPUT}
                       />
                     </Row>
-                    <Row label={t("db.keepAlive")}>
-                      <NumberInput
-                        value={config.keep_alive_secs}
-                        onChange={(keep_alive_secs) => patch({ keep_alive_secs })}
-                        placeholder={t("db.off")}
-                      />
-                    </Row>
-                    <Row label={t("db.autoDisconnect")}>
-                      <NumberInput
-                        value={config.auto_disconnect_secs}
-                        onChange={(auto_disconnect_secs) => patch({ auto_disconnect_secs })}
-                        placeholder={t("db.off")}
+                    <Row label={t("db.driver")}>
+                      <DriverPicker
+                        driver={driverDef}
+                        kind={config.kind}
+                        onOpen={(e) => setDriverMenu({ ...menuAnchor(e), change: true })}
                       />
                     </Row>
                   </div>
-                  <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                    {t("db.sessionTimersHint")}
-                  </p>
+                </div>
 
-                  <Row label={t("db.startupScript")} hint={t("db.startupScriptHint")}>
-                    <textarea
-                      value={config.startup_script}
-                      onChange={(e) => patch({ startup_script: e.target.value })}
-                      rows={4}
-                      spellCheck={false}
-                      placeholder={startupScriptExample(config.kind)}
-                      className={`${INPUT} resize-y font-mono`}
+                <div className="flex shrink-0 gap-0.5 border-b border-[var(--cf-border)] px-2 pt-1.5">
+                  {(
+                    [
+                      { id: "general", label: t("db.tab.general") },
+                      { id: "options", label: t("db.tab.options") },
+                      { id: "ssh", label: t("db.tab.ssh") },
+                      { id: "schemas", label: t("db.tab.schemas") },
+                      { id: "advanced", label: t("db.advanced") },
+                    ] as { id: Tab; label: string }[]
+                  )
+                    // A file on this machine has nothing to tunnel to.
+                    .filter((entry) => !(local && entry.id === "ssh"))
+                    .map((entry) => (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      onClick={() => setTab(entry.id)}
+                      aria-selected={tab === entry.id}
+                      className={`-mb-px border-b-2 px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
+                        tab === entry.id
+                          ? "border-[var(--cf-accent)] text-[var(--cf-text)]"
+                          : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                      }`}
+                    >
+                      {entry.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+                  {/* Said before Test is pressed, the way DataGrip does at the foot of its form: a
+                      JDBC driver whose files aren't here can't connect, and the download is one click. */}
+                  {tab === "general" && driverDef && readiness?.jvm && (!readiness.files || !readiness.runtime) && (
+                    <DriverMissingBanner
+                      def={driverDef}
+                      manual={readiness.manual}
+                      onSettings={() => {
+                        setView("drivers");
+                        setDriverSelected(driverDef.id);
+                      }}
                     />
-                  </Row>
-                </>
-              ) : tab === "ssh" ? (
-                <>
-                  <Toggle
-                    checked={config.ssh_enabled}
-                    onChange={(ssh_enabled) => patch({ ssh_enabled })}
-                    label={t("db.sshTunnel")}
-                    hint={t("db.sshTunnelHint")}
-                  />
-                  {/* Said here rather than only at connect time: a URL names the host to reach
-                      directly, which is the one thing a tunnel exists to avoid. */}
-                  {config.ssh_enabled && mode === "url" && (
-                    <p className="rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/[0.07] p-2.5 text-[11px] leading-snug text-[var(--cf-text)]">
-                      {t("db.sshNeedsFields")}
-                    </p>
                   )}
-                  {config.ssh_enabled && (
-                    <div className="space-y-2.5 border-l-2 border-[var(--cf-border)] pl-3">
-                      <div className="grid grid-cols-[1fr_104px] gap-2">
-                        <Row label={t("db.sshHost")}>
+                  {tab === "general" && engine.file && !jdbc ? (
+                    // A file is its own address: no URL, no host, no credentials — the one question is
+                    // which file.
+                    <FileRow
+                      label={engine.databaseLabel}
+                      hint={t("db.sqliteFileHint")}
+                      value={config.database}
+                      onChange={(database) => {
+                        patch({ database });
+                        setOutcome(null);
+                      }}
+                      filters={[{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "db3"] }]}
+                    />
+                  ) : tab === "general" ? (
+                    <>
+                      {/* Fields or URL — alternatives, so only one is on screen. */}
+                      <div>
+                        {/* The keyring sits on the row that starts the credentials, because that is the
+                            question it answers. It fills whichever half is on screen: the two are
+                            alternatives where the URL silently wins, so writing both would leave the
+                            visible fields not being the ones used. */}
+                        <div className="flex items-center justify-between gap-2">
+                          {/* A driver with no URL template has nothing for the fields to build. */}
+                          {jdbc && !jdbc.template ? (
+                            <span className="text-[11px] text-[var(--cf-text-muted)]">{t("db.drivers.urlOnly")}</span>
+                          ) : (
+                            <ModeSwitch
+                              mode={mode}
+                              onChange={(next) => {
+                                setMode(next);
+                                setOutcome(null);
+                              }}
+                            />
+                          )}
+                          <GhostButton onClick={() => setPicking(true)} title={t("vault.pick.action")}>
+                            <KeyRound size={12} />
+                            {t("vault.pick.action")}
+                          </GhostButton>
+                        </div>
+
+                        {urlMode ? (
+                          <div className="mt-2 space-y-2.5">
+                            <div>
+                              <input
+                                value={config.url}
+                                onChange={(e) => patch({ url: e.target.value })}
+                                placeholder={engine.urlPlaceholder}
+                                spellCheck={false}
+                                autoComplete="off"
+                                className={`${INPUT} font-mono`}
+                              />
+                              <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">
+                                {t("db.urlOverrides")}
+                              </p>
+                            </div>
+                            {/* A JDBC URL rarely carries the login, and the driver takes it apart from
+                                the URL — so the user box stays, where an engine's own URL has it. */}
+                            {jdbc?.credentials && (
+                              <Row label={(driverDef && driverDef.labels?.user) || t("db.user")}>
+                                <input
+                                  value={config.user}
+                                  onChange={(e) => patch({ user: e.target.value })}
+                                  spellCheck={false}
+                                  autoComplete="off"
+                                  className={INPUT}
+                                />
+                              </Row>
+                            )}
+                          </div>
+                        ) : jdbc && driverDef ? (
+                          <JdbcFields def={driverDef} form={jdbc} config={config} patch={patch} />
+                        ) : (
+                          <div className="mt-2 space-y-2.5">
+                            <div className="grid grid-cols-[1fr_104px] gap-2">
+                              <Row label={t("db.host")}>
+                                <input
+                                  value={config.host}
+                                  onChange={(e) => patch({ host: e.target.value })}
+                                  spellCheck={false}
+                                  autoComplete="off"
+                                  className={INPUT}
+                                />
+                              </Row>
+                              <Row label={t("db.port")}>
+                                <NumberInput
+                                  value={config.port}
+                                  onChange={(port) => patch({ port })}
+                                  placeholder={String(engine.defaultPort)}
+                                />
+                              </Row>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <Row label={engine.databaseLabel}>
+                                <input
+                                  value={config.database}
+                                  onChange={(e) => patch({ database: e.target.value })}
+                                  placeholder={engine.databaseLabel}
+                                  spellCheck={false}
+                                  autoComplete="off"
+                                  className={INPUT}
+                                />
+                              </Row>
+                              {/* Under a service principal this box is the application (client) ID —
+                                  the same question, so the same field rather than a second one that
+                                  would have to be kept in step with it. */}
+                              <Row
+                                label={
+                                  config.auth_method === "entra_service_principal"
+                                    ? t("db.clientId")
+                                    : t("db.user")
+                                }
+                              >
+                                {/* Under the Azure CLI, SQL Server takes the account from the token
+                                    alone; Postgres still logs in as a named role, which defaults to
+                                    the token's account when the box is left empty. */}
+                                <input
+                                  value={config.user}
+                                  onChange={(e) => patch({ user: e.target.value })}
+                                  disabled={config.auth_method === "entra_cli" && config.kind !== "postgres"}
+                                  placeholder={
+                                    config.auth_method === "entra_cli" ? t("db.userFromAzureCli") : ""
+                                  }
+                                  spellCheck={false}
+                                  autoComplete="off"
+                                  className={INPUT}
+                                />
+                              </Row>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* SQL Server and PostgreSQL: the two engines here that take a Microsoft Entra
+                          ID token — Azure SQL over TDS, Azure Database for PostgreSQL as the password.
+                          An Azure server set to Entra-only refuses other logins outright, so for those
+                          users this control is the difference between the engine working and being
+                          unreachable. */}
+                      {(config.kind === "sqlserver" || config.kind === "postgres") && (
+                        <Row
+                          label={t("db.authMethod")}
+                          hint={
+                            config.kind === "postgres" && config.auth_method === "entra_service_principal"
+                              ? t("db.authEntraPgAppHint")
+                              : authHint(config.auth_method, t)
+                          }
+                        >
+                          <Select
+                            value={config.auth_method}
+                            onChange={(auth_method) => {
+                              patch({ auth_method: auth_method as DbAuthMethod });
+                              setOutcome(null);
+                            }}
+                            options={[
+                              { value: "password", label: t("db.authPassword") },
+                              { value: "entra_cli", label: t("db.authEntraCli") },
+                              { value: "entra_service_principal", label: t("db.authEntraApp") },
+                            ]}
+                            size="field"
+                          />
+                        </Row>
+                      )}
+
+                      {config.auth_method !== "password" && (
+                        <Row
+                          label={t("db.tenantId")}
+                          hint={
+                            config.auth_method === "entra_cli"
+                              ? t("db.tenantIdOptionalHint")
+                              : t("db.tenantIdHint")
+                          }
+                        >
                           <input
-                            value={config.ssh_host}
-                            onChange={(e) => patch({ ssh_host: e.target.value })}
-                            placeholder="bastion.example.com"
+                            value={config.tenant_id}
+                            onChange={(e) => patch({ tenant_id: e.target.value })}
+                            placeholder="00000000-0000-0000-0000-000000000000"
                             spellCheck={false}
                             autoComplete="off"
-                            className={INPUT}
+                            className={`${INPUT} font-mono`}
                           />
                         </Row>
-                        <Row label={t("db.port")}>
+                      )}
+
+                      {/* Two ways this box is absent, and they are different absences.
+                          The CLI path stores nothing — the whole point is that the credential stays
+                          with `az`. And a URL that already carries a password has answered the
+                          question: saving moves that password into the keychain slot this box writes,
+                          so the box would be a field you fill for nothing. What is left — a URL with a
+                          user and no password — is exactly when it matters. */}
+                      {passwordInUrl && (
+                        <p className="text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+                          {t("db.passwordFromUrl")}
+                        </p>
+                      )}
+                      {config.auth_method !== "entra_cli" && !passwordInUrl && (!jdbc || jdbc.credentials) && (
+                      <Row
+                        label={
+                          config.auth_method === "entra_service_principal"
+                            ? t("db.clientSecret")
+                            : (driverDef?.labels?.password ?? t("db.password"))
+                        }
+                        hint={hasStored && !passwordTouched ? t("db.passwordStored") : t("db.passwordHint")}
+                      >
+                        {/* No reveal button. It could never show the saved password — that one lives in
+                            the OS keychain and is never read back into this dialog; the field holds
+                            either nothing or what you are typing right now. So the eye offered to
+                            uncover a row of dots that stood for a value the app deliberately does not
+                            have, and on a connection you had just opened it did nothing at all. */}
+                        <div className="relative flex items-center">
+                          <input
+                            type="password"
+                            value={password}
+                            onChange={(e) => {
+                              setPassword(e.target.value);
+                              setPasswordTouched(true);
+                              setOutcome(null);
+                            }}
+                            placeholder={hasStored && !passwordTouched ? "••••••••" : ""}
+                            autoComplete="new-password"
+                            className={`${INPUT} ${hasStored ? "pr-8" : ""}`}
+                          />
+                          {hasStored && (
+                            <div className="absolute right-1.5 flex items-center">
+                              <IconButton
+                                onClick={() => {
+                                  setPassword("");
+                                  setPasswordTouched(true);
+                                }}
+                                title={t("db.clearPassword")}
+                              >
+                                <Trash2 size={12} />
+                              </IconButton>
+                            </div>
+                          )}
+                        </div>
+                      </Row>
+                      )}
+                    </>
+                  ) : tab === "options" ? (
+                    <>
+                      <Toggle
+                        checked={config.read_only}
+                        onChange={(read_only) => patch({ read_only })}
+                        label={t("db.readOnly")}
+                        hint={t("db.readOnlyHint")}
+                      />
+                      <Toggle
+                        checked={config.show_all_databases}
+                        onChange={(show_all_databases) => patch({ show_all_databases })}
+                        label={t("db.showAllDatabases")}
+                        hint={t("db.showAllDatabasesHint")}
+                      />
+
+                      <div className="grid grid-cols-3 gap-2">
+                        <Row label={t("db.timeout")}>
                           <NumberInput
-                            value={config.ssh_port}
-                            onChange={(ssh_port) => patch({ ssh_port })}
-                            placeholder="22"
+                            value={config.connect_timeout_ms}
+                            onChange={(connect_timeout_ms) => patch({ connect_timeout_ms })}
+                            placeholder="15000"
+                          />
+                        </Row>
+                        <Row label={t("db.keepAlive")}>
+                          <NumberInput
+                            value={config.keep_alive_secs}
+                            onChange={(keep_alive_secs) => patch({ keep_alive_secs })}
+                            placeholder={t("db.off")}
+                          />
+                        </Row>
+                        <Row label={t("db.autoDisconnect")}>
+                          <NumberInput
+                            value={config.auto_disconnect_secs}
+                            onChange={(auto_disconnect_secs) => patch({ auto_disconnect_secs })}
+                            placeholder={t("db.off")}
                           />
                         </Row>
                       </div>
-                      <Row label={t("db.user")} hint={t("db.sshUserHint")}>
-                        <input
-                          value={config.ssh_user}
-                          onChange={(e) => patch({ ssh_user: e.target.value })}
+                      <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                        {t("db.sessionTimersHint")}
+                      </p>
+
+                      <Row label={t("db.startupScript")} hint={t("db.startupScriptHint")}>
+                        <textarea
+                          value={config.startup_script}
+                          onChange={(e) => patch({ startup_script: e.target.value })}
+                          rows={4}
                           spellCheck={false}
-                          autoComplete="off"
-                          className={INPUT}
+                          placeholder={startupScriptExample(config.kind)}
+                          className={`${INPUT} resize-y font-mono`}
                         />
                       </Row>
-                      <FileRow
-                        label={t("db.sshKey")}
-                        hint={t("db.sshKeyHint")}
-                        value={config.ssh_key_file}
-                        onChange={(ssh_key_file) => patch({ ssh_key_file })}
+                    </>
+                  ) : tab === "ssh" ? (
+                    <>
+                      <Toggle
+                        checked={config.ssh_enabled}
+                        onChange={(ssh_enabled) => patch({ ssh_enabled })}
+                        label={t("db.sshTunnel")}
+                        hint={t("db.sshTunnelHint")}
                       />
-                    </div>
-                  )}
-
-                  <div className="border-t border-[var(--cf-border)] pt-3">
-                    <Row label={t("db.ssl.label")}>
-                      <Select
-                        value={config.ssl}
-                        options={sslOptions}
-                        onChange={(ssl) => patch({ ssl: ssl as DbSslMode })}
-                        size="field"
-                      />
-                    </Row>
-                  </div>
-                  {config.ssl !== "disable" && (
-                    <div className="space-y-2.5 border-l-2 border-[var(--cf-border)] pl-3">
-                      <FileRow
-                        label={t("db.sslCa")}
-                        hint={t("db.sslCaHint")}
-                        value={config.ssl_ca_file}
-                        onChange={(ssl_ca_file) => patch({ ssl_ca_file })}
-                      />
-                      <FileRow
-                        label={t("db.sslCert")}
-                        hint={
-                          config.kind === "mongodb" ? t("db.sslCertMongoHint") : t("db.sslCertHint")
-                        }
-                        value={config.ssl_cert_file}
-                        onChange={(ssl_cert_file) => patch({ ssl_cert_file })}
-                      />
-                      {config.kind !== "mongodb" && (
-                        <FileRow
-                          label={t("db.sslKey")}
-                          value={config.ssl_key_file}
-                          onChange={(ssl_key_file) => patch({ ssl_key_file })}
-                        />
-                      )}
-                      {config.kind === "iris" && (
-                        <p className="text-[11px] leading-snug text-[var(--cf-warning)]">
-                          {t("db.sslIrisNote")}
+                      {/* Said here rather than only at connect time: a URL names the host to reach
+                          directly, which is the one thing a tunnel exists to avoid. */}
+                      {config.ssh_enabled && urlMode && (
+                        <p className="rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/[0.07] p-2.5 text-[11px] leading-snug text-[var(--cf-text)]">
+                          {t("db.sshNeedsFields")}
                         </p>
                       )}
-                      {config.kind === "sqlserver" && (
-                        <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                          {t("db.sslMssqlNote")}
-                        </p>
+                      {config.ssh_enabled && (
+                        <div className="space-y-2.5 border-l-2 border-[var(--cf-border)] pl-3">
+                          <div className="grid grid-cols-[1fr_104px] gap-2">
+                            <Row label={t("db.sshHost")}>
+                              <input
+                                value={config.ssh_host}
+                                onChange={(e) => patch({ ssh_host: e.target.value })}
+                                placeholder="bastion.example.com"
+                                spellCheck={false}
+                                autoComplete="off"
+                                className={INPUT}
+                              />
+                            </Row>
+                            <Row label={t("db.port")}>
+                              <NumberInput
+                                value={config.ssh_port}
+                                onChange={(ssh_port) => patch({ ssh_port })}
+                                placeholder="22"
+                              />
+                            </Row>
+                          </div>
+                          <Row label={t("db.user")} hint={t("db.sshUserHint")}>
+                            <input
+                              value={config.ssh_user}
+                              onChange={(e) => patch({ ssh_user: e.target.value })}
+                              spellCheck={false}
+                              autoComplete="off"
+                              className={INPUT}
+                            />
+                          </Row>
+                          <FileRow
+                            label={t("db.sshKey")}
+                            hint={t("db.sshKeyHint")}
+                            value={config.ssh_key_file}
+                            onChange={(ssh_key_file) => patch({ ssh_key_file })}
+                          />
+                        </div>
                       )}
-                    </div>
+
+                      {/* A JDBC driver reads TLS from its own URL parameters and properties — each driver
+                          names them differently — so a mode here would be a switch wired to nothing. */}
+                      {jdbc ? (
+                        <p className="border-t border-[var(--cf-border)] pt-3 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                          {t("db.drivers.tlsInProperties")}
+                        </p>
+                      ) : (
+                      <div className="border-t border-[var(--cf-border)] pt-3">
+                        <Row label={t("db.ssl.label")}>
+                          <Select
+                            value={config.ssl}
+                            options={sslOptions}
+                            onChange={(ssl) => patch({ ssl: ssl as DbSslMode })}
+                            size="field"
+                          />
+                        </Row>
+                      </div>
+                      )}
+                      {config.ssl !== "disable" && !jdbc && (
+                        <div className="space-y-2.5 border-l-2 border-[var(--cf-border)] pl-3">
+                          <FileRow
+                            label={t("db.sslCa")}
+                            hint={t("db.sslCaHint")}
+                            value={config.ssl_ca_file}
+                            onChange={(ssl_ca_file) => patch({ ssl_ca_file })}
+                          />
+                          <FileRow
+                            label={t("db.sslCert")}
+                            hint={
+                              config.kind === "mongodb" ? t("db.sslCertMongoHint") : t("db.sslCertHint")
+                            }
+                            value={config.ssl_cert_file}
+                            onChange={(ssl_cert_file) => patch({ ssl_cert_file })}
+                          />
+                          {config.kind !== "mongodb" && (
+                            <FileRow
+                              label={t("db.sslKey")}
+                              value={config.ssl_key_file}
+                              onChange={(ssl_key_file) => patch({ ssl_key_file })}
+                            />
+                          )}
+                          {config.kind === "iris" && (
+                            <p className="text-[11px] leading-snug text-[var(--cf-warning)]">
+                              {t("db.sslIrisNote")}
+                            </p>
+                          )}
+                          {config.kind === "sqlserver" && (
+                            <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                              {t("db.sslMssqlNote")}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  ) : tab === "schemas" ? (
+                    <SchemasTab
+                      connectionId={selected}
+                      visible={config.visible_schemas}
+                      filtered={config.schemas_filtered}
+                      onChange={patch}
+                    />
+                  ) : (
+                    <DriverOptions
+                      options={config.options}
+                      onChange={(options) => patch({ options })}
+                      kind={config.kind}
+                      driver={driverDef}
+                    />
                   )}
-                </>
-              ) : tab === "schemas" ? (
-                <SchemasTab
-                  connectionId={selected}
-                  visible={config.visible_schemas}
-                  filtered={config.schemas_filtered}
-                  onChange={patch}
-                />
-              ) : (
-                <DriverOptions
-                  options={config.options}
-                  onChange={(options) => patch({ options })}
-                  kind={config.kind}
-                />
-              )}
-            </div>
-
-            {/* Pinned under the tabs rather than inside one: what a connect will address, and how
-                the last one went, are true of the connection and not of the tab you happen to be
-                reading. The one line that catches a port left on the default, or a URL that quietly
-                overrode the fields. */}
-            <div className="shrink-0 space-y-2 border-t border-[var(--cf-border)] px-4 py-2.5">
-              <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
-                <Server size={11} className="shrink-0" />
-                <span className="shrink-0 uppercase tracking-wide">{t("db.target")}</span>
-                <span className="min-w-0 truncate font-mono text-[var(--cf-text)]">{target}</span>
-              </p>
-
-              {outcome && (
-                <div
-                  className={`max-h-32 overflow-auto rounded-lg border p-2.5 text-[12px] ${
-                    outcome.ok
-                      ? "border-[var(--cf-success)]/40 bg-[var(--cf-success)]/[0.07]"
-                      : "border-[var(--cf-danger)]/40 bg-[var(--cf-danger)]/[0.07]"
-                  }`}
-                >
-                  <p className="flex items-start gap-1.5">
-                    {outcome.ok ? (
-                      <CheckCircle2 size={13} className="mt-[2px] shrink-0 text-[var(--cf-success)]" />
-                    ) : (
-                      <XCircle size={13} className="mt-[2px] shrink-0 text-[var(--cf-danger)]" />
-                    )}
-                    <span className="min-w-0 break-words leading-snug text-[var(--cf-text)]">
-                      {outcome.ok
-                        ? [outcome.info.version, outcome.info.database, outcome.info.user]
-                            .filter(Boolean)
-                            .join(" · ")
-                        : outcome.error}
-                    </span>
-                  </p>
-                  {outcome.ok &&
-                    outcome.info.notes.map((note) => (
-                      <p
-                        key={note}
-                        className="mt-1.5 pl-5 text-[11px] leading-snug text-[var(--cf-text-muted)]"
-                      >
-                        {note}
-                      </p>
-                    ))}
                 </div>
-              )}
-            </div>
-          </div>
+
+                {/* Pinned under the tabs rather than inside one: what a connect will address, and how
+                    the last one went, are true of the connection and not of the tab you happen to be
+                    reading. The one line that catches a port left on the default, or a URL that quietly
+                    overrode the fields. */}
+                <div className="shrink-0 space-y-2 border-t border-[var(--cf-border)] px-4 py-2.5">
+                  <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+                    <Server size={11} className="shrink-0" />
+                    <span className="shrink-0 uppercase tracking-wide">{t("db.target")}</span>
+                    <span className="min-w-0 truncate font-mono text-[var(--cf-text)]">{target}</span>
+                  </p>
+
+                  {outcome && (
+                    <div
+                      className={`max-h-32 overflow-auto rounded-lg border p-2.5 text-[12px] ${
+                        outcome.ok
+                          ? "border-[var(--cf-success)]/40 bg-[var(--cf-success)]/[0.07]"
+                          : "border-[var(--cf-danger)]/40 bg-[var(--cf-danger)]/[0.07]"
+                      }`}
+                    >
+                      <p className="flex items-start gap-1.5">
+                        {outcome.ok ? (
+                          <CheckCircle2 size={13} className="mt-[2px] shrink-0 text-[var(--cf-success)]" />
+                        ) : (
+                          <XCircle size={13} className="mt-[2px] shrink-0 text-[var(--cf-danger)]" />
+                        )}
+                        <span className="min-w-0 break-words leading-snug text-[var(--cf-text)]">
+                          {outcome.ok
+                            ? [outcome.info.version, outcome.info.database, outcome.info.user]
+                                .filter(Boolean)
+                                .join(" · ")
+                            : outcome.error}
+                        </span>
+                      </p>
+                      {outcome.ok &&
+                        outcome.info.notes.map((note) => (
+                          <p
+                            key={note}
+                            className="mt-1.5 pl-5 text-[11px] leading-snug text-[var(--cf-text-muted)]"
+                          >
+                            {note}
+                          </p>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
-      {engineMenu && (
-        <EngineMenu
-          x={engineMenu.x}
-          y={engineMenu.y}
-          onPick={(kind) => void select(null, kind)}
-          onClose={() => setEngineMenu(null)}
+      {driverMenu && (
+        <DriverMenu
+          x={driverMenu.x}
+          y={driverMenu.y}
+          current={driverMenu.change ? driverId : undefined}
+          onPick={(id) => (driverMenu.change ? setDriver(id) : void select(null, id))}
+          onManage={() => setView("drivers")}
+          onClose={() => setDriverMenu(null)}
         />
       )}
 
@@ -1212,6 +1492,9 @@ function startupScriptExample(kind: DbKind): string {
       return "PRAGMA foreign_keys = ON;";
     case "oracle":
       return "ALTER SESSION SET CURRENT_SCHEMA = APP";
+    // Sixty dialects behind one kind: no example would be right for most of them.
+    case "jdbc":
+      return "";
     default:
       return "SET search_path TO app, public;";
   }
@@ -1351,7 +1634,8 @@ function SchemasTab({
     try {
       setCatalog(await dbSchemaCatalog(connectionId));
     } catch (e) {
-      setLoadError(String(e));
+      setLoadError(driverErrorText(e));
+      offerDriverDownload(e, () => void load());
     } finally {
       setLoading(false);
       // This button is the single densest opener of sessions in the app: the catalog walks every
@@ -1547,47 +1831,181 @@ function ConnectionRow({
 }
 
 /**
- * The engine picker: a named list, the way a database tool names its drivers.
+ * The driver field: the current driver, glyph and full name, opening the searchable driver menu.
  *
- * A dropdown rather than the row of chips this used to be. Chips fit the short names and nothing
- * else — "SQL Server" and "IRIS" as chips are abbreviations of a choice that decides every field
- * below them, and the row had no room to say which engines exist and how well each is supported. As
- * a list each engine gets its full name, its glyph in its own brand hue, and a heading over the set,
- * and the closed trigger still shows the current engine, which is what the chips were protecting.
- *
- * It is the app's shared `Select`, so the menu is keyboard-navigable and portalled out of the
- * dialog's scroll container for free, and the glyphs ride its `leading` slot to keep their colour.
+ * It was the app's `Select` over ten engines. Sixty-six drivers is a list that is searched rather
+ * than scrolled, so the field opens `DriverMenu` — the same one the `+` opens — and keeps the look
+ * of a select: a trigger showing what is chosen, with the chevron that says it can change.
  */
-function EnginePicker({
-  active,
-  onSelect,
+function DriverPicker({
+  driver,
+  kind,
+  onOpen,
 }: {
-  active: DbKind;
-  onSelect: (kind: DbKind) => void;
+  driver: DriverDef | null;
+  kind: DbKind;
+  onOpen: (e: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
   const t = useT();
-  const options = useMemo<SelectItems>(
-    () => [
-      {
-        label: t("db.engineGroup"),
-        options: DB_ENGINES.map((entry) => ({
-          value: entry.kind,
-          label: entry.label,
-          leading: <EngineGlyph kind={entry.kind} />,
-        })),
-      },
-    ],
-    [t],
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={t("db.driver")}
+      aria-haspopup="dialog"
+      className="flex h-[30px] w-full min-w-0 items-center gap-2 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 text-left text-[13px] text-[var(--cf-text)] outline-none hover:border-[var(--cf-border-strong)] focus-visible:border-[var(--cf-accent)]"
+    >
+      <DriverGlyph driver={driver} kind={kind} />
+      <span className="min-w-0 flex-1 truncate">{driver?.name ?? kind}</span>
+      <ChevronDown size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+    </button>
   );
+}
+
+/**
+ * What a JDBC driver's URL template asks for, as boxes: host and port, the database or the file,
+ * the fields of its own (an account, a region, a catalog) under the names the catalogue gives
+ * them, and the template itself when the driver has more than one way of being reached.
+ */
+function JdbcFields({
+  def,
+  form,
+  config,
+  patch,
+}: {
+  def: DriverDef;
+  form: DriverForm;
+  config: DbConnectionConfig;
+  patch: (partial: Partial<DbConnectionConfig>) => void;
+}) {
+  const t = useT();
+  const urls = def.urls ?? [];
+  const value = (name: string) => config.url_values.find(([key]) => key === name)?.[1] ?? "";
 
   return (
-    <Select
-      value={active}
-      options={options}
-      onChange={(kind) => onSelect(kind as DbKind)}
-      size="field"
-      ariaLabel={t("db.engine")}
-    />
+    <div className="mt-2 space-y-2.5">
+      {urls.length > 1 && (
+        <Row label={t("db.urlTemplate")}>
+          <Select
+            value={form.template?.name ?? ""}
+            onChange={(url_template) => patch({ url_template })}
+            options={urls.map((url) => ({ value: url.name, label: url.name }))}
+            size="field"
+          />
+        </Row>
+      )}
+
+      {form.host && (
+        <div className={form.port ? "grid grid-cols-[1fr_104px] gap-2" : ""}>
+          <Row label={t("db.host")}>
+            <input
+              value={config.host}
+              onChange={(e) => patch({ host: e.target.value })}
+              placeholder={form.host.fallback ?? ""}
+              spellCheck={false}
+              autoComplete="off"
+              className={INPUT}
+            />
+          </Row>
+          {form.port && (
+            <Row label={t("db.port")}>
+              <NumberInput
+                value={config.port}
+                onChange={(port) => patch({ port })}
+                placeholder={String(def.defaultPort || form.port.fallback || "")}
+              />
+            </Row>
+          )}
+        </div>
+      )}
+
+      {form.file && (
+        <FileRow
+          label={def.labels?.file ?? t("db.file")}
+          value={config.database}
+          // H2 names a database by its path *without* `.mv.db` — the file a picker hands back.
+          onChange={(database) => patch({ database: def.id === "h2" ? database.replace(/\.mv\.db$/i, "") : database })}
+        />
+      )}
+
+      {(form.database || form.extra.length > 0 || form.credentials) && (
+        <div className="grid grid-cols-2 gap-2">
+          {form.database && (
+            <Row label={def.labels?.database ?? t("db.database")}>
+              <input
+                value={config.database}
+                onChange={(e) => patch({ database: e.target.value })}
+                placeholder={form.database.fallback ?? ""}
+                spellCheck={false}
+                autoComplete="off"
+                className={INPUT}
+              />
+            </Row>
+          )}
+          {form.extra.map((field) => (
+            <Row key={field.name} label={field.label}>
+              <input
+                value={value(field.name)}
+                onChange={(e) => patch({ url_values: withUrlValue(config.url_values, field.name, e.target.value) })}
+                placeholder={field.fallback ?? ""}
+                spellCheck={false}
+                autoComplete="off"
+                className={INPUT}
+              />
+            </Row>
+          ))}
+          {form.credentials && (
+            <Row label={def.labels?.user ?? t("db.user")}>
+              <input
+                value={config.user}
+                onChange={(e) => patch({ user: e.target.value })}
+                spellCheck={false}
+                autoComplete="off"
+                className={INPUT}
+              />
+            </Row>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * "The driver files aren't downloaded", at the head of the General tab of a connection whose driver
+ * lacks them — with the download one click away, or, for a driver whose files can only be added by
+ * hand, the way to its settings.
+ */
+function DriverMissingBanner({
+  def,
+  manual,
+  onSettings,
+}: {
+  def: DriverDef;
+  manual: boolean;
+  onSettings: () => void;
+}) {
+  const t = useT();
+  const downloading = useDriverStore((s) => s.downloading.includes(def.id));
+  const error = useDriverStore((s) => s.errors[def.id]);
+  return (
+    <div className="rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/[0.07] p-2.5 text-[11.5px] leading-snug">
+      <div className="flex items-center gap-2">
+        <TriangleAlert size={13} className="shrink-0 text-[var(--cf-warning)]" />
+        <span className="min-w-0 flex-1 text-[var(--cf-text)]">
+          {manual ? t("db.drivers.manualBanner", { name: def.name }) : t("db.drivers.missingBanner", { name: def.name })}
+        </span>
+        {manual ? (
+          <GhostButton onClick={onSettings}>{t("db.drivers.openSettings")}</GhostButton>
+        ) : (
+          <GhostButton onClick={() => void useDriverStore.getState().download(def.id)} disabled={downloading}>
+            {downloading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+            {t("db.drivers.downloadNow")}
+          </GhostButton>
+        )}
+      </div>
+      {error && <p className="mt-1.5 break-words pl-5 text-[var(--cf-danger)]">{error}</p>}
+    </div>
   );
 }
 
@@ -1712,10 +2130,13 @@ function DriverOptions({
   options,
   onChange,
   kind,
+  driver,
 }: {
   options: [string, string][];
   onChange: (options: [string, string][]) => void;
   kind: DbKind;
+  /** For a JDBC driver, whose properties these are — the catalogue's own names are suggested. */
+  driver: DriverDef | null;
 }) {
   const t = useT();
   const suggestions: Record<DbKind, string[]> = {
@@ -1742,6 +2163,9 @@ function DriverOptions({
     // `sid = true` connects by SID instead of service name; the rest are Oracle JDBC properties,
     // passed to the thin driver as they are.
     oracle: ["sid", "oracle.net.CONNECT_TIMEOUT", "oracle.jdbc.ReadTimeout"],
+    // Passed to the driver as JDBC properties, over the ones its catalogue entry sets — which are
+    // the names worth suggesting, since they are the ones known to matter for it.
+    jdbc: Object.keys(driver?.properties ?? {}),
   };
   const unused = suggestions[kind].filter(
     (suggestion) => !options.some(([key]) => key === suggestion),

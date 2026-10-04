@@ -1,6 +1,18 @@
-import { lspNotify, lspProbe, lspRequest, lspStart, lspStopProject } from "../tauri/commands";
+import { lspCapabilities, lspNotify, lspProbe, lspRequest, lspStart, lspStopProject } from "../tauri/commands";
 import { LANGUAGE_SERVERS, serversForRepo, spawnFor, type LanguageServer } from "./servers";
-import { fileUriFor } from "./protocol";
+import { fileUriFor, type LspFileOperationFilter, type LspWorkspaceEdit } from "./protocol";
+import { renameWanted } from "./fileOperations";
+import { WINDOW } from "../windowIdentity";
+
+/**
+ * Whether this window only ever *joins* servers — a floating editor (`lib/editorIslands`).
+ *
+ * It holds one file of a project the main window has open too, and the servers are the process's,
+ * keyed by project: starting one here would replace the main window's (a start on a taken id is a
+ * restart), and every document the main window had told it about would be gone with it. So it uses
+ * whatever is already running for the project, starts nothing, and stops nothing.
+ */
+const joinOnly = WINDOW.satellite?.kind === "file";
 
 /**
  * Which language servers are running, and what they have been told.
@@ -215,6 +227,13 @@ export async function startForProject(projectId: string, repoPath: string, rootE
       const inflight = starting.get(id);
       if (inflight) return inflight;
       const attempt = (async () => {
+        if (joinOnly) {
+          const running = await lspCapabilities(id).catch(() => null);
+          if (running && context?.projectId === projectId) {
+            sessions.set(id, { id, server, capabilities: running });
+          }
+          return;
+        }
         const { launch } = await probe(server);
         if (!launch) return;
         // The outcome is carried rather than collapsed into `null`: `lsp_start` answers `null`
@@ -265,7 +284,8 @@ export async function stopAll(): Promise<void> {
   sessions.clear();
   documents.clear();
   announce();
-  if (projectId) await lspStopProject(projectId).catch(() => {});
+  // Joined, not owned: the servers are the main window's, and it is still using them.
+  if (projectId && !joinOnly) await lspStopProject(projectId).catch(() => {});
 }
 
 /** A session that has died — its process ended, so whatever was registered against it now answers
@@ -365,6 +385,56 @@ export async function askAll<T>(
 /** The `file://` URI for a repo-relative path in the open project. */
 export function uriFor(relPath: string): string | null {
   return context ? fileUriFor(context.repoPath, relPath) : null;
+}
+
+/** A file or folder moving inside the open project, repo-relative at both ends. */
+export interface PathRename {
+  from: string;
+  to: string;
+  isDir: boolean;
+}
+
+/** The renames `session` asked to hear about under `workspace.fileOperations.<which>`, as the
+ *  `FileRename` list the protocol sends — empty when it asked for none of them. */
+function renamesFor(session: Session, which: "willRename" | "didRename", renames: readonly PathRename[]) {
+  const workspace = session.capabilities?.workspace as
+    | { fileOperations?: Partial<Record<string, { filters?: LspFileOperationFilter[] }>> }
+    | undefined;
+  const filters = workspace?.fileOperations?.[which]?.filters;
+  if (!context || !filters?.length) return [];
+  const { repoPath } = context;
+  return renames
+    .filter((rename) => renameWanted(filters, `${repoPath}/${rename.from}`, rename.isDir))
+    .map((rename) => ({ oldUri: fileUriFor(repoPath, rename.from), newUri: fileUriFor(repoPath, rename.to) }));
+}
+
+/**
+ * "These are about to move" — `workspace/willRenameFiles`, asked of every running server that
+ * declared an interest in them, *before* anything moves: the edits a server answers with describe
+ * the project as it is now (rust-analyzer's rewrite of the `mod` line naming a module, say), which is
+ * the only state it can describe. Applying them is the caller's (`moveImports`).
+ *
+ * Every server is asked, not only the ones for one language: a folder holds files of all of them.
+ * A server that fails or times out contributes nothing, the way `askAll` treats one.
+ */
+export async function willRenameFiles(renames: readonly PathRename[]): Promise<LspWorkspaceEdit[]> {
+  const answers = await Promise.all(
+    [...sessions.values()].map((session) => {
+      const files = renamesFor(session, "willRename", renames);
+      return files.length === 0
+        ? null
+        : lspRequest<LspWorkspaceEdit | null>(session.id, "workspace/willRenameFiles", { files }).catch(() => null);
+    }),
+  );
+  return answers.filter((answer): answer is LspWorkspaceEdit => answer !== null && answer !== undefined);
+}
+
+/** "These moved" — the notification that follows, for the servers that asked for it. */
+export function didRenameFiles(renames: readonly PathRename[]): void {
+  for (const session of sessions.values()) {
+    const files = renamesFor(session, "didRename", renames);
+    if (files.length > 0) void lspNotify(session.id, "workspace/didRenameFiles", { files }).catch(() => {});
+  }
 }
 
 /**

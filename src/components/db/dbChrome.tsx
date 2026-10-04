@@ -13,6 +13,7 @@ import {
   Layers,
   Leaf,
   ListOrdered,
+  Plug,
   Server,
   Table2,
   View,
@@ -24,6 +25,7 @@ import type { ReactNode } from "react";
 import { Kbd, iconButtonClass, type IconButtonSize } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
 import { monogramStyle } from "../../lib/monogram";
+import { defaultDriverId, type DriverDef } from "../../lib/db/drivers";
 import type { DbKind, DbNodeKind } from "../../types/database";
 
 /**
@@ -129,6 +131,8 @@ const ENGINE_COLORS: Record<DbKind, string> = {
   mariadb: "#c0765a",
   sqlite: "#0ea5e9",
   oracle: "#c74634",
+  // Only the fallback: a JDBC connection is drawn in its driver's own colour (`driverColor`).
+  jdbc: "#64748b",
 };
 
 export function engineColor(kind: DbKind): string {
@@ -164,6 +168,8 @@ const ENGINE_ICONS: Record<DbKind, LucideIcon> = {
   sqlite: Feather,
   // Oracle's is the red "O".
   oracle: CircleDot,
+  // The fallback for a JDBC driver with no tile of its own — see `DriverGlyph`.
+  jdbc: Plug,
 };
 
 export function engineIcon(kind: DbKind): LucideIcon {
@@ -189,6 +195,68 @@ export function EngineGlyph({ kind, size = 14 }: { kind: DbKind; size?: number }
 }
 
 /**
+ * A driver's colour: its own brand hue, or its engine's for a connection that names none.
+ */
+export function driverColor(driver: DriverDef | null | undefined, kind: DbKind): string {
+  return driver?.color ?? engineColor(kind);
+}
+
+/**
+ * Whether a driver is drawn as a tile of its own rather than as its engine's glyph.
+ *
+ * The engines this app has always had keep their glyphs, so nothing about an existing connection
+ * changes. Every other driver — sixty of them, a dozen of which share an engine — gets two letters
+ * on its brand colour: not logos, for the reason `ENGINE_ICONS` gives, but enough to tell
+ * Snowflake from Trino in a list where they would otherwise all be the same plug.
+ */
+function ownTile(driver: DriverDef | null | undefined): DriverDef | null {
+  return driver && (driver.engine === "jdbc" || driver.id !== defaultDriverId(driver.engine)) ? driver : null;
+}
+
+/** A driver's two letters on a wash of its colour — the same recipe as the projects' monograms. */
+function DriverTile({ driver, size, label }: { driver: DriverDef; size: number; label?: string }) {
+  return (
+    <span
+      title={label}
+      role={label ? "img" : undefined}
+      aria-label={label}
+      aria-hidden={label ? undefined : true}
+      className="inline-flex shrink-0 select-none items-center justify-center rounded-[4px] font-semibold leading-none tracking-[-0.02em]"
+      style={{
+        width: size,
+        height: size,
+        fontSize: Math.max(7, Math.round(size * 0.5)),
+        ...monogramStyle(driver.color),
+      }}
+    >
+      {driver.mark}
+    </span>
+  );
+}
+
+/**
+ * The glyph a driver is listed with: its engine's, for the engines that have one, its tile
+ * otherwise. Always a `size` square, so a list mixing the two keeps its names aligned.
+ */
+export function DriverGlyph({
+  driver,
+  kind,
+  size = 16,
+}: {
+  driver: DriverDef | null | undefined;
+  kind?: DbKind;
+  size?: number;
+}) {
+  const tile = ownTile(driver);
+  if (tile) return <DriverTile driver={tile} size={size} />;
+  return (
+    <span className="inline-flex shrink-0 items-center justify-center" style={{ width: size, height: size }}>
+      <EngineGlyph kind={driver?.engine ?? kind ?? "postgres"} size={size - 2} />
+    </span>
+  );
+}
+
+/**
  * The dot next to a connection: its engine's colour, hollow when nothing is connected.
  *
  * **Three states, not two.** Filled means there is a session, hollow means there isn't — and
@@ -204,14 +272,17 @@ export function EngineGlyph({ kind, size = 14 }: { kind: DbKind; size?: number }
  */
 export function ConnectionDot({
   kind,
+  driver,
   connected,
   busy = false,
 }: {
   kind: DbKind;
+  /** The connection's driver, whose colour wins over the engine's. */
+  driver?: DriverDef | null;
   connected: boolean;
   busy?: boolean;
 }) {
-  const color = engineColor(kind);
+  const color = driverColor(driver, kind);
   const dot = (
     <span
       aria-hidden
@@ -246,14 +317,21 @@ export function ConnectionDot({
  */
 export function EngineBadge({
   kind,
+  driver,
   label,
   size = 16,
 }: {
   kind: DbKind;
+  /** The connection's driver: one with a tile of its own is drawn as that tile. */
+  driver?: DriverDef | null;
   label: string;
   /** 16 on a tab, 18 on a toolbar or a tree row. */
   size?: number;
 }) {
+  const tile = ownTile(driver);
+  if (tile) {
+    return <DriverTile driver={tile} size={size} label={label} />;
+  }
   const Icon = engineIcon(kind);
   return (
     <span

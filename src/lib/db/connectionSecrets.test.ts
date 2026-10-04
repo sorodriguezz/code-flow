@@ -2,6 +2,30 @@ import { describe, expect, it } from "vitest";
 import { liftUrlSecret, maskConnectionSecrets, urlCarriesPassword } from "./connectionSecrets";
 
 describe("liftUrlSecret", () => {
+  it("lifts a password out of any JDBC driver's URL, in the shape that driver writes it", () => {
+    expect(liftUrlSecret("jdbc", "jdbc:snowflake://acme.snowflakecomputing.com/?user=me&password=s3cret&db=SALES")).toEqual({
+      url: "jdbc:snowflake://acme.snowflakecomputing.com/?user=me&db=SALES",
+      password: "s3cret",
+      user: null,
+    });
+    expect(liftUrlSecret("jdbc", "jdbc:db2://h:50000/SAMPLE:user=db2inst1;password=pw;")).toEqual({
+      url: "jdbc:db2://h:50000/SAMPLE:user=db2inst1;",
+      password: "pw",
+      user: null,
+    });
+    expect(
+      liftUrlSecret("jdbc", "jdbc:databricks://h:443/default;transportMode=http;AuthMech=3;UID=token;PWD=dapi123").url,
+    ).toBe("jdbc:databricks://h:443/default;transportMode=http;AuthMech=3;UID=token");
+    expect(liftUrlSecret("jdbc", "jdbc:mariadb://app:pw@h:3306/db").url).toBe("jdbc:mariadb://app@h:3306/db");
+    expect(liftUrlSecret("jdbc", "jdbc:oracle:thin:scott/tiger@h:1521/orcl")).toEqual({
+      url: "jdbc:oracle:thin:@h:1521/orcl",
+      password: "tiger",
+      user: "scott",
+    });
+    // The address of an Athena URL has an `=` in it, and is still not a pair.
+    expect(liftUrlSecret("jdbc", "jdbc:athena://Region=us-east-1;WorkGroup=primary").password).toBeNull();
+  });
+
   it("lifts a URI's password and keeps the user", () => {
     expect(liftUrlSecret("postgres", "postgresql://app:s3cret@db.example.com:5432/shop?sslmode=require")).toEqual({
       url: "postgresql://app@db.example.com:5432/shop?sslmode=require",

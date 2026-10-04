@@ -125,6 +125,35 @@ export interface LspWorkspaceEdit {
   documentChanges?: (LspTextDocumentEdit | LspResourceOperation)[];
 }
 
+/** One piece of an inlay hint's label. A part with a `location` names a declaration, and is a link
+ *  to it in the editor. */
+export interface LspInlayHintLabelPart {
+  value: string;
+  tooltip?: string | LspMarkupContent;
+  location?: LspLocation;
+}
+
+export interface LspInlayHint {
+  position: LspPosition;
+  label: string | LspInlayHintLabelPart[];
+  /** 1 type · 2 parameter. */
+  kind?: 1 | 2;
+  /** What double-clicking the hint writes into the file — the type annotation it stands for. */
+  textEdits?: LspTextEdit[];
+  tooltip?: string | LspMarkupContent;
+  paddingLeft?: boolean;
+  paddingRight?: boolean;
+}
+
+/**
+ * Which renames a server wants to hear about — `workspace.fileOperations.willRename` in its
+ * capabilities. A filter matches by glob, and optionally only files or only folders.
+ */
+export interface LspFileOperationFilter {
+  scheme?: string;
+  pattern: { glob: string; matches?: "file" | "folder"; options?: { ignoreCase?: boolean } };
+}
+
 // ---------------------------------------------------------------------------
 // Positions
 // ---------------------------------------------------------------------------
@@ -132,6 +161,14 @@ export interface LspWorkspaceEdit {
 /** Monaco → LSP. Both axes lose one. */
 export function toLspPosition(position: { lineNumber: number; column: number }): LspPosition {
   return { line: position.lineNumber - 1, character: position.column - 1 };
+}
+
+/** Monaco → LSP, for a whole range. */
+export function toLspRange(range: monaco.IRange): LspRange {
+  return {
+    start: toLspPosition({ lineNumber: range.startLineNumber, column: range.startColumn }),
+    end: toLspPosition({ lineNumber: range.endLineNumber, column: range.endColumn }),
+  };
 }
 
 /** LSP → Monaco, as the four numbers `IRange` wants. */

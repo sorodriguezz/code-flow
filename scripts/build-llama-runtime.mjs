@@ -5,9 +5,9 @@
 //   LICENSE              llama.cpp's, because we are redistributing its binaries — from the
 //                        archive when it carries one, from `scripts/assets/` when it does not
 //
-// Same bargain as `build-iris-runtime.mjs`, which does this for the JRE the IRIS driver needs, and
-// deliberately the same shape: a pinned upstream release, checksum-verified, trimmed to what is
-// used, written into the app's resources, and skipped entirely when it is already current.
+// The shape every build-time fetcher here has: a pinned upstream release, checksum-verified, trimmed
+// to what is used, written into the app's resources, and skipped entirely when it is already
+// current.
 //
 // **The weights are not here and never will be.** They are gigabytes, they are optional, and the
 // app downloads the one the user picks at runtime into `paths::models_dir()`. This script ships
@@ -176,9 +176,8 @@ async function main() {
     return;
   }
 
-  // The stamp lives in the work directory rather than in `OUT`, for the reason `build-iris-runtime`
-  // keeps its own outside `resources/iris`: that directory is copied verbatim into the bundle, and a
-  // build stamp has no business reaching a user's disk.
+  // The stamp lives in the work directory rather than in `OUT`: that directory is copied verbatim
+  // into the bundle, and a build stamp has no business reaching a user's disk.
   //
   // The existence check beside it is what a stamp kept elsewhere costs. `WORK` can outlive an `OUT`
   // that was deleted by hand or restored from a partial cache, and a stamp on its own would then

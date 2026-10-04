@@ -1,6 +1,16 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ClipboardCopy, ListTree, Pin, PinOff, SaveAll, SplitSquareHorizontal, X } from "lucide-react";
+import {
+  ClipboardCopy,
+  CornerUpLeft,
+  ListTree,
+  PictureInPicture2,
+  Pin,
+  PinOff,
+  SaveAll,
+  SplitSquareHorizontal,
+  X,
+} from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { FileGlyph } from "../common/FileGlyph";
 import { Tooltip } from "../common/Tooltip";
@@ -34,12 +44,19 @@ export interface TabMenuActions {
   togglePinned: (path: string) => void;
   closeAll: () => void;
   copyPath: (path: string) => void;
-  splitRight: (path: string) => void;
+  /** Absent in a floating editor, which is one file with nothing to split it beside. */
+  splitRight?: (path: string) => void;
   /** Show this file's row in the explorer beside the editor: open every folder above it and scroll
-   *  it into view. Distinct from the tree's own "Reveal in file manager", which opens Finder. */
-  revealInTree: (path: string) => void;
+   *  it into view. Distinct from the tree's own "Reveal in file manager", which opens Finder. Absent
+   *  where there is no explorer — a floating editor. */
+  revealInTree?: (path: string) => void;
   /** Every unsaved tab of the project, not just this one — `saveAll` in `EditorView`. */
   saveAll: () => void;
+  /** Tears the tab off into a floating window, at this point on the screen — the menu's way to what
+   *  dragging it out of the window does. Only the main window's editor offers it. */
+  moveToWindow?: (path: string, screen: { x: number; y: number }) => void;
+  /** A floating editor's way home: closes its window and reopens the file in the main one. */
+  returnToMain?: () => void;
 }
 
 function baseName(path: string): string {
@@ -117,6 +134,17 @@ function dropTargetAt(x: number, y: number): TabDropTarget | null {
   return null;
 }
 
+/** Whether the pointer is past the window's own edges — where a dropped tab becomes a floating
+ *  editor. The page keeps receiving a pressed pointer out there (the drag captures it), with
+ *  coordinates beyond the viewport. */
+function outsideWindow(ev: PointerEvent): boolean {
+  return ev.clientX < 0 || ev.clientY < 0 || ev.clientX >= window.innerWidth || ev.clientY >= window.innerHeight;
+}
+
+function clampTo(value: number, low: number, high: number): number {
+  return Math.max(low, Math.min(Math.max(low, high), value));
+}
+
 /**
  * Which band of a pane the pointer is in: an edge, or its middle.
  *
@@ -149,6 +177,7 @@ export function EditorTabs({
   onClose,
   onPin,
   onDropTab,
+  onDetach,
   menu,
   actions,
 }: {
@@ -162,6 +191,12 @@ export function EditorTabs({
   /** The whole target: which group, which slot in its strip, and which band of it the pointer was
    * in. The parent decides whether that is a reorder, a move between splits, or a new split. */
   onDropTab: (payload: TabDrag, target: TabDropTarget) => void;
+  /**
+   * A tab let go **outside the window** — VS Code's gesture for a floating editor window. `screen`
+   * is where, in screen pixels, so the window opens under the pointer. Absent where a tab cannot be
+   * torn off, and there a drop outside does what it always did: nothing.
+   */
+  onDetach?: (payload: TabDrag, screen: { x: number; y: number }) => void;
   menu: TabMenuActions;
   actions?: ReactNode;
 }) {
@@ -183,6 +218,7 @@ export function EditorTabs({
   const hoveredKey = useRowHoverStore((s) => s.key);
   const over = useTabDragStore((s) => s.over);
   const origin = useTabDragStore((s) => s.origin);
+  const outside = useTabDragStore((s) => s.outside);
   const draggingHere = drag?.groupId === groupId;
   const dropAt = over?.groupId === groupId && over.zone === "strip" ? over.index : null;
 
@@ -212,6 +248,8 @@ export function EditorTabs({
     // Left button only; the middle one closes a tab.
     if (e.button !== 0) return;
     const from = { x: e.clientX, y: e.clientY };
+    const element = e.currentTarget;
+    const pointerId = e.pointerId;
     let started = false;
 
     const onMove = (ev: PointerEvent) => {
@@ -221,13 +259,28 @@ export function EditorTabs({
         suppressClickRef.current = true;
         setDragCursor(true);
         useTabDragStore.getState().start({ groupId, path }, ev.clientX, ev.clientY);
+        // Captured where a drop outside means something, so the gesture keeps reporting after the
+        // pointer leaves the window and the release out there still arrives here.
+        if (onDetach) {
+          try {
+            element.setPointerCapture(pointerId);
+          } catch {
+            // Already released — the window listeners below carry the gesture regardless.
+          }
+        }
       }
+      const away = onDetach !== undefined && outsideWindow(ev);
+      useTabDragStore.getState().setOutside(away);
       // The label is moved directly rather than through state: a re-render of every strip on
-      // every pointer move would make the drag stutter.
-      if (ghostRef.current) {
-        ghostRef.current.style.transform = `translate(${ev.clientX + 12}px, ${ev.clientY + 12}px)`;
+      // every pointer move would make the drag stutter. Outside the window it would be drawn where
+      // nobody can see it, so it waits at the edge instead, saying what letting go there does.
+      const ghost = ghostRef.current;
+      if (ghost) {
+        const x = away ? clampTo(ev.clientX + 12, 4, window.innerWidth - ghost.offsetWidth - 4) : ev.clientX + 12;
+        const y = away ? clampTo(ev.clientY + 12, 4, window.innerHeight - ghost.offsetHeight - 4) : ev.clientY + 12;
+        ghost.style.transform = `translate(${x}px, ${y}px)`;
       }
-      useTabDragStore.getState().hover(dropTargetAt(ev.clientX, ev.clientY));
+      useTabDragStore.getState().hover(away ? null : dropTargetAt(ev.clientX, ev.clientY));
     };
 
     const onUp = (ev: PointerEvent) => {
@@ -235,9 +288,15 @@ export function EditorTabs({
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
       if (!started) return;
-      const target = dropTargetAt(ev.clientX, ev.clientY);
+      // A cancelled gesture lands nowhere, however far out it had gone.
+      const away = onDetach !== undefined && ev.type === "pointerup" && outsideWindow(ev);
+      const target = away ? null : dropTargetAt(ev.clientX, ev.clientY);
       setDragCursor(false);
       useTabDragStore.getState().end();
+      if (away) {
+        onDetach?.({ groupId, path }, { x: ev.screenX, y: ev.screenY });
+        return;
+      }
       // Dropped on nothing droppable — the tab stays where it was, like every editor.
       if (target) onDropTab({ groupId, path }, target);
     };
@@ -249,28 +308,40 @@ export function EditorTabs({
 
   const dropBar = <div className="my-1 w-0.5 shrink-0 rounded-full bg-[var(--cf-accent-fill)]" />;
 
-  const menuItems = (tab: EditorTabItem): MenuItem[] => [
-    {
-      label: tab.pinned ? t("editor.unpinTab") : t("editor.pinTab"),
-      icon: tab.pinned ? PinOff : Pin,
-      onClick: () => menu.togglePinned(tab.path),
-    },
-    // Neither for a scratch tab (`lib/scratchTabs`): it lives nowhere, so there is no path to copy
-    // and no row to reveal.
-    ...(isScratchPath(tab.path)
-      ? []
-      : [
-          { label: t("editor.copyPath"), icon: ClipboardCopy, onClick: () => menu.copyPath(tab.path) },
-          // Next to Copy Path rather than at the bottom: both answer "where is this file", which is the
-          // question a strip of basenames leaves you with once a few of them are called `index.ts`.
-          { label: t("editor.revealInTree"), icon: ListTree, onClick: () => menu.revealInTree(tab.path) },
-        ]),
-    { label: t("editor.splitRight"), icon: SplitSquareHorizontal, onClick: () => menu.splitRight(tab.path) },
-    // Here because this is where the files are — and the one menu every platform has: the macOS
-    // menu bar is not drawn on Windows and Linux. The chord is the registry's (⌘⌥S by default).
-    { label: t("editor.saveAll"), icon: SaveAll, separated: true, onClick: menu.saveAll },
-    { label: t("editor.closeAllTabs"), icon: X, onClick: menu.closeAll },
-  ];
+  /** `at` is where the menu was opened, in screen pixels — where a floating window asked for from
+   *  it opens. */
+  const menuItems = (tab: EditorTabItem, at: { x: number; y: number }): MenuItem[] => {
+    const { revealInTree, splitRight, moveToWindow, returnToMain } = menu;
+    // Neither for a scratch tab (`lib/scratchTabs`): it lives nowhere, so there is no path to copy,
+    // no row to reveal, and no file a floating window could read back.
+    const scratch = isScratchPath(tab.path);
+    return [
+      {
+        label: tab.pinned ? t("editor.unpinTab") : t("editor.pinTab"),
+        icon: tab.pinned ? PinOff : Pin,
+        onClick: () => menu.togglePinned(tab.path),
+      },
+      ...(scratch ? [] : [{ label: t("editor.copyPath"), icon: ClipboardCopy, onClick: () => menu.copyPath(tab.path) }]),
+      // Next to Copy Path rather than at the bottom: both answer "where is this file", which is the
+      // question a strip of basenames leaves you with once a few of them are called `index.ts`.
+      ...(!scratch && revealInTree
+        ? [{ label: t("editor.revealInTree"), icon: ListTree, onClick: () => revealInTree(tab.path) }]
+        : []),
+      ...(splitRight
+        ? [{ label: t("editor.splitRight"), icon: SplitSquareHorizontal, onClick: () => splitRight(tab.path) }]
+        : []),
+      // The menu's way to what dragging the tab out of the window does — the only way at all when
+      // the window is maximized and there is no "outside" to drag it to.
+      ...(!scratch && moveToWindow
+        ? [{ label: t("editor.island.open"), icon: PictureInPicture2, onClick: () => moveToWindow(tab.path, at) }]
+        : []),
+      ...(returnToMain ? [{ label: t("editor.island.return"), icon: CornerUpLeft, onClick: returnToMain }] : []),
+      // Here because this is where the files are — and the one menu every platform has: the macOS
+      // menu bar is not drawn on Windows and Linux. The chord is the registry's (⌘⌥S by default).
+      { label: t("editor.saveAll"), icon: SaveAll, separated: true, onClick: menu.saveAll },
+      { label: t("editor.closeAllTabs"), icon: X, onClick: menu.closeAll },
+    ];
+  };
 
   return (
     // The strip is the sunken tone with its hairline drawn as an *inset shadow* rather than the
@@ -417,7 +488,7 @@ export function EditorTabs({
         <ContextMenu
           x={tabMenu.x}
           y={tabMenu.y}
-          items={menuItems(tabMenu.tab)}
+          items={menuItems(tabMenu.tab, { x: window.screenX + tabMenu.x, y: window.screenY + tabMenu.y })}
           onClose={() => setTabMenu(null)}
         />
       )}
@@ -433,8 +504,15 @@ export function EditorTabs({
             style={{ transform: `translate(${origin.x + 12}px, ${origin.y + 12}px)` }}
             className="pointer-events-none fixed left-0 top-0 z-[100] flex items-center gap-1.5 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-2 py-1 text-[12px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
           >
-            <FileGlyph path={drag.path} />
+            {/* Past the window's edge the label says what letting go there does: a window of its
+                own, not a reorder. */}
+            {outside ? (
+              <PictureInPicture2 size={13} className="shrink-0 text-[var(--cf-accent)]" />
+            ) : (
+              <FileGlyph path={drag.path} />
+            )}
             {baseName(drag.path)}
+            {outside && <span className="text-[11px] text-[var(--cf-text-muted)]">{t("editor.island.dropHint")}</span>}
           </div>,
           document.body,
         )}

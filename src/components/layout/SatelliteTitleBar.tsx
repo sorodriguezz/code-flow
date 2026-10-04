@@ -17,6 +17,7 @@ import {
   Minus,
   MonitorSmartphone,
   NotebookPen,
+  Pin,
   Send,
   Square,
   Workflow,
@@ -28,6 +29,9 @@ import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 import { broadcast } from "../../lib/windowBus";
 import { WINDOW } from "../../lib/windowIdentity";
+import { parseFileIslandRef, useFileIslandStore } from "../../lib/editorIslands";
+import { pushErrorToast } from "../../state/toastStore";
+import { FileGlyph } from "../common/FileGlyph";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -165,11 +169,22 @@ export function SatelliteTitleBar() {
    *  app's is a translated label, looked up from the same key the rail uses. */
   const name =
     spec?.kind === "repo" ? (project?.name ?? t("windows.repoElsewhereShort")) : t(app.labelKey);
+  const floating = spec?.kind === "file";
 
   /** Sends this window's contents back to the main window: bring that one forward, then close this.
    *  The order matters — closing first leaves the desk showing whatever was behind, which reads as
-   *  the thing having been thrown away rather than put back. */
+   *  the thing having been thrown away rather than put back.
+   *
+   *  A floating editor's contents are a buffer, which has to *arrive* before the window may go —
+   *  its editor does the handing over (`giveBack`) and closes the window once the main window has
+   *  the file, coming forward on it. Before the editor is up there is nothing in here to hand over:
+   *  the main window still holds the file, and closing is enough. */
   const reattach = () => {
+    const giveBack = floating ? useFileIslandStore.getState().giveBack : null;
+    if (giveBack) {
+      void giveBack(true);
+      return;
+    }
     broadcast({ kind: "focus-main" });
     void win.close();
   };
@@ -199,7 +214,9 @@ export function SatelliteTitleBar() {
         </div>
       )}
 
-      {spec?.kind === "repo" ? (
+      {spec?.kind === "file" ? (
+        <FileCrumb refId={spec.refId} />
+      ) : spec?.kind === "repo" ? (
         // The repository crumb the main window's title row draws: its monogram and its name.
         // `min-w-0` so it gives when the bar runs out of room — a repository window also carries
         // the workspace, a branch and three buttons.
@@ -248,10 +265,16 @@ export function SatelliteTitleBar() {
 
       <div className="flex-1" data-tauri-drag-region />
 
-      <Tooltip side="bottom" label={t("windows.reattach")} description={t("windows.reattachHint")}>
+      {floating && <KeepOnTop />}
+
+      <Tooltip
+        side="bottom"
+        label={floating ? t("windows.returnFile") : t("windows.reattach")}
+        description={floating ? t("windows.returnFileHint") : t("windows.reattachHint")}
+      >
         <button
           onClick={reattach}
-          aria-label={t("windows.reattach")}
+          aria-label={floating ? t("windows.returnFile") : t("windows.reattach")}
           className={iconButtonClass({ size: "sm" })}
         >
           <CornerUpLeft size={15} />
@@ -326,6 +349,71 @@ function RepoRemote() {
         </Suspense>
       )}
     </>
+  );
+}
+
+/**
+ * What a floating editor holds: the file — its glyph, its name, the unsaved dot its tab wears — and,
+ * dimmed after it, the repository and folder it lives in, which a bare name cannot say (two
+ * `index.ts` windows side by side are otherwise the same window). The editor inside keeps the name
+ * current (`useFileIslandStore`); until it is up, the window's own id says it.
+ */
+function FileCrumb({ refId }: { refId: string }) {
+  const target = parseFileIslandRef(refId);
+  const shown = useFileIslandStore((s) => s.path);
+  const dirty = useFileIslandStore((s) => s.dirty);
+  const projectName = useWorkspaceStore((s) => {
+    if (!target) return null;
+    for (const list of Object.values(s.projectsByWorkspace)) {
+      const found = list.find((p) => p.id === target.projectId);
+      if (found) return found.name;
+    }
+    return null;
+  });
+  const path = shown ?? target?.path ?? "";
+  const cut = path.lastIndexOf("/");
+  const name = cut >= 0 ? path.slice(cut + 1) : path;
+  const folder = cut > 0 ? path.slice(0, cut) : "";
+  const where = [projectName, folder].filter(Boolean).join(" · ");
+  return (
+    // `deep`: the whole crumb is a handle. A floating window is moved about far more than a screen of
+    // the app is, and its name is where the hand goes to pick it up.
+    <span data-tauri-drag-region="deep" className="flex h-7 min-w-0 items-center gap-2 pl-1 pr-1" title={path}>
+      <span className="flex shrink-0 items-center">
+        <FileGlyph path={path} size={15} />
+      </span>
+      <span className="min-w-0 shrink-0 truncate font-semibold text-[var(--cf-text)]">{name}</span>
+      {dirty && <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent-fill)]" />}
+      {where && <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-faint)]">{where}</span>}
+    </span>
+  );
+}
+
+/**
+ * The pin: keeps this window above every other one — the rest of the app's and other applications'
+ * alike — until it is pressed again. VS Code's "always on top" for its floating editors, and the
+ * reason to tear a file off at all as often as not: a reference kept in sight while you work
+ * somewhere else.
+ *
+ * Starts off: a window that opened above everything would be one you could not get behind.
+ */
+function KeepOnTop() {
+  const [onTop, setOnTop] = useState(false);
+  const t = useT();
+  const label = onTop ? t("windows.unpinOnTop") : t("windows.pinOnTop");
+  const toggle = () => {
+    const next = !onTop;
+    void win
+      .setAlwaysOnTop(next)
+      .then(() => setOnTop(next))
+      .catch((e: unknown) => pushErrorToast(String(e)));
+  };
+  return (
+    <Tooltip side="bottom" label={label} description={t("windows.pinOnTopHint")}>
+      <button onClick={toggle} aria-pressed={onTop} aria-label={label} className={iconButtonClass({ size: "sm", active: onTop })}>
+        <Pin size={15} className={onTop ? "fill-current" : ""} />
+      </button>
+    </Tooltip>
   );
 }
 

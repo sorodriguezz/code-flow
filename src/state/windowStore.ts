@@ -54,12 +54,13 @@ interface WindowState {
   init: () => Promise<void>;
   setLimit: (limit: number) => void;
   /**
-   * Opens — or focuses — the window for one app or one repository.
+   * Opens — or focuses — the window for one app, one repository or one file.
    *
    * Returns `false` when it refused, so the caller can leave the app where it is rather than
-   * marking an icon for a window that was never built.
+   * marking an icon for a window that was never built. `at` places a new window — see
+   * `openSatellite`.
    */
-  detach: (kind: DetachableKind, refId: string, title: string) => Promise<boolean>;
+  detach: (kind: DetachableKind, refId: string, title: string, at?: { x: number; y: number }) => Promise<boolean>;
   focus: (label: string) => Promise<void>;
   /** Whether this app or repository is showing in a window of its own. */
   detachedLabel: (kind: DetachableKind, refId: string) => string | null;
@@ -145,7 +146,7 @@ export const useWindowStore = create<WindowState>((set, get) => ({
 
   setLimit: (limit) => set({ limit: Math.max(0, Math.min(8, Math.round(limit))) }),
 
-  detach: async (kind, refId, title) => {
+  detach: async (kind, refId, title, at) => {
     const { satellites, limit } = get();
     const already = satellites.some((s) => s.kind === kind && s.ref_id === refId);
     // Focusing what is already open is never refused, however full the desk is — it opens nothing.
@@ -156,7 +157,7 @@ export const useWindowStore = create<WindowState>((set, get) => ({
     try {
       // Opened where it was asked for: an app detached while this window sits on "Tienda" shows
       // "Tienda", whatever that window was switched to the last time it was open.
-      await openSatellite(kind, refId, title, useWorkspaceStore.getState().activeWorkspaceId);
+      await openSatellite(kind, refId, title, useWorkspaceStore.getState().activeWorkspaceId, at);
       return true;
     } catch (err) {
       pushErrorToast(String(err));

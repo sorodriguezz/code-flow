@@ -19,6 +19,8 @@ import {
   tsRequest,
   tsRunningRoot,
   tsStart,
+  tsSyncNotify,
+  tsSynced,
   type TsCompletionDetail,
   type TsCodeFixAction,
   type TsDiagnostic,
@@ -29,6 +31,8 @@ import {
   type TsReferencesResponse,
   type TsRenameResponse,
   type TsSignatureHelpItems,
+  type TsDefinition,
+  type TsInlayHint,
 } from "../../lib/tsserver";
 import { modelPathForId } from "../../lib/editorModel";
 import { isInstallableName } from "../../lib/packageScripts";
@@ -37,6 +41,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import { reportSoon, useProblemsStore, type Problem } from "../../state/problemsStore";
 import { useEditorPanelStore } from "../../state/editorPanelStore";
 import { applyRename } from "./renameFlow";
+import { installTsRefactors } from "./tsRefactors";
 
 /**
  * Real TypeScript IntelliSense in the editor, from the project's own `tsserver`.
@@ -195,7 +200,7 @@ function openInServer(model: MonacoEditorNS.ITextModel): void {
   const text = model.getValue();
   tsOpenFiles.add(file);
   sentEnd.set(file, endOf(text));
-  void tsNotify("open", {
+  void tsSyncNotify("open", {
     file,
     fileContent: text,
     scriptKindName: kind,
@@ -218,7 +223,7 @@ function sendChange(model: MonacoEditorNS.ITextModel): void {
   }
   const text = model.getValue();
   sentEnd.set(file, endOf(text));
-  void tsNotify("change", {
+  void tsSyncNotify("change", {
     file,
     line: 1,
     offset: 1,
@@ -456,6 +461,117 @@ function modelUriFor(monaco: Monaco, file: string) {
   const normalized = file.replace(/\\/g, "/");
   if (!normalized.startsWith(`${root}/`)) return null;
   return monaco.Uri.parse(modelPathForId(project.projectId, normalized.slice(root.length + 1)));
+}
+
+/** tsserver's spans as places this app can open — the ones outside the repository dropped, for the
+ *  reason `modelUriFor` gives. */
+function locationsOf(monaco: Monaco, spans: readonly TsDefinition[]): languages.Location[] {
+  return spans.flatMap((span) => {
+    const uri = modelUriFor(monaco, span.file);
+    return uri
+      ? [{ uri, range: new monaco.Range(span.start.line, span.start.offset, span.end.line, span.end.offset) }]
+      : [];
+  });
+}
+
+/**
+ * Every implementation of the symbol at `position`, as repo-relative places — "Find All
+ * Implementations" in the panel under the editor. `null` when the server does not hold the file (the
+ * caller asks the language servers instead).
+ */
+export async function tsImplementations(
+  model: MonacoEditorNS.ITextModel,
+  position: Position,
+): Promise<{ path: string; range: IRange }[] | null> {
+  const file = fileOf(model);
+  if (!file || !running()) return null;
+  const spans = await tsRequest<TsDefinition[]>("implementation", {
+    file,
+    line: position.lineNumber,
+    offset: position.column,
+  }).catch(() => []);
+  return spans.flatMap((span) => {
+    const path = tsRelPath(span.file);
+    return path
+      ? [
+          {
+            path,
+            range: {
+              startLineNumber: span.start.line,
+              startColumn: span.start.offset,
+              endLineNumber: span.end.line,
+              endColumn: span.end.offset,
+            },
+          },
+        ]
+      : [];
+  });
+}
+
+/**
+ * Which inlay hints the compiler computes — handed to `configure` with the rest of the preferences,
+ * since `provideInlayHints` takes a span and reads what to draw from there.
+ *
+ * Every *type* hint, and parameter names only where the argument is a literal: `retry(3, true)` is
+ * the call nobody can read without the signature, while `send(request, options)` already says what
+ * it passes, and naming every argument of every call doubles the width of the code for nothing. A
+ * hint that would repeat the name beside it (`const user: User`) is left out for the same reason.
+ * `interactiveInlayHints` is what makes the type inside a hint a link, as in VS Code.
+ */
+const INLAY_HINT_PREFERENCES = {
+  includeInlayParameterNameHints: "literals",
+  includeInlayParameterNameHintsWhenArgumentMatchesName: false,
+  includeInlayFunctionParameterTypeHints: true,
+  includeInlayVariableTypeHints: true,
+  includeInlayVariableTypeHintsWhenTypeMatchesName: false,
+  includeInlayPropertyDeclarationTypeHints: true,
+  includeInlayFunctionLikeReturnTypeHints: true,
+  includeInlayEnumMemberValueHints: true,
+  interactiveInlayHints: true,
+};
+
+/**
+ * Tells Monaco the hints it is showing may be stale for a reason the buffer did not give — a server
+ * that has just come up, having answered nothing for the files opened before it. Set when the
+ * providers are installed; Monaco asks again for every editor on screen.
+ */
+let refreshInlayHints: (() => void) | null = null;
+
+/** One of tsserver's hints as Monaco draws it. A part that names a declaration becomes a link to it,
+ *  where that declaration is somewhere this app can open. */
+function toInlayHint(monaco: Monaco, hint: TsInlayHint): languages.InlayHint {
+  const label = hint.displayParts?.length
+    ? hint.displayParts.map((part) => {
+        const uri = part.span ? modelUriFor(monaco, part.span.file) : null;
+        return {
+          label: part.text,
+          location:
+            uri && part.span
+              ? {
+                  uri,
+                  range: new monaco.Range(
+                    part.span.start.line,
+                    part.span.start.offset,
+                    part.span.end.line,
+                    part.span.end.offset,
+                  ),
+                }
+              : undefined,
+        };
+      })
+    : hint.text;
+  return {
+    label,
+    position: { lineNumber: hint.position.line, column: hint.position.offset },
+    kind:
+      hint.kind === "Parameter"
+        ? monaco.languages.InlayHintKind.Parameter
+        : hint.kind === "Type"
+          ? monaco.languages.InlayHintKind.Type
+          : undefined,
+    paddingLeft: hint.whitespaceBefore,
+    paddingRight: hint.whitespaceAfter,
+  };
 }
 
 /**
@@ -758,22 +874,64 @@ function installProviders(monaco: Monaco): void {
         offset: position.column,
       }).catch(() => null);
       if (!found?.definitions?.length) return null;
-      return found.definitions
-        .map((definition) => {
-          const uri = modelUriFor(monaco, definition.file);
-          return uri
-            ? {
-                uri,
-                range: new monaco.Range(
-                  definition.start.line,
-                  definition.start.offset,
-                  definition.end.line,
-                  definition.end.offset,
-                ),
-              }
-            : null;
-        })
-        .filter((location) => location !== null);
+      return locationsOf(monaco, found.definitions);
+    },
+  });
+
+  /**
+   * Go to Implementations (⌘F12) and Go to Type Definition — the two jumps that begin where
+   * definition stops. The definition of an interface is the interface; what a reader usually wants
+   * from there is the classes that implement it, and from a variable, the declaration of its *type*
+   * rather than of the variable. Each is one request, answered in the same spans as
+   * `definitionAndBoundSpan`.
+   *
+   * Several implementations jump to the first (`gotoLocation` in `EditorPane`). The whole list is
+   * "Find All Implementations", in the panel under the editor — for the reason "Find All References"
+   * is there: Monaco's peek cannot preview a file that is not open.
+   */
+  const spansAt =
+    (command: "implementation" | "typeDefinition") =>
+    async (model: MonacoEditorNS.ITextModel, position: Position) => {
+      const file = fileOf(model);
+      if (!file || !running()) return null;
+      const spans = await tsRequest<TsDefinition[]>(command, {
+        file,
+        line: position.lineNumber,
+        offset: position.column,
+      }).catch(() => null);
+      return spans?.length ? locationsOf(monaco, spans) : null;
+    };
+  monaco.languages.registerImplementationProvider(TS_LANGUAGES, { provideImplementation: spansAt("implementation") });
+  monaco.languages.registerTypeDefinitionProvider(TS_LANGUAGES, { provideTypeDefinition: spansAt("typeDefinition") });
+
+  /**
+   * Inlay hints: the type the compiler inferred and the parameter a literal lands in, drawn faint
+   * beside the code. Which of them it computes is `INLAY_HINT_PREFERENCES`, handed over with
+   * `configure`; whether any are drawn is the Editor's switch (`editorDisplayStore`), which is
+   * Monaco's own and keeps it from asking at all.
+   *
+   * Asked per visible range, the way Monaco asks — a span of offsets into the text the server holds,
+   * which is the buffer: `getOffsetAt` counts line breaks the way `getValue` writes them, and
+   * `getValue` is what the document sync sends.
+   */
+  const hintsChanged = new monaco.Emitter<void>();
+  refreshInlayHints = () => hintsChanged.fire();
+  monaco.languages.registerInlayHintsProvider(TS_LANGUAGES, {
+    onDidChangeInlayHints: hintsChanged.event,
+    provideInlayHints: async (model: MonacoEditorNS.ITextModel, range: IRange, token: CancellationToken) => {
+      const none = { hints: [], dispose: () => {} };
+      const file = fileOf(model);
+      if (!file || !running()) return none;
+      // Behind the buffer's latest text: offsets into the text before an edit land on the wrong
+      // characters after it.
+      await tsSynced();
+      const start = model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn });
+      const end = model.getOffsetAt({ lineNumber: range.endLineNumber, column: range.endColumn });
+      const hints = await tsRequest<TsInlayHint[]>("provideInlayHints", { file, start, length: end - start }).catch(
+        () => null,
+      );
+      if (!hints || token.isCancellationRequested) return none;
+      return { hints: hints.map((hint) => toInlayHint(monaco, hint)), dispose: () => {} };
     },
   });
 
@@ -946,6 +1104,11 @@ function installProviders(monaco: Monaco): void {
       return { actions, dispose: () => undefined };
     },
   });
+
+  // The code actions that are not fixes — refactorings and Organize Imports. Their own module, and
+  // their own provider: they are asked for differently (by selection, by kind) and applied
+  // differently (across files) from a fix for the error under the caret.
+  installTsRefactors(monaco);
 }
 
 export function useTypeScript(
@@ -991,12 +1154,19 @@ export function useTypeScript(
           tsOpenFiles.clear();
           sentEnd.clear();
           // Rename keeps shorthand properties working (`{ foo }` becomes `{ foo: bar }`, not
-          // `{ bar }`, which would change the object's key) and never renames an import path.
+          // `{ bar }`, which would change the object's key) and never renames an import path. The
+          // inlay hints are the ones `INLAY_HINT_PREFERENCES` picks.
           void tsRequest("configure", {
-            preferences: { providePrefixAndSuffixTextForRename: true, allowRenameOfImportPath: false },
+            preferences: {
+              providePrefixAndSuffixTextForRename: true,
+              allowRenameOfImportPath: false,
+              ...INLAY_HINT_PREFERENCES,
+            },
           }).catch(() => undefined);
         }
         sweep(monaco);
+        // Every editor already on screen asked for hints before there was a server to answer.
+        if (fresh) refreshInlayHints?.();
         scheduleOpenFileDiagnostics();
         useEditorPanelStore.getState().setProjectCheck({ canCheckProject: true });
       })

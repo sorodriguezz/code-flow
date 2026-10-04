@@ -43,7 +43,7 @@ import { formatModel } from "./formatDocument";
 import { ChangesPanel } from "../git/ChangesPanel";
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
 import { setDefinitionContext } from "../../lib/goToDefinition";
-import { syncSave } from "../../lib/lsp/client";
+import { syncClose, syncOpen, syncSave } from "../../lib/lsp/client";
 import {
   closeAllInGroups,
   closeGroupInGroups,
@@ -65,7 +65,28 @@ import {
   type DiskVersion,
 } from "../../lib/tauri/commands";
 import { freeScratchPath, isScratchPath, scratchName, scratchPath } from "../../lib/scratchTabs";
-import { clearDrafts, readDrafts, writeDrafts } from "../../lib/editorDrafts";
+import { clearDrafts, readDrafts, updateDrafts, writeDrafts, type EditorDraft } from "../../lib/editorDrafts";
+import {
+  claimFromMain,
+  dropStash,
+  fileIslandRef,
+  islandHolding,
+  islandPaths,
+  openInMainWindow,
+  recallIsland,
+  refreshStash,
+  registerIslandHost,
+  returnToMain,
+  showInIsland,
+  stashForIsland,
+  takeReturns,
+  useFileIslandStore,
+  useIslandInbox,
+} from "../../lib/editorIslands";
+import { MAIN_LABEL, WINDOW } from "../../lib/windowIdentity";
+import { onWindowMessage } from "../../lib/windowBus";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useWindowStore } from "../../state/windowStore";
 import {
   describePath,
   failedLoad,
@@ -82,6 +103,7 @@ import { formatWithPrettier, prettierCanFormat } from "../../lib/formatting";
 import { useProblemsStore } from "../../state/problemsStore";
 import { useEditorPanelStore } from "../../state/editorPanelStore";
 import { useEditorFormatStore } from "../../state/editorFormatStore";
+import { useEditorDisplayStore } from "../../state/editorDisplayStore";
 import { isNotebookPath, registerNotebookHost } from "../../lib/notebook/host";
 import { notebookActions } from "../../state/notebookStore";
 import {
@@ -138,6 +160,9 @@ const PANEL_MAX = 640;
 /** The shut dock: one 28px button with a little air — the same width as the activity rail on the
  * other side of the code, so the two edges of the editor read as a pair. */
 const RAIL_W = 40;
+
+/** What the column beside the rail can show — one panel at a time, the way VS Code's side bar does. */
+type SidePanel = "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons";
 
 /**
  * An activity-rail button. At rest it is the shared icon button; the selected one hands its fill to
@@ -231,7 +256,57 @@ type ParkedEditor = ParkedEditorOf<OpenTab, Project>;
  */
 type SaveOutcome = "saved" | "clean" | "conflict" | "failed" | "skipped";
 
-export function EditorView() {
+/**
+ * Writes a window's unsaved buffers into the repository's crash journal.
+ *
+ * One row per repository, and since floating editors (`lib/editorIslands`) it can have two writers:
+ * the main window and a floating window holding one of the repository's files. Each replaces only
+ * what it owns. A floating editor owns its one file; the main window owns everything but the files
+ * floating editors hold — and while none does, it writes the row whole, as it always has, with no
+ * read in front of the write.
+ */
+function journalDrafts(
+  islandPath: string | null,
+  repoPath: string,
+  projectId: string,
+  drafts: EditorDraft[],
+): Promise<void> {
+  if (islandPath !== null) return updateDrafts(repoPath, (path) => path !== islandPath, drafts);
+  const held = islandPaths(projectId);
+  return held.size > 0 ? updateDrafts(repoPath, (path) => held.has(path), drafts) : writeDrafts(repoPath, drafts);
+}
+
+/** Where a floating editor opens when a tab is let go at `screen`: its title bar under the pointer,
+ *  kept on the screen this window is on when that is where the pointer was. */
+function islandPlacement(screen: { x: number; y: number }): { x: number; y: number } {
+  const x = screen.x - 160;
+  const y = screen.y - 22;
+  const display = window.screen as Screen & { availLeft?: number; availTop?: number };
+  const left = display.availLeft ?? 0;
+  const top = display.availTop ?? 0;
+  const inside =
+    screen.x >= left && screen.x < left + display.availWidth && screen.y >= top && screen.y < top + display.availHeight;
+  if (!inside) return { x, y };
+  // The window's own default size (`open_satellite`), so the whole of it lands on the screen.
+  return {
+    x: Math.max(left, Math.min(x, left + display.availWidth - 820)),
+    y: Math.max(top, Math.min(y, top + display.availHeight - 600)),
+  };
+}
+
+/**
+ * The Editor — and, with `island`, the whole of a floating editor window (`SatelliteApp`'s
+ * `FileWindow`): one file torn out of the main window, with no explorer, no rail and no docks
+ * around it. The island's file arrives from the main window (`claimFromMain`) and goes back to it
+ * when the window closes; anything else it is asked to open is opened in the main window. See
+ * `lib/editorIslands` for why it moves rather than being copied.
+ */
+export function EditorView({ island }: { island?: { path: string } } = {}) {
+  /** The file a floating editor holds, or `null` for the Editor everywhere else. */
+  const islandPath = island?.path ?? null;
+  /** Whether this editor can tear a tab off into a floating window: only the main window's, which
+   *  is the one the floating windows hand their files back to. */
+  const canDetach = islandPath === null && WINDOW.main;
   const t = useT();
   const chord = useShortcutChord();
   /** A registry chord as a key cap, for a tooltip's trailing slot — `undefined` when unbound. */
@@ -315,9 +390,22 @@ export function EditorView() {
   /** Bumped when a parked editor comes back — see the effect that re-reads its unfinished tabs. */
   const [restoredParked, setRestoredParked] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [sidePanel, setSidePanel] = useState<
-    "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons"
-  >("files");
+  const [sidePanel, setSidePanel] = useState<SidePanel>("files");
+  /**
+   * Whether the panel column is put away — the activity bar's own gesture in VS Code (user ask,
+   * 2026-10-03): pressing the icon of the panel that is open closes the column and gives its width
+   * to the code, and pressing any icon brings it back showing that panel.
+   *
+   * Hidden rather than unmounted, so the tree comes back with the folders that were open and the
+   * search with what it had found — the column is only out of sight. Session-only, like `sidePanel`.
+   */
+  const [sideHidden, setSideHidden] = useState(false);
+  /** Every road to a panel that is not the rail's own toggle — a shortcut, "reveal in explorer", the
+   *  tree's commands — has to open the column as well, or it would switch a panel nobody can see. */
+  const showSidePanel = useCallback((panel: SidePanel) => {
+    setSidePanel(panel);
+    setSideHidden(false);
+  }, []);
   /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
    * step into while committing, not a layout preference — the editor's resting state is code. */
   const [changesOpen, setChangesOpen] = useState(false);
@@ -439,15 +527,18 @@ export function EditorView() {
   useEffect(() => {
     if (!project) return;
     const repoPath = project.local_path;
+    const projectId = project.id;
     const id = window.setTimeout(() => {
       if (discardedRef.current) return;
-      void writeDrafts(
+      void journalDrafts(
+        islandPath,
         repoPath,
+        projectId,
         dirtyBuffers.map((buffer) => ({ path: buffer.path, content: buffer.content, at: Date.now() })),
       );
     }, DRAFT_DEBOUNCE_MS);
     return () => window.clearTimeout(id);
-  }, [project, dirtyBuffers]);
+  }, [project, dirtyBuffers, islandPath]);
 
 
   const activeAbsolutePath = useMemo(
@@ -513,6 +604,21 @@ export function EditorView() {
   const openFile = useCallback(
     async (path: string, opts?: { pin?: boolean; groupId?: string }) => {
       if (!project) return;
+      // A floating editor holds its one file. Anything else it is asked for — a go-to-definition
+      // into another file, above all — opens where every other file is: the main window.
+      if (islandPath !== null && path !== islandPath) {
+        openInMainWindow(project.id, path);
+        return;
+      }
+      // And the main window does not open a second copy of a file a floating editor holds: that
+      // window comes forward instead, the way a rail icon whose app is elsewhere does.
+      if (islandPath === null) {
+        const holder = islandHolding(project.id, path);
+        if (holder !== null) {
+          showInIsland(holder);
+          return;
+        }
+      }
       const pin = opts?.pin ?? false;
       const targetId = opts?.groupId ?? activeGroupIdRef.current;
       const alreadyOpen = tabsRef.current.some((tab) => tab.path === path);
@@ -535,7 +641,7 @@ export function EditorView() {
       if (alreadyOpen) return;
       await readInto(path);
     },
-    [project, readInto],
+    [project, readInto, islandPath],
   );
 
   /**
@@ -693,7 +799,9 @@ export function EditorView() {
    */
   const restoredRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!project) return;
+    // A floating editor offers nothing back: its one file came from the main window with its edits
+    // in it, and the journal is the main window's to restore from on the next launch.
+    if (!project || islandPath !== null) return;
     const repoPath = project.local_path;
     if (restoredRef.current === repoPath) return;
     restoredRef.current = repoPath;
@@ -706,6 +814,8 @@ export function EditorView() {
         // Already open: a parked editor came back with this very buffer in it (see `ParkedEditor`),
         // and re-applying the journal over it would at best change nothing and announce it anyway.
         if (tabsRef.current.some((tab) => tab.path === draft.path)) continue;
+        // Or open in a floating editor, which has the buffer this entry is a copy of.
+        if (islandHolding(project.id, draft.path) !== null) continue;
         // What the file holds now — which may have moved on, or may already be this exact text. A
         // file that is no longer text is not one a text draft can be laid over.
         const onDisk = await readEditorFile(repoPath, draft.path).catch(() => null);
@@ -726,12 +836,15 @@ export function EditorView() {
     return () => {
       cancelled = true;
     };
-  }, [project, openFile, patchTab]);
+  }, [project, openFile, patchTab, islandPath]);
 
-  const revealInTree = useCallback((path: string) => {
-    setSidePanel("files");
-    setExplorerCommand({ command: "revealFile", path, nonce: dropNonce.current++ });
-  }, []);
+  const revealInTree = useCallback(
+    (path: string) => {
+      showSidePanel("files");
+      setExplorerCommand({ command: "revealFile", path, nonce: dropNonce.current++ });
+    },
+    [showSidePanel],
+  );
 
   const closeGroup = useCallback(async (groupId: string) => {
     const outcome = closeGroupInGroups(groupsRef.current, groupId);
@@ -780,6 +893,282 @@ export function EditorView() {
     tabsRef.current = update(tabsRef.current);
     setTabs(update);
   }, []);
+
+  /** `setGroups` with `groupsRef` brought up to date at once — the same bargain as `commitTabs`. */
+  const commitGroups = useCallback((next: EditorGroup[]) => {
+    groupsRef.current = next;
+    setGroups(next);
+    if (!next.some((g) => g.id === activeGroupIdRef.current)) {
+      activeGroupIdRef.current = next[0].id;
+      setActiveGroupId(next[0].id);
+    }
+  }, []);
+
+  /**
+   * Takes a file out of this editor without asking: out of every split showing it, then out of the
+   * registry — which is also what disposes its model. Only for a file that is going somewhere, never
+   * for one being closed: a floating editor took it, and its edits went with it.
+   */
+  const removeEverywhere = useCallback(
+    (path: string) => {
+      let next = groupsRef.current;
+      for (;;) {
+        const holder = next.find((g) => g.paths.includes(path));
+        if (!holder) break;
+        next = closeTabInGroups(next, holder.id, path);
+      }
+      commitGroups(next);
+      commitTabs((prev) => prev.filter((tab) => tab.path !== path));
+    },
+    [commitGroups, commitTabs],
+  );
+
+  /**
+   * Tears a tab off into a floating window of its own — dragged out of the window, or "Open in a
+   * floating window" on its menu. `screen` is where it was let go, in screen pixels.
+   *
+   * The order is the handover's (see `lib/editorIslands`): the tab is stashed *before* the window is
+   * asked for, so the window's claim on it can never arrive first; it leaves this editor only once
+   * the window exists, so a refusal — the window limit — leaves it exactly where it was; and the
+   * stash is refreshed on the way, so what was typed while the window was being built goes too.
+   */
+  const detachTab = useCallback(
+    async (path: string, screen?: { x: number; y: number }) => {
+      const current = projectRef.current;
+      if (!canDetach || !current) return;
+      const tab = tabsRef.current.find((item) => item.path === path);
+      // A scratch buffer is no file the window could read back if it ever had to start from disk,
+      // and a tab still loading has nothing to hand over yet.
+      if (!tab || tab.loading || isScratchPath(path)) return;
+      // The notebook's kernel lives with this editor's tab, and stops once the tab is gone — the
+      // same question closing it asks.
+      if (isNotebookPath(path) && notebookActions.isBusy(current.local_path, path)) {
+        const ok = await confirmAction(
+          tRef.current("editor.island.notebookBusy", { name: describePath(path).name }),
+          true,
+        );
+        if (!ok) return;
+      }
+      stashForIsland(current.id, current.local_path, { ...tab, preview: false });
+      const name = describePath(path).name;
+      const opened = await useWindowStore
+        .getState()
+        .detach("file", fileIslandRef(current.id, path), `${name} — ${current.name}`, screen && islandPlacement(screen));
+      if (!opened || projectRef.current?.id !== current.id) {
+        dropStash(current.id, path);
+        return;
+      }
+      const latest = tabsRef.current.find((item) => item.path === path);
+      if (latest) refreshStash(current.id, { ...latest, preview: false });
+      removeEverywhere(path);
+    },
+    [canDetach, removeEverywhere],
+  );
+
+  /**
+   * The main window's half of a floating editor's claim, for a file that is not on its way out
+   * already — a window put back from the tray asking again for the file it handed back when it was
+   * put away. It is taken from wherever this editor has it: on screen, or parked with its project.
+   */
+  useEffect(() => {
+    if (!canDetach) return;
+    return registerIslandHost({
+      take: (projectId, path) => {
+        const current = projectRef.current;
+        if (current?.id === projectId) {
+          const tab = tabsRef.current.find((item) => item.path === path);
+          if (!tab) return null;
+          removeEverywhere(path);
+          // Still loading: there is nothing of the user's in it, and the window reads the disk.
+          return tab.loading ? null : { tab: { ...tab, preview: false }, repoPath: current.local_path };
+        }
+        const entry = Object.values(parkedRef.current).find((parkedEditor) => parkedEditor.project.id === projectId);
+        const tab = entry?.tabs.find((item) => item.path === path);
+        if (!entry || !tab) return null;
+        const repoPath = entry.project.local_path;
+        setParked((prev) => {
+          const held = prev[repoPath];
+          if (!held) return prev;
+          let groups = held.groups;
+          for (;;) {
+            const holder = groups.find((g) => g.paths.includes(path));
+            if (!holder) break;
+            groups = closeTabInGroups(groups, holder.id, path);
+          }
+          const tabs = held.tabs.filter((item) => item.path !== path);
+          const next = { ...prev };
+          // A parked editor exists to keep unsaved work; with none left in it, it has nothing to keep.
+          if (tabs.some(isDirtyTab)) {
+            const activeGroupId = groups.some((g) => g.id === held.activeGroupId) ? held.activeGroupId : groups[0].id;
+            next[repoPath] = { ...held, tabs, groups, activeGroupId };
+          } else {
+            delete next[repoPath];
+          }
+          return next;
+        });
+        return tab.loading ? null : { tab: { ...tab, preview: false }, repoPath };
+      },
+    });
+  }, [canDetach, removeEverywhere]);
+
+  /**
+   * Files given back by floating editors, opened here as the tabs they were — unsaved edits, the
+   * version they were read at, how they were being viewed. Only this project's; the rest wait in
+   * the inbox for theirs (see `useIslandInbox`).
+   */
+  const returned = useIslandInbox((s) => s.returned);
+  useEffect(() => {
+    if (!canDetach || !project || !returned.some((entry) => entry.projectId === project.id)) return;
+    for (const { tab } of takeReturns(project.id)) {
+      const back: OpenTab = { ...tab, preview: false };
+      const existing = tabsRef.current.find((item) => item.path === back.path);
+      if (existing && isDirtyTab(existing)) {
+        // Opened here meanwhile and typed into — two sets of edits to one file, and neither is this
+        // editor's to throw away. The returned one opens beside it as a scratch buffer.
+        if (isDirtyTab(back) && back.content !== existing.content) {
+          openScratch(tRef.current("editor.island.copyName", { name: describePath(back.path).name }), back.content);
+        }
+        continue;
+      }
+      const outcome = openInGroups(groupsRef.current, activeGroupIdRef.current, back.path, true, () => false);
+      commitGroups(outcome.groups);
+      commitTabs((prev) =>
+        prev.some((item) => item.path === back.path)
+          ? prev.map((item) => (item.path === back.path ? back : item))
+          : [...prev, back],
+      );
+    }
+  }, [canDetach, project, returned, commitGroups, commitTabs, openScratch]);
+
+  // ---------------- a floating editor's own life ----------------
+
+  /** Set once this window's file has gone home — or there was none to send — so the close that
+   *  follows is let through instead of sending it twice. */
+  const givenBackRef = useRef(false);
+
+  /**
+   * Sends this window's file back to the main window. `true` once it is there, or when there was
+   * nothing to send; `false` when the main window did not take it, and the buffer is still only here.
+   */
+  const giveBack = useCallback(
+    async (reveal: boolean): Promise<boolean> => {
+      if (givenBackRef.current) return true;
+      const current = projectRef.current;
+      // The file under whatever name it has now — a move recalled it under a new one.
+      const tab = tabsRef.current.find((item) => item.path === islandPath) ?? tabsRef.current[0];
+      // Still loading means still being claimed, and the main window still has its copy: a window
+      // gone before taking it gives it back by going (see `installIslandHost`).
+      if (!current || !tab || tab.loading) {
+        givenBackRef.current = true;
+        return true;
+      }
+      // Its document leaves the language servers before the tab leaves the window. They are the
+      // main window's (this one only joined them — see `lib/lsp/client`), and the main window tells
+      // them about the file again when the tab lands there; told twice about one open file, a
+      // server may keep the stale copy. Said first, so it is already said when that happens.
+      syncClose(tab.path);
+      const ok = await returnToMain(current.id, current.local_path, tab, reveal);
+      // A clean file unanswered for is still on disk, whole: nothing is lost by letting the window
+      // go, and a main window that stopped answering must not leave one that cannot be closed.
+      if (ok || !isDirtyTab(tab)) givenBackRef.current = true;
+      if (!givenBackRef.current) {
+        // Staying, with the file still open here: the servers hear about it again.
+        const model = monaco.editor.getModel(monaco.Uri.parse(modelPathFor(current, tab.path)));
+        if (model && !model.isDisposed()) syncOpen(tab.path, model.getLanguageId(), model.getValue());
+      }
+      return givenBackRef.current;
+    },
+    [islandPath],
+  );
+  const giveBackRef = useRef(giveBack);
+  giveBackRef.current = giveBack;
+
+  /** The project the file was claimed in — set once, and what tells "the file was closed" apart from
+   *  "the project went away" below. */
+  const claimedInRef = useRef<string | null>(null);
+  /** The claim: this window's file, from the main window that held it — or from disk when it held
+   *  none. Shown loading until the answer is in, so nothing can be typed over a buffer on its way. */
+  useEffect(() => {
+    if (islandPath === null || !project || claimedInRef.current !== null) return;
+    claimedInRef.current = project.id;
+    const path = islandPath;
+    commitGroups(openInGroups(groupsRef.current, activeGroupIdRef.current, path, true, () => false).groups);
+    commitTabs(() => [loadingTab(path, false)]);
+    void claimFromMain(project.id, path).then((tab) => {
+      if (tab) commitTabs((prev) => prev.map((item) => (item.path === path ? { ...tab, preview: false } : item)));
+      else void readInto(path);
+    });
+  }, [islandPath, project, commitGroups, commitTabs, readInto]);
+
+  /**
+   * Every way this window closes — its ✕, the OS's, the desk going to the tray — sends the file home
+   * first. Listening for the close request is what makes Tauri hold the close until the page lets it
+   * go, which it does only once the main window has the tab: no answer, no close, and the window
+   * stays with the buffer in it.
+   */
+  useEffect(() => {
+    if (islandPath === null) return;
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        if (await giveBackRef.current(false)) return;
+        event.preventDefault();
+        pushErrorToast(tRef.current("editor.island.returnFailed"));
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [islandPath]);
+
+  /** The file closed in here — its tab's ✕, ⌘W, deleted from the explorer — takes the window with
+   *  it: a floating editor is that one file, and there is nothing to send back. */
+  const hadTabRef = useRef(false);
+  useEffect(() => {
+    if (islandPath === null) return;
+    if (tabs.length > 0) {
+      hadTabRef.current = true;
+      return;
+    }
+    // Emptied by the project going — removed from its workspace under this window — rather than by
+    // the file closing: the editor parked whatever was unsaved (see `ParkedEditor`), and the window
+    // stays to say where its repository went instead of closing on it.
+    if (!hadTabRef.current || project?.id !== claimedInRef.current) return;
+    givenBackRef.current = true;
+    void getCurrentWindow()
+      .close()
+      .catch(() => {});
+  }, [islandPath, tabs.length, project?.id]);
+
+  /** What the window's title bar shows, and its "return" button. */
+  const islandTab = islandPath !== null ? (tabs.find((tab) => tab.path === islandPath) ?? tabs[0] ?? null) : null;
+  const islandDirty = islandTab ? isDirtyTab(islandTab) : false;
+  const islandShown = islandTab?.path ?? islandPath;
+  useEffect(() => {
+    if (islandPath === null) return;
+    useFileIslandStore.setState({ path: islandShown, dirty: islandDirty });
+  }, [islandPath, islandShown, islandDirty]);
+  useEffect(() => {
+    if (islandPath === null) return;
+    useFileIslandStore.setState({
+      giveBack: async (reveal) => {
+        if (await giveBackRef.current(reveal)) {
+          await getCurrentWindow()
+            .close()
+            .catch(() => {});
+        } else {
+          pushErrorToast(tRef.current("editor.island.returnFailed"));
+        }
+      },
+    });
+    return () => useFileIslandStore.setState({ giveBack: null });
+  }, [islandPath]);
 
   /** The question for a file that changed under its buffer. A ref because `save` asks it and the
    *  question's answers call `save` back — see `resolveDiskConflict`, assigned below. */
@@ -1229,8 +1618,10 @@ export function EditorView() {
     });
     // The journal row says what is still unsaved there — which is only what just failed.
     if (!discardedRef.current) {
-      void writeDrafts(
+      void journalDrafts(
+        null,
         repoPath,
+        entry.project.id,
         entry.tabs
           .filter((tab) => isDirtyTab(tab) && !saved.has(tab.path) && !isScratchPath(tab.path))
           .map((tab) => ({ path: tab.path, content: tab.content, at: Date.now() })),
@@ -1253,8 +1644,10 @@ export function EditorView() {
       const dirty = entry.tabs.filter(isDirtyTab);
       // Journalled now: the switch cancelled the debounced write that would have covered these.
       if (!discardedRef.current) {
-        void writeDrafts(
+        void journalDrafts(
+          null,
           repoPath,
+          entry.project.id,
           dirty
             .filter((tab) => !isScratchPath(tab.path))
             .map((tab) => ({ path: tab.path, content: tab.content, at: Date.now() })),
@@ -1276,7 +1669,9 @@ export function EditorView() {
         }
       } else if (answer === "discard") {
         dropParked(repoPath);
-        void clearDrafts(repoPath);
+        // Not the whole row: a floating editor may hold one of this project's files, and its draft
+        // is not among the tabs being thrown away.
+        void journalDrafts(null, repoPath, entry.project.id, []);
       } else if (switchedTo === null || projectRef.current?.local_path === switchedTo) {
         // `null` is a workspace switch: it passes through "no project" before the workspace's own last
         // project is picked for it, and that pick is part of the same move, not the user moving on.
@@ -1429,9 +1824,11 @@ export function EditorView() {
     useEditorPanelStore.getState().setProjectCheck({ canCheckProject: false, checkingProject: false });
   }, [project?.local_path]);
 
-  // "Formatear al guardar" is read when the editor first needs it rather than at boot.
+  // "Formatear al guardar" and word wrap are read when the editor first needs them rather than at
+  // boot.
   useEffect(() => {
     void useEditorFormatStore.getState().init();
+    void useEditorDisplayStore.getState().init();
   }, []);
 
   // A notebook whose last tab closed has its kernel stopped. Keyed on the notebooks' paths alone, so
@@ -1573,6 +1970,21 @@ export function EditorView() {
   /** Opens a file in the focused group and jumps to a position in it. */
   const openHit = useCallback(
     (path: string, line: number, column?: number) => {
+      // The same two detours `openFile` takes, with the line carried along: another file from a
+      // floating editor opens in the main window at that line, and a file a floating editor holds
+      // is jumped to over there.
+      const current = projectRef.current;
+      if (current && islandPath !== null && path !== islandPath) {
+        openInMainWindow(current.id, path, line, column);
+        return;
+      }
+      if (current && islandPath === null) {
+        const holder = islandHolding(current.id, path);
+        if (holder !== null) {
+          showInIsland(holder, line, column);
+          return;
+        }
+      }
       revealNonce.current += 1;
       setReveal({
         groupId: activeGroupIdRef.current,
@@ -1580,7 +1992,7 @@ export function EditorView() {
       });
       void openFile(path, { pin: true });
     },
-    [openFile],
+    [openFile, islandPath],
   );
 
   /** Opens a changed file's before/after in the focused group. A real tab rather than a dialog:
@@ -1646,19 +2058,19 @@ export function EditorView() {
         setPaletteOpen(true);
         break;
       case "explorer":
-        setSidePanel("files");
+        showSidePanel("files");
         break;
       case "findInProject":
-        setSidePanel("search");
+        showSidePanel("search");
         break;
       case "anchors":
-        setSidePanel("anchors");
+        showSidePanel("anchors");
         break;
       case "bookmarks":
-        setSidePanel("bookmarks");
+        showSidePanel("bookmarks");
         break;
       case "debug":
-        setSidePanel("debug");
+        showSidePanel("debug");
         break;
       case "splitRight":
         splitGroup();
@@ -1669,7 +2081,7 @@ export function EditorView() {
       case "newFolder":
       case "renamePath":
       case "deletePath":
-        setSidePanel("files");
+        showSidePanel("files");
         setExplorerCommand({
           command:
             editorCommand.command === "renamePath"
@@ -1828,6 +2240,21 @@ export function EditorView() {
 
   const clearReveal = useCallback(() => setReveal(null), []);
 
+  /** Tells the floating editors holding a path `match` accepts that the explorer moved it — `remap`
+   *  gives the new path — or deleted it, when `remap` answers `null`. */
+  const recallIslandsUnder = useCallback(
+    (match: (path: string) => boolean, remap: (path: string) => string | null) => {
+      const current = projectRef.current;
+      if (!current || islandPath !== null) return;
+      for (const path of islandPaths(current.id)) {
+        if (!match(path)) continue;
+        const label = islandHolding(current.id, path);
+        if (label) recallIsland(label, remap(path));
+      }
+    },
+    [islandPath],
+  );
+
   /** Re-points open tabs after the explorer moves a file or folder, so a moved file keeps its
    * tab (and its unsaved edits) instead of leaving one aimed at a path that no longer exists.
    * Moving a *folder* re-points everything under it. The old Monaco model is left behind and
@@ -1836,6 +2263,8 @@ export function EditorView() {
    * without asking: there is nothing left to save it back to. */
   const handlePathRemoved = useCallback((removed: string) => {
     const gone = (p: string) => p === removed || p.startsWith(`${removed}/`);
+    // A file a floating editor holds goes the same way there: it has nothing left to save to either.
+    recallIslandsUnder(gone, () => null);
     const affected = tabsRef.current.map((tab) => tab.path).filter(gone);
     if (affected.length === 0) return;
     let next = groupsRef.current;
@@ -1850,10 +2279,13 @@ export function EditorView() {
     setGroups(next);
     if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
     setTabs((prev) => prev.filter((tab) => !gone(tab.path)));
-  }, []);
+  }, [recallIslandsUnder]);
 
   const handlePathMoved = useCallback((from: string, to: string) => {
     const remap = (p: string) => (p === from ? to : p.startsWith(`${from}/`) ? `${to}${p.slice(from.length)}` : p);
+    // A floating editor is named after its file, so it cannot follow a move: it comes home under
+    // the new name, buffer and all, and lands here as a tab.
+    recallIslandsUnder((p) => p === from || p.startsWith(`${from}/`), remap);
     setTabs((prev) => prev.map((tab) => ({ ...tab, path: remap(tab.path) })));
     setGroups((prev) =>
       prev.map((g) => ({
@@ -1862,7 +2294,35 @@ export function EditorView() {
         activePath: g.activePath ? remap(g.activePath) : null,
       })),
     );
-  }, []);
+  }, [recallIslandsUnder]);
+
+  /**
+   * What the main window says to a floating editor about its file: jump to a line (an open over
+   * there landed on it), or the explorer moved or deleted it. A deleted file closes the way it does
+   * there, without asking — there is nothing left to save it to. A moved one cannot stay: the window
+   * is named after its file, so it goes home under the new name, edits and all.
+   */
+  useEffect(() => {
+    if (islandPath === null) return;
+    return onWindowMessage((message, from) => {
+      if (from !== MAIN_LABEL) return;
+      const path = tabsRef.current[0]?.path ?? islandPath;
+      if (message.kind === "island-reveal") {
+        openHit(path, message.line, message.column);
+      } else if (message.kind === "island-recall") {
+        if (message.movedTo === null) {
+          handlePathRemoved(path);
+          return;
+        }
+        const movedTo = message.movedTo;
+        commitTabs((prev) => prev.map((tab) => (tab.path === path ? { ...tab, path: movedTo } : tab)));
+        void giveBackRef.current(false).then((ok) => {
+          if (ok) void getCurrentWindow().close().catch(() => {});
+          else pushErrorToast(tRef.current("editor.island.returnFailed"));
+        });
+      }
+    });
+  }, [islandPath, openHit, handlePathRemoved, commitTabs]);
 
   /**
    * The flat group list as the grid it describes: columns in order, each holding its stack.
@@ -1984,21 +2444,53 @@ export function EditorView() {
       registerBookmarkToggle={registerBookmarkToggle}
       registerChangeNav={registerChangeNav}
       // Always available — VS Code lets you keep splitting, and each press splits *this* group
-      // rather than whichever one happens to hold focus.
-      onSplit={group.activePath ? () => splitGroup(group.id) : null}
+      // rather than whichever one happens to hold focus. Not in a floating editor, which is its one
+      // file and nothing beside it.
+      onSplit={group.activePath && islandPath === null ? () => splitGroup(group.id) : null}
       onCloseGroup={groups.length > 1 ? () => closeGroup(group.id) : null}
+      // Dragged out of the window, a tab becomes a floating editor where it was let go — the main
+      // window's editor only, the one floating editors hand their files back to.
+      onDetach={canDetach ? (payload, screen) => void detachTab(payload.path, screen) : undefined}
       // Right-clicking a tab acts on *that* tab and *this* group, which is why these close over
       // the group rather than reading whichever one happens to have focus.
       tabMenu={{
         togglePinned: (path) => togglePinned(group.id, path),
         closeAll: () => void closeAllTabs(group.id),
         copyPath,
-        revealInTree,
-        splitRight: (path) => splitGroup(group.id, path),
+        // A floating editor has no explorer to show the file in, and no room to split it into.
+        revealInTree: islandPath === null ? revealInTree : undefined,
+        splitRight: islandPath === null ? (path) => splitGroup(group.id, path) : undefined,
         saveAll: () => void saveAll(),
+        moveToWindow: canDetach ? (path, screen) => void detachTab(path, screen) : undefined,
+        returnToMain:
+          islandPath !== null ? () => void useFileIslandStore.getState().giveBack?.(true) : undefined,
       }}
     />
   );
+
+  // A floating editor is its file and nothing else: no rail, no explorer, no docks, no status line —
+  // the window's own title bar says what it holds. The snapshot stays, because its button does.
+  if (islandPath !== null) {
+    return (
+      <div className="relative flex h-full min-h-0 flex-col">
+        <div className="flex min-h-0 flex-1">
+          {groups.map((group) => (
+            <div key={group.id} className="flex min-h-0 min-w-0 flex-1">
+              {renderGroup(group)}
+            </div>
+          ))}
+        </div>
+        {codeSnap && (
+          <CodeSnapModal
+            target={codeSnap}
+            theme={activeCodeTheme}
+            tabSize={snapTabSize}
+            onClose={() => setCodeSnap(null)}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     // No header strip: the project and branch it used to repeat are already in the status bar,
@@ -2034,38 +2526,45 @@ export function EditorView() {
               // panel with no chord of its own — a choice made now and then, not a place to go to.
               { id: "icons", shortcut: null, icon: Palette, label: t("icons.panelTitle") },
             ] as const
-          ).map(({ id, icon: Icon, label, shortcut }) => (
-            // A full-width row around the button, so the marker can stand on the rail's own left
-            // edge, where VS Code's activity bar marks the open view.
-            <div key={id} className="relative flex w-full justify-center">
-              {/* A bar in the accent beside the open panel, on top of its fill (user ask, 2026-10-01:
-                  a vertical bar saying which one is selected) — the mark the view tabs and the
-                  projects panel wear. Outside the tooltip: its `contents` wrapper takes its first
-                  child for the control. The one-shot actions below are never "open" and get none. */}
-              {sidePanel === id && (
-                <ActiveMarker layoutId="cf-editor-rail-mark" color="var(--cf-accent-fill)" className="left-0 inset-y-1.5" />
-              )}
-              <Tooltip side="right" label={label} trailing={shortcut ? keyCap(shortcut) : undefined}>
-                <button
-                  onClick={() => setSidePanel(id)}
-                  aria-label={label}
-                  aria-pressed={sidePanel === id}
-                  className={railButtonClass(sidePanel === id)}
-                >
-                  {sidePanel === id && <ActivePill layoutId="cf-editor-rail-pill" />}
-                  <Icon size={16} className="relative" />
-                  {/* A live session is worth seeing from any panel — it's a running process. */}
-                  {id === "debug" && debugStatus !== "idle" && (
-                    <span
-                      className={`absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ${
-                        debugStatus === "paused" ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-success)]"
-                      }`}
-                    />
-                  )}
-                </button>
-              </Tooltip>
-            </div>
-          ))}
+          ).map(({ id, icon: Icon, label, shortcut }) => {
+            // With the column put away nothing is open, so nothing wears the mark — VS Code's
+            // activity bar does the same, and a lit icon over an absent panel would be a lie.
+            const open = !sideHidden && sidePanel === id;
+            return (
+              // A full-width row around the button, so the marker can stand on the rail's own left
+              // edge, where VS Code's activity bar marks the open view.
+              <div key={id} className="relative flex w-full justify-center">
+                {/* A bar in the accent beside the open panel, on top of its fill (user ask, 2026-10-01:
+                    a vertical bar saying which one is selected) — the mark the view tabs and the
+                    projects panel wear. Outside the tooltip: its `contents` wrapper takes its first
+                    child for the control. The one-shot actions below are never "open" and get none. */}
+                {open && (
+                  <ActiveMarker layoutId="cf-editor-rail-mark" color="var(--cf-accent-fill)" className="left-0 inset-y-1.5" />
+                )}
+                <Tooltip side="right" label={label} trailing={shortcut ? keyCap(shortcut) : undefined}>
+                  <button
+                    // The open panel's own icon puts the column away; any other icon — or this one
+                    // again — brings it back showing that panel.
+                    onClick={() => (open ? setSideHidden(true) : showSidePanel(id))}
+                    aria-label={label}
+                    aria-pressed={open}
+                    className={railButtonClass(open)}
+                  >
+                    {open && <ActivePill layoutId="cf-editor-rail-pill" />}
+                    <Icon size={16} className="relative" />
+                    {/* A live session is worth seeing from any panel — it's a running process. */}
+                    {id === "debug" && debugStatus !== "idle" && (
+                      <span
+                        className={`absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ${
+                          debugStatus === "paused" ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-success)]"
+                        }`}
+                      />
+                    )}
+                  </button>
+                </Tooltip>
+              </div>
+            );
+          })}
           {/* The actions, below the panels. `mt-auto` is on the first of them and nowhere else —
               it is what opens the gap that separates them from the five views above, and a second
               one would split the cluster in half.
@@ -2098,7 +2597,9 @@ export function EditorView() {
           </Tooltip>
         </div>
         <div
-          style={{ width: treeWidth }}
+          // Put away with `display`, not unmounted — see `sideHidden`. A class would have to win
+          // against whatever `display` `explorerClass` sets, and an inline style simply does.
+          style={{ width: treeWidth, display: sideHidden ? "none" : undefined }}
           data-tour="editor-tree"
           // The explorer column of the shared anatomy: a half-step into the sunken tone, with its
           // own hairline on the right — which is why the handle beside it draws none. The tree owns
@@ -2114,7 +2615,7 @@ export function EditorView() {
               fsNonce={fsNonce}
               dirtyBuffers={dirtyBuffers}
               onOpenHit={openHit}
-              onClose={() => setSidePanel("files")}
+              onClose={() => showSidePanel("files")}
             />
           ) : sidePanel === "anchors" ? (
             <AnchorsPanel
@@ -2156,15 +2657,18 @@ export function EditorView() {
             />
           )}
         </div>
-        <ResizeHandle
-          axis="x"
-          value={treeWidth}
-          min={TREE_MIN}
-          max={TREE_MAX}
-          onChange={(w) => setSize("editorTreeWidth", w)}
-          onCommit={(w) => commitSize("editorTreeWidth", w)}
-          seamless
-        />
+        {/* Nothing to resize while the column is put away; its width is kept for when it returns. */}
+        {!sideHidden && (
+          <ResizeHandle
+            axis="x"
+            value={treeWidth}
+            min={TREE_MIN}
+            max={TREE_MAX}
+            onChange={(w) => setSize("editorTreeWidth", w)}
+            onCommit={(w) => commitSize("editorTreeWidth", w)}
+            seamless
+          />
+        )}
         {/* Every group but the last carries an explicit width; the last takes the remainder, so
             the row fills exactly and a drag only ever moves one boundary. `GROUP_MIN` is a real
             floor — past the point where the panes stop fitting, the row scrolls rather than

@@ -33,8 +33,24 @@ export async function applyRename(plan: EditPlan, repoPath: string, newName: str
 
 /** The results panel's view of a rename: the files it changed, where, and what it could not do. */
 export function renameResults(plan: EditPlan, outcome: ApplyOutcome, newName: string, summary: string): ResultSet {
+  return editResults(plan, outcome, translate("editor.renameTitle", { name: newName, summary }), (path) =>
+    translate("editor.renameConflict", { path }),
+  );
+}
+
+/**
+ * The same view for any planned edit — a rename's, or the imports a moved file needed
+ * (`moveImports`). Only the title and the sentence for a file that changed underneath differ: what
+ * went where, what was left outside, and what still needs saving read the same either way.
+ */
+export function editResults(
+  plan: EditPlan,
+  outcome: ApplyOutcome,
+  title: string,
+  conflict: (path: string) => string,
+): ResultSet {
   const notes: string[] = [];
-  for (const path of outcome.conflicts) notes.push(translate("editor.renameConflict", { path }));
+  for (const path of outcome.conflicts) notes.push(conflict(path));
   for (const failure of outcome.failed) {
     notes.push(translate("editor.renameFailed", { path: failure.path, error: failure.error }));
   }
@@ -46,7 +62,7 @@ export function renameResults(plan: EditPlan, outcome: ApplyOutcome, newName: st
   }
   if (outcome.applied.some((file) => file.inBuffer)) notes.push(translate("editor.renameUnsaved"));
   return {
-    title: translate("editor.renameTitle", { name: newName, summary }),
+    title,
     groups: outcome.applied.map((file) => ({
       path: file.path,
       items: file.at.map((position) => ({ line: position.lineNumber, column: position.column, text: position.text })),

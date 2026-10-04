@@ -2,10 +2,10 @@
 //!
 //! Oracle's own clients need an Oracle Client installed (the OCI libraries), which is exactly the
 //! thing nobody wants to install to look at a table. Its *thin* JDBC driver is pure Java and needs
-//! nothing, and CodeFlow already ships a trimmed Java runtime for IRIS — so Oracle rides that: the
-//! same `com.codeflow.iris.IrisBridge` process ([`super::jvm`]), with `ojdbc11` on its classpath and
-//! this file naming Oracle's driver class when it opens a session. Nothing to install, and a
-//! workspace with no Oracle or IRIS connection never starts the JVM at all.
+//! nothing but a Java runtime — so Oracle rides the same `com.codeflow.jdbc.JdbcBridge` process as
+//! every JDBC driver ([`super::jvm`]), naming `ojdbc11` when it opens a session, with the runtime and
+//! the jar downloaded the first time a connection needs them ([`super::drivers`]). Nothing to
+//! install by hand, and a workspace with no JDBC connection never starts the JVM at all.
 //!
 //! What is specific to Oracle, and why:
 //!
@@ -30,6 +30,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 
 use super::iris::{decode_statement, text};
+use super::drivers;
 use super::jvm::{self, Bridge};
 use super::postgres::{annotate_types, cell, parse_bytes, relation_folders, schema_folders};
 use super::sqlgen::{self, quote_ident, quote_literal};
@@ -41,7 +42,6 @@ use super::{
 };
 
 const DIALECT: SqlDialect = SqlDialect::Oracle;
-const DRIVER_CLASS: &str = "oracle.jdbc.OracleDriver";
 
 /// Set on every session before anything else runs — see the module note on NLS.
 const SESSION_SETUP: &[&str] = &[
@@ -79,14 +79,17 @@ impl OracleSession {
     pub async fn open(config: &DbConnectionConfig, database: Option<&str>, tag: &str) -> Result<Self, String> {
         let mut config = config.clone();
         config.resolve_password();
-        let bridge = jvm::bridge().await?;
+        // The driver jar is downloaded on first use, like every JDBC driver's — see `drivers`.
+        let driver = drivers::resolve(config.driver_id())?;
+        let bridge = jvm::bridge_for(&driver.jvm).await?;
         let service = database.filter(|d| !d.is_empty()).map(str::to_string).unwrap_or_else(|| config.database.clone());
         let session_id = format!("{}#oracle#{service}{tag}", config.id);
 
         let mut request = Map::new();
         request.insert("url".into(), Value::from(jdbc_url(&config)?));
-        request.insert("driver".into(), Value::from(DRIVER_CLASS));
-        request.insert("driverName".into(), Value::from("Oracle JDBC"));
+        request.insert("driver".into(), Value::from(driver.class.clone()));
+        request.insert("driverName".into(), Value::from(driver.name.clone()));
+        request.insert("jars".into(), Value::from(driver.jar_paths()));
         request.insert("user".into(), Value::from(config.user.clone()));
         // Over a pipe to a child process, never on its command line — argv is world-readable.
         request.insert("password".into(), Value::from(config.password.clone()));
@@ -97,7 +100,10 @@ impl OracleSession {
         // is the enforcement, which is why it refuses PL/SQL blocks and `CALL` outright.
         request.insert("readOnly".into(), Value::from(config.read_only));
         request.insert("timeoutMs".into(), Value::from(config.connect_timeout().as_millis() as u64));
-        request.insert("properties".into(), Value::Object(driver_properties(&config)));
+        // The driver's defaults from the Drivers list, then the connection's own over them.
+        let mut properties = drivers::default_properties(&driver, &config);
+        properties.extend(driver_properties(&config));
+        request.insert("properties".into(), Value::Object(properties));
 
         let answer = bridge.call("open", &session_id, request).await.map_err(|e| explain_connect_failure(&config, &e))?;
         bridge.session_opened();
@@ -160,7 +166,7 @@ impl OracleSession {
     }
 
     /// Turns the JDBC connection's autocommit off or back on — how a transaction spanning several
-    /// statements is held open over the bridge (see `IrisBridge.autocommit`).
+    /// statements is held open over the bridge (see `JdbcBridge.autocommit`).
     pub async fn set_autocommit(&self, enabled: bool) -> Result<(), String> {
         let mut request = Map::new();
         request.insert("enabled".into(), Value::from(enabled));

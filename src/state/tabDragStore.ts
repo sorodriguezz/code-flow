@@ -40,8 +40,15 @@ interface TabDragState {
    * rather than at the origin for one frame. Deliberately *not* updated on every move: that
    * would re-render every strip on every pixel, and the label is positioned imperatively. */
   origin: { x: number; y: number } | null;
+  /**
+   * Whether the pointer has left the window, where letting go tears the tab off into a floating
+   * editor (see `lib/editorIslands`). Changes twice per excursion at most, so it is state: the label
+   * under the pointer says what a drop there will do.
+   */
+  outside: boolean;
   start: (drag: TabDrag, x: number, y: number) => void;
   hover: (over: TabDropTarget | null) => void;
+  setOutside: (outside: boolean) => void;
   end: () => void;
 }
 
@@ -49,8 +56,13 @@ export const useTabDragStore = create<TabDragState>((set, get) => ({
   drag: null,
   over: null,
   origin: null,
+  outside: false,
 
-  start: (drag, x, y) => set({ drag, over: null, origin: { x, y } }),
+  start: (drag, x, y) => set({ drag, over: null, origin: { x, y }, outside: false }),
+
+  setOutside: (outside) => {
+    if (get().outside !== outside) set({ outside });
+  },
 
   hover: (over) => {
     const current = get().over;
@@ -59,5 +71,5 @@ export const useTabDragStore = create<TabDragState>((set, get) => ({
     set({ over });
   },
 
-  end: () => set({ drag: null, over: null, origin: null }),
+  end: () => set({ drag: null, over: null, origin: null, outside: false }),
 }));

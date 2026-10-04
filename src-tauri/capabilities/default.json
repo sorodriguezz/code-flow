@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window and every satellite (`sat-*`), which draw the same title bar and therefore need the same window controls. Note the four maximize/restore commands: the title bar's maximize button doesn't use `toggle_maximize`, because on undecorated Windows that grows the window but doesn't put the rectangle back — `src/lib/windowControls.ts` restores by hand, and needs `maximize`, `unmaximize`, `set_size` and `set_position`. `core:default` grants none of them, so leaving them out has every click on the button rejected before it reaches the window. `hide` is here for the same reason and for one window: the quick-ask satellite (`sat-quick-ask`) dismisses itself with `getCurrentWindow().hide()` on Escape and on its own close control, and it is summoned by a global hotkey over another application — so a rejected `hide` is a box the user cannot get rid of without going and finding the app, which is precisely what it exists to avoid. It is NOT in `core:window:default`; that set carries 28 commands and `allow-hide` is not among them.",
+  "description": "Capability for the main window and every satellite (`sat-*`), which draw the same title bar and therefore need the same window controls. Note the four maximize/restore commands: the title bar's maximize button doesn't use `toggle_maximize`, because on undecorated Windows that grows the window but doesn't put the rectangle back — `src/lib/windowControls.ts` restores by hand, and needs `maximize`, `unmaximize`, `set_size` and `set_position`. `core:default` grants none of them, so leaving them out has every click on the button rejected before it reaches the window. `hide` is here for the same reason and for one window: the quick-ask satellite (`sat-quick-ask`) dismisses itself with `getCurrentWindow().hide()` on Escape and on its own close control, and it is summoned by a global hotkey over another application — so a rejected `hide` is a box the user cannot get rid of without going and finding the app, which is precisely what it exists to avoid. It is NOT in `core:window:default`; that set carries 28 commands and `allow-hide` is not among them. `set-always-on-top` and `destroy` are the floating editor’s (`sat-file-*`): the first is its pin, which keeps it above every other window; the second is how it closes once it has handed its file back — it listens for its own close request, which makes Tauri hold the close until the page calls `destroy()`.",
   "windows": ["main", "sat-*"],
   "permissions": [
     "core:default",
@@ -16,6 +16,8 @@
     "core:window:allow-set-size",
     "core:window:allow-set-position",
     "core:window:allow-set-theme",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-destroy",
     "opener:default",
     "dialog:allow-open",
     "dialog:allow-save",

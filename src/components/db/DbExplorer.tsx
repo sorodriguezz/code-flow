@@ -47,7 +47,9 @@ import {
 } from "../common/recipes";
 import { ConnectionDot, EngineBadge, ToolbarButton, nodeIcon } from "./dbChrome";
 import { DbHistoryList } from "./DbHistoryList";
-import { EngineMenu, menuAnchor } from "./EngineMenu";
+import { DriverMenu, menuAnchor } from "./DriverMenu";
+import { DRIVER_CATALOG, driverEngineInfo, effectiveDriver, limitedSelect, rowDriverId } from "../../lib/db/drivers";
+import { sqlKindOf, sqlPagingOf, useDriverStore } from "../../state/driverStore";
 import { effectiveObjectFilter, schemaIsNarrowed } from "../../lib/db/objectFilter";
 import { scopeMenuItems } from "../../lib/scopeMenu";
 import {
@@ -79,11 +81,11 @@ import {
   type SqlTemplate,
 } from "../../lib/db/sqlTemplates";
 import {
-  DB_ENGINES,
   engineInfo,
   nodeRefOf,
   type DbConnectionRow,
   type DbConsole,
+  type DbKind,
   type DbNode,
   type DbNodeKind,
   type DbNodeRef,
@@ -466,8 +468,9 @@ function NodeSubtree({
    * have been, rather than nothing at all.
    */
   const generate = async (template: SqlTemplate) => {
-    const kind = useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind;
-    if (!kind) return;
+    const row = useDbStore.getState().connections.find((c) => c.id === connectionId);
+    if (!row) return;
+    const kind = sqlKindOf(row);
     const columnNode: DbNodeRef = { ...nodeRef, kind: "column_folder" };
     const columns = await dbChildren(connectionId, columnNode).catch(() => [] as DbNode[]);
     // Straight to `dbChildren` rather than through `refreshNode`, so this is one of the few reads
@@ -477,7 +480,7 @@ function NodeSubtree({
       connectionId,
       node.database ?? undefined,
       node.schema ?? undefined,
-      sqlTemplate(template, node, kind, columns.map((column) => column.name)),
+      sqlTemplate(template, node, kind, columns.map((column) => column.name), sqlPagingOf(row)),
     );
   };
 
@@ -620,7 +623,7 @@ function NodeSubtree({
             connectionId,
             node.database ?? undefined,
             node.schema ?? undefined,
-            createTemplate("table", engineKind, node.kind === "schema" || databaseIsSchema ? node.name : null),
+            createTemplate("table", sqlKindOfConnection(connectionId) ?? engineKind, node.kind === "schema" || databaseIsSchema ? node.name : null),
           ),
       });
       // Only where a schema is a thing you can create: on Mongo it isn't, and under a schema the
@@ -634,7 +637,7 @@ function NodeSubtree({
               connectionId,
               node.database ?? undefined,
               undefined,
-              createTemplate("schema", engineKind, null),
+              createTemplate("schema", sqlKindOfConnection(connectionId) ?? engineKind, null),
             ),
         });
       }
@@ -749,9 +752,7 @@ function NodeSubtree({
                   // Left button only. A right-click opens the menu, and picking the row up under
                   // it would leave the tree dragging something the user never grabbed.
                   if (e.button !== 0) return;
-                  const kind = useDbStore.getState().connections.find(
-                    (c) => c.id === connectionId,
-                  )?.kind;
+                  const kind = sqlKindOfConnection(connectionId);
                   if (!kind) return;
                   e.currentTarget.setPointerCapture(e.pointerId);
                   dragPress(
@@ -967,6 +968,12 @@ function diagramLabel(node: DbNode): string {
   return node.database && node.kind === "schema" ? `${node.database}.${node.name}` : node.name;
 }
 
+/** The kind a connection's SQL is written in (`sqlKindOf`), or `null` for a row that has gone. */
+function sqlKindOfConnection(connectionId: string): DbKind | null {
+  const row = useDbStore.getState().connections.find((c) => c.id === connectionId);
+  return row ? sqlKindOf(row) : null;
+}
+
 /** The starter statement "Select rows" drops into a new console. */
 function selectStarFor(connectionId: string, node: DbNode): string {
   const connection = useDbStore.getState().connections.find((c) => c.id === connectionId);
@@ -987,6 +994,11 @@ function selectStarFor(connectionId: string, node: DbNode): string {
     return `SELECT TOP 50 * FROM ${target}`;
   }
   if (connection?.kind === "oracle") return `SELECT * FROM ${target} FETCH FIRST 50 ROWS ONLY`;
+  // A JDBC driver pages the way its catalogue entry says its engine does.
+  if (connection?.kind === "jdbc") {
+    const driver = effectiveDriver(rowDriverId(connection), useDriverStore.getState().settings);
+    return limitedSelect(target, driver?.sql?.paging, 50);
+  }
   return `SELECT * FROM ${target} LIMIT 50`;
 }
 
@@ -1150,7 +1162,9 @@ function ConnectionBranch({
   // were pointing at IRIS or at Mongo. This is the same tile the tab strip and the toolbars draw,
   // and the glyph the engine picker and the connection dialog use, so an engine looks like itself
   // everywhere it appears.
-  const engineLabel = engineInfo(row.kind).label;
+  const driverSettings = useDriverStore((s) => s.settings);
+  const driver = effectiveDriver(rowDriverId(row), driverSettings);
+  const engineLabel = driverEngineInfo(driver, row.kind).label;
 
   return (
     <>
@@ -1180,7 +1194,7 @@ function ConnectionBranch({
           onPointerUp: () => commitDrop(row.group_name, row.id),
         }}
         dropTarget={isDropTarget}
-        icon={<EngineBadge kind={row.kind} label={engineLabel} size={18} />}
+        icon={<EngineBadge kind={row.kind} driver={driver} label={engineLabel} size={18} />}
         name={row.name}
         strong={connected}
         detail={undefined}
@@ -1227,7 +1241,7 @@ function ConnectionBranch({
           store.selectConnection(row.id);
           setMenu({ x: e.clientX, y: e.clientY });
         }}
-        leading={<ConnectionDot kind={row.kind} connected={connected} busy={busy} />}
+        leading={<ConnectionDot kind={row.kind} driver={driver} connected={connected} busy={busy} />}
       />
       {/* Saved consoles sit above the server's own tree: they are this workspace's work, and the
           reason to open a connection more often than the schema is. */}
@@ -1499,7 +1513,7 @@ function GroupSection({
   );
   const commitDrop = useDbDrop();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
+  const [driverMenu, setDriverMenu] = useState<{ x: number; y: number } | null>(null);
   const [scopeMenu, setScopeMenu] = useState<{
     x: number;
     y: number;
@@ -1546,7 +1560,7 @@ function GroupSection({
     {
       label: `${t("db.newConnectionHere")}…`,
       icon: Plus,
-      onClick: () => setEngineMenu(menu),
+      onClick: () => setDriverMenu(menu),
     },
     { label: t("db.newGroup"), icon: FolderPlus, onClick: onNewGroup },
   ];
@@ -1675,12 +1689,13 @@ function GroupSection({
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
       )}
-      {engineMenu && (
-        <EngineMenu
-          x={engineMenu.x}
-          y={engineMenu.y}
-          onPick={(engine) => openModal({ kind: "newConnection", engine, group })}
-          onClose={() => setEngineMenu(null)}
+      {driverMenu && (
+        <DriverMenu
+          x={driverMenu.x}
+          y={driverMenu.y}
+          onPick={(driver) => openModal({ kind: "newConnection", driver, group })}
+          onManage={() => openModal({ kind: "drivers" })}
+          onClose={() => setDriverMenu(null)}
         />
       )}
       {scopeMenu && (
@@ -1849,7 +1864,7 @@ export function DbExplorer() {
   const openModal = useDbModalStore((s) => s.openDbModal);
   const [query, setQuery] = useState("");
   /** Where the "which engine?" menu is anchored, when the `+` has expanded it. */
-  const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
+  const [driverMenu, setDriverMenu] = useState<{ x: number; y: number } | null>(null);
   /** The unnamed folder being typed into, if the user just asked for one. */
   const [creatingGroup, setCreatingGroup] = useState(false);
   const dragging = useDbDragStore((s) => s.drag !== null);
@@ -1964,10 +1979,10 @@ export function DbExplorer() {
             </ToolbarButton>
             <ToolbarButton
               size="sm"
-              onClick={(e) => setEngineMenu(menuAnchor(e))}
+              onClick={(e) => setDriverMenu(menuAnchor(e))}
               title={t("db.newConnection")}
-              // The engines by name, which is the question the `+` raises before it is pressed.
-              description={DB_ENGINES.map((engine) => engine.label).join(" · ")}
+              // What the `+` asks before it is pressed: which of the catalogue's databases.
+              description={t("db.drivers.choiceHint", { n: DRIVER_CATALOG.length })}
             >
               <Plus size={15} />
             </ToolbarButton>
@@ -2101,19 +2116,20 @@ export function DbExplorer() {
               icon: Plus,
               // Anchored where the first menu was, so the engines open over it rather than wherever
               // the pointer drifted to while reading.
-              onClick: () => setEngineMenu(treeMenu),
+              onClick: () => setDriverMenu(treeMenu),
             },
             { label: t("db.newGroup"), icon: FolderPlus, onClick: () => setCreatingGroup(true) },
           ]}
           onClose={() => setTreeMenu(null)}
         />
       )}
-      {engineMenu && (
-        <EngineMenu
-          x={engineMenu.x}
-          y={engineMenu.y}
-          onPick={(engine) => openModal({ kind: "newConnection", engine })}
-          onClose={() => setEngineMenu(null)}
+      {driverMenu && (
+        <DriverMenu
+          x={driverMenu.x}
+          y={driverMenu.y}
+          onPick={(driver) => openModal({ kind: "newConnection", driver })}
+          onManage={() => openModal({ kind: "drivers" })}
+          onClose={() => setDriverMenu(null)}
         />
       )}
     </>

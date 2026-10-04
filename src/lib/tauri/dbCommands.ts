@@ -6,6 +6,9 @@ import type {
   DbConnectionConfig,
   DbConnectionRow,
   DbConsole,
+  DbDriverSettings,
+  DbDriverStatus,
+  DbDriversOverview,
   DbEditResult,
   DbForeignKey,
   DbExecContext,
@@ -350,3 +353,31 @@ export const dbAiAssist = (
     runId,
     workspaceId: workspaceId ?? null,
   });
+
+// ---------- drivers ----------
+
+/** Every JVM driver's files and whether they are on disk, and the Java runtime's. A `stat` per
+ * file — cheap enough to ask again whenever the Drivers list is shown. */
+export const dbDriversOverview = () => invoke<DbDriversOverview>("db_drivers_overview");
+
+/** Downloads what a driver still lacks — the runtime first, then its files — reporting on
+ * `db:driver-download` (see `onDbDriverDownload`). Answers with the driver's status after. */
+export const dbDriverDownload = (driverId: string) =>
+  invoke<DbDriverStatus>("db_driver_download", { driverId });
+
+/** Deletes a driver's downloaded files, except those another driver shares. */
+export const dbDriverDeleteFiles = (driverId: string) =>
+  invoke<DbDriverStatus>("db_driver_delete_files", { driverId });
+
+/** Deletes the downloaded Java runtime. The next JDBC connection asks to download it again. */
+export const dbDriverDeleteRuntime = () => invoke<void>("db_driver_delete_runtime");
+
+/** What the user changed about each driver, and the drivers they added. */
+export const dbDriverSettings = () => invoke<DbDriverSettings[]>("db_driver_settings");
+
+/** Replaces one driver's settings. Settings that change nothing are dropped by the backend. */
+export const dbDriverSaveSettings = (settings: DbDriverSettings) =>
+  invoke<void>("db_driver_save_settings", { settings });
+
+/** Forgets a driver's changes — or, for one the user added, the driver itself. */
+export const dbDriverDeleteSettings = (id: string) => invoke<void>("db_driver_delete_settings", { id });

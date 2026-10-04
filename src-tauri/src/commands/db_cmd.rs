@@ -13,6 +13,7 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::datasource::csv_import::{self, CsvPreview, ImportOutcome, ImportRequest};
+use crate::datasource::drivers;
 use crate::datasource::export::{ExportFormat, ExportWriter};
 use crate::datasource::{
     export_refusal, filter_children, next_transaction_state, read_only_refusal,
@@ -1096,7 +1097,9 @@ pub async fn db_ai_assist(
         let rendered = render_schema(&diagram);
         let schema_truncated = rendered.chars().count() > crate::ai::MAX_DB_SCHEMA_CHARS;
 
-        let dialect = format!("{} {}", config.kind.label(), info.version);
+        // The driver's name, not the engine's: CockroachDB and Snowflake are not "PostgreSQL" and
+        // "JDBC" to a model writing SQL for them.
+        let dialect = format!("{} {}", config.engine_label(), info.version);
         // Taken from the diagram and not from the request, because they can differ: a Postgres
         // console with no schema picked is read as `public`, and telling the model "base «x»" while
         // showing it one schema's tables is how it ends up writing unqualified names for a scope it
@@ -1134,6 +1137,57 @@ pub async fn db_ai_assist(
         })
     })
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Drivers — the files a JDBC driver needs, and the runtime they run on
+// ---------------------------------------------------------------------------
+//
+// `async` on the synchronous ones too: each touches the disk — deleting the runtime is a few
+// thousand files — and a plain command runs on the main thread, where that would freeze the window.
+
+/// Every JVM driver's files and whether they are on disk, and the runtime's — the whole state the
+/// Drivers list and the connection form draw "Download" from. Cheap: a `stat` per file.
+#[tauri::command(async)]
+pub fn db_drivers_overview() -> drivers::DriversOverview {
+    drivers::overview()
+}
+
+/// Downloads what a driver still lacks — the Java runtime first, then its jars — reporting progress
+/// on `db:driver-download` and answering with the driver's status once it is complete.
+#[tauri::command]
+pub async fn db_driver_download(app: AppHandle, driver_id: String) -> Result<drivers::DriverStatus, String> {
+    drivers::download(&app, &driver_id).await
+}
+
+/// Deletes a driver's downloaded jars (not the ones another driver shares). Its connections ask to
+/// download them again on their next connect.
+#[tauri::command(async)]
+pub fn db_driver_delete_files(driver_id: String) -> Result<drivers::DriverStatus, String> {
+    drivers::delete_files(&driver_id)
+}
+
+/// Deletes the downloaded Java runtime.
+#[tauri::command(async)]
+pub fn db_driver_delete_runtime() -> Result<(), String> {
+    drivers::delete_runtime()
+}
+
+/// What the user changed about each driver, and the drivers they added.
+#[tauri::command(async)]
+pub fn db_driver_settings() -> Vec<drivers::DriverSettings> {
+    drivers::all_settings()
+}
+
+#[tauri::command(async)]
+pub fn db_driver_save_settings(settings: drivers::DriverSettings) -> Result<(), String> {
+    drivers::save_settings(settings)
+}
+
+/// Forgets a driver's changes — or, for one the user added, the driver itself.
+#[tauri::command(async)]
+pub fn db_driver_delete_settings(id: String) -> Result<(), String> {
+    drivers::delete_settings(&id)
 }
 
 #[cfg(test)]

@@ -5,8 +5,8 @@ import { lineText } from "../../lib/workspaceEdit";
 import { groupHits, useEditorPanelStore } from "../../state/editorPanelStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { translate } from "../../state/languageStore";
-import { tsReferences } from "./useTypeScript";
-import { lspReferences } from "./useLanguageServer";
+import { tsImplementations, tsReferences } from "./useTypeScript";
+import { lspImplementations, lspReferences } from "./useLanguageServer";
 
 /**
  * "Find All References": every use of the symbol under the caret, across the project, listed in
@@ -52,6 +52,35 @@ export async function findAllReferences(
   for (const hit of hits) unique.set(`${hit.path}:${hit.range.startLineNumber}:${hit.range.startColumn}`, hit);
   useEditorPanelStore.getState().showResults({
     title: translate("editor.referencesTitle", { n: unique.size, name: symbol }),
+    groups: groupHits([...unique.values()]),
+    notes: [],
+  });
+}
+
+/**
+ * "Find All Implementations": every class that implements the interface under the caret, every
+ * override of the method — the whole list "Go to Implementations" jumps to the first of, in the
+ * same panel and for the same reason as the references above.
+ *
+ * Neither tsserver's answer nor a server's carries the line's text, so both are read the way the
+ * language servers' references are.
+ */
+export async function findAllImplementations(
+  model: monaco.editor.ITextModel,
+  position: monaco.Position,
+  project: { id: string; local_path: string },
+): Promise<void> {
+  const symbol = model.getWordAtPosition(position)?.word ?? "";
+  const found = (await tsImplementations(model, position)) ?? (await lspImplementations(model, position));
+  if (!found) {
+    pushErrorToast(translate("editor.implementationsUnavailable"));
+    return;
+  }
+  const hits = await withLineText(found, project);
+  const unique = new Map<string, Hit>();
+  for (const hit of hits) unique.set(`${hit.path}:${hit.range.startLineNumber}:${hit.range.startColumn}`, hit);
+  useEditorPanelStore.getState().showResults({
+    title: translate("editor.implementationsTitle", { n: unique.size, name: symbol }),
     groups: groupHits([...unique.values()]),
     notes: [],
   });

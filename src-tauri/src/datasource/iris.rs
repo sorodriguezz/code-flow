@@ -2,9 +2,10 @@
 //!
 //! IRIS has no pure-Rust driver and no third-party implementation of its superserver protocol. Its
 //! one real client is the InterSystems Type 4 JDBC driver, which is Java — so this file is a client
-//! of [`super::jvm`], a single `java` process running `com.codeflow.iris.IrisBridge` that CodeFlow
-//! spawns on the first IRIS connection and shuts down when the last one closes. Both the trimmed
-//! runtime and the driver jar ship inside the app, so nothing has to be installed for this to work.
+//! of [`super::jvm`], a single `java` process running `com.codeflow.jdbc.JdbcBridge` that CodeFlow
+//! spawns on the first JDBC connection and shuts down when the last one closes. The runtime and the
+//! driver jar are downloaded the first time an IRIS connection needs them ([`super::drivers`]) —
+//! the connection form offers to — so nothing has to be installed by hand for this to work.
 //!
 //! Going through JDBC rather than the Atelier REST API (which this replaces) is what makes IRIS a
 //! first-class engine in the workspace instead of an approximation of one:
@@ -30,6 +31,7 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
+use super::drivers;
 use super::jvm::{self, Bridge};
 use super::postgres::{annotate_types, cell, relation_folders, schema_folders};
 use super::sqlgen::{self, quote_ident, quote_literal};
@@ -90,12 +92,20 @@ impl IrisSession {
                 }
             });
 
-        let bridge = jvm::bridge().await?;
+        // The driver jar is downloaded on first use, like every JDBC driver's — see `drivers`.
+        let driver = drivers::resolve(config.driver_id())?;
+        let bridge = jvm::bridge_for(&driver.jvm).await?;
         let session_id = format!("{}#{namespace}{tag}", config.id);
-        let (properties, ignored_options) = driver_properties(&config);
+        // The driver's defaults from the Drivers list, then the connection's own over them.
+        let (own, ignored_options) = driver_properties(&config);
+        let mut properties = drivers::default_properties(&driver, &config);
+        properties.extend(own);
 
         let mut request = Map::new();
         request.insert("url".into(), Value::from(jdbc_url(&config, &namespace)));
+        request.insert("driver".into(), Value::from(driver.class.clone()));
+        request.insert("driverName".into(), Value::from(driver.name.clone()));
+        request.insert("jars".into(), Value::from(driver.jar_paths()));
         request.insert("user".into(), Value::from(config.user.clone()));
         // Over a pipe to a child process, never on its command line — argv is world-readable.
         request.insert("password".into(), Value::from(config.password.clone()));
@@ -188,7 +198,7 @@ impl IrisSession {
     }
 
     /// Turns the JDBC connection's autocommit off or back on — how a transaction spanning several
-    /// statements is held open over the bridge (see `IrisBridge.autocommit`).
+    /// statements is held open over the bridge (see `JdbcBridge.autocommit`).
     pub async fn set_autocommit(&self, enabled: bool) -> Result<(), String> {
         let mut request = Map::new();
         request.insert("enabled".into(), Value::from(enabled));
@@ -1157,6 +1167,9 @@ mod tests {
             ssh_port: 0,
             ssh_user: String::new(),
             ssh_key_file: String::new(),
+            driver_id: String::new(),
+            url_template: String::new(),
+            url_values: Vec::new(),
         }
     }
 

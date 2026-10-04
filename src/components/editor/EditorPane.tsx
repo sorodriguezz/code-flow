@@ -58,6 +58,7 @@ import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useBlameStore } from "../../state/blameStore";
 import { useCursorBlameStore } from "../../state/cursorBlameStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
+import { monacoInlayHints, monacoWordWrap, useEditorDisplayStore } from "../../state/editorDisplayStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useTabDragStore, type TabDrag, type TabDropTarget } from "../../state/tabDragStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -75,7 +76,7 @@ import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CsvSeparatorPicker } from "./CsvSeparatorPicker";
 import { useTypeScript } from "./useTypeScript";
 import { formatModel, isComponentFile } from "./formatDocument";
-import { findAllReferences } from "./findReferences";
+import { findAllImplementations, findAllReferences } from "./findReferences";
 import { useLanguageServer } from "./useLanguageServer";
 import { useInlineCompletion } from "./useInlineCompletion";
 import { useImportCost } from "./useImportCost";
@@ -684,6 +685,7 @@ export function EditorPane({
   registerChangeNav,
   onSplit,
   onCloseGroup,
+  onDetach,
   tabMenu,
 }: {
   groupId: string;
@@ -752,6 +754,9 @@ export function EditorPane({
   onSplit: (() => void) | null;
   /** `null` for the only group; a group you can't close is one without a close button. */
   onCloseGroup: (() => void) | null;
+  /** A tab let go outside the window, at that point on the screen — passed straight through to the
+   *  strip. Absent where a tab cannot become a floating editor. */
+  onDetach?: (payload: TabDrag, screen: { x: number; y: number }) => void;
   /** The tab strip's right-click actions, passed straight through. */
   tabMenu: TabMenuActions;
 }) {
@@ -1125,6 +1130,13 @@ export function EditorPane({
   useEffect(() => {
     tRef.current = t;
   });
+
+  /** Word wrap at the pane's own width — see `editorDisplayStore`. Applied to the code and to the
+   *  diff alike: a long line read side by side runs off just as far. */
+  const wordWrap = monacoWordWrap(useEditorDisplayStore((s) => s.wordWrap));
+  /** Inlay hints on or off — see `editorDisplayStore`. The code only: a diff is read for what
+   *  changed, and hints there would be text that is in neither side. */
+  const inlayHints = monacoInlayHints(useEditorDisplayStore((s) => s.inlayHints));
 
   const activeAbsolutePath = useMemo(
     () => (activePath ? normalizePath(`${project.local_path}/${activePath}`) : null),
@@ -2149,6 +2161,22 @@ export function EditorPane({
       run: () => onSaveRef.current(),
     });
     /**
+     * Word wrap on and off — VS Code's ⌥Z, and the same chord here. It flips the Editor's preference
+     * (`editorDisplayStore`) rather than this pane alone, so every split and every window follows.
+     *
+     * The chord comes from the registry through `installEditorShortcuts`, like the save above. The
+     * Monaco keybinding is here as well for one platform's sake: on macOS ⌥Z types `Ω`, which the
+     * registry's chords — compared by the character a keystroke produces — can never match, while
+     * Monaco resolves the physical key. Moving the chord in settings takes this one off with it
+     * (`installEditorShortcuts` unbinds the shipped key of any command that was moved).
+     */
+    editorInstance.addAction({
+      id: "cf-toggle-word-wrap",
+      label: tRef.current("editor.toggleWordWrap"),
+      keybindings: [monacoInstance.KeyMod.Alt | monacoInstance.KeyCode.KeyZ],
+      run: () => void useEditorDisplayStore.getState().toggleWordWrap(),
+    });
+    /**
      * Format the document — and say so when nothing can.
      *
      * `isSupported()` is Monaco's own answer to "is there a formatter for this language": it is the
@@ -2189,6 +2217,22 @@ export function EditorPane({
         const model = ed.getModel();
         const position = ed.getPosition();
         if (model && position) void findAllReferences(model, position, projectRef.current);
+      },
+    });
+    /**
+     * Every implementation of the symbol under the caret, in the same panel — beside Monaco's own
+     * "Go to Implementations" (⌘F12), which jumps to the first of several and whose peek, like the
+     * references one, cannot preview a file that is not open.
+     */
+    editorInstance.addAction({
+      id: "cf-find-implementations",
+      label: tRef.current("editor.findImplementations"),
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 1.46,
+      run: (ed) => {
+        const model = ed.getModel();
+        const position = ed.getPosition();
+        if (model && position) void findAllImplementations(model, position, projectRef.current);
       },
     });
     editorInstance.addAction({
@@ -2542,6 +2586,13 @@ export function EditorPane({
           fontSize: 13,
           fontFamily: CODE_FONT_FAMILY,
           automaticLayout: true,
+          // At the viewport, never at a column: where a line breaks is the pane's width, so it
+          // re-wraps as a split or the explorer changes it. Continuation lines keep the indentation
+          // of the line they belong to (Monaco's `same`), which is what keeps wrapped code legible.
+          wordWrap,
+          // The types and parameter names the servers infer, drawn faint beside the code. Off means
+          // Monaco never asks for them — see `editorDisplayStore`.
+          inlayHints: { enabled: inlayHints },
           /**
            * Ghost text. On for every editor, because the provider — not this flag — is what decides
            * whether there is anything to draw: with the feature off, no model downloaded, or a
@@ -2619,6 +2670,7 @@ export function EditorPane({
             onClose={onClose}
             onPin={onPin}
             onDropTab={onDropTab}
+            onDetach={onDetach}
             menu={tabMenu}
             actions={
               <>
@@ -2832,6 +2884,8 @@ export function EditorPane({
                     readOnly: true,
                     fontSize: 13,
                     fontFamily: CODE_FONT_FAMILY,
+                    // Both sides, so a changed line wraps the same way before and after.
+                    wordWrap,
                     renderSideBySide: true,
                     useInlineViewWhenSpaceIsLimited: false,
                     automaticLayout: true,

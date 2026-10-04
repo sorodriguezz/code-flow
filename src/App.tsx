@@ -37,6 +37,7 @@ import { useLocalAiStore } from "./state/localAiStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { restoreSatellites } from "./lib/tauri/windows";
 import { onWindowMessage } from "./lib/windowBus";
+import { installIslandHost } from "./lib/editorIslands";
 import { showDiagramHere } from "./lib/dbmlBridge";
 import { showChatHere } from "./lib/chatBridge";
 import { WINDOW } from "./lib/windowIdentity";
@@ -718,6 +719,10 @@ export default function App() {
    * that owns something on everybody's behalf: the status bar that claims to list every model
    * running, and the agent-chain executor. See `lib/windowBus`.
    */
+  // Floating editors hand their files to this window and take them back — whatever view is on
+  // screen, which is why it is installed here and not by the editor. See `lib/editorIslands`.
+  useEffect(() => installIslandHost(), []);
+
   useEffect(
     () =>
       onWindowMessage((message, from) => {

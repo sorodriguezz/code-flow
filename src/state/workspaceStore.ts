@@ -155,8 +155,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({ activeWorkspaceId: target.id });
         if (!WINDOW.main && target.id === opener) {
           // Recorded, so that putting this window away and back brings it here rather than to
-          // wherever it was before it was opened this time.
-          void api.setSetting(windowKey(LAST_WORKSPACE_KEY), target.id);
+          // wherever it was before it was opened this time. Not for a floating editor: its
+          // workspace is its file's, derived every time (see `FileWindow`), and its label is one
+          // per file — a row each would be a row for every file ever torn off.
+          if (WINDOW.satellite?.kind !== "file") void api.setSetting(windowKey(LAST_WORKSPACE_KEY), target.id);
         } else {
           opener = null;
         }
@@ -456,9 +458,13 @@ export async function refreshWorkspacesFromElsewhere(): Promise<void> {
       firstKnown(workspaces, [await setting(windowKey(LAST_WORKSPACE_KEY)), await setting(LAST_WORKSPACE_KEY)]) ??
       workspaces[0];
     // A repository window's workspace is derived from its repository, never recorded — see
-    // `RepoWindow`. Its repository went with the workspace, so it will say so wherever it lands.
-    if (WINDOW.satellite?.kind === "repo") void useWorkspaceStore.getState().followWorkspace(target.id);
-    else useWorkspaceStore.getState().setActiveWorkspace(target.id);
+    // `RepoWindow` — and a floating editor's from its file's. Its repository went with the
+    // workspace, so it will say so wherever it lands.
+    if (WINDOW.satellite?.kind === "repo" || WINDOW.satellite?.kind === "file") {
+      void useWorkspaceStore.getState().followWorkspace(target.id);
+    } else {
+      useWorkspaceStore.getState().setActiveWorkspace(target.id);
+    }
   } else if (activeGone) {
     useWorkspaceStore.setState({ activeWorkspaceId: null, activeProjectId: null });
   }

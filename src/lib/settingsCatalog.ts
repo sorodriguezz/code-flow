@@ -73,6 +73,7 @@ import {
   SquarePen,
   SunMoon,
   TerminalSquare,
+  TextWrap,
   type LucideIcon,
   Upload,
   UserRound,
@@ -218,6 +219,15 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         hintKey: "editor.formattingHint",
         icon: AlignLeft,
         searchKey: "settings.searchTermsFormatting",
+      },
+      // How the text is laid out on screen — word wrap and inlay hints. Beside Formatting and not inside it:
+      // formatting rewrites the file, this never touches it.
+      {
+        id: "display",
+        labelKey: "editor.display",
+        hintKey: "editor.displayHint",
+        icon: TextWrap,
+        searchKey: "settings.searchTermsEditorDisplay",
       },
     ],
   },

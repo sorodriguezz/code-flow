@@ -2271,6 +2271,11 @@ export const lspNotify = (sessionId: string, method: string, params: unknown) =>
 
 export const lspRunning = (sessionId: string) => invoke<boolean>("lsp_running", { sessionId });
 
+/** A running server's `capabilities`, or `null` when nothing runs under that id — for a window that
+ *  joins a server rather than starting one (`lib/lsp/client`'s `startForProject`). */
+export const lspCapabilities = (sessionId: string) =>
+  invoke<Record<string, unknown> | null>("lsp_capabilities", { sessionId });
+
 /** The version string a server printed, or a rejection naming what was missing. */
 export const lspProbe = (command: string, args: string[]) =>
   invoke<string>("lsp_probe", { command, args });

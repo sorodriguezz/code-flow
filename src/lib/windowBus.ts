@@ -1,9 +1,10 @@
-import { emit, listen } from "@tauri-apps/api/event";
+import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { WINDOW } from "./windowIdentity";
 // Type-only: this module must stay a leaf, or the store that imports it to broadcast would import
 // it back through this line.
 import type { AiRunAbout } from "../state/aiRunStore";
 import type { UnsavedItem } from "./unsavedWork";
+import type { IslandTab } from "./editorIslands";
 
 /**
  * How the windows tell each other things.
@@ -131,7 +132,40 @@ export type WindowMessage =
    */
   | { kind: "unsaved-save" | "unsaved-discard"; to: string; requestId: string }
   /** The answer to either: the labels that could not be saved (always empty for a discard). */
-  | { kind: "unsaved-done"; requestId: string; failed: string[] };
+  | { kind: "unsaved-done"; requestId: string; failed: string[] }
+  /*
+   * A floating editor and the main window handing one file between them — see `lib/editorIslands`
+   * for the whole protocol. All of these are *sent* (`sendTo`) rather than broadcast: each has
+   * exactly one window that may act on it, and two of them carry a whole file's text, which every
+   * other window has no business receiving.
+   */
+  /** A floating editor that has just opened, asking the main window for its file's buffer. */
+  | { kind: "island-claim"; requestId: string; projectId: string; path: string }
+  /** The main window's answer: the tab as it was there, or `null` when it was not open — the
+   *  floating editor then reads the file from disk. */
+  | { kind: "island-handoff"; requestId: string; tab: IslandTab | null }
+  /** "I have it": the main window drops the copy it kept until the buffer was safely across. */
+  | { kind: "island-taken"; ref: string }
+  /** A floating editor closing, giving its tab back. `reveal` is the title bar's "return" button:
+   *  the main window also comes forward on that file. */
+  | {
+      kind: "island-return";
+      requestId: string;
+      projectId: string;
+      repoPath: string;
+      tab: IslandTab;
+      reveal: boolean;
+    }
+  /** The main window has the returned tab — only then may the floating editor go. */
+  | { kind: "island-returned"; requestId: string }
+  /** Open another file of the repository in the main window — a go-to-definition from a floating
+   *  editor, which holds its one file and nothing else. */
+  | { kind: "island-open"; projectId: string; path: string; line?: number; column?: number }
+  /** Jump to a line in a floating editor, when an open in the main window landed on its file. */
+  | { kind: "island-reveal"; line: number; column?: number }
+  /** The file a floating editor holds was moved (`movedTo`) or deleted (`null`) from the main
+   *  window's explorer. */
+  | { kind: "island-recall"; movedTo: string | null };
 
 interface Frame {
   from: string;
@@ -142,6 +176,18 @@ interface Frame {
  *  raised it, and a failed emit must not take the caller's own work down with it. */
 export function broadcast(message: WindowMessage): void {
   void emit(CHANNEL, { from: WINDOW.label, message } satisfies Frame).catch(() => {});
+}
+
+/**
+ * Sends to one window only — `MAIN_LABEL` or a satellite's label.
+ *
+ * For the messages exactly one window may act on, and above all for the ones that carry a file's
+ * text: `emit` evaluates the payload in every webview, `emitTo` only in the one it names. Resolves
+ * once the backend has it, which is what a window about to close waits for; rejects when it could
+ * not be sent, so a caller that must know (a buffer on its way out) can keep it instead.
+ */
+export function sendTo(label: string, message: WindowMessage): Promise<void> {
+  return emitTo(label, CHANNEL, { from: WINDOW.label, message } satisfies Frame);
 }
 
 /**
@@ -174,4 +220,21 @@ export function onWindowMessage(
     cancelled = true;
     stop?.();
   };
+}
+
+/**
+ * [`onWindowMessage`], resolving only once the listener is attached.
+ *
+ * For a question whose answer must not be missed: ask before the listener is in place and a fast
+ * answer arrives to nobody. The floating editor's claim on its buffer is the case — an answer lost
+ * there is a file read from disk while its unsaved text sits forgotten in the main window.
+ */
+export async function listenWindowMessages(
+  handler: (message: WindowMessage, from: string) => void,
+): Promise<() => void> {
+  const unlisten = await listen<Frame>(CHANNEL, (event) => {
+    if (event.payload.from === WINDOW.label) return;
+    handler(event.payload.message, event.payload.from);
+  });
+  return () => void unlisten();
 }

@@ -61,6 +61,13 @@ pub fn lsp_running(session_id: String) -> bool {
     crate::lsp::is_running(&session_id)
 }
 
+/// A running server's capabilities, for a window that joins it rather than starting its own —
+/// `None` when nothing is running under that id. See [`crate::lsp::capabilities_of`].
+#[tauri::command]
+pub fn lsp_capabilities(session_id: String) -> Option<Value> {
+    crate::lsp::capabilities_of(&session_id)
+}
+
 /// Is this server on `PATH`, and which version? Powers the found/not-found badge in Settings —
 /// the same treatment the AI engines get, and for the same reason: a language with no server
 /// installed is a feature that is not there, not an error.

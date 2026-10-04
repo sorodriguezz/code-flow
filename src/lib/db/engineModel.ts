@@ -155,6 +155,8 @@ export const ENGINE_RECORD_MODELS: Record<DbKind, EngineRecordModel> = {
     conventionalIdentity: ["rowid"],
   },
   oracle: RELATIONAL,
+  // Every JDBC driver here reads a relational catalog through `DatabaseMetaData`, keys and all.
+  jdbc: RELATIONAL,
   redis: {
     // A Redis grid holds the *entries* of one value — a hash's fields, a list's items — or the keys
     // under a namespace. Neither is a row and neither is a document, so it gets its own vocabulary

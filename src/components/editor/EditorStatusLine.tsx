@@ -1,9 +1,12 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Check, CircleX, GitCommitHorizontal, TriangleAlert } from "lucide-react";
+import { Check, CircleX, GitCommitHorizontal, TextWrap, TriangleAlert } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { LanguagePicker } from "./LanguagePicker";
 import { FileGlyph } from "../common/FileGlyph";
 import { Tooltip } from "../common/Tooltip";
+import { Kbd } from "../common/Button";
+import { useShortcutChord } from "../../lib/useShortcutHint";
+import { useEditorDisplayStore } from "../../state/editorDisplayStore";
 import { useCursorBlameStore } from "../../state/cursorBlameStore";
 import { useEditorStatusStore, type LineEnding } from "../../state/editorStatusStore";
 import { extensionOf, useLanguageOverrideStore } from "../../state/languageOverrideStore";
@@ -53,6 +56,8 @@ export function EditorStatusLine() {
   const problemsByOwner = useProblemsStore((s) => s.byOwner);
   const problems = useMemo(() => countProblems(problemsByOwner), [problemsByOwner]);
   const problemsOpen = useEditorPanelStore((s) => s.open && s.tab === "problems");
+  const wordWrap = useEditorDisplayStore((s) => s.wordWrap);
+  const wrapKeys = useShortcutChord()("editor.toggleWordWrap");
 
   return (
     <div className="flex h-6 shrink-0 items-center justify-end gap-0.5 border-t border-[var(--cf-border)] px-2 text-[12px] text-[var(--cf-text-muted)]">
@@ -169,6 +174,25 @@ export function EditorStatusLine() {
           >
             {status.eol}
           </button>
+
+          {/* Word wrap, where the rest of "how this file is laid out" already is — and lit while it
+              is on, because a wrapped line looks like two and the reason should be on screen. The
+              Editor's preference, not this file's: see `editorDisplayStore`. */}
+          <Tooltip
+            side="top"
+            label={t("editor.wordWrap")}
+            description={wordWrap ? t("editor.status.wordWrapOn") : t("editor.status.wordWrapOff")}
+            trailing={wrapKeys ? <Kbd>{wrapKeys}</Kbd> : undefined}
+          >
+            <button
+              onClick={() => void useEditorDisplayStore.getState().toggleWordWrap()}
+              aria-pressed={wordWrap}
+              aria-label={t("editor.wordWrap")}
+              className={`${itemClass} ${wordWrap ? "text-[var(--cf-accent)]" : ""}`}
+            >
+              <TextWrap size={13} />
+            </button>
+          </Tooltip>
 
           {/* Chosen by hand from here (`LanguagePicker`), or detected — and the tooltip says which. The
               mousedown is kept from the picker's outside-click while it is open, so a second press on

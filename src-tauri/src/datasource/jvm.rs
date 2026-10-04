@@ -1,25 +1,29 @@
-//! The JVM sidecar that carries the InterSystems JDBC driver.
+//! The JVM sidecar that carries every JDBC driver.
 //!
-//! IRIS's only real client is a Type 4 JDBC driver, which is Java, so the driver in
-//! [`super::iris`] is a client of *this* — a single `java` process running
-//! `com.codeflow.iris.IrisBridge`, talked to in newline-delimited JSON over its stdin and stdout.
+//! IRIS's only real client is a Type 4 JDBC driver, which is Java, and so are Oracle's thin driver and
+//! every engine of the driver catalogue that has no Rust driver at all. They are all clients of
+//! *this* — a `java` process running `com.codeflow.jdbc.JdbcBridge`, talked to in newline-delimited
+//! JSON over its stdin and stdout. Each session names the jars of its driver when it opens, and the
+//! bridge loads them into a class loader of their own.
 //!
 //! What that buys, and what it costs:
 //!
-//! - **One process for every IRIS session, not one per connection.** The explorer opens a session
-//!   per namespace and a JVM apiece would cost tens of megabytes each. Sessions are multiplexed by
-//!   the id in each request; the Java side keeps a `Connection` per id.
-//! - **It exists only while IRIS is in use.** The process is spawned on the first connection and
-//!   asked to exit when the last one closes, so a workspace with no IRIS connection never pays for
-//!   it. Reopening pays the ~300 ms spawn again, which is the right side of that trade for a tool
-//!   that is idle most of the time.
+//! - **One process for every session, not one per connection.** The explorer opens a session per
+//!   database and a JVM apiece would cost tens of megabytes each. Sessions are multiplexed by the id
+//!   in each request; the Java side keeps a `Connection` per id.
+//! - **One process per JVM configuration, not one for everything.** A driver can be given JVM
+//!   options of its own (`-Xmx2g`, `-Duser.timezone=UTC`) or a Java home of its own, and those are
+//!   properties of a process — so bridges are keyed by [`JvmOptions`], and every driver left at the
+//!   defaults shares one.
+//! - **It exists only while it is in use.** A bridge is spawned on the first connection that needs
+//!   it and asked to exit when the last one closes, so a workspace with no JDBC connection never pays
+//!   for it.
 //! - **The password crosses on stdin, never in argv.** A command line is world-readable in `ps`;
 //!   a pipe between parent and child is not.
 //!
-//! The runtime itself is bundled — a `jlink`-trimmed JRE under the app's resources, built by
-//! `scripts/build-iris-runtime.mjs` — so nothing has to be installed for IRIS to work. An
-//! already-installed JDK is still honoured when the bundle isn't there, which is what makes
-//! `cargo test` and a dev build work before that script has ever run.
+//! Neither the runtime nor the drivers ship with the app: both are downloaded on first use
+//! ([`super::drivers`]). What ships is the bridge itself, a few kilobytes built from
+//! `src-tauri/java/` by `scripts/build-jdbc-bridge.mjs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,23 +36,27 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
-/// The live bridge, or nothing when IRIS isn't in use.
+use super::drivers::JvmOptions;
+
+/// The live bridges, one per JVM configuration in use.
 ///
 /// A `tokio` mutex rather than a `std` one because obtaining it spans the spawn, and holding a
 /// blocking lock across `await` would stall the runtime's worker thread.
-static BRIDGE: OnceLock<AsyncMutex<Option<Arc<Bridge>>>> = OnceLock::new();
+static BRIDGES: OnceLock<AsyncMutex<HashMap<JvmOptions, Arc<Bridge>>>> = OnceLock::new();
 
-/// Hands back the running bridge, starting one if there isn't a usable one.
-pub async fn bridge() -> Result<Arc<Bridge>, String> {
-    let slot = BRIDGE.get_or_init(|| AsyncMutex::new(None));
-    let mut guard = slot.lock().await;
-    if let Some(existing) = guard.as_ref() {
+/// Hands back the running bridge for a JVM configuration, starting one if there isn't a usable one.
+pub async fn bridge_for(jvm: &JvmOptions) -> Result<Arc<Bridge>, String> {
+    let slot = BRIDGES.get_or_init(|| AsyncMutex::new(HashMap::new()));
+    let mut bridges = slot.lock().await;
+    if let Some(existing) = bridges.get(jvm) {
         if existing.alive.load(Ordering::SeqCst) {
             return Ok(existing.clone());
         }
     }
-    let started = Arc::new(Bridge::spawn().await?);
-    *guard = Some(started.clone());
+    // Dead ones go: a bridge that exited is only kept as the key to replace.
+    bridges.retain(|_, bridge| bridge.alive.load(Ordering::SeqCst));
+    let started = Arc::new(Bridge::spawn(jvm).await?);
+    bridges.insert(jvm.clone(), started.clone());
     Ok(started)
 }
 
@@ -68,7 +76,8 @@ pub struct Bridge {
     /// Held so that replacing a dead bridge reaps its process rather than leaving a zombie.
     child: Mutex<tokio::process::Child>,
     /// Which `java` this was started with, so a failure can say *whose* runtime failed — the
-    /// bundled one and a system JDK fail in very different ways, and the fix differs with them.
+    /// downloaded one and a Java home set on a driver fail in very different ways, and the fix
+    /// differs with them.
     java: String,
     /// What the JVM wrote to stderr before it died. See [`Diagnostics`].
     diagnostics: Diagnostics,
@@ -98,14 +107,15 @@ const DIAGNOSTICS_KEPT: usize = 8;
 const DIAGNOSTICS_SHOWN: usize = 4;
 
 impl Bridge {
-    async fn spawn() -> Result<Self, String> {
-        let runtime = Runtime::locate()?;
+    async fn spawn(jvm: &JvmOptions) -> Result<Self, String> {
+        let runtime = Runtime::locate(jvm)?;
 
         // Through `proc` rather than `Command::new`: `java.exe` is a console binary, and Windows
         // hands one a `conhost` window of its own. Opening a database would flash a black console
         // over the app — which reads as the app running something behind your back, not as a driver
         // starting.
-        let mut child = crate::proc::command(&runtime.java)
+        let mut command = crate::proc::command(&runtime.java);
+        command
             .arg("-cp")
             .arg(&runtime.classpath)
             // The bridge is a request/response servant, not a server: a small heap keeps a result
@@ -117,7 +127,17 @@ impl Bridge {
             .arg("-XX:TieredStopAtLevel=1")
             .arg("-XX:+UseSerialGC")
             .arg("-Dfile.encoding=UTF-8")
-            .arg("com.codeflow.iris.IrisBridge")
+            // Apache Arrow — inside Snowflake's driver, the Flight SQL one InfluxDB uses and
+            // Databricks' — reads direct buffers through `java.nio` internals, which Java 16 and
+            // later close by default: without this, those drivers connect and then fail on the
+            // first result set. Opening one package to the classpath costs every other driver nothing.
+            .arg("--add-opens=java.base/java.nio=ALL-UNNAMED")
+            // The driver's own options last, so one of them overrides ours — the JVM takes the last
+            // of a repeated flag, which is what makes `-Xmx2g` on a driver mean what it says.
+            .args(&jvm.vm_options)
+            .envs(jvm.env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
+            .arg("com.codeflow.jdbc.JdbcBridge");
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -126,7 +146,7 @@ impl Bridge {
             .spawn()
             .map_err(|e| {
                 format!(
-                    "CodeFlow couldn't start the Java runtime it uses to reach IRIS \
+                    "CodeFlow couldn't start the Java runtime its JDBC drivers run on \
                      ({}): {e}",
                     runtime.java.display()
                 )
@@ -156,7 +176,7 @@ impl Bridge {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("iris-bridge: {line}");
+                    eprintln!("jdbc-bridge: {line}");
                     if let Ok(mut kept) = sink.lock() {
                         if kept.len() < DIAGNOSTICS_KEPT && !line.trim().is_empty() {
                             kept.push(line);
@@ -180,7 +200,7 @@ impl Bridge {
                         continue;
                     }
                     let Ok(frame) = serde_json::from_str::<Value>(&line) else {
-                        eprintln!("iris-bridge: unreadable frame: {line}");
+                        eprintln!("jdbc-bridge: unreadable frame: {line}");
                         continue;
                     };
                     let Some(id) = frame.get("id").and_then(Value::as_u64) else {
@@ -194,7 +214,7 @@ impl Bridge {
                         Err(frame
                             .get("error")
                             .and_then(Value::as_str)
-                            .unwrap_or("The IRIS bridge failed without saying why.")
+                            .unwrap_or("The JDBC bridge failed without saying why.")
                             .to_string())
                     };
                     let _ = waiting.send(answer);
@@ -226,7 +246,7 @@ impl Bridge {
     }
 
     /// Closes a session without waiting for it, from anywhere — including a thread that is not
-    /// inside the async runtime. This is what [`super::iris::IrisSession`]'s `Drop` uses.
+    /// inside the async runtime. This is what every JDBC session's `Drop` uses.
     pub fn close_session_detached(self: &Arc<Self>, session: String) {
         let bridge = self.clone();
         self.handle
@@ -288,7 +308,7 @@ impl Bridge {
         died_message(&self.java, &self.diagnostics)
     }
 
-    /// False once the JVM is gone. The IRIS driver reports this as the session being dead, which is
+    /// False once the JVM is gone. A JDBC session reports this as the session being dead, which is
     /// what makes the registry reconnect rather than replay every statement into a closed pipe.
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
@@ -321,12 +341,12 @@ impl Bridge {
     }
 }
 
-const POISONED: &str = "The IRIS bridge's request table was left in a broken state.";
+const POISONED: &str = "The JDBC bridge's request table was left in a broken state.";
 
 /// What every in-flight call fails with when the JVM goes away. Never reported bare — it says what
 /// happened and not why, so it is always composed by [`died_message`], which adds the cause.
 pub const BRIDGE_DIED: &str =
-    "The Java bridge CodeFlow uses to reach IRIS stopped running. The next statement reconnects.";
+    "The Java bridge CodeFlow runs JDBC drivers in stopped running. The next statement reconnects.";
 
 /// See [`Bridge::died`]. A free function because the reader task needs it too, and that task
 /// outlives no `Bridge` — it is spawned while one is still being built.
@@ -351,118 +371,68 @@ struct Runtime {
 }
 
 impl Runtime {
-    /// The bundled runtime, else whatever JDK the machine already has.
+    /// The `java` a driver's options name — the downloaded runtime, unless the driver was given a
+    /// Java home of its own — and the bridge jar to run on it.
     ///
-    /// The fallbacks are not a convenience feature — they are what makes a source checkout work
-    /// before `scripts/build-iris-runtime.mjs` has produced the bundle, and what keeps a damaged
-    /// install recoverable instead of simply broken.
-    fn locate() -> Result<Self, String> {
-        let dir = iris_resource_dir().ok_or_else(|| missing_resources().to_string())?;
-        let classpath = classpath(&dir)?;
-
-        let bundled = dir.join("runtime").join("bin").join(java_exe());
-        if bundled.is_file() {
-            return Ok(Self {
-                java: bundled,
-                classpath,
-            });
+    /// A Java home the user picked is version-checked; the downloaded runtime is the release the
+    /// catalogue asks for and cannot be too old.
+    fn locate(jvm: &JvmOptions) -> Result<Self, String> {
+        if jvm.java.as_os_str().is_empty() || !jvm.java.is_file() {
+            return Err(format!(
+                "{}jvm\nThe Java runtime CodeFlow's JDBC drivers run on hasn't been downloaded yet.",
+                super::drivers::MISSING
+            ));
         }
-        // Only the fallbacks are version-checked. The bundled runtime is built by
-        // `scripts/build-iris-runtime.mjs` against the same release the bridge is compiled for, so
-        // it cannot be too old; a JDK that happens to be on the machine very much can, and a JVM
-        // started on one dies on its first class file with a message no dialog ever sees.
-        if let Some(home) = std::env::var_os("JAVA_HOME") {
-            let candidate = Path::new(&home).join("bin").join(java_exe());
-            if candidate.is_file() {
-                too_old(&candidate, "JAVA_HOME")?;
-                return Ok(Self {
-                    java: candidate,
-                    classpath,
-                });
-            }
+        if super::drivers::runtime_java().as_deref() != Some(jvm.java.as_path()) {
+            too_old(&jvm.java, "the driver's settings")?;
         }
-        if let Some(candidate) = which_java() {
-            too_old(&candidate, "PATH")?;
-            return Ok(Self {
-                java: PathBuf::from("java"),
-                classpath,
-            });
-        }
-        Err(format!(
-            "CodeFlow ships its own Java runtime for IRIS, and this install doesn't have it \
-             (expected {}). Reinstalling the app restores it; installing a JDK and setting \
-             JAVA_HOME also works.",
-            bundled.display()
-        ))
+        let jar = bridge_jar().ok_or_else(|| missing_bridge().to_string())?;
+        Ok(Self { java: jvm.java.clone(), classpath: jar.to_string_lossy().into_owned() })
     }
 }
 
-/// The jar `scripts/build-iris-runtime.mjs` compiles from `src-tauri/java`. Named here because its
-/// absence is the one classpath problem worth its own message.
-const BRIDGE_JAR: &str = "iris-bridge.jar";
+/// The jar `scripts/build-jdbc-bridge.mjs` compiles from `src-tauri/java` — the only Java the app
+/// ships. The drivers' jars are not on its classpath: each session names its own (see
+/// `JdbcBridge.Drivers`).
+const BRIDGE_JAR: &str = "codeflow-jdbc-bridge.jar";
 
-/// Every jar in the resource directory, in one classpath.
+/// Where the bridge jar is.
 ///
-/// Scanned rather than named so that bumping the driver's version is a change to the build script
-/// alone — nothing here has to learn the new file name.
-fn classpath(dir: &Path) -> Result<String, String> {
-    let separator = if cfg!(windows) { ';' } else { ':' };
-    let mut jars: Vec<String> = std::fs::read_dir(dir)
-        .map_err(|e| format!("{} ({}: {e})", missing_resources(), dir.display()))?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("jar"))
-        })
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect();
-    if jars.is_empty() {
-        return Err(format!(
-            "{} (no .jar in {})",
-            missing_resources(),
-            dir.display()
-        ));
+/// In a packaged app that is the resource directory Tauri unpacks to. In a source checkout it is the
+/// build script's own output directory, which is why a dev build needs no install step.
+fn bridge_jar() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(resources) = crate::paths::resource_dir() {
+        candidates.push(resources.join("jdbc").join(BRIDGE_JAR));
     }
-    // The bridge by name, not just "some jar". A build whose `javac` step failed still leaves the
-    // driver jar here — it is downloaded first — and a classpath of only the driver starts a JVM
-    // that dies on `Could not find or load main class`, which reaches the user as "the bridge
-    // stopped running" and names nothing that can be fixed.
-    if !jars.iter().any(|jar| jar.ends_with(BRIDGE_JAR)) {
-        return Err(format!(
-            "{} ({BRIDGE_JAR} is not in {})",
-            missing_resources(),
-            dir.display()
-        ));
-    }
-    // Deterministic, so a classpath conflict fails the same way twice rather than by directory
-    // iteration order.
-    jars.sort();
-    Ok(jars.join(&separator.to_string()))
+    // Debug only. In a release build this path names the *build* machine, so it could never
+    // resolve on a user's — and baking it into the shipped binary would leak it for nothing.
+    #[cfg(debug_assertions)]
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join("jdbc").join(BRIDGE_JAR));
+    candidates.into_iter().find(|jar| jar.is_file())
 }
 
-/// What to say when the runtime and jars aren't there.
+/// What to say when the bridge jar isn't there.
 ///
 /// The advice differs by build, and giving the wrong one wastes real time: a packaged app has a
 /// damaged install, while a source checkout has simply never run the generator — the directory is
 /// in git but its contents are build outputs.
-fn missing_resources() -> &'static str {
+fn missing_bridge() -> &'static str {
     if cfg!(debug_assertions) {
-        "CodeFlow's IRIS support files (the Java runtime, the bridge and the InterSystems JDBC \
-         driver) haven't been built. Run `pnpm iris:runtime` — it needs a JDK 17+ and only has to \
-         be done once."
+        "CodeFlow's JDBC bridge (codeflow-jdbc-bridge.jar) hasn't been built. Run `pnpm jdbc:bridge` \
+         — it needs a JDK 17+ and only has to be done once."
     } else {
-        "CodeFlow's IRIS support files (the Java runtime, the bridge and the InterSystems JDBC \
-         driver) aren't where they should be. Reinstalling the app restores them."
+        "CodeFlow's JDBC bridge (codeflow-jdbc-bridge.jar) isn't where it should be. Reinstalling the \
+         app restores it."
     }
 }
 
 /// The Java release the bridge's class files are built for — `RELEASE` in
-/// `scripts/build-iris-runtime.mjs`. A JVM older than this cannot load them at all.
+/// `scripts/build-jdbc-bridge.mjs`. A JVM older than this cannot load them at all.
 const REQUIRED_JAVA: u32 = 17;
 
-/// Refuses a fallback JVM that is too old to load the bridge, and says so in the terms the user can
-/// act on.
+/// Refuses a Java the user pointed a driver at that is too old to load the bridge, and says so in
+/// the terms the user can act on.
 ///
 /// Fails *open*: an unparseable `-version` is allowed through. The banner is here to replace a
 /// confusing failure with a clear one, and refusing a JDK we simply failed to interrogate would be
@@ -475,10 +445,9 @@ fn too_old(java: &Path, found_via: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "CodeFlow's own Java runtime for IRIS isn't in this install, and the Java it fell back to \
-         is too old: {} (on {found_via}) is Java {version}, and the IRIS bridge needs {REQUIRED_JAVA} \
-         or newer. Reinstalling CodeFlow restores the bundled runtime; installing a JDK \
-         {REQUIRED_JAVA}+ and pointing JAVA_HOME at it also works.",
+        "The Java set in {found_via} is too old: {} is Java {version}, and CodeFlow's JDBC bridge \
+         needs {REQUIRED_JAVA} or newer. Point the driver at a newer Java home, or clear it to use the \
+         runtime CodeFlow downloads.",
         java.display()
     ))
 }
@@ -509,53 +478,6 @@ fn parse_java_release(text: &str) -> Option<u32> {
         return parts.next()?.parse().ok();
     }
     Some(first)
-}
-
-fn java_exe() -> &'static str {
-    if cfg!(windows) {
-        "java.exe"
-    } else {
-        "java"
-    }
-}
-
-fn which_java() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(java_exe()))
-        .find(|candidate| candidate.is_file())
-}
-
-/// Where the bundled runtime and jars live.
-///
-/// In a packaged app that is the resource directory Tauri unpacks to. In a source checkout it is
-/// the build script's own output directory, which is why a dev build needs no install step.
-fn iris_resource_dir() -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(resources) = crate::paths::resource_dir() {
-        candidates.push(resources.join("iris"));
-    }
-    // Debug only. In a release build this path names the *build* machine, so it could never
-    // resolve on a user's — and baking it into the shipped binary would leak it for nothing.
-    #[cfg(debug_assertions)]
-    candidates.push(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("resources")
-            .join("iris"),
-    );
-
-    // "The directory exists" stopped being evidence of anything: *every* checkout has one now,
-    // holding only the README that keeps it in git so tauri-build can find it. Taking the first
-    // that existed meant a dev build locked onto Tauri's copy — which holds just that README until
-    // the generator has run — and never looked at the checkout that may have the real thing.
-    //
-    // So the usable directory is the one with jars in it. Only when none qualifies does the first
-    // existing path win, and that is purely so the error names somewhere real.
-    candidates
-        .iter()
-        .find(|dir| classpath(dir).is_ok())
-        .or_else(|| candidates.iter().find(|dir| dir.is_dir()))
-        .cloned()
 }
 
 #[cfg(test)]
@@ -595,72 +517,6 @@ mod tests {
         assert!(parse_java_release("openjdk version \"17.0.9\"").unwrap() >= REQUIRED_JAVA);
     }
 
-    /// The classpath has to hold every jar in the directory — the bridge and the driver are two
-    /// separate files, and dropping either one makes the JVM start and immediately fail.
-    #[test]
-    fn the_classpath_collects_every_jar() {
-        let dir = std::env::temp_dir().join(format!("cf-iris-cp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a-driver.jar"), b"").unwrap();
-        std::fs::write(dir.join(BRIDGE_JAR), b"").unwrap();
-        std::fs::write(dir.join("notes.txt"), b"").unwrap();
-
-        let built = classpath(&dir).unwrap();
-        let separator = if cfg!(windows) { ';' } else { ':' };
-        let parts: Vec<&str> = built.split(separator).collect();
-        assert_eq!(parts.len(), 2, "{built}");
-        assert!(parts[0].ends_with("a-driver.jar"), "{built}");
-        assert!(parts[1].ends_with(BRIDGE_JAR), "{built}");
-        assert!(!built.contains("notes.txt"));
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The exact leftover a failed build produces: `javac` never ran, so the driver jar — which is
-    /// downloaded before it — is the only thing in the directory. Accepting that starts a JVM with
-    /// no main class to run.
-    #[test]
-    fn the_driver_alone_is_not_a_runtime() {
-        let dir = std::env::temp_dir().join(format!("cf-iris-nobridge-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("intersystems-jdbc-3.11.0.jar"), b"").unwrap();
-        let refused = classpath(&dir).unwrap_err();
-        assert!(refused.contains(BRIDGE_JAR), "{refused}");
-
-        std::fs::write(dir.join(BRIDGE_JAR), b"").unwrap();
-        assert!(classpath(&dir).is_ok());
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The README-only directory that every checkout has must not count as "the runtime is here".
-    ///
-    /// This is the exact shape that broke a Windows dev build: Tauri's copy under `target/debug`
-    /// held only that file, the old check accepted it for merely existing, and the real jars a few
-    /// directories away were never looked at.
-    #[test]
-    fn a_directory_holding_only_the_readme_does_not_qualify() {
-        let dir = std::env::temp_dir().join(format!("cf-iris-readme-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("README.md"), b"# generated, not checked in").unwrap();
-        assert!(classpath(&dir).is_err(), "a README is not a runtime");
-
-        std::fs::write(dir.join("iris-bridge.jar"), b"").unwrap();
-        assert!(classpath(&dir).is_ok(), "a jar is");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// An empty directory is a broken install, not an empty classpath — starting the JVM with one
-    /// would fail with `ClassNotFoundException` instead of something a user can act on.
-    #[test]
-    fn a_directory_without_jars_is_an_error() {
-        let dir = std::env::temp_dir().join(format!("cf-iris-empty-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(classpath(&dir).is_err());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     /// Starts the real bridge and talks to it.
     ///
     /// Everything between `locate` and the reply is only exercised together: finding the runtime,
@@ -668,19 +524,23 @@ mod tests {
     /// to the caller that is waiting for it. A unit test of any one of those would have passed
     /// while the chain was broken.
     ///
-    /// Skipped rather than failed when the runtime hasn't been built — a fresh checkout has the
-    /// directory (git keeps it, so tauri-build can find it) but none of its generated contents
-    /// until `pnpm iris:runtime` runs, and that is not a broken test. The condition is therefore
-    /// "are the jars there", not "is there a directory".
+    /// Skipped rather than failed when either half is missing — a runtime nobody has downloaded
+    /// on this machine, or a bridge `pnpm jdbc:bridge` hasn't built — since neither is a broken
+    /// test.
     #[tokio::test]
-    async fn the_bundled_runtime_answers() {
-        if !iris_resource_dir().is_some_and(|dir| classpath(&dir).is_ok()) {
-            eprintln!("skipping: no IRIS runtime built — run `pnpm iris:runtime`");
+    async fn the_downloaded_runtime_answers() {
+        let Some(java) = super::super::drivers::runtime_java() else {
+            eprintln!("skipping: no Java runtime downloaded");
+            return;
+        };
+        if bridge_jar().is_none() {
+            eprintln!("skipping: the bridge isn't built — run `pnpm jdbc:bridge`");
             return;
         }
-        let bridge = match bridge().await {
+        let jvm = JvmOptions { java, ..Default::default() };
+        let bridge = match bridge_for(&jvm).await {
             Ok(bridge) => bridge,
-            Err(e) => panic!("could not start the IRIS bridge: {e}"),
+            Err(e) => panic!("could not start the JDBC bridge: {e}"),
         };
         let answer = bridge
             .call("ping", "", Map::new())

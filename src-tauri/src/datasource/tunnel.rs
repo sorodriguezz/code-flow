@@ -330,6 +330,9 @@ mod tests {
             ssh_port: 0,
             ssh_user: "deploy".into(),
             ssh_key_file: String::new(),
+            driver_id: String::new(),
+            url_template: String::new(),
+            url_values: Vec::new(),
         }
     }
 

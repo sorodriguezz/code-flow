@@ -73,12 +73,16 @@ function liftFromUri(url: string): LiftedSecret {
   return { url: stripped, password: decode(password), user: null };
 }
 
-/** Postgres' `?password=…` query parameter, which libpq and `tokio-postgres` both honour. */
-function liftFromQuery(url: string): LiftedSecret {
+/**
+ * Postgres' `?password=…` query parameter, which libpq and `tokio-postgres` both honour — and,
+ * with `pwd` too, the same parameter on the JDBC URLs that take their properties as a query.
+ */
+function liftFromQuery(url: string, keys: string[] = ["password"]): LiftedSecret {
   const queryAt = url.indexOf("?");
   if (queryAt === -1) return NONE(url);
   const params = url.slice(queryAt + 1).split("&");
-  const index = params.findIndex((param) => /^password=/i.test(param));
+  const key = new RegExp(`^(?:${keys.join("|")})=`, "i");
+  const index = params.findIndex((param) => key.test(param));
   if (index === -1) return NONE(url);
   const password = decode(params[index].slice(params[index].indexOf("=") + 1));
   if (password === "") return NONE(url);
@@ -158,7 +162,12 @@ const keyOf = (pair: string) =>
  * strings. `Pwd` is the ODBC-era spelling both still accept.
  */
 function liftFromConnectionString(url: string): LiftedSecret {
-  const jdbc = /^jdbc:sqlserver:\/\//i.test(url);
+  return liftFromPairs(url, /^jdbc:sqlserver:\/\//i.test(url));
+}
+
+/** `password=`/`pwd=` among `;`-separated pairs. `jdbc`: the first piece is a JDBC URL's address,
+ *  never a pair — even when it has an `=` in it (`jdbc:athena://Region=…`). */
+function liftFromPairs(url: string, jdbc: boolean): LiftedSecret {
   const pieces = splitPairs(url);
   // The first piece of a JDBC URL is the server, never a pair.
   const index = pieces.findIndex(
@@ -188,6 +197,21 @@ function liftFromOracle(url: string): LiftedSecret {
 }
 
 /**
+ * Any JDBC driver's URL — the catalogue's sixty, each with its own spelling, so every shape one of
+ * them uses: a URI's `user:pass@`, a `password`/`pwd` parameter after `?` or among `;` pairs (SQL
+ * Server, DB2, Databricks), and Oracle's `user/pass@`. The bridge hands the lifted password back to
+ * the driver as its `password` property, or under the name the driver's catalogue entry maps it to.
+ */
+function liftFromJdbc(url: string): LiftedSecret {
+  if (/^jdbc:oracle:/i.test(url)) return liftFromOracle(url);
+  const fromUri = liftFromUri(url);
+  if (fromUri.password !== null) return fromUri;
+  const fromQuery = liftFromQuery(url, ["password", "pwd"]);
+  if (fromQuery.password !== null) return fromQuery;
+  return liftFromPairs(url, true);
+}
+
+/**
  * The password a connection URL carries, lifted out, for the engine it is written for.
  *
  * `null` for a URL with no password, an empty one, or an engine whose URLs carry none (IRIS, SQLite).
@@ -213,6 +237,8 @@ export function liftUrlSecret(kind: DbKind, url: string): LiftedSecret {
       return liftFromConnectionString(trimmed);
     case "oracle":
       return liftFromOracle(trimmed);
+    case "jdbc":
+      return liftFromJdbc(trimmed);
     default:
       return NONE(url);
   }

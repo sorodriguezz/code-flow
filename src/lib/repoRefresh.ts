@@ -56,7 +56,12 @@ export function trailingDebounce(fn: () => void, waitMs: number, maxWaitMs: numb
  * focused again. Silent, like the main window's: this is the list keeping up, not the window busy.
  * Returns the teardown.
  */
-export function followRepoChanges(repoPath: () => string | null): () => void {
+export function followRepoChanges(
+  repoPath: () => string | null,
+  /** `statusOnly`: the working tree and nothing else — a floating editor draws its change marks
+   *  from it, and has no graph, branches or stashes to keep up. */
+  options: { statusOnly?: boolean } = {},
+): () => void {
   const near = trailingDebounce(
     () => {
       void useRepoStore.getState().refreshStatus({ silent: true });
@@ -79,7 +84,7 @@ export function followRepoChanges(repoPath: () => string | null): () => void {
   );
   const both = () => {
     near();
-    far();
+    if (!options.statusOnly) far();
   };
 
   const stopFs = onRepoFsChanged((event) => {

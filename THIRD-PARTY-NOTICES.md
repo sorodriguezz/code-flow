@@ -20,7 +20,7 @@ component's own licence wins — which is what section 6 says.
 | npm packages (production tree) | 102 resolved versions of 98 packages |
 | Rust crates (resolved for macOS and Windows) | 685 resolved versions of 599 crates |
 | C libraries compiled into the app | 5, plus 4 bundled inside them |
-| Runtimes, drivers and web apps bundled with it | 5 |
+| Runtimes, drivers and web apps bundled with it | 2 |
 | Fonts | 4 |
 | Icon sets | 2 |
 
@@ -60,30 +60,6 @@ noVNC's core — the VNC client behind the Remote workspace's desktop viewer —
 the frontend, minified. Its own `LICENSE.txt` names the files that core took from elsewhere
 under MPL-compatible licences: `vendor/pako/` (MIT) and `core/des.js` (BSD-style).
 
-### The bundled Java runtime — GPL-2.0 with the Classpath Exception
-
-`resources/iris/runtime/` is an OpenJDK image, built by `jlink` from Eclipse Temurin 17
-and shipped inside the installer so that nobody has to install Java to reach an IRIS or Oracle
-database. It is [GPL-2.0-only WITH Classpath-exception-2.0](https://openjdk.org/legal/gplv2+ce.html).
-
-The Classpath Exception is what makes it safe to ship next to CodeFlow's own code: linking to
-these classes does not make CodeFlow a derivative work, and CodeFlow's licence is unaffected.
-The runtime's own source obligation is unaffected too, so:
-
-> **The complete corresponding source for the bundled Java runtime is published by the
-> Adoptium project at <https://github.com/adoptium/jdk17u>, and the exact
-> builds at <https://adoptium.net/temurin/>. If you would rather not fetch it yourself,
-> open an issue at <https://github.com/sorodriguezz/code-flow/issues> and we will
-> send you a copy at no charge.**
-
-The image carries its own `legal/` directory — the licence of every module in it, and the
-notices for the third-party code OpenJDK itself incorporates — and that directory ships inside
-the installer with it.
-
-It is produced by `scripts/build-iris-runtime.mjs` from whichever JDK is on the build machine.
-The version above is the one the release workflow pins, and so the one every Official Build
-contains; a build made on some other JDK carries that JDK's licence instead.
-
 ### libgit2 — GPL-2.0 with a linking exception
 
 The Git engine is libgit2 1.8.1, compiled into the app's own binary from the copy inside the
@@ -96,30 +72,19 @@ licence. The GPL still governs libgit2's own files, whose source at the exact ve
 libgit2 compiles in pieces of other projects under licences of their own. They are listed with
 it under *C libraries compiled into the app* below, and one of them is an open item.
 
-### The InterSystems JDBC driver — its terms must travel with it
+### Downloaded on demand, not shipped — the Java runtime and the JDBC drivers
 
-`resources/iris/intersystems-jdbc-3.11.0.jar` is InterSystems' own driver, downloaded from Maven Central
-and shipped unmodified. It is **not** open source: its POM points at the
-[InterSystems External Repository Terms of Use](https://www.intersystems.com/IERTU/), which allow redistribution on
-conditions — among them that a copy of those terms accompany every distribution of the driver,
-that no fee be charged for its distribution or use, that its markings and notices stay in place,
-and that it be neither modified nor reverse engineered. CodeFlow ships it verbatim and free of
-charge. The copy travels with it: the terms as InterSystems publishes them are kept in this
-repository, in `scripts/assets/`, and `scripts/build-iris-runtime.mjs` writes them beside the jar
-as `resources/iris/InterSystems-External-Repository-Terms-of-Use.pdf`, which the installer carries
-in the app's `iris/` resources. A build without them fails rather than ship the driver alone.
+Oracle, InterSystems IRIS and the other databases of the driver catalogue
+(`src/lib/db/driverCatalog.json`) are reached through their vendors' own JDBC drivers, which run
+in a Java runtime. Neither is part of the installer. The app downloads them — Eclipse Temurin from
+Adoptium, each driver from Maven Central or its vendor's own download — only when a connection
+first needs them, after asking, and checks every file against the hash the catalogue pins.
 
-### The Oracle JDBC driver — its licence travels inside the jar
-
-`resources/iris/ojdbc11-23.26.3.0.0.jar` is Oracle's thin JDBC driver, downloaded from Maven Central
-and shipped unmodified; it is what lets Oracle connections work with no Oracle client installed.
-It is **not** open source either. Its licence is `META-INF/license.txt` inside the jar itself,
-titled *Oracle Free Distribution, Hosting, and Use Terms and Conditions* — the terms
-`scripts/build-iris-runtime.mjs` calls the Oracle Free Use Terms and Conditions. They allow
-redistributing the unmodified driver on conditions much like InterSystems': a copy of the
-licence with every distribution, no additional fee for it, its markings and notices left in
-place, no reverse engineering. The jar carries its licence wherever it goes, which is how the
-copy requirement is met.
+They are the publishers' own files, under their own licences — the OpenJDK runtime under
+[GPL-2.0-only WITH Classpath-exception-2.0](https://openjdk.org/legal/gplv2+ce.html), each driver
+under the terms its vendor publishes with it (linked from the Drivers panel). CodeFlow does not
+redistribute any of them. What the installer does carry is `resources/jdbc/codeflow-jdbc-bridge.jar`,
+CodeFlow's own code, which the drivers run inside.
 
 ### Open items
 
@@ -148,18 +113,15 @@ These are the elections made deliberately:
 
 ## Runtimes, drivers and web apps bundled with it
 
-These are not dependencies of the app's source. They are third-party programs fetched or built
-at build time and copied into the installer — the first four through `bundle.resources` in
-`tauri.conf.json`, draw.io through the frontend bundle. llama.cpp, the two drivers and draw.io are
-pinned by version and verified against a SHA-256 by the script that fetches them; the Java
-runtime is cut by `jlink` from the JDK the release workflow installs.
+These are not dependencies of the app's source. They are third-party programs fetched at build
+time and copied into the installer — llama.cpp through `bundle.resources` in `tauri.conf.json`,
+draw.io through the frontend bundle — each pinned by version and verified against a SHA-256 by
+the script that fetches it. (The Java runtime and the JDBC drivers are not among them: see
+*Downloaded on demand, not shipped* above.)
 
 | Component | Version | Licence (SPDX) | Project | Ships as | Fetched by |
 |---|---|---|---|---|---|
 | llama.cpp (with ggml) | `b10587` | MIT | <https://github.com/ggml-org/llama.cpp> | `resources/llama/` — `llama-server` and the ggml libraries it resolves | `scripts/build-llama-runtime.mjs` |
-| Eclipse Temurin JDK (jlink image) | `17` | GPL-2.0-only WITH Classpath-exception-2.0 | <https://adoptium.net/temurin/> | `resources/iris/runtime/` — trimmed by `jlink` to the modules the two JDBC drivers load | `scripts/build-iris-runtime.mjs` |
-| InterSystems IRIS JDBC driver | `3.11.0` | LicenseRef-InterSystems-IERTU (proprietary) | <https://repo1.maven.org/maven2/com/intersystems/intersystems-jdbc/> | `resources/iris/intersystems-jdbc-3.11.0.jar` | `scripts/build-iris-runtime.mjs` |
-| Oracle JDBC driver (ojdbc11) | `23.26.3.0.0` | LicenseRef-Oracle-FUTC (proprietary) | <https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/> | `resources/iris/ojdbc11-23.26.3.0.0.jar` | `scripts/build-iris-runtime.mjs` |
 | draw.io | `31.1.8` | Apache-2.0 | <https://github.com/jgraph/drawio> | `public/drawio/` — vendored into the frontend bundle | `scripts/build-drawio-webapp.mjs` |
 
 llama.cpp's `LICENSE` is copied next to its binaries by its build script, so it travels inside

@@ -61,6 +61,18 @@ describe("window identity", () => {
     expect(identity.satellite).toEqual({ kind: "quick", refId: "ask" });
   });
 
+  /**
+   * A floating editor — one file torn out of the main window. Its id is a path, so it is the one
+   * that carries the characters `open_satellite` has to escape: the colon after the project, and a
+   * `+` or a `%` in a file name, which `URLSearchParams` would otherwise read as a space and an
+   * escape.
+   */
+  it("reads what a floating editor holds", () => {
+    const identity = parseIdentity("sat-file-0123456789abcdef", "?kind=file&ref=p1%3Asrc/c%2B%2B/100%25.md");
+    expect(identity.main).toBe(false);
+    expect(identity.satellite).toEqual({ kind: "file", refId: "p1:src/c++/100%.md" });
+  });
+
   /** The prefix is the whole of the test, so a window called `mobile` or `settings` one day is not
    *  silently treated as a satellite. */
   it("only the sat- prefix makes a satellite", () => {

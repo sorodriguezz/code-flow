@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useShortcutsStore, activeChords, bindingFor } from "../state/shortcutsStore";
 import { useTourStore } from "../state/tourStore";
 import { useDataDirsStore } from "../state/dataDirsStore";
-import { SHORTCUT_BY_ID } from "./shortcuts";
+import { SHORTCUT_BY_ID, type ShortcutId } from "./shortcuts";
 import { shortcutBlockedByDialog } from "./useFocusTrap";
 import { eventToChord, isFunctionKey, isTypingTarget, usesMod } from "./keys";
 
@@ -93,12 +93,39 @@ export function useGlobalShortcuts(): void {
  * user who moves fetch to F5 moves it in both windows at once.
  */
 export function useRemoteActionShortcuts(): void {
+  useSatelliteShortcuts(REMOTE_ACTIONS);
+}
+
+const REMOTE_ACTIONS: readonly ShortcutId[] = ["git.fetch", "git.pull", "git.push", "branch.switcher"];
+
+/**
+ * A floating editor's chords — the editor's own, and only those.
+ *
+ * Save and word wrap need nothing from here with the caret in the code (Monaco's actions take them
+ * through `installEditorShortcuts`); these are for the rest of the window — the tab strip, the
+ * breadcrumb — and for the two that have no Monaco action at all: Save All, and ⌘W, which closes
+ * the file and the window with it. Same test as the repository window's: every one of them acts on
+ * the one thing this window holds.
+ */
+export function useFloatingEditorShortcuts(): void {
+  useSatelliteShortcuts(FLOATING_EDITOR_ACTIONS);
+}
+
+const FLOATING_EDITOR_ACTIONS: readonly ShortcutId[] = [
+  "editor.save",
+  "editor.saveAll",
+  "editor.closeTab",
+  "editor.toggleWordWrap",
+];
+
+/** Binds a satellite's chosen commands to its window — see the two hooks above for which. */
+function useSatelliteShortcuts(ids: readonly ShortcutId[]): void {
   const overrides = useShortcutsStore((s) => s.overrides);
 
   useEffect(() => {
     const chords = new Map<string, () => void>();
     const chordIds = new Map<string, string>();
-    for (const id of ["git.fetch", "git.pull", "git.push", "branch.switcher"] as const) {
+    for (const id of ids) {
       const chord = bindingFor(id, overrides);
       const run = SHORTCUT_BY_ID.get(id)?.run;
       if (chord && run) {
@@ -126,5 +153,5 @@ export function useRemoteActionShortcuts(): void {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [overrides]);
+  }, [overrides, ids]);
 }

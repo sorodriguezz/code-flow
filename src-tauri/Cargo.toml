@@ -211,6 +211,10 @@ flate2 = "1"
 # one writes. The crate is already in the lockfile as a transitive dependency, so this adds a name
 # to the manifest rather than a build.
 zip = { version = "4", default-features = false, features = ["deflate"] }
+# The Java runtime the JDBC drivers run on is downloaded on first use (`datasource::drivers`), and
+# Adoptium ships it as a `.zip` for Windows — the crate above — and a `.tar.gz` for macOS: this, over
+# `flate2`. Already in the lockfile, so it adds a name to the manifest rather than a build.
+tar = "0.4"
 # Wipes the derived key and the decrypted plaintext once they've served their purpose, so a
 # passphrase-derived key doesn't linger in freed memory for the rest of the session.
 zeroize = "1"
@@ -236,11 +240,12 @@ protox = "0.9"
 # One driver per engine, and five of the six are pure Rust: the app installs nothing on the user's
 # machine, so there is no ODBC manager and no vendor client library to make a prerequisite.
 #
-# IRIS is the exception, and it costs no crate. It has no Rust driver and no third-party
-# implementation of its superserver protocol, so `datasource::iris` drives the InterSystems JDBC
-# driver through a small Java sidecar (`src-tauri/java/`, spoken to over stdio). The runtime and
-# the driver jar are `jlink`-trimmed into the bundle by `scripts/build-iris-runtime.mjs` — still
-# nothing for the user to install, and nothing here for cargo to build.
+# IRIS, Oracle and the rest of the driver catalogue (`src/lib/db/driverCatalog.json`) are the
+# exception, and they cost no crate: they run their vendors' own JDBC drivers inside a small Java
+# sidecar (`src-tauri/java/`, spoken to over stdio). Only that sidecar ships, built by
+# `scripts/build-jdbc-bridge.mjs`; the Java runtime and the drivers are downloaded by the app the
+# first time a connection needs them (`datasource::drivers`) — nothing for the user to install by
+# hand, and nothing here for cargo to build.
 #
 # Postgres covers Supabase too — a Supabase project *is* a Postgres instance, so the only
 # difference is which host/port/SSL defaults the connection form fills in.

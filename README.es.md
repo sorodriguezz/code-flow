@@ -48,7 +48,7 @@ credenciales — y ninguna se filtra a la ventana del cliente siguiente.
 |---|---|---|
 | **Git** — grafo, diffs, ramas, stashes | **Pull requests** — GitHub · GitLab · Bitbucket · Azure DevOps | **Pipelines** — ejecuciones, aprobaciones, artefactos |
 | **Editor** — Monaco, LSP, notebooks, autocompletado local | **Terminal y servicios** — en orden de dependencias | **Agentes** — roles con su propio modelo |
-| **Cliente de API** — REST · GraphQL · WS · gRPC · MQTT · SSE | **Bases de datos** — diez motores, de SQLite a Oracle | **Diagramas** — DBML y draw.io completo |
+| **Cliente de API** — REST · GraphQL · WS · gRPC · MQTT · SSE | **Bases de datos** — 66 drivers, de SQLite a Snowflake | **Diagramas** — DBML y draw.io completo |
 | **Remoto** — SSH, SFTP, SMB, escritorios remotos, S3 y Azure | **Notas** — cuadernos Markdown con panel de IA | **Llavero** — bóveda de contraseñas cifrada |
 | **Historias** — un documento convertido en backlog | **Wiki** — documentación escrita desde el código | **Respaldos** — cifrados, programados, restaurables |
 | **Chat** — tus CLIs de IA, con o sin repo | **Nuevo proyecto** — veinte generadores, un formulario | **Pregunta rápida** — la IA desde cualquier app, con un atajo |
@@ -282,6 +282,16 @@ El mismo Monaco que ya conoces, conectado al repositorio que tiene alrededor.
   el proyecto a un clic, y **Buscar todas las referencias** (⇧⌥F12) listadas ahí también.
 - **Renombra en todo el proyecto**, estén los archivos abiertos o no, con un punto de restauración
   antes de tocar nada en disco.
+- **Ir a la implementación y a la definición de tipo** (⌘F12), y **Buscar todas las
+  implementaciones** listadas en el mismo panel que las referencias.
+- **Los refactors del compilador** —extraer una función o una constante, mover una declaración a un
+  archivo nuevo y el resto de los de TypeScript— desde la bombilla, ⌘. o ⌃⇧R, y **Organizar imports**
+  con ⇧⌥O.
+- **Mover o renombrar un archivo en el explorador arregla los imports que apuntan a él** —los de
+  TypeScript, y los de cualquier language server que lo pida (las líneas `mod` de rust-analyzer)—
+  con un punto de restauración antes.
+- **Inlay hints**: los tipos que infiere el compilador y los nombres de parámetro de los argumentos
+  literales, en gris junto al código; un interruptor en **Ajustes › Editor › Visualización**.
 - **Formatea con el Prettier del propio repositorio** cuando lo tiene, al guardar si quieres;
   **Guardar todo** con ⌘⌥S.
 - **Notebooks de Jupyter** que se abren como notebooks — celdas, salidas ricas (tablas, imágenes,
@@ -292,6 +302,10 @@ El mismo Monaco que ya conoces, conectado al repositorio que tiene alrededor.
 - **Blame en línea** sobre la línea del cursor: quién la tocó por última vez, cuándo y en qué commit.
 - **Editores divididos**, borradores que sobreviven a un reinicio, snippets, anidado de archivos y
   reglas de iconos propias.
+- **Pestañas flotantes**: arrastra una pestaña fuera de la ventana —o «Abrir en ventana flotante» en
+  su menú— y se convierte en una ventana propia que puedes llevar a otro monitor y **anclar siempre
+  encima**. El archivo se mueve con sus cambios sin guardar, y vuelve al editor al cerrarla.
+- **Ajuste de línea** (⌥Z): las líneas largas siguen debajo, al ancho del editor.
 - **Se da cuenta de lo que cambia por debajo**: un archivo editado en disco mientras está abierto
   ofrece comparar, recargar o sobrescribir, y al salir te pregunta por lo que no guardaste. Las
   imágenes se abren como vista previa.
@@ -460,8 +474,20 @@ cambió.
 
 La consulta que necesitas comprobar está a una pestaña de la migración que acabas de escribir.
 
-- **Diez motores**: PostgreSQL, Supabase, MySQL, MariaDB, SQL Server, Oracle, SQLite, InterSystems
-  IRIS, MongoDB y Redis.
+- **66 bases de datos**, la lista que ofrece DataGrip. Con **soporte completo**, mediante drivers
+  incluidos en la app: PostgreSQL y su familia (Supabase, Aurora, CockroachDB, Greenplum,
+  YugabyteDB), MySQL, MariaDB, TiDB, SQL Server y Azure SQL, Oracle, SQLite, InterSystems IRIS,
+  MongoDB y DocumentDB, y Redis. Con **soporte básico**, recorridas a través del propio driver JDBC de
+  la base de datos: Snowflake, BigQuery, Redshift, Athena, DynamoDB, Databricks, Db2, ClickHouse,
+  Trino, Presto, Hive, Spark, Cassandra, DuckDB, H2, Derby, HSQLDB, Firebird, Vertica, Teradata, SAP
+  HANA, Exasol, Spanner, Elasticsearch, InfluxDB, Sybase y más.
+- **Drivers, como los tiene DataGrip** — una lista de Drivers junto a tus orígenes de datos. Un driver
+  JDBC se descarga la primera vez que una conexión lo necesita («Configuración incompleta — Descargar
+  archivos del driver», al probar o conectar), y cada archivo se verifica contra el hash que fija el
+  catálogo; el runtime de Java sobre el que corren llega una sola vez, con el primero. Cambia la clase
+  de un driver, agrega tus propios .jar o plantillas de URL, define las propiedades de conexión con
+  las que parte cada origen de datos y las opciones de la JVM, o agrega un driver propio. El
+  instalador no lleva nada de Java.
 - **Recorre el árbol** — esquemas, tablas, vistas, rutinas, secuencias, columnas, índices y claves.
 - **Consola SQL** con historial, `EXPLAIN`, un formateador (⇧⌥F) y resultados exportables — la página
   en pantalla o todas las filas. Cada consola es una sesión propia, y te avisa cuando está dentro de
@@ -692,11 +718,13 @@ CodeFlow es software de **código visible, no de código abierto** — mira [`LI
   venderla, ofrecerla como servicio alojado, ni usar su código para entrenar un modelo.
 
 CodeFlow también distribuye código que no escribió: crates de Rust, paquetes de npm, bibliotecas de C
-compiladas dentro de la app y unos cuantos runtimes y drivers empaquetados en los instaladores, cada
-uno con su propia licencia. [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) los lista con sus
-licencias y lleva los avisos que algunas de esas licencias exigen, incluido dónde conseguir el código
-fuente de los componentes MPL-2.0 y del runtime de Java que va dentro. Es un archivo generado:
-`pnpm notices` lo reconstruye y `pnpm notices:check` falla cuando se ha quedado obsoleto.
+compiladas dentro de la app y unos cuantos runtimes empaquetados en los instaladores, cada uno con su
+propia licencia. [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) los lista con sus licencias y
+lleva los avisos que algunas de esas licencias exigen, incluido dónde conseguir el código fuente de
+los componentes MPL-2.0. Los drivers de bases de datos y el runtime de Java que la app descarga cuando
+una conexión los necesita no se distribuyen, y quedan bajo los términos de sus fabricantes. Es un
+archivo generado: `pnpm notices` lo reconstruye y `pnpm notices:check` falla cuando se ha quedado
+obsoleto.
 
 Copyright © 2026 Sebastián Rodríguez Zapata. Todos los derechos reservados.
 

@@ -30,6 +30,7 @@ import { AiSparkles } from "../common/AiGlyph";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { installSqlCompletions } from "../../lib/db/sqlCompletion";
 import { formatLanguage, formatSql } from "../../lib/db/sqlFormat";
+import { rowDriverId } from "../../lib/db/drivers";
 import { firstStatement, type ConsoleLanguage } from "../../lib/db/statements";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
@@ -55,6 +56,7 @@ import { useDbObjectDragStore } from "../../state/dbObjectDragStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useThemeStore } from "../../state/themeStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { useConnectionDriver } from "../../state/driverStore";
 import { useT } from "../../state/languageStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { RunEngineChip } from "../ai/AiRunLog";
@@ -62,7 +64,7 @@ import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { Markdown } from "../common/Markdown";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
-import { engineInfo, type DbKind, type DbNodeRef } from "../../types/database";
+import { type DbKind, type DbNodeRef } from "../../types/database";
 import { buttonClass } from "../common/Button";
 
 const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
@@ -138,7 +140,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
     void useDbStore.getState().refreshTransaction(tab.id);
   }, [tab.id, tab.connectionId, tab.database]);
 
-  const engine = connection ? engineInfo(connection.kind) : null;
+  const { driver: connectionDriver, engine } = useConnectionDriver(connection);
   const isSql = engine?.sql ?? true;
   /**
    * Which Monaco language the console gets.
@@ -361,14 +363,16 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
   const format = async () => {
     const editor = editorRef.current;
     const model = editor?.getModel();
-    const kind = useDbStore.getState().connections.find((c) => c.id === tab.connectionId)?.kind;
-    if (!editor || !model || !kind || !formatLanguage(kind)) return;
+    const row = useDbStore.getState().connections.find((c) => c.id === tab.connectionId);
+    const kind = row?.kind;
+    const driverId = row ? rowDriverId(row) : "";
+    if (!editor || !model || !kind || !formatLanguage(kind, driverId)) return;
     const selection = editor.getSelection();
     const range = selection && !selection.isEmpty() ? selection : model.getFullModelRange();
     const text = model.getValueInRange(range);
     if (!text.trim()) return;
     try {
-      const formatted = await formatSql(text, kind);
+      const formatted = await formatSql(text, kind, driverId);
       if (formatted === text) return;
       editor.pushUndoStop();
       editor.executeEdits("cf-db-format", [{ range, text: formatted, forceMoveMarkers: true }]);
@@ -427,7 +431,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
-        {connection && <EngineBadge kind={connection.kind} label={engine?.label ?? ""} />}
+        {connection && <EngineBadge kind={connection.kind} driver={connectionDriver} label={engine?.label ?? ""} />}
         {/* The group, ahead of the connection it holds — the same order the explorer draws them in,
             so a console opened from the tree reads as the path you clicked down. Muted and with the
             tree's own folder icon, because the connection is the subject here and the group is where

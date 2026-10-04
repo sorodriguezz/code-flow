@@ -47,7 +47,7 @@ credentials together — and none of them leaks into the next client's window.
 |---|---|---|
 | **Git** — graph, diffs, branches, stashes | **Pull requests** — GitHub · GitLab · Bitbucket · Azure DevOps | **Pipelines** — runs, approvals, artifacts |
 | **Editor** — Monaco, LSP, notebooks, local autocomplete | **Terminal & services** — started in dependency order | **Agents** — roles with their own model |
-| **API client** — REST · GraphQL · WS · gRPC · MQTT · SSE | **Databases** — ten engines, SQLite to Oracle | **Diagrams** — DBML and the full draw.io |
+| **API client** — REST · GraphQL · WS · gRPC · MQTT · SSE | **Databases** — 66 drivers, SQLite to Snowflake | **Diagrams** — DBML and the full draw.io |
 | **Remote** — SSH, SFTP, SMB, remote desktops, S3 & Azure | **Notes** — Markdown notebooks with an AI panel | **Llavero** — an encrypted password vault |
 | **Stories** — a document turned into a backlog | **Wiki** — docs written from the code | **Backups** — encrypted, scheduled, restorable |
 | **Chat** — your AI CLIs, with or without a repo | **New project** — twenty generators, one form | **Quick ask** — the AI from any app, on a hotkey |
@@ -274,6 +274,16 @@ The same Monaco you already know, wired to the repository around it.
   **Find All References** (⇧⌥F12) listed there too.
 - **Rename across the whole project**, open files or not, with a restore point taken before anything
   on disk changes.
+- **Go to implementation and to type definition** (⌘F12), and **Find All Implementations** listed
+  in the same panel as the references.
+- **The compiler's refactorings** — extract a function or a constant, move a declaration to a new
+  file, and the rest of TypeScript's — from the lightbulb, ⌘. or ⌃⇧R, and **Organize imports** with
+  ⇧⌥O.
+- **Moving or renaming a file in the explorer fixes the imports that point at it** — TypeScript's,
+  and those of any language server that asks (rust-analyzer's `mod` lines) — with a restore point
+  first.
+- **Inlay hints**: the types the compiler inferred and the parameter names of literal arguments,
+  drawn faint beside the code; one switch in **Settings › Editor › Display**.
 - **Formats with the repository's own Prettier** when it has one, on save if you like; **Save all**
   with ⌘⌥S.
 - **Jupyter notebooks** open as notebooks — cells, rich outputs (tables, images, errors) and real
@@ -282,6 +292,10 @@ The same Monaco you already know, wired to the repository around it.
   Running cells needs Python with `ipykernel`, which the app offers to install.
 - **Inline blame** on the line under your cursor: who last touched it, when, and in which commit.
 - **Split editors**, drafts that survive a restart, snippets, file nesting and custom icon rules.
+- **Floating editors**: drag a tab out of the window — or "Open in a floating window" on its menu — and
+  it becomes a window of its own you can take to another monitor and **pin on top** of everything. The
+  file moves there with its unsaved edits, and comes back to the editor when you close it.
+- **Word wrap** (⌥Z): long lines carry on underneath, at the editor's own width.
 - **It notices what changed underneath it**: a file edited on disk while open offers to compare,
   reload or overwrite, and quitting asks about unsaved work first. Images open as a preview.
 - **Markdown and diagram preview** side by side with the source.
@@ -442,8 +456,19 @@ changed it.
 
 The query you need to check is one tab away from the migration you just wrote.
 
-- **Ten engines**: PostgreSQL, Supabase, MySQL, MariaDB, SQL Server, Oracle, SQLite, InterSystems
-  IRIS, MongoDB and Redis.
+- **66 databases**, the list DataGrip offers. With **complete support**, through drivers built into
+  the app: PostgreSQL and its family (Supabase, Aurora, CockroachDB, Greenplum, YugabyteDB), MySQL,
+  MariaDB, TiDB, SQL Server and Azure SQL, Oracle, SQLite, InterSystems IRIS, MongoDB and DocumentDB,
+  and Redis. With **basic support**, browsed through the database's own JDBC driver: Snowflake,
+  BigQuery, Redshift, Athena, DynamoDB, Databricks, Db2, ClickHouse, Trino, Presto, Hive, Spark,
+  Cassandra, DuckDB, H2, Derby, HSQLDB, Firebird, Vertica, Teradata, SAP HANA, Exasol, Spanner,
+  Elasticsearch, InfluxDB, Sybase and more.
+- **Drivers, as DataGrip has them** — a Drivers list beside your data sources. A JDBC driver is
+  downloaded the first time a connection needs it ("Incomplete configuration — Download Driver
+  Files", on Test or Connect), each file checked against the hash the catalogue pins; the Java
+  runtime they run on comes once, with the first. Change a driver's class, add your own jars or URL
+  templates, set the connection properties every data source starts with and the JVM's options, or
+  add a driver of your own. Nothing Java ships inside the installer.
 - **Browse the tree** — schemas, tables, views, routines, sequences, columns, indexes and keys.
 - **SQL console** with history, `EXPLAIN`, a formatter (⇧⌥F) and results you can export — the page on
   screen or every row. Each console is a session of its own, and says so when it's inside a
@@ -664,11 +689,12 @@ CodeFlow is **source-available, not open source** — see [`LICENSE`](LICENSE).
   it as a hosted service, or use its code to train a model.
 
 CodeFlow also ships code it did not write — Rust crates, npm packages, C libraries compiled into the
-app, and a handful of runtimes and drivers bundled into the installers, each under its own licence.
+app, and a handful of runtimes bundled into the installers, each under its own licence.
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) lists them with their licences and carries the
 notices some of those licences require, including where to obtain the source of the MPL-2.0
-components and of the bundled Java runtime. It is generated — `pnpm notices` rebuilds it,
-`pnpm notices:check` fails when it has gone stale.
+components. The database drivers and the Java runtime the app downloads when a connection needs
+them are not shipped, and stay under their vendors' terms. The file is generated — `pnpm notices`
+rebuilds it, `pnpm notices:check` fails when it has gone stale.
 
 Copyright © 2026 Sebastián Rodríguez Zapata. All rights reserved.
 

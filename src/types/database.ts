@@ -14,7 +14,14 @@
 
 import type { RowScope } from "./domain";
 
-/** Which engine a connection speaks. `supabase` is Postgres with different connection defaults. */
+/**
+ * Which session serves a connection. `supabase` is Postgres with different connection defaults.
+ *
+ * Not the same thing as the *driver* (`DbConnectionConfig.driver_id`), which is what the user
+ * picked from the catalogue: CockroachDB and Greenplum are drivers served by `postgres`, and every
+ * database without a session of its own — Snowflake, DB2, ClickHouse and the rest of the catalogue
+ * — is `jdbc`, browsed through its JDBC driver's metadata. See `lib/db/drivers`.
+ */
 export type DbKind =
   | "postgres"
   | "supabase"
@@ -25,7 +32,8 @@ export type DbKind =
   | "mysql"
   | "mariadb"
   | "sqlite"
-  | "oracle";
+  | "oracle"
+  | "jdbc";
 
 export type DbSslMode = "disable" | "require" | "verify_full";
 
@@ -86,6 +94,22 @@ export function sameFilterTarget(a: DbFilterTarget, b: DbFilterTarget): boolean 
 export interface DbConnectionConfig {
   id: string;
   kind: DbKind;
+  /**
+   * The catalogue driver this connection was made with (`cockroachdb`, `snowflake`, …). Empty in a
+   * connection saved before drivers existed, which stands for its engine's own (`postgresql` for
+   * `postgres`) — see `connectionDriverId`.
+   */
+  driver_id: string;
+  /**
+   * Which of the driver's URL templates builds the URL, by name. Empty is the first — the
+   * driver's default. Only JDBC drivers have templates.
+   */
+  url_template: string;
+  /**
+   * Values for the template fields that aren't one of the standard ones above — a Snowflake
+   * `account`, a Trino `catalog`, an Athena `region` — as ordered pairs.
+   */
+  url_values: [string, string][];
   host: string;
   /** 0 means "the engine's default port". */
   port: number;
@@ -850,6 +874,22 @@ export const DB_ENGINES: DbEngineInfo[] = [
     databaseIsSchema: false,
     file: false,
   },
+  {
+    // Every catalogue driver without a session of its own. What is said here is only the fallback:
+    // the label, port, field names and URL come from the connection's driver (`driverEngineInfo`).
+    kind: "jdbc",
+    label: "JDBC",
+    defaultPort: 0,
+    sql: true,
+    consoleLanguage: "sql",
+    documents: false,
+    databaseLabel: "Database",
+    urlPlaceholder: "jdbc:…",
+    defaultSsl: "disable",
+    defaultUser: "",
+    databaseIsSchema: false,
+    file: false,
+  },
 ];
 
 export function engineInfo(kind: DbKind): DbEngineInfo {
@@ -861,6 +901,9 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
   return {
     id: "",
     kind,
+    driver_id: "",
+    url_template: "",
+    url_values: [],
     host: "localhost",
     port: 0,
     // IRIS names its namespaces and Redis numbers its databases; everything else takes the
@@ -899,6 +942,91 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     ssh_user: "",
     ssh_key_file: "",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Drivers — mirrors of `datasource/drivers.rs`
+// ---------------------------------------------------------------------------
+
+/** A URL template, as the catalogue and a driver's settings both write it. */
+export interface DbUrlTemplate {
+  name: string;
+  template: string;
+}
+
+/**
+ * One driver as the user changed it, or one the user added (`custom`). Every field left empty means
+ * "as the catalogue has it". Stored by the backend in the app's data directory, not per workspace:
+ * a driver is a property of the machine, like the files it downloaded.
+ */
+export interface DbDriverSettings {
+  /** The catalogue id it changes, or `custom-…` for a driver the user added. */
+  id: string;
+  custom: boolean;
+  /** The name a custom driver goes by. */
+  name: string;
+  /** The catalogue entry a custom driver borrows its SQL traits from. Empty is the standard's. */
+  basedOn: string;
+  /** A driver class other than the catalogue's — or the only one, for a custom driver. */
+  class: string;
+  /** Jars of the user's own, by absolute path. */
+  files: string[];
+  /** URL templates offered before the catalogue's. */
+  urls: DbUrlTemplate[];
+  /** Properties every connection of this driver starts with, under its own. */
+  properties: [string, string][];
+  /** Arguments for the JVM that runs this driver (`-Xmx2g`). */
+  vmOptions: string;
+  vmEnv: [string, string][];
+  /** A Java home to run on instead of the downloaded runtime. */
+  javaHome: string;
+}
+
+export interface DbDriverFileStatus {
+  name: string;
+  version: string;
+  size: number;
+  present: boolean;
+  /** Added by the user rather than listed by the catalogue. */
+  user: boolean;
+  path: string;
+}
+
+export interface DbDriverStatus {
+  id: string;
+  files: DbDriverFileStatus[];
+  /** Every file it needs is on disk. Says nothing about the runtime — see `DbRuntimeStatus`. */
+  ready: boolean;
+  /** What a download would still fetch, runtime excluded. */
+  downloadBytes: number;
+}
+
+/** The Java runtime every JDBC driver runs on, downloaded once for all of them. */
+export interface DbRuntimeStatus {
+  ready: boolean;
+  /** Adoptium's release name (`jdk-21.0.12.1+1`), when downloaded. */
+  release: string | null;
+  /** The Java feature release the catalogue asks for. */
+  java: number;
+  path: string | null;
+}
+
+export interface DbDriversOverview {
+  runtime: DbRuntimeStatus;
+  drivers: DbDriverStatus[];
+  /** The folder all of it lives in. */
+  root: string;
+}
+
+/** One step of a download, as `db:driver-download` reports it. */
+export interface DbDriverProgress {
+  driverId: string;
+  /** The file — or `Java <n> runtime` — this is about. */
+  item: string;
+  phase: "downloading" | "verifying" | "extracting" | "done" | "failed";
+  done: number;
+  total: number;
+  error: string | null;
 }
 
 /** The default row limit for a console run. Matches what DataGrip's page size defaults to. */

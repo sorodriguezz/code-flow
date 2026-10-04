@@ -1,8 +1,9 @@
 //! Driver layer for the database workspace.
 //!
-//! Five engines — PostgreSQL, Supabase, SQL Server, InterSystems IRIS and MongoDB — behind one
-//! set of wire types, so the whole frontend (explorer tree, console, result grid, data editor)
-//! is written once and every engine plugs into it.
+//! Every engine — the Rust drivers for PostgreSQL, MySQL, SQL Server, SQLite, MongoDB and Redis,
+//! IRIS and Oracle over JDBC, and the generic JDBC driver behind the rest of the driver catalogue
+//! ([`catalog`]) — behind one set of wire types, so the whole frontend (explorer tree, console,
+//! result grid, data editor) is written once and every engine plugs into it.
 //!
 //! Three decisions shape everything here:
 //!
@@ -28,10 +29,13 @@
 //! Every type below is mirrored one-for-one in `src/types/database.ts`; field names are the serde
 //! wire names, so renaming one here is a breaking change on both sides.
 
+pub mod catalog;
 pub mod csv_import;
+pub mod drivers;
 pub mod entra;
 pub mod export;
 pub mod iris;
+pub mod jdbc;
 pub mod jvm;
 pub mod mongo;
 pub mod mssql;
@@ -84,6 +88,9 @@ pub enum DbKind {
     /// Over JDBC, through the same JVM sidecar as IRIS — Oracle's thin driver is pure Java, which is
     /// what makes this work without an Oracle client installed. See `datasource::oracle`.
     Oracle,
+    /// Any other database of the driver catalogue, through its own JDBC driver: which one is the
+    /// connection's `driver_id`. See `datasource::jdbc`.
+    Jdbc,
 }
 
 /// Which SQL to generate — identifier quoting, paging, `EXPLAIN`, and the catalog queries the
@@ -121,6 +128,8 @@ impl DbKind {
             // A file has no port. Zero is never dialled: the SQLite driver reads only `database`.
             DbKind::Sqlite => 0,
             DbKind::Oracle => 1521,
+            // The driver's, which `DbConnectionConfig::effective_port` reads from the catalogue.
+            DbKind::Jdbc => 0,
         }
     }
 
@@ -142,6 +151,8 @@ impl DbKind {
             DbKind::Mariadb => "MariaDB",
             DbKind::Sqlite => "SQLite",
             DbKind::Oracle => "Oracle",
+            // The engine's own name is the driver's; see `DbConnectionConfig::engine_label`.
+            DbKind::Jdbc => "JDBC",
         }
     }
 
@@ -161,7 +172,8 @@ impl DbKind {
             | DbKind::Mysql
             | DbKind::Mariadb
             | DbKind::Sqlite
-            | DbKind::Oracle => "sql",
+            | DbKind::Oracle
+            | DbKind::Jdbc => "sql",
             DbKind::Mongodb => "javascript",
             DbKind::Redis => "redis",
         }
@@ -395,9 +407,42 @@ pub struct DbConnectionConfig {
     /// default identities — which is usually the right answer on a machine that already pushes.
     #[serde(default)]
     pub ssh_key_file: String,
+
+    // ------------------------------------------------------------------ driver
+
+    /// The catalogue driver the connection was made with (`catalog::drivers`). Empty on every
+    /// connection made before the catalogue existed, which stands for its engine's own entry
+    /// ([`catalog::default_driver_id`]). Required for [`DbKind::Jdbc`], where it is the only thing
+    /// that says which database this is.
+    #[serde(default)]
+    pub driver_id: String,
+    /// Which of the driver's URL templates the fields fill in, by name. Empty is the first.
+    #[serde(default)]
+    pub url_template: String,
+    /// The values of a template's fields that are not one of the standard ones above — Snowflake's
+    /// `account`, Athena's `region`, Spanner's `project` and `instance`.
+    #[serde(default)]
+    pub url_values: Vec<(String, String)>,
 }
 
 impl DbConnectionConfig {
+    /// The catalogue entry this connection was made with.
+    pub fn driver_id(&self) -> &str {
+        if self.driver_id.is_empty() {
+            catalog::default_driver_id(self.kind)
+        } else {
+            &self.driver_id
+        }
+    }
+
+    /// The engine's name as a person writes it — the driver's, so a CockroachDB connection is not
+    /// introduced to a model as "PostgreSQL" and a Snowflake one is not "JDBC".
+    pub fn engine_label(&self) -> String {
+        catalog::driver(self.driver_id())
+            .map(|driver| driver.name.clone())
+            .unwrap_or_else(|| self.kind.label().to_string())
+    }
+
     pub fn option(&self, key: &str) -> Option<&str> {
         self.options
             .iter()
@@ -407,10 +452,14 @@ impl DbConnectionConfig {
     }
 
     pub fn effective_port(&self) -> u16 {
-        if self.port == 0 {
-            self.kind.default_port()
-        } else {
-            self.port
+        if self.port != 0 {
+            return self.port;
+        }
+        // The driver's default before the engine's: CockroachDB speaks PostgreSQL on 26257, and a
+        // JDBC driver has no engine default at all.
+        match catalog::driver(self.driver_id()).map(|driver| driver.default_port).filter(|&port| port != 0) {
+            Some(port) => port,
+            None => self.kind.default_port(),
         }
     }
 
@@ -1525,6 +1574,7 @@ pub enum Session {
     Mysql(mysql::MysqlSession),
     Sqlite(sqlite::SqliteSession),
     Oracle(oracle::OracleSession),
+    Jdbc(jdbc::JdbcSession),
 }
 
 impl Session {
@@ -1597,6 +1647,9 @@ impl Session {
             DbKind::Oracle => oracle::OracleSession::open(config, database, tag)
                 .await
                 .map(Session::Oracle),
+            DbKind::Jdbc => jdbc::JdbcSession::open(config, database, tag)
+                .await
+                .map(Session::Jdbc),
         }?;
         session.run_startup_script(config).await?;
         Ok(session)
@@ -1640,6 +1693,8 @@ impl Session {
             Session::Redis(_) => self.execute("PING", &ctx).await.map(|_| ()),
             // Oracle has no `SELECT` without a `FROM`; `DUAL` is the table that exists for this.
             Session::Oracle(_) => self.execute("SELECT 1 FROM DUAL", &ctx).await.map(|_| ()),
+            // `Connection.isValid`: half the JDBC engines refuse a `SELECT` with no `FROM`.
+            Session::Jdbc(s) => s.ping().await,
             _ => self.execute("SELECT 1", &ctx).await.map(|_| ()),
         }
     }
@@ -1654,6 +1709,7 @@ impl Session {
             Session::Mysql(s) => s.info(),
             Session::Sqlite(s) => s.info(),
             Session::Oracle(s) => s.info(),
+            Session::Jdbc(s) => s.info(),
         }
     }
 
@@ -1684,6 +1740,7 @@ impl Session {
             // fails every statement with a message saying so, which is the right thing to show.
             Session::Sqlite(_) => true,
             Session::Oracle(s) => s.is_alive(),
+            Session::Jdbc(s) => s.is_alive(),
         }
     }
 
@@ -1697,6 +1754,7 @@ impl Session {
             Session::Mysql(s) => s.children(node).await,
             Session::Sqlite(s) => s.children(node).await,
             Session::Oracle(s) => s.children(node).await,
+            Session::Jdbc(s) => s.children(node).await,
         }
     }
 
@@ -1710,6 +1768,7 @@ impl Session {
             Session::Mysql(s) => s.execute(sql, ctx).await,
             Session::Sqlite(s) => s.execute(sql, ctx).await,
             Session::Oracle(s) => s.execute(sql, ctx).await,
+            Session::Jdbc(s) => s.execute(sql, ctx).await,
         }
     }
 
@@ -1726,6 +1785,7 @@ impl Session {
             Session::Mysql(s) => s.table_data(request).await,
             Session::Sqlite(s) => s.table_data(request).await,
             Session::Oracle(s) => s.table_data(request).await,
+            Session::Jdbc(s) => s.table_data(request).await,
         }
     }
 
@@ -1746,6 +1806,7 @@ impl Session {
             Session::Mysql(s) => s.foreign_keys(node).await,
             Session::Sqlite(s) => s.foreign_keys(node).await,
             Session::Oracle(s) => s.foreign_keys(node).await,
+            Session::Jdbc(s) => s.foreign_keys(node).await,
         }
     }
 
@@ -1769,6 +1830,7 @@ impl Session {
             Session::Mysql(s) => s.schema_objects(node).await,
             Session::Sqlite(s) => s.schema_objects(node).await,
             Session::Oracle(s) => s.schema_objects(node).await,
+            Session::Jdbc(s) => s.schema_objects(node).await,
         }
     }
 
@@ -1782,6 +1844,7 @@ impl Session {
             Session::Mysql(s) => s.schema_diagram(node).await,
             Session::Sqlite(s) => s.schema_diagram(node).await,
             Session::Oracle(s) => s.schema_diagram(node).await,
+            Session::Jdbc(s) => s.schema_diagram(node).await,
         }?;
         mark_foreign_keys(&mut diagram.tables, &diagram.edges);
         Ok(diagram)
@@ -1805,6 +1868,7 @@ impl Session {
             Session::Mysql(s) => s.row_count(node, filter).await,
             Session::Sqlite(s) => s.row_count(node, filter).await,
             Session::Oracle(s) => s.row_count(node, filter).await,
+            Session::Jdbc(s) => s.row_count(node, filter).await,
         }
     }
 
@@ -1822,6 +1886,7 @@ impl Session {
             Session::Mysql(s) => s.apply_edits(node, edits).await,
             Session::Sqlite(s) => s.apply_edits(node, edits).await,
             Session::Oracle(s) => s.apply_edits(node, edits).await,
+            Session::Jdbc(s) => s.apply_edits(node, edits).await,
         }
     }
 
@@ -1907,6 +1972,7 @@ impl Session {
             Session::Mysql(s) => s.object_ddl(node).await,
             Session::Sqlite(s) => s.object_ddl(node).await,
             Session::Oracle(s) => s.object_ddl(node).await,
+            Session::Jdbc(s) => s.object_ddl(node).await,
         }
     }
 
@@ -1920,6 +1986,7 @@ impl Session {
             Session::Mysql(s) => s.explain(sql, ctx).await,
             Session::Sqlite(s) => s.explain(sql, ctx).await,
             Session::Oracle(s) => s.explain(sql, ctx).await,
+            Session::Jdbc(s) => s.explain(sql, ctx).await,
         }
     }
 
@@ -1933,6 +2000,7 @@ impl Session {
             Session::Mysql(s) => Some(s.dialect()),
             Session::Sqlite(_) => Some(SqlDialect::Sqlite),
             Session::Oracle(_) => Some(SqlDialect::Oracle),
+            Session::Jdbc(s) => Some(s.dialect()),
             Session::Mongo(_) | Session::Redis(_) => None,
         }
     }
@@ -1945,6 +2013,7 @@ impl Session {
         match self {
             Session::Iris(s) => s.set_autocommit(enabled).await,
             Session::Oracle(s) => s.set_autocommit(enabled).await,
+            Session::Jdbc(s) => s.set_autocommit(enabled).await,
             _ => Ok(()),
         }
     }
@@ -1967,6 +2036,7 @@ impl Session {
             // `SQLITE_INTERRUPT`; the connection is fine afterwards.
             Session::Sqlite(s) => s.cancel_running(),
             Session::Oracle(s) => s.cancel_running().await,
+            Session::Jdbc(s) => s.cancel_running().await,
             // Mongo and Redis fall here, and for Redis it is a decision rather than a gap: there is
             // no per-request cancel, and `CLIENT KILL` from a second connection would kill every
             // other tab's in-flight commands on the shared multiplexer. `DbRegistry::run` dropping
@@ -2090,6 +2160,9 @@ pub fn console_dialect(kind: DbKind) -> Option<SqlDialect> {
         DbKind::Mysql | DbKind::Mariadb => Some(SqlDialect::MySql { backslash_escapes: true }),
         DbKind::Sqlite => Some(SqlDialect::Sqlite),
         DbKind::Oracle => Some(SqlDialect::Oracle),
+        // Each driver's own dialect is the session's (`JdbcSession::dialect`); without one, the
+        // standard's — which is what this one is used for: finding where statements end.
+        DbKind::Jdbc => Some(SqlDialect::Sqlite),
         DbKind::Mongodb | DbKind::Redis => None,
     }
 }
@@ -2775,6 +2848,9 @@ pub(crate) mod tests_support {
             ssh_port: 0,
             ssh_user: String::new(),
             ssh_key_file: String::new(),
+            driver_id: String::new(),
+            url_template: String::new(),
+            url_values: Vec::new(),
         }
     }
 }
@@ -3292,6 +3368,9 @@ mod tests {
             ssh_port: 0,
             ssh_user: String::new(),
             ssh_key_file: String::new(),
+            driver_id: String::new(),
+            url_template: String::new(),
+            url_values: Vec::new(),
         }
     }
 
@@ -3611,6 +3690,9 @@ mod tests {
             ssh_port: 0,
             ssh_user: String::new(),
             ssh_key_file: String::new(),
+            driver_id: String::new(),
+            url_template: String::new(),
+            url_values: Vec::new(),
         };
         let guard = |sql: &str| read_only_guard(sql, config.read_only, SqlDialect::Postgres);
         assert!(guard("WITH x AS (SELECT 1) SELECT * FROM x").is_ok());

@@ -54,6 +54,8 @@ import { confirmAction } from "./confirmStore";
 import { liftUrlSecret, maskConnectionSecrets, urlCarriesPassword } from "../lib/db/connectionSecrets";
 import { isUnknownHostKeyError } from "../lib/hostKey";
 import { useHostKeyStore } from "./hostKeyStore";
+import { offerDriverDownload, sqlKindOf, useDriverStore } from "./driverStore";
+import { driverEngineInfo, driverErrorText, effectiveDriver, jdbcUrlPreview, rowDriverId } from "../lib/db/drivers";
 import {
   dropContainerSql,
   dropRelationSql,
@@ -911,6 +913,9 @@ function nodeFromKey(key: string): DbNodeRef {
 function onlyChangesWhatIsListed(before: DbConnectionConfig, after: DbConnectionConfig): boolean {
   return (
     before.kind === after.kind &&
+    before.driver_id === after.driver_id &&
+    before.url_template === after.url_template &&
+    JSON.stringify(before.url_values) === JSON.stringify(after.url_values) &&
     before.host === after.host &&
     before.port === after.port &&
     before.database === after.database &&
@@ -1001,7 +1006,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       // keychain write — which on macOS may be a permission prompt the load must not wait behind.
       void liftStoredUrlSecrets(tree.connections, set);
     } catch (e) {
-      pushErrorToast(String(e));
+      reportError(e);
     } finally {
       if (get().workspaceId === workspaceId) set({ loading: false });
     }
@@ -1193,7 +1198,7 @@ export const useDbStore = create<DbState>((set, get) => ({
     try {
       await dbReorderGroups(next.map((group) => group.id));
     } catch (e) {
-      pushErrorToast(String(e));
+      reportError(e);
       set({ groups });
     }
   },
@@ -1373,6 +1378,9 @@ export const useDbStore = create<DbState>((set, get) => ({
       try {
         info = await dbConnect(id);
       } catch (e) {
+        // A driver whose files aren't downloaded yet: asked about, and the connect runs again once
+        // they are — the explorer's Connect gets the same question the dialog's Test does.
+        if (offerDriverDownload(e, () => void get().connect(id))) return false;
         if (!offerHostKeyTrust(get, id, e, () => void get().connect(id))) pushErrorToast(String(e));
         return false;
       }
@@ -1442,8 +1450,10 @@ export const useDbStore = create<DbState>((set, get) => ({
     } catch (e) {
       // Shown against the node rather than as a toast: "permission denied on schema auth" is about
       // that row, and a toast would leave the tree looking merely empty.
-      set((s) => ({ nodeErrors: { ...s.nodeErrors, [key]: String(e) } }));
-      offerHostKeyTrust(get, connectionId, e, () => void get().refreshNode(connectionId, node, key));
+      set((s) => ({ nodeErrors: { ...s.nodeErrors, [key]: driverErrorText(e) } }));
+      if (!offerDriverDownload(e, () => void get().refreshNode(connectionId, node, key))) {
+        offerHostKeyTrust(get, connectionId, e, () => void get().refreshNode(connectionId, node, key));
+      }
     } finally {
       set((s) => ({ loadingNodes: s.loadingNodes.filter((entry) => entry !== key) }));
     }
@@ -1473,8 +1483,10 @@ export const useDbStore = create<DbState>((set, get) => ({
   },
 
   dropObject: async ({ connectionId, node, scope, contents, parent }) => {
-    const kind = get().connections.find((c) => c.id === connectionId)?.kind;
-    if (!kind) return false;
+    const row = get().connections.find((c) => c.id === connectionId);
+    if (!row) return false;
+    // Written in the dialect the driver speaks — backticks on Hive, brackets on Sybase.
+    const kind = sqlKindOf(row);
     const sql =
       scope === "relation"
         ? dropRelationSql(node, kind)
@@ -1776,12 +1788,15 @@ export const useDbStore = create<DbState>((set, get) => ({
         );
       }
     } catch (e) {
-      const message = String(e);
+      const message = driverErrorText(e);
       // A cancel or a dropped session changes the transaction the run was in; the backend knows how.
       void get().refreshTransaction(tabId);
-      // A tunnel that failed on an unknown host key never reached the server, so running the same
-      // statement again once the key is trusted is exactly what was asked for.
-      offerHostKeyTrust(get, tab.connectionId, e, () => void get().runConsole(tabId, sql));
+      // A tunnel that failed on an unknown host key never reached the server — nor did a driver
+      // whose files weren't downloaded — so running the same statement again once that is fixed is
+      // exactly what was asked for.
+      if (!offerDriverDownload(e, () => void get().runConsole(tabId, sql))) {
+        offerHostKeyTrust(get, tab.connectionId, e, () => void get().runConsole(tabId, sql));
+      }
       patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({
         ...current,
         result: {
@@ -1837,7 +1852,7 @@ export const useDbStore = create<DbState>((set, get) => ({
         result: null,
       }));
     } catch (e) {
-      pushErrorToast(String(e));
+      reportError(e);
     } finally {
       patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({
         ...current,
@@ -1894,7 +1909,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       });
       if (failed?.error) pushErrorToast(failed.error);
     } catch (e) {
-      pushErrorToast(String(e));
+      reportError(e);
       void get().refreshTransaction(tabId);
     }
   },
@@ -1935,7 +1950,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       }
     } catch (e) {
       if (String(e) === CANCELLED) useToastStore.getState().pushToast(translate("db.exportCancelled"), "info");
-      else pushErrorToast(String(e));
+      else reportError(e);
     } finally {
       set((s) => ({ exports: s.exports.filter((job) => job.runId !== runId) }));
     }
@@ -2194,7 +2209,8 @@ export const useDbStore = create<DbState>((set, get) => ({
       schema: key.ref_schema ?? tab.node.schema,
       name: key.ref_table,
     };
-    const kind = get().connections.find((c) => c.id === tab.connectionId)?.kind ?? "postgres";
+    const row = get().connections.find((c) => c.id === tab.connectionId);
+    const kind = row ? sqlKindOf(row) : "postgres";
     // A NULL foreign key points at nothing, so the honest destination is the whole table rather
     // than a filter that would match no row.
     const filter =
@@ -2346,7 +2362,8 @@ export const useDbStore = create<DbState>((set, get) => ({
           ),
         );
     } catch (e) {
-      patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, error: String(e) }));
+      patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, error: driverErrorText(e) }));
+      offerDriverDownload(e, () => void get().loadData(tabId));
       // A failed page is exactly what the log is for: the message alone rarely says which
       // statement produced it, and the tab only keeps the last one.
       get().logSql({
@@ -2545,7 +2562,7 @@ export const useDbStore = create<DbState>((set, get) => ({
     } catch (e) {
       patchTab<DbDdlTab>(set, id, "ddl", (current) => ({
         ...current,
-        text: `-- ${String(e)}`,
+        text: `-- ${driverErrorText(e)}`,
         loading: false,
       }));
     } finally {
@@ -2609,7 +2626,8 @@ export const useDbStore = create<DbState>((set, get) => ({
       });
     } catch (e) {
       // Against the tab rather than as a toast: the panel is empty and has room to explain itself.
-      patchTab<DbSchemaTab>(set, tabId, "schema", (current) => ({ ...current, error: String(e) }));
+      patchTab<DbSchemaTab>(set, tabId, "schema", (current) => ({ ...current, error: driverErrorText(e) }));
+      offerDriverDownload(e, () => void get().loadSchema(tabId));
     } finally {
       patchTab<DbSchemaTab>(set, tabId, "schema", (current) => ({
         ...current,
@@ -2676,7 +2694,8 @@ export const useDbStore = create<DbState>((set, get) => ({
     } catch (e) {
       // Against the tab, not as a toast: the panel is empty and has room to explain itself, which
       // a toast that vanishes in four seconds does not.
-      patchTab<DbDiagramTab>(set, tabId, "diagram", (current) => ({ ...current, error: String(e) }));
+      patchTab<DbDiagramTab>(set, tabId, "diagram", (current) => ({ ...current, error: driverErrorText(e) }));
+      offerDriverDownload(e, () => void get().loadDiagram(tabId));
     } finally {
       patchTab<DbDiagramTab>(set, tabId, "diagram", (current) => ({
         ...current,
@@ -3035,12 +3054,20 @@ export function parseSpec(row: DbConnectionRow): DbConnectionConfig | null {
 /** The label under a connection's name in the explorer: what it is, and where. */
 export function describeConnection(row: DbConnectionRow): string {
   const config = parseSpec(row);
-  const engine = engineInfo(row.kind);
+  const driver = effectiveDriver(rowDriverId(row), useDriverStore.getState().settings);
+  const engine = driverEngineInfo(driver, row.kind);
   if (!config) return engine.label;
   if (config.url) {
     // A URI can carry a password; showing it in the sidebar would put a credential on screen.
     return `${engine.label} · ${maskConnectionSecrets(config.url)}`;
   }
+  // A JDBC driver is described by the URL its template makes — the one thing that says where a
+  // Snowflake account or a DuckDB file is.
+  if (row.kind === "jdbc" && driver) {
+    const url = jdbcUrlPreview(config, driver);
+    return url ? `${engine.label} · ${maskConnectionSecrets(url)}` : engine.label;
+  }
+  if (engine.file) return config.database ? `${engine.label} · ${config.database}` : engine.label;
   const port = config.port || engine.defaultPort;
   const where = `${config.host}:${port}`;
   return config.database ? `${engine.label} · ${where}/${config.database}` : `${engine.label} · ${where}`;
@@ -3374,11 +3401,19 @@ function parseJson<T>(raw: string | null, fallback: T): T {
 }
 
 /** Every store action funnels its failure into one toast; nothing here is worth a modal. */
+/**
+ * An error as a toast — unless it says a driver's files aren't downloaded, which is a question
+ * (`DriverDownloadDialog`) rather than a sentence to read and dismiss.
+ */
+function reportError(e: unknown): void {
+  if (!offerDriverDownload(e)) pushErrorToast(String(e));
+}
+
 async function guarded<T>(fn: () => Promise<T>): Promise<T | null> {
   try {
     return await fn();
   } catch (e) {
-    pushErrorToast(String(e));
+    reportError(e);
     return null;
   }
 }

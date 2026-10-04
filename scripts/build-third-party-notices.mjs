@@ -6,9 +6,10 @@
 // and require us to say something specific to whoever installs an Official Build:
 //
 //   MPL-2.0 §3.2(a)   tell recipients of the Executable Form where to get the Source Code Form
-//   GPL-2.0 §3        the same, for the OpenJDK image inside `resources/iris/runtime/`
-//   InterSystems      a copy of its terms of use must accompany any distribution of the driver
-//   Oracle            the same for ojdbc11 — met by the licence the jar carries inside itself
+//
+// (The Java runtime and the JDBC drivers used to be listed here too, with obligations of their own.
+// They no longer ship: the app downloads them from their publishers when a connection first needs
+// them — see the section the render writes about that.)
 //
 // None of that is satisfied by a file nobody generates, so this script exists to make the file
 // cheap to regenerate and expensive to forget. Same bargain as the three runtime builders next
@@ -48,7 +49,6 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inflateRawSync } from "node:zlib";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "THIRD-PARTY-NOTICES.md");
@@ -97,59 +97,6 @@ const BUNDLED = [
     verify() {
       proveFile("scripts/assets/llama.cpp-LICENSE", ["MIT License", "The ggml authors"], "llama.cpp", "MIT");
       proveFile("src-tauri/resources/llama/LICENSE", ["MIT License"], "llama.cpp", "MIT", { optional: true });
-    },
-  },
-  {
-    // The image is jlinked from whatever JDK the build machine has, so the licence below is only
-    // the licence of an *Official* Build. `verify` asserts rather than reports for that reason: if
-    // the release workflow ever moves off Temurin, the licence in this row stops being true and
-    // the run stops with it.
-    name: "Eclipse Temurin JDK (jlink image)",
-    version: () => scrape(".github/workflows/release.yml", /java-version:\s*"?([0-9.]+)"?/),
-    licence: "GPL-2.0-only WITH Classpath-exception-2.0",
-    url: "https://adoptium.net/temurin/",
-    ships: "`resources/iris/runtime/` — trimmed by `jlink` to the modules the two JDBC drivers load",
-    by: "scripts/build-iris-runtime.mjs",
-    notice: "jdk",
-    verify() {
-      expect(".github/workflows/release.yml", /distribution:\s*(\S+)/, "temurin");
-    },
-  },
-  {
-    name: "InterSystems IRIS JDBC driver",
-    version: () => scrape("scripts/build-iris-runtime.mjs", /const DRIVER = \{[\s\S]*?version: "([^"]+)"/),
-    licence: "LicenseRef-InterSystems-IERTU (proprietary)",
-    url: "https://repo1.maven.org/maven2/com/intersystems/intersystems-jdbc/",
-    terms: "https://www.intersystems.com/IERTU/",
-    ships: "`resources/iris/intersystems-jdbc-<version>.jar`",
-    by: "scripts/build-iris-runtime.mjs",
-    notice: "iris",
-    verify(version) {
-      proveJar(
-        `src-tauri/resources/iris/intersystems-jdbc-${version}.jar`,
-        "META-INF/maven/com.intersystems/intersystems-jdbc/pom.xml",
-        ["<url>https://www.intersystems.com/IERTU/</url>"],
-        "the InterSystems driver",
-        "the InterSystems External Repository Terms of Use",
-      );
-    },
-  },
-  {
-    name: "Oracle JDBC driver (ojdbc11)",
-    version: () => scrape("scripts/build-iris-runtime.mjs", /const ORACLE_DRIVER = \{[\s\S]*?version: "([^"]+)"/),
-    licence: "LicenseRef-Oracle-FUTC (proprietary)",
-    url: "https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/",
-    ships: "`resources/iris/ojdbc11-<version>.jar`",
-    by: "scripts/build-iris-runtime.mjs",
-    notice: "oracle",
-    verify(version) {
-      proveJar(
-        `src-tauri/resources/iris/ojdbc11-${version}.jar`,
-        "META-INF/license.txt",
-        ["Oracle Free Distribution, Hosting, and Use Terms and Conditions", "redistributing unmodified Programs"],
-        "the Oracle driver",
-        "the Oracle Free Use Terms and Conditions",
-      );
     },
   },
   {
@@ -997,9 +944,6 @@ const NORMALISATION = [
 function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, models }) {
   const mpl = [...npm, ...cargo].filter((component) => component.elected === "MPL-2.0").sort(byName);
   const elected = [...npm, ...cargo].filter((component) => ELECTIONS[component.name]).sort(byName);
-  const jdk = bundled.find((entry) => entry.notice === "jdk");
-  const iris = bundled.find((entry) => entry.notice === "iris");
-  const oracle = bundled.find((entry) => entry.notice === "oracle");
   const libgit2 = native.find((row) => row.notice === "libgit2");
   const shipped = (name) => npm.some((component) => component.name === name);
   const platforms = targets.map((target) => target.label).join(" and ");
@@ -1087,35 +1031,6 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, m
     }
   }
 
-  if (jdk) {
-    w(
-      "### The bundled Java runtime — GPL-2.0 with the Classpath Exception",
-      "",
-      `\`resources/iris/runtime/\` is an OpenJDK image, built by \`jlink\` from Eclipse Temurin ${jdk.version}`,
-      "and shipped inside the installer so that nobody has to install Java to reach an IRIS or Oracle",
-      "database. It is [GPL-2.0-only WITH Classpath-exception-2.0](https://openjdk.org/legal/gplv2+ce.html).",
-      "",
-      "The Classpath Exception is what makes it safe to ship next to CodeFlow's own code: linking to",
-      "these classes does not make CodeFlow a derivative work, and CodeFlow's licence is unaffected.",
-      "The runtime's own source obligation is unaffected too, so:",
-      "",
-      "> **The complete corresponding source for the bundled Java runtime is published by the",
-      `> Adoptium project at <https://github.com/adoptium/jdk${major(jdk.version)}u>, and the exact`,
-      `> builds at <${jdk.url}>. If you would rather not fetch it yourself,`,
-      `> open an issue at <${REPO}/issues> and we will`,
-      "> send you a copy at no charge.**",
-      "",
-      "The image carries its own `legal/` directory — the licence of every module in it, and the",
-      "notices for the third-party code OpenJDK itself incorporates — and that directory ships inside",
-      "the installer with it.",
-      "",
-      "It is produced by `scripts/build-iris-runtime.mjs` from whichever JDK is on the build machine.",
-      "The version above is the one the release workflow pins, and so the one every Official Build",
-      "contains; a build made on some other JDK carries that JDK's licence instead.",
-      "",
-    );
-  }
-
   if (libgit2) {
     w(
       "### libgit2 — GPL-2.0 with a linking exception",
@@ -1133,40 +1048,22 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, m
     );
   }
 
-  if (iris) {
-    w(
-      "### The InterSystems JDBC driver — its terms must travel with it",
-      "",
-      `\`${iris.ships.replace(/`/g, "")}\` is InterSystems' own driver, downloaded from Maven Central`,
-      "and shipped unmodified. It is **not** open source: its POM points at the",
-      `[InterSystems External Repository Terms of Use](${iris.terms}), which allow redistribution on`,
-      "conditions — among them that a copy of those terms accompany every distribution of the driver,",
-      "that no fee be charged for its distribution or use, that its markings and notices stay in place,",
-      "and that it be neither modified nor reverse engineered. CodeFlow ships it verbatim and free of",
-      "charge. The copy travels with it: the terms as InterSystems publishes them are kept in this",
-      "repository, in `scripts/assets/`, and `scripts/build-iris-runtime.mjs` writes them beside the jar",
-      "as `resources/iris/InterSystems-External-Repository-Terms-of-Use.pdf`, which the installer carries",
-      "in the app's `iris/` resources. A build without them fails rather than ship the driver alone.",
-      "",
-    );
-  }
-
-  if (oracle) {
-    w(
-      "### The Oracle JDBC driver — its licence travels inside the jar",
-      "",
-      `\`${oracle.ships.replace(/`/g, "")}\` is Oracle's thin JDBC driver, downloaded from Maven Central`,
-      "and shipped unmodified; it is what lets Oracle connections work with no Oracle client installed.",
-      "It is **not** open source either. Its licence is `META-INF/license.txt` inside the jar itself,",
-      "titled *Oracle Free Distribution, Hosting, and Use Terms and Conditions* — the terms",
-      "`scripts/build-iris-runtime.mjs` calls the Oracle Free Use Terms and Conditions. They allow",
-      "redistributing the unmodified driver on conditions much like InterSystems': a copy of the",
-      "licence with every distribution, no additional fee for it, its markings and notices left in",
-      "place, no reverse engineering. The jar carries its licence wherever it goes, which is how the",
-      "copy requirement is met.",
-      "",
-    );
-  }
+  w(
+    "### Downloaded on demand, not shipped — the Java runtime and the JDBC drivers",
+    "",
+    "Oracle, InterSystems IRIS and the other databases of the driver catalogue",
+    "(`src/lib/db/driverCatalog.json`) are reached through their vendors' own JDBC drivers, which run",
+    "in a Java runtime. Neither is part of the installer. The app downloads them — Eclipse Temurin from",
+    "Adoptium, each driver from Maven Central or its vendor's own download — only when a connection",
+    "first needs them, after asking, and checks every file against the hash the catalogue pins.",
+    "",
+    "They are the publishers' own files, under their own licences — the OpenJDK runtime under",
+    "[GPL-2.0-only WITH Classpath-exception-2.0](https://openjdk.org/legal/gplv2+ce.html), each driver",
+    "under the terms its vendor publishes with it (linked from the Drivers panel). CodeFlow does not",
+    "redistribute any of them. What the installer does carry is `resources/jdbc/codeflow-jdbc-bridge.jar`,",
+    "CodeFlow's own code, which the drivers run inside.",
+    "",
+  );
 
   if (open.length > 0) {
     w("### Open items", "", "Found, written down, and not yet resolved:", "");
@@ -1204,11 +1101,11 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, m
   w(
     "## Runtimes, drivers and web apps bundled with it",
     "",
-    "These are not dependencies of the app's source. They are third-party programs fetched or built",
-    "at build time and copied into the installer — the first four through `bundle.resources` in",
-    "`tauri.conf.json`, draw.io through the frontend bundle. llama.cpp, the two drivers and draw.io are",
-    "pinned by version and verified against a SHA-256 by the script that fetches them; the Java",
-    "runtime is cut by `jlink` from the JDK the release workflow installs.",
+    "These are not dependencies of the app's source. They are third-party programs fetched at build",
+    "time and copied into the installer — llama.cpp through `bundle.resources` in `tauri.conf.json`,",
+    "draw.io through the frontend bundle — each pinned by version and verified against a SHA-256 by",
+    "the script that fetches it. (The Java runtime and the JDBC drivers are not among them: see",
+    "*Downloaded on demand, not shipped* above.)",
     "",
     "| Component | Version | Licence (SPDX) | Project | Ships as | Fetched by |",
     "|---|---|---|---|---|---|",
@@ -1574,54 +1471,6 @@ function proveFile(relative, phrases, what, licence, { optional = false } = {}) 
   if (missing.length > 0) {
     fail(`${what}: ${relative} no longer reads as ${licence} (missing "${missing[0]}"). Read it, then update BUNDLED.`);
   }
-}
-
-/** The same, for a file inside a downloaded jar — skipped when the jar has not been built here. */
-function proveJar(relative, entry, phrases, what, licence) {
-  const path = join(ROOT, relative);
-  if (!existsSync(path)) return;
-  const bytes = zipEntry(path, entry);
-  if (!bytes) fail(`${relative} has no ${entry} any more — ${what}'s licence evidence moved. Read the jar, then update BUNDLED.`);
-  const missing = saysAll(bytes.toString("utf8"), phrases);
-  if (missing.length > 0) {
-    fail(`${relative}: ${entry} no longer reads as ${licence} (missing "${missing[0]}"). Read it, then update BUNDLED.`);
-  }
-}
-
-/**
- * One entry out of a zip (a jar), without a dependency: the central directory, then the local
- * header, then stored or deflated bytes. Enough for the drivers' jars; not a general zip reader.
- */
-function zipEntry(path, name) {
-  const buffer = readFileSync(path);
-  let end = -1;
-  for (let i = buffer.length - 22; i >= Math.max(0, buffer.length - 65557); i -= 1) {
-    if (buffer.readUInt32LE(i) === 0x06054b50) {
-      end = i;
-      break;
-    }
-  }
-  if (end < 0) return null;
-  const count = buffer.readUInt16LE(end + 10);
-  let at = buffer.readUInt32LE(end + 16);
-  for (let k = 0; k < count; k += 1) {
-    if (buffer.readUInt32LE(at) !== 0x02014b50) return null;
-    const method = buffer.readUInt16LE(at + 10);
-    const size = buffer.readUInt32LE(at + 20);
-    const nameLength = buffer.readUInt16LE(at + 28);
-    const extraLength = buffer.readUInt16LE(at + 30);
-    const commentLength = buffer.readUInt16LE(at + 32);
-    const local = buffer.readUInt32LE(at + 42);
-    if (buffer.toString("utf8", at + 46, at + 46 + nameLength) === name) {
-      const start = local + 30 + buffer.readUInt16LE(local + 26) + buffer.readUInt16LE(local + 28);
-      const data = buffer.subarray(start, start + size);
-      if (method === 0) return data;
-      if (method === 8) return inflateRawSync(data);
-      return null;
-    }
-    at += 46 + nameLength + extraLength + commentLength;
-  }
-  return null;
 }
 
 /**

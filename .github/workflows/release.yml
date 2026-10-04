@@ -246,10 +246,10 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      # Needed to *build* the app, never to run it: `pnpm iris:runtime` uses javac/jar/jlink to
-      # produce the trimmed Java runtime that ships inside the installer for the IRIS driver.
-      # Pinned rather than left to whatever the runner image happens to preinstall, because the
-      # runtime that reaches users is whatever version this step provides.
+      # Needed to *build* the app, never to run it: `pnpm jdbc:bridge` uses javac/jar to compile the
+      # JDBC bridge that ships inside the installer. The Java runtime the drivers run on is not built
+      # here any more — the app downloads it on first use. Pinned rather than left to whatever the
+      # runner image happens to preinstall, so the bridge is always compiled by the same javac.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -303,35 +303,15 @@ jobs:
       # as a failed download.
       - run: pnpm drawio:webapp
 
-      # `jlink` and `javac` cost between 20 seconds and 2.5 minutes on a cold runner, to produce
-      # something whose inputs change about once a year.
+      # `javac` costs seconds, but it is the step where a broken Java toolchain shows, so it runs on its
+      # own line — where a failure reads as one — rather than somewhere inside a ten-minute Rust build.
+      # `tauri build` runs it again through `beforeBuildCommand`, where it is an incremental no-op.
       #
-      # Both paths, not just the one that ships: the script's "already current" checks read stamp
-      # files it deliberately keeps *outside* `resources/iris`, because that directory is copied
-      # verbatim into the bundle and a build stamp has no business reaching users. Restore the
-      # runtime without its stamp and the script rebuilds it anyway — the cache would cost time
-      # rather than save it.
-      #
-      # No `restore-keys`. A near-miss would hand the script a runtime built from different inputs,
-      # and while its stamp check would catch that and rebuild, this directory is the one that ends
-      # up inside an installer — an exact match or nothing is the right bargain here.
-      - uses: actions/cache@v4
-        with:
-          path: |
-            src-tauri/resources/iris
-            src-tauri/target/iris-build
-          # `jlink` emits a runtime for whatever platform ran it, so the OS is part of the identity,
-          # and so is the JDK that `setup-java` above pins. The script carries the driver's version
-          # and its pinned checksum and the module list, so hashing the script covers all three;
-          # `src-tauri/java` is the bridge's own source.
-          key: iris-runtime-${{ runner.os }}-jdk17-${{ hashFiles('scripts/build-iris-runtime.mjs', 'src-tauri/java/**') }}
+      # Nothing to cache: the output is one 20 KB jar, and the runtime and drivers that used to be
+      # built here (~50 MB, per runner) are downloaded by the app when a connection first needs them.
+      - run: pnpm jdbc:bridge
 
-      # `tauri build` runs this again through `beforeBuildCommand`, where it is an incremental
-      # no-op. Doing it here first is for the log: when the Java toolchain is the thing that broke,
-      # this step fails on its own line instead of somewhere inside a ten-minute Rust build.
-      - run: pnpm iris:runtime
-
-      # The same bargain as the iris cache above, and both paths for the same reason it uses both:
+      # Both paths, and for the reason that matters:
       # the stamp that says "already current" is deliberately kept out of `resources/llama`, which
       # is copied verbatim into the bundle. Restore the engine without `target/llama-build` and the
       # script rebuilds it anyway — and re-downloads the 38 MB it was trimmed from.
@@ -453,23 +433,22 @@ jobs:
           retryAttempts: 2
           args: ${{ matrix.args }}
 
-      # The one thing no unit test can check: that the Java runtime actually made it *inside* what
-      # was built. Everything upstream can pass while a `bundle.resources` change quietly drops it,
-      # and the symptom would be an installer that looks fine until a user opens an IRIS connection.
-      # Cheap enough to run on every release, and it fails the job rather than leaving that to them.
-      - name: Verify the IRIS runtime shipped inside the bundle
+      # The one thing no unit test can check: that the JDBC bridge actually made it *inside* what was
+      # built. Everything upstream can pass while a `bundle.resources` change quietly drops it, and the
+      # symptom would be an installer that looks fine until a user opens an Oracle, IRIS or any other
+      # JDBC connection. Cheap enough to run on every release, and it fails the job rather than
+      # leaving that to them.
+      - name: Verify the JDBC bridge shipped inside the bundle
         shell: bash
         run: |
           set -euo pipefail
-          found=$(find src-tauri/target -type f \
-            \( -name java -o -name java.exe \) -path '*iris/runtime/bin/*' | head -n1 || true)
+          found=$(find src-tauri/target -type f -name codeflow-jdbc-bridge.jar -path *jdbc/* | head -n1 || true)
           if [ -z "$found" ]; then
-            echo "::error::The bundled Java runtime is missing — this installer would ship an IRIS engine that cannot connect."
-            find src-tauri/target -maxdepth 6 -type d -name iris || true
+            echo "::error::The JDBC bridge is missing — this installer would ship a database workspace whose JDBC drivers cannot connect."
+            find src-tauri/target -maxdepth 6 -type d -name jdbc || true
             exit 1
           fi
-          echo "Bundled runtime: $found"
-          du -sh "$(dirname "$(dirname "$found")")"
+          echo "Bundled bridge: $found"
 
   # The single writer of `latest.json`, and the only thing in this workflow that publishes.
   #
@@ -624,10 +603,10 @@ jobs:
 
   # Keeps the repository under GitHub's 10 GB Actions cache quota.
   #
-  # Not only the Rust ones any more. The three runtime caches (`iris-runtime-*`, `llama-runtime-*`,
-  # `drawio-webapp-*`) add ~120 MB per platform per generation, and their keys are content hashes of
-  # the scripts that produce them — so the moment one of those scripts changes, the entry it
-  # supersedes becomes unreachable rather than merely old. Unreachable entries still count against
+  # Not only the Rust ones any more. The runtime caches (`llama-runtime-*`, `drawio-webapp-*`, and
+  # the `iris-runtime-*` ones no build writes any more) add ~120 MB per platform per generation, and
+  # their keys are content hashes of the scripts that produce them — so the moment one of those
+  # scripts changes, the entry it supersedes becomes unreachable rather than merely old. Unreachable entries still count against
   # the quota, and the thing the quota evicts is a 2 GB Rust cache.
   #
   # `rust-cache` writes a new entry whenever its key changes and never removes the old one, so the
@@ -684,10 +663,16 @@ jobs:
                   #
                   # Everything else is left alone: the `node-cache-*` entries are ~60 MB each and
                   # belong to `setup-node`, which manages its own.
+                  # Nothing produces these since the Java runtime stopped shipping: every one is
+                  # superseded, the newest included.
+                  if (key ~ /^iris-runtime-/) {
+                    print $2 "	" $3
+                    next
+                  }
                   if (key ~ /^v0-rust-/) {
                     keep = rust
                     sub(/-[^-]*-[^-]*$/, "", key)
-                  } else if (key ~ /^(iris-runtime|llama-runtime|drawio-webapp)-/) {
+                  } else if (key ~ /^(llama-runtime|drawio-webapp)-/) {
                     keep = exact
                     sub(/-[^-]*$/, "", key)
                   } else {

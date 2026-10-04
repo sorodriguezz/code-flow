@@ -40,6 +40,8 @@ import { iconButtonClass, Kbd } from "../common/Button";
 import { explorerHeadClass, explorerTitleClass } from "../common/recipes";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import { HiddenFilesSection } from "./HiddenFilesSection";
+import { finishMoves, planMoves } from "./moveImports";
+import type { PathRename } from "../../lib/lsp/client";
 import {
   EMPTY_NESTS,
   EMPTY_PARENTS,
@@ -1004,37 +1006,6 @@ export function FileTree({
     setRenaming(focus.path);
   }, [focus.path]);
 
-  const submitRename = useCallback(
-    async (name: string) => {
-      const from = renaming;
-      if (!from) return;
-      const trimmed = name.trim();
-      if (!trimmed || trimmed === from.split("/").pop()) {
-        setRenaming(null);
-        return;
-      }
-      try {
-        const to = await renamePath(repoPath, from, trimmed);
-        setRenaming(null);
-        await loadDir(parentDir(from));
-        void useRepoStore.getState().refreshStatus();
-        // A renamed folder takes every open file under it with it, which is why the editor is told
-        // the prefix rather than each path — see `handlePathMoved`.
-        onPathMoved?.(from, to);
-        // And a Copy or Cut waiting on it follows the new name rather than failing on the old one.
-        useExplorerClipboardStore.getState().moved(repoPath, from, to);
-        setFocus({ path: to, isDir: expanded.has(from) || childrenRef.current.has(from) });
-      } catch (e) {
-        // Left open on failure, the same as a new-file name that collided: the name is right there
-        // to be corrected.
-        pushErrorToast(String(e));
-      }
-    },
-    [renaming, repoPath, loadDir, onPathMoved, expanded],
-  );
-
-  const cancelRename = useCallback(() => setRenaming(null), []);
-
   /**
    * Whether a selected path is a folder, read off the row that draws it.
    *
@@ -1049,6 +1020,42 @@ export function FileTree({
     );
     return row?.dataset.cfTreedir === "1";
   }, []);
+
+  const submitRename = useCallback(
+    async (name: string) => {
+      const from = renaming;
+      if (!from) return;
+      const trimmed = name.trim();
+      if (!trimmed || trimmed === from.split("/").pop()) {
+        setRenaming(null);
+        return;
+      }
+      const parent = parentDir(from);
+      const isDir = isDirPath(from) || expanded.has(from) || childrenRef.current.has(from);
+      try {
+        // What the rename breaks, asked while nothing has moved yet — see `moveImports`.
+        const imports = await planMoves(repoPath, [{ from, to: parent ? `${parent}/${trimmed}` : trimmed, isDir }]);
+        const to = await renamePath(repoPath, from, trimmed);
+        setRenaming(null);
+        // A renamed folder takes every open file under it with it, which is why the editor is told
+        // the prefix rather than each path — see `handlePathMoved`. The imports that pointed at it
+        // follow too: into the open tabs before they are re-pointed, onto disk after.
+        finishMoves(repoPath, imports, [{ from, to, isDir }], onPathMoved);
+        await loadDir(parent);
+        void useRepoStore.getState().refreshStatus();
+        // And a Copy or Cut waiting on it follows the new name rather than failing on the old one.
+        useExplorerClipboardStore.getState().moved(repoPath, from, to);
+        setFocus({ path: to, isDir });
+      } catch (e) {
+        // Left open on failure, the same as a new-file name that collided: the name is right there
+        // to be corrected.
+        pushErrorToast(String(e));
+      }
+    },
+    [renaming, repoPath, loadDir, onPathMoved, expanded, isDirPath],
+  );
+
+  const cancelRename = useCallback(() => setRenaming(null), []);
 
   /**
    * The rows an action applies to, oldest question in this file answered plurally.
@@ -1239,8 +1246,19 @@ export function FileTree({
 
     // Asked before anything moves: after a move the source's row, and its place in the cache, are gone.
     const kinds = new Map(steps.map((step) => [step.source, kindOf(step.source)]));
+    // So is what a cut breaks, for the same reason — see `moveImports`. A copy breaks nothing.
+    const imports = cut
+      ? await planMoves(
+          repoPath,
+          steps.map(({ source, destDir }) => {
+            const name = source.split("/").pop() ?? source;
+            return { from: source, to: destDir ? `${destDir}/${name}` : name, isDir: kinds.get(source) ?? false };
+          }),
+        )
+      : null;
     const landed: { path: string; isDir: boolean }[] = [];
     const movedAway: string[] = [];
+    const moves: PathRename[] = [];
     const failures: string[] = [];
     for (const { source, destDir } of steps) {
       try {
@@ -1248,7 +1266,7 @@ export function FileTree({
           const to = await movePath(repoPath, source, destDir);
           movedAway.push(source);
           // `to === source` is a cut pasted back where it already was: done, with nothing to re-point.
-          if (to !== source) onPathMoved?.(source, to);
+          if (to !== source) moves.push({ from: source, to, isDir: kinds.get(source) ?? false });
           landed.push({ path: to, isDir: kinds.get(source) ?? false });
         } else {
           landed.push({ path: await copyPath(repoPath, source, destDir), isDir: kinds.get(source) ?? false });
@@ -1258,6 +1276,10 @@ export function FileTree({
       }
     }
     if (failures.length > 0) pushErrorToast(failures[0]);
+    // The tabs re-pointed together once everything has moved, with the imports every move broke
+    // mended around it in one pass — two moves can need edits in the same file, and edits planned
+    // together are the only ones that cannot land on each other's coordinates.
+    if (imports) finishMoves(repoPath, imports, moves, onPathMoved);
 
     // A cut is spent once it has moved. Whatever did not move stays cut, to be pasted elsewhere.
     if (cut && movedAway.length > 0) {
@@ -1575,23 +1597,40 @@ export function FileTree({
   const rootIsDropTarget = useTreeDragStore((s) => s.overDir === "");
   const treeOrigin = useTreeDragStore((s) => s.origin);
 
-  const applyMove = useCallback(
-    async (from: string, destDir: string) => {
-      const fromParent = parentDir(from);
-      try {
-        const to = await movePath(repoPath, from, destDir);
-        if (activeRepoRef.current !== repoPath) return;
-        // Both ends changed; the destination may not have been listed yet, in which case this
-        // primes it for when it's expanded.
-        await Promise.all([loadDir(fromParent), loadDir(destDir)]);
-        void useRepoStore.getState().refreshStatus();
-        onPathMoved?.(from, to);
-        useExplorerClipboardStore.getState().moved(repoPath, from, to);
-      } catch (e) {
-        pushErrorToast(String(e));
+  /**
+   * Moves `paths` into `destDir` — one dragged row, or the whole selection it belonged to.
+   *
+   * One at a time and in the order given, which the drop makes deepest-first: a folder and something
+   * inside it, dragged together, move the child while its path still resolves. The imports they
+   * break are asked about before the first of them moves and mended once the last has (see
+   * `moveImports`) — in one pass, because two moves can need edits in the same file.
+   */
+  const applyMoves = useCallback(
+    async (paths: string[], destDir: string) => {
+      const planned = paths.map((from) => {
+        const name = from.split("/").pop() ?? from;
+        return { from, to: destDir ? `${destDir}/${name}` : name, isDir: kindOf(from) };
+      });
+      const imports = await planMoves(repoPath, planned);
+      const moved: PathRename[] = [];
+      for (const move of planned) {
+        try {
+          const to = await movePath(repoPath, move.from, destDir);
+          if (to !== move.from) moved.push({ ...move, to });
+        } catch (e) {
+          pushErrorToast(String(e));
+        }
       }
+      if (activeRepoRef.current !== repoPath || moved.length === 0) return;
+      finishMoves(repoPath, imports, moved, onPathMoved);
+      // Both ends of every move changed; the destination may not have been listed yet, in which case
+      // this primes it for when it's expanded.
+      const dirs = new Set([destDir, ...moved.map((move) => parentDir(move.from))]);
+      await Promise.all([...dirs].map((dir) => loadDir(dir).catch(() => {})));
+      void useRepoStore.getState().refreshStatus();
+      for (const move of moved) useExplorerClipboardStore.getState().moved(repoPath, move.from, move.to);
     },
-    [repoPath, loadDir, onPathMoved],
+    [repoPath, kindOf, loadDir, onPathMoved],
   );
 
   const beginDrag = useCallback((e: React.PointerEvent<HTMLElement>, entry: FileEntry) => {
@@ -1651,7 +1690,7 @@ export function FileTree({
         .current()
         .filter((path) => path === dragged.path || markedRef.current.has(path));
       const moving = batch.includes(dragged.path) ? batch : [dragged.path];
-      for (const path of moving) void applyMoveRef.current(path, dest);
+      void applyMovesRef.current(moving, dest);
       // The rows the selection named are about to be at different paths, so keeping it would leave
       // a highlight on names that have moved out from under it.
       if (moving.length > 1) setMarkedRef.current(EMPTY_SELECTION);
@@ -1662,8 +1701,8 @@ export function FileTree({
     window.addEventListener("pointercancel", onUp);
   }, []);
 
-  const applyMoveRef = useRef(applyMove);
-  applyMoveRef.current = applyMove;
+  const applyMovesRef = useRef(applyMoves);
+  applyMovesRef.current = applyMoves;
   /** `beginDrag` is a `useCallback` with no dependencies — registered once and holding its
    *  closure for the life of the tree — so the selection has to reach it through a ref. */
   const markedRef = useRef(marked);

@@ -35,6 +35,29 @@ export const tsNotify = (command: string, args: unknown) =>
   invoke<number>("ts_notify", { command, arguments: args });
 
 /**
+ * Every `open` and `change` handed to the server so far, settled.
+ *
+ * A notification resolves once it is on its way to the server's stdin (`ts_notify`), and the two
+ * commands are separate invokes: a request made the instant after a buffer was edited has no
+ * promise of travelling behind the edit. That is harmless for a completion — the next keystroke asks
+ * again — and wrong for anything that acts on the answer. A refactor that extracts a function and
+ * then asks where to rename it must ask about the text with the function in it.
+ */
+let synced: Promise<unknown> = Promise.resolve();
+
+/** `tsNotify` for the document sync, remembered so `tsSynced` can wait on it. */
+export function tsSyncNotify(command: "open" | "change", args: unknown): Promise<number> {
+  const sent = tsNotify(command, args);
+  // Settled to nothing, so the chain holds no values: one link per keystroke for a whole session
+  // would otherwise be a list that only ever grows.
+  synced = Promise.all([synced, sent.catch(() => undefined)]).then(() => undefined);
+  return sent;
+}
+
+/** Resolves once everything the document sync has sent so far is with the server. */
+export const tsSynced = (): Promise<void> => synced.then(() => undefined);
+
+/**
  * One event tsserver raised on its own — only the diagnostics ones are forwarded (`tsserver.rs`).
  * `root` is the repository the server was started for: every window hears every event, and a
  * window editing another repository must not take these for its own.
@@ -234,6 +257,53 @@ export interface TsDefinition {
 export interface TsDefinitionInfo {
   definitions: TsDefinition[];
   textSpan: TsTextSpan;
+}
+
+/**
+ * One inlay hint — what `provideInlayHints` answers with.
+ *
+ * `text` is the whole hint when `displayParts` is absent, and empty when it is present: since TS 5.0
+ * (`interactiveInlayHints`) a type arrives as parts, and a part that names a declaration carries its
+ * `span`, which is what makes Ctrl+click on the type in a hint go to it.
+ */
+export interface TsInlayHint {
+  text: string;
+  position: { line: number; offset: number };
+  kind: "Type" | "Parameter" | "Enum";
+  whitespaceBefore?: boolean;
+  whitespaceAfter?: boolean;
+  displayParts?: { text: string; span?: { file: string; start: { line: number; offset: number }; end: { line: number; offset: number } } }[];
+}
+
+/** One way to carry out a refactoring — `getApplicableRefactors` lists them under their refactor. */
+export interface TsRefactorAction {
+  /** The programmatic name, handed back to `getEditsForRefactor`. */
+  name: string;
+  /** A sentence in the server's locale, fit for a menu row ("Extract to function in module scope"). */
+  description: string;
+  /** Present when the refactoring exists here but cannot run — said in the menu, greyed out. */
+  notApplicableReason?: string;
+  /** The dotted code action kind (`refactor.extract.function`). Older servers leave it out. */
+  kind?: string;
+  /** Needs an argument this editor has no way to ask for (the target file of "Move to file"). */
+  isInteractive?: boolean;
+}
+
+export interface TsApplicableRefactor {
+  name: string;
+  description: string;
+  actions: TsRefactorAction[];
+}
+
+/**
+ * What a refactoring does, from `getEditsForRefactor`: its edits, and where to start a rename once
+ * they are in — the name an extraction made up (`newFunction`) is the first thing anyone changes.
+ */
+export interface TsRefactorEditInfo {
+  edits: TsFileCodeEdits[];
+  renameLocation?: { line: number; offset: number };
+  renameFilename?: string;
+  notApplicableReason?: string;
 }
 
 /** Flattens tsserver's part list into the text a tooltip shows. */

@@ -46,7 +46,7 @@ const LABEL_PREFIX: &str = "sat-";
 
 /// What a satellite holds.
 ///
-/// Three kinds, because they scope differently and the difference is visible to the user. An `App`
+/// Four kinds, because they scope differently and the difference is visible to the user. An `App`
 /// belongs to a **workspace** — its own: every window holds the workspace it was opened on or
 /// switched to from its own title bar, and follows no other window. A `Repo` belongs to one
 /// repository, which lives in exactly one workspace, so its workspace is derived from the
@@ -61,12 +61,21 @@ const LABEL_PREFIX: &str = "sat-";
 /// [`MAX_SATELLITES`]: it is hidden, not closed, between uses, so it is "open" all day, and a limit
 /// of four windows that quietly meant three once the hotkey had been pressed was a limit that lied.
 /// Everywhere the main window's desk is put away, this one deliberately stays; see [`close_all`].
+///
+/// `File` is one editor tab of one repository, torn out of the main window's editor into a window of
+/// its own — VS Code's floating editor window, and an island like `App` and `Repo`. Its `ref_id` is
+/// `"<project id>:<path in the repository>"`. Detaching *moves* the file there, by the rule in the
+/// module note: the main window hands its buffer over and stops showing it, so one file never has
+/// two editors, and closing the window gives it back. Smaller than the others when it is built and
+/// placed where the tab was dropped (see [`open_satellite`]); it counts against the ceilings like any
+/// other window, because it is a whole webview like any other.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum SatelliteKind {
     App,
     Repo,
     Quick,
+    File,
 }
 
 impl SatelliteKind {
@@ -75,6 +84,7 @@ impl SatelliteKind {
             SatelliteKind::App => "app",
             SatelliteKind::Repo => "repo",
             SatelliteKind::Quick => "quick",
+            SatelliteKind::File => "file",
         }
     }
 }
@@ -201,11 +211,29 @@ impl SatelliteRegistry {
 /// folded to `_` regardless, because a label the platform rejects is a window that never opens and
 /// an error the user cannot act on.
 fn label_for(kind: SatelliteKind, ref_id: &str) -> String {
+    // A file's id is a path, and paths are exactly the ids the folding below would merge:
+    // `src/a-b.ts` and `src/a_b.ts` fold to the same label, and the second window would "already
+    // exist" — the first one would come forward instead. So a file's label is a digest of its id
+    // rather than a spelling of it. Stable across runs (no random seed), which the restore needs.
+    if kind == SatelliteKind::File {
+        return format!("{LABEL_PREFIX}{}-{:016x}", kind.slug(), fnv1a64(ref_id));
+    }
     let safe: String = ref_id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect();
     format!("{LABEL_PREFIX}{}-{}", kind.slug(), safe)
+}
+
+/// FNV-1a, 64 bits — a digest for [`label_for`], where all that matters is that two paths a person
+/// has open at once never share one. Not a security property, so no crate for it.
+fn fnv1a64(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// Whether a window label belongs to a satellite. The main window is `"main"`; nothing else here
@@ -248,6 +276,9 @@ pub fn satellite_spec(
 /// itself. A window that is already open ignores it: it keeps the workspace it was switched to.
 ///
 /// Returns the label either way, so the caller can go straight on to focusing it.
+///
+/// `x`/`y` place the window's top-left corner, in logical screen pixels — where a tab dragged out of
+/// the editor was let go. Absent, the window cascades off the others as it always has.
 #[tauri::command]
 pub async fn open_satellite(
     app: AppHandle,
@@ -255,6 +286,8 @@ pub async fn open_satellite(
     ref_id: String,
     title: String,
     workspace_id: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
 ) -> Result<String, String> {
     let label = label_for(kind, &ref_id);
 
@@ -299,6 +332,19 @@ pub async fn open_satellite(
     }
 
     let look = crate::glass::stored(&app);
+    // A floating editor is one file, not a screen of the app: it opens at the size of a reference
+    // window you keep beside your work, and may be made much smaller than a screen would tolerate.
+    let ((width, height), (min_width, min_height)) = match kind {
+        SatelliteKind::File => ((820.0, 600.0), (360.0, 240.0)),
+        _ => ((1100.0, 760.0), (560.0, 420.0)),
+    };
+    // Where the tab was dropped, when it was dropped; cascaded off the main window otherwise rather
+    // than centred: four centred windows land on top of each other, which looks exactly like
+    // nothing happening.
+    let (left, top) = match (x, y) {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => (x, y),
+        _ => (cascade_offset(&app), cascade_offset(&app) + 24.0),
+    };
     let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         // As the main window (see `lib.rs`): without it WebView2 refuses every clipboard read.
         .enable_clipboard_access()
@@ -306,11 +352,9 @@ pub async fn open_satellite(
         // switched live on a window that was built able to show it. See `glass`.
         .transparent(true)
         .title(&title)
-        .inner_size(1100.0, 760.0)
-        .min_inner_size(560.0, 420.0)
-        // Cascaded off the main window rather than centred: four centred windows land on top of
-        // each other, which looks exactly like nothing happening.
-        .position(cascade_offset(&app), cascade_offset(&app) + 24.0);
+        .inner_size(width, height)
+        .min_inner_size(min_width, min_height)
+        .position(left, top);
     if let Some(script) = crate::glass::init_script(&look) {
         builder = builder.initialization_script(script);
     }
@@ -385,6 +429,11 @@ fn urlencode(value: &str) -> String {
             '=' => "%3D".to_string(),
             '#' => "%23".to_string(),
             ' ' => "%20".to_string(),
+            // Two a floating editor's path can carry and a rail id never did: `URLSearchParams`
+            // reads `+` as a space and `%` as the start of an escape, so `c++/a.cpp` or `100%.md`
+            // would come out the other end as a different file.
+            '%' => "%25".to_string(),
+            '+' => "%2B".to_string(),
             other => other.to_string(),
         })
         .collect()
@@ -557,7 +606,7 @@ pub async fn restore_satellites(app: AppHandle) -> usize {
         }
         // No workspace: a restored window goes back to the one it recorded, not to the main
         // window's.
-        if open_satellite(app.clone(), info.kind, info.ref_id, info.title, None).await.is_ok() {
+        if open_satellite(app.clone(), info.kind, info.ref_id, info.title, None, None, None).await.is_ok() {
             opened += 1;
         }
     }
@@ -1081,5 +1130,33 @@ mod tests {
     fn the_query_string_escapes_what_would_break_it() {
         assert_eq!(urlencode("api:requests"), "api%3Arequests");
         assert_eq!(urlencode("plain-id"), "plain-id");
+        // A floating editor's id is a path, and `URLSearchParams` would read these two back wrong.
+        assert_eq!(urlencode("p1:c++/100%.md"), "p1%3Ac%2B%2B/100%25.md");
+    }
+
+    /// A file's id is a path, and two paths that fold to the same spelling are still two files —
+    /// with the sanitised label the second window would have "already existed".
+    #[test]
+    fn two_files_never_share_a_window() {
+        let a = label_for(SatelliteKind::File, "p1:src/a-b.ts");
+        let b = label_for(SatelliteKind::File, "p1:src/a_b.ts");
+        assert_ne!(a, b);
+        assert_eq!(a, label_for(SatelliteKind::File, "p1:src/a-b.ts"), "the restore needs it stable");
+        assert!(is_satellite(&a));
+        assert!(
+            a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "{a} carries a character the window system may refuse"
+        );
+        assert_ne!(a, label_for(SatelliteKind::Repo, "p1:src/a-b.ts"));
+    }
+
+    /// A floating editor is a webview like any other, so it is a window like any other for the
+    /// ceilings — unlike the ask box.
+    #[test]
+    fn a_floating_editor_counts_against_the_ceiling() {
+        let app = desk(&[NOTES, ASK, ("sat-file-1", SatelliteKind::File, "p1:src/main.rs")]);
+        let registry = app.state::<SatelliteRegistry>();
+        let held = registry.open.lock().unwrap();
+        assert_eq!(SatelliteRegistry::counted(&held), 2);
     }
 }

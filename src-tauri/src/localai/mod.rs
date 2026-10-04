@@ -10,11 +10,9 @@
 //!
 //! # Two halves, and only one of them ships
 //!
-//! **The engine ships.** `llama-server` from llama.cpp lives in the app's resources next to the
-//! Java runtime the IRIS driver uses, put there at build time by `scripts/build-llama-runtime.mjs`
-//! exactly as `scripts/build-iris-runtime.mjs` puts the JRE there. Trimmed to the binary and its
-//! own `@rpath` closure it is ~22 MB on macOS and ~37 MB on Windows — smaller than the 36 MB JRE
-//! that is already in the bundle.
+//! **The engine ships.** `llama-server` from llama.cpp lives in the app's resources, put there at
+//! build time by `scripts/build-llama-runtime.mjs`. Trimmed to the binary and its own `@rpath`
+//! closure it is ~22 MB on macOS and ~37 MB on Windows.
 //!
 //! **The weights do not.** They are gigabytes, most users will not want them, and a model is a
 //! choice rather than a component — so [`catalogue`] describes what can be fetched and

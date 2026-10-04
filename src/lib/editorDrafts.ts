@@ -93,3 +93,30 @@ export async function writeDrafts(repoPath: string, drafts: EditorDraft[]): Prom
 export async function clearDrafts(repoPath: string): Promise<void> {
   await setSetting(keyFor(repoPath), "[]").catch(() => {});
 }
+
+/**
+ * A row two windows write: what is stored, minus what the writer owns, plus the writer's own drafts.
+ *
+ * The one row per repository was written by one window, whole, which was right while one window
+ * held every buffer of a repository. A floating editor holds one file of it in a webview of its
+ * own (`lib/editorIslands`), so the row now has two writers, and a whole-list write from either
+ * would drop the other's draft. `keep` says which stored entries belong to someone else: the main
+ * window keeps the paths a floating editor holds, a floating editor keeps every path but its own.
+ * The writer's entries win over a stored one for the same path.
+ */
+export function mergeDrafts(stored: EditorDraft[], keep: (path: string) => boolean, mine: EditorDraft[]): EditorDraft[] {
+  const own = new Set(mine.map((draft) => draft.path));
+  return [...stored.filter((draft) => keep(draft.path) && !own.has(draft.path)), ...mine];
+}
+
+/** Writes this window's drafts into the shared row, leaving the entries `keep` says are another
+ *  window's — see [`mergeDrafts`]. A read before the write, which is why the main window only pays
+ *  for it while a floating editor holds a file of the repository. */
+export async function updateDrafts(
+  repoPath: string,
+  keep: (path: string) => boolean,
+  mine: EditorDraft[],
+): Promise<void> {
+  const stored = await readDrafts(repoPath, Date.now());
+  await writeDrafts(repoPath, mergeDrafts(stored, keep, mine));
+}

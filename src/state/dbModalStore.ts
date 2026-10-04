@@ -10,14 +10,16 @@ import type { DbColumn, DbFilterTarget, DbForeignKey, DbKind, DbNodeRef } from "
  * connection dialog has to outlive the menu that opened it. `DatabaseView` is the sole renderer.
  */
 export type DbModal =
-  /** The connection dialog on a blank form for an engine already chosen. The engine is picked
+  /** The connection dialog on a blank form for a driver already chosen. The driver is picked
    * *before* the dialog opens — from the menu the `+` expands — because it decides what every field
    * in the dialog means, and a dialog that opens on Postgres when you came for IRIS asks you to
-   * undo a choice you never made. */
+   * undo a choice you never made. `driver` is a catalogue id (`lib/db/drivers`). */
   /** `group` is where in the tree it lands — set when the dialog was opened from a folder's own
    * menu, so "new connection here" files it there rather than dropping it in ungrouped for the
    * user to drag back. Absent means ungrouped. */
-  | { kind: "newConnection"; engine: DbKind; group?: string }
+  | { kind: "newConnection"; driver: string; group?: string }
+  /** The connection dialog on its Drivers list — on one driver, when `driverId` names it. */
+  | { kind: "drivers"; driverId?: string }
   /** The connection dialog on an existing connection. */
   | { kind: "connection"; connectionId: string }
   /** The connection dialog with nothing in particular selected — "manage my connections", which is

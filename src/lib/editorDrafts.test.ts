@@ -14,7 +14,7 @@ vi.mock("./tauri/commands", () => ({
   }),
 }));
 
-import { clearDrafts, readDrafts, writeDrafts } from "./editorDrafts";
+import { clearDrafts, mergeDrafts, readDrafts, updateDrafts, writeDrafts } from "./editorDrafts";
 
 const NOW = 1_000_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -74,5 +74,39 @@ describe("editor drafts", () => {
     await writeDrafts("/r", [{ path: "a.ts", content: "1", at: NOW }]);
     await clearDrafts("/r");
     expect(await readDrafts("/r", NOW)).toEqual([]);
+  });
+});
+
+/**
+ * Two writers on one row: the main window, and a floating editor holding one of the repository's
+ * files in a webview of its own. Each replaces only what it owns, so neither can drop the other's
+ * unsaved text from the journal — a whole-list write from the main window used to be exactly that.
+ */
+describe("editor drafts shared with a floating editor", () => {
+  const draft = (path: string, content: string) => ({ path, content, at: NOW });
+
+  it("keeps the other window's entries and replaces its own", () => {
+    const stored = [draft("main.ts", "old"), draft("floating.ts", "theirs"), draft("gone.ts", "x")];
+    // The main window: a floating editor holds `floating.ts`, everything else is its own.
+    const merged = mergeDrafts(stored, (path) => path === "floating.ts", [draft("main.ts", "new")]);
+    expect(merged).toEqual([draft("floating.ts", "theirs"), draft("main.ts", "new")]);
+  });
+
+  it("lets a floating editor take its own entry out when the file is clean again", () => {
+    const stored = [draft("main.ts", "mine"), draft("floating.ts", "dirty")];
+    expect(mergeDrafts(stored, (path) => path !== "floating.ts", [])).toEqual([draft("main.ts", "mine")]);
+  });
+
+  it("writes through the row a launch reads back", async () => {
+    // `updateDrafts` reads the row as of now, so these are stamped now rather than at `NOW`.
+    const at = Date.now();
+    await writeDrafts("/r", [{ path: "a.ts", content: "main", at }]);
+    await updateDrafts("/r", (path) => path !== "b.ts", [{ path: "b.ts", content: "floating", at }]);
+    expect(await readDrafts("/r", at)).toEqual(
+      expect.arrayContaining([
+        { path: "a.ts", content: "main", at },
+        { path: "b.ts", content: "floating", at },
+      ]),
+    );
   });
 });

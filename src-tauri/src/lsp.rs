@@ -63,6 +63,9 @@ struct Session {
     /// they read configuration from `initializationOptions`, from the notification, or from the
     /// pull request — so it is held here and handed over through all three.
     settings: Value,
+    /// What `initialize` answered, kept for a second window that joins this server instead of
+    /// starting its own — see [`capabilities_of`].
+    capabilities: Mutex<Value>,
 }
 
 /// Every running server, keyed by the id the frontend made up (`{projectId}:{serverId}`).
@@ -83,6 +86,18 @@ fn session(id: &str) -> Option<Arc<Session>> {
 
 pub fn is_running(id: &str) -> bool {
     session(id).is_some()
+}
+
+/// The capabilities of a server that is already running, or `None` when there is none.
+///
+/// For a floating editor window (`lib/editorIslands`): it holds one file of a project whose servers
+/// the main window has already started, and starting its own would *replace* them — a start on a
+/// taken id is a restart (see [`start`]) — taking the main window's open documents with them. So it
+/// joins instead, which needs to know what the server can do without asking it a second time.
+pub fn capabilities_of(id: &str) -> Option<Value> {
+    let session = session(id)?;
+    let capabilities = session.capabilities.lock().map(|held| held.clone()).unwrap_or(Value::Null);
+    Some(capabilities)
 }
 
 impl Session {
@@ -156,7 +171,14 @@ fn client_capabilities() -> Value {
             "workspaceFolders": true,
             "configuration": true,
             "didChangeConfiguration": { "dynamicRegistration": false },
-            "symbol": { "dynamicRegistration": false }
+            "symbol": { "dynamicRegistration": false },
+            // A file or folder moved in the explorer is announced before it moves
+            // (`workspace/willRenameFiles`, whose edits the editor applies — rust-analyzer's rewrite of
+            // the `mod` line naming a renamed module) and after (`didRenameFiles`). See `moveImports.ts`.
+            "fileOperations": { "dynamicRegistration": false, "willRename": true, "didRename": true },
+            // A server whose hints went stale says so — rust-analyzer does once indexing ends — and the
+            // reader below passes it on as `lsp:refresh`, which has the editor ask again.
+            "inlayHint": { "refreshSupport": true }
         },
         "textDocument": {
             "synchronization": {
@@ -196,6 +218,9 @@ fn client_capabilities() -> Value {
             "implementation": { "dynamicRegistration": false, "linkSupport": false },
             "references": { "dynamicRegistration": false },
             "documentHighlight": { "dynamicRegistration": false },
+            // Types and parameter names drawn beside the code. clangd offers them only to a client
+            // that declares this; rust-analyzer offers them either way.
+            "inlayHint": { "dynamicRegistration": false },
             "documentSymbol": {
                 "dynamicRegistration": false,
                 "hierarchicalDocumentSymbolSupport": true,
@@ -311,6 +336,7 @@ pub async fn start(
         pending: Mutex::new(HashMap::new()),
         child: Mutex::new(Some(child)),
         settings: settings.clone(),
+        capabilities: Mutex::new(Value::Null),
     });
 
     // stderr is drained rather than ignored. A pipe nobody reads fills, and the write that fills
@@ -350,6 +376,14 @@ pub async fn start(
                 // A request *from* the server. Answer everything, even with a refusal.
                 (Some(method), Some(id)) => {
                     handle_server_request(&reader_session, method, id, &message);
+                    // The one of them the editor has to hear about: hints drawn from a cold index are
+                    // stale once it is warm, and only the editor can ask for them again. Emitted
+                    // here rather than in `handle_server_request`, which has no `AppHandle` to emit
+                    // with — it is also what the live tests drive.
+                    if method == "workspace/inlayHint/refresh" {
+                        let _ = reader_app
+                            .emit("lsp:refresh", json!({ "session_id": reader_id, "what": "inlayHint" }));
+                    }
                 }
                 // A notification.
                 (Some(method), None) => {
@@ -405,11 +439,16 @@ pub async fn start(
         session.notify("workspace/didChangeConfiguration", json!({ "settings": settings }));
     }
 
+    let capabilities = capabilities.get("capabilities").cloned().unwrap_or(Value::Null);
+    if let Ok(mut held) = session.capabilities.lock() {
+        *held = capabilities.clone();
+    }
+
     if let Ok(mut registry) = registry().lock() {
         registry.insert(session_id.to_string(), Arc::clone(&session));
     }
 
-    Ok(capabilities.get("capabilities").cloned().unwrap_or(Value::Null))
+    Ok(capabilities)
 }
 
 
@@ -731,6 +770,7 @@ mod live_tests {
             pending: Mutex::new(HashMap::new()),
             child: Mutex::new(Some(child)),
             settings: Value::Null,
+            capabilities: Mutex::new(Value::Null),
         });
 
         let reader = Arc::clone(&session);

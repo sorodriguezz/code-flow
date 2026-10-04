@@ -6,6 +6,7 @@ import { useWindowStore } from "../state/windowStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { useNavigationStore } from "../state/navigationStore";
 import { useEditorCommandStore } from "../state/editorCommandStore";
+import { useEditorDisplayStore } from "../state/editorDisplayStore";
 import { useApiCommandStore } from "../state/apiCommandStore";
 import { useDbCommandStore } from "../state/dbCommandStore";
 import { useDbStore } from "../state/dbStore";
@@ -92,6 +93,8 @@ export type ShortcutId =
   | "editor.toggleComment"
   | "editor.formatDocument"
   | "editor.findReferences"
+  | "editor.organizeImports"
+  | "editor.toggleWordWrap"
   | "editor.selectNextOccurrence"
   | "editor.moveLineUp"
   | "editor.moveLineDown"
@@ -751,6 +754,39 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "editor.findReferences",
     defaultChord: "Alt+Shift+F12",
     monacoCommand: "cf-find-references",
+  },
+  /**
+   * Organize Imports — the compiler's: unused imports out, the rest merged per module and sorted
+   * (`tsRefactors`).
+   *
+   * ⇧⌥O because it is VS Code's, and because it is already Monaco's own chord for the action that
+   * runs it: `editor.action.organizeImports` asks the code action providers for
+   * `source.organizeImports` and applies the one answer. Listed here so it moves like every other
+   * editor key — and on macOS, where ⌥⇧O types `Ø` and no recorded chord can match it, Monaco's own
+   * binding of the physical key is still there to catch it (the reason `editor.toggleWordWrap` gives).
+   */
+  {
+    id: "editor.organizeImports",
+    group: "editor",
+    labelKey: "editor.organizeImports",
+    defaultChord: "Alt+Shift+O",
+    monacoCommand: "editor.action.organizeImports",
+  },
+  /**
+   * Word wrap on and off — the Editor's preference (`editorDisplayStore`), not one pane's.
+   *
+   * ⌥Z because it is VS Code's, and free here: no command in this table and nothing in Monaco's
+   * claims it. Two owners like ⌘S: with the caret in the code `installEditorShortcuts` hands it to
+   * `cf-toggle-word-wrap` on that editor; anywhere else in the Editor — the tree, a tab — `run` flips
+   * the same switch. A chord without ⌘ is held back while typing in a field, so it never eats a `z`.
+   */
+  {
+    id: "editor.toggleWordWrap",
+    group: "editor",
+    labelKey: "editor.toggleWordWrap",
+    defaultChord: "Alt+Z",
+    monacoCommand: "cf-toggle-word-wrap",
+    run: () => void useEditorDisplayStore.getState().toggleWordWrap(),
   },
   {
     id: "editor.closeTab",

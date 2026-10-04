@@ -42,8 +42,11 @@ export const MAIN_LABEL = "main";
  * module, it carries the `sat-` prefix so `capabilities/default.json` covers it, and the registry
  * counts it. It scopes to nothing — no workspace, no repository — which is why [`close_all`] leaves
  * it alone when the main window hides to the tray.
+ *
+ * `file` is one editor tab torn out of the main window into a floating window of its own — see
+ * `lib/editorIslands`. Its `refId` is `"<project id>:<path>"`.
  */
-export type SatelliteKind = "app" | "repo" | "quick";
+export type SatelliteKind = "app" | "repo" | "quick" | "file";
 
 /**
  * The kinds a window can be *detached into*, which is not all of them.
@@ -102,7 +105,8 @@ export function parseIdentity(label: string, search: string): WindowIdentity {
     // Rust builds and this list omits is the same silent failure as an unreadable query string,
     // except that it happens on a window that is working perfectly: the webview loads, the label is
     // right, and `SatelliteApp` is handed `satellite: null` and paints a skeleton forever.
-    satellite: (kind === "app" || kind === "repo" || kind === "quick") && refId ? { kind, refId } : null,
+    satellite:
+      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file") && refId ? { kind, refId } : null,
   };
 }
 

@@ -32,7 +32,8 @@ import { followRepoChanges } from "./lib/repoRefresh";
 import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectionsStore";
 import { WINDOW } from "./lib/windowIdentity";
 import { startWindowBoundsTracking } from "./lib/windowControls";
-import { useRemoteActionShortcuts } from "./lib/useGlobalShortcuts";
+import { useFloatingEditorShortcuts, useRemoteActionShortcuts } from "./lib/useGlobalShortcuts";
+import { parseFileIslandRef } from "./lib/editorIslands";
 import { onWindowMessage } from "./lib/windowBus";
 import { showDiagramHere } from "./lib/dbmlBridge";
 import { showChatHere } from "./lib/chatBridge";
@@ -404,6 +405,105 @@ function RepoTabs({ tab }: { tab: MainView }) {
 }
 
 /**
+ * The window that holds one file torn out of the main window's editor — a floating editor, VS
+ * Code's floating editor window. See `lib/editorIslands` for how its buffer gets here and back.
+ *
+ * Built like `RepoWindow` underneath, and much lighter on top: its project is its file's, derived
+ * rather than chosen (and not recorded — see `workspaceStore`), its `repoStore` reads the working
+ * tree for the change marks and nothing more, and it watches the repository so a file changed on
+ * disk under it is noticed here as it is in the main window.
+ */
+function FileWindow({ refId }: { refId: string }) {
+  const target = parseFileIslandRef(refId);
+  const projectId = target?.projectId ?? null;
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const projects = useWorkspaceStore((s) =>
+    s.activeWorkspaceId ? s.projectsByWorkspace[s.activeWorkspaceId] : undefined,
+  );
+  const t = useT();
+  // Save, Save All, close and word wrap from anywhere in the window — see the hook.
+  useFloatingEditorShortcuts();
+
+  const project = projectId ? (projects?.find((p) => p.id === projectId) ?? null) : null;
+  /** Whether the store already says this window's project. The editor is not mounted before it
+   *  does: it reads its project from the store, and a child's effects run before this component's —
+   *  mounted any earlier, it would claim its file from whichever project the store happened to hold
+   *  (the workspace load picks one of its own). */
+  const settled = useWorkspaceStore((s) => project !== null && s.activeProjectId === project.id);
+
+  // The editor reads its project from the workspace store, as everywhere else. Set without being
+  // recorded: `setActiveProject` would write a settings row under this window's label, which is one
+  // per file. The view is the Editor's, which is what its file watcher and its commands check.
+  useEffect(() => {
+    if (!project) return;
+    useWorkspaceStore.setState({ activeProjectId: project.id });
+    useUiStore.setState({ activeView: "editor" });
+    useRepoStore.setState({ repoPath: project.local_path });
+    void useRepoStore.getState().refreshStatus({ silent: true });
+  }, [project]);
+
+  // Its own claim on the repository's watcher, as a repository window makes: released with the
+  // window, whatever the main window does with the same repository.
+  const repoPath = project?.local_path ?? null;
+  useEffect(() => {
+    if (!repoPath) return;
+    void startWatching(repoPath).catch(() => {});
+    const stopFollowing = followRepoChanges(() => repoPath, { statusOnly: true });
+    return () => {
+      stopFollowing();
+      void stopWatching(repoPath).catch(() => {});
+    };
+  }, [repoPath]);
+
+  // Opened on the main window's workspace, which is normally the file's. When it is not, go where
+  // the file is — derived, not picked, exactly as `RepoWindow` does.
+  useEffect(() => {
+    if (project || !projectId || !workspaceId || !projects) return;
+    let cancelled = false;
+    void getProject(projectId)
+      .then((row) => {
+        if (cancelled || !row || row.workspace_id === workspaceId) return;
+        void useWorkspaceStore.getState().followWorkspace(row.workspace_id);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [project, projectId, projects, workspaceId]);
+
+  if (!target) {
+    return (
+      <div className="cf-sheet min-h-0 flex-1">
+        <EmptyState icon={Unlink} title={t("windows.unknownApp")} subtitle={refId} />
+      </div>
+    );
+  }
+  if (workspaceId && projects && !project) {
+    return (
+      <div className="cf-sheet min-h-0 flex-1">
+        <EmptyState icon={FolderGit2} title={t("windows.repoElsewhereTitle")} subtitle={t("windows.repoElsewhereBody")} />
+      </div>
+    );
+  }
+  if (!project || !settled) {
+    return (
+      <div className="cf-sheet min-h-0 flex-1">
+        <ViewSkeleton />
+      </div>
+    );
+  }
+  return (
+    <div className="cf-sheet min-h-0 flex-1 overflow-hidden">
+      <ErrorBoundary resetKey={refId}>
+        <Suspense fallback={<ViewSkeleton />}>
+          <EditorView island={{ path: target.path }} />
+        </Suspense>
+      </ErrorBoundary>
+    </div>
+  );
+}
+
+/**
  * The quick-ask window: one composer, one answer, and nothing else at all.
  *
  * It is a satellite by construction — a second webview with none of the shell — but it is not a
@@ -475,6 +575,8 @@ export default function SatelliteApp() {
           <div className="cf-sheet min-h-0 flex-1">
             <AppWindow refId={spec.refId} />
           </div>
+        ) : kind === "file" ? (
+          <FileWindow refId={spec.refId} />
         ) : (
           <RepoWindow projectId={spec.refId} />
         )}

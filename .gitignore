@@ -23,15 +23,17 @@ dist-ssr
 *.sln
 *.sw?
 
-# Built by scripts/build-iris-runtime.mjs: the trimmed Java runtime, the InterSystems JDBC driver
-# downloaded from Maven Central, and the compiled bridge jar. All three are build outputs (~37 MB),
-# reproducible from `pnpm iris:runtime` — the source is src-tauri/java/.
+# Built by scripts/build-jdbc-bridge.mjs: the compiled JDBC bridge jar, reproducible from
+# `pnpm jdbc:bridge` — the source is src-tauri/java/. (The Java runtime and the drivers are not build
+# outputs at all any more: the app downloads them on first use.)
 #
 # The *contents* are ignored, not the directory: `tauri.conf.json` lists it under `bundle.resources`
 # and tauri-build refuses to compile when a configured resource path doesn't exist. Ignoring the
 # directory itself would break `cargo check` on every fresh clone.
-src-tauri/resources/iris/*
-!src-tauri/resources/iris/README.md
+src-tauri/resources/jdbc/*
+!src-tauri/resources/jdbc/README.md
+# What the old runtime build left behind in a checkout that ran it.
+src-tauri/resources/iris/
 
 # Built by `pnpm build:mobile` (vite.mobile.config.ts): the remote-control client a paired phone
 # loads. A build output like the two above, reproducible from src/mobile/.

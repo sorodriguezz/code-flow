@@ -199,7 +199,23 @@ export const LANGUAGE_SERVERS: LanguageServer[] = [
     versionArgs: ["version"],
     rootFiles: ["go.mod", "go.work"],
     initializationOptions: {},
-    settings: { gopls: { usePlaceholders: true, staticcheck: false } },
+    // gopls computes no inlay hints until told which, unlike rust-analyzer and clangd. These are the
+    // ones that say what Go leaves unsaid: a `:=`'s type, a range variable's, a literal argument's
+    // parameter, a constant's value. The composite-literal ones would repeat field names Go code
+    // already spells out, and are left off. Whether any are drawn is the Editor's switch.
+    settings: {
+      gopls: {
+        usePlaceholders: true,
+        staticcheck: false,
+        hints: {
+          assignVariableTypes: true,
+          rangeVariableTypes: true,
+          parameterNames: true,
+          constantValues: true,
+          functionTypeParameters: true,
+        },
+      },
+    },
     install: "go install golang.org/x/tools/gopls@latest",
   },
   {

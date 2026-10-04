@@ -61,12 +61,12 @@ import { useDbModalStore } from "../../state/dbModalStore";
 import { useDbCommandStore } from "../../state/dbCommandStore";
 import { useToastStore } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
+import { useConnectionDriver } from "../../state/driverStore";
 import { useT } from "../../state/languageStore";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
 import {
   EMPTY_QUERY_OPTIONS,
-  engineInfo,
   hasQueryOptions,
   type DbForeignKey,
   type DbKind,
@@ -143,7 +143,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   /** What a ⌘-drag must not throw away: the selection as it stood when the drag began. */
   const kept = useRef<Set<number>>(new Set());
 
-  const engine = connection ? engineInfo(connection.kind) : null;
+  const { driver: connectionDriver, engine } = useConnectionDriver(connection);
   /** Read-only connections get no import: it writes, and the backend would refuse it anyway. */
   const readOnly = connection ? parseSpec(connection)?.read_only ?? false : false;
   /**
@@ -793,7 +793,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
       {/* Toolbar. 44px like every surface's, and allowed to wrap: on a narrow panel the Discard and
           Apply pair drops to a second line rather than being clipped off the right edge. */}
       <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-b border-[var(--cf-border)] py-[7px] pl-3.5 pr-3">
-        {connection && <EngineBadge kind={connection.kind} label={engine?.label ?? ""} size={18} />}
+        {connection && <EngineBadge kind={connection.kind} driver={connectionDriver} label={engine?.label ?? ""} size={18} />}
         {/* Which connection these rows came from, in words. The engine badge says *what kind* of
             server it is, which is not the same question — two of the three connections in a
             workspace are usually the same engine, and the one you must not confuse is production

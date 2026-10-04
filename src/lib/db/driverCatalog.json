@@ -1,0 +1,2028 @@
+{
+  "$comment": "Every database CodeFlow can reach and what each one needs to be reached. Read by both halves: datasource/catalog.rs compiles it in, src/lib/db/drivers.ts imports it. Edited by hand. Every downloadable file carries the hash it must have — Maven Central's sha1, or a sha256 taken when the entry was written — and the download is refused when it differs. URL templates: {field}, {field::default}, and [optional parts] kept only when every field inside has a value.",
+  "runtime": {
+    "java": 21
+  },
+  "drivers": [
+    {
+      "id": "postgresql",
+      "name": "PostgreSQL",
+      "support": "complete",
+      "engine": "postgres",
+      "color": "#3b82f6",
+      "mark": "Pg",
+      "defaultPort": 5432,
+      "aliases": [
+        "postgres",
+        "pg",
+        "psql"
+      ],
+      "homepage": "https://www.postgresql.org/"
+    },
+    {
+      "id": "supabase",
+      "name": "Supabase",
+      "support": "complete",
+      "engine": "supabase",
+      "color": "#3ecf8e",
+      "mark": "Sb",
+      "defaultPort": 5432,
+      "aliases": [
+        "postgres"
+      ],
+      "homepage": "https://supabase.com/"
+    },
+    {
+      "id": "aurora-postgresql",
+      "name": "Amazon Aurora PostgreSQL",
+      "support": "complete",
+      "engine": "postgres",
+      "color": "#527fff",
+      "mark": "Au",
+      "defaultPort": 5432,
+      "aliases": [
+        "aws",
+        "rds",
+        "aurora"
+      ],
+      "homepage": "https://aws.amazon.com/rds/aurora/"
+    },
+    {
+      "id": "cockroachdb",
+      "name": "CockroachDB",
+      "support": "complete",
+      "engine": "postgres",
+      "color": "#6933ff",
+      "mark": "Cr",
+      "defaultPort": 26257,
+      "defaultUser": "root",
+      "defaultDatabase": "defaultdb",
+      "aliases": [
+        "cockroach",
+        "crdb"
+      ],
+      "homepage": "https://www.cockroachlabs.com/"
+    },
+    {
+      "id": "greenplum",
+      "name": "Greenplum",
+      "support": "complete",
+      "engine": "postgres",
+      "color": "#2e9e8f",
+      "mark": "Gp",
+      "defaultPort": 5432,
+      "defaultUser": "gpadmin",
+      "aliases": [
+        "gpdb"
+      ],
+      "homepage": "https://greenplum.org/"
+    },
+    {
+      "id": "yugabytedb",
+      "name": "YugabyteDB",
+      "support": "complete",
+      "engine": "postgres",
+      "color": "#ff6e42",
+      "mark": "Yb",
+      "defaultPort": 5433,
+      "defaultUser": "yugabyte",
+      "defaultDatabase": "yugabyte",
+      "aliases": [
+        "yugabyte",
+        "ysql"
+      ],
+      "homepage": "https://www.yugabyte.com/"
+    },
+    {
+      "id": "mysql",
+      "name": "MySQL",
+      "support": "complete",
+      "engine": "mysql",
+      "color": "#00758f",
+      "mark": "My",
+      "defaultPort": 3306,
+      "aliases": [
+        "mysql"
+      ],
+      "homepage": "https://www.mysql.com/"
+    },
+    {
+      "id": "aurora-mysql",
+      "name": "Amazon Aurora MySQL",
+      "support": "complete",
+      "engine": "mysql",
+      "color": "#527fff",
+      "mark": "Au",
+      "defaultPort": 3306,
+      "aliases": [
+        "aws",
+        "rds",
+        "aurora"
+      ],
+      "homepage": "https://aws.amazon.com/rds/aurora/"
+    },
+    {
+      "id": "tidb",
+      "name": "TiDB",
+      "support": "complete",
+      "engine": "mysql",
+      "color": "#e30c34",
+      "mark": "Ti",
+      "defaultPort": 4000,
+      "defaultUser": "root",
+      "aliases": [
+        "pingcap"
+      ],
+      "homepage": "https://www.pingcap.com/"
+    },
+    {
+      "id": "singlestore-mysql",
+      "name": "SingleStore (MySQL driver)",
+      "support": "complete",
+      "engine": "mysql",
+      "color": "#8800cc",
+      "mark": "S2",
+      "defaultPort": 3306,
+      "defaultUser": "root",
+      "aliases": [
+        "memsql",
+        "singlestore"
+      ],
+      "homepage": "https://www.singlestore.com/"
+    },
+    {
+      "id": "mariadb",
+      "name": "MariaDB",
+      "support": "complete",
+      "engine": "mariadb",
+      "color": "#c0765a",
+      "mark": "Ma",
+      "defaultPort": 3306,
+      "aliases": [
+        "mysql"
+      ],
+      "homepage": "https://mariadb.org/"
+    },
+    {
+      "id": "sqlserver",
+      "name": "Microsoft SQL Server",
+      "support": "complete",
+      "engine": "sqlserver",
+      "color": "#ef4444",
+      "mark": "Ms",
+      "defaultPort": 1433,
+      "aliases": [
+        "mssql",
+        "sql server",
+        "tsql"
+      ],
+      "homepage": "https://www.microsoft.com/sql-server"
+    },
+    {
+      "id": "azure-sql",
+      "name": "Azure SQL Database",
+      "support": "complete",
+      "engine": "sqlserver",
+      "color": "#0078d4",
+      "mark": "Az",
+      "defaultPort": 1433,
+      "defaultSsl": "require",
+      "aliases": [
+        "azure",
+        "mssql"
+      ],
+      "homepage": "https://azure.microsoft.com/products/azure-sql/database"
+    },
+    {
+      "id": "azure-synapse",
+      "name": "Azure Synapse Analytics",
+      "support": "complete",
+      "engine": "sqlserver",
+      "color": "#2f8fd8",
+      "mark": "Sy",
+      "defaultPort": 1433,
+      "defaultSsl": "require",
+      "aliases": [
+        "azure",
+        "synapse",
+        "dw"
+      ],
+      "homepage": "https://azure.microsoft.com/products/synapse-analytics"
+    },
+    {
+      "id": "sqlite",
+      "name": "SQLite",
+      "support": "complete",
+      "engine": "sqlite",
+      "color": "#0ea5e9",
+      "mark": "Sl",
+      "defaultPort": 0,
+      "aliases": [
+        "sqlite3"
+      ],
+      "homepage": "https://sqlite.org/"
+    },
+    {
+      "id": "mongodb",
+      "name": "MongoDB",
+      "support": "complete",
+      "engine": "mongodb",
+      "color": "#22c55e",
+      "mark": "Mg",
+      "defaultPort": 27017,
+      "aliases": [
+        "mongo",
+        "atlas"
+      ],
+      "homepage": "https://www.mongodb.com/"
+    },
+    {
+      "id": "documentdb",
+      "name": "Amazon DocumentDB",
+      "support": "complete",
+      "engine": "mongodb",
+      "color": "#2e73b8",
+      "mark": "Dd",
+      "defaultPort": 27017,
+      "defaultSsl": "require",
+      "aliases": [
+        "aws",
+        "mongo"
+      ],
+      "homepage": "https://aws.amazon.com/documentdb/"
+    },
+    {
+      "id": "redis",
+      "name": "Redis",
+      "support": "complete",
+      "engine": "redis",
+      "color": "#dc382d",
+      "mark": "Rd",
+      "defaultPort": 6379,
+      "aliases": [
+        "valkey",
+        "keydb"
+      ],
+      "homepage": "https://redis.io/"
+    },
+    {
+      "id": "oracle",
+      "name": "Oracle",
+      "support": "complete",
+      "engine": "oracle",
+      "color": "#c74634",
+      "mark": "Or",
+      "defaultPort": 1521,
+      "class": "oracle.jdbc.OracleDriver",
+      "files": [
+        {
+          "maven": "com.oracle.database.jdbc:ojdbc11:23.26.3.0.0",
+          "name": "ojdbc11-23.26.3.0.0.jar",
+          "size": 7779716,
+          "sha256": "764cc3f88454d1be117e155d01ed617467b984c9c68f13090dd6083799d2bb8c"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Service name",
+          "template": "jdbc:oracle:thin:@//{host::localhost}[:{port::1521}]/{database::FREEPDB1}"
+        }
+      ],
+      "license": "https://www.oracle.com/downloads/licenses/oracle-free-license.html",
+      "aliases": [
+        "ojdbc"
+      ],
+      "homepage": "https://www.oracle.com/database/"
+    },
+    {
+      "id": "iris",
+      "name": "InterSystems IRIS",
+      "support": "complete",
+      "engine": "iris",
+      "color": "#8b5cf6",
+      "mark": "Ir",
+      "defaultPort": 1972,
+      "class": "com.intersystems.jdbc.IRISDriver",
+      "files": [
+        {
+          "maven": "com.intersystems:intersystems-jdbc:3.11.0",
+          "name": "intersystems-jdbc-3.11.0.jar",
+          "size": 607851,
+          "sha256": "08469804eadbfe62f8139b42cd81af814180300f006d5132dd1ab11c8f9d80ce"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:IRIS://{host::localhost}[:{port::1972}]/{database::USER}"
+        }
+      ],
+      "license": "https://www.intersystems.com/IERTU/",
+      "aliases": [
+        "cache",
+        "intersystems"
+      ],
+      "homepage": "https://www.intersystems.com/products/intersystems-iris/"
+    },
+    {
+      "id": "oracle-legacy",
+      "name": "Oracle 10g–11g (legacy)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#c74634",
+      "mark": "Or",
+      "defaultPort": 1521,
+      "class": "oracle.jdbc.OracleDriver",
+      "files": [
+        {
+          "maven": "com.oracle.database.jdbc:ojdbc6:11.2.0.4",
+          "name": "ojdbc6-11.2.0.4.jar",
+          "size": 2739670,
+          "sha1": "a483a046eee2f404d864a6ff5b09dc0e1be3fe6c"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Service name",
+          "template": "jdbc:oracle:thin:@//{host::localhost}[:{port::1521}]/{database::orcl}"
+        },
+        {
+          "name": "SID",
+          "template": "jdbc:oracle:thin:@{host::localhost}:{port::1521}:{database::orcl}"
+        }
+      ],
+      "sql": {
+        "dialect": "oracle",
+        "paging": "none"
+      },
+      "license": "https://www.oracle.com/downloads/licenses/oracle-free-license.html",
+      "aliases": [
+        "oracle 9",
+        "oracle 10",
+        "oracle 11"
+      ],
+      "homepage": "https://www.oracle.com/database/"
+    },
+    {
+      "id": "redshift",
+      "name": "Amazon Redshift",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#2e5ea8",
+      "mark": "Rs",
+      "defaultPort": 5439,
+      "defaultDatabase": "dev",
+      "class": "com.amazon.redshift.Driver",
+      "files": [
+        {
+          "maven": "com.amazon.redshift:redshift-jdbc42:2.2.9",
+          "name": "redshift-jdbc42-2.2.9.jar",
+          "size": 1127526,
+          "sha1": "d7ffb85e9d6d192f4c976ca3f7886ce4ab196f6c"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:redshift://{host::localhost}[:{port::5439}]/{database::dev}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "aws"
+      ],
+      "homepage": "https://aws.amazon.com/redshift/"
+    },
+    {
+      "id": "athena",
+      "name": "Amazon Athena",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#8c4fff",
+      "mark": "At",
+      "defaultPort": 0,
+      "host": false,
+      "class": "com.amazon.athena.jdbc.AthenaDriver",
+      "files": [
+        {
+          "url": "https://downloads.athena.us-east-1.amazonaws.com/drivers/JDBC/3.6.0/athena-jdbc-3.6.0-with-dependencies.jar",
+          "name": "athena-jdbc-3.6.0-with-dependencies.jar",
+          "size": 32625175,
+          "sha256": "adac98fbe12bb95a89d60ac90a9b7cd2bb982c2e1d383a2ef0aa3b47ca146bf8"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:athena://Region={region::us-east-1};WorkGroup={workgroup::primary}[;OutputLocation={output}]"
+        }
+      ],
+      "properties": {
+        "AccessKeyId": "{user}",
+        "SecretAccessKey": "{password}"
+      },
+      "labels": {
+        "user": "Access key ID",
+        "password": "Secret access key",
+        "region": "Region",
+        "workgroup": "Workgroup",
+        "output": "S3 output location"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "aws",
+        "s3",
+        "presto",
+        "trino"
+      ],
+      "homepage": "https://aws.amazon.com/athena/"
+    },
+    {
+      "id": "dynamodb",
+      "name": "Amazon DynamoDB",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#4053d6",
+      "mark": "Dy",
+      "defaultPort": 0,
+      "host": false,
+      "class": "com.dbvis.driver.dynamodb.jdbc.DynamoDbDriver",
+      "files": [
+        {
+          "maven": "com.dbvis:dynamodb-jdbc:1.6",
+          "name": "dynamodb-jdbc-1.6.jar",
+          "size": 20465188,
+          "sha1": "0c388dcfb4e9e4b8f7ef8118a0c090638a94b922"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:dynamodb:"
+        }
+      ],
+      "properties": {
+        "Region": "{region::us-east-1}",
+        "AccessKey": "{user}",
+        "SecretKey": "{password}",
+        "Host": "{endpoint}"
+      },
+      "labels": {
+        "user": "Access key ID",
+        "password": "Secret access key",
+        "endpoint": "Local endpoint host",
+        "region": "Region"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "none"
+      },
+      "aliases": [
+        "aws",
+        "partiql",
+        "nosql"
+      ],
+      "homepage": "https://aws.amazon.com/dynamodb/"
+    },
+    {
+      "id": "cassandra",
+      "name": "Apache Cassandra",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#1287b1",
+      "mark": "Ca",
+      "defaultPort": 9042,
+      "class": "com.ing.data.cassandra.jdbc.CassandraDriver",
+      "files": [
+        {
+          "url": "https://github.com/ing-bank/cassandra-jdbc-wrapper/releases/download/v5.0.3/cassandra-jdbc-wrapper-5.0.3-bundle.jar",
+          "name": "cassandra-jdbc-wrapper-5.0.3-bundle.jar",
+          "size": 36107065,
+          "sha256": "92e30552772721257d010f648fae590f0a207d6bf0486bfa1b1f7ff234febaba"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:cassandra://{host::localhost}[:{port::9042}]/{database}?localdatacenter={datacenter::datacenter1}"
+        }
+      ],
+      "labels": {
+        "database": "Keyspace",
+        "datacenter": "Local datacenter"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit"
+      },
+      "aliases": [
+        "cql",
+        "scylla",
+        "astra",
+        "keyspaces"
+      ],
+      "homepage": "https://cassandra.apache.org/"
+    },
+    {
+      "id": "derby-embedded",
+      "name": "Apache Derby (Embedded)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#d22128",
+      "mark": "Dr",
+      "defaultPort": 0,
+      "file": true,
+      "class": "org.apache.derby.iapi.jdbc.AutoloadedDriver",
+      "files": [
+        {
+          "maven": "org.apache.derby:derby:10.17.1.0",
+          "name": "derby-10.17.1.0.jar",
+          "size": 3544643,
+          "sha1": "e90e61e8ee731614a9bafd3d81155e09fff5e80c"
+        },
+        {
+          "maven": "org.apache.derby:derbyshared:10.17.1.0",
+          "name": "derbyshared-10.17.1.0.jar",
+          "size": 88762,
+          "sha1": "e6eac60d1b80b3781dff97ccef88fa131043f2a5"
+        },
+        {
+          "maven": "org.apache.derby:derbytools:10.17.1.0",
+          "name": "derbytools-10.17.1.0.jar",
+          "size": 253605,
+          "sha1": "6d1a4e5e0f5c26516abbba85ece081506b9ad2e1"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:derby:{file}[;create={create}]"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "offset-fetch"
+      },
+      "aliases": [
+        "javadb"
+      ],
+      "homepage": "https://db.apache.org/derby/",
+      "labels": {
+        "create": "Create if missing (true/false)"
+      }
+    },
+    {
+      "id": "derby-remote",
+      "name": "Apache Derby (Remote)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#d22128",
+      "mark": "Dr",
+      "defaultPort": 1527,
+      "class": "org.apache.derby.client.ClientAutoloadedDriver",
+      "files": [
+        {
+          "maven": "org.apache.derby:derbyclient:10.17.1.0",
+          "name": "derbyclient-10.17.1.0.jar",
+          "size": 600922,
+          "sha1": "de3c15ed06ad5e438720fff251d41de12ec0ee1f"
+        },
+        {
+          "maven": "org.apache.derby:derbyshared:10.17.1.0",
+          "name": "derbyshared-10.17.1.0.jar",
+          "size": 88762,
+          "sha1": "e6eac60d1b80b3781dff97ccef88fa131043f2a5"
+        },
+        {
+          "maven": "org.apache.derby:derbytools:10.17.1.0",
+          "name": "derbytools-10.17.1.0.jar",
+          "size": 253605,
+          "sha1": "6d1a4e5e0f5c26516abbba85ece081506b9ad2e1"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:derby://{host::localhost}[:{port::1527}]/{database}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "offset-fetch"
+      },
+      "aliases": [
+        "javadb"
+      ],
+      "homepage": "https://db.apache.org/derby/"
+    },
+    {
+      "id": "hive",
+      "name": "Apache Hive",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#c9a400",
+      "mark": "Hv",
+      "defaultPort": 10000,
+      "defaultDatabase": "default",
+      "class": "org.apache.hive.jdbc.HiveDriver",
+      "files": [
+        {
+          "maven": "org.apache.hive:hive-jdbc:4.2.1:standalone",
+          "name": "hive-jdbc-4.2.1-standalone.jar",
+          "size": 48513880,
+          "sha1": "3ab1483c3fb07dfbe5dfd68cf80af3d7ef9c4049"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:hive2://{host::localhost}[:{port::10000}]/{database::default}"
+        }
+      ],
+      "sql": {
+        "dialect": "backtick",
+        "paging": "limit",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "hadoop",
+        "hiveserver2"
+      ],
+      "homepage": "https://hive.apache.org/"
+    },
+    {
+      "id": "spark",
+      "name": "Apache Spark",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#e25a1c",
+      "mark": "Sp",
+      "defaultPort": 10000,
+      "defaultDatabase": "default",
+      "class": "org.apache.hive.jdbc.HiveDriver",
+      "files": [
+        {
+          "maven": "org.apache.hive:hive-jdbc:4.2.1:standalone",
+          "name": "hive-jdbc-4.2.1-standalone.jar",
+          "size": 48513880,
+          "sha1": "3ab1483c3fb07dfbe5dfd68cf80af3d7ef9c4049"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Thrift server",
+          "template": "jdbc:hive2://{host::localhost}[:{port::10000}]/{database::default}"
+        }
+      ],
+      "sql": {
+        "dialect": "backtick",
+        "paging": "limit",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "spark sql",
+        "thrift"
+      ],
+      "homepage": "https://spark.apache.org/"
+    },
+    {
+      "id": "clickhouse",
+      "name": "ClickHouse",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#d4a900",
+      "mark": "Ch",
+      "defaultPort": 8123,
+      "defaultUser": "default",
+      "defaultDatabase": "default",
+      "class": "com.clickhouse.jdbc.Driver",
+      "files": [
+        {
+          "maven": "com.clickhouse:clickhouse-jdbc:0.10.0:all",
+          "name": "clickhouse-jdbc-0.10.0-all.jar",
+          "size": 12309579,
+          "sha1": "00e53167f2f66641078d437514d115257fce5cd5"
+        }
+      ],
+      "urls": [
+        {
+          "name": "HTTP",
+          "template": "jdbc:clickhouse://{host::localhost}[:{port::8123}][/{database}]"
+        }
+      ],
+      "sql": {
+        "dialect": "backtick",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "olap"
+      ],
+      "homepage": "https://clickhouse.com/"
+    },
+    {
+      "id": "couchbase",
+      "name": "Couchbase Server",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#ea2328",
+      "mark": "Cb",
+      "defaultPort": 8093,
+      "class": "com.couchbase.client.jdbc.CouchbaseDriver",
+      "files": [
+        {
+          "maven": "com.couchbase.client:couchbase-jdbc-driver:1.1.1",
+          "name": "couchbase-jdbc-driver-1.1.1.jar",
+          "size": 44938443,
+          "sha1": "9fac11a5fcef9881a5e21bc6580b9be7a48b7754"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Query service",
+          "template": "jdbc:couchbase:query://{host::localhost}"
+        },
+        {
+          "name": "Analytics service",
+          "template": "jdbc:couchbase:analytics://{host::localhost}"
+        }
+      ],
+      "sql": {
+        "dialect": "backtick",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "n1ql",
+        "sql++",
+        "capella"
+      ],
+      "homepage": "https://www.couchbase.com/"
+    },
+    {
+      "id": "exasol",
+      "name": "Exasol",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#5aa02c",
+      "mark": "Ex",
+      "defaultPort": 8563,
+      "defaultUser": "sys",
+      "class": "com.exasol.jdbc.EXADriver",
+      "files": [
+        {
+          "maven": "com.exasol:exasol-jdbc:26.2.9",
+          "name": "exasol-jdbc-26.2.9.jar",
+          "size": 12444352,
+          "sha1": "c0c78284df5c3cce15e4ff67ab453565e05da8f4"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:exa:{host::localhost}[:{port::8563}][;schema={database}]"
+        }
+      ],
+      "labels": {
+        "database": "Schema"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset"
+      },
+      "aliases": [],
+      "homepage": "https://www.exasol.com/"
+    },
+    {
+      "id": "bigquery",
+      "name": "Google BigQuery",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#4285f4",
+      "mark": "Bq",
+      "defaultPort": 0,
+      "host": false,
+      "class": "com.google.cloud.bigquery.jdbc.BigQueryDriver",
+      "files": [
+        {
+          "maven": "com.google.cloud:google-cloud-bigquery-jdbc:1.6.0:all",
+          "name": "google-cloud-bigquery-jdbc-1.6.0-all.jar",
+          "size": 67935381,
+          "sha1": "7a3e19d0caefdac1f8a0a03d743ca7953e879ee7"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:bigquery://https://www.googleapis.com/bigquery/v2:443;ProjectId={project};OAuthType={oauth::3}[;DefaultDataset={database}]"
+        }
+      ],
+      "labels": {
+        "database": "Default dataset",
+        "oauth": "OAuth type",
+        "project": "Project ID"
+      },
+      "sql": {
+        "dialect": "backtick",
+        "paging": "limit-offset"
+      },
+      "aliases": [
+        "gcp",
+        "google"
+      ],
+      "homepage": "https://cloud.google.com/bigquery"
+    },
+    {
+      "id": "h2",
+      "name": "H2",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0b4f9c",
+      "mark": "H2",
+      "defaultPort": 9092,
+      "defaultUser": "sa",
+      "file": true,
+      "class": "org.h2.Driver",
+      "files": [
+        {
+          "maven": "com.h2database:h2:2.5.252",
+          "name": "h2-2.5.252.jar",
+          "size": 2693360,
+          "sha1": "993ba74eafa574df15f4809f8082a12f67cad34b"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Embedded",
+          "template": "jdbc:h2:{file}"
+        },
+        {
+          "name": "Server",
+          "template": "jdbc:h2:tcp://{host::localhost}[:{port::9092}]/{database}"
+        },
+        {
+          "name": "In-memory",
+          "template": "jdbc:h2:mem:{database::test}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [],
+      "homepage": "https://h2database.com/"
+    },
+    {
+      "id": "hsqldb-local",
+      "name": "HSQLDB (Local)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#5b6b7a",
+      "mark": "Hs",
+      "defaultPort": 0,
+      "defaultUser": "SA",
+      "file": true,
+      "class": "org.hsqldb.jdbc.JDBCDriver",
+      "files": [
+        {
+          "maven": "org.hsqldb:hsqldb:2.7.4",
+          "name": "hsqldb-2.7.4.jar",
+          "size": 1662185,
+          "sha1": "4aad3c109b5b04927d3bc663bf13535f830401ce"
+        }
+      ],
+      "urls": [
+        {
+          "name": "File",
+          "template": "jdbc:hsqldb:file:{file}"
+        },
+        {
+          "name": "In-memory",
+          "template": "jdbc:hsqldb:mem:{database::test}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset"
+      },
+      "aliases": [
+        "hypersql"
+      ],
+      "homepage": "https://hsqldb.org/"
+    },
+    {
+      "id": "hsqldb-remote",
+      "name": "HSQLDB (Remote)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#5b6b7a",
+      "mark": "Hs",
+      "defaultPort": 9001,
+      "defaultUser": "SA",
+      "class": "org.hsqldb.jdbc.JDBCDriver",
+      "files": [
+        {
+          "maven": "org.hsqldb:hsqldb:2.7.4",
+          "name": "hsqldb-2.7.4.jar",
+          "size": 1662185,
+          "sha1": "4aad3c109b5b04927d3bc663bf13535f830401ce"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:hsqldb:hsql://{host::localhost}[:{port::9001}]/{database}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset"
+      },
+      "aliases": [
+        "hypersql"
+      ],
+      "homepage": "https://hsqldb.org/"
+    },
+    {
+      "id": "db2",
+      "name": "IBM Db2 for LUW (11.x, 12.x)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0f62fe",
+      "mark": "D2",
+      "defaultPort": 50000,
+      "defaultUser": "db2inst1",
+      "class": "com.ibm.db2.jcc.DB2Driver",
+      "files": [
+        {
+          "maven": "com.ibm.db2:jcc:12.1.5.0",
+          "name": "jcc-12.1.5.0.jar",
+          "size": 6630167,
+          "sha1": "f549d8e6f78dff153eebec2ed5e67e41744bb690"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:db2://{host::localhost}[:{port::50000}]/{database}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "offset-fetch"
+      },
+      "aliases": [
+        "ibm",
+        "luw"
+      ],
+      "homepage": "https://www.ibm.com/db2"
+    },
+    {
+      "id": "db2-legacy",
+      "name": "IBM Db2 for 9.x, 10.x",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0f62fe",
+      "mark": "D2",
+      "defaultPort": 50000,
+      "defaultUser": "db2inst1",
+      "class": "com.ibm.db2.jcc.DB2Driver",
+      "files": [
+        {
+          "maven": "com.ibm.db2:jcc:11.5.9.0",
+          "name": "jcc-11.5.9.0.jar",
+          "size": 6547072,
+          "sha1": "3aa914029632e1ea8752954ef088aac56f9da309"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:db2://{host::localhost}[:{port::50000}]/{database}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "fetch-first"
+      },
+      "aliases": [
+        "ibm"
+      ],
+      "homepage": "https://www.ibm.com/db2"
+    },
+    {
+      "id": "db2-jtopen",
+      "name": "IBM Db2 for i (JTOpen)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0f62fe",
+      "mark": "Di",
+      "defaultPort": 0,
+      "class": "com.ibm.as400.access.AS400JDBCDriver",
+      "files": [
+        {
+          "maven": "net.sf.jt400:jt400:21.0.7",
+          "name": "jt400-21.0.7.jar",
+          "size": 6346900,
+          "sha1": "b4f63f22cf133131b536a7d2c6a1720b289abc52"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:as400://{host::localhost}[/{database}]"
+        }
+      ],
+      "labels": {
+        "database": "Library"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "offset-fetch"
+      },
+      "aliases": [
+        "ibm i",
+        "as400",
+        "iseries",
+        "jt400"
+      ],
+      "homepage": "https://jt400.sourceforge.net/"
+    },
+    {
+      "id": "informix",
+      "name": "IBM Informix",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0f62fe",
+      "mark": "If",
+      "defaultPort": 9088,
+      "defaultUser": "informix",
+      "class": "com.informix.jdbc.IfxDriver",
+      "files": [
+        {
+          "maven": "com.ibm.informix:jdbc:15.0.1.4",
+          "name": "jdbc-15.0.1.4.jar",
+          "size": 1195494,
+          "sha1": "603a518fc74464865bc7fa7ff3373855430be776"
+        },
+        {
+          "maven": "org.mongodb:bson:5.13.0",
+          "name": "bson-5.13.0.jar",
+          "size": 531686,
+          "sha1": "93839f51ce4b6d3d378a4aa39e5918fc07df5ec8"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:informix-sqli://{host::localhost}[:{port::9088}]/{database}:INFORMIXSERVER={server::informix}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "none"
+      },
+      "aliases": [
+        "ibm"
+      ],
+      "homepage": "https://www.ibm.com/products/informix",
+      "labels": {
+        "server": "INFORMIXSERVER"
+      }
+    },
+    {
+      "id": "sqlserver-jdbc",
+      "name": "Microsoft SQL Server (JDBC)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#cc2927",
+      "mark": "Ms",
+      "defaultPort": 1433,
+      "defaultUser": "sa",
+      "class": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
+      "files": [
+        {
+          "maven": "com.microsoft.sqlserver:mssql-jdbc:13.6.0.jre11",
+          "name": "mssql-jdbc-13.6.0.jre11.jar",
+          "size": 1576575,
+          "sha1": "9c438510cb1e19d2db0a152e9f719a32f11e1177"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:sqlserver://{host::localhost}[:{port::1433}][;databaseName={database}]"
+        }
+      ],
+      "properties": {
+        "encrypt": "true",
+        "trustServerCertificate": "true"
+      },
+      "sql": {
+        "dialect": "tsql",
+        "paging": "top"
+      },
+      "aliases": [
+        "mssql",
+        "kerberos",
+        "windows authentication"
+      ],
+      "homepage": "https://learn.microsoft.com/sql/connect/jdbc/"
+    },
+    {
+      "id": "sqlserver-jtds",
+      "name": "Microsoft SQL Server (jTDS)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#cc2927",
+      "mark": "Ms",
+      "defaultPort": 1433,
+      "defaultUser": "sa",
+      "class": "net.sourceforge.jtds.jdbc.Driver",
+      "files": [
+        {
+          "maven": "net.sourceforge.jtds:jtds:1.3.1",
+          "name": "jtds-1.3.1.jar",
+          "size": 317816,
+          "sha1": "1527f2fc2f040898625370a1687d902aa0743bcc"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:jtds:sqlserver://{host::localhost}[:{port::1433}][/{database}]"
+        }
+      ],
+      "sql": {
+        "dialect": "tsql",
+        "paging": "top"
+      },
+      "aliases": [
+        "mssql",
+        "jtds"
+      ],
+      "homepage": "https://jtds.sourceforge.net/"
+    },
+    {
+      "id": "sqlserver-localdb",
+      "name": "Microsoft SQL Server LocalDB",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#cc2927",
+      "mark": "Ld",
+      "defaultPort": 0,
+      "host": false,
+      "platforms": [
+        "windows"
+      ],
+      "class": "net.sourceforge.jtds.jdbc.Driver",
+      "files": [
+        {
+          "maven": "net.sourceforge.jtds:jtds:1.3.1",
+          "name": "jtds-1.3.1.jar",
+          "size": 317816,
+          "sha1": "1527f2fc2f040898625370a1687d902aa0743bcc"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Named pipe",
+          "template": "jdbc:jtds:sqlserver://./{database::master};instance={instance::LOCALDB#00000000};namedPipe=true"
+        }
+      ],
+      "labels": {
+        "instance": "Pipe instance (sqllocaldb info)"
+      },
+      "sql": {
+        "dialect": "tsql",
+        "paging": "top"
+      },
+      "aliases": [
+        "mssql",
+        "localdb"
+      ],
+      "homepage": "https://learn.microsoft.com/sql/database-engine/configure-windows/sql-server-express-localdb"
+    },
+    {
+      "id": "snowflake",
+      "name": "Snowflake",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#29b5e8",
+      "mark": "Sf",
+      "defaultPort": 0,
+      "host": false,
+      "class": "net.snowflake.client.jdbc.SnowflakeDriver",
+      "files": [
+        {
+          "maven": "net.snowflake:snowflake-jdbc:4.4.0",
+          "name": "snowflake-jdbc-4.4.0.jar",
+          "size": 98569339,
+          "sha1": "27d3ce654461a80119a75c3b7dcde907c9ae7263"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:snowflake://{account}.snowflakecomputing.com"
+        }
+      ],
+      "properties": {
+        "db": "{database}",
+        "warehouse": "{warehouse}",
+        "role": "{role}"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "warehouse"
+      ],
+      "homepage": "https://www.snowflake.com/",
+      "labels": {
+        "account": "Account identifier",
+        "warehouse": "Warehouse",
+        "role": "Role"
+      }
+    },
+    {
+      "id": "sybase-jtds",
+      "name": "Sybase ASE (jTDS)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0a6ed1",
+      "mark": "As",
+      "defaultPort": 5000,
+      "defaultUser": "sa",
+      "class": "net.sourceforge.jtds.jdbc.Driver",
+      "files": [
+        {
+          "maven": "net.sourceforge.jtds:jtds:1.3.1",
+          "name": "jtds-1.3.1.jar",
+          "size": 317816,
+          "sha1": "1527f2fc2f040898625370a1687d902aa0743bcc"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:jtds:sybase://{host::localhost}[:{port::5000}][/{database}]"
+        }
+      ],
+      "sql": {
+        "dialect": "tsql",
+        "paging": "top"
+      },
+      "aliases": [
+        "sap ase",
+        "adaptive server"
+      ],
+      "homepage": "https://www.sap.com/products/technology-platform/sybase-ase.html"
+    },
+    {
+      "id": "sybase-jconnect",
+      "name": "Sybase ASE (jConnect)",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0a6ed1",
+      "mark": "As",
+      "defaultPort": 5000,
+      "defaultUser": "sa",
+      "class": "com.sybase.jdbc4.jdbc.SybDriver",
+      "files": [],
+      "manual": "https://help.sap.com/docs/SAP_ASE_SDK",
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:sybase:Tds:{host::localhost}[:{port::5000}][/{database}]"
+        }
+      ],
+      "sql": {
+        "dialect": "tsql",
+        "paging": "top"
+      },
+      "aliases": [
+        "sap ase",
+        "jconnect"
+      ],
+      "homepage": "https://www.sap.com/products/technology-platform/sybase-ase.html"
+    },
+    {
+      "id": "vertica",
+      "name": "Vertica",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0073e7",
+      "mark": "Ve",
+      "defaultPort": 5433,
+      "defaultUser": "dbadmin",
+      "class": "com.vertica.jdbc.Driver",
+      "files": [
+        {
+          "maven": "com.vertica.jdbc:vertica-jdbc:25.3.0-0",
+          "name": "vertica-jdbc-25.3.0-0.jar",
+          "size": 1850793,
+          "sha1": "e5137ce646c126dd543dfb3b120b5360b5a0f549"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:vertica://{host::localhost}[:{port::5433}]/{database}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "opentext"
+      ],
+      "homepage": "https://www.vertica.com/"
+    },
+    {
+      "id": "trino",
+      "name": "Trino",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#dd00a1",
+      "mark": "Tr",
+      "defaultPort": 8080,
+      "class": "io.trino.jdbc.TrinoDriver",
+      "files": [
+        {
+          "maven": "io.trino:trino-jdbc:483",
+          "name": "trino-jdbc-483.jar",
+          "size": 10436748,
+          "sha1": "2542d30d8f27e35e52dbb884ffc40c1a829ce8a9"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:trino://{host::localhost}[:{port::8080}][/{catalog}[/{database}]]"
+        }
+      ],
+      "labels": {
+        "database": "Schema",
+        "catalog": "Catalog"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "starburst",
+        "presto"
+      ],
+      "homepage": "https://trino.io/"
+    },
+    {
+      "id": "presto",
+      "name": "Presto",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#5890ff",
+      "mark": "Pr",
+      "defaultPort": 8080,
+      "class": "com.facebook.presto.jdbc.PrestoDriver",
+      "files": [
+        {
+          "maven": "com.facebook.presto:presto-jdbc:0.299",
+          "name": "presto-jdbc-0.299.jar",
+          "size": 15499389,
+          "sha1": "0ada484547905ef0ece8bb260c3a88efad81630c"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:presto://{host::localhost}[:{port::8080}][/{catalog}[/{database}]]"
+        }
+      ],
+      "labels": {
+        "database": "Schema",
+        "catalog": "Catalog"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "prestodb"
+      ],
+      "homepage": "https://prestodb.io/"
+    },
+    {
+      "id": "databricks",
+      "name": "Databricks",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#ff3621",
+      "mark": "Db",
+      "defaultPort": 443,
+      "defaultDatabase": "default",
+      "class": "com.databricks.client.jdbc.Driver",
+      "files": [
+        {
+          "maven": "com.databricks:databricks-jdbc:3.4.3",
+          "name": "databricks-jdbc-3.4.3.jar",
+          "size": 41479811,
+          "sha1": "bb43835394945fdf4cc3a4832859fdf49e038513"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Personal access token",
+          "template": "jdbc:databricks://{host}[:{port::443}][/{database}];transportMode=http;ssl=1;httpPath={httpPath};AuthMech=3;UID=token"
+        }
+      ],
+      "properties": {
+        "PWD": "{password}"
+      },
+      "labels": {
+        "password": "Access token",
+        "httpPath": "HTTP path"
+      },
+      "sql": {
+        "dialect": "backtick",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "spark",
+        "delta",
+        "lakehouse"
+      ],
+      "homepage": "https://www.databricks.com/"
+    },
+    {
+      "id": "ignite",
+      "name": "Apache Ignite",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#ee1c25",
+      "mark": "Ig",
+      "defaultPort": 10800,
+      "class": "org.apache.ignite.IgniteJdbcThinDriver",
+      "files": [
+        {
+          "maven": "org.apache.ignite:ignite-core:2.18.0",
+          "name": "ignite-core-2.18.0.jar",
+          "size": 14379054,
+          "sha1": "72cf694822c83fd5ad0d8b7b9535ba05cf53bddf"
+        },
+        {
+          "maven": "javax.cache:cache-api:1.1.1",
+          "name": "cache-api-1.1.1.jar",
+          "size": 51281,
+          "sha1": "c56fb980eb5208bfee29a9a5b9d951aba076bd91"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Thin",
+          "template": "jdbc:ignite:thin://{host::localhost}[:{port::10800}][/{database}]"
+        }
+      ],
+      "labels": {
+        "database": "Schema"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset"
+      },
+      "aliases": [
+        "gridgain"
+      ],
+      "homepage": "https://ignite.apache.org/"
+    },
+    {
+      "id": "phoenix",
+      "name": "Apache Phoenix",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#f15822",
+      "mark": "Ph",
+      "defaultPort": 2181,
+      "class": "org.apache.phoenix.jdbc.PhoenixDriver",
+      "files": [
+        {
+          "maven": "org.apache.phoenix:phoenix-client-embedded-hbase-2.5:5.3.2",
+          "name": "phoenix-client-embedded-hbase-2.5-5.3.2.jar",
+          "size": 167965915,
+          "sha1": "5ce505231a6cf95488df794b0c4c2747a6f10b34"
+        }
+      ],
+      "urls": [
+        {
+          "name": "ZooKeeper",
+          "template": "jdbc:phoenix:{host::localhost}[:{port::2181}][:{znode::/hbase}]"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "hbase"
+      ],
+      "homepage": "https://phoenix.apache.org/",
+      "labels": {
+        "znode": "ZooKeeper znode"
+      }
+    },
+    {
+      "id": "phoenix-thin",
+      "name": "Apache Phoenix Thin",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#f15822",
+      "mark": "Ph",
+      "defaultPort": 8765,
+      "class": "org.apache.phoenix.queryserver.client.Driver",
+      "files": [
+        {
+          "maven": "org.apache.phoenix:phoenix-queryserver-client:6.0.0",
+          "name": "phoenix-queryserver-client-6.0.0.jar",
+          "size": 6294972,
+          "sha1": "52d3e565aa2f789682e2d126c8465986490f5b0b"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Query server",
+          "template": "jdbc:phoenix:thin:url=http://{host::localhost}:{port::8765};serialization=PROTOBUF"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "hbase",
+        "avatica"
+      ],
+      "homepage": "https://phoenix.apache.org/"
+    },
+    {
+      "id": "denodo",
+      "name": "Denodo",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#e5004c",
+      "mark": "De",
+      "defaultPort": 9999,
+      "defaultDatabase": "admin",
+      "defaultUser": "admin",
+      "class": "com.denodo.vdp.jdbc.Driver",
+      "files": [],
+      "manual": "https://community.denodo.com/drivers/jdbc",
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:vdb://{host::localhost}[:{port::9999}]/{database::admin}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "offset-fetch"
+      },
+      "aliases": [
+        "virtualization"
+      ],
+      "homepage": "https://www.denodo.com/"
+    },
+    {
+      "id": "duckdb",
+      "name": "DuckDB",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#e0c800",
+      "mark": "Du",
+      "defaultPort": 0,
+      "file": true,
+      "class": "org.duckdb.DuckDBDriver",
+      "files": [
+        {
+          "maven": "org.duckdb:duckdb_jdbc:1.5.6.0",
+          "name": "duckdb_jdbc-1.5.6.0.jar",
+          "size": 85178546,
+          "sha1": "fc5cf1f8e1f92a9958c6835e65ea06d09af8cc72"
+        }
+      ],
+      "urls": [
+        {
+          "name": "File",
+          "template": "jdbc:duckdb:{file}"
+        },
+        {
+          "name": "In-memory",
+          "template": "jdbc:duckdb:"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "parquet",
+        "motherduck"
+      ],
+      "homepage": "https://duckdb.org/"
+    },
+    {
+      "id": "elasticsearch",
+      "name": "Elasticsearch",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#00bfb3",
+      "mark": "Es",
+      "defaultPort": 9200,
+      "defaultUser": "elastic",
+      "class": "org.elasticsearch.xpack.sql.jdbc.EsDriver",
+      "files": [
+        {
+          "maven": "org.elasticsearch.plugin:x-pack-sql-jdbc:8.19.5",
+          "name": "x-pack-sql-jdbc-8.19.5.jar",
+          "size": 847046,
+          "repo": "elastic",
+          "sha1": "2240d4bee1150d7dd54a9da5e379b761d9a1b908"
+        }
+      ],
+      "urls": [
+        {
+          "name": "HTTP",
+          "template": "jdbc:es://{host::localhost}[:{port::9200}]"
+        },
+        {
+          "name": "HTTPS",
+          "template": "jdbc:es://https://{host::localhost}[:{port::9200}]"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit"
+      },
+      "license": "https://www.elastic.co/licensing/elastic-license",
+      "aliases": [
+        "opensearch",
+        "elastic"
+      ],
+      "homepage": "https://www.elastic.co/elasticsearch"
+    },
+    {
+      "id": "firebird",
+      "name": "Firebird",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#f26f21",
+      "mark": "Fb",
+      "defaultPort": 3050,
+      "defaultUser": "SYSDBA",
+      "class": "org.firebirdsql.jdbc.FBDriver",
+      "files": [
+        {
+          "maven": "org.firebirdsql.jdbc:jaybird:6.0.6",
+          "name": "jaybird-6.0.6.jar",
+          "size": 1603780,
+          "sha1": "25e80e6a3115d30697cf820f46fd8d64675be9bd"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:firebird://{host::localhost}[:{port::3050}]/{database}"
+        }
+      ],
+      "labels": {
+        "database": "Database path or alias"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "offset-fetch"
+      },
+      "aliases": [
+        "interbase",
+        "jaybird"
+      ],
+      "homepage": "https://firebirdsql.org/"
+    },
+    {
+      "id": "spanner",
+      "name": "Google Cloud Spanner",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#4285f4",
+      "mark": "Sn",
+      "defaultPort": 0,
+      "host": false,
+      "class": "com.google.cloud.spanner.jdbc.JdbcDriver",
+      "files": [
+        {
+          "maven": "com.google.cloud:google-cloud-spanner-jdbc:2.46.0:single-jar-with-dependencies",
+          "name": "google-cloud-spanner-jdbc-2.46.0-single-jar-with-dependencies.jar",
+          "size": 67489724,
+          "sha1": "6fe49978dfb3f7ccb9ed7fd04bf339d51461709d"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:cloudspanner:/projects/{project}/instances/{instance}/databases/{database}[?credentials={credentials}]"
+        }
+      ],
+      "labels": {
+        "credentials": "Service account key file",
+        "project": "Project ID",
+        "instance": "Instance"
+      },
+      "sql": {
+        "dialect": "backtick",
+        "paging": "limit-offset"
+      },
+      "aliases": [
+        "gcp",
+        "google"
+      ],
+      "homepage": "https://cloud.google.com/spanner"
+    },
+    {
+      "id": "influxdb",
+      "name": "InfluxDB",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#9394ff",
+      "mark": "In",
+      "defaultPort": 443,
+      "host": true,
+      "class": "org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver",
+      "files": [
+        {
+          "maven": "org.apache.arrow:flight-sql-jdbc-driver:19.0.0",
+          "name": "flight-sql-jdbc-driver-19.0.0.jar",
+          "size": 47259660,
+          "sha1": "300f1bc6d866aebe730d493605b82cf600cc1d3d"
+        }
+      ],
+      "urls": [
+        {
+          "name": "Flight SQL (InfluxDB 3)",
+          "template": "jdbc:arrow-flight-sql://{host::localhost}[:{port::443}]?database={database}&useEncryption={tls::true}"
+        }
+      ],
+      "properties": {
+        "token": "{password}"
+      },
+      "labels": {
+        "password": "Token",
+        "tls": "Encrypt (true/false)"
+      },
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "influx",
+        "time series",
+        "flight sql"
+      ],
+      "homepage": "https://www.influxdata.com/"
+    },
+    {
+      "id": "mimer",
+      "name": "Mimer SQL",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0068b5",
+      "mark": "Mi",
+      "defaultPort": 1360,
+      "defaultUser": "SYSADM",
+      "class": "com.mimer.jdbc.Driver",
+      "files": [
+        {
+          "maven": "com.mimer.jdbc:mimjdbc:3.42.3",
+          "name": "mimjdbc-3.42.3.jar",
+          "size": 204943,
+          "sha1": "3edd711fd2f9eb7caec17f1406585ea1619cf0b8"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:mimer://{host::localhost}[:{port::1360}]/{database}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "offset-fetch"
+      },
+      "aliases": [],
+      "homepage": "https://www.mimer.com/"
+    },
+    {
+      "id": "openedge",
+      "name": "OpenEdge",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#4cbb17",
+      "mark": "Oe",
+      "defaultPort": 5566,
+      "class": "com.ddtek.jdbc.openedge.OpenEdgeDriver",
+      "files": [],
+      "manual": "https://docs.progress.com/category/openedge-sql-jdbc",
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:datadirect:openedge://{host::localhost}[:{port::5566}];databaseName={database}"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "offset-fetch"
+      },
+      "aliases": [
+        "progress"
+      ],
+      "homepage": "https://www.progress.com/openedge"
+    },
+    {
+      "id": "saphana",
+      "name": "SAP HANA",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#0faaff",
+      "mark": "Ha",
+      "defaultPort": 30015,
+      "defaultUser": "SYSTEM",
+      "class": "com.sap.db.jdbc.Driver",
+      "files": [
+        {
+          "maven": "com.sap.cloud.db.jdbc:ngdbc:2.30.11",
+          "name": "ngdbc-2.30.11.jar",
+          "size": 1588075,
+          "sha1": "1de6dc11c4d88ec05763363f101a2667d51492f9"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:sap://{host::localhost}[:{port::30015}][/?databaseName={database}]"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN PLAN FOR {sql}"
+      },
+      "aliases": [
+        "hana",
+        "sap"
+      ],
+      "homepage": "https://www.sap.com/products/data-cloud/hana.html"
+    },
+    {
+      "id": "singlestore",
+      "name": "SingleStore",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#8800cc",
+      "mark": "S2",
+      "defaultPort": 3306,
+      "defaultUser": "root",
+      "class": "com.singlestore.jdbc.Driver",
+      "files": [
+        {
+          "maven": "com.singlestore:singlestore-jdbc-client:1.2.12",
+          "name": "singlestore-jdbc-client-1.2.12.jar",
+          "size": 716568,
+          "sha1": "d86f239b484782983cb8c961f9cffac069046d58"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:singlestore://{host::localhost}[:{port::3306}][/{database}]"
+        }
+      ],
+      "sql": {
+        "dialect": "backtick",
+        "paging": "limit-offset",
+        "explain": "EXPLAIN {sql}"
+      },
+      "aliases": [
+        "memsql"
+      ],
+      "homepage": "https://www.singlestore.com/"
+    },
+    {
+      "id": "tarantool",
+      "name": "Tarantool",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#ec1c24",
+      "mark": "Tt",
+      "defaultPort": 3301,
+      "defaultUser": "guest",
+      "class": "org.tarantool.jdbc.SQLDriver",
+      "files": [
+        {
+          "maven": "org.tarantool:connector:1.9.4",
+          "name": "connector-1.9.4.jar",
+          "size": 186691,
+          "sha1": "24d4950cb63c6ba072c740f04a4cf8d3efcfd483"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:tarantool://{host::localhost}[:{port::3301}]"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "limit-offset"
+      },
+      "aliases": [],
+      "homepage": "https://www.tarantool.io/"
+    },
+    {
+      "id": "teradata",
+      "name": "Teradata Vantage",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#f37440",
+      "mark": "Td",
+      "defaultPort": 1025,
+      "defaultUser": "dbc",
+      "class": "com.teradata.jdbc.TeraDriver",
+      "files": [
+        {
+          "maven": "com.teradata.jdbc:terajdbc:20.00.00.60",
+          "name": "terajdbc-20.00.00.60.jar",
+          "size": 1295877,
+          "sha1": "83dd73ccbf83fd6b794cb51c23917c9e88f80b8d"
+        }
+      ],
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:teradata://{host::localhost}[/DATABASE={database}]"
+        }
+      ],
+      "sql": {
+        "dialect": "ansi",
+        "paging": "top"
+      },
+      "aliases": [
+        "vantage"
+      ],
+      "homepage": "https://www.teradata.com/"
+    },
+    {
+      "id": "tibero",
+      "name": "Tibero",
+      "support": "basic",
+      "engine": "jdbc",
+      "color": "#00a0e9",
+      "mark": "Tb",
+      "defaultPort": 8629,
+      "defaultUser": "sys",
+      "class": "com.tmax.tibero.jdbc.TbDriver",
+      "files": [],
+      "manual": "https://technet.tmaxsoft.com/",
+      "urls": [
+        {
+          "name": "default",
+          "template": "jdbc:tibero:thin:@{host::localhost}:{port::8629}:{database}"
+        }
+      ],
+      "sql": {
+        "dialect": "oracle",
+        "paging": "none"
+      },
+      "aliases": [
+        "tmax"
+      ],
+      "homepage": "https://www.tmaxtibero.com/"
+    }
+  ]
+}
