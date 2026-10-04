@@ -14,6 +14,7 @@ pub mod db_cmd;
 pub mod debug_cmd;
 pub mod diagrams_cmd;
 pub mod editor_cmd;
+pub mod flows_cmd;
 pub mod fs_cmd;
 pub mod git_ops;
 pub mod bitbucket_cmd;

@@ -622,6 +622,7 @@ async fn attempt_item<R: Runtime>(
             temperature: 0.1,
             think: run.thinking.then_some(false),
             keep_alive: (kind == BackendKind::Ollama).then_some("10m"),
+            schema: None,
         };
         let _in_flight = live.engine.as_ref().map(|engine| engine.begin());
         let call_started = Instant::now();

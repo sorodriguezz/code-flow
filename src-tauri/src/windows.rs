@@ -690,6 +690,8 @@ pub fn get_quick_ask_shortcut(db: tauri::State<crate::db::Db>) -> QuickAskShortc
 pub fn unregister_quick_ask_shortcut(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     app.global_shortcut().unregister_all().map_err(|e| e.to_string())?;
+    // `unregister_all` takes the chords active flows listen for too; they go straight back.
+    crate::flows::triggers::rebind_hotkeys(&app);
     crate::applog::info("window: quick-ask shortcut switched off");
     Ok(())
 }
@@ -888,6 +890,9 @@ pub fn register_quick_ask_shortcut(app: AppHandle, accelerator: String) -> Resul
     // registered, and this process may have inherited a binding from an earlier call in this
     // session that failed halfway.
     manager.unregister_all().map_err(|e| e.to_string())?;
+    // The chords active flows listen for went with them; bound again before the new quick-ask one,
+    // so a clash between the two is reported on the setting being typed.
+    crate::flows::triggers::rebind_hotkeys(&app);
 
     // `register`, and **not** `on_shortcut`. The difference is one call per press.
     //

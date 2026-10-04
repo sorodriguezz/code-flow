@@ -74,6 +74,7 @@ const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => 
 const DiagramsView = lazy(() =>
   import("./components/diagrams/DiagramsView").then((m) => ({ default: m.DiagramsView })),
 );
+const FlowsView = lazy(() => import("./components/flows/FlowsView").then((m) => ({ default: m.FlowsView })));
 const ChatView = lazy(() => import("./components/chat/ChatView").then((m) => ({ default: m.ChatView })));
 const QuickAskWindow = lazy(() =>
   import("./components/chat/QuickAskWindow").then((m) => ({ default: m.QuickAskWindow })),
@@ -105,6 +106,7 @@ const APP_VIEWS: Record<string, { view: MainView; workspace?: ApiWorkspace; rend
   remote: { view: "remote", render: () => <RemoteView /> },
   notes: { view: "notes", render: () => <NotesView /> },
   diagrams: { view: "diagrams", render: () => <DiagramsView /> },
+  flows: { view: "flows", render: () => <FlowsView /> },
   vault: { view: "vault", render: () => <VaultView /> },
   chat: { view: "chat", render: () => <ChatView /> },
 };

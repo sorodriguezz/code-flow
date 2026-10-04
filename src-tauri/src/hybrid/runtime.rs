@@ -439,6 +439,7 @@ mod live {
             temperature: 0.0,
             think: None,
             keep_alive: None,
+            schema: None,
         }
     }
 

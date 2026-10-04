@@ -108,6 +108,20 @@ const BUNDLED = [
     ships: "`public/drawio/` — vendored into the frontend bundle",
     by: "scripts/build-drawio-webapp.mjs",
   },
+  {
+    // Copied in by hand from npm's `luxon` (its `build/global/luxon.min.js`), not downloaded by a
+    // script: the Flujos expression engine embeds it in the binary with `include_str!`, so it has to
+    // be in the tree for `cargo build` to work without `pnpm install`.
+    name: "Luxon",
+    version: () => scrape("src-tauri/src/flows/js/luxon.min.js", /e\.VERSION="([^"]+)"/),
+    licence: "MIT",
+    url: "https://github.com/moment/luxon",
+    ships: "`src-tauri/src/flows/js/luxon.min.js` — embedded in the app binary for Flujos expressions",
+    by: "vendored from npm luxon",
+    verify() {
+      proveFile("src-tauri/src/flows/js/luxon.LICENSE.md", ["Permission is hereby granted, free of charge"], "Luxon", "MIT");
+    },
+  },
 ];
 
 /**
@@ -216,6 +230,22 @@ const NATIVE = {
     // `git2`'s `vendored-openssl` feature is scoped to macOS in Cargo.toml, and on Windows libgit2
     // and libssh2 use the system's own TLS and crypto.
     on: ["macOS"],
+  },
+  "rquickjs-sys": {
+    // QuickJS-ng, the engine Flujos evaluates expressions and Code nodes in. The crate's build
+    // compiles its own copy of the C sources on every platform.
+    library: "QuickJS-ng",
+    version: (dir) => {
+      const text = readIn(dir, "quickjs/quickjs.h");
+      const part = (name) => text.match(new RegExp(`QJS_VERSION_${name}\\s+(\\d+)`))?.[1];
+      return [part("MAJOR"), part("MINOR"), part("PATCH")].every(Boolean)
+        ? [part("MAJOR"), part("MINOR"), part("PATCH")].join(".")
+        : fail("could not read QuickJS-ng's version out of rquickjs-sys");
+    },
+    licence: "MIT",
+    url: (version) => `https://github.com/quickjs-ng/quickjs/tree/v${version}`,
+    proof: ["quickjs/LICENSE", ["The MIT License (MIT)", "Copyright (c) 2017-2026 Fabrice Bellard"]],
+    on: ["macOS", "Windows"],
   },
   "libz-sys": {
     library: "zlib",

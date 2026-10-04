@@ -180,6 +180,10 @@ fn open_at(path: &Path, version: &str, consent: Option<&str>) -> Result<db::Db, 
     if running.is_some_and(|running| running != stamp) {
         applog::info(&format!("database: migrated from {} to {version}", describe(stamp)));
     }
+    // Flow runs the last session left going, and the files of runs nobody can reach any more. Here
+    // and not in `db::finish`, which the scratch database runs through too: against an empty
+    // in-memory schema, "a folder with no row" is every folder there is.
+    crate::flows::runs::recover(&conn);
     db::finish(conn).map_err(|e| failed("marking interrupted work", &e))
 }
 

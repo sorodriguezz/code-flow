@@ -379,6 +379,17 @@ pub fn sandbox_path(diagram_id: &str) -> PathBuf {
     sandbox_dir().join(format!("{diagram_id}.sqlite"))
 }
 
+/// What Flujos executions leave on disk: one folder per run, holding each node's input and output
+/// (gzipped JSON), the run's log and the scratch folder its scripts are written to. The rows in
+/// `flow_runs` are the index; this is the data.
+///
+/// **State and not cache**: an execution is a record somebody may be reading to find out why a
+/// nightly job failed, and deleting it is retention's decision (`flows::runs::prune`), not a
+/// cleaner's. Not backed up — see `NEVER_BACKED_UP`.
+pub fn flow_runs_dir() -> PathBuf {
+    state_dir().join("flow-runs")
+}
+
 /// The working directory a conversation that is about **no repository** runs its engine in.
 ///
 /// Every CLI this app drives takes a `cwd`, and none of them takes "nowhere". Left unset the

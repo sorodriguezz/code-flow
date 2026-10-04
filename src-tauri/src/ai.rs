@@ -909,9 +909,10 @@ pub struct AiInvocation<'a> {
     /// Only the chats set it; see `crate::mcp_registry`.
     pub app_mcp: Vec<crate::mcp_registry::LiveServer>,
     /// A JSON Schema the final answer must satisfy, for an engine whose CLI can enforce one:
-    /// Claude Code's `--json-schema` (the object comes back as `structured_output`) and Codex's
-    /// `--output-schema`. Every other engine ignores it, so a caller must still parse leniently —
-    /// the instruction says the same thing in words. Only the hybrid task's plan sets it.
+    /// Claude Code's `--json-schema` (the object comes back as `structured_output`), Codex's
+    /// `--output-schema`, agy's and grok's `--json-schema`. opencode and Cline ignore it, so a caller
+    /// must still parse leniently — the instruction says the same thing in words. Set by the hybrid
+    /// task's plan and by the flows' AI nodes.
     pub json_schema: Option<&'a str>,
     /// More working copies the run may read (and, unless read-only, write) besides `cwd`: Claude's
     /// and agy's `--add-dir`, Codex's `--add-dir`. An engine without the flag ignores them — see
@@ -1063,6 +1064,9 @@ pub mod task {
     /// `local-exec` provider. Its plan and review are chain turns like any other and count as chat;
     /// the run itself keeps what each of those spent, for the summary it ends with.
     pub const HYBRID_EXECUTE: &str = "hybrid-execute";
+    /// A node of a flow — the agent, or one of its shortcuts (classify, extract, summarize, review,
+    /// commit) — see [`super::flow_turn`].
+    pub const FLOWS: &str = "flows";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -4549,7 +4553,7 @@ fn tidy_message(text: &str) -> String {
 /// under 72 chars, no body", so anything past the first paragraph is the model explaining its
 /// answer rather than continuing it. A user who customized the template asked for whatever they
 /// asked for, and the whole message is kept.
-fn clean_commit_message(raw: &str, subject_only: bool) -> String {
+pub(crate) fn clean_commit_message(raw: &str, subject_only: bool) -> String {
     let text = strip_reasoning_blocks(raw);
     let message = commit_slice(&text)
         .or_else(|| last_fenced_block(&text))
@@ -6047,6 +6051,55 @@ pub async fn chat_turn(
     inv.app_mcp = turn.app_mcp;
     inv.json_schema = turn.json_schema;
     inv.extra_dirs = turn.extra_dirs;
+    run(engine, binary, inv).await
+}
+
+/// One model call made by a node of a flow — the CLI agent node and the shortcuts built on it.
+///
+/// Its own function rather than a [`ChatTurn`], for the two things a flow is not: a conversation
+/// with project context sent once per session (a node says everything it means in its own prompt),
+/// and spending that should be filed as chat. The meter files it under [`task::FLOWS`].
+pub struct FlowTurn<'a> {
+    /// The ask. A long one moves into the data, as in [`chat_turn`].
+    pub message: &'a str,
+    /// What the node hands over to read — the items, a diff, a document.
+    pub data: &'a str,
+    /// Replaces the CLI's default framing for this node; `None` sends none.
+    pub system_prompt: Option<&'a str>,
+    /// Resume this engine session (the node keeps one between runs when asked to).
+    pub session_id: Option<&'a str>,
+    pub cwd: Option<&'a str>,
+    /// The node may write: edits are auto-approved and the user's allowed tools apply.
+    pub can_edit: bool,
+    pub allowed_tools: &'a [String],
+    pub effort: Option<&'a str>,
+    pub json_schema: Option<&'a str>,
+    pub app_mcp: Vec<crate::mcp_registry::LiveServer>,
+}
+
+pub async fn flow_turn(engine: &dyn AiEngine, binary: &str, model: &str, turn: FlowTurn<'_>) -> Result<AiRun, String> {
+    let bulky = turn.message.chars().count() > INLINE_ASK_LIMIT;
+    let mut stdin_payload = String::new();
+    if bulky {
+        stdin_payload.push_str(turn.message);
+        if !turn.data.is_empty() {
+            stdin_payload.push_str("\n\n");
+        }
+    }
+    stdin_payload.push_str(turn.data);
+    let read_only_tools = if turn.can_edit { Vec::new() } else { engine.read_only_tools() };
+    let mut inv = AiInvocation::new(if bulky { BULK_ASK } else { turn.message }, &stdin_payload);
+    inv.system_prompt = turn.system_prompt;
+    inv.model = model;
+    inv.allowed_tools = if turn.can_edit { turn.allowed_tools } else { &read_only_tools };
+    inv.cwd = turn.cwd;
+    inv.resume_session_id = turn.session_id;
+    inv.auto_approve_edits = turn.can_edit;
+    inv.read_only = !turn.can_edit;
+    inv.effort = turn.effort;
+    inv.task = task::FLOWS;
+    inv.json_schema = turn.json_schema;
+    inv.app_mcp = turn.app_mcp;
     run(engine, binary, inv).await
 }
 

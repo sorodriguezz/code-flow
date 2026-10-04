@@ -15,6 +15,7 @@ import { monogram, monogramStyle } from "../../lib/monogram";
 import type { ShortcutId } from "../../lib/shortcuts";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { APPS } from "./AppRail";
+import { StageChip } from "../common/StageChip";
 import { setChromeSlot } from "./ChromeSlot";
 
 interface Tab {
@@ -22,6 +23,10 @@ interface Tab {
   labelKey: TranslationKey;
   icon: LucideIcon;
   shortcut: ShortcutId;
+  /** A tab still settling wears the word beside its label — see `StageChip`. */
+  stage?: "beta";
+  /** What the stage means for this tab, as the chip's tooltip. */
+  stageHintKey?: TranslationKey;
 }
 
 const TABS: Tab[] = [
@@ -33,7 +38,16 @@ const TABS: Tab[] = [
 const PIPELINES_TAB: Tab = { id: "pipelines", labelKey: "tabbar.pipelines", icon: Route, shortcut: "view.pipelines" };
 
 /** Right after Editor, where the user asked for it — and only while switched on in Settings. */
-const REVIEWER_TAB: Tab = { id: "reviewer", labelKey: "tabbar.reviewer", icon: ShieldCheck, shortcut: "view.reviewer" };
+const REVIEWER_TAB: Tab = {
+  id: "reviewer",
+  labelKey: "tabbar.reviewer",
+  icon: ShieldCheck,
+  shortcut: "view.reviewer",
+  // Beta, at the user's ask (2026-10-04): the pipeline works end to end, but it is new and leans on
+  // a SonarQube it downloads, so the tab says so before it is opened.
+  stage: "beta",
+  stageHintKey: "reviewer.betaHint",
+};
 
 const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "reviewer", "pipelines"];
 
@@ -95,6 +109,9 @@ function TabButton({ tab, active, badge, dot }: { tab: Tab; active: boolean; bad
         <span className="relative flex items-center gap-1.5">
           <Icon size={14} />
           {t(tab.labelKey)}
+          {tab.stage && (
+            <StageChip stage={tab.stage} size="sm" title={tab.stageHintKey ? t(tab.stageHintKey) : undefined} />
+          )}
           {dot && <span aria-hidden className="h-[7px] w-[7px] rounded-full" style={{ background: dot }} />}
           {badge !== undefined && badge > 0 && (
             <span
@@ -212,6 +229,9 @@ export function ChromeScope() {
         <span className="flex h-7 shrink-0 items-center gap-2 px-1 text-[13px] font-semibold text-[var(--cf-text)]">
           <AppIcon size={15} className="text-[var(--cf-accent)]" />
           {t(app.labelKey)}
+          {app.stage && (
+            <StageChip stage={app.stage} title={app.stageHintKey ? t(app.stageHintKey) : undefined} />
+          )}
         </span>
       )}
       <span ref={setChromeSlot} className="ml-2 flex min-w-0 items-center gap-2" />

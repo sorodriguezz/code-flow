@@ -3,6 +3,7 @@ import { NotificationBell } from "./NotificationBell";
 import { RemoteActions } from "../git/RemoteActions";
 import { AgentActivity } from "./AgentActivity";
 import { ServicesActivity } from "./ServicesActivity";
+import { FlowsActivity } from "./FlowsActivity";
 import { CompletionActivity } from "./CompletionActivity";
 import { BatteryMeter } from "./BatteryMeter";
 import { SystemMeter } from "./SystemMeter";
@@ -74,6 +75,7 @@ export function StatusBar() {
         <div className="cf-bar-group ml-auto flex items-center">
           <AgentActivity />
           <ServicesActivity />
+          <FlowsActivity />
           <CompletionActivity />
           <SystemMeter />
           <BatteryMeter />
@@ -161,6 +163,7 @@ export function StatusBar() {
       <div className="cf-bar-group ml-auto flex shrink-0 items-center">
         <AgentActivity />
         <ServicesActivity />
+        <FlowsActivity />
         <CompletionActivity />
         <SystemMeter />
         <BatteryMeter />

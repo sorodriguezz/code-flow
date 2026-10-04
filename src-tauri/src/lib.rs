@@ -32,6 +32,7 @@ mod dap;
 mod datasource;
 mod db;
 mod debugger;
+mod flows;
 mod fsops;
 mod codex;
 mod gdrive;
@@ -372,10 +373,15 @@ pub fn run() {
         // handler does not need to ask which one fired.
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
                     // Pressed only. Both edges are delivered, and acting on the release as well
                     // would open the ask box and toggle it shut again on a single tap.
                     if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        // A chord a flow listens for starts that flow and nothing else; every other
+                        // chord the process holds is the quick-ask one.
+                        if flows::triggers::hotkey_pressed(app, shortcut) {
+                            return;
+                        }
                         windows::toggle_quick_ask(app);
                     }
                 })
@@ -460,6 +466,9 @@ pub fn run() {
             if boot_guard::take_over(app.handle()) {
                 return Ok(());
             }
+            // The active flows' triggers: schedules, webhooks, watchers, pollers, chords. After the
+            // takeover check, so a launch that is only answering a recovery question arms nothing.
+            flows::triggers::start(app.handle());
             // The main window, built here from its own entry in `tauri.conf.json` (which says
             // `"create": false`) rather than by Tauri before `setup` runs — the one difference being
             // `enable_clipboard_access`, which that config has no field for. Without it WebView2 (and
@@ -1429,6 +1438,57 @@ pub fn run() {
             commands::notes_cmd::notes_set_book_scope,
             commands::notes_cmd::notes_move_book_to_workspace,
             // ---- Diagrams (workspace-scoped, like Notes above it) ----
+            commands::flows_cmd::flows_node_catalog,
+            commands::flows_cmd::flows_load_tree,
+            commands::flows_cmd::flows_get_flow,
+            commands::flows_cmd::flows_create_flow,
+            commands::flows_cmd::flows_save_flow,
+            commands::flows_cmd::flows_rename_flow,
+            commands::flows_cmd::flows_set_description,
+            commands::flows_cmd::flows_move_flow,
+            commands::flows_cmd::flows_set_scope,
+            commands::flows_cmd::flows_move_to_workspace,
+            commands::flows_cmd::flows_duplicate_flow,
+            commands::flows_cmd::flows_delete_flow,
+            commands::flows_cmd::flows_create_folder,
+            commands::flows_cmd::flows_rename_folder,
+            commands::flows_cmd::flows_delete_folder,
+            commands::flows_cmd::flows_list_versions,
+            commands::flows_cmd::flows_version_content,
+            commands::flows_cmd::flows_delete_version,
+            commands::flows_cmd::flows_clear_versions,
+            commands::flows_cmd::flows_run,
+            commands::flows_cmd::flows_cancel_run,
+            commands::flows_cmd::flows_active_runs,
+            commands::flows_cmd::flows_list_runs,
+            commands::flows_cmd::flows_get_run,
+            commands::flows_cmd::flows_run_node_data,
+            commands::flows_cmd::flows_run_log,
+            commands::flows_cmd::flows_delete_run,
+            commands::flows_cmd::flows_clear_runs,
+            commands::flows_cmd::flows_preview_expression,
+            commands::flows_cmd::flows_list_pins,
+            commands::flows_cmd::flows_pin_node,
+            commands::flows_cmd::flows_unpin_node,
+            commands::flows_cmd::flows_state_list,
+            commands::flows_cmd::flows_state_clear,
+            commands::flows_cmd::flows_list_variables,
+            commands::flows_cmd::flows_put_variable,
+            commands::flows_cmd::flows_rename_variable,
+            commands::flows_cmd::flows_delete_variable,
+            commands::flows_cmd::flows_set_variable_scope,
+            commands::flows_cmd::flows_list_credentials,
+            commands::flows_cmd::flows_create_credential,
+            commands::flows_cmd::flows_update_credential,
+            commands::flows_cmd::flows_delete_credential,
+            commands::flows_cmd::flows_set_credential_scope,
+            commands::flows_cmd::flows_set_active,
+            commands::flows_cmd::flows_trigger_status,
+            commands::flows_cmd::flows_armed_names,
+            commands::flows_cmd::flows_webhook_base,
+            commands::flows_cmd::flows_run_edits,
+            commands::flows_cmd::flows_undo_edits,
+            commands::flows_cmd::flows_local_models,
             commands::diagrams_cmd::diagrams_load_tree,
             commands::diagrams_cmd::diagrams_get_diagram,
             commands::diagrams_cmd::diagrams_load_thumbnails,

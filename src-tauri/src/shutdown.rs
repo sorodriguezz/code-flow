@@ -73,6 +73,12 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         crate::ai_runs::stop_all(std::time::Duration::from_secs(3));
         crate::commands::chat_cmd::record_turns_stopped_at_quit(app);
         crate::ai_prompt_files::remove_own();
+        // Flow runs, and every process their nodes started: each sits in a process group of its
+        // own (that is what Stop needs), so a `npm run build` a flow started would outlive the app.
+        // Cancelled first so each run files itself as canceled; the processes that have not gone
+        // when the grace is up are ended directly.
+        crate::flows::triggers::shutdown();
+        crate::flows::runs::shutdown(std::time::Duration::from_secs(3));
         // Services, stopped the way the Stop button stops them — Ctrl-C first — rather than
         // by the process exiting under them. The difference is Compose: its Ctrl-C takes the
         // containers down, and an app that simply exits leaves them running.

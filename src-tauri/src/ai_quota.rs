@@ -255,6 +255,18 @@ fn cached(provider: &str) -> Option<(Instant, ProviderQuota)> {
     guard.as_ref()?.get(provider).cloned()
 }
 
+/// The tightest window of one engine from the last reading, without asking anyone: `(used percent,
+/// resets_at)` — the RFC 3339 instant, empty when the provider did not say. `key` is the cache key:
+/// the provider for the system account, `provider|id` for an added one
+/// (`AccountEnv::key`). `None` when nothing has been read yet.
+///
+/// For callers that only want to *look* — a flow warning that a plan is nearly spent, or working out
+/// when one reopens — and must never start a CLI or a request to find out.
+pub fn cached_tightest(key: &str) -> Option<(f64, String)> {
+    let (_, quota) = cached(key)?;
+    quota.limits.first().map(|limit| (limit.used_percent, limit.resets_at.clone()))
+}
+
 /// Drops one provider's cached answer, so the next read has to go and ask.
 fn forget(provider: &str) {
     if let Ok(mut guard) = CACHE.lock() {

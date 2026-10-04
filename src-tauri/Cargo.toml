@@ -420,6 +420,10 @@ smb2 = "0.22"
 # what gets saved in the `.ipynb`, and a field the enum does not know would be a field lost. The
 # wire format under it is four signed JSON frames (`jupyter/wire.rs`).
 zeromq = { version = "0.6", default-features = false, features = ["tokio-runtime", "tcp-transport"] }
+rquickjs = "0.14"
+croner = "4"
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 
 # Sending a signal to a *process group*, which is what stopping an AI run needs: `child.kill()`
 # reaches the CLI and nothing it started, and every one of these CLIs is a Node process that spawns

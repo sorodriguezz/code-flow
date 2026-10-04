@@ -39,6 +39,7 @@ export type LayoutKey =
   | "notesSidebarWidth"
   | "notesOutlineWidth"
   | "diagramsSidebarWidth"
+  | "flowsSidebarWidth"
   | "vaultSidebarWidth"
   | "chatSidebarWidth"
   | "dbmlEditorWidth"
@@ -86,6 +87,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   notesSidebarWidth: "layout_notes_sidebar_width",
   notesOutlineWidth: "layout_notes_outline_width",
   diagramsSidebarWidth: "layout_diagrams_sidebar_width",
+  flowsSidebarWidth: "layout_flows_sidebar_width",
   vaultSidebarWidth: "layout_vault_sidebar_width",
   chatSidebarWidth: "layout_chat_sidebar_width",
   dbmlEditorWidth: "layout_dbml_editor_width",
@@ -165,6 +167,8 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // shape at the same indent, and two workspaces whose sidebars start eight pixels apart look
   // misaligned rather than distinct.
   diagramsSidebarWidth: 288,
+  // Narrower than the diagrams' tree: a flow row is a glyph and a name, and the canvas wants the room.
+  flowsSidebarWidth: 248,
   vaultSidebarWidth: 300,
   // The conversation list, and narrow on purpose. A row here is a title and a timestamp, and the
   // titles are auto-generated from the first message truncated at 60 characters — so past roughly

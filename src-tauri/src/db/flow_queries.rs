@@ -1,0 +1,505 @@
+//! CRUD over `flows` and `flow_folders` — the Flujos workspace.
+//!
+//! A sibling of [`super::diagram_queries`], and the same three rules hold:
+//!
+//! - **The tree never carries documents.** [`load_tree`] projects [`FlowMeta`] — every column but
+//!   `spec`. A flow's document arrives alone, through [`get_flow`], when it is opened.
+//! - **The root is a real place.** `folder_id` may be null, and every query that scopes by folder
+//!   treats null as a container like any other.
+//! - **`spec` is opaque here.** The command layer validates it (`crate::flows::spec`) and hands
+//!   down the derived columns; nothing in this file parses a document.
+//!
+//! Two things differ. Flows carry the `scope` column (`'global'` puts a flow on every workspace's
+//! shelf — see `codeflow-row-scope`), and saves are **versioned**: `version` counts them, and a save
+//! that names the version it started from is refused as a conflict when another write got there
+//! first, so a stale window can never put back an older drawing over a newer one.
+
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
+use uuid::Uuid;
+
+use super::queries::now;
+use super::version_queries;
+use crate::flows::spec::Derived;
+
+/// The `doc_versions.kind` a flow's history is filed under.
+pub const VERSION_KIND: &str = "flow";
+
+const META_COLUMNS: &str = "id, workspace_id, scope, folder_id, name, description, node_count, \
+                            trigger_types, active, version, sort_order, created_at, updated_at";
+const FOLDER_COLUMNS: &str = "id, workspace_id, name, sort_order, created_at, updated_at";
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FlowMeta {
+    pub id: String,
+    /// The flow's home. A global flow still has one: it is where it was made, and where it goes back
+    /// to being local if it is restricted again.
+    pub workspace_id: String,
+    pub scope: String,
+    pub folder_id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub node_count: i64,
+    /// JSON array of trigger type ids, in canvas order — see `spec::Derived`.
+    pub trigger_types: String,
+    /// Whether its triggers are armed. Nothing reads it before the scheduler exists.
+    pub active: bool,
+    pub version: i64,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FlowRow {
+    #[serde(flatten)]
+    pub meta: FlowMeta,
+    pub spec: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FlowFolderRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowsTree {
+    pub folders: Vec<FlowFolderRow>,
+    pub flows: Vec<FlowMeta>,
+}
+
+/// What a save answers. `meta` is `None` when the flow was deleted while it was open; `conflict`
+/// says the save named a version that is no longer the latest, and nothing was written.
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowSaved {
+    pub meta: Option<FlowMeta>,
+    pub conflict: bool,
+    /// Set when the flow was active and its triggers could not be armed again from what was saved:
+    /// it has been switched off, and this says why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_error: Option<String>,
+}
+
+fn map_meta(row: &rusqlite::Row) -> rusqlite::Result<FlowMeta> {
+    Ok(FlowMeta {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        scope: row.get(2)?,
+        folder_id: row.get(3)?,
+        name: row.get(4)?,
+        description: row.get(5)?,
+        node_count: row.get(6)?,
+        trigger_types: row.get(7)?,
+        active: row.get::<_, i64>(8)? != 0,
+        version: row.get(9)?,
+        sort_order: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<FlowFolderRow> {
+    Ok(FlowFolderRow {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        name: row.get(2)?,
+        sort_order: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn trigger_json(derived: &Derived) -> String {
+    serde_json::to_string(&derived.trigger_types).unwrap_or_else(|_| "[]".into())
+}
+
+// ---------- reads ----------
+
+/// The workspace's folders and every flow it can see: its own, and the global ones.
+pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<FlowsTree> {
+    let mut folders = conn.prepare(&format!(
+        "SELECT {FOLDER_COLUMNS} FROM flow_folders WHERE workspace_id = ?1 \
+         ORDER BY sort_order, name COLLATE NOCASE"
+    ))?;
+    let folders = folders
+        .query_map(params![workspace_id], map_folder)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut flows = conn.prepare(&format!(
+        "SELECT {META_COLUMNS} FROM flows WHERE workspace_id = ?1 OR scope = 'global' \
+         ORDER BY sort_order, name COLLATE NOCASE"
+    ))?;
+    let flows = flows
+        .query_map(params![workspace_id], map_meta)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(FlowsTree { folders, flows })
+}
+
+pub fn get_meta(conn: &Connection, id: &str) -> rusqlite::Result<Option<FlowMeta>> {
+    conn.query_row(&format!("SELECT {META_COLUMNS} FROM flows WHERE id = ?1"), params![id], map_meta)
+        .optional()
+}
+
+/// One flow with its document — the only read in this file that returns `spec`.
+pub fn get_flow(conn: &Connection, id: &str) -> rusqlite::Result<Option<FlowRow>> {
+    conn.query_row(
+        &format!("SELECT {META_COLUMNS}, spec FROM flows WHERE id = ?1"),
+        params![id],
+        |row| Ok(FlowRow { meta: map_meta(row)?, spec: row.get(13)? }),
+    )
+    .optional()
+}
+
+/// The next `sort_order` at the end of a container (null = the root).
+fn next_flow_order(conn: &Connection, workspace_id: &str, folder_id: Option<&str>) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM flows WHERE workspace_id = ?1 AND folder_id IS ?2",
+        params![workspace_id, folder_id],
+        |row| row.get(0),
+    )
+}
+
+// ---------- flows ----------
+
+pub fn create_flow(
+    conn: &Connection,
+    workspace_id: &str,
+    folder_id: Option<&str>,
+    name: &str,
+    spec: &str,
+    derived: &Derived,
+) -> rusqlite::Result<FlowMeta> {
+    let id = Uuid::new_v4().to_string();
+    let stamp = now();
+    let order = next_flow_order(conn, workspace_id, folder_id)?;
+    conn.execute(
+        "INSERT INTO flows (id, workspace_id, scope, folder_id, name, description, spec, node_count, \
+                            trigger_types, active, version, sort_order, created_at, updated_at) \
+         VALUES (?1, ?2, 'workspace', ?3, ?4, '', ?5, ?6, ?7, 0, 1, ?8, ?9, ?9)",
+        params![id, workspace_id, folder_id, name, spec, derived.node_count, trigger_json(derived), order, stamp],
+    )?;
+    Ok(get_meta(conn, &id)?.expect("the row was just written"))
+}
+
+/// The autosave path. See [`FlowSaved`] for the two shapes of "not saved".
+///
+/// The previous document is recorded as a version before it is overwritten — throttled and capped
+/// by `version_queries`, so an afternoon of dragging is a handful of snapshots, not hundreds. An
+/// unchanged document writes nothing and keeps its version number: autosave fires on a timer as
+/// well as on an edit.
+pub fn save_spec(
+    conn: &Connection,
+    id: &str,
+    spec: &str,
+    derived: &Derived,
+    expected_version: Option<i64>,
+) -> rusqlite::Result<FlowSaved> {
+    let current: Option<(i64, String, String)> = conn
+        .query_row("SELECT version, name, spec FROM flows WHERE id = ?1", params![id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()?;
+    let Some((version, name, previous)) = current else {
+        return Ok(FlowSaved { meta: None, conflict: false, trigger_error: None });
+    };
+    if expected_version.is_some_and(|expected| expected != version) {
+        return Ok(FlowSaved { meta: get_meta(conn, id)?, conflict: true, trigger_error: None });
+    }
+    if previous == spec {
+        return Ok(FlowSaved { meta: get_meta(conn, id)?, conflict: false, trigger_error: None });
+    }
+    let stamp = now();
+    let _ = version_queries::record_version(conn, VERSION_KIND, id, &name, &previous, &stamp);
+    conn.execute(
+        "UPDATE flows SET spec = ?2, node_count = ?3, trigger_types = ?4, version = version + 1, \
+                          updated_at = ?5 WHERE id = ?1",
+        params![id, spec, derived.node_count, trigger_json(derived), stamp],
+    )?;
+    Ok(FlowSaved { meta: get_meta(conn, id)?, conflict: false, trigger_error: None })
+}
+
+/// Switches a flow on or off. Only the flag: arming its triggers is `flows::triggers`' business.
+pub fn set_active(conn: &Connection, id: &str, active: bool) -> rusqlite::Result<Option<FlowMeta>> {
+    conn.execute("UPDATE flows SET active = ?2 WHERE id = ?1", params![id, active as i64])?;
+    get_meta(conn, id)
+}
+
+/// Every active flow, in any workspace — what startup arms.
+pub fn active_flow_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare("SELECT id FROM flows WHERE active = 1")?;
+    let rows = statement.query_map([], |row| row.get(0))?;
+    rows.collect()
+}
+
+pub fn rename_flow(conn: &Connection, id: &str, name: &str) -> rusqlite::Result<Option<FlowMeta>> {
+    conn.execute("UPDATE flows SET name = ?2, updated_at = ?3 WHERE id = ?1", params![id, name, now()])?;
+    get_meta(conn, id)
+}
+
+pub fn set_description(conn: &Connection, id: &str, description: &str) -> rusqlite::Result<Option<FlowMeta>> {
+    conn.execute(
+        "UPDATE flows SET description = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, description, now()],
+    )?;
+    get_meta(conn, id)
+}
+
+/// Files a flow in a folder (or the root), at the end of it. A folder of another workspace is
+/// refused by answering `None` — the tree that offered it was stale.
+pub fn move_flow(conn: &Connection, id: &str, folder_id: Option<&str>) -> rusqlite::Result<Option<FlowMeta>> {
+    let Some(meta) = get_meta(conn, id)? else { return Ok(None) };
+    if let Some(folder) = folder_id {
+        let home: Option<String> = conn
+            .query_row("SELECT workspace_id FROM flow_folders WHERE id = ?1", params![folder], |row| row.get(0))
+            .optional()?;
+        if home.as_deref() != Some(meta.workspace_id.as_str()) {
+            return Ok(None);
+        }
+    }
+    let order = next_flow_order(conn, &meta.workspace_id, folder_id)?;
+    conn.execute(
+        "UPDATE flows SET folder_id = ?2, sort_order = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, folder_id, order, now()],
+    )?;
+    get_meta(conn, id)
+}
+
+/// `true` puts the flow on every workspace's shelf; `false` back on its home's alone.
+pub fn set_scope(conn: &Connection, id: &str, global: bool) -> rusqlite::Result<Option<FlowMeta>> {
+    let scope = if global { "global" } else { "workspace" };
+    conn.execute("UPDATE flows SET scope = ?2, updated_at = ?3 WHERE id = ?1", params![id, scope, now()])?;
+    get_meta(conn, id)
+}
+
+/// Moves a flow to another workspace and files it *there*: local, at the root (its folder belongs to
+/// the workspace it is leaving). The same rule `note_queries::move_book_to_workspace` keeps.
+pub fn move_to_workspace(conn: &Connection, id: &str, workspace_id: &str) -> rusqlite::Result<Option<FlowMeta>> {
+    let order = next_flow_order(conn, workspace_id, None)?;
+    conn.execute(
+        "UPDATE flows SET workspace_id = ?2, scope = 'workspace', folder_id = NULL, sort_order = ?3, \
+                          updated_at = ?4 WHERE id = ?1",
+        params![id, workspace_id, order, now()],
+    )?;
+    get_meta(conn, id)
+}
+
+/// A copy beside the original, under the name the caller chose (it is translated upstairs). A copy
+/// starts inactive whatever the original was: duplicating a scheduled flow must not double its runs.
+pub fn duplicate_flow(conn: &Connection, id: &str, name: &str) -> rusqlite::Result<Option<FlowMeta>> {
+    let Some(row) = get_flow(conn, id)? else { return Ok(None) };
+    let copy = Uuid::new_v4().to_string();
+    let stamp = now();
+    let order = next_flow_order(conn, &row.meta.workspace_id, row.meta.folder_id.as_deref())?;
+    conn.execute(
+        "INSERT INTO flows (id, workspace_id, scope, folder_id, name, description, spec, node_count, \
+                            trigger_types, active, version, sort_order, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 1, ?10, ?11, ?11)",
+        params![
+            copy,
+            row.meta.workspace_id,
+            row.meta.scope,
+            row.meta.folder_id,
+            name,
+            row.meta.description,
+            row.spec,
+            row.meta.node_count,
+            row.meta.trigger_types,
+            order,
+            stamp
+        ],
+    )?;
+    get_meta(conn, &copy)
+}
+
+/// Deletes a flow and its history together — a flow is deleted from a confirmation that names it,
+/// and fifty snapshots of something the user asked to be rid of are not a recovery feature.
+pub fn delete_flow(conn: &Connection, id: &str) -> rusqlite::Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    version_queries::delete_versions(&tx, VERSION_KIND, id)?;
+    // Its executions have no foreign key to cascade from (see `add_flow_run_tables`); their files
+    // are the caller's to remove, after the commit.
+    super::flow_run_queries::delete_runs_of_flow(&tx, id)?;
+    let deleted = tx.execute("DELETE FROM flows WHERE id = ?1", params![id])?;
+    tx.commit()?;
+    Ok(deleted)
+}
+
+// ---------- folders ----------
+
+pub fn create_folder(conn: &Connection, workspace_id: &str, name: &str) -> rusqlite::Result<FlowFolderRow> {
+    let id = Uuid::new_v4().to_string();
+    let stamp = now();
+    let order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM flow_folders WHERE workspace_id = ?1",
+        params![workspace_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO flow_folders (id, workspace_id, parent_id, name, sort_order, created_at, updated_at) \
+         VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?5)",
+        params![id, workspace_id, name, order, stamp],
+    )?;
+    conn.query_row(&format!("SELECT {FOLDER_COLUMNS} FROM flow_folders WHERE id = ?1"), params![id], map_folder)
+}
+
+pub fn rename_folder(conn: &Connection, id: &str, name: &str) -> rusqlite::Result<Option<FlowFolderRow>> {
+    conn.execute(
+        "UPDATE flow_folders SET name = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, name, now()],
+    )?;
+    conn.query_row(&format!("SELECT {FOLDER_COLUMNS} FROM flow_folders WHERE id = ?1"), params![id], map_folder)
+        .optional()
+}
+
+/// Deletes a folder and puts its flows back at the root — explicitly, rather than trusting the
+/// foreign key's `ON DELETE SET NULL` to be enforced on this connection.
+pub fn delete_folder(conn: &Connection, id: &str) -> rusqlite::Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("UPDATE flows SET folder_id = NULL, updated_at = ?2 WHERE folder_id = ?1", params![id, now()])?;
+    let deleted = tx.execute("DELETE FROM flow_folders WHERE id = ?1", params![id])?;
+    tx.commit()?;
+    Ok(deleted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flows::spec;
+
+    fn workspaces() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::migrations::run(&conn).unwrap();
+        // On, as the app's own connection has it: the workspace test leans on the cascade.
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            "DELETE FROM workspaces;
+             INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                 VALUES ('w1', 'Plataforma', 'workflow', '#111', 0, '2026-01-01T00:00:00+00:00'),
+                        ('w2', 'Personal', 'workflow', '#222', 1, '2026-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn create(conn: &Connection, workspace: &str, name: &str) -> FlowMeta {
+        let text = spec::empty_text();
+        let derived = spec::derive(&spec::parse(&text).unwrap());
+        create_flow(conn, workspace, None, name, &text, &derived).unwrap()
+    }
+
+    fn with_trigger() -> (String, Derived) {
+        let text = r#"{"schema":1,"nodes":[{"id":"n1","type":"trigger.schedule","name":"Cada hora","pos":[0,0]}]}"#;
+        let derived = spec::derive(&spec::parse(text).unwrap());
+        (text.to_string(), derived)
+    }
+
+    #[test]
+    fn a_workspace_sees_its_own_flows_and_the_global_ones() {
+        let conn = workspaces();
+        let mine = create(&conn, "w1", "Informe");
+        let theirs = create(&conn, "w2", "Respaldo");
+        assert_eq!(load_tree(&conn, "w1").unwrap().flows, vec![mine.clone()]);
+
+        set_scope(&conn, &theirs.id, true).unwrap();
+        let seen: Vec<String> = load_tree(&conn, "w1").unwrap().flows.into_iter().map(|f| f.id).collect();
+        assert_eq!(seen.len(), 2);
+        assert!(seen.contains(&theirs.id));
+    }
+
+    #[test]
+    fn a_save_bumps_the_version_records_history_and_refuses_a_stale_writer() {
+        let conn = workspaces();
+        let flow = create(&conn, "w1", "Informe");
+        assert_eq!(flow.version, 1);
+        let (text, derived) = with_trigger();
+
+        let saved = save_spec(&conn, &flow.id, &text, &derived, Some(1)).unwrap();
+        let meta = saved.meta.unwrap();
+        assert!(!saved.conflict);
+        assert_eq!(meta.version, 2);
+        assert_eq!(meta.node_count, 1);
+        assert_eq!(meta.trigger_types, r#"["trigger.schedule"]"#);
+        // The document it replaced is now the flow's first version.
+        assert_eq!(version_queries::list_versions(&conn, VERSION_KIND, &flow.id).unwrap().len(), 1);
+
+        // A window still holding version 1 is told, and writes nothing.
+        let stale = save_spec(&conn, &flow.id, &spec::empty_text(), &spec::derive(&spec::empty()), Some(1)).unwrap();
+        assert!(stale.conflict);
+        assert_eq!(get_flow(&conn, &flow.id).unwrap().unwrap().spec, text);
+
+        // Saving the same document again changes nothing, version included.
+        let same = save_spec(&conn, &flow.id, &text, &derived, Some(2)).unwrap();
+        assert_eq!(same.meta.unwrap().version, 2);
+    }
+
+    #[test]
+    fn a_deleted_flow_answers_none_and_takes_its_history() {
+        let conn = workspaces();
+        let flow = create(&conn, "w1", "Informe");
+        let (text, derived) = with_trigger();
+        save_spec(&conn, &flow.id, &text, &derived, None).unwrap();
+        assert_eq!(delete_flow(&conn, &flow.id).unwrap(), 1);
+        assert!(save_spec(&conn, &flow.id, &text, &derived, None).unwrap().meta.is_none());
+        assert!(version_queries::list_versions(&conn, VERSION_KIND, &flow.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn folders_file_flows_and_give_them_back_when_deleted() {
+        let conn = workspaces();
+        let flow = create(&conn, "w1", "Informe");
+        let folder = create_folder(&conn, "w1", "Pagos").unwrap();
+        let elsewhere = create_folder(&conn, "w2", "Ajena").unwrap();
+
+        assert_eq!(move_flow(&conn, &flow.id, Some(&folder.id)).unwrap().unwrap().folder_id, Some(folder.id.clone()));
+        // Another workspace's folder is not a place this flow can go.
+        assert!(move_flow(&conn, &flow.id, Some(&elsewhere.id)).unwrap().is_none());
+
+        delete_folder(&conn, &folder.id).unwrap();
+        assert_eq!(get_meta(&conn, &flow.id).unwrap().unwrap().folder_id, None);
+    }
+
+    #[test]
+    fn a_copy_starts_inactive_beside_the_original() {
+        let conn = workspaces();
+        let flow = create(&conn, "w1", "Informe");
+        conn.execute("UPDATE flows SET active = 1 WHERE id = ?1", params![flow.id]).unwrap();
+        let copy = duplicate_flow(&conn, &flow.id, "Informe (copia)").unwrap().unwrap();
+        assert_ne!(copy.id, flow.id);
+        assert!(!copy.active);
+        assert_eq!(copy.folder_id, flow.folder_id);
+        assert_eq!(get_flow(&conn, &copy.id).unwrap().unwrap().spec, spec::empty_text());
+    }
+
+    #[test]
+    fn moving_to_another_workspace_files_it_there_locally() {
+        let conn = workspaces();
+        let flow = create(&conn, "w1", "Informe");
+        let folder = create_folder(&conn, "w1", "Pagos").unwrap();
+        move_flow(&conn, &flow.id, Some(&folder.id)).unwrap();
+        set_scope(&conn, &flow.id, true).unwrap();
+
+        let moved = move_to_workspace(&conn, &flow.id, "w2").unwrap().unwrap();
+        assert_eq!(moved.workspace_id, "w2");
+        assert_eq!(moved.scope, "workspace");
+        assert_eq!(moved.folder_id, None);
+        assert!(load_tree(&conn, "w1").unwrap().flows.is_empty());
+    }
+
+    /// A workspace deleted out from under a global flow must not take the flow with it — the rule
+    /// `rehome_global_rows` keeps for every scoped table.
+    #[test]
+    fn a_global_flow_survives_its_home_workspace() {
+        let conn = workspaces();
+        let global = create(&conn, "w1", "Compartido");
+        let local = create(&conn, "w1", "Local");
+        set_scope(&conn, &global.id, true).unwrap();
+        crate::db::queries::delete_workspace(&conn, "w1").unwrap();
+        let left: Vec<String> = load_tree(&conn, "w2").unwrap().flows.into_iter().map(|f| f.id).collect();
+        assert_eq!(left, vec![global.id]);
+        assert!(get_meta(&conn, &local.id).unwrap().is_none());
+    }
+}

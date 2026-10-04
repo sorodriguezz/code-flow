@@ -527,7 +527,16 @@ fn rehome_global_rows(conn: &Connection, from: &str) -> rusqlite::Result<()> {
     // Nothing left to be global *to*. The cascade is the right answer here.
     let Some(into) = into else { return Ok(()) };
 
-    for table in ["note_books", "notes", "api_collections", "db_connections", "mcp_servers"] {
+    for table in [
+        "note_books",
+        "notes",
+        "api_collections",
+        "db_connections",
+        "mcp_servers",
+        "flows",
+        "flow_variables",
+        "flow_credentials",
+    ] {
         conn.execute(
             &format!(
                 "UPDATE {table} SET workspace_id = ?2 WHERE workspace_id = ?1 AND scope = 'global'"

@@ -31,6 +31,9 @@ export type MainView =
   | "remote"
   | "notes"
   | "diagrams"
+  /** Flujos — node-based automations. Workspace-scoped and rail-reached like the seven above; see
+   *  `components/flows`. */
+  | "flows"
   | "vault"
   /**
    * The chat workspace — the odd one among the odd ones, and for a different reason than the vault.

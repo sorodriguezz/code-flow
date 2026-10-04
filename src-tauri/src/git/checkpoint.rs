@@ -295,16 +295,33 @@ pub fn remove_if_unchanged(path: &str, id: &str) -> Result<bool, String> {
 
 const BASELINE_PREFIX: &str = "refs/codeflow/hybrid/";
 
+/// A flow run's baseline: the tree before the first node of the run that may edit it. One per run
+/// and repository — a second editing node of the same run measures against the same "before".
+const FLOW_PREFIX: &str = "refs/codeflow/flows/";
+
 fn baseline_ref(chain_id: &str) -> String {
     format!("{BASELINE_PREFIX}{chain_id}")
+}
+
+fn flow_ref(run_id: &str) -> String {
+    format!("{FLOW_PREFIX}{run_id}")
 }
 
 /// Snapshots the working tree as `chain_id`'s baseline and returns the commit id. Taken once, on the
 /// run's first write; a later call finds the existing ref and returns it untouched, so a resumed run
 /// keeps measuring against the tree as it was before the *first* attempt.
 pub fn create_baseline(path: &str, chain_id: &str) -> Result<String, String> {
+    create_at(path, &baseline_ref(chain_id), "hybrid")
+}
+
+/// [`create_baseline`] for a flow run.
+pub fn create_flow_baseline(path: &str, run_id: &str) -> Result<String, String> {
+    create_at(path, &flow_ref(run_id), "flow")
+}
+
+fn create_at(path: &str, refname: &str, message: &str) -> Result<String, String> {
     let repo = open(path)?;
-    if let Ok(existing) = repo.find_reference(&baseline_ref(chain_id)) {
+    if let Ok(existing) = repo.find_reference(refname) {
         if let Ok(commit) = existing.peel_to_commit() {
             return Ok(commit.id().to_string());
         }
@@ -315,13 +332,13 @@ pub fn create_baseline(path: &str, chain_id: &str) -> Result<String, String> {
     let parents: Vec<git2::Commit> = repo.head().ok().and_then(|h| h.peel_to_commit().ok()).into_iter().collect();
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
     let oid = repo
-        .commit(Some(&baseline_ref(chain_id)), &sig, &sig, "hybrid", &tree, &parent_refs)
+        .commit(Some(refname), &sig, &sig, message, &tree, &parent_refs)
         .map_err(|e| e.message().to_string())?;
     Ok(oid.to_string())
 }
 
-fn read_baseline<'r>(repo: &'r Repository, chain_id: &str) -> Result<git2::Commit<'r>, String> {
-    repo.find_reference(&baseline_ref(chain_id))
+fn read_at<'r>(repo: &'r Repository, refname: &str) -> Result<git2::Commit<'r>, String> {
+    repo.find_reference(refname)
         .map_err(|_| "this run's baseline no longer exists".to_string())?
         .peel_to_commit()
         .map_err(|e| e.message().to_string())
@@ -329,16 +346,34 @@ fn read_baseline<'r>(repo: &'r Repository, chain_id: &str) -> Result<git2::Commi
 
 /// Paths that differ from the baseline right now — what the run (and anything else since) changed.
 pub fn baseline_changed_paths(path: &str, chain_id: &str) -> Result<Vec<String>, String> {
+    changed_at(path, &baseline_ref(chain_id))
+}
+
+/// [`baseline_changed_paths`] for a flow run.
+pub fn flow_changed_paths(path: &str, run_id: &str) -> Result<Vec<String>, String> {
+    changed_at(path, &flow_ref(run_id))
+}
+
+fn changed_at(path: &str, refname: &str) -> Result<Vec<String>, String> {
     let repo = open(path)?;
-    let commit = read_baseline(&repo, chain_id)?;
+    let commit = read_at(&repo, refname)?;
     diff_paths(&repo, &commit)
 }
 
 /// Puts paths back as they were in the baseline: all of them with `only = None`, or just the ones
 /// listed. Returns the paths it touched.
 pub fn restore_baseline(path: &str, chain_id: &str, only: Option<&[String]>) -> Result<Vec<String>, String> {
+    restore_at(path, &baseline_ref(chain_id), only)
+}
+
+/// [`restore_baseline`] for a flow run: everything the run's editing nodes changed goes back.
+pub fn restore_flow(path: &str, run_id: &str) -> Result<Vec<String>, String> {
+    restore_at(path, &flow_ref(run_id), None)
+}
+
+fn restore_at(path: &str, refname: &str, only: Option<&[String]>) -> Result<Vec<String>, String> {
     let repo = open(path)?;
-    let commit = read_baseline(&repo, chain_id)?;
+    let commit = read_at(&repo, refname)?;
     let tree = commit.tree().map_err(|e| e.message().to_string())?;
     let workdir = repo.workdir().ok_or_else(|| "bare repository".to_string())?.to_path_buf();
     let mut touched = Vec::new();
@@ -370,8 +405,17 @@ pub fn restore_baseline(path: &str, chain_id: &str, only: Option<&[String]>) -> 
 /// code that is not there. What did not fit is listed by name at the end, so the reviewer knows to
 /// open it rather than assuming it is unchanged.
 pub fn baseline_diff(path: &str, chain_id: &str, max_chars: usize) -> Result<String, String> {
+    diff_at(path, &baseline_ref(chain_id), max_chars)
+}
+
+/// [`baseline_diff`] for a flow run.
+pub fn flow_diff(path: &str, run_id: &str, max_chars: usize) -> Result<String, String> {
+    diff_at(path, &flow_ref(run_id), max_chars)
+}
+
+fn diff_at(path: &str, refname: &str, max_chars: usize) -> Result<String, String> {
     let repo = open(path)?;
-    let commit = read_baseline(&repo, chain_id)?;
+    let commit = read_at(&repo, refname)?;
     let tree = commit.tree().map_err(|e| e.message().to_string())?;
     let mut opts = DiffOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true).context_lines(3);
@@ -425,8 +469,17 @@ pub fn baseline_diff(path: &str, chain_id: &str, max_chars: usize) -> Result<Str
 
 /// Forgets a run's baseline. Best effort, for when the chain is deleted.
 pub fn remove_baseline(path: &str, chain_id: &str) {
+    remove_at(path, &baseline_ref(chain_id));
+}
+
+/// Forgets a flow run's baseline — when the run is deleted or ages out.
+pub fn remove_flow_baseline(path: &str, run_id: &str) {
+    remove_at(path, &flow_ref(run_id));
+}
+
+fn remove_at(path: &str, refname: &str) {
     if let Ok(repo) = open(path) {
-        if let Ok(mut reference) = repo.find_reference(&baseline_ref(chain_id)) {
+        if let Ok(mut reference) = repo.find_reference(refname) {
             let _ = reference.delete();
         }
     }

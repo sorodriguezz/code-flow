@@ -17,10 +17,10 @@ component's own licence wins — which is what section 6 says.
 
 | What ships | Count |
 |---|---|
-| npm packages (production tree) | 340 resolved versions of 311 packages |
-| Rust crates (resolved for macOS and Windows) | 685 resolved versions of 599 crates |
-| C libraries compiled into the app | 5, plus 4 bundled inside them |
-| Runtimes, drivers and web apps bundled with it | 2 |
+| npm packages (production tree) | 343 resolved versions of 314 packages |
+| Rust crates (resolved for macOS and Windows) | 702 resolved versions of 611 crates |
+| C libraries compiled into the app | 6, plus 4 bundled inside them |
+| Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 10 |
 | Icon sets | 2 |
 
@@ -123,6 +123,7 @@ the script that fetches it. (The Java runtime and the JDBC drivers are not among
 |---|---|---|---|---|---|
 | llama.cpp (with ggml) | `b10587` | MIT | <https://github.com/ggml-org/llama.cpp> | `resources/llama/` — `llama-server` and the ggml libraries it resolves | `scripts/build-llama-runtime.mjs` |
 | draw.io | `31.1.8` | Apache-2.0 | <https://github.com/jgraph/drawio> | `public/drawio/` — vendored into the frontend bundle | `scripts/build-drawio-webapp.mjs` |
+| Luxon | `3.7.2` | MIT | <https://github.com/moment/luxon> | `src-tauri/src/flows/js/luxon.min.js` — embedded in the app binary for Flujos expressions | `vendored from npm luxon` |
 
 llama.cpp's `LICENSE` is copied next to its binaries by its build script, so it travels inside
 the installer as well as being listed here. draw.io and llama.cpp both carry third-party code of
@@ -145,6 +146,7 @@ listed here. Each licence is re-read from the crate's copy of the library on eve
 | **libssh2** | `1.11.1_DEV` | BSD-3-Clause | macOS, Windows | `libssh2-sys` 0.3.2 |
 | **SQLite** | `3.46.0` | blessing | macOS, Windows | `libsqlite3-sys` 0.30.1 |
 | **OpenSSL** | `3.6.3` | Apache-2.0 | macOS | `openssl-src` 300.6.1+3.6.3 |
+| **QuickJS-ng** | `0.16.2` | MIT | macOS, Windows | `rquickjs-sys` 0.14.0 |
 | **zlib** | `1.3.2` | Zlib | Windows | `libz-sys` 1.1.29 |
 
 Where a library is compiled in on one platform only, the other uses the operating system's own:
@@ -227,7 +229,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### MIT — 230 packages
+### MIT — 233 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -321,6 +323,8 @@ because there the order carries meaning.
 | `@xterm/addon-web-links` | 0.12.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/addon-webgl` | 0.19.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/xterm` | 6.0.0 | MIT | <https://github.com/xtermjs/xterm.js> |
+| `@xyflow/react` | 12.12.0 | MIT | <https://reactflow.dev> |
+| `@xyflow/system` | 0.0.83 | MIT | <https://github.com/xyflow/xyflow> |
 | `abort-controller` | 3.0.0 | MIT | <https://github.com/mysticatea/abort-controller> |
 | `aria-hidden` | 1.2.6 | MIT | <https://github.com/theKashey/aria-hidden> |
 | `base64-js` | 0.0.8, 1.5.1 | MIT | <https://github.com/beatgammit/base64-js> |
@@ -333,6 +337,7 @@ because there the order carries meaning.
 | `canvas-roundrect-polyfill` | 0.0.1 | MIT | <https://github.com/Kaiido/roundRect> |
 | `chevrotain-allstar` | 0.3.1 | MIT | <https://github.com/langium/chevrotain-allstar> |
 | `chokidar` | 3.6.0 | MIT | <https://github.com/paulmillr/chokidar> |
+| `classcat` | 5.0.5 | MIT | <https://github.com/jorgebucaran/classcat> |
 | `clone` | 2.1.2 | MIT | <https://github.com/pvorb/node-clone> |
 | `clsx` | 1.1.1 | MIT | <https://github.com/lukeed/clsx> |
 | `commander` | 2.20.3, 7.2.0, 8.3.0 | MIT | <https://github.com/tj/commander.js> |
@@ -621,7 +626,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### Apache-2.0 OR MIT — 368 crates
+### Apache-2.0 OR MIT — 374 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -629,6 +634,7 @@ because there the order carries meaning.
 | `aes` | 0.8.4, 0.9.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/block-ciphers> |
 | `aes-gcm` | 0.10.3, 0.11.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/AEADs> |
 | `ahash` | 0.8.12 | Apache-2.0 OR MIT | <https://github.com/tkaitchuck/ahash> |
+| `allocator-api2` | 0.2.21 | Apache-2.0 OR MIT | <https://github.com/zakarumych/allocator-api2> |
 | `anyhow` | 1.0.104 | Apache-2.0 OR MIT | <https://github.com/dtolnay/anyhow> |
 | `arc-swap` | 1.9.2 | Apache-2.0 OR MIT | <https://github.com/vorner/arc-swap> |
 | `argon2` | 0.5.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/password-hashes/tree/master/argon2> |
@@ -662,6 +668,7 @@ because there the order carries meaning.
 | `cfg-if` | 1.0.4 | Apache-2.0 OR MIT | <https://github.com/rust-lang/cfg-if> |
 | `chacha20` | 0.10.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/stream-ciphers> |
 | `chrono` | 0.4.45 | Apache-2.0 OR MIT | <https://github.com/chronotope/chrono> |
+| `chrono-tz` | 0.10.4 | Apache-2.0 OR MIT | <https://github.com/chronotope/chrono-tz> |
 | `cipher` | 0.4.4, 0.5.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/traits> |
 | `cmac` | 0.8.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/MACs> |
 | `cmov` | 0.5.4 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
@@ -699,6 +706,9 @@ because there the order carries meaning.
 | `deranged` | 0.5.8 | Apache-2.0 OR MIT | <https://github.com/jhpratt/deranged> |
 | `derive-syn-parse` | 0.2.0 | Apache-2.0 OR MIT | <https://github.com/sharnoff/derive-syn-parse> |
 | `derive-where` | 1.6.1 | Apache-2.0 OR MIT | <https://github.com/ModProg/derive-where> |
+| `derive_builder` | 0.20.2 | Apache-2.0 OR MIT | <https://github.com/colin-kiegel/rust-derive-builder> |
+| `derive_builder_core` | 0.20.2 | Apache-2.0 OR MIT | <https://github.com/colin-kiegel/rust-derive-builder> |
+| `derive_builder_macro` | 0.20.2 | Apache-2.0 OR MIT | <https://github.com/colin-kiegel/rust-derive-builder> |
 | `des` | 0.8.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/block-ciphers> |
 | `digest` | 0.10.7, 0.11.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/traits> |
 | `dirs` | 4.0.0, 5.0.1, 6.0.0 | Apache-2.0 OR MIT | <https://github.com/soc/dirs-rs> |
@@ -851,6 +861,7 @@ because there the order carries meaning.
 | `regex` | 1.13.1 | Apache-2.0 OR MIT | <https://github.com/rust-lang/regex> |
 | `regex-automata` | 0.4.16 | Apache-2.0 OR MIT | <https://github.com/rust-lang/regex> |
 | `regex-syntax` | 0.8.11 | Apache-2.0 OR MIT | <https://github.com/rust-lang/regex> |
+| `relative-path` | 2.0.1 | Apache-2.0 OR MIT | <https://github.com/udoprog/relative-path> |
 | `reqwest` | 0.12.28, 0.13.4 | Apache-2.0 OR MIT | <https://github.com/seanmonstar/reqwest> |
 | `resolv-conf` | 0.7.6 | Apache-2.0 OR MIT | <https://github.com/hickory-dns/resolv-conf> |
 | `rustc-hash` | 2.1.3 | Apache-2.0 OR MIT | <https://github.com/rust-lang/rustc-hash> |
@@ -994,7 +1005,7 @@ because there the order carries meaning.
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `zeroize_derive` | 1.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 
-### MIT — 126 crates
+### MIT — 132 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -1012,10 +1023,11 @@ because there the order carries meaning.
 | `cfg_aliases` | 0.2.2 | MIT | <https://github.com/katharostech/cfg_aliases> |
 | `combine` | 4.6.7 | MIT | <https://github.com/Marwes/combine> |
 | `convert_case` | 0.10.0 | MIT | <https://github.com/rutrum/convert-case> |
+| `croner` | 4.0.1 | MIT | <https://github.com/hexagon/croner-rust> |
 | `crunchy` | 0.2.4 | MIT | <https://github.com/eira-fransham/crunchy> |
-| `darling` | 0.23.0 | MIT | <https://github.com/TedDriggs/darling> |
-| `darling_core` | 0.23.0 | MIT | <https://github.com/TedDriggs/darling> |
-| `darling_macro` | 0.23.0 | MIT | <https://github.com/TedDriggs/darling> |
+| `darling` | 0.20.11, 0.23.0 | MIT | <https://github.com/TedDriggs/darling> |
+| `darling_core` | 0.20.11, 0.23.0 | MIT | <https://github.com/TedDriggs/darling> |
+| `darling_macro` | 0.20.11, 0.23.0 | MIT | <https://github.com/TedDriggs/darling> |
 | `dashmap` | 6.2.1 | MIT | <https://github.com/xacrimon/dashmap> |
 | `data-encoding` | 2.11.0 | MIT | <https://github.com/ia0/data-encoding> |
 | `derive_more` | 2.1.1 | MIT | <https://github.com/JelteF/derive_more> |
@@ -1060,11 +1072,11 @@ because there the order carries meaning.
 | `ordered-float` | 2.10.1 | MIT | <https://github.com/reem/rust-ordered-float> |
 | `os_info` | 3.15.0 | MIT | <https://github.com/stanislav-tkach/os_info> |
 | `pem` | 4.0.0 | MIT | <https://github.com/jcreekmore/pem-rs> |
-| `phf` | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
+| `phf` | 0.12.1, 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | `phf_codegen` | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | `phf_generator` | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | `phf_macros` | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
-| `phf_shared` | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
+| `phf_shared` | 0.12.1, 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | `plist` | 1.10.0 | MIT | <https://github.com/ebarnard/rust-plist> |
 | `portable-pty` | 0.8.1 | MIT | <https://github.com/wez/wezterm> |
 | `precomputed-hash` | 0.1.1 | MIT | <https://github.com/emilio/precomputed-hash> |
@@ -1072,6 +1084,9 @@ because there the order carries meaning.
 | `quick-xml` | 0.41.0 | MIT | <https://github.com/tafia/quick-xml> |
 | `radium` | 0.7.0 | MIT | <https://github.com/bitvecto-rs/radium> |
 | `rfd` | 0.16.0 | MIT | <https://github.com/PolyMeilex/rfd> |
+| `rquickjs` | 0.14.0 | MIT | <https://github.com/DelSkayn/rquickjs> |
+| `rquickjs-core` | 0.14.0 | MIT | <https://github.com/DelSkayn/rquickjs> |
+| `rquickjs-sys` | 0.14.0 | MIT | <https://github.com/DelSkayn/rquickjs> |
 | `rusqlite` | 0.32.1 | MIT | <https://github.com/rusqlite/rusqlite> |
 | `rustc_version_runtime` | 0.3.0 | MIT | <https://github.com/seppo0010/rustc-version-runtime-rs> |
 | `saturating` | 0.1.0 | MIT | <https://github.com/breeswish/saturating-rs> |
@@ -1087,6 +1102,8 @@ because there the order carries meaning.
 | `slab` | 0.4.12 | MIT | <https://github.com/tokio-rs/slab> |
 | `spin` | 0.9.9 | MIT | <https://github.com/mvdnes/spin-rs> |
 | `strsim` | 0.11.1 | MIT | <https://github.com/rapidfuzz/strsim-rs> |
+| `strum` | 0.27.2 | MIT | <https://github.com/Peternator7/strum> |
+| `strum_macros` | 0.27.2 | MIT | <https://github.com/Peternator7/strum> |
 | `synstructure` | 0.13.2 | MIT | <https://github.com/mystor/synstructure> |
 | `sysinfo` | 0.39.6 | MIT | <https://github.com/GuillaumeGomez/sysinfo> |
 | `take_mut` | 0.2.2 | MIT | <https://github.com/Sgeo/take_mut> |

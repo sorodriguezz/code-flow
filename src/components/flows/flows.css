@@ -1,0 +1,366 @@
+/* The Flujos canvas. Imported by `FlowEditor`, so it travels in the editor's lazy chunk with
+   @xyflow/react rather than in the app's first paint.
+
+   React Flow draws its own pane, edges, handles and selection box; everything it draws is re-dressed
+   here in CodeFlow's tokens, which is what makes the canvas follow the theme, the accent and the
+   24 editor schemes without a `colorMode` of its own. Nodes are ours entirely (`FlowNodes.tsx`). */
+
+.cf-flow-canvas {
+  --xy-background-color: transparent;
+  --xy-node-border-radius: 12px;
+  --xy-edge-stroke: var(--cf-border-strong);
+  --xy-edge-stroke-selected: var(--cf-accent);
+  --xy-edge-stroke-width: 1.6;
+  --xy-connectionline-stroke: var(--cf-accent);
+  --xy-connectionline-stroke-width: 1.6;
+  --xy-selection-background-color: color-mix(in oklab, var(--cf-accent) 8%, transparent);
+  --xy-selection-border: 1px solid var(--cf-accent-line);
+  --xy-handle-background-color: var(--cf-surface);
+  --xy-handle-border-color: var(--cf-border-strong);
+  --xy-resize-background-color: var(--cf-accent);
+  --xy-background-pattern-color: color-mix(in oklab, var(--cf-text) 16%, transparent);
+  background-color: var(--cf-sunken);
+}
+
+.cf-flow-canvas .react-flow__pane {
+  cursor: default;
+}
+.cf-flow-canvas .react-flow__pane.dragging {
+  cursor: grabbing;
+}
+
+.cf-flow-canvas .react-flow__edge-path {
+  stroke: var(--cf-border-strong);
+  stroke-width: 1.6;
+}
+.cf-flow-canvas .react-flow__edge.selected .react-flow__edge-path,
+.cf-flow-canvas .react-flow__edge:focus-visible .react-flow__edge-path {
+  stroke: var(--cf-accent);
+  stroke-width: 2;
+}
+.cf-flow-canvas .react-flow__edge-interaction {
+  stroke-width: 14;
+}
+
+.cf-flow-canvas .react-flow__handle {
+  width: 10px;
+  height: 10px;
+  min-width: 0;
+  min-height: 0;
+  border: 1.5px solid var(--cf-border-strong);
+  background: var(--cf-surface);
+  transition: border-color 100ms, transform 100ms;
+}
+.cf-flow-canvas .react-flow__handle:hover,
+.cf-flow-canvas .react-flow__handle.connectingfrom,
+.cf-flow-canvas .react-flow__handle.connectingto.valid {
+  border-color: var(--cf-accent);
+  transform: translate(-50%, -50%) scale(1.25);
+}
+.cf-flow-canvas .react-flow__handle-right:hover,
+.cf-flow-canvas .react-flow__handle-right.connectingfrom {
+  transform: translate(50%, -50%) scale(1.25);
+}
+.cf-flow-canvas .react-flow__handle.connectingto:not(.valid) {
+  border-color: var(--cf-danger);
+}
+
+.cf-flow-canvas .react-flow__nodesselection-rect,
+.cf-flow-canvas .react-flow__selection {
+  background: color-mix(in oklab, var(--cf-accent) 8%, transparent);
+  border: 1px solid var(--cf-accent-line);
+  border-radius: 6px;
+}
+
+.cf-flow-canvas .react-flow__node:focus-visible {
+  outline: none;
+}
+
+/* ---- a node: the tile is the measured box; the name hangs under it ---- */
+
+.cf-flow-node {
+  position: relative;
+  width: 64px;
+  height: 64px;
+}
+
+.cf-flow-node__tile {
+  position: relative;
+  display: grid;
+  width: 64px;
+  height: 64px;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--cf-surface-raised);
+  box-shadow: 0 0 0 1px var(--cf-border-strong), var(--cf-shadow-lift);
+  color: var(--node-color);
+  transition: box-shadow 100ms;
+}
+.cf-flow-node__tile::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: color-mix(in oklab, var(--node-color) 8%, transparent);
+  pointer-events: none;
+}
+.cf-flow-node.is-trigger .cf-flow-node__tile {
+  border-radius: 32px 12px 12px 32px;
+}
+.react-flow__node:hover .cf-flow-node__tile {
+  box-shadow: 0 0 0 1px var(--cf-text-muted), var(--cf-shadow-lift);
+}
+.react-flow__node.selected .cf-flow-node__tile {
+  box-shadow: 0 0 0 2px var(--cf-accent), var(--cf-shadow-lift);
+}
+.cf-flow-node.is-disabled .cf-flow-node__tile > :not(.react-flow__handle) {
+  opacity: 0.4;
+}
+.cf-flow-node.is-disabled .cf-flow-node__name {
+  text-decoration: line-through;
+  color: var(--cf-text-muted);
+}
+
+.cf-flow-node__label {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  width: 150px;
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+}
+.cf-flow-node__name {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--cf-text);
+  overflow-wrap: anywhere;
+}
+.cf-flow-node__type {
+  display: block;
+  margin-top: 1px;
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--cf-text-muted);
+}
+
+.cf-flow-port-label {
+  position: absolute;
+  left: calc(100% + 9px);
+  transform: translateY(-50%);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--cf-text-muted);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.cf-flow-port-label.is-input {
+  left: auto;
+  right: calc(100% + 9px);
+}
+
+/* ---- a sticky note ---- */
+
+.cf-flow-note {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  background: color-mix(in oklab, #facc15 20%, var(--cf-surface));
+  box-shadow: 0 0 0 1px color-mix(in oklab, #facc15 45%, var(--cf-border));
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--cf-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.react-flow__node.selected .cf-flow-note {
+  box-shadow: 0 0 0 2px var(--cf-accent);
+}
+.cf-flow-note.is-empty {
+  color: var(--cf-text-faint);
+}
+.cf-flow-note textarea {
+  display: block;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.cf-flow-canvas .react-flow__resize-control.handle {
+  width: 8px;
+  height: 8px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--cf-accent);
+}
+.cf-flow-canvas .react-flow__resize-control.line {
+  border-color: var(--cf-accent-line);
+}
+
+/* ---- what the run on screen did with each node ---- */
+
+@keyframes cf-flow-running {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--cf-accent) 55%, transparent), var(--cf-shadow-lift);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--cf-accent) 28%, transparent), var(--cf-shadow-lift);
+  }
+}
+@keyframes cf-flow-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.cf-flow-node.is-run-running .cf-flow-node__tile {
+  animation: cf-flow-running 1.4s ease-in-out infinite;
+}
+.cf-flow-node.is-run-success .cf-flow-node__tile {
+  box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--cf-success) 70%, transparent), var(--cf-shadow-lift);
+}
+.cf-flow-node.is-run-error .cf-flow-node__tile {
+  box-shadow: 0 0 0 2px var(--cf-danger), var(--cf-shadow-lift);
+}
+.cf-flow-node.is-run-skipped .cf-flow-node__tile > :not(.react-flow__handle):not(.cf-flow-node__badge),
+.cf-flow-node.is-run-canceled .cf-flow-node__tile > :not(.react-flow__handle):not(.cf-flow-node__badge) {
+  opacity: 0.45;
+}
+.react-flow__node.selected .cf-flow-node.is-run-success .cf-flow-node__tile,
+.react-flow__node.selected .cf-flow-node.is-run-error .cf-flow-node__tile {
+  box-shadow: 0 0 0 2px var(--cf-accent), var(--cf-shadow-lift);
+}
+.cf-flow-pulse {
+  animation: cf-flow-pulse 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-flow-node.is-run-running .cf-flow-node__tile,
+  .cf-flow-pulse {
+    animation: none;
+  }
+}
+
+.cf-flow-node__badge,
+.cf-flow-node__pin {
+  position: absolute;
+  top: -6px;
+  z-index: 1;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--cf-on-accent);
+  box-shadow: 0 0 0 2px var(--cf-sunken);
+}
+.cf-flow-node__badge {
+  right: -6px;
+}
+.cf-flow-node__orb {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+/* The orb says it already: a thinking AI node does not also pulse. */
+.cf-flow-node.is-run-running:has(.cf-flow-node__orb) .cf-flow-node__tile {
+  animation: none;
+}
+.cf-flow-node__badge.is-success {
+  background: var(--cf-success);
+}
+.cf-flow-node__badge.is-error {
+  background: var(--cf-danger);
+}
+.cf-flow-node__badge.is-skipped,
+.cf-flow-node__badge.is-canceled {
+  background: var(--cf-text-faint);
+}
+.cf-flow-node__pin {
+  left: -6px;
+  background: var(--cf-blue);
+}
+
+.cf-flow-canvas .react-flow__handle.is-error-port {
+  border-color: color-mix(in oklab, var(--cf-danger) 75%, var(--cf-border-strong));
+}
+.cf-flow-port-label.is-error-port {
+  color: var(--cf-danger);
+}
+
+/* ---- edges that carried items ---- */
+
+.cf-flow-canvas .react-flow__edge.has-items .react-flow__edge-path {
+  stroke: color-mix(in oklab, var(--cf-success) 65%, var(--cf-border-strong));
+}
+.cf-flow-canvas .react-flow__edge.is-error-edge .react-flow__edge-path {
+  stroke: color-mix(in oklab, var(--cf-danger) 60%, var(--cf-border-strong));
+  stroke-dasharray: 5 4;
+}
+.cf-flow-canvas .react-flow__edge-textbg {
+  fill: var(--cf-sunken);
+}
+.cf-flow-canvas .react-flow__edge-text {
+  fill: var(--cf-text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+/* ---- the inspector's data and fields ---- */
+
+.cf-flow-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 11.5px;
+  width: max-content;
+  min-width: 100%;
+}
+.cf-flow-table th,
+.cf-flow-table td {
+  max-width: 260px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--cf-border);
+  padding: 4px 8px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cf-flow-table th {
+  position: sticky;
+  top: 0;
+  background: var(--cf-surface);
+  font-weight: 600;
+  color: var(--cf-text-muted);
+}
+.cf-flow-table td {
+  font-family: var(--cf-font-mono, ui-monospace, monospace);
+  color: var(--cf-text);
+}
+
+.cf-flow-expr {
+  border-color: color-mix(in oklab, var(--cf-accent) 45%, var(--cf-field-border));
+  background: color-mix(in oklab, var(--cf-accent) 5%, var(--cf-field));
+}
+.cf-flow-drop {
+  outline: 1.5px dashed var(--cf-accent);
+  outline-offset: 1px;
+}

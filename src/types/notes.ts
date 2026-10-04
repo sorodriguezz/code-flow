@@ -176,7 +176,7 @@ export interface NoteBook extends NoteBookRow {
  */
 export interface DocVersion {
   id: string;
-  kind: "note" | "diagram";
+  kind: "note" | "diagram" | "flow";
   doc_id: string;
   title: string;
   created_at: string;

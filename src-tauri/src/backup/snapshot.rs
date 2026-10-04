@@ -131,6 +131,16 @@ pub const TABLES: &[&str] = &[
     // `db/service_queries.rs`), so there is no stale pid to restore.
     "service_groups",
     "services",
+    // The Flujos workspace, for the services' reason: a flow is a definition worked out once.
+    // Folders before flows — a flow points at the folder it is filed in. Its history rides in
+    // `doc_versions` with the notes' and the diagrams'. Pins and state hang off a flow; variables
+    // and credentials off the workspace.
+    "flow_folders",
+    "flows",
+    "flow_pins",
+    "flow_state",
+    "flow_variables",
+    "flow_credentials",
     // History, activity and agent work. Last because every one of them hangs off a project or a
     // workspace, and `agent_chain_steps` and `agent_chain_repos` hang off `agent_chains` in turn.
     "activity_log",
@@ -190,13 +200,24 @@ pub const TABLES: &[&str] = &[
 /// its own authority. A restore also empties it (see [`apply`]), so a declared server that starts a
 /// program waits to be approved again.
 ///
+/// `flow_runs` and `flow_run_nodes` are the fourth pair, and theirs is the bench's reason: a run is
+/// a record of what happened on *this* machine — its processes, its network, its disk — and the
+/// items it produced are files under this machine's state root that a backup does not carry. A run
+/// row restored without them is an execution whose every node opens empty.
+///
 /// Read only by [`covers_every_table`], and that is the point rather than an oversight: nothing at
 /// runtime consults this, because excluding a table is *not* an action the exporter takes — it is
 /// [`TABLES`] not naming it. This list is the written-down reason, and the test is what makes
 /// writing it down compulsory.
 #[allow(dead_code)]
-pub const NEVER_BACKED_UP: &[&str] =
-    &["workspace_terminals", "workspace_bench_tabs", "remote_devices", "mcp_trust"];
+pub const NEVER_BACKED_UP: &[&str] = &[
+    "workspace_terminals",
+    "workspace_bench_tabs",
+    "remote_devices",
+    "mcp_trust",
+    "flow_runs",
+    "flow_run_nodes",
+];
 
 // ---------------------------------------------------------------------------
 // What the user chose to include
@@ -240,6 +261,16 @@ pub const CORE_TABLES: &[&str] = &[
     // trim by dropping them. Groups first: a service points at the group it is filed in.
     "service_groups",
     "services",
+    // Flows are definitions too — the same argument as the services above them, and as small.
+    // Pins and state ride with them: pinned output is test data somebody typed or chose, and state
+    // is what a flow has learned ("the last id I saw"), which a restored flow must not forget.
+    // Credentials are rows of names; their secrets are in the keychain roster (`backup::vault`).
+    "flow_folders",
+    "flows",
+    "flow_pins",
+    "flow_state",
+    "flow_variables",
+    "flow_credentials",
 ];
 
 /// The optional groups, in the order the panel lists them.

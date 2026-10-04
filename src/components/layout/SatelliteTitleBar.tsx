@@ -20,6 +20,7 @@ import {
   Pin,
   Send,
   Square,
+  Waypoints,
   Workflow,
   X,
   type LucideIcon,
@@ -38,6 +39,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { RemoteActions } from "../git/RemoteActions";
 import { useT } from "../../state/languageStore";
 import { Tooltip } from "../common/Tooltip";
+import { StageChip } from "../common/StageChip";
 import { iconButtonClass } from "../common/Button";
 import { monogram, monogramStyle } from "../../lib/monogram";
 import { setChromeSlot } from "./ChromeSlot";
@@ -246,6 +248,9 @@ export function SatelliteTitleBar() {
           <span className="flex h-7 min-w-0 items-center gap-2 px-1 font-semibold text-[var(--cf-text)]">
             <app.icon size={15} className="shrink-0 text-[var(--cf-accent)]" />
             <span className="min-w-0 truncate">{name}</span>
+            {app.stage && (
+              <StageChip stage={app.stage} title={app.stageHintKey ? t(app.stageHintKey) : undefined} />
+            )}
           </span>
           <span ref={setChromeSlot} className="ml-2 flex min-w-0 items-center gap-2" />
         </>
@@ -518,7 +523,12 @@ function WorkspacePicker({ current }: { current: Workspace }) {
 // from `SatelliteApp`'s own map, so a detached chat drew the whole chat correctly under a title bar
 // announcing that this version did not know what the window held. If you are adding an app, the
 // symptom to look for is exactly that mismatch.
-function appMeta(refId: string): { labelKey: TranslationKey; icon: LucideIcon } {
+function appMeta(refId: string): {
+  labelKey: TranslationKey;
+  icon: LucideIcon;
+  stage?: "alpha" | "beta";
+  stageHintKey?: TranslationKey;
+} {
   switch (refId) {
     case "api:requests":
       return { labelKey: "tabbar.api", icon: Send };
@@ -538,6 +548,8 @@ function appMeta(refId: string): { labelKey: TranslationKey; icon: LucideIcon } 
       return { labelKey: "tabbar.vault", icon: KeyRound };
     case "chat":
       return { labelKey: "tabbar.chat", icon: MessagesSquare };
+    case "flows":
+      return { labelKey: "tabbar.flows", icon: Waypoints, stage: "alpha", stageHintKey: "flows.alphaHint" };
     default:
       return { labelKey: "windows.unknownApp", icon: Layers };
   }

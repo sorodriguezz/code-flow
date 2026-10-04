@@ -89,6 +89,17 @@
   --cf-method-head: #0f766e;
   --cf-method-options: #be185d;
   --cf-method-trace: #4d7c0f;
+  /* The Flujos canvas: one hue per node family (components/flows). Seven reuse a token that already
+     switches with the theme; the two literals here have their dark pair in both dark blocks. */
+  --cf-flow-trigger: #c2410c;
+  --cf-flow-logic: #475569;
+  --cf-flow-ai: var(--cf-ai-b);
+  --cf-flow-code: var(--cf-teal);
+  --cf-flow-net: var(--cf-blue);
+  --cf-flow-data: var(--cf-method-options);
+  --cf-flow-transform: var(--cf-method-trace);
+  --cf-flow-files: var(--cf-ref-tag);
+  --cf-flow-app: var(--cf-accent);
   /* BSON value colours for the document list. Their own tokens rather than borrowed semantics:
      `--cf-danger` happens to be the right red for an ObjectId today, and the day someone retunes
      what "danger" means, every id in every document would move with it. Chosen to sit at similar
@@ -185,6 +196,8 @@
   --cf-method-head: #2dd4bf;
   --cf-method-options: #f472b6;
   --cf-method-trace: #a3e635;
+  --cf-flow-trigger: #fb923c;
+  --cf-flow-logic: #94a3b8;
   /* Same five, lifted for a dark background — see the light theme's note. */
   --cf-bson-string: #6ee7a8;
   --cf-bson-number: #93b4fd;
@@ -239,6 +252,8 @@
     --cf-method-head: #2dd4bf;
     --cf-method-options: #f472b6;
     --cf-method-trace: #a3e635;
+    --cf-flow-trigger: #fb923c;
+    --cf-flow-logic: #94a3b8;
     --cf-bson-string: #6ee7a8;
     --cf-bson-number: #93b4fd;
     --cf-bson-id: #fbbf5c;
@@ -882,6 +897,29 @@ textarea,
 }
 .cf-ai-brain {
   --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 18V5'/><path d='M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4'/><path d='M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5'/><path d='M17.997 5.125a4 4 0 0 1 2.526 5.77'/><path d='M18 18a4 4 0 0 0 2-7.464'/><path d='M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517'/><path d='M6 18a4 4 0 0 1-2-7.464'/><path d='M6.003 5.125a4 4 0 0 0-2.526 5.77'/></svg>");
+}
+
+/* The AI nodes of the Flujos canvas (`components/flows`). Same copy rule as the three above. */
+.cf-ai-bot {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 8V4H8'/><rect width='16' height='12' x='4' y='8' rx='2'/><path d='M2 14h2'/><path d='M20 14h2'/><path d='M15 13v2'/><path d='M9 13v2'/></svg>");
+}
+.cf-ai-cpu {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 20v2'/><path d='M12 2v2'/><path d='M17 20v2'/><path d='M17 2v2'/><path d='M2 12h2'/><path d='M2 17h2'/><path d='M2 7h2'/><path d='M20 12h2'/><path d='M20 17h2'/><path d='M20 7h2'/><path d='M7 20v2'/><path d='M7 2v2'/><rect x='4' y='4' width='16' height='16' rx='2'/><rect x='8' y='8' width='8' height='8' rx='1'/></svg>");
+}
+.cf-ai-list-checks {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M13 5h8'/><path d='M13 12h8'/><path d='M13 19h8'/><path d='m3 17 2 2 4-4'/><path d='m3 7 2 2 4-4'/></svg>");
+}
+.cf-ai-file-braces {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z'/><path d='M14 2v5a1 1 0 0 0 1 1h5'/><path d='M10 12a1 1 0 0 0-1 1v1a1 1 0 0 1-1 1 1 1 0 0 1 1 1v1a1 1 0 0 0 1 1'/><path d='M14 18a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1 1 1 0 0 1-1-1v-1a1 1 0 0 0-1-1'/></svg>");
+}
+.cf-ai-message-square-text {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z'/><path d='M7 11h10'/><path d='M7 15h6'/><path d='M7 7h8'/></svg>");
+}
+.cf-ai-eye {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0'/><circle cx='12' cy='12' r='3'/></svg>");
+}
+.cf-ai-pencil {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z'/><path d='m15 5 4 4'/></svg>");
 }
 
 .cf-ai-glyph {

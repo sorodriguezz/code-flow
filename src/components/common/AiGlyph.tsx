@@ -5,7 +5,18 @@ import type { LucideIcon, LucideProps } from "lucide-react";
 const FLOW_MS = 3000;
 
 /** The glyphs that stand for AI in this app, each a mask copied from lucide (`.cf-ai-*`). */
-export type AiGlyphName = "sparkles" | "wand" | "brain";
+export type AiGlyphName =
+  | "sparkles"
+  | "wand"
+  | "brain"
+  // The AI nodes of the Flujos canvas, one per node type's own glyph.
+  | "bot"
+  | "cpu"
+  | "list-checks"
+  | "file-braces"
+  | "message-square-text"
+  | "eye"
+  | "pencil";
 
 /**
  * An AI icon: the glyph cut out of the logo's stroke, with the stroke flowing through it — see

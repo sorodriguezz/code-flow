@@ -449,6 +449,7 @@ pub async fn local_exec_probe(db: State<'_, Db>) -> Result<ProbeResult, String> 
         temperature: 0.0,
         think: resolved.details.thinking.then_some(false),
         keep_alive: None,
+        schema: None,
     };
     let at = chrono::Utc::now().timestamp_millis();
     let outcome = local_llm::chat(&live.endpoint, &request, |_| {}, std::future::pending::<()>()).await;

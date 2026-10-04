@@ -44,7 +44,10 @@ export type NotificationSource =
   | "ci"
   /** A review of the Revisor tab — build, tests, SonarQube — that finished. Its own source: a gate that
    *  failed is neither a host's pipeline nor the assistant's opinion, and the row opens the Revisor. */
-  | "reviewer";
+  | "reviewer"
+  /** A flow that failed, finished after a long while, or told the user something with its Notify
+   *  node. Its own source: a flow is the user's automation, and its noise is muted separately. */
+  | "flows";
 
 /**
  * The menu each source is called in the rest of the app.
@@ -68,6 +71,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   remote: "remote.title",
   ci: "tabbar.pipelines",
   reviewer: "tabbar.reviewer",
+  flows: "tabbar.flows",
 };
 
 /**

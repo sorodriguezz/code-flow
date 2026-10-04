@@ -1,0 +1,316 @@
+import { useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  CalendarClock,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Folder,
+  FolderInput,
+  FolderOpen,
+  FolderPlus,
+  Globe,
+  Pause,
+  Pencil,
+  Play,
+  Plus,
+  Search,
+  Trash2,
+  Waypoints,
+  X,
+} from "lucide-react";
+import { iconButtonClass } from "../common/Button";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { explorerHeadClass, fieldClass, rowClass } from "../common/recipes";
+import { nodeIcon } from "../../lib/flows/nodeIcons";
+import { scopeMenuItems } from "../../lib/scopeMenu";
+import type { FlowFolderRow } from "../../lib/tauri/flowsCommands";
+import { confirmAction } from "../../state/confirmStore";
+import { useFlowRunsStore } from "../../state/flowRunsStore";
+import { useFlowsStore, type FlowItem } from "../../state/flowsStore";
+import { useT } from "../../state/languageStore";
+import { promptAction } from "../../state/promptStore";
+
+const byName = (a: { name: string }, b: { name: string }) =>
+  a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true });
+
+/**
+ * The workspace's flows: folders first, then the flows at the top level, each by name.
+ *
+ * A flow's row wears the glyph of the trigger it starts from — the one fact that says what kind of
+ * automation it is before it is opened. A flow made global on another workspace's shelf sits at the
+ * top level here, since the folder it is filed in belongs to that other workspace.
+ */
+export function FlowExplorer() {
+  const flows = useFlowsStore((s) => s.flows);
+  const folders = useFlowsStore((s) => s.folders);
+  const collapsed = useFlowsStore((s) => s.collapsed);
+  const query = useFlowsStore((s) => s.query);
+  const activeId = useFlowsStore((s) => s.activeId);
+  const pane = useFlowRunsStore((s) => s.pane);
+  const workspaceId = useFlowsStore((s) => s.workspaceId);
+  const catalogMap = useFlowsStore((s) => s.catalogMap);
+  const t = useT();
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; heading?: string } | null>(null);
+  const searchField = useRef<HTMLInputElement>(null);
+
+  const needle = query.trim().toLowerCase();
+  const groups = useMemo(() => {
+    const matches = (flow: FlowItem) => !needle || flow.name.toLowerCase().includes(needle);
+    const here = new Set(folders.map((folder) => folder.id));
+    const sortedFolders = [...folders].sort(byName).map((folder) => ({
+      folder,
+      flows: flows.filter((flow) => flow.folder_id === folder.id && matches(flow)).sort(byName),
+    }));
+    const root = flows
+      .filter((flow) => (!flow.folder_id || !here.has(flow.folder_id)) && matches(flow))
+      .sort(byName);
+    return {
+      folders: needle ? sortedFolders.filter((group) => group.flows.length > 0) : sortedFolders,
+      root,
+    };
+  }, [flows, folders, needle]);
+
+  const store = () => useFlowsStore.getState();
+
+  const triggerGlyph = (flow: FlowItem) => {
+    const descriptor = flow.triggers[0] ? catalogMap.get(flow.triggers[0]) : undefined;
+    return descriptor ? nodeIcon(descriptor.icon) : Waypoints;
+  };
+
+  const flowMenu = (event: ReactMouseEvent, flow: FlowItem) => {
+    event.preventDefault();
+    const anchor = { x: event.clientX, y: event.clientY };
+    const own = flow.workspace_id === workspaceId;
+    const items: MenuItem[] = [
+      {
+        label: t("flows.rename"),
+        icon: Pencil,
+        onClick: () =>
+          void promptAction(t("flows.renamePrompt"), { initial: flow.name, confirmLabel: t("flows.rename") }).then(
+            (value) => value && void store().renameFlow(flow.id, value),
+          ),
+      },
+      { label: t("flows.duplicate"), icon: Copy, onClick: () => void store().duplicateFlow(flow.id) },
+    ];
+    if (flow.triggers.some((type) => type !== "trigger.manual")) {
+      items.push({
+        label: flow.active ? t("flows.active.pause") : t("flows.active.activate"),
+        icon: flow.active ? Pause : Play,
+        onClick: () => void store().setActive(flow.id, !flow.active),
+      });
+    }
+    if (own && folders.length > 0) {
+      items.push({
+        label: t("flows.moveTo"),
+        icon: FolderInput,
+        onClick: () => {},
+        children: [
+          { label: t("flows.root"), onClick: () => void store().moveFlow(flow.id, null), disabled: !flow.folder_id },
+          ...[...folders].sort(byName).map((folder) => ({
+            label: folder.name,
+            icon: Folder,
+            onClick: () => void store().moveFlow(flow.id, folder.id),
+            disabled: flow.folder_id === folder.id,
+          })),
+        ],
+      });
+    }
+    items.push(
+      ...scopeMenuItems({
+        scope: flow.scope,
+        anchor,
+        openMenu: setMenu,
+        onSetGlobal: (global) => void store().setScope(flow.id, global),
+        onMoveToWorkspace: (target) => void store().moveToWorkspace(flow.id, target),
+        separated: true,
+      }),
+      {
+        label: t("flows.delete"),
+        icon: Trash2,
+        danger: true,
+        separated: true,
+        onClick: () =>
+          void confirmAction(t("flows.deleteConfirm", { name: flow.name }), true, t("flows.delete")).then(
+            (ok) => ok && void store().deleteFlow(flow.id),
+          ),
+      },
+    );
+    setMenu({ ...anchor, items });
+  };
+
+  const folderMenu = (event: ReactMouseEvent, folder: FlowFolderRow) => {
+    event.preventDefault();
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        { label: t("flows.newFlowHere"), icon: Plus, onClick: () => void store().createFlow(folder.id) },
+        {
+          label: t("flows.rename"),
+          icon: Pencil,
+          onClick: () =>
+            void promptAction(t("flows.renameFolderPrompt"), { initial: folder.name, confirmLabel: t("flows.rename") }).then(
+              (value) => value && void store().renameFolder(folder.id, value),
+            ),
+        },
+        {
+          label: t("flows.delete"),
+          icon: Trash2,
+          danger: true,
+          separated: true,
+          onClick: () =>
+            void confirmAction(t("flows.deleteFolderConfirm", { name: folder.name }), true, t("flows.delete")).then(
+              (ok) => ok && void store().deleteFolder(folder.id),
+            ),
+        },
+      ],
+    });
+  };
+
+  const flowRow = (flow: FlowItem, nested: boolean) => {
+    const Glyph = triggerGlyph(flow);
+    return (
+      <button
+        key={flow.id}
+        type="button"
+        role="treeitem"
+        aria-selected={flow.id === activeId}
+        onClick={() => {
+          void store().openFlow(flow.id);
+          if (useFlowRunsStore.getState().pane === "schedule") useFlowRunsStore.getState().setPane("editor");
+        }}
+        onContextMenu={(event) => flowMenu(event, flow)}
+        title={`${flow.name} · ${t("flows.nodeCount", { n: flow.node_count })}`}
+        className={rowClass(flow.id === activeId, `h-7 ${nested ? "pl-7" : ""}`)}
+      >
+        <span className="relative shrink-0">
+          <Glyph size={14} className="text-[var(--cf-text-muted)]" />
+          {flow.active && (
+            <span
+              className="absolute -bottom-[2px] -right-[2px] h-[6px] w-[6px] rounded-full bg-[var(--cf-success)] shadow-[0_0_0_1.5px_var(--cf-surface)]"
+              title={t("flows.active.on")}
+            />
+          )}
+        </span>
+        <span className="min-w-0 flex-1 truncate">{flow.name}</span>
+        {flow.scope === "global" && (
+          <span className="shrink-0 text-[var(--cf-text-faint)]" title={t("flows.global")}>
+            <Globe size={12} />
+          </span>
+        )}
+      </button>
+    );
+  };
+
+  const empty = groups.root.length === 0 && groups.folders.length === 0;
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className={explorerHeadClass}>
+        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-muted)]">
+          {t("flows.title")}
+        </span>
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm", active: pane === "schedule" })}
+          title={t("flows.schedule.title")}
+          aria-label={t("flows.schedule.title")}
+          aria-pressed={pane === "schedule"}
+          onClick={() => useFlowRunsStore.getState().setPane(pane === "schedule" ? "editor" : "schedule")}
+          data-tour="flows-schedule-button"
+        >
+          <CalendarClock size={14} />
+        </button>
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm" })}
+          title={t("flows.newFolder")}
+          aria-label={t("flows.newFolder")}
+          onClick={() =>
+            void promptAction(t("flows.newFolderPrompt"), { confirmLabel: t("flows.create") }).then(
+              (value) => value && void store().createFolder(value),
+            )
+          }
+        >
+          <FolderPlus size={14} />
+        </button>
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm" })}
+          title={t("flows.newFlow")}
+          aria-label={t("flows.newFlow")}
+          onClick={() => void store().createFlow(null)}
+          data-tour="flows-new"
+        >
+          <Plus size={15} />
+        </button>
+      </div>
+
+      <div className="relative mx-2 mb-1.5 shrink-0" data-tour="flows-search">
+        <Search
+          size={12}
+          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+        />
+        <input
+          ref={searchField}
+          value={query}
+          onChange={(event) => store().setQuery(event.target.value)}
+          onKeyDown={(event) => event.key === "Escape" && store().setQuery("")}
+          placeholder={t("flows.searchPlaceholder")}
+          aria-label={t("flows.searchPlaceholder")}
+          spellCheck={false}
+          className={fieldClass({ size: "sm", className: "w-full pl-6 pr-6" })}
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => {
+              store().setQuery("");
+              searchField.current?.focus();
+            }}
+            aria-label={t("flows.clearSearch")}
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </div>
+
+      <div
+        className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2"
+        role="tree"
+        aria-label={t("flows.title")}
+        data-tour="flows-tree"
+      >
+        {groups.folders.map(({ folder, flows: inFolder }) => {
+          // While searching, a folder with matches is shown open whatever its stored state.
+          const open = needle ? true : !collapsed.includes(folder.id);
+          return (
+            <div key={folder.id} role="group">
+              <button
+                type="button"
+                role="treeitem"
+                aria-expanded={open}
+                onClick={() => store().toggleFolder(folder.id)}
+                onContextMenu={(event) => folderMenu(event, folder)}
+                className={rowClass(false, "h-7 font-medium text-[var(--cf-text-muted)]")}
+              >
+                {open ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+                {open ? <FolderOpen size={14} className="shrink-0" /> : <Folder size={14} className="shrink-0" />}
+                <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+                <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-faint)]">{inFolder.length || ""}</span>
+              </button>
+              {open && inFolder.map((flow) => flowRow(flow, true))}
+            </div>
+          );
+        })}
+        {groups.root.map((flow) => flowRow(flow, false))}
+        {empty && needle && <p className="px-2 py-4 text-center text-[12px] text-[var(--cf-text-muted)]">{t("flows.noMatches")}</p>}
+      </div>
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menu.items} heading={menu.heading} onClose={() => setMenu(null)} />
+      )}
+    </div>
+  );
+}

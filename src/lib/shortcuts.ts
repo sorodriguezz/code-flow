@@ -54,6 +54,7 @@ export type ShortcutId =
   | "view.diagrams"
   | "view.vault"
   | "view.chat"
+  | "view.flows"
   | "chat.focusComposer"
   | "view.remote"
   | "view.pipelines"
@@ -180,6 +181,8 @@ const VIEW_ORDER: { view: MainView; workspace?: ApiWorkspace }[] = [
   // arriving in it by accident costs the reader exactly a transcript they can read. It is last
   // because it is the newest, and because cycling is how the rail's apps are discovered.
   { view: "chat" },
+  // Flujos, newest, last — the same argument chat makes above it.
+  { view: "flows" },
   // The keyring is deliberately absent, for a sharper version of `remote`'s reason: cycling into it
   // by accident would put a lock screen — or worse, an open vault — on screen in the middle of
   // moving between documents. It has its own chord.
@@ -478,6 +481,16 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     // Remote's Mod+Shift+M twice over. H is in the word, and nothing else wants it.
     defaultChord: "Mod+Shift+H",
     run: () => useUiStore.getState().setActiveView("chat"),
+  },
+  {
+    // The automations app. Every digit is taken and so are its obvious letters (⌘⇧F finds in
+    // files, ⌘⌥F filters the database tree), so it follows the Revisor into Mod+Alt with the W of
+    // "workflow" — a letter AltGr does not turn into a character on the Spanish or German layouts.
+    id: "view.flows",
+    group: "views",
+    labelKey: "tabbar.flows",
+    defaultChord: "Mod+Alt+W",
+    run: () => useUiStore.getState().setActiveView("flows"),
   },
   {
     /**

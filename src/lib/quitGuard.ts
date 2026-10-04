@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { quitAppConfirmed, quitGuardAck, quitGuardArm, quitGuardCancel } from "./tauri/commands";
 import { showMainWindow } from "./tauri/windows";
+import { flowsArmedNames } from "./tauri/flowsCommands";
 import { broadcast, onWindowMessage } from "./windowBus";
 import { collectUnsaved, discardAllUnsaved, saveAllUnsaved, type UnsavedItem } from "./unsavedWork";
 import { chooseAction } from "../state/confirmStore";
@@ -86,6 +87,22 @@ export function installQuitGuard(): () => void {
       // A satellite that has closed since it reported took its buffers with it.
       const open = new Set(useWindowStore.getState().satellites.map((s) => s.label));
       for (const label of [...satellites.keys()]) if (!open.has(label)) satellites.delete(label);
+      // Active flows stop listening when the process ends — a schedule at 03:00 will not run. Asked
+      // before the unsaved work, and only when there are some: most quits have none.
+      const armed = await flowsArmedNames().catch(() => [] as string[]);
+      if (armed.length > 0) {
+        await showMainWindow().catch(() => {});
+        const answer = await chooseAction({
+          message: translate("quit.flowsMessage", { n: armed.length }),
+          items: armed.length > LISTED ? [...armed.slice(0, LISTED), translate("quit.andMore", { n: armed.length - LISTED })] : armed,
+          danger: true,
+          choices: [{ id: "quit", label: translate("quit.flowsQuit"), variant: "danger" }],
+        });
+        if (answer !== "quit") {
+          await quitGuardCancel();
+          return;
+        }
+      }
       const lines = [...collectUnsaved(), ...[...satellites.values()].flat()].map(describe);
       if (lines.length === 0) {
         await quitAppConfirmed();

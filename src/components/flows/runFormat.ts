@@ -1,0 +1,74 @@
+import type { FlowNodeRunStatus, FlowRunStatus } from "../../lib/tauri/flowsCommands";
+import type { TranslationKey } from "../../lib/i18n/translations";
+
+/** "1 item", "3 items" — the translator substitutes, it does not pluralise. */
+export function itemsLabel(t: (key: TranslationKey, params?: Record<string, string | number>) => string, n: number): string {
+  return n === 1 ? t("flows.oneItem") : t("flows.items", { n });
+}
+
+/** How long something took, the way a person reads it. */
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "";
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))} ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  if (minutes < 60) return rest ? `${minutes} min ${rest} s` : `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} h ${minutes % 60} min`;
+}
+
+/** A moment, relative while it is recent and a date after. */
+export function formatWhen(iso: string, language: string): string {
+  const date = new Date(iso);
+  const diff = (Date.now() - date.getTime()) / 1000;
+  const relative = new Intl.RelativeTimeFormat(language, { numeric: "auto" });
+  if (diff < 45) return relative.format(-Math.round(diff), "second");
+  if (diff < 3600) return relative.format(-Math.round(diff / 60), "minute");
+  if (diff < 86_400) return relative.format(-Math.round(diff / 3600), "hour");
+  return date.toLocaleString(language, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+export const RUN_STATUS_KEY: Record<FlowRunStatus, TranslationKey> = {
+  running: "flows.status.running",
+  success: "flows.status.success",
+  error: "flows.status.error",
+  canceled: "flows.status.canceled",
+  interrupted: "flows.status.interrupted",
+};
+
+export const NODE_STATUS_KEY: Record<FlowNodeRunStatus, TranslationKey> = {
+  running: "flows.status.running",
+  success: "flows.status.success",
+  error: "flows.status.error",
+  skipped: "flows.status.skipped",
+  canceled: "flows.status.canceled",
+  pinned: "flows.status.pinned",
+  reused: "flows.status.reused",
+  disabled: "flows.status.disabled",
+};
+
+/** The colour a status is drawn in. */
+export function statusColor(status: FlowRunStatus | FlowNodeRunStatus): string {
+  switch (status) {
+    case "success":
+      return "var(--cf-success)";
+    case "error":
+    case "interrupted":
+      return "var(--cf-danger)";
+    case "running":
+      return "var(--cf-accent)";
+    case "pinned":
+    case "reused":
+      return "var(--cf-blue)";
+    default:
+      return "var(--cf-text-faint)";
+  }
+}
+
+export const MODE_KEY: Record<string, TranslationKey> = {
+  manual: "flows.mode.manual",
+  partial: "flows.mode.partial",
+  step: "flows.mode.step",
+};

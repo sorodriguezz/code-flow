@@ -136,6 +136,9 @@ pub(crate) enum AiTask {
     /// Text-only and a handful of words, so like [`AiTask::Commit`] it defaults to the engine's fast
     /// model rather than the base one: it runs once per new conversation, behind the user's back.
     ChatTitle,
+    /// The AI nodes of a flow whose engine is left automatic. A node that names its own engine runs
+    /// on that one; this row is where the rest go, and what Settings shows as their default.
+    Flows,
 }
 
 impl AiTask {
@@ -145,7 +148,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 19] = [
+    pub(crate) const ALL: [AiTask; 20] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -165,6 +168,7 @@ impl AiTask {
         AiTask::SampleRows,
         AiTask::Notebook,
         AiTask::ChatTitle,
+        AiTask::Flows,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -191,6 +195,7 @@ impl AiTask {
             AiTask::SampleRows => "sample_rows",
             AiTask::Notebook => "notebook",
             AiTask::ChatTitle => "chat_title",
+            AiTask::Flows => "flows",
         }
     }
 }

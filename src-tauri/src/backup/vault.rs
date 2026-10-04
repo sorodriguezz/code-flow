@@ -225,6 +225,11 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
         push_unique(&mut keys, crate::remotes::password_key(&id));
     }
 
+    // Flujos credentials: the row names one, the keychain holds what it sends.
+    for id in column(conn, "SELECT id FROM flow_credentials") {
+        push_unique(&mut keys, secrets::flow_credential_key(&id));
+    }
+
     keys
 }
 

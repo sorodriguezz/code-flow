@@ -3,6 +3,8 @@ import { useBenchStore } from "../../state/benchStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
 import { useDbModalStore, type DbModal } from "../../state/dbModalStore";
 import { useDiagramsStore } from "../../state/diagramsStore";
+import { useFlowRunsStore, type FlowPane } from "../../state/flowRunsStore";
+import { useFlowsStore } from "../../state/flowsStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useTerminalStore, type DockView } from "../../state/terminalStore";
 import {
@@ -65,6 +67,21 @@ export interface TourStage {
    * worth seeing anyway. Default `false`, so every other step puts it away.
    */
   diagramsAi?: boolean;
+  /**
+   * The Flujos node palette, for the step about adding nodes. It lives over the canvas, so it only
+   * shows with a flow open — from an empty workspace the step falls back to the view and the copy
+   * still reads. Default `false`, so every other step puts it away.
+   */
+  flowsPalette?: boolean;
+  /**
+   * The Flujos node inspector, open on the open flow's first node that is not a trigger (or its
+   * first node). Default `false`. Only with a flow open, like the palette.
+   */
+  flowsInspector?: boolean;
+  /** The Flujos executions pane instead of the canvas. Default `false`. */
+  flowsExecutions?: boolean;
+  /** The Flujos Programación pane. Default `false`. */
+  flowsSchedule?: boolean;
   /** AI panel docked open. Default `false`. */
   ai?: boolean;
   /** The dock open on its terminal panel. Default `false`. */
@@ -100,6 +117,9 @@ export interface AppSnapshot {
   agentsBenchOpen: boolean;
   dbModal: DbModal | null;
   diagramsAiOpen: boolean;
+  flowsPalette: { at: [number, number] | null } | null;
+  flowsInspector: string | null;
+  flowsPane: FlowPane;
 }
 
 /**
@@ -134,6 +154,9 @@ export function captureAppState(): AppSnapshot {
     agentsBenchOpen: useBenchStore.getState().open,
     dbModal: useDbModalStore.getState().modal,
     diagramsAiOpen: useDiagramsStore.getState().aiOpen,
+    flowsPalette: useFlowsStore.getState().palette,
+    flowsInspector: useFlowRunsStore.getState().inspector,
+    flowsPane: useFlowRunsStore.getState().pane,
   };
 }
 
@@ -153,6 +176,17 @@ export function restoreAppState(snapshot: AppSnapshot): void {
   useBenchStore.setState({ open: snapshot.agentsBenchOpen });
   useDbModalStore.setState({ modal: snapshot.dbModal });
   useDiagramsStore.setState({ aiOpen: snapshot.diagramsAiOpen });
+  useFlowsStore.setState({ palette: snapshot.flowsPalette });
+  useFlowRunsStore.setState({ inspector: snapshot.flowsInspector, pane: snapshot.flowsPane });
+}
+
+/** The node a tour step opens the inspector on: the first that is not a trigger, else the first. */
+function tourInspectorNode(): string | null {
+  const draft = useFlowsStore.getState().draft;
+  if (!draft) return null;
+  const catalog = useFlowsStore.getState().catalogMap;
+  const node = draft.spec.nodes.find((n) => catalog.get(n.type)?.family !== "trigger") ?? draft.spec.nodes[0];
+  return node?.id ?? null;
 }
 
 /**
@@ -189,4 +223,9 @@ export function applyStage(stage: TourStage | undefined): void {
   // Straight onto the store like the rest: `setAiOpen` is the view's own way in, and nothing
   // about a tour opening a panel for one step should look to the app like the user did it.
   useDiagramsStore.setState({ aiOpen: stage?.diagramsAi ?? false });
+  useFlowsStore.setState({ palette: stage?.flowsPalette ? { at: null } : null });
+  useFlowRunsStore.setState({
+    inspector: stage?.flowsInspector ? tourInspectorNode() : null,
+    pane: stage?.flowsExecutions ? "executions" : stage?.flowsSchedule ? "schedule" : "editor",
+  });
 }

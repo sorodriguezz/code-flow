@@ -221,6 +221,11 @@ impl AiEngine for GeminiEngine {
             }
             None => {}
         }
+        // The final result must satisfy this schema — agy 1.2.16's `--json-schema` takes the JSON
+        // inline, and under stream-json applies it to the closing `result` only.
+        if let Some(schema) = inv.json_schema {
+            cmd.arg("--json-schema").arg(schema);
+        }
         if let Some(dir) = inv.cwd {
             cmd.current_dir(dir);
             // **And named to agy as a directory it may use**, which `current_dir` alone does not

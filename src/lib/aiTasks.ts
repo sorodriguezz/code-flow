@@ -93,6 +93,10 @@ export const AI_TASKS: AiTaskDef[] = [
   // after the first answer, without being asked (`chat_title.rs`). Text-only, and like `commit` it
   // runs on the engine's fast model unless this row names another.
   { key: "chat_title", labelKey: "task.chatTitle", hintKey: "task.chatTitleHint", area: "other", modelForKey: "task.chatTitleModelFor" },
+  // The AI nodes of a flow that leave their engine automatic (`AiTask::Flows`). A node that names
+  // its own engine runs on that one; this row is the default for the rest — and since an agent node
+  // may edit, it wants an engine with tools.
+  { key: "flows", labelKey: "task.flows", hintKey: "task.flowsHint", agenticOnly: true, area: "other", modelForKey: "task.flowsModelFor" },
 ];
 
 export const AI_TASK_KEYS = AI_TASKS.map((t) => t.key);

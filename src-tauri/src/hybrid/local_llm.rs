@@ -671,6 +671,9 @@ pub struct ChatRequest<'a> {
     pub think: Option<bool>,
     /// Ollama only: how long the model stays loaded after this request.
     pub keep_alive: Option<&'a str>,
+    /// A JSON Schema the answer must follow — Ollama's `format`, the OpenAI-compatible servers'
+    /// `response_format` (llama.cpp turns it into a grammar). `None` for free text.
+    pub schema: Option<&'a Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -735,10 +738,13 @@ where
             if let Some(keep_alive) = request.keep_alive {
                 body["keep_alive"] = json!(keep_alive);
             }
+            if let Some(schema) = request.schema {
+                body["format"] = schema.clone();
+            }
             client.post(format!("{}/api/chat", endpoint.base_url)).json(&body)
         }
         BackendKind::Openai | BackendKind::Bundled => {
-            let body = json!({
+            let mut body = json!({
                 "model": request.model,
                 "messages": messages,
                 "stream": true,
@@ -746,6 +752,10 @@ where
                 "max_tokens": request.max_tokens,
                 "temperature": request.temperature,
             });
+            if let Some(schema) = request.schema {
+                body["response_format"] =
+                    json!({ "type": "json_schema", "json_schema": { "name": "answer", "strict": true, "schema": schema } });
+            }
             with_auth(client.post(format!("{}/v1/chat/completions", endpoint.base_url)), endpoint).json(&body)
         }
     };
@@ -939,6 +949,85 @@ impl StreamReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One request on a loopback port: hands back the JSON body it was sent, answering `reply`.
+    async fn serve_once(reply: &'static str, content_type: &'static str) -> (String, tokio::task::JoinHandle<Value>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut seen = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let body_at = loop {
+                let n = socket.read(&mut buffer).await.unwrap();
+                seen.extend_from_slice(&buffer[..n]);
+                if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&seen[..body_at]).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                .unwrap_or(0);
+            while seen.len() < body_at + length {
+                let n = socket.read(&mut buffer).await.unwrap();
+                seen.extend_from_slice(&buffer[..n]);
+            }
+            let body: Value = serde_json::from_slice(&seen[body_at..body_at + length]).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            body
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn a_schema_rides_as_format_for_ollama_and_response_format_for_the_rest() {
+        let schema = json!({"type": "object", "properties": {"a": {"type": "integer"}}, "required": ["a"]});
+        let request = ChatRequest {
+            model: "qwen2.5-coder:7b",
+            system: "",
+            user: "Dame a = 1",
+            num_ctx: Some(8_192),
+            max_tokens: 64,
+            temperature: 0.0,
+            think: None,
+            keep_alive: None,
+            schema: Some(&schema),
+        };
+
+        let (url, server) = serve_once(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"a\\\":1}\"},\"done\":true,\"prompt_eval_count\":5,\"eval_count\":3}\n",
+            "application/x-ndjson",
+        )
+        .await;
+        let outcome = chat(&Endpoint::new(BackendKind::Ollama, &url, None), &request, |_| {}, std::future::pending::<()>())
+            .await
+            .expect("ollama answer");
+        let sent = server.await.unwrap();
+        assert_eq!(sent["format"], schema);
+        assert_eq!(sent["options"]["num_ctx"], 8_192);
+        assert_eq!(outcome.text, "{\"a\":1}");
+
+        let (url, server) = serve_once(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"a\\\":1}\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        )
+        .await;
+        let outcome = chat(&Endpoint::new(BackendKind::Openai, &url, None), &request, |_| {}, std::future::pending::<()>())
+            .await
+            .expect("openai answer");
+        let sent = server.await.unwrap();
+        assert_eq!(sent["response_format"]["type"], "json_schema");
+        assert_eq!(sent["response_format"]["json_schema"]["schema"], schema);
+        assert!(sent.get("format").is_none());
+        assert_eq!(outcome.text, "{\"a\":1}");
+    }
 
     #[test]
     fn urls_lose_their_trailing_v1() {

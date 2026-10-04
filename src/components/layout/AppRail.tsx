@@ -9,6 +9,7 @@ import {
   MonitorSmartphone,
   NotebookPen,
   Send,
+  Waypoints,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import { useWindowStore } from "../../state/windowStore";
 import { useT } from "../../state/languageStore";
 import { Tooltip } from "../common/Tooltip";
 import { AiGlyph } from "../common/AiGlyph";
+import { StageChip } from "../common/StageChip";
 import { TourLauncher } from "../tour/TourLauncher";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { useAiRunStore } from "../../state/aiRunStore";
@@ -45,11 +47,12 @@ export interface WorkspaceApp {
    * nothing else. */
   descriptionKey: TranslationKey;
   /** Marks an app that is still settling, so the rail says so before it is opened rather than
-   * after something behaves unexpectedly inside it.
-   *
-   * Intentionally unused right now — nothing is in beta. Kept so the next app that ships early
-   * is one field, not a rediscovered design. Don't delete as dead code. */
-  beta?: boolean;
+   * after something behaves unexpectedly inside it — the word under the icon, a chip in the tooltip
+   * and in the title row's crumb. Flujos ships as `"alpha"`: it draws and saves flows before it can
+   * run them. */
+  stage?: "alpha" | "beta";
+  /** What the stage means for this app, as the chip's tooltip in the title row. */
+  stageHintKey?: TranslationKey;
 }
 
 /** Everything that belongs to the workspace rather than to the selected repository. Adding the
@@ -144,6 +147,17 @@ export const APPS: WorkspaceApp[] = [
     icon: MessagesSquare,
     labelKey: "tabbar.chat",
     descriptionKey: "tabbar.chatDescription",
+  },
+  // Node-based automations — schedules, scripts, APIs and AI. Workspace-scoped like the API client
+  // and the databases whose transports and connections its nodes reuse. Last because it is the
+  // newest, and marked alpha: milestone 0 draws and saves flows, and running them comes after.
+  {
+    id: "flows",
+    icon: Waypoints,
+    labelKey: "tabbar.flows",
+    descriptionKey: "tabbar.flowsDescription",
+    stage: "alpha",
+    stageHintKey: "flows.alphaHint",
   },
 ];
 
@@ -392,13 +406,7 @@ export function AppRail() {
                   <span className="mt-1 block opacity-70">{t("tabbar.reorderHint")}</span>
                 </>
               }
-              trailing={
-                app.beta ? (
-                  <span className="shrink-0 rounded-[4px] bg-[color-mix(in_oklab,var(--cf-warning)_18%,transparent)] px-1 py-px text-[10.5px] font-bold uppercase leading-none tracking-[0.06em] text-[var(--cf-warning)]">
-                    {t("common.beta")}
-                  </span>
-                ) : undefined
-              }
+              trailing={app.stage ? <StageChip stage={app.stage} /> : undefined}
             >
             {/* The app's button and its "open in a window" corner are siblings in one box. The
                 corner used to be a `span role="button"` *inside* the app's button — an interactive
@@ -499,12 +507,12 @@ export function AppRail() {
                   Absolutely positioned, so the icon stays on the same centre line as the other
                   four: a rail is read as a column, and one glyph nudged up to make room for its own
                   caption is the kind of misalignment you see before you can name. */}
-              {app.beta && (
+              {app.stage && (
                 <span
                   aria-hidden
                   className="pointer-events-none absolute inset-x-0 bottom-[1px] text-center text-[6.5px] font-bold uppercase leading-none tracking-[0.06em] text-[var(--cf-warning)]"
                 >
-                  {t("common.beta")}
+                  {t(app.stage === "alpha" ? "common.alpha" : "common.beta")}
                 </span>
               )}
             </button>

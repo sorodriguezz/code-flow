@@ -8,6 +8,7 @@ import {
   NotebookPen,
   Route,
   Send,
+  Waypoints,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -88,7 +89,10 @@ export type TourId =
   | "chat"
   /** The CI screen — the one whose central idea (a run has a shape, not a list) most needs saying
    *  out loud. */
-  | "pipelines";
+  | "pipelines"
+  /** Flujos, the automations app — a canvas whose rules (what may connect to what) are worth a
+   *  sentence before the first drag. */
+  | "flows";
 
 /**
  * The one-screen tour of the main window.
@@ -1260,6 +1264,115 @@ const PIPELINES_TOUR: TourStep[] = [
   ),
 ];
 
+const FLOWS_STAGE: TourStage = { view: "flows" };
+/** The same stage with the node palette open — the one step about adding nodes. */
+const FLOWS_PALETTE_STAGE: TourStage = { ...FLOWS_STAGE, flowsPalette: true };
+const FLOWS_INSPECTOR_STAGE: TourStage = { ...FLOWS_STAGE, flowsInspector: true };
+const FLOWS_EXECUTIONS_STAGE: TourStage = { ...FLOWS_STAGE, flowsExecutions: true };
+const FLOWS_SCHEDULE_STAGE: TourStage = { ...FLOWS_STAGE, flowsSchedule: true };
+
+/**
+ * The Flujos tour.
+ *
+ * Short on purpose: the app is in alpha and draws flows before it runs them, so the tour is about
+ * what is true today — the tree, the canvas's rules and the palette — and says plainly what is not
+ * there yet. Every step that points into a flow falls back to the view, so a tour taken on an empty
+ * workspace still lands somewhere real.
+ */
+const FLOWS_TOUR: TourStep[] = [
+  {
+    id: "flows.intro",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.intro.title",
+    bodyKey: "tour.flows.intro.body",
+    anchors: ['[data-tour="flows-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: FLOWS_STAGE,
+  },
+  {
+    id: "flows.tree",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.tree.title",
+    bodyKey: "tour.flows.tree.body",
+    anchors: ['[data-tour="flows-tree"]', '[data-tour="flows-view"]'],
+    stage: FLOWS_STAGE,
+  },
+  {
+    id: "flows.new",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.new.title",
+    bodyKey: "tour.flows.new.body",
+    anchors: ['[data-tour="flows-new"]', '[data-tour="flows-view"]'],
+    padding: 6,
+    stage: FLOWS_STAGE,
+  },
+  {
+    id: "flows.canvas",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.canvas.title",
+    bodyKey: "tour.flows.canvas.body",
+    // Only with a flow open; otherwise the view, where the canvas would be.
+    anchors: ['[data-tour="flows-canvas"]', '[data-tour="flows-view"]'],
+    placement: "inside",
+    stage: FLOWS_STAGE,
+  },
+  {
+    id: "flows.palette",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.palette.title",
+    bodyKey: "tour.flows.palette.body",
+    anchors: ['[data-tour="flows-palette"]', '[data-tour="flows-add-node"]', '[data-tour="flows-view"]'],
+    padding: 6,
+    stage: FLOWS_PALETTE_STAGE,
+  },
+  {
+    id: "flows.edit",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.edit.title",
+    bodyKey: "tour.flows.edit.body",
+    anchors: ['[data-tour="flows-toolbar"]', '[data-tour="flows-view"]'],
+    padding: 6,
+    stage: FLOWS_STAGE,
+  },
+  {
+    id: "flows.run",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.run.title",
+    bodyKey: "tour.flows.run.body",
+    anchors: ['[data-tour="flows-run"]', '[data-tour="flows-toolbar"]', '[data-tour="flows-view"]'],
+    padding: 6,
+    stage: FLOWS_STAGE,
+  },
+  {
+    id: "flows.inspector",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.inspector.title",
+    bodyKey: "tour.flows.inspector.body",
+    anchors: ['[data-tour="flows-inspector"]', '[data-tour="flows-canvas"]', '[data-tour="flows-view"]'],
+    placement: "inside",
+    stage: FLOWS_INSPECTOR_STAGE,
+  },
+  {
+    id: "flows.executions",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.executions.title",
+    bodyKey: "tour.flows.executions.body",
+    anchors: ['[data-tour="flows-executions"]', '[data-tour="flows-view"]'],
+    placement: "inside",
+    stage: FLOWS_EXECUTIONS_STAGE,
+  },
+  {
+    id: "flows.schedule",
+    chapterKey: "tour.chapter.flows",
+    titleKey: "tour.flows.schedule.title",
+    bodyKey: "tour.flows.schedule.body",
+    anchors: ['[data-tour="flows-schedule"]', '[data-tour="flows-schedule-button"]', '[data-tour="flows-view"]'],
+    placement: "inside",
+    stage: FLOWS_SCHEDULE_STAGE,
+  },
+  closingStep("flows", "tour.chapter.flows", "tour.flows.done.title", "tour.flows.done.body", FLOWS_STAGE),
+];
+
 export const TOURS: Record<TourId, TourStep[]> = {
   main: MAIN_TOUR,
   api: API_TOUR,
@@ -1272,6 +1385,7 @@ export const TOURS: Record<TourId, TourStep[]> = {
   vault: VAULT_TOUR,
   chat: CHAT_TOUR,
   pipelines: PIPELINES_TOUR,
+  flows: FLOWS_TOUR,
 };
 
 /**
@@ -1310,6 +1424,7 @@ export const APP_TOURS: AppTour[] = [
   { tour: "diagrams", view: "diagrams", labelKey: "tabbar.diagrams", icon: Workflow },
   { tour: "vault", view: "vault", labelKey: "tabbar.vault", icon: KeyRound },
   { tour: "chat", view: "chat", labelKey: "tabbar.chat", icon: MessagesSquare },
+  { tour: "flows", view: "flows", labelKey: "tabbar.flows", icon: Waypoints },
   // Last, and the only one on a repository-scoped view: the tab exists only where the repository
   // is linked to a host with CI, so the launcher offers this exactly where the screen is real.
   { tour: "pipelines", view: "pipelines", labelKey: "tabbar.pipelines", icon: Route },

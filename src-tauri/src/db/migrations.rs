@@ -1982,7 +1982,146 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_continued_from_to_chat_conversations(conn)?;
     add_hybrid_tables(conn)?;
     add_kind_to_chain_templates(conn)?;
+    add_flow_tables(conn)?;
+    add_flow_run_tables(conn)?;
     Ok(())
+}
+
+/// The Flujos workspace — see `crate::flows` and `flow_queries`.
+///
+/// A flow is one `spec` document per row, like an API request, so no node type or parameter will
+/// ever need a column here. What the table does hold is what the explorer draws without opening a
+/// flow (`node_count`, `trigger_types`, both derived on save) and the two facts a later milestone's
+/// scheduler reads: `active`, and the `version` saves are checked against.
+///
+/// `scope` from the start, as `add_scope_to_scoped_tables` gave the other shelves: `'global'` puts
+/// a flow on every workspace's shelf and `rehome_global_rows` keeps it when its home is deleted.
+/// Folders are workspace-only and flat for now; `parent_id` is there so nesting them later is not a
+/// migration. History lives in `doc_versions` under the kind `flow`, beside notes and diagrams.
+pub(crate) fn add_flow_tables(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS flow_folders (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            parent_id    TEXT REFERENCES flow_folders(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_flow_folders_tree
+            ON flow_folders (workspace_id, parent_id, sort_order);
+        CREATE TABLE IF NOT EXISTS flows (
+            id            TEXT PRIMARY KEY,
+            workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            scope         TEXT NOT NULL DEFAULT 'workspace',
+            folder_id     TEXT REFERENCES flow_folders(id) ON DELETE SET NULL,
+            name          TEXT NOT NULL,
+            description   TEXT NOT NULL DEFAULT '',
+            spec          TEXT NOT NULL,
+            node_count    INTEGER NOT NULL DEFAULT 0,
+            trigger_types TEXT NOT NULL DEFAULT '[]',
+            active        INTEGER NOT NULL DEFAULT 0,
+            version       INTEGER NOT NULL DEFAULT 1,
+            sort_order    INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_flows_workspace ON flows (workspace_id, sort_order);
+        CREATE INDEX IF NOT EXISTS idx_flows_folder ON flows (folder_id, sort_order);
+        "#,
+    )
+}
+
+/// What running a flow leaves behind, and the three things a flow keeps beside its spec.
+///
+/// - `flow_runs` / `flow_run_nodes`: one row per execution and per node in it — the list the
+///   Executions view reads and the waterfall it draws. The items themselves are files under
+///   `paths::flow_runs_dir()`, one per node; a row is the index, not the data. **No foreign key from
+///   `flow_runs` to `flows`**, deliberately: these rows are never backed up, so a restore that
+///   replaces `flows` would leave them pointing at nothing and `foreign_key_check` would count each
+///   one. Orphans are swept at launch instead (`flows::runs::sweep`), which also removes their files.
+/// - `flow_pins`: output a node is pinned to while the flow is edited — authored test data, so it
+///   travels with the flow in a backup, but kept out of the spec so 50 versions do not each carry it.
+/// - `flow_state`: what a flow remembers between runs (`data.state`, dedupe across runs).
+/// - `flow_variables` and `flow_credentials`: the workspace's `$vars` and the named credentials a
+///   node points at. A credential row holds only what is safe to show (kind, user name, header
+///   name); its secret is in the OS keychain under `flow-cred:<id>`.
+pub(crate) fn add_flow_run_tables(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS flow_runs (
+            id           TEXT PRIMARY KEY,
+            flow_id      TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            flow_name    TEXT NOT NULL DEFAULT '',
+            flow_version INTEGER NOT NULL DEFAULT 0,
+            mode         TEXT NOT NULL,
+            trigger_node TEXT NOT NULL DEFAULT '',
+            target_node  TEXT NOT NULL DEFAULT '',
+            status       TEXT NOT NULL,
+            error        TEXT NOT NULL DEFAULT '',
+            error_node   TEXT NOT NULL DEFAULT '',
+            started_at   TEXT NOT NULL,
+            finished_at  TEXT,
+            duration_ms  INTEGER,
+            data_bytes   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_flow_runs_flow ON flow_runs (flow_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_flow_runs_status ON flow_runs (status);
+        CREATE TABLE IF NOT EXISTS flow_run_nodes (
+            run_id       TEXT NOT NULL REFERENCES flow_runs(id) ON DELETE CASCADE,
+            node_id      TEXT NOT NULL,
+            node_name    TEXT NOT NULL,
+            node_type    TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            started_at   TEXT,
+            finished_at  TEXT,
+            duration_ms  INTEGER,
+            items_in     INTEGER NOT NULL DEFAULT 0,
+            items_out    TEXT NOT NULL DEFAULT '[]',
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            error        TEXT NOT NULL DEFAULT '',
+            seq          INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (run_id, node_id)
+        );
+        CREATE TABLE IF NOT EXISTS flow_pins (
+            flow_id    TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
+            node_id    TEXT NOT NULL,
+            items      TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (flow_id, node_id)
+        );
+        CREATE TABLE IF NOT EXISTS flow_state (
+            flow_id    TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (flow_id, key)
+        );
+        CREATE TABLE IF NOT EXISTS flow_variables (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            scope        TEXT NOT NULL DEFAULT 'workspace',
+            name         TEXT NOT NULL,
+            value        TEXT NOT NULL DEFAULT '',
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_flow_variables_workspace ON flow_variables (workspace_id, name);
+        CREATE TABLE IF NOT EXISTS flow_credentials (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            scope        TEXT NOT NULL DEFAULT 'workspace',
+            name         TEXT NOT NULL,
+            kind         TEXT NOT NULL,
+            meta         TEXT NOT NULL DEFAULT '{}',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_flow_credentials_workspace ON flow_credentials (workspace_id, name);
+        "#,
+    )
 }
 
 /// The hybrid task's two tables — see `crate::hybrid`.

@@ -141,6 +141,11 @@ impl AiEngine for GrokEngine {
         } else if !inv.allowed_tools.is_empty() {
             cmd.arg("--tools").arg(inv.allowed_tools.join(","));
         }
+        // The final answer must satisfy this schema (grok 1.0.4's `--json-schema`, which implies the
+        // `json` output already chosen above). A flow node checks the answer itself either way.
+        if let Some(schema) = inv.json_schema {
+            cmd.arg("--json-schema").arg(schema);
+        }
         // Resume by id. Not `--session-id`: that names a **new** conversation and errors if the id
         // already exists, so using it to resume would fail on the second turn of every chat.
         if let Some(session) = inv.resume_session_id {

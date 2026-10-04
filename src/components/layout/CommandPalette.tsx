@@ -1,35 +1,36 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
-  Bot,
-  Braces,
-  KeyRound,
-  Briefcase,
-  ClipboardList,
-  NotebookPen,
-  Cloud,
-  Database,
   ArrowDownToLine,
   ArrowUpFromLine,
+  Bot,
+  Braces,
+  Briefcase,
+  CirclePlay,
+  ClipboardList,
+  Cloud,
+  Database,
   Download,
-  RefreshCw,
   FolderGit2,
   FolderPlus,
   GitBranch,
   Glasses,
   History,
+  KeyRound,
   MessageCircle,
   MessagesSquare,
   MonitorSmartphone,
+  NotebookPen,
   Plus,
+  RefreshCw,
   Rocket,
   Route,
+  SaveAll,
   ShieldCheck,
+  Sparkles,
+  TerminalSquare,
+  Waypoints,
   Workflow,
   Zap,
-  Sparkles,
-  SaveAll,
-  CirclePlay,
-  TerminalSquare,
 } from "lucide-react";
 import { canPasteJsonHere, pasteJsonInFocusedEditor } from "../editor/pasteJsonAsCode";
 import { fetchNow, pullNow, pushNow } from "../../lib/gitActions";
@@ -116,6 +117,7 @@ const VIEW_ITEMS: {
   // spelled for the AI panel's repository chat in the actions group below, and two rows sharing an
   // icon in one palette is how you pick the wrong one.
   { id: "chat", labelKey: "tabbar.chat", icon: MessagesSquare },
+  { id: "flows", labelKey: "tabbar.flows", icon: Waypoints },
 ];
 
 const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {

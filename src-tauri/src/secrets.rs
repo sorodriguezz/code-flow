@@ -460,6 +460,12 @@ pub fn api_secret_key(owner: &str, id: &str, path: &str) -> String {
     format!("api-secret:{owner}:{id}:{path}")
 }
 
+/// The secret of one Flujos credential (`flow_credentials`): the token, password or key value a
+/// node sends. The row keeps the kind and the parts that are safe to show; this is the rest.
+pub fn flow_credential_key(id: &str) -> String {
+    format!("flow-cred:{id}")
+}
+
 /// The key that seals the API client's cookie jar at rest (`db::api_cookie_seal`): 32 random bytes,
 /// base64, minted the first time a cookie is stored.
 ///
