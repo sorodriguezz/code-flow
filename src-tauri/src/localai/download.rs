@@ -338,7 +338,7 @@ fn emit(app: &AppHandle, progress: Progress) {
 /// anything — a network path on Windows, or a volume that appeared after the list was taken. A
 /// check that cannot answer must not block the user; the download will fail on `ENOSPC` with a
 /// clear message anyway, and that is the worse-but-still-honest path.
-fn ensure_space(dir: &Path, needed: u64) -> Result<(), String> {
+pub(crate) fn ensure_space(dir: &Path, needed: u64) -> Result<(), String> {
     use sysinfo::Disks;
 
     let disks = Disks::new_with_refreshed_list();

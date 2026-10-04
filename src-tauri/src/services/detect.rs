@@ -109,7 +109,7 @@ pub fn on_path(program: &str) -> bool {
 /// globally installed tool when there is no wrapper. On Windows the wrapper is the `.cmd`/`.bat`
 /// beside the shell script (the same spelling the project initializer writes), run by name: `cmd`
 /// looks in the working folder first.
-fn build_tool(dir: &Path, host: &Host, unix: &'static str, windows: &'static str, global: &'static str) -> &'static str {
+pub(crate) fn build_tool(dir: &Path, host: &Host, unix: &'static str, windows: &'static str, global: &'static str) -> &'static str {
     if host.windows {
         if dir.join(windows).is_file() { windows } else { global }
     } else if dir.join(unix).is_file() {
@@ -416,7 +416,7 @@ fn run_script(manager: &str, script: &str) -> String {
 
 /// Which package manager a folder says it uses: the `packageManager` field when it has one, else
 /// its lockfile. `None` when it says nothing — a workspace package, which runs with the root's.
-fn declared_manager(dir: &Path) -> Option<String> {
+pub(crate) fn declared_manager(dir: &Path) -> Option<String> {
     if let Some(declared) = read_json(&dir.join("package.json"))
         .and_then(|pkg| pkg.get("packageManager").and_then(Value::as_str).map(str::to_string))
     {

@@ -112,6 +112,9 @@ const EditorView = lazy(() => import("./components/editor/EditorView").then((m) 
 const PipelinesView = lazy(() =>
   import("./components/pipelines/PipelinesView").then((m) => ({ default: m.PipelinesView })),
 );
+const ReviewerView = lazy(() =>
+  import("./components/reviewer/ReviewerView").then((m) => ({ default: m.ReviewerView })),
+);
 const ApiView = lazy(() => import("./components/api/ApiView").then((m) => ({ default: m.ApiView })));
 const AgentsView = lazy(() => import("./components/agents/AgentsView").then((m) => ({ default: m.AgentsView })));
 const StoriesView = lazy(() => import("./components/stories/StoriesView").then((m) => ({ default: m.StoriesView })));
@@ -276,6 +279,8 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   // repository reloads everything here. The tab that opens it is conditional — see `TabBar` — but
   // membership of this list is not, because the guard below has to be able to leave it.
   { id: "pipelines", render: () => <PipelinesView /> },
+  // The Revisor, conditional on a setting rather than on a host — same guard below, same reason.
+  { id: "reviewer", render: () => <ReviewerView /> },
 ];
 
 /** Views that aren't about a repository, so the "no project open" empty state must not swallow
@@ -438,6 +443,12 @@ function MainContent() {
   useEffect(() => {
     if (activeView === "pipelines" && !pipelinesOpen) useUiStore.getState().setActiveView("graph");
   }, [activeView, pipelinesOpen]);
+  // The Revisor switched off in Settings while its tab was open — or reached by a shortcut or a
+  // notification after it was. Back to the graph rather than a screen with no tab lit.
+  const reviewerEnabled = usePreferencesStore((s) => s.reviewerEnabled);
+  useEffect(() => {
+    if (activeView === "reviewer" && !reviewerEnabled) useUiStore.getState().setActiveView("graph");
+  }, [activeView, reviewerEnabled]);
 
   const workspaceViewOpen =
     workspaceId !== null && WORKSPACE_VIEWS.some((v) => v.id === activeView);

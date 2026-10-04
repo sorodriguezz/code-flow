@@ -345,6 +345,24 @@ pub fn monday_token_key(slug: &str) -> String {
     format!("monday-token:{slug}")
 }
 
+/// A connected SonarQube server's token — a company's SonarQube Server or SonarQube Cloud, whose
+/// rules the Reviewer copies — keyed by the connection's id.
+pub fn sonar_server_token_key(id: &str) -> String {
+    format!("sonar-server-token:{id}")
+}
+
+/// The local SonarQube's admin password. CodeFlow generates it on the server's first start, in place
+/// of the factory `admin`. Machine-specific — it is useless without the server's data, which a backup
+/// doesn't carry — so it is deliberately not in the backup's roster.
+pub fn sonar_local_admin_key() -> String {
+    "reviewer-sonar-admin".to_string()
+}
+
+/// The token CodeFlow signs in to the local SonarQube with, minted with the password above.
+pub fn sonar_local_token_key() -> String {
+    "reviewer-sonar-token".to_string()
+}
+
 /// Passphrase the whole-install backup is sealed with. In the credential store rather than in
 /// `app_settings` for the obvious reason, and there is exactly one: the scheduled backup has to be
 /// able to write the file unattended, which it cannot do if the only copy is in the user's head.

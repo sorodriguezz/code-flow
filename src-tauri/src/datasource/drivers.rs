@@ -647,7 +647,7 @@ async fn fetch(
 }
 
 /// Adoptium's names for this machine, and the archive its JRE comes in.
-fn platform() -> Result<(&'static str, &'static str, &'static str), String> {
+pub(crate) fn platform() -> Result<(&'static str, &'static str, &'static str), String> {
     let os = if cfg!(target_os = "windows") {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -749,7 +749,7 @@ async fn download_runtime(app: &AppHandle, driver_id: &str) -> Result<(), String
     Ok(())
 }
 
-fn extract(archive: &Path, into: &Path) -> Result<(), String> {
+pub(crate) fn extract(archive: &Path, into: &Path) -> Result<(), String> {
     let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
     if archive.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip")) {
         // `extract` resolves every entry through its enclosed name, so a path that climbs out of
@@ -763,7 +763,7 @@ fn extract(archive: &Path, into: &Path) -> Result<(), String> {
 }
 
 /// `bin/java` somewhere under `dir`: the archive's top folder, and on macOS its `Contents/Home`.
-fn find_java(dir: &Path, depth: usize) -> Option<PathBuf> {
+pub(crate) fn find_java(dir: &Path, depth: usize) -> Option<PathBuf> {
     let candidate = dir.join("bin").join(java_exe());
     if candidate.is_file() {
         return Some(candidate);

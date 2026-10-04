@@ -336,6 +336,15 @@ pub fn models_dir() -> PathBuf {
     state_dir().join("models")
 }
 
+/// The Reviewer's own corner: the JDK, SonarQube and its scanner it downloads on demand, the local
+/// server's data and logs, and each project's last results. See `crate::reviewer`.
+///
+/// App data like the JDBC drivers beside it — nothing here was authored by the user, and a download
+/// brings the binaries back exactly — so it lives under the state root and a reset may take it.
+pub fn reviewer_dir() -> PathBuf {
+    state_dir().join("reviewer")
+}
+
 /// Where a workspace's skills (installed via `npx skills add`) live before being synced
 /// into whichever project is actually being reviewed — the canonical, workspace-scoped copy.
 pub fn workspace_skills_dir(workspace_id: &str) -> PathBuf {

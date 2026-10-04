@@ -41,7 +41,10 @@ export type NotificationSource =
   /** A pipeline that finished while the user was elsewhere. Its own source rather than `git`:
    *  a build breaking is not something the repository did, it is something a host did to it,
    *  and the menu the row sends you to is the Pipelines tab. */
-  | "ci";
+  | "ci"
+  /** A review of the Revisor tab — build, tests, SonarQube — that finished. Its own source: a gate that
+   *  failed is neither a host's pipeline nor the assistant's opinion, and the row opens the Revisor. */
+  | "reviewer";
 
 /**
  * The menu each source is called in the rest of the app.
@@ -64,6 +67,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   db: "tabbar.databases",
   remote: "remote.title",
   ci: "tabbar.pipelines",
+  reviewer: "tabbar.reviewer",
 };
 
 /**

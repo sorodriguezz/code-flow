@@ -36,6 +36,8 @@ const CHAT_FILE_GENERATION_KEY = "chat_file_generation";
  *  `chat_cmd.rs`. */
 const CHAT_AUTO_COMPACT_KEY = "chat_auto_compact";
 const WINDOW_LIMIT_KEY = "satellite_window_limit";
+/** Whether the Revisor tab is shown. Unset is off: it needs a gigabyte of SonarQube to do anything. */
+const REVIEWER_KEY = "reviewer_enabled";
 export const MIN_AUTO_FETCH_SECONDS = 10;
 
 /**
@@ -142,6 +144,15 @@ interface PreferencesState {
    */
   satelliteLimit: number;
   /**
+   * Whether the Revisor tab sits beside Editor — the project's quality pipeline (build, tests,
+   * SonarQube, Quality Gate).
+   *
+   * Off by default and only switched on in Settings › Revisor, where its download lives: the tab is
+   * useless until SonarQube is on the disk, and a tab that opens onto "go download a gigabyte first"
+   * is not one to show everybody.
+   */
+  reviewerEnabled: boolean;
+  /**
    * Branch-name patterns whose branches come locked in every repository, without anyone having
    * clicked a padlock on them — `main`, `master`, `develop` and `release/*` out of the box.
    *
@@ -174,6 +185,7 @@ interface PreferencesState {
   setChatFileGenerationEnabled: (enabled: boolean) => Promise<void>;
   setChatAutoCompactEnabled: (enabled: boolean) => Promise<void>;
   setSatelliteLimit: (limit: number) => Promise<void>;
+  setReviewerEnabled: (enabled: boolean) => Promise<void>;
   /** Saves the list and adopts the normalised version the backend stored. */
   setLockedBranchRules: (rules: string[]) => Promise<void>;
   /** Puts the shipped defaults back, asking the backend what they are so they're named once. */
@@ -209,6 +221,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   pipelinePollSeconds: 5,
   blameAnnotationEnabled: false,
   satelliteLimit: DEFAULT_SATELLITE_LIMIT,
+  reviewerEnabled: false,
   lockedBranchRules: null,
 
   init: async () => {
@@ -232,6 +245,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         WINDOW_LIMIT_KEY,
         CHAT_FILE_GENERATION_KEY,
         CHAT_AUTO_COMPACT_KEY,
+        REVIEWER_KEY,
       ]).catch(
         () => ({}) as Record<string, string>,
       ),
@@ -281,6 +295,8 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       chatAutoCompactEnabled: (stored[CHAT_AUTO_COMPACT_KEY] ?? null) === null
         ? true
         : stored[CHAT_AUTO_COMPACT_KEY] === "true",
+      // Unset and explicit-false are both off: the tab is opted into, never out of.
+      reviewerEnabled: stored[REVIEWER_KEY] === "true",
       lockedBranchRules: rules,
     });
     // The store that enforces it keeps its own copy, so the rail can refuse without reaching across
@@ -357,6 +373,11 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     await setSetting(BLAME_ANNOTATION_KEY, String(enabled));
   },
 
+  setReviewerEnabled: async (enabled) => {
+    set({ reviewerEnabled: enabled });
+    await setSetting(REVIEWER_KEY, String(enabled));
+  },
+
   setSatelliteLimit: async (limit) => {
     const value = clampWindows(String(limit));
     set({ satelliteLimit: value });
@@ -404,6 +425,7 @@ watchSettings(
     WINDOW_LIMIT_KEY,
     CHAT_FILE_GENERATION_KEY,
     CHAT_AUTO_COMPACT_KEY,
+    REVIEWER_KEY,
   ],
   () => usePreferencesStore.getState().init(),
 );

@@ -21,6 +21,10 @@ export type MainView =
    * that is **conditional**: it exists only while the repository is linked to a host that is
    * connected. See `pipelinesAvailable` and the guard in `App.tsx`. */
   | "pipelines"
+  /** The project's quality pipeline — build, tests, SonarQube, Quality Gate. Repository-scoped and
+   * conditional like Pipelines, for another reason: it exists only while the user has switched it on
+   * in Settings › Revisor. See `reviewerEnabled` and the guard in `App.tsx`. */
+  | "reviewer"
   | "api"
   | "agents"
   | "stories"
@@ -70,6 +74,8 @@ export type SettingsSectionId =
   /** The CI tab's polling interval. Its own section rather than a line under Git: the tab is
    *  repository-scoped but the cost is per host, and it is the app's only polling client. */
   | "pipelines"
+  /** The Revisor's switch, its SonarQube download, the rules and the connected servers. */
+  | "reviewer"
   | "review"
   | "skills"
   | "mcp"

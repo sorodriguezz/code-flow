@@ -1,9 +1,11 @@
-import { useMemo } from "react";
-import { ChevronRight, Code2, FolderGit2, GitBranch, History, Layers, Route, type LucideIcon } from "lucide-react";
+import { useEffect, useMemo } from "react";
+import { ChevronRight, Code2, FolderGit2, GitBranch, History, Layers, Route, ShieldCheck, type LucideIcon } from "lucide-react";
 import { useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { usePreferencesStore } from "../../state/preferencesStore";
+import { useReviewerStore } from "../../state/reviewerStore";
 import { ActiveMarker, ActivePill } from "../common/ActivePill";
 import { Kbd } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
@@ -30,7 +32,22 @@ const TABS: Tab[] = [
 
 const PIPELINES_TAB: Tab = { id: "pipelines", labelKey: "tabbar.pipelines", icon: Route, shortcut: "view.pipelines" };
 
-const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "pipelines"];
+/** Right after Editor, where the user asked for it — and only while switched on in Settings. */
+const REVIEWER_TAB: Tab = { id: "reviewer", labelKey: "tabbar.reviewer", icon: ShieldCheck, shortcut: "view.reviewer" };
+
+const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "reviewer", "pipelines"];
+
+/**
+ * The colour of the dot the Revisor tab wears: the selected repository's last review. Nothing while
+ * it has never been reviewed, and nothing while a review runs — the tab's own content says that.
+ */
+function useReviewerDot(projectId: string | undefined): string | null {
+  const run = useReviewerStore((s) => (projectId ? s.runs[projectId] : undefined));
+  const summary = run?.summary;
+  if (!summary || summary.status === "cancelled") return null;
+  if (summary.status === "passed") return "var(--cf-success)";
+  return summary.status === "failed" ? "var(--cf-danger)" : "var(--cf-warning)";
+}
 
 /**
  * Staged + unstaged + untracked + conflicted, counted by path so a file that is both staged and
@@ -48,7 +65,7 @@ function useUncommittedCount(): number {
   }, [status]);
 }
 
-function TabButton({ tab, active, badge }: { tab: Tab; active: boolean; badge?: number }) {
+function TabButton({ tab, active, badge, dot }: { tab: Tab; active: boolean; badge?: number; dot?: string | null }) {
   const setActiveView = useUiStore((s) => s.setActiveView);
   const t = useT();
   const chord = useShortcutChord();
@@ -78,6 +95,7 @@ function TabButton({ tab, active, badge }: { tab: Tab; active: boolean; badge?: 
         <span className="relative flex items-center gap-1.5">
           <Icon size={14} />
           {t(tab.labelKey)}
+          {dot && <span aria-hidden className="h-[7px] w-[7px] rounded-full" style={{ background: dot }} />}
           {badge !== undefined && badge > 0 && (
             <span
               title={t("tabbar.uncommittedCount", { n: badge })}
@@ -110,10 +128,23 @@ export function ChromeScope() {
   const workspace = useWorkspaceStore((s) => s.workspaces.find((w) => w.id === s.activeWorkspaceId) ?? null);
   const connections = useVcsConnectionsStore();
   const uncommitted = useUncommittedCount();
+  const reviewerEnabled = usePreferencesStore((s) => s.reviewerEnabled);
+  const reviewerDot = useReviewerDot(project?.id);
+  // The dot answers for the repository as soon as it is selected, not only once its tab was opened:
+  // the last review is read from disk — a file read and two cheap calls, and only with the Revisor on.
+  useEffect(() => {
+    if (!reviewerEnabled || !project) return;
+    if (useReviewerStore.getState().suggestions[project.id]) return;
+    void useReviewerStore.getState().loadProject(project).catch(() => {});
+  }, [reviewerEnabled, project]);
   const t = useT();
 
   if (REPO_VIEWS.includes(activeView)) {
-    const tabs = pipelinesAvailable(project, connections) ? [...TABS, PIPELINES_TAB] : TABS;
+    const tabs = [
+      ...TABS,
+      ...(reviewerEnabled ? [REVIEWER_TAB] : []),
+      ...(pipelinesAvailable(project, connections) ? [PIPELINES_TAB] : []),
+    ];
     return (
       <div className="flex min-w-0 items-center gap-1">
         <Tooltip
@@ -145,6 +176,7 @@ export function ChromeScope() {
               tab={tab}
               active={tab.id === activeView}
               badge={tab.id === "changes" ? uncommitted : undefined}
+              dot={tab.id === "reviewer" ? reviewerDot : undefined}
             />
           ))}
         </div>

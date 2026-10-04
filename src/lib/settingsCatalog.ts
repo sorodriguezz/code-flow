@@ -29,6 +29,7 @@ import {
   BrainCircuit,
   Briefcase,
   ChartColumn,
+  Cloud,
   Compass,
   Cpu,
   Database,
@@ -56,6 +57,7 @@ import {
   Plug,
   Palette,
   PanelsTopLeft,
+  Power,
   QrCode,
   Rainbow,
   RefreshCw,
@@ -421,6 +423,21 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     searchKey: "settings.searchTermsPipelines",
   },
   {
+    // Beside Pipelines because it is the same idea run here instead of on a host: a project's quality
+    // job. The switch that shows its tab is the first pane — "where do I turn the Revisor on" is the
+    // question this section is opened with first, and the download is the second.
+    id: "reviewer",
+    labelKey: "tabbar.reviewer",
+    icon: ShieldCheck,
+    group: "global",
+    tabs: [
+      { id: "general", labelKey: "reviewer.paneGeneral", hintKey: "reviewer.paneGeneralHint", icon: Power, searchKey: "settings.searchTermsReviewerGeneral" },
+      { id: "sonarqube", labelKey: "reviewer.paneSonar", hintKey: "reviewer.paneSonarHint", icon: Server, searchKey: "settings.searchTermsReviewerSonar" },
+      { id: "rules", labelKey: "reviewer.paneRules", hintKey: "reviewer.paneRulesHint", icon: ListChecks, searchKey: "settings.searchTermsReviewerRules" },
+      { id: "servers", labelKey: "reviewer.paneServers", hintKey: "reviewer.paneServersHint", icon: Cloud, searchKey: "settings.searchTermsReviewerServers" },
+    ],
+  },
+  {
     id: "notifications",
     labelKey: "notifications.settingsTitle",
     // The bell, the same glyph as the status bar's notification centre these settings are about.
@@ -524,6 +541,7 @@ export const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>([
   "editor",
   "vault",
   "pipelines",
+  "reviewer",
   "notifications",
 ]);
 

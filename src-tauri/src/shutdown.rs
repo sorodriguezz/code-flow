@@ -98,6 +98,10 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // own — that is what lets Stop reach what it started — so it would outlive this process,
         // quite possibly paused at a breakpoint for ever, holding whatever port it had opened.
         tauri::async_runtime::block_on(crate::commands::debug_cmd::stop_all());
+        // The Reviewer's local SonarQube and the review in flight. The server is four JVMs and an
+        // Elasticsearch index in a process group of their own; left behind they would hold two
+        // gigabytes and the data folder the next launch needs.
+        crate::reviewer::shutdown(std::time::Duration::from_secs(10));
         // The hybrid task's local model, if one is loaded. A child process does not die with its
         // parent, and this one can be holding twenty gigabytes; the sweep at the next launch would
         // find it, but only after it had sat in memory for however long the app was closed.

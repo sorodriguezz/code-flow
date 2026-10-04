@@ -16,6 +16,7 @@ import { ShortcutsSettings } from "./ShortcutsSettings";
 import { VaultSettings } from "./VaultSettings";
 import { NotificationSettings } from "./NotificationSettings";
 import { PipelinesSettings } from "./PipelinesSettings";
+import { ReviewerSettings } from "./ReviewerSettings";
 import { ApiSettingsBody } from "../api/ApiSettingsPanel";
 import { ActivePill } from "../common/ActivePill";
 import { Kbd, iconButtonClass } from "../common/Button";
@@ -669,6 +670,7 @@ export function SettingsView() {
               {section === "remote" && <RemoteSettings />}
               {section === "vault" && <VaultSettings />}
               {section === "pipelines" && <PipelinesSettings />}
+              {section === "reviewer" && <ReviewerSettings />}
               {section === "notifications" && <NotificationSettings />}
               {section === "backup" && <BackupSettings />}
               {section === "review" && <ReviewSettings />}

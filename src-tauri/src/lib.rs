@@ -71,6 +71,7 @@ mod requirements;
 mod reset;
 mod review;
 mod review_memory;
+mod reviewer;
 mod search;
 mod secret_scan;
 mod secrets;
@@ -1473,6 +1474,24 @@ pub fn run() {
             commands::debug_cmd::debug_is_running,
             commands::debug_cmd::debug_session,
             commands::debug_cmd::debug_python,
+            commands::reviewer_cmd::reviewer_status,
+            commands::reviewer_cmd::reviewer_disk_used,
+            commands::reviewer_cmd::reviewer_install,
+            commands::reviewer_cmd::reviewer_cancel_install,
+            commands::reviewer_cmd::reviewer_uninstall,
+            commands::reviewer_cmd::reviewer_server_start,
+            commands::reviewer_cmd::reviewer_server_stop,
+            commands::reviewer_cmd::reviewer_server_log,
+            commands::reviewer_cmd::reviewer_save_config,
+            commands::reviewer_cmd::reviewer_apply_rules,
+            commands::reviewer_cmd::reviewer_save_server,
+            commands::reviewer_cmd::reviewer_delete_server,
+            commands::reviewer_cmd::reviewer_server_catalog,
+            commands::reviewer_cmd::reviewer_detect,
+            commands::reviewer_cmd::reviewer_run,
+            commands::reviewer_cmd::reviewer_cancel_run,
+            commands::reviewer_cmd::reviewer_active_run,
+            commands::reviewer_cmd::reviewer_last_run,
             commands::localai_cmd::localai_state,
             commands::localai_cmd::localai_set_enabled,
             commands::localai_cmd::localai_set_model,

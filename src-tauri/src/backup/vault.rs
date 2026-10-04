@@ -209,6 +209,11 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
         push_unique(&mut keys, secrets::monday_token_key(slug.trim()));
     }
 
+    // The SonarQube servers the Reviewer copies rules from: one token per connection.
+    for id in field_of_each(conn, crate::reviewer::config::SERVERS_KEY, "id") {
+        push_unique(&mut keys, secrets::sonar_server_token_key(&id));
+    }
+
     // Database passwords — the column the schema deliberately doesn't have.
     for id in column(conn, "SELECT id FROM db_connections") {
         push_unique(&mut keys, crate::datasource::password_key(&id));

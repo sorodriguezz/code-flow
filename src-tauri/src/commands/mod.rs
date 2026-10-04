@@ -30,6 +30,7 @@ pub mod remote_cmd;
 pub mod remotectl_cmd;
 pub mod repos;
 pub mod review_pipeline;
+pub mod reviewer_cmd;
 pub mod secret_scan_cmd;
 pub mod secrets_cmd;
 pub mod sandbox_cmd;

@@ -11,6 +11,7 @@ import { useApiCommandStore } from "../state/apiCommandStore";
 import { useDbCommandStore } from "../state/dbCommandStore";
 import { useDbStore } from "../state/dbStore";
 import { useDbModalStore } from "../state/dbModalStore";
+import { usePreferencesStore } from "../state/preferencesStore";
 import { fetchNow, pullNow, pushNow } from "./gitActions";
 import type { Chord } from "./keys";
 import type { TranslationKey } from "./i18n/translations";
@@ -56,6 +57,7 @@ export type ShortcutId =
   | "chat.focusComposer"
   | "view.remote"
   | "view.pipelines"
+  | "view.reviewer"
   | "db.newConsole"
   | "db.connections"
   | "db.refresh"
@@ -510,6 +512,19 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     // the Shortcuts pane greeted everyone with a conflict warning they had not caused.
     defaultChord: "Mod+Alt+P",
     run: () => useUiStore.getState().setActiveView("pipelines"),
+  },
+  {
+    // Conditional on a setting: while the Revisor is off, the chord opens the place that turns it on
+    // rather than doing nothing — the way to the tab is the same as the way to the switch.
+    id: "view.reviewer",
+    group: "views",
+    labelKey: "tabbar.reviewer",
+    // G for the Quality Gate. Not Q, which AltGr turns into "@" on Spanish and German layouts.
+    defaultChord: "Mod+Alt+G",
+    run: () =>
+      usePreferencesStore.getState().reviewerEnabled
+        ? useUiStore.getState().setActiveView("reviewer")
+        : useUiStore.getState().openSettings("reviewer"),
   },
   {
     id: "view.next",

@@ -23,6 +23,7 @@ import {
   Plus,
   Rocket,
   Route,
+  ShieldCheck,
   Workflow,
   Zap,
   Sparkles,
@@ -33,6 +34,7 @@ import {
 import { canPasteJsonHere, pasteJsonInFocusedEditor } from "../editor/pasteJsonAsCode";
 import { fetchNow, pullNow, pushNow } from "../../lib/gitActions";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { usePreferencesStore } from "../../state/preferencesStore";
 import { useMissingProjectsStore } from "../../state/missingProjectsStore";
 import { useWindowStore } from "../../state/windowStore";
 import { useRepoStore } from "../../state/repoStore";
@@ -99,6 +101,9 @@ const VIEW_ITEMS: {
   // unconditional here: the palette is how you find out a screen exists, and a row that vanishes
   // depending on which repository is selected is one nobody learns.
   { id: "pipelines", labelKey: "tabbar.pipelines", icon: Route },
+  // Unlike Pipelines, listed only while switched on: the tab is opted into in Settings, and a row
+  // here would only bounce off the guard in `App.tsx`. Settings › Revisor is found by the search.
+  { id: "reviewer", labelKey: "tabbar.reviewer", icon: ShieldCheck },
   { id: "api", workspace: "requests", labelKey: "tabbar.api", icon: Zap },
   { id: "api", workspace: "database", labelKey: "tabbar.databases", icon: Database },
   { id: "agents", labelKey: "tabbar.agents", icon: Bot },
@@ -201,7 +206,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     }));
 
     const viewItems: PaletteItem[] = [
-      ...VIEW_ITEMS.map(({ id, labelKey, icon, workspace }) => ({
+      ...VIEW_ITEMS.filter(({ id }) => id !== "reviewer" || usePreferencesStore.getState().reviewerEnabled).map(({ id, labelKey, icon, workspace }) => ({
         key: `view:${id}:${workspace ?? ""}`,
         icon,
         label: t(labelKey),
