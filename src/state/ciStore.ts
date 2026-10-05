@@ -456,11 +456,12 @@ export const useCiStore = create<CiState>((set, get) => ({
           // re-run of the same id inheriting a stale verdict.
           [projectId]: runs.map((run) => {
             const refined = s.detailByRun[runKey(projectId, run)]?.run;
-            return refined &&
-              refined.raw_status === run.raw_status &&
-              refined.finished_at === run.finished_at
-              ? refined
-              : run;
+            if (refined && refined.raw_status === run.raw_status && refined.finished_at === run.finished_at) {
+              return refined;
+            }
+            // Who ran it never changes for a run, and GitLab's listing never says: a name learnt
+            // from the detail stays on the row instead of vanishing at the next poll.
+            return run.actor === null && refined?.actor ? { ...run, actor: refined.actor } : run;
           }),
         },
         branchesSeenByProject: {

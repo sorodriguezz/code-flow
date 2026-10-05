@@ -116,6 +116,130 @@ async fn open(req: &SocketIoConnectRequest, v4: bool) -> Result<WsStream, String
     ws::dial(&url, &req.headers, &[], &req.options).await
 }
 
+/// One flow node's Socket.IO exchange: connect to the namespace, optionally emit one event (and
+/// wait for its acknowledgement), collect up to `max` events named `listen` — any, when it is
+/// empty — until `timeout`, then leave. Nothing is registered or emitted to a window.
+pub(crate) struct SocketIoExchange {
+    pub emit: Option<(String, String)>,
+    pub want_ack: bool,
+    pub listen: String,
+    pub max: usize,
+    pub timeout: std::time::Duration,
+    /// Where events go instead of the answer — a trigger listening for as long as it is armed.
+    pub sink: Option<std::sync::Arc<dyn Fn(Value) + Send + Sync>>,
+    /// Called once the server has confirmed the namespace.
+    pub opened: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+pub(crate) async fn exchange(
+    req: SocketIoConnectRequest,
+    plan: SocketIoExchange,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<Vec<Value>, String> {
+    const ACK_ID: u64 = 1;
+    let v4 = req.version.trim() != "v3";
+    let namespace = if req.namespace.trim().is_empty() { "/".to_string() } else { req.namespace.trim().to_string() };
+    let normalized = |ns: &str| if ns.starts_with('/') { ns.to_string() } else { format!("/{ns}") };
+    let stream = open(&req, v4).await?;
+    let (mut writer, mut reader) = stream.split();
+    let deadline = tokio::time::Instant::now() + plan.timeout;
+    let mut ping: Option<Interval> = None;
+    let (mut connected, mut emitted, mut ack_pending) = (false, plan.emit.is_none(), false);
+    let mut events: Vec<Value> = Vec::new();
+    let mut ack: Option<Value> = None;
+    // A named event is listened for until the time limit unless a count ends it sooner; with no
+    // name, a count says to take whatever events arrive.
+    let wants_events = plan.sink.is_some() || !plan.listen.trim().is_empty() || plan.max > 0;
+    loop {
+        if plan.sink.is_none() && connected && emitted && !ack_pending && (!wants_events || (plan.max > 0 && events.len() >= plan.max)) {
+            break;
+        }
+        let frame = tokio::select! {
+            _ = cancel.cancelled() => return Err(crate::ai_runs::CANCELLED_MARKER.to_string()),
+            _ = tokio::time::sleep_until(deadline) => break,
+            _ = ws::tick(&mut ping) => {
+                writer.send(Message::text(engine_frame(ENGINE_PING))).await.map_err(|e| e.to_string())?;
+                continue;
+            }
+            frame = reader.next() => frame,
+        };
+        let text = match frame {
+            Some(Ok(Message::Text(text))) => text.to_string(),
+            Some(Ok(Message::Close(_))) | None => break,
+            Some(Err(e)) => return Err(e.to_string()),
+            Some(Ok(_)) => continue,
+        };
+        match decode_engine(&text) {
+            Some(Engine::Open(body)) => {
+                if !v4 {
+                    let handshake: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    ping = ws::keepalive(handshake.get("pingInterval").and_then(Value::as_u64).unwrap_or(25_000));
+                }
+                let frame = message_frame(CONNECT, &namespace, &connect_body(&req.auth_json, v4));
+                writer.send(Message::text(frame)).await.map_err(|e| e.to_string())?;
+            }
+            Some(Engine::Ping(_)) => {
+                writer.send(Message::text(engine_frame(ENGINE_PONG))).await.map_err(|e| e.to_string())?;
+            }
+            Some(Engine::Close) => break,
+            Some(Engine::Message(body)) => {
+                let packet = decode_packet(&body)?;
+                if normalized(&packet.namespace) != normalized(&namespace) {
+                    continue;
+                }
+                match packet.kind {
+                    CONNECT => {
+                        connected = true;
+                        if let Some(opened) = &plan.opened {
+                            opened();
+                        }
+                        if let Some((event, payload)) = &plan.emit {
+                            let args = event_args(event, payload)?;
+                            let body = if plan.want_ack { format!("{ACK_ID}{args}") } else { args };
+                            writer.send(Message::text(message_frame(EVENT, &namespace, &body))).await.map_err(|e| e.to_string())?;
+                            emitted = true;
+                            ack_pending = plan.want_ack;
+                        }
+                    }
+                    CONNECT_ERROR => return Err(format!("The server refused the connection: {}", packet.data)),
+                    ACK | BINARY_ACK if packet.ack_id == Some(ACK_ID) => {
+                        ack = Some(Value::Array(parse_args(&packet.data)?));
+                        ack_pending = false;
+                    }
+                    EVENT | BINARY_EVENT if wants_events => {
+                        let (name, payload) = split_event(&packet.data)?;
+                        if plan.listen.trim().is_empty() || plan.listen.trim() == name {
+                            let data = serde_json::from_str::<Value>(&payload).unwrap_or(Value::String(payload));
+                            let event = serde_json::json!({ "event": name, "data": data });
+                            match &plan.sink {
+                                Some(sink) => sink(event),
+                                None => events.push(event),
+                            }
+                        }
+                    }
+                    DISCONNECT => break,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    let _ = writer.send(Message::text(message_frame(DISCONNECT, &namespace, ""))).await;
+    let _ = writer.close().await;
+    if !connected {
+        return Err("The server never confirmed the Socket.IO connection".to_string());
+    }
+    if ack_pending {
+        return Err("The server did not acknowledge the event in time".to_string());
+    }
+    let mut out = Vec::new();
+    if let Some(ack) = ack {
+        out.push(serde_json::json!({ "ack": ack }));
+    }
+    out.extend(events);
+    Ok(out)
+}
+
 /// What a handled frame decided about the connection's future.
 enum Flow {
     Continue,

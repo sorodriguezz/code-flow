@@ -237,6 +237,12 @@ export function App() {
         case "services:runtime":
           state.applyServiceRuntime(frame.payload as ServiceRuntime);
           break;
+        // A flow started or stopped waiting for somebody, or the armed flows changed: both lists
+        // in the Flujos view are re-read — the frames carry nothing.
+        case "flows:waits-changed":
+        case "flows:triggers":
+          void state.refreshFlows();
+          break;
         // The server sends this when this socket fell far enough behind to lose frames — a locked
         // screen through a long run. Everything on screen is suspect, so everything is re-read, and
         // the user is told: a screen that silently rewrites itself is how somebody ends up acting on

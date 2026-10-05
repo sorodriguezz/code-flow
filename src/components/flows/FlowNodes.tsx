@@ -1,6 +1,6 @@
 import { createContext, memo, useContext, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
-import { Check, Minus, Pin, X } from "lucide-react";
+import { Check, Hourglass, Minus, Pin, X } from "lucide-react";
 import { AiGlyph, type AiGlyphName } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { familyColor, nodeIcon } from "../../lib/flows/nodeIcons";
@@ -29,9 +29,12 @@ export interface CfNodeData extends Record<string, unknown> {
   /** Whether the last port is the error port. */
   errorPort: boolean;
   /** What the run on screen did with it. */
-  run: { status: FlowNodeRunStatus; error: string; title: string } | null;
+  run: { status: FlowNodeRunStatus; error: string; title: string; waiting?: boolean } | null;
   pinned: boolean;
   pinnedTitle: string;
+  /** What an AI proposal on screen does to it. */
+  diff?: "added" | "changed" | "removed";
+  diffTitle?: string;
 }
 
 export interface NoteNodeData extends Record<string, unknown> {
@@ -62,7 +65,14 @@ const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "
 const portTop = (index: number, count: number) => (count <= 1 ? "50%" : `${((index + 1) / (count + 1)) * 100}%`);
 
 /** The mark in a node's corner for what the run did with it. */
-function RunBadge({ status, title }: { status: FlowNodeRunStatus; title: string }) {
+function RunBadge({ status, title, waiting }: { status: FlowNodeRunStatus; title: string; waiting?: boolean }) {
+  if (waiting) {
+    return (
+      <span className="cf-flow-node__badge is-waiting" title={title}>
+        <Hourglass size={10} strokeWidth={2.5} />
+      </span>
+    );
+  }
   const icon =
     status === "success" ? <Check size={10} strokeWidth={3} /> : status === "error" ? <X size={10} strokeWidth={3} /> : status === "skipped" || status === "canceled" ? <Minus size={10} strokeWidth={3} /> : null;
   if (!icon) return null;
@@ -74,7 +84,7 @@ function RunBadge({ status, title }: { status: FlowNodeRunStatus; title: string 
 }
 
 export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNode>) {
-  const { descriptor, name, typeLabel, disabled, inputLabels, outputLabels, outputs, errorPort, run, pinned, pinnedTitle } = data;
+  const { descriptor, name, typeLabel, disabled, inputLabels, outputLabels, outputs, errorPort, run, pinned, pinnedTitle, diff, diffTitle } = data;
   const Icon = nodeIcon(descriptor.icon);
   const glyph =
     descriptor.family === "ai" && AI_GLYPHS.has(descriptor.icon) ? (
@@ -86,16 +96,21 @@ export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNod
     <div
       className={`cf-flow-node ${descriptor.family === "trigger" ? "is-trigger" : ""} ${disabled ? "is-disabled" : ""} ${
         run ? `is-run-${run.status}` : ""
-      }`}
+      } ${diff ? `is-diff-${diff}` : ""}`}
       style={{ "--node-color": familyColor(descriptor.family) } as CSSProperties}
     >
       <div className="cf-flow-node__tile">
         {glyph}
-        {run && <RunBadge status={run.status} title={run.title} />}
+        {run && <RunBadge status={run.status} title={run.title} waiting={run.waiting} />}
         {/* A model at work — the one mark the app keeps for reasoning, and only while it lasts. */}
         {run?.status === "running" && descriptor.family === "ai" && (
           <span className="cf-flow-node__orb" title={run.title}>
             <ThinkingOrb size="sm" />
+          </span>
+        )}
+        {diff && (
+          <span className="cf-flow-node__diff" title={diffTitle}>
+            {diff === "added" ? "+" : diff === "changed" ? "~" : "−"}
           </span>
         )}
         {pinned && (

@@ -3,7 +3,8 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 
 /** "1 item", "3 items" — the translator substitutes, it does not pluralise. */
 export function itemsLabel(t: (key: TranslationKey, params?: Record<string, string | number>) => string, n: number): string {
-  return n === 1 ? t("flows.oneItem") : t("flows.items", { n });
+  // Grouped the way the reader writes numbers: «10.000 items», "10,000 items".
+  return n === 1 ? t("flows.oneItem") : t("flows.items", { n: n.toLocaleString() });
 }
 
 /** How long something took, the way a person reads it. */
@@ -32,6 +33,7 @@ export function formatWhen(iso: string, language: string): string {
 
 export const RUN_STATUS_KEY: Record<FlowRunStatus, TranslationKey> = {
   running: "flows.status.running",
+  waiting: "flows.status.waiting",
   success: "flows.status.success",
   error: "flows.status.error",
   canceled: "flows.status.canceled",
@@ -59,6 +61,8 @@ export function statusColor(status: FlowRunStatus | FlowNodeRunStatus): string {
       return "var(--cf-danger)";
     case "running":
       return "var(--cf-accent)";
+    case "waiting":
+      return "var(--cf-warning)";
     case "pinned":
     case "reused":
       return "var(--cf-blue)";

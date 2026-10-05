@@ -444,21 +444,29 @@ export function ResultGrid({
                 className="relative flex shrink-0 flex-col justify-center border-r border-[var(--cf-border)]"
               >
                 {/*
-                  The button *is* the cell — full width, full height, and it owns the padding.
+                  The sort button *is* the cell — full width, full height.
 
                   It used to be a content-sized element inside a padded box, which meant the header
                   you saw and the header you could click were different rectangles: the two lines of
                   padding and the whole type row below the name did nothing, so sorting a column
                   meant hitting its name rather than its header. The visual box has to be the target,
                   or the target has to be found by trial.
+
+                  It lies *under* the header's content rather than holding it, so the foreign-key
+                  arrow can sit in the name's line — left of the sort arrow — as a button of its own:
+                  one button cannot hold another. The content lets clicks through to it; only that
+                  arrow takes them. (It used to float over the cell's corner, right where the sort
+                  arrow is drawn, and the two landed on top of each other.)
                 */}
                 <button
                   type="button"
                   onClick={(e) => onSort?.(column.name, e.shiftKey || e.metaKey || e.ctrlKey)}
                   disabled={!onSort}
                   title={onSort ? t("db.sortHint") : column.name}
-                  className="flex h-full w-full min-w-0 flex-col justify-center gap-[3px] px-2 py-1 text-left disabled:cursor-default"
-                >
+                  aria-label={column.name}
+                  className="absolute inset-0 disabled:cursor-default"
+                />
+                <div className="pointer-events-none relative flex h-full w-full min-w-0 flex-col justify-center gap-[3px] px-2 py-1 text-left">
                   <span className="flex w-full min-w-0 items-center gap-1">
                     <span className="min-w-0 flex-1 truncate text-[11px] font-semibold leading-none text-[var(--cf-text)]">
                       {column.name}
@@ -470,6 +478,21 @@ export function ResultGrid({
                       >
                         {model.identity.badge}
                       </span>
+                    )}
+                    {/* The way to the referenced table, beside the name and before any sort arrow.
+                        Its tooltip names the destination — the only place that table is spelled
+                        out. */}
+                    {facts.reference && onFollowForeignKey && (
+                      <button
+                        type="button"
+                        onClick={() => onFollowForeignKey(facts.reference!, null)}
+                        title={t("db.openReferencedTable", {
+                          table: referenceLabel(facts.reference),
+                        })}
+                        className="pointer-events-auto flex shrink-0 items-center text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                      >
+                        <ExternalLink size={10} />
+                      </button>
                     )}
                     {sortKey && (
                       <span className="flex shrink-0 items-center text-[var(--cf-accent)]">
@@ -499,23 +522,7 @@ export function ResultGrid({
                       {facts.type}
                     </span>
                   )}
-                </button>
-                {/* The arrow rides beside the name, not over it: the header's job is still to sort.
-                    Its tooltip names the destination, which is the only place the referenced table
-                    is spelled out. A sibling of the button rather than a child — nesting one button
-                    in another is invalid, and it needs to sit above the cell-sized target anyway. */}
-                {facts.reference && onFollowForeignKey && (
-                  <button
-                    type="button"
-                    onClick={() => onFollowForeignKey(facts.reference!, null)}
-                    title={t("db.openReferencedTable", {
-                      table: referenceLabel(facts.reference),
-                    })}
-                    className="absolute right-2.5 top-1 z-10 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-                  >
-                    <ExternalLink size={10} />
-                  </button>
-                )}
+                </div>
                 <ColumnResizer
                   width={widthOf(column.name)}
                   onChange={(width) => applyWidth(column.name, width)}

@@ -1067,6 +1067,9 @@ pub mod task {
     /// A node of a flow — the agent, or one of its shortcuts (classify, extract, summarize, review,
     /// commit) — see [`super::flow_turn`].
     pub const FLOWS: &str = "flows";
+    /// A flow written or changed from a description — see [`super::build_flow`]. Its own label
+    /// rather than [`FLOWS`]': that one is what a running flow spends, this one is the editor's.
+    pub const FLOW_BUILD: &str = "flow-build";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -3931,6 +3934,28 @@ pub async fn draw_diagram(
     if schema_dialect {
         return Ok(text.trim().to_string());
     }
+    Ok(json_answer(&text).map(|json| json.into_owned()).unwrap_or(text).trim().to_string())
+}
+
+/// Asks an engine to write a flow — see `flows::builder`, which owns the prompt, the schema and the
+/// checks. Text-only like [`draw_diagram`]: the catalogue, the flow and the request go on stdin and
+/// the answer is JSON that is validated before anything is drawn, so this routes anywhere.
+pub async fn build_flow(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    system_prompt: &str,
+    ask: &str,
+    data: &str,
+    json_schema: &str,
+) -> Result<String, String> {
+    let mut inv = AiInvocation::new(ask, data);
+    inv.system_prompt = Some(system_prompt);
+    inv.model = model;
+    inv.task = task::FLOW_BUILD;
+    inv.json_schema = Some(json_schema);
+    let run = run(engine, binary, inv).await?;
+    let text = strip_code_fence(&run.text);
     Ok(json_answer(&text).map(|json| json.into_owned()).unwrap_or(text).trim().to_string())
 }
 

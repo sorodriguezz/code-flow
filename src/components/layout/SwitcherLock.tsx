@@ -6,6 +6,7 @@ import { openable } from "../../lib/shortcuts";
 import { shortcutBlockedByDialog } from "../../lib/useFocusTrap";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import { useDataDirsStore } from "../../state/dataDirsStore";
+import { chordHeld, chordMatches, useSwitcherLockStore } from "../../state/switcherLockStore";
 import { useT } from "../../state/languageStore";
 import { useTourStore } from "../../state/tourStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -54,19 +55,24 @@ const AXIS: Record<LockKind, [string, string]> = {
 };
 
 /**
- * Which lock a keystroke opens: Ctrl+Shift — Control on macOS too (⌃⇧), which is why this is not a
- * registry shortcut: `Mod` is ⌘ there — with ←/→ for workspaces and ↑/↓ for repositories. With any
- * other modifier as well, the chord is somebody else's.
+ * Which lock a keystroke opens: the chord recorded in Settings (`switcherLockStore`; Ctrl+Shift+Alt
+ * by default, ⌃⇧⌥ on macOS — Control literally there, which is why this is not a registry
+ * shortcut: `Mod` is ⌘) with ←/→ for workspaces and ↑/↓ for repositories. With any other modifier
+ * as well, the chord is somebody else's. Read at the keystroke, so a new chord applies at once.
  */
 function lockFor(e: KeyboardEvent, repos: boolean): LockKind | null {
-  if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return null;
+  const chord = useSwitcherLockStore.getState().chord;
+  if (!chord || !chordMatches(chord, e)) return null;
   if (AXIS.workspace.includes(e.key)) return "workspace";
   if (AXIS.repo.includes(e.key)) return repos ? "repo" : null;
   return null;
 }
 
-/** Whether the chord is still held — letting go of either key is the switch. */
-const held = (e: KeyboardEvent) => e.ctrlKey && e.shiftKey;
+/** Whether the chord is still held — letting go of any of its keys is the switch. */
+const held = (e: KeyboardEvent) => {
+  const chord = useSwitcherLockStore.getState().chord;
+  return chord !== null && chordHeld(chord, e);
+};
 
 /** The workspaces as the switcher lists them, and where the current one sits. */
 function workspaceLock(): { items: LockItem[]; at: number } {
@@ -92,18 +98,19 @@ function repoLock(): { items: LockItem[]; at: number } {
  * The combination lock: a drum of workspaces — or of this workspace's repositories — rolled with
  * the arrows while a chord is held, and switched to only when the chord is let go.
  *
- * **Hidden on purpose** (the user's ask, 2026-10-01): in no menu, tour or settings screen, and not
- * in the shortcut registry — its chord is not one `Mod` can spell, and it acts on *keyup*, which no
- * registry command does.
+ * **Out of the way on purpose** (the user's ask, 2026-10-01): in no menu or tour, and not in the
+ * shortcut registry — its chord is not one `Mod` can spell, and it acts on *keyup*, which no
+ * registry command does. Its one appearance is the row in Settings → Shortcuts where its chord is
+ * changed (asked for 2026-10-05).
  *
- * - Ctrl+Shift (⌃⇧ on macOS) with ←/→: workspaces; with ↑/↓: repositories (the user's pick,
- *   2026-10-01 — it replaced ↑/↓ for workspaces and ⌃⇧⌘ for repositories).
+ * - The chord (Ctrl+Shift+Alt by default — ⌃⇧⌥ on macOS) with ←/→: workspaces; with ↑/↓:
+ *   repositories.
  * - The first arrow opens it on what is current; the next ones roll it, round and round like a
  *   lock's wheel — → and ↓ forward, ← and ↑ back, on the same upright drum. Letting go of the chord
  *   switches — never before. Escape, or the window losing focus, leaves everything as it was.
  * - Listened for in the capture phase, so it works over the editor, a terminal and a text field
- *   alike — which means those never see Ctrl+Shift+arrows in this window: on Windows and Linux that
- *   is select-by-word (←/→), on macOS select-to-line-edge.
+ *   alike — which means those never see the chord's arrows in this window. Hence three modifiers by
+ *   default: the old Ctrl+Shift was select-by-word on Windows and Linux.
  *
  * One per window, and each window switches its own workspace — an island included (`repos={false}`
  * there: an app window has no repository to show). A repository window mounts none: it holds one
@@ -112,6 +119,9 @@ function repoLock(): { items: LockItem[]; at: number } {
 export function SwitcherLock({ repos = true }: { repos?: boolean }) {
   const t = useT();
   const reduceMotion = useReducedMotion();
+  useEffect(() => {
+    void useSwitcherLockStore.getState().init();
+  }, []);
   const [lock, setLock] = useState<Lock | null>(null);
   const [unlocking, setUnlocking] = useState(false);
   /** Where the drum is going (a whole number of rows, unbounded — wrapped when read) and where it is. */
@@ -149,6 +159,7 @@ export function SwitcherLock({ repos = true }: { repos?: boolean }) {
 
   useEffect(() => {
     const blocked = () =>
+      useSwitcherLockStore.getState().recording ||
       useTourStore.getState().active ||
       (useDataDirsStore.getState().status !== null && !useDataDirsStore.getState().status?.ok) ||
       shortcutBlockedByDialog("workspace.switcher");

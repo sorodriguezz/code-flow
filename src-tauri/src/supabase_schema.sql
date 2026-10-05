@@ -1,4 +1,4 @@
--- CodeFlow — shared API collections
+-- CodeFlow — shared API collections and flows
 --
 -- Paste this whole script into your Supabase project's SQL editor and run it once. It is
 -- idempotent: running it again after an update is safe.
@@ -33,7 +33,8 @@
 -- WHAT IS SHARED IS ONE COLLECTION. Earlier builds shared a whole workspace, which meant accepting
 -- an invitation adopted somebody else's entire sidebar — environments, unrelated collections and
 -- all. A collection is the unit a team actually works on together, and it is the unit that can be
--- dropped into a workspace you already have.
+-- dropped into a workspace you already have. A FLOW (the Flows app) is shared the same way: one
+-- share per flow, holding a single item of kind 'flow' — the whole document.
 
 -- ---------------------------------------------------------------------------
 -- Migration off the workspace-shaped tables
@@ -100,7 +101,7 @@ create trigger cf_shares_guard_owner before update on cf_shares
 create table if not exists cf_items (
     id           uuid primary key,
     share_id     uuid not null references cf_shares(id) on delete cascade,
-    kind         text not null check (kind in ('collection', 'folder', 'request')),
+    kind         text not null check (kind in ('collection', 'folder', 'request', 'flow')),
     payload      jsonb not null,
     -- Three-way merge is resolved on this, so it is the client's own timestamp, not now().
     updated_at   timestamptz not null,
@@ -113,6 +114,12 @@ create table if not exists cf_items (
     -- a client that is pulling changes since a point in time.
     deleted      boolean not null default false
 );
+
+-- A table created by an earlier copy of this script has the check without 'flow', and
+-- `create table if not exists` cannot reach it. Postgres named the inline check cf_items_kind_check.
+alter table cf_items drop constraint if exists cf_items_kind_check;
+alter table cf_items add constraint cf_items_kind_check
+    check (kind in ('collection', 'folder', 'request', 'flow'));
 
 -- A default only fires on insert, and every write here is an upsert; without the trigger an
 -- updated row would keep the `synced_at` of its creation and stay invisible to every peer's cursor.
@@ -268,5 +275,5 @@ create or replace function cf_ping() returns text
 create or replace function cf_schema_version() returns integer
     language sql immutable
     as $$
-        select 2
+        select 3
     $$;

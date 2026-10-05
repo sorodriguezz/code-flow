@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, GitBranch, Hand, LoaderCircle, Play, RefreshCw } from "lucide-react";
+import { ExternalLink, GitBranch, Hand, LoaderCircle, Play, RefreshCw, User } from "lucide-react";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { riseDelay } from "../../lib/rise";
 import { useCiStore } from "../../state/ciStore";
@@ -180,6 +180,17 @@ function RunRow({
           <span className="font-mono text-[10.5px]">{run.commit_sha.slice(0, 7)}</span>
           <span className="opacity-45">·</span>
           <span className="truncate">{run.branch}</span>
+          {/* Who ran it. GitLab's listing does not say — its row gets the name once the run has
+              been opened, and keeps it (`ciStore.load`). */}
+          {run.actor && (
+            <>
+              <span className="opacity-45">·</span>
+              <span className="flex min-w-0 items-center gap-0.5" title={t("pipelines.ranBy", { name: run.actor })}>
+                <User size={10} className="shrink-0" />
+                <span className="truncate">{run.actor}</span>
+              </span>
+            </>
+          )}
           {jobStatuses.length > 0 && (
             <>
               <span className="opacity-45">·</span>

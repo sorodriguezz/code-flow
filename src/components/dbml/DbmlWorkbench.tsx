@@ -96,6 +96,7 @@ import { useT } from "../../state/languageStore";
 import { isMac as platformIsMac } from "../../lib/platform";
 import { getWindowStatus, subscribeWindowStatus } from "../../lib/windowControls";
 import { isTypingTarget } from "../../lib/keys";
+import { useFindShortcut } from "../../lib/useFindShortcut";
 
 /**
  * The editor for a diagram whose format is `dbml`.
@@ -338,6 +339,8 @@ export function DbmlWorkbench({
 
   const canvas = useRef<DbmlCanvasHandle>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  // ⌘F / Ctrl+F is this search, not the webview's find bar.
+  useFindShortcut(searchRef);
   /** The document as of the last recorded revision, and what caused the change now in flight. Refs
    *  because neither is drawn: they are the two things the capture effect below needs to remember
    *  between renders it does not trigger. */

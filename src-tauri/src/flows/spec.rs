@@ -229,6 +229,65 @@ pub struct Derived {
     /// The trigger types the flow starts from, in canvas order, deduplicated — the explorer draws the
     /// first one's glyph. Stored as a JSON array.
     pub trigger_types: Vec<String>,
+    /// [`executable_hash`] of the document; empty when nothing in it runs code.
+    pub exec_hash: String,
+}
+
+/// The node types whose parameters are code or commands — a script, a shell line, an SSH or Docker
+/// command, a terminal command, a database statement, an agent's instructions. Trust is about these:
+/// a flow somebody else wrote is reviewed for what it would *run*, not for its URLs or field names.
+pub const EXECUTABLE_TYPES: &[&str] = &[
+    "code.shell",
+    "code.python",
+    "code.node",
+    "code.command",
+    "code.script",
+    "code.js",
+    "code.ssh",
+    "code.docker",
+    "app.terminal",
+    "app.agent",
+    "ai.agent",
+    "data.sql",
+    "data.mongo",
+    "data.redis",
+];
+
+/// The nodes of `spec` that run code, in id order.
+pub fn executable_nodes(spec: &FlowSpec) -> Vec<&FlowNode> {
+    let mut nodes: Vec<&FlowNode> = spec.nodes.iter().filter(|n| EXECUTABLE_TYPES.contains(&n.type_id.as_str())).collect();
+    nodes.sort_by(|a, b| a.id.cmp(&b.id));
+    nodes
+}
+
+/// A value with every object's keys in order, so two equal documents hash alike whatever order
+/// their keys were written in.
+fn canonical(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            Value::Object(keys.into_iter().map(|key| (key.clone(), canonical(&map[key]))).collect())
+        }
+        Value::Array(list) => Value::Array(list.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
+}
+
+/// SHA-256 over what the flow would run — each executable node's id, type, parameters and whether it
+/// is switched off — or `""` when it runs nothing. A flow is trusted when this equals the hash the
+/// user trusted; see `flow_queries` for how that hash is kept.
+pub fn executable_hash(spec: &FlowSpec) -> String {
+    use sha2::Digest as _;
+    let nodes = executable_nodes(spec);
+    if nodes.is_empty() {
+        return String::new();
+    }
+    let document: Vec<Value> = nodes
+        .iter()
+        .map(|node| serde_json::json!([node.id, node.type_id, canonical(&node.params), node.disabled]))
+        .collect();
+    hex::encode(sha2::Sha256::digest(Value::Array(document).to_string().as_bytes()))
 }
 
 pub fn derive(spec: &FlowSpec) -> Derived {
@@ -239,7 +298,7 @@ pub fn derive(spec: &FlowSpec) -> Derived {
             trigger_types.push(node.type_id.clone());
         }
     }
-    Derived { node_count: spec.nodes.len() as i64, trigger_types }
+    Derived { node_count: spec.nodes.len() as i64, trigger_types, exec_hash: executable_hash(spec) }
 }
 
 #[cfg(test)]
@@ -369,5 +428,30 @@ mod tests {
         off.disabled = true;
         let flow = spec(vec![off, node("m", "trigger.manual", "M")], vec![]);
         assert_eq!(derive(&flow).trigger_types, vec!["trigger.manual"]);
+    }
+
+    #[test]
+    fn the_executable_hash_sees_only_what_runs() {
+        let doc = |script: &str, url: &str, x: i64, key_order: bool| {
+            let params = if key_order {
+                serde_json::json!({"script": script, "shell": "auto"})
+            } else {
+                serde_json::json!({"shell": "auto", "script": script})
+            };
+            let text = serde_json::json!({
+                "schema": 1,
+                "nodes": [
+                    {"id": "h", "type": "net.http", "name": "HTTP", "pos": [0, 0], "params": {"url": url}},
+                    {"id": "s", "type": "code.shell", "name": "Shell", "pos": [x, 0], "params": params},
+                ],
+            })
+            .to_string();
+            executable_hash(&parse(&text).unwrap())
+        };
+        let base = doc("echo hola", "https://example.com/a", 0, true);
+        assert_eq!(base.len(), 64);
+        assert_eq!(base, doc("echo hola", "https://example.com/b", 500, false), "a URL, a position, key order: not what runs");
+        assert_ne!(base, doc("echo adios", "https://example.com/a", 0, true));
+        assert_eq!(executable_hash(&parse(&empty_text()).unwrap()), "");
     }
 }

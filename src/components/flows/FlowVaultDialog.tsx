@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
-import { Globe, KeyRound, Pencil, Plus, Trash2, Variable } from "lucide-react";
+import { FlaskConical, Globe, KeyRound, Pencil, Plus, Trash2, Variable } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";
 import { Button, iconButtonClass } from "../common/Button";
 import { Select } from "../common/Select";
 import { fieldClass, underlineStripClass, underlineTabClass } from "../common/recipes";
-import type { FlowCredential, FlowCredentialKind } from "../../lib/tauri/flowsCommands";
+import { flowsTestCredential, type FlowCredential, type FlowCredentialKind } from "../../lib/tauri/flowsCommands";
+import { keyvaultGetItem } from "../../lib/tauri/keyvaultCommands";
+import { VaultItemPicker } from "./AppFields";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import type { VaultSecret } from "../../types/vault";
 import { chooseAction } from "../../state/confirmStore";
+import { pushErrorToast } from "../../state/toastStore";
 import { useFlowVaultStore } from "../../state/flowVaultStore";
 import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -19,7 +23,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
  * keychain, and is never shown again — editing one means replacing it.
  */
 
-const KINDS: FlowCredentialKind[] = ["bearer", "basic", "header", "query"];
+const KINDS: FlowCredentialKind[] = ["bearer", "basic", "header", "query", "hmac", "smtp", "webhook"];
 
 function VariablesTab() {
   const t = useT();
@@ -118,9 +122,79 @@ interface CredentialDraft {
   user: string;
   field: string;
   secret: string;
+  host: string;
+  port: string;
+  security: string;
+  from: string;
 }
 
-const blankCredential = (): CredentialDraft => ({ id: null, name: "", kind: "bearer", user: "", field: "", secret: "" });
+const blankCredential = (): CredentialDraft => ({
+  id: null,
+  name: "",
+  kind: "bearer",
+  user: "",
+  field: "",
+  secret: "",
+  host: "",
+  port: "",
+  security: "starttls",
+  from: "",
+});
+
+/** What a credential row keeps besides its secret, by kind — the backend drops anything else. */
+function metaOf(draft: CredentialDraft): Record<string, string> {
+  switch (draft.kind) {
+    case "basic":
+      return { user: draft.user };
+    case "header":
+    case "query":
+      return { name: draft.field };
+    case "smtp":
+      return { host: draft.host, port: draft.port, user: draft.user, security: draft.security, from: draft.from };
+    default:
+      return {};
+  }
+}
+
+/** Tries a saved credential: an SMTP account signs in; an HTTP one is sent to a URL; a webhook is
+ *  asked about itself. */
+function CredentialTest({ credential }: { credential: FlowCredential }) {
+  const t = useT();
+  const [url, setUrl] = useState("");
+  const [answer, setAnswer] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const needsUrl = ["bearer", "basic", "header", "query"].includes(credential.kind);
+  const run = async () => {
+    setBusy(true);
+    try {
+      setAnswer({ ok: true, text: await flowsTestCredential(credential.id, needsUrl ? url : undefined) });
+    } catch (error) {
+      setAnswer({ ok: false, text: String(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-1.5 rounded-md bg-[var(--cf-sunken)] p-2">
+      <div className="flex items-center gap-1.5">
+        {needsUrl && (
+          <input
+            className={fieldClass({ size: "sm", className: "min-w-0 flex-1 font-mono text-[11.5px]" })}
+            placeholder="https://api.example.com/me"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void run()}
+          />
+        )}
+        <Button size="sm" onClick={() => void run()} disabled={busy || (needsUrl && !url.trim())}>
+          <FlaskConical size={12} />
+          {t("flows.vault.test")}
+        </Button>
+      </div>
+      {answer && <span className={`text-[11.5px] ${answer.ok ? "text-[var(--cf-success)]" : "text-[var(--cf-danger)]"}`}>{answer.text}</span>}
+    </div>
+  );
+}
 
 function CredentialsTab() {
   const t = useT();
@@ -128,19 +202,47 @@ function CredentialsTab() {
   const [draft, setDraft] = useState<CredentialDraft | null>(null);
   const store = useFlowVaultStore.getState;
 
+  const [testing, setTesting] = useState<string | null>(null);
+  const [filling, setFilling] = useState(false);
+
   const edit = (credential: FlowCredential) =>
     setDraft({
+      ...blankCredential(),
       id: credential.id,
       name: credential.name,
       kind: credential.kind,
       user: credential.meta.user ?? "",
       field: credential.meta.name ?? "",
-      secret: "",
+      host: credential.meta.host ?? "",
+      port: credential.meta.port ?? "",
+      security: credential.meta.security ?? "starttls",
+      from: credential.meta.from ?? "",
     });
+
+  /** Takes the secret (and the user, where there is one) from a Llavero item. */
+  const fillFrom = async (itemId: string) => {
+    setFilling(false);
+    if (!draft || !itemId) return;
+    try {
+      const item = await keyvaultGetItem(itemId);
+      if (!item) return;
+      const pick = (...names: (keyof Omit<VaultSecret, "custom">)[]) => names.map((name) => item.secret[name]).find((v) => !!v) ?? "";
+      setDraft({
+        ...draft,
+        secret: pick("password", "apiKey", "token", "secretAccessKey", "privateKey") || draft.secret,
+        user: pick("username") || draft.user,
+        host: draft.kind === "smtp" ? pick("host") || draft.host : draft.host,
+        port: draft.kind === "smtp" ? pick("port") || draft.port : draft.port,
+        name: draft.name || item.title,
+      });
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  };
 
   const save = async () => {
     if (!draft) return;
-    const meta: Record<string, string> = draft.kind === "basic" ? { user: draft.user } : draft.kind === "header" || draft.kind === "query" ? { name: draft.field } : {};
+    const meta = metaOf(draft);
     const ok = draft.id
       ? await store().updateCredential(draft.id, draft.name, meta, draft.secret || null)
       : !!(await store().createCredential(draft.name, draft.kind, meta, draft.secret));
@@ -148,7 +250,16 @@ function CredentialsTab() {
   };
 
   if (draft) {
-    const secretLabel = draft.kind === "basic" ? t("flows.vault.password") : draft.kind === "bearer" ? t("flows.vault.token") : t("flows.vault.value");
+    const secretLabel =
+      draft.kind === "basic" || draft.kind === "smtp"
+        ? t("flows.vault.password")
+        : draft.kind === "bearer"
+          ? t("flows.vault.token")
+          : draft.kind === "hmac"
+            ? t("flows.vault.signingSecret")
+            : draft.kind === "webhook"
+              ? t("flows.vault.webhookUrl")
+              : t("flows.vault.value");
     return (
       <div className="flex flex-col gap-3">
         <label className="flex flex-col gap-1">
@@ -167,7 +278,36 @@ function CredentialsTab() {
             />
           </div>
         </div>
-        {draft.kind === "basic" && (
+        {draft.kind === "smtp" && (
+          <>
+            <div className="grid grid-cols-[minmax(0,1fr)_96px] gap-2">
+              <label className="flex flex-col gap-1">
+                <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.smtpHost")}</span>
+                <input className={fieldClass({ size: "sm", className: "font-mono" })} value={draft.host} placeholder="smtp.example.com" onChange={(e) => setDraft({ ...draft, host: e.target.value })} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.smtpPort")}</span>
+                <input className={fieldClass({ size: "sm", className: "font-mono" })} value={draft.port} placeholder="587" onChange={(e) => setDraft({ ...draft, port: e.target.value })} />
+              </label>
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.smtpSecurity")}</span>
+              <div className="max-w-[260px]">
+                <Select
+                  value={draft.security}
+                  onChange={(security) => setDraft({ ...draft, security })}
+                  options={["starttls", "tls", "none"].map((value) => ({ value, label: t(`flows.vault.security.${value}` as TranslationKey) }))}
+                  size="sm"
+                />
+              </div>
+            </div>
+            <label className="flex flex-col gap-1">
+              <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.smtpFrom")}</span>
+              <input className={fieldClass({ size: "sm" })} value={draft.from} placeholder="Flujos <flujos@example.com>" onChange={(e) => setDraft({ ...draft, from: e.target.value })} />
+            </label>
+          </>
+        )}
+        {(draft.kind === "basic" || draft.kind === "smtp") && (
           <label className="flex flex-col gap-1">
             <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.user")}</span>
             <input className={fieldClass({ size: "sm" })} value={draft.user} onChange={(e) => setDraft({ ...draft, user: e.target.value })} />
@@ -179,17 +319,25 @@ function CredentialsTab() {
             <input className={fieldClass({ size: "sm", className: "font-mono" })} value={draft.field} placeholder={draft.kind === "header" ? "X-API-Key" : "api_key"} onChange={(e) => setDraft({ ...draft, field: e.target.value })} />
           </label>
         )}
-        <label className="flex flex-col gap-1">
+        <div className="flex flex-col gap-1">
           <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{secretLabel}</span>
-          <input
-            type="password"
-            autoComplete="new-password"
-            className={fieldClass({ size: "sm" })}
-            value={draft.secret}
-            placeholder={draft.id ? t("flows.vault.keepSecret") : ""}
-            onChange={(e) => setDraft({ ...draft, secret: e.target.value })}
-          />
-        </label>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="password"
+              autoComplete="new-password"
+              aria-label={secretLabel}
+              className={fieldClass({ size: "sm", className: "min-w-0 flex-1" })}
+              value={draft.secret}
+              placeholder={draft.id ? t("flows.vault.keepSecret") : ""}
+              onChange={(e) => setDraft({ ...draft, secret: e.target.value })}
+            />
+            <Button size="sm" onClick={() => setFilling((on) => !on)} title={t("flows.vault.fromVaultHint")}>
+              <KeyRound size={12} />
+              {t("flows.vault.fromVault")}
+            </Button>
+          </div>
+          {filling && <VaultItemPicker value="" onChange={(id) => void fillFrom(String(id))} />}
+        </div>
         <div className="flex justify-end gap-2">
           <Button size="sm" onClick={() => setDraft(null)}>
             {t("common.cancel")}
@@ -212,7 +360,8 @@ function CredentialsTab() {
       </div>
       {credentials.length === 0 && <p className="py-3 text-[12px] text-[var(--cf-text-muted)]">{t("flows.vault.noCredentials")}</p>}
       {credentials.map((credential) => (
-        <div key={credential.id} className="group flex min-h-[32px] items-center gap-2 border-b border-[var(--cf-border)] py-1 last:border-b-0">
+        <div key={credential.id} className="flex flex-col gap-1 border-b border-[var(--cf-border)] py-1 last:border-b-0">
+        <div className="group flex min-h-[32px] items-center gap-2">
           <KeyRound size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
           <span className="min-w-0 flex-1 truncate text-[12.5px]">{credential.name}</span>
           <span className="shrink-0 text-[11.5px] text-[var(--cf-text-muted)]">
@@ -221,6 +370,17 @@ function CredentialsTab() {
           </span>
           {credential.scope === "global" && <Globe size={12} className="shrink-0 text-[var(--cf-text-faint)]" />}
           <span className="flex opacity-0 transition-opacity group-hover:opacity-100">
+            {credential.kind !== "hmac" && (
+              <button
+                type="button"
+                className={iconButtonClass({ size: "xs" })}
+                title={t("flows.vault.test")}
+                aria-label={t("flows.vault.test")}
+                onClick={() => setTesting((current) => (current === credential.id ? null : credential.id))}
+              >
+                <FlaskConical size={12} />
+              </button>
+            )}
             <button
               type="button"
               className={iconButtonClass({ size: "xs" })}
@@ -249,6 +409,8 @@ function CredentialsTab() {
               <Trash2 size={12} />
             </button>
           </span>
+        </div>
+        {testing === credential.id && <CredentialTest credential={credential} />}
         </div>
       ))}
     </div>

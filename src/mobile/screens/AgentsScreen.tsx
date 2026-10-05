@@ -12,6 +12,7 @@ import { Card, Divider, Row, Section } from "../ui/List";
 import { Badge, EmptyState } from "../ui/Feedback";
 import { RunsView } from "./RunsScreen";
 import { ServicesView } from "./ServicesScreen";
+import { FlowsView } from "./FlowsScreen";
 import type { AgentChain, ChainStatus } from "../../types/domain";
 
 /**
@@ -174,8 +175,10 @@ export function AgentsScreen() {
   const failedServices = useMobileStore(
     (s) => s.services.filter((service) => s.serviceRuntime[service.id]?.status === "failed").length,
   );
-  const [view, setView] = useState<"chains" | "runs" | "services">("chains");
+  const [view, setView] = useState<"chains" | "runs" | "services" | "flows">("chains");
   const waiting = chains.filter((c) => c.status === "gated").length;
+  // Approvals are questions, like gates; a wait for a call or a time is not, so it adds no badge.
+  const approvals = useMobileStore((s) => s.flowWaits.filter((w) => w.kind === "approval").length);
 
   return (
     <Screen
@@ -192,6 +195,7 @@ export function AgentsScreen() {
                   { id: "chains", label: t("agents.chains"), badge: waiting },
                   { id: "runs", label: t("agents.runs"), badge: liveRuns },
                   { id: "services", label: t("agents.services"), badge: failedServices },
+                  { id: "flows", label: t("agents.flows"), badge: approvals },
                 ]}
               />
             </div>
@@ -199,7 +203,15 @@ export function AgentsScreen() {
         />
       }
     >
-      {view === "chains" ? <ChainsView chains={chains} /> : view === "runs" ? <RunsView /> : <ServicesView />}
+      {view === "chains" ? (
+        <ChainsView chains={chains} />
+      ) : view === "runs" ? (
+        <RunsView />
+      ) : view === "services" ? (
+        <ServicesView />
+      ) : (
+        <FlowsView />
+      )}
     </Screen>
   );
 }

@@ -476,6 +476,27 @@ pub fn api_cookie_key() -> String {
     "api-cookie-key".to_string()
 }
 
+/// For a test elsewhere that reaches the credential store through the app's own calls (a share's
+/// token, a project's key): it runs one at a time with this module's tests, and the vault item is
+/// gone when the guard drops — also when the test panics, since an item left by one build stops the
+/// next build's run at a password dialog (see `tests::drop_test_store`).
+#[cfg(test)]
+pub(crate) struct TestStore {
+    _order: MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_store() -> TestStore {
+    TestStore { _order: tests::serially() }
+}
+
+#[cfg(test)]
+impl Drop for TestStore {
+    fn drop(&mut self) {
+        tests::drop_test_store();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,7 +504,7 @@ mod tests {
     /// `Store` is process-global and, on macOS, every write rewrites the whole vault — so two tests
     /// running at once are two tests writing over each other. Serialised rather than made
     /// independent because the thing under test *is* the global.
-    fn serially() -> MutexGuard<'static, ()> {
+    pub(super) fn serially() -> MutexGuard<'static, ()> {
         static ORDER: OnceLock<Mutex<()>> = OnceLock::new();
         ORDER
             .get_or_init(Default::default)
@@ -509,7 +530,7 @@ mod tests {
     /// therefore an item *this* build is not on the ACL of — and the next run stops for a password
     /// dialog on the developer's screen instead of finishing. Creating the item fresh needs no
     /// authorization; inheriting one does.
-    fn drop_test_store() {
+    pub(super) fn drop_test_store() {
         let mut store = locked();
         store.values.clear();
         #[cfg(target_os = "macos")]

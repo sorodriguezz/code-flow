@@ -70,7 +70,7 @@ pub const LOOP_TYPE: &str = "logic.loop";
 
 /// The last milestone whose nodes this build runs. A node from a later one can be drawn and saved,
 /// and the engine says which milestone brings it when a run reaches it.
-pub const RUNS_THROUGH: u8 = 3;
+pub const RUNS_THROUGH: u8 = 6;
 
 const fn node(type_id: &'static str, family: Family, icon: &'static str, milestone: u8) -> NodeDescriptor {
     let inputs = if matches!(family, Family::Trigger) { 0 } else { 1 };
@@ -170,6 +170,7 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("net.transfer", Net, "hard-drive", 4),
     node("net.storage", Net, "cloud-upload", 4),
     node("net.email", Net, "mail", 4),
+    node("net.connector", Net, "blocks", 6),
     // Data — the database workspace's connections, and the flow's own memory.
     node("data.sql", Data, "database", 4),
     node("data.mongo", Data, "boxes", 4),
@@ -271,13 +272,13 @@ mod tests {
         assert_eq!(count(Trigger), 13);
         assert_eq!(count(Ai), 7);
         assert_eq!(count(Code), 10);
-        assert_eq!(count(Net), 12);
+        assert_eq!(count(Net), 13);
         assert_eq!(count(Data), 6);
         assert_eq!(count(Logic), 10);
         assert_eq!(count(Transform), 12);
         assert_eq!(count(Files), 6);
         assert_eq!(count(App), 8);
-        assert_eq!(CATALOG.len(), 84);
+        assert_eq!(CATALOG.len(), 85);
     }
 
     #[test]

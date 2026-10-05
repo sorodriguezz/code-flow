@@ -19,6 +19,7 @@
 //! The error trigger and the "called by another flow" trigger arm nothing: the first is fired from
 //! [`run_finished`] when another flow fails, the second by an Execute flow node.
 
+mod listen;
 mod poll;
 mod watch;
 pub mod webhook;
@@ -129,6 +130,42 @@ pub fn status(workspace_id: Option<&str>) -> Vec<ArmedFlowView> {
         .collect();
     out.sort_by(|a, b| a.flow_name.to_lowercase().cmp(&b.flow_name.to_lowercase()));
     out
+}
+
+/// The armed flows a paired phone may start: one button per phone trigger, labelled as the node says.
+pub fn phone_buttons() -> Vec<Value> {
+    let Ok(hub) = HUB.lock() else { return vec![] };
+    let mut out: Vec<Value> = hub
+        .iter()
+        .flat_map(|(flow_id, armed)| {
+            armed.triggers.iter().filter_map(move |view| {
+                let view = view.lock().ok()?;
+                (view.type_id == "trigger.phone").then(|| {
+                    json!({
+                        "flowId": flow_id,
+                        "nodeId": view.node_id,
+                        "flowName": armed.flow_name,
+                        "label": view.detail,
+                        "workspaceId": armed.workspace_id,
+                    })
+                })
+            })
+        })
+        .collect();
+    out.sort_by_key(|button| button["label"].as_str().unwrap_or_default().to_lowercase());
+    out
+}
+
+/// Starts an armed flow from its phone trigger. Refused for a flow that is not armed, or a node that
+/// is not one of its phone triggers — the phone can only press the buttons it was shown.
+pub fn fire_from_phone(app: &AppHandle, flow_id: &str, node_id: &str, text: &str) -> Result<Value, String> {
+    let allowed = phone_buttons().iter().any(|b| b["flowId"] == json!(flow_id) && b["nodeId"] == json!(node_id));
+    if !allowed {
+        return Err("That flow cannot be started from the phone".into());
+    }
+    let item = Item::new(json!({"source": "phone", "text": text, "at": chrono::Utc::now().to_rfc3339()}));
+    let fired = fire(app, flow_id, node_id, vec![item])?;
+    Ok(json!({"held": fired.held}))
 }
 
 /// How many flows are armed — for the quit question.
@@ -260,6 +297,10 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
     if !row.meta.active {
         return Ok(());
     }
+    // A flow runs on its own only with what the user trusted it to run.
+    if !row.meta.trusted {
+        return Err("untrusted".into());
+    }
     let parsed = spec::parse(&row.spec)?;
     validate(app, flow_id, &parsed)?;
     let overlap = match parsed.settings.get("overlap").and_then(Value::as_str) {
@@ -346,6 +387,27 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
                 error_watch.push((node.id.clone(), flows));
             }
             "trigger.subflow" => set_detail("subflow".into()),
+            // Nothing to listen to on this side: the phone asks, through `phone_buttons`.
+            "trigger.phone" => {
+                let label = param_text(&params, "label");
+                set_detail(if label.is_empty() { row.meta.name.clone() } else { label });
+            }
+            "trigger.listen" => {
+                let transport = param_text(&params, "transport");
+                let label = match transport.as_str() {
+                    "mqtt" => "MQTT",
+                    "socketio" => "Socket.IO",
+                    "sse" => "SSE",
+                    _ => "WebSocket",
+                };
+                let topic = param_text(&params, "topic");
+                set_detail(if transport == "mqtt" && !topic.is_empty() {
+                    format!("{label} {} · {topic}", param_text(&params, "url"))
+                } else {
+                    format!("{label} {}", param_text(&params, "url"))
+                });
+                listen::spawn(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
             _ => {}
         }
         triggers.push(view);

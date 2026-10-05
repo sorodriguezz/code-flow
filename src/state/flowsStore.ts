@@ -1,10 +1,13 @@
 import { create } from "zustand";
 import {
+  flowsBuildWithAi,
   flowsCreateFlow,
   flowsCreateFolder,
   flowsDeleteFlow,
   flowsDeleteFolder,
   flowsDuplicateFlow,
+  flowsExportFlow,
+  flowsImportFlow,
   flowsGetFlow,
   flowsLoadTree,
   flowsMoveFlow,
@@ -14,16 +17,21 @@ import {
   flowsRenameFolder,
   flowsSaveFlow,
   flowsSetActive,
+  flowsTrustFlow,
   flowsSetScope,
   type FlowFolderRow,
   type FlowMetaRow,
   type FlowNodeDescriptor,
 } from "../lib/tauri/flowsCommands";
 import { parseSpec, serializeSpec, uniqueName, type Catalog, type FlowSpec } from "../lib/flows/spec";
+import { FLOW_TEMPLATES } from "../lib/flows/templates";
+import type { TranslationKey } from "../lib/i18n/translations";
 import { notifyUnsavedChanged, registerUnsavedProvider } from "../lib/unsavedWork";
+import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { chooseAction } from "./confirmStore";
-import { translate } from "./languageStore";
-import { pushErrorToast } from "./toastStore";
+import { translate, useLanguageStore } from "./languageStore";
+import { notify } from "./notificationStore";
+import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { useWorkspaceStore } from "./workspaceStore";
 
 /**
@@ -49,6 +57,8 @@ const SAVE_DEBOUNCE_MS = 700;
 const HISTORY_LIMIT = 100;
 
 const collapsedKey = (workspaceId: string) => `flows_collapsed_folders:${workspaceId}`;
+/** Whether the node palette was left open — one choice for every workspace. */
+const PALETTE_KEY = "flows_palette_open";
 const lastOpenKey = (workspaceId: string) => `flows_last_open:${workspaceId}`;
 
 /** A row as the explorer holds it — the one place `trigger_types` stops being JSON. */
@@ -62,6 +72,22 @@ export interface FlowDraft {
   /** The version the open document was read at, or last saved as. */
   version: number;
   dirty: boolean;
+  /** Holds an accepted AI proposal not saved yet: its save carries no trust (`keepTrust: false`). */
+  aiWritten?: boolean;
+}
+
+/**
+ * The AI builder's run for one flow — the flow's, not the window's: closing the panel, opening
+ * another flow or switching workspace leaves it running, and its answer waiting, until the flow is
+ * opened again. `workspaceId` is stamped before the first await (`codeflow-run-isolation`).
+ */
+export interface FlowAiRun {
+  runId: string;
+  workspaceId: string;
+  status: "running" | "ready";
+  /** What was asked, so the panel shows it again over its answer. */
+  prompt: string;
+  proposal: { spec: FlowSpec; summary: string } | null;
 }
 
 interface FlowsState {
@@ -85,8 +111,19 @@ interface FlowsState {
    *  the selection or the middle of the view). Here rather than in the editor so the guided tour
    *  can open it for the step about it — a tour stage writes stores, never component state. */
   palette: { at: [number, number] | null } | null;
+  /** The AI builder, by flow id. Never cleared by a workspace switch. */
+  aiByFlow: Record<string, FlowAiRun>;
 
   setPalette: (palette: { at: [number, number] | null } | null) => void;
+  /** Asks the "flow_builder" engine to write or change the open flow as `prompt` says. The answer
+   *  waits in `aiByFlow` as a proposal; nothing changes until it is accepted. */
+  buildWithAi: (flowId: string, prompt: string) => Promise<void>;
+  /** A teammate's version of a shared flow landed (`flows:shared`): the tree re-reads, and the
+   *  open document is replaced when it has nothing unsaved — a dirty one's save conflicts and asks. */
+  reloadShared: (flowId: string) => Promise<void>;
+  /** Puts the proposal on the canvas (one undo step) and saves it without carrying trust. */
+  acceptProposal: (flowId: string) => Promise<void>;
+  discardProposal: (flowId: string) => void;
   setWorkspace: (workspaceId: string | null) => Promise<void>;
   refresh: () => Promise<void>;
   ensureCatalog: () => Promise<void>;
@@ -98,12 +135,20 @@ interface FlowsState {
   createFlow: (folderId: string | null) => Promise<string | null>;
   renameFlow: (id: string, name: string) => Promise<void>;
   duplicateFlow: (id: string) => Promise<string | null>;
+  /** A new flow from one of the built-in templates, opened. */
+  createFromTemplate: (templateId: string, folderId: string | null) => Promise<string | null>;
+  /** Saves the flow as a JSON file the user picks. */
+  exportFlow: (id: string) => Promise<void>;
+  /** Reads a flow file into a new flow (untrusted, inactive) and opens it. */
+  importFlow: (folderId: string | null) => Promise<string | null>;
   deleteFlow: (id: string) => Promise<void>;
   moveFlow: (id: string, folderId: string | null) => Promise<void>;
   setScope: (id: string, global: boolean) => Promise<void>;
   /** Switches a flow's automatic triggers on or off. The flow is saved first: what gets armed is
    *  what is on the canvas. */
   setActive: (id: string, active: boolean) => Promise<boolean>;
+  /** Trusts what the flow runs, as it is saved now — the review dialog's answer. */
+  trust: (id: string) => Promise<boolean>;
   moveToWorkspace: (id: string, workspaceId: string) => Promise<void>;
 
   createFolder: (name: string) => Promise<string | null>;
@@ -124,6 +169,7 @@ interface FlowsState {
 
 /** A trigger problem as a sentence: the one code the backend sends, translated; the rest as said. */
 export function describeTriggerError(error: string): string {
+  if (error === "untrusted") return translate("flows.trust.activateHint");
   return error.includes("no-automatic-trigger") ? translate("flows.active.noTrigger") : error;
 }
 
@@ -216,7 +262,7 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
     const written = draft.spec;
     set({ saving: true });
     try {
-      const result = await flowsSaveFlow(draft.id, serializeSpec(written), force ? null : draft.version);
+      const result = await flowsSaveFlow(draft.id, serializeSpec(written), force ? null : draft.version, !draft.aiWritten);
       if (get().workspaceId !== workspaceId) return;
       const current = get().draft;
       if (!result.meta) {
@@ -235,7 +281,8 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
       }
       if (current?.id === draft.id) {
         set({
-          draft: { ...current, version: result.meta.version, dirty: current.spec !== written },
+          // What the AI wrote is saved now, with the trust it should have; later edits are the user's.
+          draft: { ...current, version: result.meta.version, dirty: current.spec !== written, aiWritten: false },
           savedAt: new Date().toISOString(),
         });
       }
@@ -261,8 +308,124 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
     past: [],
     future: [],
     palette: null,
+    aiByFlow: {},
 
-    setPalette: (palette) => set({ palette }),
+    setPalette: (palette) => {
+      const wasOpen = get().palette !== null;
+      set({ palette });
+      if (wasOpen !== (palette !== null)) void savePref(PALETTE_KEY, palette ? "1" : "0");
+    },
+
+    buildWithAi: async (flowId, prompt) => {
+      const state = get();
+      const draft = state.draft;
+      const workspaceId = state.workspaceId;
+      // Asked from the open flow's panel, so these disagree only when the store moved underneath it.
+      if (!prompt.trim() || draft?.id !== flowId || !workspaceId) return;
+      if (state.aiByFlow[flowId]?.status === "running") return;
+      // Asking again over a proposal refines the proposal, not the flow underneath it.
+      const base = state.aiByFlow[flowId]?.proposal?.spec ?? draft.spec;
+      const runId = newRunId("flow-ai");
+      const flowName = state.flows.find((flow) => flow.id === flowId)?.name ?? "";
+      set((s) => ({ aiByFlow: { ...s.aiByFlow, [flowId]: { runId, workspaceId, status: "running", prompt, proposal: null } } }));
+      useAiRunStore.getState().start(runId, {
+        kindKey: "flows.builder.runKind",
+        detail: flowName,
+        workspaceId,
+        target: { view: "flows" },
+      });
+      // Settled into the slot only if it is still this run's: a newer ask or a discard took it.
+      const settle = (proposal: FlowAiRun["proposal"]) =>
+        set((s) => {
+          if (s.aiByFlow[flowId]?.runId !== runId) return {};
+          const next = { ...s.aiByFlow };
+          if (proposal) next[flowId] = { ...next[flowId], status: "ready", proposal };
+          else delete next[flowId];
+          return { aiByFlow: next };
+        });
+      const stillHere = () => get().workspaceId === workspaceId;
+      try {
+        const notes = Object.fromEntries(
+          get().catalog.map((descriptor) => [descriptor.typeId, translate(`flows.nodeDesc.${descriptor.typeId}` as TranslationKey)]),
+        );
+        const built = await flowsBuildWithAi({
+          workspaceId,
+          flowName,
+          prompt: prompt.trim(),
+          current: serializeSpec(base),
+          language: useLanguageStore.getState().language,
+          notes,
+          runId,
+        });
+        settle({ spec: parseSpec(built.spec), summary: built.summary });
+        notify({
+          source: "flows",
+          titleKey: "notifications.flowBuilt",
+          target: { view: "flows" },
+          status: "success",
+          detail: flowName,
+          workspaceId,
+        });
+      } catch (error) {
+        settle(null);
+        if (!isCancellation(error)) {
+          if (stillHere()) pushErrorToast(String(error));
+          notify({
+            source: "flows",
+            titleKey: "notifications.flowBuildFailed",
+            target: { view: "flows" },
+            status: "error",
+            detail: flowName,
+            workspaceId,
+          });
+        }
+      } finally {
+        useAiRunStore.getState().finish(runId);
+      }
+    },
+
+    reloadShared: async (flowId) => {
+      await get().refresh();
+      const draft = get().draft;
+      if (draft?.id !== flowId || draft.dirty) return;
+      const workspaceId = get().workspaceId;
+      const row = await flowsGetFlow(flowId).catch(() => null);
+      const now = get().draft;
+      if (!row || get().workspaceId !== workspaceId || now?.id !== flowId || now.dirty) return;
+      try {
+        const spec = parseSpec(row.spec);
+        // Undo does not reach across someone else's version: stepping back would quietly revert it.
+        set({ draft: { ...now, spec, version: row.version, dirty: false }, past: [], future: [] });
+      } catch {
+        // Unreadable here: the canvas keeps what it has, and the next save says why.
+      }
+    },
+
+    acceptProposal: async (flowId) => {
+      const run = get().aiByFlow[flowId];
+      const draft = get().draft;
+      if (run?.status !== "ready" || !run.proposal || draft?.id !== flowId) return;
+      get().edit(run.proposal.spec);
+      const edited = get().draft;
+      if (edited?.id === flowId) set({ draft: { ...edited, aiWritten: true } });
+      set((s) => {
+        const next = { ...s.aiByFlow };
+        delete next[flowId];
+        return { aiByFlow: next };
+      });
+      await get().flush();
+    },
+
+    discardProposal: (flowId) => {
+      const run = get().aiByFlow[flowId];
+      if (!run) return;
+      if (run.status === "running") void useAiRunStore.getState().cancel(run.runId);
+      set((s) => {
+        const next = { ...s.aiByFlow };
+        delete next[flowId];
+        return { aiByFlow: next };
+      });
+    },
 
     setWorkspace: async (workspaceId) => {
       if (pendingLoad?.workspaceId === workspaceId) return pendingLoad.promise;
@@ -278,14 +441,20 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
       const promise = (async () => {
         set({ workspaceId, loading: true, ...clearedWorkspaceState() });
         try {
-          const [tree, collapsed, lastOpen] = await Promise.all([
+          const [tree, collapsed, lastOpen, paletteOpen] = await Promise.all([
             flowsLoadTree(workspaceId),
             loadPref(collapsedKey(workspaceId)),
             loadPref(lastOpenKey(workspaceId)),
+            loadPref(PALETTE_KEY),
             get().ensureCatalog(),
           ]);
           if (get().workspaceId !== workspaceId) return;
-          set({ flows: tree.flows.map(toItem), folders: tree.folders, collapsed: parseList(collapsed) });
+          set({
+            flows: tree.flows.map(toItem),
+            folders: tree.folders,
+            collapsed: parseList(collapsed),
+            palette: paletteOpen === "1" ? { at: null } : null,
+          });
           // The flow that was open when this workspace was last left comes back with it.
           if (lastOpen && tree.flows.some((flow) => flow.id === lastOpen)) void get().openFlow(lastOpen);
         } catch (error) {
@@ -358,14 +527,15 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
           return;
         }
         replaceRow(id, row);
-        set({
+        set((state) => ({
           activeId: id,
           draft: { id, spec, version: row.version, dirty: false },
           past: [],
           future: [],
           savedAt: null,
-          palette: null,
-        });
+          // The docked palette stays as it was; only a drop point picked on the last flow goes.
+          palette: state.palette ? { at: null } : null,
+        }));
         if (workspaceId) void savePref(lastOpenKey(workspaceId), id);
       } catch (error) {
         pushErrorToast(String(error));
@@ -378,7 +548,7 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
       await get().flush();
       cancelSave();
       const workspaceId = get().workspaceId;
-      set({ activeId: null, draft: null, past: [], future: [], palette: null });
+      set((state) => ({ activeId: null, draft: null, past: [], future: [], palette: state.palette ? { at: null } : null }));
       if (workspaceId) void savePref(lastOpenKey(workspaceId), "");
     },
 
@@ -398,12 +568,76 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
       }
     },
 
+    createFromTemplate: async (templateId, folderId) => {
+      const workspaceId = get().workspaceId;
+      const template = FLOW_TEMPLATES.find((item) => item.id === templateId);
+      if (!workspaceId || !template) return null;
+      const name = uniqueName(translate(`flows.tpl.${template.id}.name` as TranslationKey), get().flows.map((flow) => flow.name));
+      try {
+        const spec = template.build((key) => translate(key));
+        const row = await flowsCreateFlow(workspaceId, folderId, name, serializeSpec(spec));
+        if (get().workspaceId !== workspaceId) return null;
+        set((state) => ({ flows: [...state.flows, toItem(row)] }));
+        await get().openFlow(row.id);
+        return row.id;
+      } catch (error) {
+        pushErrorToast(String(error));
+        return null;
+      }
+    },
+
     renameFlow: async (id, name) => {
       if (!name.trim()) return;
       try {
         replaceRow(id, await flowsRenameFlow(id, name));
       } catch (error) {
         pushErrorToast(String(error));
+      }
+    },
+
+    exportFlow: async (id) => {
+      const flow = get().flows.find((item) => item.id === id);
+      if (!flow) return;
+      if (get().activeId === id) await get().flush();
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const path = await save({
+        defaultPath: `${flow.name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "").trim() || "flow"}.json`,
+        filters: [{ name: translate("flows.fileFilter"), extensions: ["json"] }],
+      });
+      if (!path) return;
+      try {
+        await flowsExportFlow(id, path);
+        pushSuccessToast(translate("flows.exported"));
+      } catch (error) {
+        pushErrorToast(String(error));
+      }
+    },
+
+    importFlow: async (folderId) => {
+      const workspaceId = get().workspaceId;
+      if (!workspaceId) return null;
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const path = await open({ multiple: false, filters: [{ name: translate("flows.fileFilter"), extensions: ["json"] }] });
+      if (typeof path !== "string") return null;
+      const fileName = (path.split(/[\\/]/).pop() ?? "").replace(/\.json$/i, "") || translate("flows.untitled");
+      try {
+        const { meta, notes } = await flowsImportFlow(workspaceId, folderId, path, uniqueName(fileName, get().flows.map((flow) => flow.name)));
+        if (get().workspaceId !== workspaceId) return null;
+        set((state) => ({ flows: [...state.flows, toItem(meta)] }));
+        if (notes.unmatchedCredentials.length > 0) {
+          pushErrorToast(translate("flows.imported.unmatched", { names: notes.unmatchedCredentials.join(", ") }));
+        }
+        if (notes.cleared.length > 0) {
+          pushErrorToast(translate("flows.imported.cleared", { names: notes.cleared.join(", ") }));
+        }
+        if (notes.unmapped.length > 0) {
+          pushErrorToast(translate("flows.imported.unmapped", { names: notes.unmapped.join(", ") }));
+        }
+        await get().openFlow(meta.id);
+        return meta.id;
+      } catch (error) {
+        pushErrorToast(String(error));
+        return null;
       }
     },
 
@@ -450,6 +684,20 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
         else void get().refresh();
       } catch (error) {
         pushErrorToast(String(error));
+      }
+    },
+
+    trust: async (id) => {
+      if (get().activeId === id) await get().flush();
+      const meta = get().flows.find((flow) => flow.id === id);
+      if (!meta) return false;
+      try {
+        replaceRow(id, await flowsTrustFlow(id, meta.exec_hash));
+        return true;
+      } catch (error) {
+        pushErrorToast(String(error) === "changed" ? translate("flows.trust.changed") : String(error));
+        await get().refresh();
+        return false;
       }
     },
 

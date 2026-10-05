@@ -460,7 +460,7 @@ fn clear_base(conn: &Connection, collection_id: &str, kind: &str, id: &str) -> r
 ///
 /// Anything unparseable falls back to string equality: it did not come from a CodeFlow client, and
 /// guessing about it is worse than treating it as opaque.
-fn same_instant(a: &str, b: &str) -> bool {
+pub(crate) fn same_instant(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }

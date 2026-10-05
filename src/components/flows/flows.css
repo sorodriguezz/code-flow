@@ -288,6 +288,9 @@
 .cf-flow-node__badge.is-success {
   background: var(--cf-success);
 }
+.cf-flow-node__badge.is-waiting {
+  background: var(--cf-warning);
+}
 .cf-flow-node__badge.is-error {
   background: var(--cf-danger);
 }
@@ -363,4 +366,61 @@
 .cf-flow-drop {
   outline: 1.5px dashed var(--cf-accent);
   outline-offset: 1px;
+}
+
+/* ---------- an AI proposal drawn over the canvas (FlowAiPanel) ---------- */
+
+.cf-flow-node.is-diff-added .cf-flow-node__tile {
+  box-shadow: 0 0 0 2px var(--cf-success), var(--cf-shadow-lift);
+}
+.cf-flow-node.is-diff-changed .cf-flow-node__tile {
+  box-shadow: 0 0 0 2px var(--cf-warning), var(--cf-shadow-lift);
+}
+/* A removed node is a ghost where it was: there, but plainly on its way out. */
+.cf-flow-node.is-diff-removed {
+  opacity: 0.5;
+}
+.cf-flow-node.is-diff-removed .cf-flow-node__tile {
+  box-shadow: 0 0 0 1.5px var(--cf-danger), var(--cf-shadow-lift);
+  background-image: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--cf-danger) 10%, transparent) 0 6px,
+    transparent 6px 12px
+  );
+}
+.cf-flow-node.is-diff-removed .cf-flow-node__name {
+  text-decoration: line-through;
+}
+.cf-flow-node__diff {
+  position: absolute;
+  bottom: -6px;
+  left: -6px;
+  z-index: 1;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--cf-on-accent);
+  box-shadow: 0 0 0 2px var(--cf-sunken);
+}
+.cf-flow-node.is-diff-added .cf-flow-node__diff {
+  background: var(--cf-success);
+}
+.cf-flow-node.is-diff-changed .cf-flow-node__diff {
+  background: var(--cf-warning);
+}
+.cf-flow-node.is-diff-removed .cf-flow-node__diff {
+  background: var(--cf-danger);
+}
+.cf-flow-canvas .react-flow__edge.is-diff-added .react-flow__edge-path {
+  stroke: var(--cf-success);
+}
+.cf-flow-canvas .react-flow__edge.is-diff-removed .react-flow__edge-path {
+  stroke: var(--cf-danger);
+  stroke-dasharray: 5 4;
+  opacity: 0.6;
 }

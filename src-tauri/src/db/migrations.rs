@@ -1984,7 +1984,101 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_kind_to_chain_templates(conn)?;
     add_flow_tables(conn)?;
     add_flow_run_tables(conn)?;
+    add_flow_waits(conn)?;
+    add_trust_to_flows(conn)?;
+    add_flow_shares(conn)?;
     Ok(())
+}
+
+/// Flows shared through the user's own Supabase project — see `flows::share`. One row per shared
+/// flow, keyed by the flow's id (which is also the share's). The share token and the host's secret
+/// are in the credential store, never here.
+///
+/// `base` is the `updated_at` both sides last agreed on: the flow moved here when its own
+/// `updated_at` differs, moved there when the remote item's does — both is a conflict, and the
+/// remote version waits in `conflict` (neither applied nor overwritten) until the user picks.
+pub(crate) fn add_flow_shares(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS flow_shares (
+            flow_id      TEXT PRIMARY KEY,
+            project_url  TEXT NOT NULL,
+            name         TEXT NOT NULL DEFAULT '',
+            -- owner | member
+            role         TEXT NOT NULL,
+            -- The server's synced_at of the newest change pulled.
+            cursor       TEXT NOT NULL DEFAULT '',
+            base         TEXT NOT NULL DEFAULT '',
+            -- JSON: the remote version frozen while both sides changed.
+            conflict     TEXT,
+            conflict_at  TEXT,
+            last_error   TEXT NOT NULL DEFAULT '',
+            synced_at    TEXT NOT NULL DEFAULT ''
+        );
+        "#,
+    )
+}
+
+/// What a flow runs, hashed, and the hash the user trusted — see `flow_queries::FlowMeta::trusted`.
+///
+/// The flows already here were written in this app before trust existed, so they start trusted, the
+/// way `api_trust::migrate` seeded the API scripts: what someone typed into their own editor is
+/// theirs. The hash is computed here rather than in SQL because it is over the parsed document.
+pub(crate) fn add_trust_to_flows(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "flows")? || has_column(conn, "flows", "exec_hash")? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "ALTER TABLE flows ADD COLUMN exec_hash TEXT NOT NULL DEFAULT '';
+         ALTER TABLE flows ADD COLUMN trusted_hash TEXT NOT NULL DEFAULT '';",
+    )?;
+    let rows: Vec<(String, String)> = {
+        let mut statement = conn.prepare("SELECT id, spec FROM flows")?;
+        let collected = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        collected
+    };
+    for (id, text) in rows {
+        let Ok(parsed) = crate::flows::spec::parse(&text) else { continue };
+        let hash = crate::flows::spec::executable_hash(&parsed);
+        conn.execute("UPDATE flows SET exec_hash = ?2, trusted_hash = ?2 WHERE id = ?1", rusqlite::params![id, hash])?;
+    }
+    Ok(())
+}
+
+/// Runs parked at a node until someone decides — an approval, a call to the run's resume URL, a
+/// time that comes (`flows::waits`). One row per wait; `decided_at` is null while it is open, and
+/// the guarded `UPDATE … WHERE decided_at IS NULL` is what makes deciding twice impossible — the
+/// desk and the phone may both press Approve.
+///
+/// No foreign key to `flow_runs`, like `flow_run_nodes` has none to `flows`: a run's rows go when
+/// its run is deleted (`flow_run_queries::delete_run`), and a wait outliving its run is harmless.
+pub(crate) fn add_flow_waits(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS flow_waits (
+            id           TEXT PRIMARY KEY,
+            run_id       TEXT NOT NULL,
+            flow_id      TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            flow_name    TEXT NOT NULL DEFAULT '',
+            node_id      TEXT NOT NULL,
+            node_name    TEXT NOT NULL DEFAULT '',
+            -- approval | webhook | time
+            kind         TEXT NOT NULL,
+            message      TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL,
+            expires_at   TEXT,
+            decided_at   TEXT,
+            -- approved | rejected | resumed | expired | canceled
+            decision     TEXT NOT NULL DEFAULT '',
+            decided_by   TEXT NOT NULL DEFAULT '',
+            -- JSON: a call's body, an approver's comment
+            payload      TEXT NOT NULL DEFAULT 'null'
+        );
+        CREATE INDEX IF NOT EXISTS idx_flow_waits_open ON flow_waits (decided_at, workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_flow_waits_run ON flow_waits (run_id);
+        "#,
+    )
 }
 
 /// The Flujos workspace — see `crate::flows` and `flow_queries`.

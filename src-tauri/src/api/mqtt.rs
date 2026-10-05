@@ -496,6 +496,106 @@ fn clamp_qos(qos: u8) -> u8 {
     }
 }
 
+/// One flow node's MQTT exchange: connect (3.1.1), publish one message and/or subscribe to one
+/// topic, collect up to `max` messages (0: no count) until `timeout`, disconnect. Nothing is registered or
+/// emitted — the node reads the answer — which is why it lives beside the API tab's client rather
+/// than in it.
+pub(crate) struct MqttExchange {
+    pub publish: Option<(String, Vec<u8>, u8, bool)>,
+    pub subscribe: Option<(String, u8)>,
+    pub max: usize,
+    pub timeout: Duration,
+    /// Where messages go instead of the answer — a trigger listening for as long as it is armed.
+    /// With a sink, `max` does not end the exchange; the broker closing it or `cancel` does.
+    pub sink: Option<Arc<dyn Fn(serde_json::Value) + Send + Sync>>,
+    /// Called once the broker has accepted the connection.
+    pub opened: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+pub(crate) async fn exchange(
+    req: &MqttConnectRequest,
+    plan: MqttExchange,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<Vec<serde_json::Value>, String> {
+    use rumqttc::{Event, Packet};
+    let endpoint = parse_endpoint(&req.url)?;
+    let mut opts = rumqttc::MqttOptions::new(resolve_client_id(&req.client_id), endpoint.host.clone(), endpoint.port);
+    opts.set_keep_alive(Duration::from_secs(req.keep_alive_secs.max(5)))
+        .set_clean_session(req.clean_session)
+        .set_max_packet_size(MAX_PACKET_BYTES, MAX_PACKET_BYTES);
+    if !req.username.is_empty() {
+        opts.set_credentials(&req.username, &req.password);
+    }
+    if endpoint.tls {
+        opts.set_transport(tls_transport(&req.options)?);
+    }
+    let (client, mut eventloop) = rumqttc::AsyncClient::new(opts, REQUEST_CAPACITY);
+    let mut network = rumqttc::NetworkOptions::new();
+    network.set_connection_timeout((req.options.timeout_ms / 1000).clamp(1, 3600));
+    eventloop.network_options = network;
+
+    let deadline = tokio::time::Instant::now() + plan.timeout;
+    let publish_qos = plan.publish.as_ref().map(|(_, _, qos, _)| clamp_qos(*qos));
+    if let Some((topic, qos)) = &plan.subscribe {
+        client.subscribe(topic.clone(), v4_qos(*qos)).await.map_err(|e| e.to_string())?;
+    }
+    if let Some((topic, payload, qos, retain)) = plan.publish {
+        client.publish(topic, v4_qos(qos), retain, payload).await.map_err(|e| e.to_string())?;
+    }
+    let mut published = publish_qos.is_none();
+    let mut received = Vec::new();
+    let collecting = plan.subscribe.is_some();
+    loop {
+        if published && plan.sink.is_none() && (!collecting || (plan.max > 0 && received.len() >= plan.max)) {
+            break;
+        }
+        let event = tokio::select! {
+            _ = cancel.cancelled() => return Err(crate::ai_runs::CANCELLED_MARKER.to_string()),
+            _ = tokio::time::sleep_until(deadline) => break,
+            event = eventloop.poll() => event,
+        };
+        match event {
+            Ok(Event::Incoming(Packet::ConnAck(ack))) => {
+                if ack.code != rumqttc::ConnectReturnCode::Success {
+                    return Err(format!("The broker refused the connection: {:?}", ack.code));
+                }
+                if let Some(opened) = &plan.opened {
+                    opened();
+                }
+            }
+            Ok(Event::Incoming(Packet::Publish(message))) if collecting => {
+                let text = String::from_utf8_lossy(&message.payload).into_owned();
+                let data = serde_json::from_str::<serde_json::Value>(&text).unwrap_or(serde_json::Value::String(text));
+                let message = serde_json::json!({
+                    "topic": message.topic,
+                    "data": data,
+                    "qos": message.qos as u8,
+                    "retain": message.retain,
+                });
+                match &plan.sink {
+                    Some(sink) => sink(message),
+                    None => received.push(message),
+                }
+            }
+            Ok(Event::Incoming(Packet::PubAck(_) | Packet::PubComp(_))) => published = true,
+            // QoS 0 has no answer: written to the socket is as delivered as it gets.
+            Ok(Event::Outgoing(Outgoing::Publish(_))) if publish_qos == Some(0) => published = true,
+            Ok(_) => {}
+            Err(error) => {
+                let detail = error.to_string();
+                return Err(crate::api::explain_cause(&endpoint.host, Some(endpoint.port), &detail).unwrap_or(detail));
+            }
+        }
+    }
+    let _ = client.disconnect().await;
+    // Let the disconnect go out; the loop ends with an error once it has.
+    let _ = tokio::time::timeout(Duration::from_millis(300), eventloop.poll()).await;
+    if !published {
+        return Err("The broker did not confirm the message in time".to_string());
+    }
+    Ok(received)
+}
+
 fn v4_qos(qos: u8) -> rumqttc::QoS {
     match clamp_qos(qos) {
         1 => rumqttc::QoS::AtLeastOnce,

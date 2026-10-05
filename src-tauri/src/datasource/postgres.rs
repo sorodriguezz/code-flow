@@ -155,6 +155,15 @@ impl PgSession {
         Ok(session)
     }
 
+    /// The type of each column `statement` would return, from the server's own description of it —
+    /// a prepare, which plans but runs nothing. The console's simple-query path carries no types (see
+    /// the module note); a caller that hands rows on as values rather than as text asks here.
+    /// `None` for anything that is not one preparable statement.
+    pub async fn describe_columns(&self, statement: &str) -> Option<Vec<String>> {
+        let prepared = self.client.prepare(statement).await.ok()?;
+        Some(prepared.columns().iter().map(|column| column.type_().name().to_string()).collect())
+    }
+
     pub fn info(&self) -> DbServerInfo {
         let mut notes = Vec::new();
         if self.kind == DbKind::Supabase && self.port == 6543 {

@@ -1368,6 +1368,7 @@ export function useImportCollaborative() {
     try {
       const { decodeInvite } = await import("../../lib/api/sync");
       const invite = decodeInvite(code);
+      if (invite.kind === "flow") throw new Error(t("api.collab.flowInvite"));
 
       // Filed under the project the invitation names, before anything is asked of that project.
       // Every request is built from the key stored for the URL it goes to, so skipping this is

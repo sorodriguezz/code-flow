@@ -32,7 +32,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     Ok(vec![out])
 }
 
-fn build_url(raw: &str, query: &[(String, String)]) -> Result<url::Url, NodeError> {
+pub(super) fn build_url(raw: &str, query: &[(String, String)]) -> Result<url::Url, NodeError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(NodeError::failed("The URL is empty"));
@@ -49,12 +49,41 @@ fn build_url(raw: &str, query: &[(String, String)]) -> Result<url::Url, NodeErro
 }
 
 /// What the log shows of a URL: no query string, no user info — the two places a secret travels.
-fn loggable(url: &url::Url) -> String {
+pub(super) fn loggable(url: &url::Url) -> String {
     let mut shown = url.clone();
     shown.set_query(None);
     let _ = shown.set_username("");
     let _ = shown.set_password(None);
     shown.to_string()
+}
+
+/// Signs a request with a flow credential — a header or a query parameter, never the URL's user
+/// info. Shared by every node that speaks HTTP (and WebSocket, whose upgrade is one).
+pub(super) fn apply_credential(
+    ctx: &NodeCtx,
+    credential_id: &str,
+    headers: &mut Vec<(String, String)>,
+    query: &mut Vec<(String, String)>,
+) -> Result<(), NodeError> {
+    if credential_id.trim().is_empty() {
+        return Ok(());
+    }
+    let credential = ctx.run.host.credential(credential_id.trim()).map_err(NodeError::failed)?;
+    let meta_text = |key: &str| credential.meta.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+    match credential.kind.as_str() {
+        "bearer" => headers.push(("Authorization".into(), format!("Bearer {}", credential.secret))),
+        "basic" => {
+            let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", meta_text("user"), credential.secret));
+            // The encoded pair is as much the password as the password: a server that echoes the
+            // request must not put it in the run's stored data either.
+            ctx.run.host.secret_used(&token);
+            headers.push(("Authorization".into(), format!("Basic {token}")));
+        }
+        "header" => headers.push((meta_text("name"), credential.secret.clone())),
+        "query" => query.push((meta_text("name"), credential.secret.clone())),
+        other => return Err(NodeError::failed(format!("A {other} credential cannot sign an HTTP request"))),
+    }
+    Ok(())
 }
 
 async fn request(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError> {
@@ -63,21 +92,7 @@ async fn request(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError>
     let mut query = pairs(params, "query");
     let mut headers = pairs(params, "headers");
 
-    let credential_id = text(params, "credential");
-    if !credential_id.trim().is_empty() {
-        let credential = ctx.run.host.credential(credential_id.trim()).map_err(NodeError::failed)?;
-        let meta_text = |key: &str| credential.meta.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
-        match credential.kind.as_str() {
-            "bearer" => headers.push(("Authorization".into(), format!("Bearer {}", credential.secret))),
-            "basic" => {
-                let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", meta_text("user"), credential.secret));
-                headers.push(("Authorization".into(), format!("Basic {token}")));
-            }
-            "header" => headers.push((meta_text("name"), credential.secret.clone())),
-            "query" => query.push((meta_text("name"), credential.secret.clone())),
-            other => return Err(NodeError::failed(format!("A {other} credential cannot sign an HTTP request"))),
-        }
-    }
+    apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query)?;
 
     let url = build_url(&text(params, "url"), &query)?;
     let has = |name: &str| headers.iter().any(|(key, _)| key.eq_ignore_ascii_case(name));

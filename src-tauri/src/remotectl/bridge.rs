@@ -73,6 +73,10 @@ const FORWARDED: &[&str] = &[
     // per line of output — the log itself is not forwarded. The phone's Services list is drawn from
     // these, so a service stopped at the desk goes grey on the phone the way it does in the dock.
     crate::services::supervisor::RUNTIME_EVENT,
+    // Flujos: a run started or stopped waiting for someone, or the set of armed flows changed (and
+    // with it the phone triggers on offer). Both carry nothing — the phone re-reads its lists.
+    crate::flows::waits::CHANGED_EVENT,
+    "flows:triggers",
 ];
 
 /// Events forwarded **only to the device whose shell they came from**.

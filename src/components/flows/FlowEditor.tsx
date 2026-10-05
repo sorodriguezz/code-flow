@@ -15,35 +15,9 @@ import {
   type NodeChange,
   type NodeTypes,
 } from "@xyflow/react";
-import {
-  ChevronDown,
-  ClipboardPaste,
-  Copy,
-  CopyPlus,
-  Globe,
-  History,
-  KeyRound,
-  Network,
-  PanelTop,
-  Pencil,
-  Pin,
-  PinOff,
-  Play,
-  Plus,
-  Power,
-  Redo2,
-  Scan,
-  Scissors,
-  ScrollText,
-  Settings2,
-  Square,
-  StepForward,
-  StickyNote,
-  Trash2,
-  Undo2,
-  ZoomIn,
-  ZoomOut,
-} from "lucide-react";
+import { ChevronDown, ClipboardPaste, Copy, CopyPlus, Globe, History, KeyRound, Network, PanelTop, Pencil, Pin, PinOff, Play, Plus, Power, Redo2, Scan, Scissors, ScrollText, Settings2, ShieldAlert, Square, StepForward, StickyNote, Trash2, Undo2, Users, ZoomIn, ZoomOut } from "lucide-react";
+import { AiWand } from "../common/AiGlyph";
+import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Button, iconButtonClass } from "../common/Button";
 import { Segmented } from "../common/Segmented";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
@@ -59,6 +33,9 @@ import {
   type NoteNode,
 } from "./FlowNodes";
 import { NodePalette } from "./NodePalette";
+import { FlowAiPanel } from "./FlowAiPanel";
+import { FlowShareDialog, ShareConflictDialog } from "./FlowShareDialog";
+import { useFlowShareStore } from "../../state/flowShareStore";
 import { FlowSettingsDialog } from "./FlowSettingsDialog";
 import { ExecutionsView } from "./ExecutionsView";
 import { RunLog } from "./RunLog";
@@ -91,6 +68,7 @@ import {
   flowsVersionContent,
   type FlowNodeDescriptor,
 } from "../../lib/tauri/flowsCommands";
+import { diffSpecs } from "../../lib/flows/diff";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowVaultStore } from "../../state/flowVaultStore";
@@ -181,11 +159,25 @@ function Editor() {
   const { screenToFlowPosition, fitView } = useReactFlow();
   const live = useFlowRunsStore((s) => s.current[draftId]);
   const pins = useFlowRunsStore((s) => s.pins[draftId]);
+  const openWaits = useFlowRunsStore((s) => s.waits);
+  // The nodes of the run on screen that are parked waiting for someone.
+  const waitingNodes = useMemo(
+    () => new Set(openWaits.filter((wait) => wait.runId === live?.run.id).map((wait) => wait.nodeId)),
+    [openWaits, live?.run.id],
+  );
   const inspector = useFlowRunsStore((s) => s.inspector);
   const logOpen = useFlowRunsStore((s) => s.logOpen);
   const pane = useFlowRunsStore((s) => s.pane);
   const running = live?.run.status === "running";
   const [now, setNow] = useState(Date.now());
+  // The AI builder: its window, and a proposal drawn over the canvas as changes until answered.
+  const aiRun = useFlowsStore((s) => s.aiByFlow[draftId]);
+  const [aiOpen, setAiOpen] = useState(false);
+  const share = useFlowShareStore((s) => s.shares[draftId]);
+  const [shareDialog, setShareDialog] = useState<"share" | "conflict" | null>(null);
+  const proposal = aiRun?.status === "ready" ? aiRun.proposal : null;
+  const diff = useMemo(() => (spec && proposal ? diffSpecs(spec, proposal.spec) : null), [spec, proposal]);
+  const shown = diff?.shown ?? spec;
 
   // What this flow ran last, painted on the canvas; and its pins.
   useEffect(() => {
@@ -226,17 +218,20 @@ function Editor() {
    *  keeps its object — which is what lets React Flow skip re-adopting it on every drag frame. */
   const nodeCache = useRef(new Map<string, { key: unknown[]; node: FlowCanvasNode }>());
   const nodes = useMemo<FlowCanvasNode[]>(() => {
-    if (!spec) return [];
+    if (!shown) return [];
     const next = new Map<string, { key: unknown[]; node: FlowCanvasNode }>();
     const same = (a: unknown[], b: unknown[]) => a.length === b.length && a.every((v, i) => v === b[i]);
     const out: FlowCanvasNode[] = [];
-    for (const item of spec.nodes) {
+    for (const item of shown.nodes) {
       const selected = selection.has(item.id);
       const size = measured.current.get(item.id);
       const descriptor = catalogMap.get(item.type);
-      const record = live?.nodes[item.id];
+      // A proposal on screen is not what the last run ran: no run marks over it.
+      const record = diff ? undefined : live?.nodes[item.id];
       const pinned = pins?.[item.id] !== undefined;
-      const key = [item, selected, size, descriptor, language, record, pinned];
+      const waiting = waitingNodes.has(item.id);
+      const mark = diff?.nodes.get(item.id);
+      const key = [item, selected, size, descriptor, language, record, pinned, waiting, mark];
       const cached = nodeCache.current.get(item.id);
       if (cached && same(cached.key, key)) {
         out.push(cached.node);
@@ -268,7 +263,10 @@ function Editor() {
             ? {
                 status: record.status,
                 error: record.error,
-                title: record.error
+                waiting,
+                title: waiting
+                  ? t("flows.status.waiting")
+                  : record.error
                   ? `${t(NODE_STATUS_KEY[record.status])}: ${record.error}`
                   : `${t(NODE_STATUS_KEY[record.status])}${HAS_OUTPUT.has(record.status) ? ` · ${itemsLabel(t, record.itemsOut.reduce((a, b) => a + b, 0))}` : ""}${
                       record.durationMs !== null ? ` · ${formatDuration(record.durationMs)}` : ""
@@ -277,12 +275,14 @@ function Editor() {
             : null,
           pinned,
           pinnedTitle: t("flows.inspector.pinned"),
+          diff: mark,
+          diffTitle: mark ? t(`flows.builder.${mark}` as TranslationKey) : "",
         },
       };
       out.push(node);
       next.set(item.id, { key, node });
     }
-    for (const note of spec.notes) {
+    for (const note of shown.notes) {
       const selected = selection.has(note.id);
       const size = measured.current.get(note.id);
       const key = [note, selected, size, language];
@@ -311,15 +311,16 @@ function Editor() {
     return out;
     // `measureTick` is the signal that `measured` (a ref) changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [spec, selection, measureTick, catalogMap, language, t, live, pins]);
+  }, [shown, diff, selection, measureTick, catalogMap, language, t, live, pins, waitingNodes]);
 
   const edges = useMemo<Edge[]>(
     () =>
-      (spec?.connections ?? []).map((c) => {
+      (shown?.connections ?? []).map((c) => {
         const id = connectionKey(c);
-        const record = live?.nodes[c.from];
+        const record = diff ? undefined : live?.nodes[c.from];
         const count = record && HAS_OUTPUT.has(record.status) ? record.itemsOut[c.out] : undefined;
-        const source = spec?.nodes.find((n) => n.id === c.from);
+        const source = shown?.nodes.find((n) => n.id === c.from);
+        const mark = diff?.connections.get(id);
         const descriptor = source ? catalogMap.get(source.type) : undefined;
         const fromErrorPort = !!source && hasErrorOutput(source, descriptor) && c.out === (descriptor?.outputs ?? 0);
         return {
@@ -332,11 +333,18 @@ function Editor() {
           label: count !== undefined && count > 0 ? itemsLabel(t, count) : undefined,
           labelBgPadding: [5, 2] as [number, number],
           labelBgBorderRadius: 4,
-          className: `${count ? "has-items" : ""} ${fromErrorPort ? "is-error-edge" : ""}`,
+          className: `${count ? "has-items" : ""} ${fromErrorPort ? "is-error-edge" : ""} ${mark ? `is-diff-${mark}` : ""}`,
         };
       }),
-    [spec, edgeSelection, live, catalogMap, t],
+    [shown, diff, edgeSelection, live, catalogMap, t],
   );
+
+  // A proposal arriving is looked at whole.
+  useEffect(() => {
+    if (diff) requestAnimationFrame(() => void fitView({ padding: 0.25, maxZoom: 1, duration: 200 }));
+    // Once per proposal, not per render of it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proposal]);
 
   // ---------- React Flow's changes, written back into the document ----------
 
@@ -549,7 +557,28 @@ function Editor() {
     }
     edit(next);
     select([added.id]);
-    setPalette(null);
+    // The palette stays open — a flow is built from it, node after node. A drop point from the
+    // canvas's menu is used once.
+    if (palette?.at) setPalette({ at: null });
+  };
+
+  /** The client point is on the drawing itself — not the AI window, the inspector or the zoom
+   *  controls laid over it — and the canvas is taking edits. */
+  const canvasAt = (x: number, y: number): boolean => {
+    const host = wrapper.current;
+    const under = document.elementFromPoint(x, y);
+    return !diff && !!host && !!under && host.contains(under) && !!under.closest(".react-flow");
+  };
+
+  /** A node dragged in from the palette, centred where it was let go — on the grid, unwired. */
+  const dropNode = (typeId: string, x: number, y: number) => {
+    const doc = current();
+    if (!doc || !canvasAt(x, y)) return;
+    const point = screenToFlowPosition({ x, y });
+    const snap = (n: number) => Math.round(n / 10) * 10;
+    const added = addNode(doc, typeId, t(`flows.node.${typeId}` as TranslationKey), [snap(point.x - 32), snap(point.y - 32)]);
+    edit(added.spec);
+    select([added.id]);
   };
 
   const addNoteAt = (at: [number, number] | null) => {
@@ -612,6 +641,9 @@ function Editor() {
       // is on screen and the keyboard is not in a field somewhere else — or in the open inspector.
       if (!host || host.offsetParent === null || isTyping(event.target)) return;
       if (useFlowRunsStore.getState().inspector) return;
+      // A proposal on the canvas is answered from its window, not edited underneath it.
+      const flowId = useFlowsStore.getState().draft?.id ?? "";
+      if (useFlowsStore.getState().aiByFlow[flowId]?.status === "ready") return;
       const focus = document.activeElement;
       if (focus && focus !== document.body && !host.contains(focus)) return;
       const mod = event.metaKey || event.ctrlKey;
@@ -735,7 +767,7 @@ function Editor() {
         <header className={toolbarClass} data-tour="flows-toolbar">
           <button
             type="button"
-            className="min-w-0 truncate rounded-md px-1 text-[14px] font-semibold text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
+            className="min-w-[56px] truncate rounded-md px-1 text-[14px] font-semibold text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
             title={t("flows.rename")}
             onClick={() => {
               if (!meta) return;
@@ -765,6 +797,9 @@ function Editor() {
             ariaLabel={t("flows.pane.label")}
           />
           <span className="flex-1" />
+          {/* The icon buttons sit at toolbar spacing: at the header's own 8 px gaps they no longer
+              fit beside the run controls on a laptop-width editor, and the flow's name paid for it. */}
+          <span className="flex shrink-0 items-center gap-0.5">
           {pane === "editor" && (
             <>
               <button
@@ -850,6 +885,20 @@ function Editor() {
           {pane === "editor" && (
             <button
               type="button"
+              className={iconButtonClass({ size: "sm", active: aiOpen || !!aiRun })}
+              title={t("flows.builder.button")}
+              aria-label={t("flows.builder.button")}
+              aria-expanded={aiOpen || aiRun?.status === "ready"}
+              onClick={() => setAiOpen((open) => !open)}
+              data-tour="flows-ai"
+            >
+              {/* While the model works with its window closed, the orb is where the run shows. */}
+              {aiRun?.status === "running" && !aiOpen ? <ThinkingOrb size="sm" /> : <AiWand size={15} />}
+            </button>
+          )}
+          {pane === "editor" && (
+            <button
+              type="button"
               className={iconButtonClass({ size: "sm", active: palette !== null })}
               title={`${t("flows.addNode")} (Tab)`}
               aria-label={t("flows.addNode")}
@@ -860,8 +909,50 @@ function Editor() {
               <Plus size={16} />
             </button>
           )}
+          </span>
           <span className="mx-0.5 h-[18px] w-px shrink-0 bg-[var(--cf-border)]" />
-          {meta && <ActiveSwitch flowId={meta.id} active={meta.active} automatic={triggers.some((n) => n.type !== "trigger.manual")} />}
+          {share?.conflict ? (
+            <button
+              type="button"
+              className="flex h-[24px] shrink-0 items-center gap-1 rounded-md px-1.5 text-[11.5px] font-medium text-[var(--cf-warning)] hover:bg-[var(--cf-hover)]"
+              title={t("flows.share.conflictHint")}
+              onClick={() => setShareDialog("conflict")}
+            >
+              <Users size={13} />
+              {t("flows.share.conflictChip")}
+            </button>
+          ) : (
+            share && (
+              <button
+                type="button"
+                className={`${iconButtonClass({ size: "sm" })} ${share.lastError ? "text-[var(--cf-warning)]" : ""}`}
+                title={share.lastError || t("flows.share.shared")}
+                aria-label={t("flows.share.title")}
+                onClick={() => setShareDialog("share")}
+              >
+                <Users size={15} />
+              </button>
+            )
+          )}
+          {meta && !meta.trusted && (
+            <button
+              type="button"
+              className="flex h-[24px] shrink-0 items-center gap-1 rounded-md px-1.5 text-[11.5px] font-medium text-[var(--cf-warning)] hover:bg-[var(--cf-hover)]"
+              title={t("flows.trust.chipHint")}
+              onClick={() => useFlowRunsStore.getState().askTrust(meta.id)}
+            >
+              <ShieldAlert size={13} />
+              {t("flows.trust.chip")}
+            </button>
+          )}
+          {meta && (
+            <ActiveSwitch
+              flowId={meta.id}
+              active={meta.active}
+              automatic={triggers.some((n) => n.type !== "trigger.manual")}
+              trusted={meta.trusted}
+            />
+          )}
           {running ? (
             <Button variant="danger-ghost" size="sm" onClick={() => void useFlowRunsStore.getState().stop(draftId)} data-tour="flows-run">
               <Square size={11} />
@@ -900,7 +991,8 @@ function Editor() {
         {pane === "executions" ? (
           <ExecutionsView />
         ) : (
-          <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <div ref={wrapper} className="relative min-h-0 flex-1" data-tour="flows-canvas">
               <ReactFlow<FlowCanvasNode, Edge>
                 className="cf-flow-canvas"
@@ -913,13 +1005,18 @@ function Editor() {
                 isValidConnection={isValidConnection}
                 onNodeDragStart={checkpoint}
                 onSelectionDragStart={checkpoint}
-                onNodeDoubleClick={(_, node) => node.type === "cf" && useFlowRunsStore.getState().openInspector(node.id)}
-                onPaneContextMenu={openPaneMenu}
+                // A proposal is looked at, not edited: it is answered from the builder's window.
+                nodesDraggable={!diff}
+                nodesConnectable={!diff}
+                elementsSelectable={!diff}
+                onNodeDoubleClick={(_, node) => !diff && node.type === "cf" && useFlowRunsStore.getState().openInspector(node.id)}
+                onPaneContextMenu={(event) => (diff ? event.preventDefault() : openPaneMenu(event))}
                 onNodeContextMenu={(event, node) => {
+                  if (diff) return event.preventDefault();
                   if (!selectionRef.current.has(node.id)) select([node.id]);
                   openSelectionMenu(event, node.id);
                 }}
-                onSelectionContextMenu={(event) => openSelectionMenu(event, null)}
+                onSelectionContextMenu={(event) => (diff ? event.preventDefault() : openSelectionMenu(event, null))}
                 onPaneClick={() => setMenu(null)}
                 fitView
                 fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
@@ -927,7 +1024,7 @@ function Editor() {
                 maxZoom={2}
                 snapToGrid
                 snapGrid={[10, 10]}
-                deleteKeyCode={inspector ? null : ["Backspace", "Delete"]}
+                deleteKeyCode={inspector || diff ? null : ["Backspace", "Delete"]}
                 zoomOnDoubleClick={false}
                 connectionRadius={26}
                 proOptions={{ hideAttribution: true }}
@@ -935,15 +1032,8 @@ function Editor() {
                 <Background variant={BackgroundVariant.Dots} gap={20} size={1.3} />
               </ReactFlow>
               <ZoomControls />
-              {palette && (
-                <NodePalette
-                  catalog={catalog}
-                  initialFamily={hasTrigger ? null : "trigger"}
-                  onPick={placeNode}
-                  onClose={() => setPalette(null)}
-                />
-              )}
-              {inspector && spec.nodes.some((n) => n.id === inspector) && (
+              {(aiOpen || aiRun?.status === "ready") && <FlowAiPanel flowId={draftId} diff={diff} onClose={() => setAiOpen(false)} />}
+              {inspector && !diff && spec.nodes.some((n) => n.id === inspector) && (
                 <Suspense fallback={null}>
                   <NodeInspector nodeId={inspector} onClose={() => useFlowRunsStore.getState().openInspector(null)} />
                 </Suspense>
@@ -951,12 +1041,27 @@ function Editor() {
             </div>
             {logOpen && <RunLog lines={live?.logs ?? []} names={names} onClose={() => useFlowRunsStore.getState().setLogOpen(false)} />}
           </div>
+          {/* Docked beside the canvas, not over it — see `NodePalette`. */}
+          <NodePalette
+            catalog={catalog}
+            initialFamily={hasTrigger ? null : "trigger"}
+            expanded={palette !== null}
+            disabled={diff !== null}
+            onPick={placeNode}
+            canDropAt={canvasAt}
+            onDropAt={dropNode}
+            onExpand={() => setPalette({ at: null })}
+            onCollapse={() => setPalette(null)}
+          />
+          </div>
         )}
       </div>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
 
       {settingsOpen && <FlowSettingsDialog onClose={() => setSettingsOpen(false)} />}
+      {shareDialog === "share" && <FlowShareDialog flowId={draftId} onClose={() => setShareDialog(null)} />}
+      {shareDialog === "conflict" && <ShareConflictDialog flowId={draftId} onClose={() => setShareDialog(null)} />}
 
       {historyOpen && meta && (
         <VersionHistoryModal
@@ -984,7 +1089,7 @@ function Editor() {
  * Active or paused: whether the flow's automatic triggers listen. A flow with only a manual trigger
  * has nothing to switch on, and says so instead of failing.
  */
-function ActiveSwitch({ flowId, active, automatic }: { flowId: string; active: boolean; automatic: boolean }) {
+function ActiveSwitch({ flowId, active, automatic, trusted }: { flowId: string; active: boolean; automatic: boolean; trusted: boolean }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
   return (
@@ -992,8 +1097,16 @@ function ActiveSwitch({ flowId, active, automatic }: { flowId: string; active: b
       type="button"
       role="switch"
       aria-checked={active}
-      disabled={busy || (!active && !automatic)}
-      title={active ? t("flows.active.onHint") : automatic ? t("flows.active.offHint") : t("flows.active.noTrigger")}
+      disabled={busy || (!active && (!automatic || !trusted))}
+      title={
+        active
+          ? t("flows.active.onHint")
+          : !trusted
+            ? t("flows.trust.activateHint")
+            : automatic
+              ? t("flows.active.offHint")
+              : t("flows.active.noTrigger")
+      }
       data-tour="flows-active"
       onClick={async () => {
         setBusy(true);

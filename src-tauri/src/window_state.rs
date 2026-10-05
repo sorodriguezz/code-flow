@@ -176,13 +176,15 @@ fn reachable(window: &tauri::WebviewWindow, state: &WindowState) -> bool {
     })
 }
 
-/// Puts the window back the way the last session left it, then shows it.
+/// Puts the window back the way the last session left it, then shows it — unless `show` is false,
+/// for a launch at login that runs in the background: its geometry is still put back, so showing it
+/// later opens it where it was.
 ///
 /// The showing is this function's job and not the caller's, and nothing in here may return early
 /// past the point the window would stay hidden: the window is created invisible so that the
 /// resizing and the maximizing below don't happen in front of the user, which means a path through
 /// this that skips `show` is an app that launches to nothing.
-pub fn restore(app: &AppHandle) {
+pub fn restore_with(app: &AppHandle, show: bool) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -212,12 +214,14 @@ pub fn restore(app: &AppHandle) {
             // position is given up on.
             let _ = window.center();
         }
-        if state.maximized {
+        if state.maximized && show {
             let _ = window.maximize();
         }
     }
 
-    let _ = window.show();
+    if show {
+        let _ = window.show();
+    }
 }
 
 #[cfg(test)]

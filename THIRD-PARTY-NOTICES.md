@@ -18,7 +18,7 @@ component's own licence wins — which is what section 6 says.
 | What ships | Count |
 |---|---|
 | npm packages (production tree) | 343 resolved versions of 314 packages |
-| Rust crates (resolved for macOS and Windows) | 702 resolved versions of 611 crates |
+| Rust crates (resolved for macOS and Windows) | 721 resolved versions of 627 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 10 |
@@ -626,7 +626,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### Apache-2.0 OR MIT — 374 crates
+### Apache-2.0 OR MIT — 383 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -638,12 +638,14 @@ because there the order carries meaning.
 | `anyhow` | 1.0.104 | Apache-2.0 OR MIT | <https://github.com/dtolnay/anyhow> |
 | `arc-swap` | 1.9.2 | Apache-2.0 OR MIT | <https://github.com/vorner/arc-swap> |
 | `argon2` | 0.5.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/password-hashes/tree/master/argon2> |
+| `arraydeque` | 0.5.1 | Apache-2.0 OR MIT | <https://github.com/andylokandy/arraydeque> |
 | `asn1-rs` | 0.7.2 | Apache-2.0 OR MIT | <https://github.com/rusticata/asn1-rs> |
 | `asn1-rs-derive` | 0.6.0 | Apache-2.0 OR MIT | <https://github.com/rusticata/asn1-rs> |
 | `asn1-rs-impl` | 0.2.0 | Apache-2.0 OR MIT | <https://github.com/rusticata/asn1-rs> |
 | `async-compression` | 0.4.42 | Apache-2.0 OR MIT | <https://github.com/Nullus157/async-compression> |
 | `async-lock` | 3.4.2 | Apache-2.0 OR MIT | <https://github.com/smol-rs/async-lock> |
 | `async-trait` | 0.1.91 | Apache-2.0 OR MIT | <https://github.com/dtolnay/async-trait> |
+| `atoi_simd` | 0.18.1 | Apache-2.0 OR MIT | <https://github.com/RoDmitry/atoi_simd> |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT | <https://github.com/smol-rs/atomic-waker> |
 | `autocfg` | 1.5.1 | Apache-2.0 OR MIT | <https://github.com/cuviper/autocfg> |
 | `base64` | 0.21.7, 0.22.1, 0.23.1 | Apache-2.0 OR MIT | <https://github.com/marshallpierce/rust-base64> |
@@ -673,6 +675,7 @@ because there the order carries meaning.
 | `cmac` | 0.8.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/MACs> |
 | `cmov` | 0.5.4 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `cms` | 0.2.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/cms> |
+| `codepage` | 0.1.3 | Apache-2.0 OR MIT | <https://github.com/hsivonen/codepage> |
 | `compression-codecs` | 0.4.38 | Apache-2.0 OR MIT | <https://github.com/Nullus157/async-compression> |
 | `compression-core` | 0.4.32 | Apache-2.0 OR MIT | <https://github.com/Nullus157/async-compression> |
 | `concurrent-queue` | 2.5.0 | Apache-2.0 OR MIT | <https://github.com/smol-rs/concurrent-queue> |
@@ -700,6 +703,7 @@ because there the order carries meaning.
 | `ctutils` | 0.4.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `curve25519-dalek-derive` | 0.1.1 | Apache-2.0 OR MIT | <https://github.com/dalek-cryptography/curve25519-dalek> |
 | `dbl` | 0.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
+| `debug_unsafe` | 0.1.4 | Apache-2.0 OR MIT | <https://github.com/RoDmitry/debug_unsafe> |
 | `der` | 0.7.10 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/der> |
 | `der-parser` | 10.0.0 | Apache-2.0 OR MIT | <https://github.com/rusticata/der-parser> |
 | `der_derive` | 0.7.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/der/derive> |
@@ -720,6 +724,7 @@ because there the order carries meaning.
 | `dtor-proc-macro` | 0.0.6 | Apache-2.0 OR MIT | <https://github.com/mmastrac/rust-ctor> |
 | `dyn-clone` | 1.0.20 | Apache-2.0 OR MIT | <https://github.com/dtolnay/dyn-clone> |
 | `either` | 1.17.0 | Apache-2.0 OR MIT | <https://github.com/rayon-rs/either> |
+| `email-encoding` | 0.4.2 | Apache-2.0 OR MIT | <https://github.com/lettre/email-encoding> |
 | `embed_plist` | 1.2.2 | Apache-2.0 OR MIT | <https://github.com/nvzqz/embed-plist-rs> |
 | `enumflags2` | 0.7.12 | Apache-2.0 OR MIT | <https://github.com/meithecatte/enumflags2> |
 | `enumflags2_derive` | 0.7.12 | Apache-2.0 OR MIT | <https://github.com/meithecatte/enumflags2> |
@@ -730,6 +735,7 @@ because there the order carries meaning.
 | `event-listener-strategy` | 0.5.4 | Apache-2.0 OR MIT | <https://github.com/smol-rs/event-listener-strategy> |
 | `fallible-iterator` | 0.2.0, 0.3.0 | Apache-2.0 OR MIT | <https://github.com/sfackler/rust-fallible-iterator> |
 | `fallible-streaming-iterator` | 0.1.9 | Apache-2.0 OR MIT | <https://github.com/sfackler/fallible-streaming-iterator> |
+| `fast-float2` | 0.2.4 | Apache-2.0 OR MIT | <https://github.com/Alexhuszagh/fast-float-rust> |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT | <https://github.com/smol-rs/fastrand> |
 | `fdeflate` | 0.3.7 | Apache-2.0 OR MIT | <https://github.com/image-rs/fdeflate> |
 | `filetime` | 0.2.29 | Apache-2.0 OR MIT | <https://github.com/alexcrichton/filetime> |
@@ -756,7 +762,7 @@ because there the order carries meaning.
 | `glob` | 0.3.4 | Apache-2.0 OR MIT | <https://github.com/rust-lang/glob> |
 | `global-hotkey` | 0.8.0 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/global-hotkey> |
 | `hashbrown` | 0.12.3, 0.14.5, 0.17.1 | Apache-2.0 OR MIT | <https://github.com/rust-lang/hashbrown> |
-| `hashlink` | 0.9.1 | Apache-2.0 OR MIT | <https://github.com/kyren/hashlink> |
+| `hashlink` | 0.12.2, 0.9.1 | Apache-2.0 OR MIT | <https://github.com/djc/hashlink> |
 | `heck` | 0.5.0 | Apache-2.0 OR MIT | <https://github.com/withoutboats/heck> |
 | `hex` | 0.4.3 | Apache-2.0 OR MIT | <https://github.com/KokaKiwi/rust-hex> |
 | `hickory-net` | 0.26.1 | Apache-2.0 OR MIT | <https://github.com/hickory-dns/hickory-dns> |
@@ -864,6 +870,7 @@ because there the order carries meaning.
 | `relative-path` | 2.0.1 | Apache-2.0 OR MIT | <https://github.com/udoprog/relative-path> |
 | `reqwest` | 0.12.28, 0.13.4 | Apache-2.0 OR MIT | <https://github.com/seanmonstar/reqwest> |
 | `resolv-conf` | 0.7.6 | Apache-2.0 OR MIT | <https://github.com/hickory-dns/resolv-conf> |
+| `rust_xlsxwriter` | 0.99.1 | Apache-2.0 OR MIT | <https://github.com/jmcnamara/rust_xlsxwriter> |
 | `rustc-hash` | 2.1.3 | Apache-2.0 OR MIT | <https://github.com/rust-lang/rustc-hash> |
 | `rustc_version` | 0.4.1 | Apache-2.0 OR MIT | <https://github.com/djc/rustc-version-rs> |
 | `rusticata-macros` | 4.1.0 | Apache-2.0 OR MIT | <https://github.com/rusticata/rusticata-macros> |
@@ -956,6 +963,7 @@ because there the order carries meaning.
 | `tungstenite` | 0.29.0, 0.30.0 | Apache-2.0 OR MIT | <https://github.com/snapview/tungstenite-rs> |
 | `typed-builder` | 0.22.0 | Apache-2.0 OR MIT | <https://github.com/idanarye/rust-typed-builder> |
 | `typed-builder-macro` | 0.22.0 | Apache-2.0 OR MIT | <https://github.com/idanarye/rust-typed-builder> |
+| `typed-path` | 0.12.3 | Apache-2.0 OR MIT | <https://github.com/chipsenkbeil/typed-path> |
 | `typeid` | 1.0.3 | Apache-2.0 OR MIT | <https://github.com/dtolnay/typeid> |
 | `typenum` | 1.20.1 | Apache-2.0 OR MIT | <https://github.com/paholg/typenum> |
 | `unic-char-property` | 0.9.0 | Apache-2.0 OR MIT | <https://github.com/open-i18n/rust-unic> |
@@ -1001,11 +1009,12 @@ because there the order carries meaning.
 | `x509-cert` | 0.2.5 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/x509-cert> |
 | `x509-parser` | 0.18.1 | Apache-2.0 OR MIT | <https://github.com/rusticata/x509-parser> |
 | `xattr` | 1.6.1 | Apache-2.0 OR MIT | <https://github.com/Stebalien/xattr> |
+| `yaml-rust2` | 0.13.0 | Apache-2.0 OR MIT | <https://github.com/Ethiraric/yaml-rust2> |
 | `yasna` | 0.6.0 | Apache-2.0 OR MIT | <https://github.com/qnighy/yasna.rs> |
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `zeroize_derive` | 1.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 
-### MIT — 132 crates
+### MIT — 138 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -1018,6 +1027,7 @@ because there the order carries meaning.
 | `block2` | 0.6.2 | MIT | <https://github.com/madsmtm/objc2> |
 | `bson` | 2.15.0 | MIT | <https://github.com/mongodb/bson-rust> |
 | `bytes` | 1.12.1 | MIT | <https://github.com/tokio-rs/bytes> |
+| `calamine` | 0.36.1 | MIT | <https://github.com/tafia/calamine> |
 | `cargo_metadata` | 0.19.2 | MIT | <https://github.com/oli-obk/cargo_metadata> |
 | `cfb` | 0.7.3 | MIT | <https://github.com/mdsteele/rust-cfb> |
 | `cfg_aliases` | 0.2.2 | MIT | <https://github.com/katharostech/cfg_aliases> |
@@ -1033,12 +1043,14 @@ because there the order carries meaning.
 | `derive_more` | 2.1.1 | MIT | <https://github.com/JelteF/derive_more> |
 | `derive_more-impl` | 2.1.1 | MIT | <https://github.com/JelteF/derive_more> |
 | `dom_query` | 0.27.0 | MIT | <https://github.com/niklak/dom_query> |
+| `email_address` | 0.2.9 | MIT | <https://github.com/johnstonskj/rust-email_address> |
 | `embed-resource` | 3.0.11 | MIT | <https://github.com/nabijaczleweli/rust-embed-resource> |
 | `filedescriptor` | 0.8.3 | MIT | <https://github.com/wezterm/wezterm> |
 | `fsevent-sys` | 4.1.0 | MIT | <https://github.com/octplane/fsevent-rust/tree/master/fsevent-sys> |
 | `funty` | 2.0.0 | MIT | <https://github.com/myrrlyn/funty> |
 | `generic-array` | 0.14.7 | MIT | <https://github.com/fizyk20/generic-array> |
 | `h2` | 0.4.15 | MIT | <https://github.com/hyperium/h2> |
+| `hostname` | 0.4.2 | MIT | <https://github.com/djc/hostname> |
 | `http-body` | 1.1.0 | MIT | <https://github.com/hyperium/http-body> |
 | `http-body-util` | 0.1.4 | MIT | <https://github.com/hyperium/http-body> |
 | `http-range-header` | 0.4.2 | MIT | <https://github.com/MarcusGrass/parse-range-headers> |
@@ -1050,6 +1062,7 @@ because there the order carries meaning.
 | `keyed_priority_queue` | 0.4.2 | MIT | <https://github.com/AngelicosPhosphoros/keyed_priority_queue> |
 | `lazy-regex` | 3.6.1 | MIT | <https://github.com/Canop/lazy-regex> |
 | `lazy-regex-proc_macros` | 3.6.1 | MIT | <https://github.com/Canop/lazy-regex/tree/main/src/proc_macros> |
+| `lettre` | 0.11.23 | MIT | <https://github.com/lettre/lettre> |
 | `libsqlite3-sys` | 0.30.1 | MIT | <https://github.com/rusqlite/rusqlite> |
 | `lru` | 0.18.5 | MIT | <https://github.com/jeromefroe/lru-rs> |
 | `lz4_flex` | 0.13.1 | MIT | <https://github.com/pseitz/lz4_flex> |
@@ -1063,7 +1076,7 @@ because there the order carries meaning.
 | `mio` | 1.2.2 | MIT | <https://github.com/tokio-rs/mio> |
 | `new_debug_unreachable` | 1.0.6 | MIT | <https://github.com/mbrubeck/rust-debug-unreachable> |
 | `nix` | 0.25.1, 0.31.3 | MIT | <https://github.com/nix-rust/nix> |
-| `nom` | 7.1.3 | MIT | <https://github.com/Geal/nom> |
+| `nom` | 7.1.3, 8.0.0 | MIT | <https://github.com/Geal/nom> |
 | `objc2` | 0.6.4 | MIT | <https://github.com/madsmtm/objc2> |
 | `objc2-encode` | 4.1.0 | MIT | <https://github.com/madsmtm/objc2> |
 | `objc2-foundation` | 0.3.2 | MIT | <https://github.com/madsmtm/objc2> |
@@ -1081,6 +1094,8 @@ because there the order carries meaning.
 | `portable-pty` | 0.8.1 | MIT | <https://github.com/wez/wezterm> |
 | `precomputed-hash` | 0.1.1 | MIT | <https://github.com/emilio/precomputed-hash> |
 | `pretty-hex` | 0.3.0 | MIT | <https://github.com/wolandr/pretty-hex> |
+| `pulldown-cmark` | 0.13.4 | MIT | <https://github.com/raphlinus/pulldown-cmark> |
+| `pulldown-cmark-escape` | 0.11.0 | MIT | <https://github.com/raphlinus/pulldown-cmark> |
 | `quick-xml` | 0.41.0 | MIT | <https://github.com/tafia/quick-xml> |
 | `radium` | 0.7.0 | MIT | <https://github.com/bitvecto-rs/radium> |
 | `rfd` | 0.16.0 | MIT | <https://github.com/PolyMeilex/rfd> |
@@ -1139,7 +1154,7 @@ because there the order carries meaning.
 | `winreg` | 0.10.1, 0.55.0 | MIT | <https://github.com/gentoo90/winreg-rs> |
 | `wyz` | 0.5.1 | MIT | <https://github.com/myrrlyn/wyz> |
 | `zeromq` | 0.6.0 | MIT | <https://github.com/zeromq/zmq.rs> |
-| `zip` | 4.6.1 | MIT | <https://github.com/zip-rs/zip2> |
+| `zip` | 4.6.1, 8.6.0 | MIT | <https://github.com/zip-rs/zip2> |
 | `zmij` | 1.0.23 | MIT | <https://github.com/dtolnay/zmij> |
 
 ### Apache-2.0 — 20 crates
@@ -1309,6 +1324,12 @@ because there the order carries meaning.
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | <https://github.com/dtolnay/unicode-ident> |
+
+### 0BSD — 1 crate
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `quoted_printable` | 0.5.2 | 0BSD | <https://github.com/staktrace/quoted-printable> |
 
 ### 0BSD OR Apache-2.0 OR MIT — 1 crate
 

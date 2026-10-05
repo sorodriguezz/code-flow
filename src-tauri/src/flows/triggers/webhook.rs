@@ -66,6 +66,12 @@ pub fn base_url() -> String {
     format!("http://127.0.0.1:{}/hooks/", port_in_use())
 }
 
+/// Where a run's "wait for a call" node listens — `/resume/<run>`, plus `/<node name>` when the run
+/// has more than one such node waiting at once.
+pub fn resume_url(run_id: &str) -> String {
+    format!("http://127.0.0.1:{}/resume/{run_id}", port_in_use())
+}
+
 fn param(params: &Value, key: &str) -> String {
     params.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string()
 }
@@ -150,7 +156,7 @@ pub fn shutdown() {
     }
 }
 
-fn ensure_server(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn ensure_server(app: &AppHandle) -> Result<(), String> {
     let mut server = SERVER.lock().map_err(|e| e.to_string())?;
     if server.is_some() {
         return Ok(());
@@ -278,6 +284,14 @@ fn reply_of(items: &[Item]) -> Response {
 }
 
 async fn handle(State(app): State<AppHandle>, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
+    if let Some(rest) = uri.path().strip_prefix("/resume/") {
+        let call = item_of(&method, &uri, &headers, &body);
+        return match crate::flows::waits::resume_by_call(&app, rest.trim_end_matches('/'), call) {
+            Ok(run_id) => json_response(StatusCode::OK, json!({"resumed": true, "runId": run_id})),
+            Err(error) if error == "not-waiting" => json_response(StatusCode::NOT_FOUND, json!({"error": "nothing waits for a call here"})),
+            Err(error) => json_response(StatusCode::CONFLICT, json!({"error": error})),
+        };
+    }
     let Some(path) = uri.path().strip_prefix("/hooks/").map(|p| p.trim_end_matches('/').to_string()) else {
         return json_response(StatusCode::NOT_FOUND, json!({"error": "not found"}));
     };

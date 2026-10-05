@@ -68,6 +68,17 @@ pub enum Kind {
     Agent,
     /// A saved chain template of the workspace, by id.
     ChainTemplate,
+    /// A saved connection of the Databases workspace, of one of these engines.
+    DbConnection { kinds: &'static [&'static str] },
+    /// A host of the Remote workspace, of one of these kinds.
+    RemoteHost { kinds: &'static [&'static str] },
+    /// A note of the workspace, by id.
+    Note,
+    /// An item of the Llavero, by id.
+    VaultItem,
+    /// `{ connector, operation, fields }` — a call to one of `flows::connectors`, its form drawn
+    /// from the connector's definition.
+    Connector,
 }
 
 /// Shown only while another parameter holds one of `values`.
@@ -264,10 +275,17 @@ const MERGE: &[ParamSpec] = &[
 ];
 
 const WAIT: &[ParamSpec] = &[
-    p("mode", select(&["duration", "until"]), "\"duration\"").literal(),
+    p("mode", select(&["duration", "until", "webhook"]), "\"duration\"").literal(),
     p("amount", COUNT, "5").when("mode", &["duration"]),
     p("unit", select(&["seconds", "minutes", "hours", "days"]), "\"seconds\"").when("mode", &["duration"]),
     p("until", text("2026-12-31T09:00"), "\"\"").when("mode", &["until"]),
+    p("timeoutHours", COUNT, "0").literal().when("mode", &["webhook"]),
+];
+
+const APPROVAL: &[ParamSpec] = &[
+    p("message", long_text("¿Publicar el reporte de {{ $json.fecha }}?"), "\"\""),
+    p("timeoutHours", COUNT, "0").literal(),
+    p("onTimeout", select(&["reject", "fail"]), "\"reject\"").literal(),
 ];
 
 const STOP: &[ParamSpec] = &[p("message", text(""), "\"\"")];
@@ -564,6 +582,399 @@ const AGENT_TASK: &[ParamSpec] = &[
     p("waitEnd", Kind::Boolean, "true").literal(),
 ];
 
+// ------------------------------------------------------------------ milestone 4
+
+const EACH: ParamSpec = p("runFor", select(&["each", "once"]), "\"each\"").literal();
+const ONCE: ParamSpec = p("runFor", select(&["once", "each"]), "\"once\"").literal();
+const HTTP_CREDENTIAL: ParamSpec = p("credential", Kind::Credential { kinds: &["bearer", "basic", "header", "query"] }, "\"\"").literal();
+const HEADERS: ParamSpec = p("headers", Kind::KeyValue, "[]");
+const VERIFY_SSL: ParamSpec = p("verifySsl", Kind::Boolean, "true");
+const TIMEOUT_MS: ParamSpec = p("timeoutMs", COUNT, "30000");
+const TIMEOUT_SEC: ParamSpec = p("timeoutSec", Kind::Number { min: Some(0.1), max: None }, "10");
+const SQL_ENGINES: &[&str] = &["postgres", "supabase", "sqlserver", "iris", "mysql", "mariadb", "sqlite", "oracle", "jdbc"];
+const FILE_HOSTS: &[&str] = &["ssh", "sftp", "ftp", "ftps", "smb"];
+const STORAGE_HOSTS: &[&str] = &["s3", "azure", "azure_blob", "azure_files"];
+
+const GRAPHQL: &[ParamSpec] = &[
+    p("url", text("https://api.example.com/graphql"), "\"\""),
+    HTTP_CREDENTIAL,
+    HEADERS,
+    p("operation", select(&["query", "introspect"]), "\"query\"").literal(),
+    p("queryText", long_text("query Pedidos($estado: String) { pedidos(estado: $estado) { id total } }"), "\"\"").when("operation", &["query"]),
+    p("variables", Kind::Code { lang: "json" }, "\"{}\"").when("operation", &["query"]),
+    p("operationName", text(""), "\"\"").when("operation", &["query"]),
+    p("failOnErrors", Kind::Boolean, "false").literal().when("operation", &["query"]),
+    TIMEOUT_MS,
+    VERIFY_SSL,
+    EACH,
+];
+
+const WEBSOCKET: &[ParamSpec] = &[
+    p("url", text("wss://example.com/socket"), "\"\""),
+    HTTP_CREDENTIAL,
+    HEADERS,
+    p("subprotocols", Kind::Strings, "[]"),
+    p("messages", Kind::Strings, "[]"),
+    p("maxMessages", COUNT, "1"),
+    p("untilContains", text(""), "\"\""),
+    TIMEOUT_SEC,
+    p("requireAnswer", Kind::Boolean, "false").literal(),
+    VERIFY_SSL,
+    EACH,
+];
+
+const SOCKETIO: &[ParamSpec] = &[
+    p("url", text("https://example.com"), "\"\""),
+    p("socketPath", text("/socket.io"), "\"/socket.io\""),
+    p("namespace", text("/"), "\"/\""),
+    p("version", raw_select(&["v4", "v3"]), "\"v4\"").literal(),
+    HTTP_CREDENTIAL,
+    HEADERS,
+    p("auth", Kind::Code { lang: "json" }, "\"\""),
+    p("event", text("pedido:nuevo"), "\"\""),
+    p("payload", Kind::Code { lang: "json" }, "\"\""),
+    p("waitAck", Kind::Boolean, "false"),
+    p("listen", text("pedido:estado"), "\"\""),
+    p("maxMessages", COUNT, "0"),
+    TIMEOUT_SEC,
+    EACH,
+];
+
+const GRPC: &[ParamSpec] = &[
+    p("endpoint", text("https://api.example.com:443"), "\"\""),
+    p("source", select(&["reflection", "proto"]), "\"reflection\"").literal(),
+    p("protoPath", text("~/protos/pedidos.proto"), "\"\"").when("source", &["proto"]),
+    p("importPaths", Kind::Strings, "[]").when("source", &["proto"]),
+    p("service", text("pedidos.v1.Pedidos"), "\"\""),
+    p("method", text("Obtener"), "\"\""),
+    p("message", Kind::Code { lang: "json" }, "\"{}\""),
+    p("metadata", Kind::KeyValue, "[]"),
+    p("credential", Kind::Credential { kinds: &["bearer", "header"] }, "\"\"").literal(),
+    p("tls", Kind::Boolean, "true"),
+    TIMEOUT_MS,
+    EACH,
+];
+
+const MQTT: &[ParamSpec] = &[
+    p("url", text("mqtt://broker.example.com:1883"), "\"\""),
+    p("credential", Kind::Credential { kinds: &["basic"] }, "\"\"").literal(),
+    p("clientId", text(""), "\"\""),
+    p("operation", select(&["publish", "subscribe"]), "\"publish\"").literal(),
+    p("topic", text("sensores/temperatura"), "\"\""),
+    p("payload", long_text("{{ JSON.stringify($json) }}"), "\"\"").when("operation", &["publish"]),
+    p("qos", Kind::Number { min: Some(0.0), max: Some(2.0) }, "0"),
+    p("retain", Kind::Boolean, "false").when("operation", &["publish"]),
+    p("maxMessages", COUNT, "1").when("operation", &["subscribe"]),
+    TIMEOUT_SEC.when("operation", &["subscribe"]),
+    EACH,
+];
+
+const SSE: &[ParamSpec] = &[
+    p("url", text("https://example.com/events"), "\"\""),
+    HTTP_CREDENTIAL,
+    HEADERS,
+    p("eventName", text(""), "\"\""),
+    p("untilEvent", text("done"), "\"\""),
+    p("maxMessages", COUNT, "10"),
+    p("timeoutSec", Kind::Number { min: Some(0.1), max: None }, "30"),
+    VERIFY_SSL,
+    ONCE,
+];
+
+const DOWNLOAD: &[ParamSpec] = &[
+    p("url", text("https://example.com/reporte.pdf"), "\"\""),
+    HTTP_CREDENTIAL,
+    HEADERS,
+    p("folder", Kind::Folder, "\"\""),
+    p("fileName", text(""), "\"\""),
+    p("overwrite", Kind::Boolean, "false"),
+    VERIFY_SSL,
+    EACH,
+];
+
+const EMAIL: &[ParamSpec] = &[
+    p("credential", Kind::Credential { kinds: &["smtp"] }, "\"\"").literal(),
+    p("from", text("Flujos <flujos@example.com>"), "\"\""),
+    p("to", text("equipo@example.com"), "\"\""),
+    p("cc", text(""), "\"\""),
+    p("bcc", text(""), "\"\""),
+    p("replyTo", text(""), "\"\""),
+    p("subject", text(""), "\"\""),
+    p("body", long_text(""), "\"\""),
+    p("html", Kind::Boolean, "false"),
+    p("attachments", Kind::Strings, "[]"),
+    EACH,
+];
+
+const TRANSFER_OPS: &[&str] = &["list", "download", "upload", "rename", "delete", "mkdir"];
+const TRANSFER: &[ParamSpec] = &[
+    p("host", Kind::RemoteHost { kinds: FILE_HOSTS }, "\"\"").literal(),
+    p("operation", select(TRANSFER_OPS), "\"list\"").literal(),
+    p("remotePath", text("/srv/exportes"), "\"\""),
+    p("prefix", text(""), "\"\"").when("operation", &["list"]),
+    p("localPath", text("~/Descargas/reporte.csv"), "\"\"").when("operation", &["download", "upload"]),
+    p("overwrite", Kind::Boolean, "false").when("operation", &["download"]),
+    p("newPath", text(""), "\"\"").when("operation", &["rename"]),
+    p("isFolder", Kind::Boolean, "false").when("operation", &["delete"]),
+];
+
+const STORAGE: &[ParamSpec] = &[
+    p("host", Kind::RemoteHost { kinds: STORAGE_HOSTS }, "\"\"").literal(),
+    p("operation", select(TRANSFER_OPS), "\"list\"").literal(),
+    p("remotePath", text("mi-bucket/reportes"), "\"\""),
+    p("prefix", text(""), "\"\"").when("operation", &["list"]),
+    p("localPath", text("~/Descargas/reporte.csv"), "\"\"").when("operation", &["download", "upload"]),
+    p("overwrite", Kind::Boolean, "false").when("operation", &["download"]),
+    p("newPath", text(""), "\"\"").when("operation", &["rename"]),
+    p("isFolder", Kind::Boolean, "false").when("operation", &["delete"]),
+];
+
+const SSH: &[ParamSpec] = &[
+    p("host", Kind::RemoteHost { kinds: &["ssh"] }, "\"\"").literal(),
+    p("command", Kind::Code { lang: "shell" }, "\"\""),
+    ONCE,
+    OUTPUT,
+    FAIL_ON_EXIT,
+];
+
+const DOCKER: &[ParamSpec] = &[
+    p("mode", select(&["runImage", "exec", "compose"]), "\"runImage\"").literal(),
+    p("image", text("alpine:3"), "\"\"").when("mode", &["runImage"]),
+    p("args", Kind::Strings, "[]").when("mode", &["runImage"]),
+    p("env", Kind::KeyValue, "[]").when("mode", &["runImage", "exec"]),
+    p("volumes", Kind::KeyValue, "[]").when("mode", &["runImage"]),
+    p("workdir", text("/app"), "\"\"").when("mode", &["runImage"]),
+    p("network", text(""), "\"\"").when("mode", &["runImage"]),
+    p("remove", Kind::Boolean, "true").when("mode", &["runImage"]),
+    p("container", text("api"), "\"\"").when("mode", &["exec"]),
+    p("command", Kind::Code { lang: "shell" }, "\"\"").when("mode", &["exec"]),
+    p("composeFile", text("~/proyectos/api/compose.yaml"), "\"\"").when("mode", &["compose"]),
+    p("composeAction", select(&["up", "down", "ps", "logs"]), "\"up\"").when("mode", &["compose"]),
+    ONCE,
+    OUTPUT,
+    FAIL_ON_EXIT,
+];
+
+const SQL: &[ParamSpec] = &[
+    p("connection", Kind::DbConnection { kinds: SQL_ENGINES }, "\"\"").literal(),
+    p("database", text(""), "\"\"").literal(),
+    p("schema", text(""), "\"\"").literal(),
+    p("queryText", Kind::Code { lang: "sql" }, "\"\""),
+    p("queryParams", Kind::Strings, "[]"),
+    p("maxRows", COUNT, "10000").literal(),
+    EACH,
+];
+
+const MONGO: &[ParamSpec] = &[
+    p("connection", Kind::DbConnection { kinds: &["mongodb"] }, "\"\"").literal(),
+    p("database", text(""), "\"\"").literal(),
+    p("queryText", Kind::Code { lang: "javascript" }, "\"db.coleccion.find({})\""),
+    p("maxRows", COUNT, "10000").literal(),
+    EACH,
+];
+
+const REDIS: &[ParamSpec] = &[
+    p("connection", Kind::DbConnection { kinds: &["redis"] }, "\"\"").literal(),
+    p("queryText", Kind::Code { lang: "shell" }, "\"\""),
+    EACH,
+];
+
+const SHEET: &[ParamSpec] = &[
+    p("operation", select(&["read", "write"]), "\"read\"").literal(),
+    p("path", text("~/Documentos/pedidos.xlsx"), "\"\""),
+    p("fileFormat", select(&["auto", "csv", "tsv", "xlsx"]), "\"auto\"").literal(),
+    p("sheet", text(""), "\"\""),
+    p("header", Kind::Boolean, "true").literal(),
+    p("delimiter", text(","), "\",\"").literal().when("fileFormat", &["auto", "csv"]),
+    p("limit", COUNT, "0").when("operation", &["read"]),
+    p("createFolders", Kind::Boolean, "true").literal().when("operation", &["write"]),
+];
+
+const FILE_RW: &[ParamSpec] = &[
+    p("operation", select(&["read", "write", "addToEnd"]), "\"read\"").literal(),
+    p("path", text("~/Documentos/notas.txt"), "\"\""),
+    p("readAs", select(&["text", "json", "lines", "base64"]), "\"text\"").literal().when("operation", &["read"]),
+    p("target", text("content"), "\"content\"").literal().when("operation", &["read"]),
+    p("content", long_text("{{ $json.text }}"), "\"\"").when("operation", &["write", "addToEnd"]),
+    p("writeAs", select(&["text", "json", "base64"]), "\"text\"").literal().when("operation", &["write", "addToEnd"]),
+    p("createFolders", Kind::Boolean, "true").literal().when("operation", &["write", "addToEnd"]),
+];
+
+const LIST: &[ParamSpec] = &[
+    p("folder", Kind::Folder, "\"\""),
+    p("pattern", text("*.csv"), "\"\""),
+    p("recursive", Kind::Boolean, "false"),
+    p("entryKinds", select(&["files", "folders", "both"]), "\"files\"").literal(),
+    p("newerThanMinutes", COUNT, "0"),
+    p("sortBy", select(&["name", "modified", "size"]), "\"name\"").literal(),
+    p("limit", COUNT, "0"),
+];
+
+const MOVE: &[ParamSpec] = &[
+    p("operation", select(&["move", "copy", "rename", "trash"]), "\"move\"").literal(),
+    p("source", text("{{ $json.file.path }}"), "\"\""),
+    p("destPath", text("~/Documentos/procesados/"), "\"\"").when("operation", &["move", "copy"]),
+    p("newName", text(""), "\"\"").when("operation", &["rename"]),
+    p("overwrite", Kind::Boolean, "false").when("operation", &["move", "copy", "rename"]),
+];
+
+const GIT_OPS: &[&str] = &["status", "makeCommit", "pull", "push", "fetch", "checkout", "createTag", "diff", "log"];
+const GIT: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("repoPath", Kind::Folder, "\"\"").literal(),
+    p("operation", select(GIT_OPS), "\"status\"").literal(),
+    p("message", text(""), "\"\"").when("operation", &["makeCommit", "createTag"]),
+    p("stageAll", Kind::Boolean, "true").when("operation", &["makeCommit"]),
+    p("remote", text("origin"), "\"origin\"").when("operation", &["pull", "push", "fetch"]),
+    p("branch", text(""), "\"\"").when("operation", &["push", "checkout"]),
+    p("create", Kind::Boolean, "false").when("operation", &["checkout"]),
+    p("pushTags", Kind::Boolean, "false").when("operation", &["push"]),
+    p("tag", text("v1.0.0"), "\"\"").when("operation", &["createTag"]),
+    p("base", text("main"), "\"\"").when("operation", &["diff"]),
+    p("maxCount", COUNT, "20").when("operation", &["log"]),
+];
+
+const PULL_REQUEST: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("operation", select(&["create", "comment", "merge"]), "\"create\"").literal(),
+    p("title", text(""), "\"\"").when("operation", &["create"]),
+    p("description", long_text(""), "\"\"").when("operation", &["create"]),
+    p("sourceBranch", text(""), "\"\"").when("operation", &["create"]),
+    p("targetBranch", text("main"), "\"main\"").when("operation", &["create"]),
+    p("draft", Kind::Boolean, "false").when("operation", &["create"]),
+    p("prId", text("{{ $json.id }}"), "\"\"").when("operation", &["comment", "merge"]),
+    p("body", long_text(""), "\"\"").when("operation", &["comment"]),
+    p("mergeMethod", select(&["merge", "squash", "rebase"]), "\"merge\"").when("operation", &["merge"]),
+    p("deleteSourceBranch", Kind::Boolean, "false").when("operation", &["merge"]),
+];
+
+const PIPELINE_RUN: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("definitionId", text("ci.yml"), "\"\""),
+    p("ref", text(""), "\"\""),
+    p("inputs", Kind::KeyValue, "[]"),
+    p("variables", Kind::KeyValue, "[]"),
+    p("waitEnd", Kind::Boolean, "true").literal(),
+    p("timeoutMin", COUNT, "60").literal(),
+    p("failOnFailure", Kind::Boolean, "true").literal(),
+];
+
+const NOTE: &[ParamSpec] = &[
+    p("operation", select(&["create", "addToEnd"]), "\"create\"").literal(),
+    p("title", text(""), "\"\"").when("operation", &["create"]),
+    p("tags", text(""), "\"\"").when("operation", &["create"]),
+    p("note", Kind::Note, "\"\"").literal().when("operation", &["addToEnd"]),
+    p("content", long_text(""), "\"\""),
+];
+
+const REVIEWER: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("prepare", text(""), "\"\"").literal(),
+    p("build", text(""), "\"\"").literal(),
+    p("test", text(""), "\"\"").literal(),
+    p("exclusions", text(""), "\"\"").literal(),
+    p("failOnGate", Kind::Boolean, "false").literal(),
+];
+
+const OPEN: &[ParamSpec] = &[
+    p("openKind", select(&["url", "file", "folder", "view"]), "\"url\"").literal(),
+    p("openTarget", text("https://example.com"), "\"\""),
+];
+
+const TERMINAL: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("cwd", Kind::Folder, "\"\""),
+    p("command", Kind::Code { lang: "shell" }, "\"\""),
+];
+
+const CLIPBOARD: &[ParamSpec] = &[p("text", long_text("{{ $json.text }}"), "\"={{ $json.text }}\"")];
+
+const VAULT: &[ParamSpec] = &[
+    p("item", Kind::VaultItem, "\"\"").literal(),
+    p("itemField", text("password"), "\"password\"").literal(),
+    p("target", text("secret"), "\"secret\"").literal(),
+];
+
+const RATE_LIMIT: &[ParamSpec] = &[
+    p("amount", Kind::Number { min: Some(1.0), max: None }, "10").literal(),
+    p("per", select(&["second", "minute", "hour"]), "\"second\"").literal(),
+    p("overflow", select(&["queue", "drop"]), "\"queue\"").literal(),
+];
+
+const CONVERT_OPS: &[&str] = &["toCsv", "fromCsv", "toXml", "fromXml", "toYaml", "fromYaml", "markdownToHtml", "toJsonText", "fromJsonText"];
+const CONVERT: &[ParamSpec] = &[
+    p("operation", select(CONVERT_OPS), "\"toCsv\"").literal(),
+    p("inputField", text("data"), "\"\"").literal(),
+    p("target", text(""), "\"\"").literal(),
+    p("delimiter", text(","), "\",\"").literal().when("operation", &["toCsv", "fromCsv"]),
+    p("header", Kind::Boolean, "true").literal().when("operation", &["toCsv", "fromCsv"]),
+    p("allItems", Kind::Boolean, "true").literal().when("operation", &["toCsv"]),
+    p("xmlRoot", text("root"), "\"\"").literal().when("operation", &["toXml"]),
+    p("pretty", Kind::Boolean, "false").literal().when("operation", &["toJsonText"]),
+];
+
+const CRYPTO: &[ParamSpec] = &[
+    p("operation", select(&["hash", "hmac", "uuid", "base64Encode", "base64Decode", "random"]), "\"hash\"").literal(),
+    p("value", text("{{ $json.text }}"), "\"\"").when("operation", &["hash", "hmac", "base64Encode", "base64Decode"]),
+    p("algorithm", raw_select(&["sha256", "sha512", "sha1", "md5"]), "\"sha256\"").literal().when("operation", &["hash", "hmac"]),
+    p("credential", Kind::Credential { kinds: &["hmac"] }, "\"\"").literal().when("operation", &["hmac"]),
+    p("secret", text(""), "\"\"").when("operation", &["hmac"]),
+    p("encoding", select(&["hex", "base64"]), "\"hex\"").literal().when("operation", &["hash", "hmac", "random"]),
+    p("length", COUNT, "16").when("operation", &["random"]),
+    p("target", text(""), "\"\"").literal(),
+];
+
+const COMPRESS: &[ParamSpec] = &[
+    p("operation", select(&["zip", "unzip", "tarGz", "untarGz", "gzip", "gunzip"]), "\"zip\"").literal(),
+    p("source", text("{{ $json.file.path }}"), "\"\""),
+    p("sources", Kind::Strings, "[]").when("operation", &["zip", "tarGz"]),
+    p("destPath", text(""), "\"\""),
+    p("target", text(""), "\"\"").literal(),
+];
+
+const COMPARE: &[ParamSpec] = &[
+    p("keyA", text("id"), "\"id\"").literal(),
+    p("keyB", text(""), "\"\"").literal(),
+    p("fields", Kind::Strings, "[]").literal(),
+];
+
+const NOTEBOOK: &[ParamSpec] = &[
+    p("path", text("~/Notebooks/informe.ipynb"), "\"\""),
+    p("kernelName", text("python3"), "\"\"").literal(),
+    p("notebookParams", Kind::Code { lang: "json" }, "\"{}\""),
+    p("saveRun", select(&["none", "overwrite", "saveCopy"]), "\"none\"").literal(),
+    p("copyPath", text("~/Notebooks/informe-ejecutado.ipynb"), "\"\"").when("saveRun", &["saveCopy"]),
+    RUN_FOR,
+];
+
+const CONNECTOR: &[ParamSpec] = &[
+    p("call", Kind::Connector, r#"{"connector":"slack","operation":"postMessage","fields":{}}"#).literal(),
+    // Narrowed to what the chosen connector takes (`Connector::credential_kinds`) by the form.
+    p("credential", Kind::Credential { kinds: &["bearer", "basic", "webhook"] }, "\"\"").literal(),
+    TIMEOUT_MS,
+    EACH,
+];
+
+const PHONE: &[ParamSpec] = &[p("label", text("Publicar el reporte"), "\"\"").literal()];
+
+const LOOP: &[ParamSpec] = &[p("batchSize", Kind::Number { min: Some(1.0), max: None }, "10").literal()];
+
+const LISTEN: &[ParamSpec] = &[
+    p("transport", select(&["websocket", "socketio", "mqtt", "sse"]), "\"websocket\"").literal(),
+    p("url", text("wss://example.com/socket"), "\"\"").literal(),
+    p("credential", Kind::Credential { kinds: &["bearer", "basic", "header", "query"] }, "\"\"").literal(),
+    p("subscribeMessage", text(""), "\"\"").literal().when("transport", &["websocket"]),
+    p("topic", text("sensores/#"), "\"\"").literal().when("transport", &["mqtt"]),
+    p("qos", Kind::Number { min: Some(0.0), max: Some(2.0) }, "0").literal().when("transport", &["mqtt"]),
+    p("clientId", text(""), "\"\"").literal().when("transport", &["mqtt"]),
+    p("socketPath", text("/socket.io"), "\"/socket.io\"").literal().when("transport", &["socketio"]),
+    p("namespace", text("/"), "\"/\"").literal().when("transport", &["socketio"]),
+    p("version", raw_select(&["v4", "v3"]), "\"v4\"").literal().when("transport", &["socketio"]),
+    p("auth", Kind::Code { lang: "json" }, "\"\"").literal().when("transport", &["socketio"]),
+    p("event", text(""), "\"\"").literal().when("transport", &["socketio", "sse"]),
+    p("reconnect", Kind::Boolean, "true").literal(),
+];
+
 /// The parameters of a node type; empty for a type that has none (or none yet).
 pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
     match type_id {
@@ -610,6 +1021,45 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "ai.review" => REVIEW,
         "ai.commit" => COMMIT,
         "app.agent" => AGENT_TASK,
+        "net.graphql" => GRAPHQL,
+        "net.websocket" => WEBSOCKET,
+        "net.socketio" => SOCKETIO,
+        "net.grpc" => GRPC,
+        "net.mqtt" => MQTT,
+        "net.sse" => SSE,
+        "net.download" => DOWNLOAD,
+        "net.email" => EMAIL,
+        "net.transfer" => TRANSFER,
+        "net.storage" => STORAGE,
+        "code.ssh" => SSH,
+        "code.docker" => DOCKER,
+        "data.sql" => SQL,
+        "data.mongo" => MONGO,
+        "data.redis" => REDIS,
+        "data.sheet" => SHEET,
+        "files.file" => FILE_RW,
+        "files.list" => LIST,
+        "files.move" => MOVE,
+        "files.git" => GIT,
+        "files.pr" => PULL_REQUEST,
+        "files.pipeline" => PIPELINE_RUN,
+        "app.note" => NOTE,
+        "app.reviewer" => REVIEWER,
+        "app.open" => OPEN,
+        "app.terminal" => TERMINAL,
+        "app.clipboard" => CLIPBOARD,
+        "app.vault" => VAULT,
+        "logic.ratelimit" => RATE_LIMIT,
+        "transform.convert" => CONVERT,
+        "transform.crypto" => CRYPTO,
+        "transform.compress" => COMPRESS,
+        "transform.compare" => COMPARE,
+        "trigger.listen" => LISTEN,
+        "logic.loop" => LOOP,
+        "logic.approval" => APPROVAL,
+        "trigger.phone" => PHONE,
+        "net.connector" => CONNECTOR,
+        "code.notebook" => NOTEBOOK,
         _ => &[],
     }
 }

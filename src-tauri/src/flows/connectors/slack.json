@@ -1,0 +1,44 @@
+{
+  "id": "slack",
+  "name": "Slack",
+  "baseUrl": "https://slack.com/api",
+  "auth": "bearer",
+  "authHint": { "es": "Token de bot (xoxb-…) como credencial Bearer", "en": "Bot token (xoxb-…) as a Bearer credential" },
+  "okField": "ok",
+  "errorField": "error",
+  "operations": [
+    {
+      "id": "postMessage",
+      "name": { "es": "Enviar un mensaje", "en": "Send a message" },
+      "method": "POST",
+      "path": "/chat.postMessage",
+      "fields": [
+        { "name": "channel", "label": { "es": "Canal", "en": "Channel" }, "placeholder": "#general", "required": true },
+        { "name": "text", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true },
+        { "name": "thread_ts", "label": { "es": "Responder en el hilo (ts)", "en": "Reply in thread (ts)" } }
+      ],
+      "body": { "channel": "{{channel}}", "text": "{{text}}", "thread_ts": "{{thread_ts}}" }
+    },
+    {
+      "id": "listChannels",
+      "name": { "es": "Listar canales", "en": "List channels" },
+      "method": "GET",
+      "path": "/conversations.list",
+      "query": { "limit": "200", "exclude_archived": "true" },
+      "fields": [],
+      "result": "channels"
+    },
+    {
+      "id": "history",
+      "name": { "es": "Leer mensajes de un canal", "en": "Read a channel's messages" },
+      "method": "GET",
+      "path": "/conversations.history",
+      "query": { "channel": "{{channel}}", "limit": "{{limit}}" },
+      "fields": [
+        { "name": "channel", "label": { "es": "ID del canal", "en": "Channel ID" }, "placeholder": "C0123456", "required": true },
+        { "name": "limit", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "50" }
+      ],
+      "result": "messages"
+    }
+  ]
+}

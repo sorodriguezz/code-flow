@@ -97,6 +97,11 @@ export const AI_TASKS: AiTaskDef[] = [
   // its own engine runs on that one; this row is the default for the rest — and since an agent node
   // may edit, it wants an engine with tools.
   { key: "flows", labelKey: "task.flows", hintKey: "task.flowsHint", agenticOnly: true, area: "other", modelForKey: "task.flowsModelFor" },
+  // Writing or changing a flow from a description (`flows::builder`). Text-only: the catalogue goes
+  // on stdin and the answer is JSON checked before it is drawn, so it routes anywhere. Its own row
+  // rather than `flows`': picking a strong model to build with must not move every automatic AI
+  // node onto it.
+  { key: "flow_builder", labelKey: "task.flowBuilder", hintKey: "task.flowBuilderHint", area: "other", modelForKey: "task.flowBuilderModelFor" },
 ];
 
 export const AI_TASK_KEYS = AI_TASKS.map((t) => t.key);

@@ -11,9 +11,17 @@
 
 mod ai;
 mod app;
+mod connector;
+mod data;
+mod files;
+mod formats;
 mod http;
+mod integrations;
 mod logic;
+mod net;
+mod notebook;
 mod process;
+mod remote;
 mod transform;
 
 use std::sync::Arc;
@@ -30,6 +38,14 @@ use super::run::{Item, Ports};
 use super::spec::FlowNode;
 
 pub use process::shutdown as shutdown_processes;
+
+/// A path as a node writes it — `~` for the home folder.
+/// What a decided wait hands on — for a run picking up after a restart. See `logic::decided_ports`.
+pub use logic::decided_ports;
+
+pub fn expand_path(path: &str) -> std::path::PathBuf {
+    files::expand(path)
+}
 
 /// How long one expression job may take. Expressions are meant to be one-liners; a Code node gets
 /// its own, longer limit.
@@ -117,7 +133,7 @@ impl NodeCtx {
         json!({
             "node": self.node.name,
             "flow": {"id": self.run.flow_id, "name": self.run.flow_name, "active": false, "workspaceId": self.run.workspace_id},
-            "execution": {"id": self.run.run_id, "mode": self.run.mode},
+            "execution": {"id": self.run.run_id, "mode": self.run.mode, "resumeUrl": self.run.host.resume_url()},
             "vars": self.run.vars,
             "timezone": self.run.timezone,
             "runIndex": 0,
@@ -251,7 +267,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "code.shell" | "code.python" | "code.node" | "code.command" | "code.script" => process::execute(ctx).await,
         "code.js" => code(ctx).await,
         "net.http" => http::execute(ctx).await,
-        "logic.if" | "logic.switch" | "logic.merge" | "logic.wait" | "logic.stop" | "logic.noop" => {
+        "logic.if" | "logic.switch" | "logic.merge" | "logic.wait" | "logic.stop" | "logic.noop" | "logic.approval" => {
             logic::execute(ctx).await
         }
         "transform.set" | "transform.filter" | "transform.sort" | "transform.split" | "transform.aggregate"
@@ -260,6 +276,19 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "logic.subflow" => logic::subflow(ctx).await,
         "ai.agent" | "ai.local" | "ai.classify" | "ai.extract" | "ai.summarize" | "ai.review" | "ai.commit" | "app.agent" => {
             ai::execute(ctx).await
+        }
+        "files.file" | "files.list" | "files.move" | "files.git" | "code.docker" => files::execute(ctx).await,
+        "transform.convert" | "transform.crypto" | "transform.compress" | "transform.compare" => formats::execute(ctx).await,
+        "logic.ratelimit" => logic::ratelimit(ctx).await,
+        "net.graphql" | "net.websocket" | "net.socketio" | "net.grpc" | "net.mqtt" | "net.sse" | "net.download" | "net.email" => {
+            net::execute(ctx).await
+        }
+        "net.connector" => connector::execute(ctx).await,
+        "code.notebook" => notebook::execute(ctx).await,
+        "data.sql" | "data.mongo" | "data.redis" | "data.sheet" => data::execute(ctx).await,
+        "code.ssh" | "net.transfer" | "net.storage" => remote::execute(ctx).await,
+        "files.pr" | "files.pipeline" | "app.note" | "app.reviewer" | "app.open" | "app.terminal" | "app.clipboard" | "app.vault" => {
+            integrations::execute(ctx).await
         }
         other => Err(NodeError::failed(format!("No executor for {other}"))),
     }

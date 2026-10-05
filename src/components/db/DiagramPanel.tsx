@@ -35,6 +35,7 @@ import {
 } from "../../lib/db/erLayout";
 import { clip, edgeEnds, edgePath, rasterize, standaloneSvg } from "../../lib/diagramSvg";
 import { schemaToDbml } from "../../lib/dbml/fromSchema";
+import { useFindShortcut } from "../../lib/useFindShortcut";
 import { FORMAT_DBML } from "../../lib/diagrams/doc";
 import { useDbStore, type DbDiagramTab } from "../../state/dbStore";
 import { ensureDiagramsStoreLoaded, useDiagramsStore } from "../../state/diagramsStore";
@@ -71,6 +72,9 @@ type Highlight = "none" | "noPrimaryKey" | "isolated";
 export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
   const t = useT();
   const store = useDbStore.getState();
+  const findRef = useRef<HTMLInputElement>(null);
+  // ⌘F / Ctrl+F is the find box above the schema, not the webview's find bar.
+  useFindShortcut(findRef);
   /**
    * Everything about how this canvas is being *read* — the column mode, the density, the boxes
    * dragged by hand, the selection, the search and the highlight — on the tab record.
@@ -454,6 +458,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
             className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
           />
           <input
+            ref={findRef}
             value={query}
             onChange={(e) => setUi(tab.id, { query: e.target.value })}
             placeholder={t("db.diagram.findPlaceholder")}
@@ -669,7 +674,6 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
                 // Double-click opens the rows: the diagram is where you work out which table you
                 // want, and the next thing you want is what is in it.
                 onOpen={() =>
-                  !node.external &&
                   store.openData(
                     tab.connectionId,
                     {
@@ -760,11 +764,7 @@ function TableBox({
   onPointerDown: (e: React.PointerEvent) => void;
   onOpen: () => void;
 }) {
-  const accent = node.external
-    ? "var(--cf-text-muted)"
-    : node.kind === "view"
-      ? "var(--cf-text-muted)"
-      : "var(--cf-accent)";
+  const accent = node.kind === "view" ? "var(--cf-text-muted)" : "var(--cf-accent)";
   const border = flagged
     ? flagTone === "noPrimaryKey"
       ? "var(--cf-warning)"
@@ -789,10 +789,10 @@ function TableBox({
         stroke={border}
         strokeWidth={selected || flagged ? 1.8 : 1}
       />
-      <rect width={node.width} height={26} rx={7} fill={accent} fillOpacity={node.external ? 0.08 : 0.14} />
+      <rect width={node.width} height={26} rx={7} fill={accent} fillOpacity={0.14} />
       {/* Squares off the bottom corners of the header, which `rx` would otherwise round into the
           first column row. */}
-      <rect y={19} width={node.width} height={7} fill={accent} fillOpacity={node.external ? 0.08 : 0.14} />
+      <rect y={19} width={node.width} height={7} fill={accent} fillOpacity={0.14} />
 
       <text x={9} y={17} fontSize={11.5} fontWeight={600} fill="var(--cf-text)">
         {clip(node.name, node.width - 60)}
@@ -806,11 +806,6 @@ function TableBox({
           fill="var(--cf-text-muted)"
         >
           {`~${formatCount(node.rowEstimate)}`}
-        </text>
-      )}
-      {node.external && (
-        <text x={node.width - 8} y={17} fontSize={9} textAnchor="end" fill="var(--cf-text-muted)">
-          ↗
         </text>
       )}
 

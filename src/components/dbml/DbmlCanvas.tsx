@@ -44,7 +44,7 @@ import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 // a fourth colour family beside the badge legend above, and the reason they may reuse the semantic
 // tokens the badges could not is written out there.
 import { LEGEND, MARK_COLOUR, markMenuItems, markNamesOf } from "./markChrome";
-import { LaserLayer } from "../diagrams/Laser";
+import { LaserLayer, type LaserPan } from "../diagrams/Laser";
 import { useT } from "../../state/languageStore";
 import type { DbDiagramColumn } from "../../types/database";
 import type { DiagramColumnMode, DiagramDensity, DiagramNode } from "../../lib/db/erLayout";
@@ -650,6 +650,19 @@ export const DbmlCanvas = forwardRef<
     },
     [],
   );
+
+  /** The laser's right-button drag — the same pan a drag on the background does without it. */
+  const laserPan = useMemo<LaserPan>(() => {
+    let from = { x: 0, y: 0 };
+    return {
+      start: () => {
+        from = { x: viewRef.current.x, y: viewRef.current.y };
+        setNoteTip(null);
+      },
+      move: (dx, dy) => applyView({ ...viewRef.current, x: from.x + dx, y: from.y + dy }),
+      end: commitView,
+    };
+  }, [applyView, commitView]);
 
   const fit = useCallback(() => {
     const frame = frameRef.current;
@@ -1391,6 +1404,7 @@ export const DbmlCanvas = forwardRef<
         <LaserLayer
           colour={laser}
           onPress={() => frameRef.current?.focus({ preventScroll: true })}
+          pan={laserPan}
         />
       )}
 

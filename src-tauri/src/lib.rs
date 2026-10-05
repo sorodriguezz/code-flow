@@ -103,6 +103,21 @@ use datasource::DbRegistry;
 use terminal::TerminalRegistry;
 use watcher::WatcherRegistry;
 
+/// What the login item passes, so a launch at login can be told from one by hand.
+const AUTOSTARTED_FLAG: &str = "--autostarted";
+
+/// Whether this launch starts without a window: at login, with Flujos' "without opening the window"
+/// on. The app then runs from the tray — triggers armed, schedules firing — and opening CodeFlow
+/// (the dock, the tray, a second launch through `single_instance`) shows the window it kept hidden.
+fn launched_in_background(app: &tauri::AppHandle) -> bool {
+    if !std::env::args().any(|arg| arg == AUTOSTARTED_FLAG) {
+        return false;
+    }
+    let db = app.state::<db::Db>();
+    let Ok(conn) = db.0.lock() else { return false };
+    db::queries::get_setting(&conn, "flows_background_at_login").ok().flatten().as_deref() == Some("1")
+}
+
 /// Hides the window for the "keep running in the background" close path.
 ///
 /// macOS gives a fullscreened window its own Space, and hiding it there leaves that Space
@@ -393,9 +408,11 @@ pub fn run() {
         // a habit around — and wiring the setting is a frontend change this backend does not own.
         // `MacosLauncher::LaunchAgent` because the alternative (a login item) is the one macOS
         // shows in a list the user cannot explain, under a name that is not the app's.
+        // Launched at login, the app is told so (`--autostarted`), and stays in the tray without a
+        // window when Flujos asked for that — see `launched_in_background`.
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![AUTOSTARTED_FLAG]),
         ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -469,6 +486,7 @@ pub fn run() {
             // The active flows' triggers: schedules, webhooks, watchers, pollers, chords. After the
             // takeover check, so a launch that is only answering a recovery question arms nothing.
             flows::triggers::start(app.handle());
+            flows::waits::arm(app.handle());
             // The main window, built here from its own entry in `tauri.conf.json` (which says
             // `"create": false`) rather than by Tauri before `setup` runs — the one difference being
             // `enable_clipboard_access`, which that config has no field for. Without it WebView2 (and
@@ -506,7 +524,7 @@ pub fn run() {
             // hidden (`"visible": false` in `tauri.conf.json`) so that being resized and maximized
             // back to where the last session left it does not happen in front of the user, and
             // this is what ends that — a `?` above it would leave the app running with no window.
-            window_state::restore(app.handle());
+            window_state::restore_with(app.handle(), !launched_in_background(app.handle()));
             // From here the frontend has ~30 s to say it rendered; a release whose window never comes
             // up is then offered an update from Rust, since its own update check never ran.
             boot_guard::arm_watchdog(app.handle());
@@ -1439,6 +1457,16 @@ pub fn run() {
             commands::notes_cmd::notes_move_book_to_workspace,
             // ---- Diagrams (workspace-scoped, like Notes above it) ----
             commands::flows_cmd::flows_node_catalog,
+            commands::flows_cmd::flows_connectors,
+            commands::flows_cmd::flows_build_with_ai,
+            commands::flows_cmd::flows_shares,
+            commands::flows_cmd::flows_share,
+            commands::flows_cmd::flows_join_shared,
+            commands::flows_cmd::flows_share_tick,
+            commands::flows_cmd::flows_share_sync,
+            commands::flows_cmd::flows_share_resolve,
+            commands::flows_cmd::flows_share_rotate,
+            commands::flows_cmd::flows_share_leave,
             commands::flows_cmd::flows_load_tree,
             commands::flows_cmd::flows_get_flow,
             commands::flows_cmd::flows_create_flow,
@@ -1459,6 +1487,11 @@ pub fn run() {
             commands::flows_cmd::flows_clear_versions,
             commands::flows_cmd::flows_run,
             commands::flows_cmd::flows_cancel_run,
+            commands::flows_cmd::flows_list_waits,
+            commands::flows_cmd::flows_trust_flow,
+            commands::flows_cmd::flows_export_flow,
+            commands::flows_cmd::flows_import_flow,
+            commands::flows_cmd::flows_decide_wait,
             commands::flows_cmd::flows_active_runs,
             commands::flows_cmd::flows_list_runs,
             commands::flows_cmd::flows_get_run,
@@ -1489,6 +1522,7 @@ pub fn run() {
             commands::flows_cmd::flows_run_edits,
             commands::flows_cmd::flows_undo_edits,
             commands::flows_cmd::flows_local_models,
+            commands::flows_cmd::flows_test_credential,
             commands::diagrams_cmd::diagrams_load_tree,
             commands::diagrams_cmd::diagrams_get_diagram,
             commands::diagrams_cmd::diagrams_load_thumbnails,

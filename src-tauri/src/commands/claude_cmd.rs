@@ -139,6 +139,11 @@ pub(crate) enum AiTask {
     /// The AI nodes of a flow whose engine is left automatic. A node that names its own engine runs
     /// on that one; this row is where the rest go, and what Settings shows as their default.
     Flows,
+    /// Writing or changing a flow from a description in the editor — see `flows::builder`.
+    /// Text-only (the catalogue goes on stdin, the answer is JSON checked before it is drawn), and
+    /// its own row rather than [`AiTask::Flows`]': picking a strong model to *build* a flow must not
+    /// move every automatic AI node of every flow onto it.
+    FlowBuilder,
 }
 
 impl AiTask {
@@ -148,7 +153,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 20] = [
+    pub(crate) const ALL: [AiTask; 21] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -169,6 +174,7 @@ impl AiTask {
         AiTask::Notebook,
         AiTask::ChatTitle,
         AiTask::Flows,
+        AiTask::FlowBuilder,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -196,6 +202,7 @@ impl AiTask {
             AiTask::Notebook => "notebook",
             AiTask::ChatTitle => "chat_title",
             AiTask::Flows => "flows",
+            AiTask::FlowBuilder => "flow_builder",
         }
     }
 }

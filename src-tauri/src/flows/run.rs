@@ -159,13 +159,18 @@ pub struct Plan {
     /// What the trigger emitted when something outside fired it — a webhook's request, a file
     /// that appeared. `None` for a run started by hand, where the trigger makes its own item.
     pub trigger_output: Option<Ports>,
+    /// Seeds already on record — a run picking up where it waited, after a restart: their output
+    /// stands and nothing is reported for them again.
+    pub quiet: HashSet<String>,
+    /// The seed that is the node the run waited at: its output is the decision, reported as done.
+    pub decided: Option<String>,
 }
 
 fn is_trigger(node: &FlowNode) -> bool {
     catalog::find(&node.type_id).is_some_and(|d| d.family == Family::Trigger)
 }
 
-fn downstream(spec: &FlowSpec, from: &str) -> HashSet<String> {
+pub(crate) fn downstream(spec: &FlowSpec, from: &str) -> HashSet<String> {
     let mut seen = HashSet::from([from.to_string()]);
     let mut queue = VecDeque::from([from.to_string()]);
     while let Some(id) = queue.pop_front() {
@@ -247,7 +252,7 @@ pub fn plan(
             let start = chosen_trigger(None)?;
             let active = downstream(spec, &start);
             let seeds = seeds_for(&active);
-            Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None })
+            Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None, quiet: HashSet::new(), decided: None })
         }
         RunMode::UpTo { node: target } => {
             let target_node = node(target).ok_or_else(|| format!("No node {target} in this flow"))?;
@@ -256,12 +261,12 @@ pub fn plan(
                 let start = chosen_trigger(Some(&HashSet::from([target.clone()])))?;
                 let active = HashSet::from([start.clone()]);
                 let seeds = seeds_for(&active);
-                return Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None });
+                return Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None, quiet: HashSet::new(), decided: None });
             }
             let start = chosen_trigger(Some(&leads))?;
             let active: HashSet<String> = downstream(spec, &start).intersection(&leads).cloned().collect();
             let seeds = seeds_for(&active);
-            Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None })
+            Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None, quiet: HashSet::new(), decided: None })
         }
         RunMode::Step { node: target } => {
             let target_node = node(target).ok_or_else(|| format!("No node {target} in this flow"))?;
@@ -283,7 +288,7 @@ pub fn plan(
                     return Err("needs-upstream".into());
                 }
             }
-            Ok(Plan { trigger: None, active: HashSet::from([target.clone()]), seeds, trigger_output: None })
+            Ok(Plan { trigger: None, active: HashSet::from([target.clone()]), seeds, trigger_output: None, quiet: HashSet::new(), decided: None })
         }
     }
 }

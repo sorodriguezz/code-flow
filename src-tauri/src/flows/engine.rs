@@ -29,6 +29,7 @@ use serde_json::{json, Map, Value};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use super::catalog::LOOP_TYPE;
 use super::expr::{ExprWorker, RunLookup};
 use super::nodes::{self, NodeCtx, NodeError};
 use super::run::{has_error_output, output_count, Item, NodeSettings, OnError, Origin, Plan, Ports};
@@ -37,6 +38,10 @@ use super::spec::{FlowNode, FlowSpec};
 /// Nodes of one run executing at once. Branches are mostly waiting — on a process, the network, a
 /// model — so this is about not starting forty processes at once, not about CPU.
 const MAX_PARALLEL: usize = 8;
+
+/// Batches one loop node may hand out in a run — far beyond any real list, low enough that a body
+/// wired to grow its own input stops instead of running all night.
+const MAX_BATCHES: u32 = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -95,6 +100,9 @@ pub struct NodeReport {
     /// Where each input item came from, per input port — what `$('Nodo').item` walks.
     pub origins: Arc<Vec<Vec<Origin>>>,
     pub outputs: Arc<Ports>,
+    /// Which batch of a loop this report is about: 0 outside loops and for a loop's first batch. A
+    /// node inside a loop reports once per batch.
+    pub iteration: u32,
 }
 
 /// What a run sends back to the webhook that started it — from a Respond node, or the last node's
@@ -218,6 +226,33 @@ pub struct AgentRequest {
     pub wait: bool,
 }
 
+/// A run parked at a node until someone decides — see [`RunHost::wait_for`].
+#[derive(Debug, Clone)]
+pub struct WaitRequest {
+    pub node_id: String,
+    pub node_name: String,
+    /// `approval`, `webhook` or `time`.
+    pub kind: String,
+    /// What the person deciding reads.
+    pub message: String,
+    /// When it stops waiting on its own; `None` waits until decided.
+    pub timeout: Option<Duration>,
+    /// The node's input, kept so a run picked up after a restart can hand it on.
+    pub inputs: Ports,
+}
+
+/// How a wait ended.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaitAnswer {
+    /// `approved`, `rejected`, `resumed` (its URL was called, or its time came) or `expired`.
+    pub decision: String,
+    /// `desktop`, `phone`, `webhook` or `timer`.
+    pub by: String,
+    pub at: String,
+    /// A call's body, or what an approver wrote.
+    pub payload: Value,
+}
+
 fn not_here<'a, T: Send + 'a>(what: &'static str) -> HostFuture<'a, Result<T, String>> {
     Box::pin(async move { Err(format!("{what} is not available in this run")) })
 }
@@ -279,6 +314,40 @@ pub trait RunHost: Send + Sync {
     /// run should offer to undo it.
     fn edits_recorded(&self, path: &str) {
         let _ = path;
+    }
+    /// A secret this run is holding (a Llavero value, a credential): what the run stores — its node
+    /// data and its log — shows it redacted from now on.
+    fn secret_used(&self, value: &str) {
+        let _ = value;
+    }
+
+    // ---- The app's own things (milestone 4).
+
+    /// A saved connection of the Databases workspace, password attached from the keychain.
+    fn db_connection(&self, connection_id: &str) -> Result<crate::datasource::DbConnectionConfig, String> {
+        Err(format!("Unknown database connection {connection_id}"))
+    }
+    /// A host of the Remote workspace.
+    fn remote_host(&self, host_id: &str) -> Result<crate::remotes::RemoteHostSpec, String> {
+        Err(format!("Unknown remote host {host_id}"))
+    }
+    /// One of the app's operations by name, with JSON in and out — pull requests, pipelines, notes,
+    /// the Reviewer, the Llavero, windows. See `flows::app_ops` for the list.
+    /// Parks the run at a node until it is decided: approved or rejected (on the desk or the phone),
+    /// its resume URL called, its time come. The run reads as waiting meanwhile, and a wait the app
+    /// restarted under picks up where it was once decided.
+    fn wait_for(&self, request: WaitRequest, cancel: CancellationToken) -> HostFuture<'_, Result<WaitAnswer, String>> {
+        let _ = (request, cancel);
+        not_here("Waiting")
+    }
+    /// The URL whose call resumes this run's "wait for a call" node; `None` where nothing listens.
+    fn resume_url(&self) -> Option<String> {
+        None
+    }
+    fn app_call(&self, op: &str, args: Value, cancel: CancellationToken) -> HostFuture<'_, Result<Value, String>> {
+        let _ = (args, cancel);
+        let op = op.to_string();
+        Box::pin(async move { Err(format!("{op} is not available in this run")) })
     }
 }
 
@@ -366,6 +435,18 @@ impl Graph {
     }
 }
 
+/// The `index`-th item origin across a node's input ports — by the ports' lengths, not by walking
+/// every item before it: `$('X').item` asks once per item, and a walk would make that quadratic.
+fn nth_origin(origins: &[Vec<Origin>], mut index: usize) -> Option<&Origin> {
+    for port in origins {
+        if index < port.len() {
+            return port.get(index);
+        }
+        index -= port.len();
+    }
+    None
+}
+
 impl RunLookup for Graph {
     fn node_output(&self, name: &str) -> Option<String> {
         let id = self.by_name.get(name)?;
@@ -390,7 +471,7 @@ impl RunLookup for Graph {
         // A flow is a DAG outside loops, so the walk ends; the bound is for a corrupt record.
         for _ in 0..10_000 {
             let Some(slot) = slots.get(&current) else { break };
-            let Some(origin) = slot.origins.iter().flatten().nth(position) else {
+            let Some(origin) = nth_origin(&slot.origins, position) else {
                 return fail(format!("No item from \"{target}\" leads to item {index} of \"{node}\""));
             };
             let source_name = self.names.get(&origin.node).cloned().unwrap_or_default();
@@ -424,10 +505,126 @@ impl RunLookup for Graph {
     fn origin(&self, node: &str, index: usize) -> Option<String> {
         let id = self.by_name.get(node)?;
         let slots = self.slots.lock().ok()?;
-        let origin = slots.get(id)?.origins.iter().flatten().nth(index)?.clone();
+        let origin = nth_origin(&slots.get(id)?.origins, index)?.clone();
         let name = self.names.get(&origin.node).cloned().unwrap_or_default();
         Some(json!({"name": name, "outputIndex": origin.output, "runIndex": 0}).to_string())
     }
+}
+
+// ------------------------------------------------------------------------------------------ loops
+
+/// What the loop nodes of a run repeat — worked out once from the graph.
+///
+/// A loop node's **body** is everything reachable from its first output ("loop") without passing
+/// back through it: those nodes run once per batch. Wires from the body into the loop node are its
+/// **back wires** — they bring a batch's results home instead of counting towards the loop node
+/// being ready. A loop inside another loop's body is that body's member like any node, and its own
+/// body is its own: each node counts towards the innermost loop that repeats it.
+#[derive(Default)]
+struct LoopPlan {
+    body: HashMap<String, HashSet<String>>,
+    /// The body minus inner loops' bodies — the nodes whose finishing ends one of this loop's batches.
+    direct: HashMap<String, HashSet<String>>,
+    owner: HashMap<String, String>,
+    /// Indices into `spec.connections`.
+    back: HashSet<usize>,
+}
+
+impl LoopPlan {
+    fn new(spec: &FlowSpec, active: &HashSet<String>) -> Self {
+        let mut plan = LoopPlan::default();
+        let loops: Vec<&String> = spec.nodes.iter().filter(|n| n.type_id == LOOP_TYPE && active.contains(&n.id)).map(|n| &n.id).collect();
+        for id in &loops {
+            let mut body = HashSet::new();
+            let mut queue: VecDeque<String> = spec.connections.iter().filter(|w| w.from == **id && w.out == 0).map(|w| w.to.clone()).collect();
+            while let Some(next) = queue.pop_front() {
+                if next == **id || !active.contains(&next) || !body.insert(next.clone()) {
+                    continue;
+                }
+                queue.extend(spec.connections.iter().filter(|w| w.from == next).map(|w| w.to.clone()));
+            }
+            for (index, wire) in spec.connections.iter().enumerate() {
+                if wire.to == **id && body.contains(&wire.from) {
+                    plan.back.insert(index);
+                }
+            }
+            plan.body.insert((*id).clone(), body);
+        }
+        for id in &loops {
+            let mut direct = plan.body[*id].clone();
+            for inner in &loops {
+                if inner != id && plan.body[*id].contains(*inner) {
+                    for member in &plan.body[*inner] {
+                        direct.remove(member);
+                    }
+                }
+            }
+            for member in &direct {
+                plan.owner.insert(member.clone(), (*id).clone());
+            }
+            plan.direct.insert((*id).clone(), direct);
+        }
+        plan
+    }
+}
+
+/// A loop node part way through its list.
+struct LoopRun {
+    /// What is still to hand out, with each item's position in what the loop node was given.
+    queue: VecDeque<(usize, Item)>,
+    given: Vec<Item>,
+    batch: usize,
+    /// Batches handed out so far.
+    emitted: u32,
+    /// Body nodes still to finish before the batch counts as done.
+    remaining: usize,
+}
+
+/// Delivers a finished node's output along its wires (only those of `port`, when given); returns
+/// the nodes that became ready. A back wire's items go to the loop's results instead.
+#[allow(clippy::too_many_arguments)]
+fn deliver(
+    spec: &FlowSpec,
+    graph: &Graph,
+    from: &str,
+    outputs: &Ports,
+    finished: &HashSet<String>,
+    back: &HashSet<usize>,
+    returned: &mut HashMap<String, Vec<Item>>,
+    port: Option<u8>,
+) -> Vec<String> {
+    let mut now_ready = Vec::new();
+    let mut slots = graph.slots.lock().expect("run state");
+    for (index, wire) in spec.connections.iter().enumerate() {
+        if wire.from != from || port.is_some_and(|only| wire.out != only) {
+            continue;
+        }
+        if back.contains(&index) {
+            if let Some(items) = outputs.get(wire.out as usize) {
+                returned.entry(wire.to.clone()).or_default().extend(items.iter().map(|item| Item::new(item.json.clone())));
+            }
+            continue;
+        }
+        if finished.contains(&wire.to) {
+            continue;
+        }
+        let Some(slot) = slots.get_mut(&wire.to) else { continue };
+        let input = wire.input as usize;
+        if input >= slot.inputs.len() {
+            continue;
+        }
+        if let Some(items) = outputs.get(wire.out as usize) {
+            for (position, item) in items.iter().enumerate() {
+                slot.inputs[input].push(item.clone());
+                slot.origins[input].push(Origin { node: from.to_string(), output: wire.out as u16, index: position as u32 });
+            }
+        }
+        slot.pending = slot.pending.saturating_sub(1);
+        if slot.pending == 0 {
+            now_ready.push(wire.to.clone());
+        }
+    }
+    now_ready
 }
 
 // ------------------------------------------------------------------------------------- one node
@@ -527,16 +724,23 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
 
     // Slots for every node taking part, and how many deliveries each waits for.
     let participating: HashSet<&String> = plan.active.iter().chain(plan.seeds.keys()).collect();
+    let loops = LoopPlan::new(&spec, &plan.active);
+    // How many deliveries a node waits for: its wires from nodes taking part (from `among`, when
+    // given), never a loop's back wires.
+    let pending_of = |id: &str, among: Option<&HashSet<String>>| -> usize {
+        spec.connections
+            .iter()
+            .enumerate()
+            .filter(|(index, wire)| wire.to == id && participating.contains(&wire.from) && !loops.back.contains(index))
+            .filter(|(_, wire)| among.is_none_or(|set| set.contains(&wire.from)))
+            .count()
+    };
     {
         let mut slots = graph.slots.lock().expect("fresh lock");
         for id in &plan.active {
             let Some(node) = graph.node(id) else { continue };
             let inputs = super::catalog::find(&node.type_id).map(|d| d.inputs as usize).unwrap_or(0).max(1);
-            let pending = spec
-                .connections
-                .iter()
-                .filter(|wire| wire.to == *id && participating.contains(&wire.from))
-                .count();
+            let pending = pending_of(id, None);
             slots.insert(id.clone(), Slot { inputs: vec![Vec::new(); inputs], origins: vec![Vec::new(); inputs], pending, outputs: None });
         }
     }
@@ -544,32 +748,23 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
     let mut ready: VecDeque<String> = VecDeque::new();
     let mut seq: u32 = 0;
     let mut finished_nodes: HashSet<String> = HashSet::new();
-
-    // Delivers a finished node's output along its connections; returns the nodes that became ready.
-    let deliver = |from: &str, outputs: &Arc<Ports>, graph: &Graph, finished: &HashSet<String>| -> Vec<String> {
-        let mut now_ready = Vec::new();
-        let mut slots = graph.slots.lock().expect("run state");
-        for wire in spec.connections.iter().filter(|w| w.from == from) {
-            if finished.contains(&wire.to) {
-                continue;
-            }
-            let Some(slot) = slots.get_mut(&wire.to) else { continue };
-            let port = wire.input as usize;
-            if port >= slot.inputs.len() {
-                continue;
-            }
-            if let Some(items) = outputs.get(wire.out as usize) {
-                for (index, item) in items.iter().enumerate() {
-                    slot.inputs[port].push(item.clone());
-                    slot.origins[port].push(Origin { node: from.to_string(), output: wire.out as u16, index: index as u32 });
-                }
-            }
-            slot.pending = slot.pending.saturating_sub(1);
-            if slot.pending == 0 {
-                now_ready.push(wire.to.clone());
-            }
+    let mut loop_runs: HashMap<String, LoopRun> = HashMap::new();
+    // What came back to each loop node through its back wires, all batches so far.
+    let mut returned: HashMap<String, Vec<Item>> = HashMap::new();
+    // Loop nodes whose batch just ended (or that just started), to hand out what comes next.
+    let mut due_loops: VecDeque<String> = VecDeque::new();
+    // The batch a node's report belongs to: its innermost loop's current one.
+    let iteration_of = |id: &str, runs: &HashMap<String, LoopRun>| -> u32 {
+        loops.owner.get(id).and_then(|owner| runs.get(owner)).map(|run| run.emitted.saturating_sub(1)).unwrap_or(0)
+    };
+    // A node finished: if it was the last of its loop's batch, that loop is due.
+    let body_finished = |id: &str, runs: &mut HashMap<String, LoopRun>, due: &mut VecDeque<String>| {
+        let Some(owner) = loops.owner.get(id) else { return };
+        let Some(run) = runs.get_mut(owner) else { return };
+        run.remaining = run.remaining.saturating_sub(1);
+        if run.remaining == 0 {
+            due.push_back(owner.clone());
         }
-        now_ready
     };
 
     // Seeds first: pinned and reused output is known before anything runs.
@@ -584,11 +779,22 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
             slots.entry(id.clone()).or_default().outputs = Some(outputs.clone());
         }
         finished_nodes.insert(id.clone());
+        if plan.quiet.contains(id) {
+            ready.extend(deliver(&spec, &graph, id, &outputs, &finished_nodes, &loops.back, &mut returned, None));
+            continue;
+        }
+        let decided = plan.decided.as_deref() == Some(id.as_str());
         run.host.node_finished(
             &node,
             NodeReport {
                 node_id: id.clone(),
-                status: if *pinned { NodeStatus::Pinned } else { NodeStatus::Reused },
+                status: if decided {
+                    NodeStatus::Success
+                } else if *pinned {
+                    NodeStatus::Pinned
+                } else {
+                    NodeStatus::Reused
+                },
                 seq,
                 started_at: None,
                 finished_at: None,
@@ -598,9 +804,10 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
                 inputs: Arc::new(vec![]),
                 origins: Arc::new(vec![]),
                 outputs: outputs.clone(),
+                iteration: 0,
             },
         );
-        ready.extend(deliver(id, &outputs, &graph, &finished_nodes));
+        ready.extend(deliver(&spec, &graph, id, &outputs, &finished_nodes, &loops.back, &mut returned, None));
     }
     // The start: the trigger, or — in a step run — the target, ready once its seeds delivered.
     {
@@ -648,14 +855,117 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
                     inputs: Arc::new(vec![]),
                     origins: Arc::new(vec![]),
                     outputs: outputs.clone(),
+                    iteration: 0,
                 },
             );
             last_output = Some(outputs.clone());
-            ready.extend(deliver(&start, &outputs, &graph, &finished_nodes));
+            ready.extend(deliver(&spec, &graph, &start, &outputs, &finished_nodes, &loops.back, &mut returned, None));
         }
     }
 
     loop {
+        // Loops whose batch ended hand out the next one, or finish.
+        while failure.is_none() && !run.cancel.is_cancelled() {
+            let Some(loop_id) = due_loops.pop_front() else { break };
+            let Some(node) = graph.node(&loop_id).cloned() else { continue };
+            let Some(state) = loop_runs.get_mut(&loop_id) else { continue };
+            if state.emitted >= MAX_BATCHES {
+                failure.get_or_insert_with(|| (loop_id.clone(), format!("The loop handed out {MAX_BATCHES} batches and was stopped")));
+                run.cancel.cancel();
+                break;
+            }
+            seq += 1;
+            let at = now_text();
+            if !state.queue.is_empty() {
+                let take = state.batch.min(state.queue.len());
+                let batch: Vec<Item> = state.queue.drain(..take).map(|(position, item)| Item::paired(item.json, position)).collect();
+                if state.emitted > 0 {
+                    // The body runs again from scratch — and a loop inside it starts its list over.
+                    let body = loops.body.get(&loop_id).cloned().unwrap_or_default();
+                    let mut members = body.clone();
+                    members.insert(loop_id.clone());
+                    let mut slots = graph.slots.lock().expect("run state");
+                    for member in &body {
+                        finished_nodes.remove(member);
+                        returned.remove(member);
+                        if let Some(slot) = slots.get_mut(member) {
+                            // Its inputs were taken when it ran: the port count comes from its type.
+                            let inputs = graph.node(member).and_then(|n| super::catalog::find(&n.type_id)).map_or(1, |d| (d.inputs as usize).max(1));
+                            *slot = Slot { inputs: vec![Vec::new(); inputs], origins: vec![Vec::new(); inputs], pending: pending_of(member, Some(&members)), outputs: None };
+                        }
+                    }
+                    drop(slots);
+                    for member in &body {
+                        loop_runs.remove(member);
+                    }
+                }
+                let state = loop_runs.get_mut(&loop_id).expect("still running");
+                state.remaining = loops.direct.get(&loop_id).map_or(0, HashSet::len);
+                state.emitted += 1;
+                let iteration = state.emitted - 1;
+                let empty_body = state.remaining == 0;
+                let given = Arc::new(vec![batch.clone()]);
+                let outputs = Arc::new(vec![batch, Vec::new()]);
+                graph.slots.lock().expect("run state").get_mut(&loop_id).expect("slot").outputs = Some(outputs.clone());
+                run.host.node_started(&node, seq, given[0].len(), &at);
+                run.host.node_finished(
+                    &node,
+                    NodeReport {
+                        node_id: loop_id.clone(),
+                        status: NodeStatus::Running,
+                        seq,
+                        started_at: Some(at.clone()),
+                        finished_at: None,
+                        duration_ms: None,
+                        attempts: 1,
+                        error: None,
+                        inputs: given,
+                        origins: graph.origins(&loop_id),
+                        outputs: outputs.clone(),
+                        iteration,
+                    },
+                );
+                ready.extend(deliver(&spec, &graph, &loop_id, &outputs, &finished_nodes, &loops.back, &mut returned, Some(0)));
+                if empty_body {
+                    due_loops.push_back(loop_id.clone());
+                }
+            } else {
+                // The list is done: what came back, or — when nothing is wired back — what it was given.
+                let done = match returned.remove(&loop_id) {
+                    Some(items) => items,
+                    None if loops.back.iter().any(|index| spec.connections[*index].to == loop_id) => Vec::new(),
+                    None => state.given.iter().enumerate().map(|(position, item)| Item::paired(item.json.clone(), position)).collect(),
+                };
+                let iteration = state.emitted.saturating_sub(1);
+                // Its input was reported batch by batch; the last report adds only what it hands on.
+                let given = Arc::new(if state.emitted == 0 { vec![state.given.clone()] } else { vec![Vec::new()] });
+                loop_runs.remove(&loop_id);
+                let outputs = Arc::new(vec![Vec::new(), done]);
+                graph.slots.lock().expect("run state").get_mut(&loop_id).expect("slot").outputs = Some(outputs.clone());
+                finished_nodes.insert(loop_id.clone());
+                run.host.node_finished(
+                    &node,
+                    NodeReport {
+                        node_id: loop_id.clone(),
+                        status: NodeStatus::Success,
+                        seq,
+                        started_at: Some(at.clone()),
+                        finished_at: Some(now_text()),
+                        duration_ms: Some(0),
+                        attempts: 1,
+                        error: None,
+                        inputs: given,
+                        origins: graph.origins(&loop_id),
+                        outputs: outputs.clone(),
+                        iteration,
+                    },
+                );
+                last_output = Some(outputs.clone());
+                ready.extend(deliver(&spec, &graph, &loop_id, &outputs, &finished_nodes, &loops.back, &mut returned, Some(1)));
+                body_finished(&loop_id, &mut loop_runs, &mut due_loops);
+            }
+        }
+
         // Start whatever is ready, up to the limit.
         while running.len() < MAX_PARALLEL && failure.is_none() && !run.cancel.is_cancelled() {
             let Some(id) = ready.pop_front() else { break };
@@ -692,9 +1002,20 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
                         inputs: Arc::new(inputs),
                         origins: graph.origins(&id),
                         outputs: outputs.clone(),
+                        iteration: iteration_of(&id, &loop_runs),
                     },
                 );
-                ready.extend(deliver(&id, &outputs, &graph, &finished_nodes));
+                ready.extend(deliver(&spec, &graph, &id, &outputs, &finished_nodes, &loops.back, &mut returned, None));
+                body_finished(&id, &mut loop_runs, &mut due_loops);
+                continue;
+            }
+
+            if node.type_id == LOOP_TYPE && !node.disabled {
+                // A loop node is the engine's own: it takes its list and hands it out in batches.
+                let given: Vec<Item> = inputs.into_iter().flatten().collect();
+                let batch = node.params.get("batchSize").and_then(Value::as_f64).unwrap_or(10.0).clamp(1.0, 1_000_000.0) as usize;
+                loop_runs.insert(id.clone(), LoopRun { queue: given.iter().cloned().enumerate().collect(), given, batch, emitted: 0, remaining: 0 });
+                due_loops.push_back(id.clone());
                 continue;
             }
 
@@ -711,10 +1032,12 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
             run.host.node_started(&node, seq, items_in, &started_at);
 
             if node.disabled {
-                // Switched off: the items go through untouched, out of the first output.
+                // Switched off: the items go through untouched, out of the first output — a loop's
+                // "done", so a switched-off loop skips its body rather than running it once.
                 let mut ports: Ports = vec![Vec::new(); output_count(&node) as usize];
-                if let Some(first) = ports.first_mut() {
-                    *first = inputs.iter().flatten().enumerate().map(|(i, item)| Item::paired(item.json.clone(), i)).collect();
+                let through = usize::from(node.type_id == LOOP_TYPE);
+                if let Some(port) = ports.get_mut(through) {
+                    *port = inputs.iter().flatten().enumerate().map(|(i, item)| Item::paired(item.json.clone(), i)).collect();
                 }
                 let outputs = Arc::new(ports);
                 graph.slots.lock().expect("run state").get_mut(&id).expect("slot").outputs = Some(outputs.clone());
@@ -733,9 +1056,11 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
                         inputs: inputs.clone(),
                         origins: graph.origins(&id),
                         outputs: outputs.clone(),
+                        iteration: iteration_of(&id, &loop_runs),
                     },
                 );
-                ready.extend(deliver(&id, &outputs, &graph, &finished_nodes));
+                ready.extend(deliver(&spec, &graph, &id, &outputs, &finished_nodes, &loops.back, &mut returned, None));
+                body_finished(&id, &mut loop_runs, &mut due_loops);
                 continue;
             }
 
@@ -751,7 +1076,11 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
         }
 
         if running.is_empty() {
-            break;
+            let stopped = failure.is_some() || run.cancel.is_cancelled();
+            if stopped || (ready.is_empty() && due_loops.is_empty()) {
+                break;
+            }
+            continue;
         }
 
         let Some(joined) = running.join_next().await else { break };
@@ -810,6 +1139,7 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
                 inputs: finished.inputs,
                 origins: graph.origins(&id),
                 outputs: outputs.clone(),
+                iteration: iteration_of(&id, &loop_runs),
             },
         );
         if status == NodeStatus::Success {
@@ -817,7 +1147,8 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
         }
         let carries_on = status == NodeStatus::Success || (status == NodeStatus::Error && settings.on_error != OnError::Stop);
         if carries_on && failure.is_none() && !run.cancel.is_cancelled() {
-            ready.extend(deliver(&id, &outputs, &graph, &finished_nodes));
+            ready.extend(deliver(&spec, &graph, &id, &outputs, &finished_nodes, &loops.back, &mut returned, None));
+            body_finished(&id, &mut loop_runs, &mut due_loops);
         }
     }
 

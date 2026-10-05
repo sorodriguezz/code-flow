@@ -5,6 +5,7 @@ import { rowClass, underlineStripClass, underlineTabClass } from "../common/reci
 import { DataModeSwitch, ItemsView, type DataMode } from "./DataView";
 import { LogLines } from "./RunLog";
 import { MODE_KEY, NODE_STATUS_KEY, RUN_STATUS_KEY, formatDuration, formatWhen, itemsLabel, statusColor } from "./runFormat";
+import { WaitCard } from "./WaitCard";
 import { familyColor, nodeIcon } from "../../lib/flows/nodeIcons";
 import {
   flowsRunEdits,
@@ -129,7 +130,10 @@ function RunDetail({ runId, flowId }: { runId: string; flowId: string }) {
   useEffect(() => {
     void useFlowRunsStore.getState().loadRun(runId);
   }, [runId]);
-  const running = detail?.run.status === "running";
+  // A waiting run is still going: its clock runs and it can be stopped.
+  const running = detail?.run.status === "running" || detail?.run.status === "waiting";
+  const openWaits = useFlowRunsStore((s) => s.waits);
+  const waits = useMemo(() => openWaits.filter((wait) => wait.runId === runId), [openWaits, runId]);
   useEffect(() => {
     if (!running) return;
     const timer = setInterval(() => setNow(Date.now()), 250);
@@ -195,6 +199,13 @@ function RunDetail({ runId, flowId }: { runId: string; flowId: string }) {
           </>
         )}
       </div>
+      {waits.length > 0 && (
+        <div className="mx-4 mt-3 flex flex-col gap-2">
+          {waits.map((wait) => (
+            <WaitCard key={wait.id} wait={wait} showFlow={false} />
+          ))}
+        </div>
+      )}
       {run.status === "error" && run.error && (
         <div className="mx-4 mt-3 flex gap-2 rounded-lg bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] px-3 py-2 text-[12px] text-[var(--cf-danger)]">
           <CircleAlert size={14} className="mt-[1px] shrink-0" />

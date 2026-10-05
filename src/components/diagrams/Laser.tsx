@@ -268,17 +268,40 @@ export const LaserCanvas = forwardRef<LaserCanvasHandle, { colour: string }>(fun
  * is the opposite of pointing at something. A selection made before the laser came on stays lit, so
  * "select the table, then talk over it" is how the two combine.
  */
+/** The right button's drag over a `LaserLayer`: the canvas under it moves, by `dx`/`dy` pixels from
+ *  where the drag started. */
+export interface LaserPan {
+  start: () => void;
+  move: (dx: number, dy: number) => void;
+  end: () => void;
+}
+
 export function LaserLayer({
   colour,
   onPress,
+  pan,
 }: {
   /** A CSS colour, usually `laserInk(…)`. */
   colour: string;
   /** Called on every press — the canvas moves focus to its frame there, as its own press does. */
   onPress?: () => void;
+  /** The left button draws; with this, the right one drags the drawing around — the laser covers
+   *  the canvas, and pointing at a schema must not cost the way around it (user ask). */
+  pan?: LaserPan;
 }) {
   const layerRef = useRef<HTMLDivElement>(null);
   const canvas = useRef<LaserCanvasHandle>(null);
+  /** The right-button drag under way, if any. */
+  const panning = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+
+  /** Ends a pan the event belongs to; whether it did. */
+  const endPan = (event: { pointerId: number }): boolean => {
+    if (panning.current?.pointerId !== event.pointerId) return false;
+    panning.current = null;
+    if (layerRef.current) layerRef.current.style.cursor = "none";
+    pan?.end();
+    return true;
+  };
 
   /** A client point in the layer's own pixels. */
   const local = (event: { clientX: number; clientY: number }): LaserPoint => {
@@ -295,7 +318,19 @@ export function LaserLayer({
       // window, which is what a touch screen does with a drag by default.
       style={{ cursor: "none", touchAction: "none" }}
       onPointerDown={(event) => {
-        if (event.button !== 0 || canvas.current?.drawing()) return;
+        if (event.button === 2 && pan && !panning.current && !canvas.current?.drawing()) {
+          event.preventDefault();
+          event.stopPropagation();
+          onPress?.();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          panning.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+          // The dot is the laser's cursor, and this is not the laser.
+          canvas.current?.dot(null);
+          event.currentTarget.style.cursor = "grabbing";
+          pan.start();
+          return;
+        }
+        if (event.button !== 0 || canvas.current?.drawing() || panning.current) return;
         // The press is the laser's, all of it: no text selection over the labels, and the canvas's
         // own press handler — which would select, pan or start a drag — never sees it.
         event.preventDefault();
@@ -307,6 +342,11 @@ export function LaserLayer({
         canvas.current?.begin(point, event.pointerId);
       }}
       onPointerMove={(event) => {
+        const moving = panning.current;
+        if (moving) {
+          if (event.pointerId === moving.pointerId) pan?.move(event.clientX - moving.x, event.clientY - moving.y);
+          return;
+        }
         canvas.current?.dot(local(event));
         // Every sample the browser merged into this event, not just the last: a fast circle drawn
         // from the last sample per frame comes out as a polygon.
@@ -318,13 +358,18 @@ export function LaserLayer({
       }}
       onPointerUp={(event) => {
         event.stopPropagation();
+        if (endPan(event)) return;
         canvas.current?.end(event.pointerId);
       }}
-      onPointerCancel={(event) => canvas.current?.end(event.pointerId)}
+      onPointerCancel={(event) => {
+        if (!endPan(event)) canvas.current?.end(event.pointerId);
+      }}
       // A capture can end without a `pointerup` reaching here — the window losing focus mid-stroke —
       // and a stroke nobody releases is one that never fades. After a normal release this finds
       // nothing live and does nothing.
-      onLostPointerCapture={(event) => canvas.current?.end(event.pointerId)}
+      onLostPointerCapture={(event) => {
+        if (!endPan(event)) canvas.current?.end(event.pointerId);
+      }}
       onPointerLeave={() => canvas.current?.dot(null)}
       // The canvas's menus are under this layer and cannot be reached; the browser's own would be a
       // stray "Inspect element" over the drawing.

@@ -122,27 +122,39 @@
 
   const compiled = new Map();
 
+  /**
+   * The scope names a source can mention. Only those are bound: reading the rest would run their
+   * getters for nothing — `$now` builds a DateTime, `$prevNode` asks the host — once per item, which
+   * on ten thousand items is most of a node's time.
+   */
+  function namesIn(source, names) {
+    return names.filter((name) => source.includes(name));
+  }
+
   function compile(source) {
-    let fn = compiled.get(source);
-    if (fn) return fn;
+    let entry = compiled.get(source);
+    if (entry) return entry;
+    const names = namesIn(source || "", SCOPE_NAMES);
+    let fn;
     try {
-      fn = new Function(...SCOPE_NAMES, `"use strict"; return (${source || "undefined"}\n);`);
+      fn = new Function(...names, `"use strict"; return (${source || "undefined"}\n);`);
     } catch (error) {
       throw new ExpressionError(error && error.message ? error.message : String(error), source);
     }
     if (compiled.size > 4000) compiled.clear();
-    compiled.set(source, fn);
-    return fn;
+    entry = { fn, names };
+    compiled.set(source, entry);
+    return entry;
   }
 
-  function scopeValues(scope) {
-    return SCOPE_NAMES.map((name) => scope[name]);
+  function scopeValues(scope, names = SCOPE_NAMES) {
+    return names.map((name) => scope[name]);
   }
 
   function evaluate(source, scope) {
-    const fn = compile(source);
+    const { fn, names } = compile(source);
     try {
-      return fn(...scopeValues(scope));
+      return fn(...scopeValues(scope, names));
     } catch (error) {
       if (error instanceof ExpressionError) throw error;
       throw new ExpressionError(error && error.message ? error.message : String(error), source);
@@ -275,38 +287,46 @@
     /** The scope for item `index` of the node's input. */
     function scopeFor(index) {
       const json = index < items.length ? items[index] : {};
-      const $ = (name) => nodeProxy(name, index);
-      const $node = new Proxy(
-        {},
-        {
-          get(_target, name) {
-            if (typeof name !== "string") return undefined;
-            const proxy = nodeProxy(name, index);
-            return {
-              get json() {
-                try {
-                  return proxy.item.json;
-                } catch (error) {
-                  const first = proxy.first();
-                  return first ? first.json : {};
-                }
-              },
-            };
+      // `$`, `$node` and `$input` are made when read: an expression binds only the names it
+      // mentions, and building them for every one of ten thousand items is most of the cost.
+      const makeNode = () =>
+        new Proxy(
+          {},
+          {
+            get(_target, name) {
+              if (typeof name !== "string") return undefined;
+              const proxy = nodeProxy(name, index);
+              return {
+                get json() {
+                  try {
+                    return proxy.item.json;
+                  } catch (error) {
+                    const first = proxy.first();
+                    return first ? first.json : {};
+                  }
+                },
+              };
+            },
           },
-        },
-      );
-      const $input = {
+        );
+      const makeInput = () => ({
         item: wrap(json),
         all: () => items.map(wrap),
         first: () => (items.length ? wrap(items[0]) : undefined),
         last: () => (items.length ? wrap(items[items.length - 1]) : undefined),
-      };
+      });
       return Object.assign(
         {
           $json: json,
-          $input,
-          $,
-          $node,
+          get $input() {
+            return makeInput();
+          },
+          get $() {
+            return (name) => nodeProxy(name, index);
+          },
+          get $node() {
+            return makeNode();
+          },
           $vars: vars,
           get $now() {
             return DateTime.now();
@@ -689,14 +709,16 @@
     return { log: line("log"), info: line("info"), warn: line("warn"), error: line("error"), debug: line("debug") };
   }
 
-  const CODE_NAMES = SCOPE_NAMES.concat(["items", "item", "console"]);
+  const CODE_ALWAYS = ["items", "item", "console"];
 
   async function runCode(job, context) {
     const logs = [];
     const consoleObject = makeConsole(logs);
     let fn;
+    // As with expressions: only the scope names the code mentions are bound.
+    const names = namesIn(job.code || "", SCOPE_NAMES);
     try {
-      fn = new AsyncFunction(...CODE_NAMES, `"use strict";\n${job.code || ""}\n`);
+      fn = new AsyncFunction(...names, ...CODE_ALWAYS, `"use strict";\n${job.code || ""}\n`);
     } catch (error) {
       throw new ExpressionError(error && error.message ? error.message : String(error), null);
     }
@@ -705,13 +727,13 @@
     if (job.mode === "each") {
       for (let index = 0; index < context.items.length; index++) {
         const scope = context.scopeFor(index);
-        const args = scopeValues(scope).concat([all, { json: context.items[index] }, consoleObject]);
+        const args = scopeValues(scope, names).concat([all, { json: context.items[index] }, consoleObject]);
         const result = await fn(...args);
         out = out.concat(normaliseItems(result, index));
       }
     } else {
       const scope = context.scopeFor(0);
-      const args = scopeValues(scope).concat([all, all.length ? all[0] : { json: {} }, consoleObject]);
+      const args = scopeValues(scope, names).concat([all, all.length ? all[0] : { json: {} }, consoleObject]);
       const result = await fn(...args);
       out = normaliseItems(result, undefined);
       // As many out as in: the n-th item came from the n-th. Otherwise nothing can be assumed

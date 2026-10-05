@@ -169,12 +169,6 @@ export interface DiagramNode {
   schema: string | null;
   name: string;
   kind: DbNodeKind;
-  /**
-   * Referenced by this schema but not part of it — a key into `auth.users`, or a table in another
-   * database. Drawn as a stub so the line has somewhere to land: dropping the edge would make the
-   * diagram claim the column points at nothing.
-   */
-  external: boolean;
   /** The table's own comment, when it has one. See `DbDiagramTable.note`. */
   note?: string;
   columns: DbDiagramColumn[];
@@ -298,8 +292,6 @@ export interface DiagramStats {
   withoutPrimaryKey: string[];
   /** Tables with no relationship in either direction. */
   isolated: string[];
-  /** Tables referenced from here that live outside the schema. */
-  external: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -325,13 +317,10 @@ function edgeToId(edge: DbDiagramEdge): string {
 // ---------------------------------------------------------------------------
 
 export function diagramStats(diagram: DbSchemaDiagram): DiagramStats {
-  const own = new Set(diagram.tables.map((table) => tableId(table.schema, table.name)));
   const connected = new Set<string>();
-  const external = new Set<string>();
   for (const edge of diagram.edges) {
     connected.add(edgeFromId(edge));
     connected.add(edgeToId(edge));
-    if (!own.has(edgeToId(edge))) external.add(edgeToId(edge));
   }
 
   const constraints = new Set(diagram.edges.map((edge) => `${edgeFromId(edge)}|${edge.constraint}`));
@@ -355,8 +344,23 @@ export function diagramStats(diagram: DbSchemaDiagram): DiagramStats {
     isolated: diagram.tables
       .map((table) => tableId(table.schema, table.name))
       .filter((id) => !connected.has(id)),
-    external: external.size,
   };
+}
+
+/**
+ * A schema's own model: its tables, and the relationships among them.
+ *
+ * A key into another schema (or another database) is left out of the drawing. The diagram is of
+ * the schema that was asked for, and drawing a box for every table it points outside of made a
+ * schema look like it held the other schemas' tables — `reglas` showed `agenda`'s `recurso`,
+ * `servicio` and `usuario` beside its own (user report). The column keeps its FK mark, which is a
+ * fact about the column, not an edge. Filtered once, where the diagram arrives, so the counts, the
+ * drawing and the Mermaid and DBML exports all describe the same model.
+ */
+export function ownTablesOnly(diagram: DbSchemaDiagram): DbSchemaDiagram {
+  const own = new Set(diagram.tables.map((table) => tableId(table.schema, table.name)));
+  const edges = diagram.edges.filter((edge) => own.has(edgeFromId(edge)) && own.has(edgeToId(edge)));
+  return edges.length === diagram.edges.length ? diagram : { ...diagram, edges };
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +622,6 @@ function buildNodes(
       schema: table.schema,
       name: table.name,
       kind: table.kind,
-      external: false,
       note: table.note,
       columns: table.columns,
       visible: kept.slice(0, MAX_ROWS),
@@ -626,35 +629,6 @@ function buildNodes(
       rowEstimate: table.row_estimate,
     }, metrics);
   });
-
-  // Stubs for whatever is pointed at from outside this schema.
-  const known = new Set(nodes.map((node) => node.id));
-  for (const edge of diagram.edges) {
-    const id = edgeToId(edge);
-    if (known.has(id)) continue;
-    known.add(id);
-    nodes.push(
-      measure({
-        id,
-        schema: edge.to_schema,
-        name: edge.to_table,
-        kind: "table",
-        external: true,
-        columns: [],
-        visible: [
-          {
-            name: edge.to_column,
-            data_type: "",
-            nullable: false,
-            primary_key: true,
-            foreign_key: false,
-          },
-        ],
-        hidden: 0,
-        rowEstimate: null,
-      }, metrics),
-    );
-  }
 
   return nodes;
 }

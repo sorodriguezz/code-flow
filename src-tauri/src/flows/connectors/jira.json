@@ -1,0 +1,54 @@
+{
+  "id": "jira",
+  "name": "Jira",
+  "baseUrl": "https://{{site}}.atlassian.net/rest/api/3",
+  "auth": "basic",
+  "authHint": { "es": "Tu correo y un token de API de Atlassian como credencial Usuario y contraseña", "en": "Your email and an Atlassian API token as a User and password credential" },
+  "siteField": { "name": "site", "label": { "es": "Sitio (tu-equipo en tu-equipo.atlassian.net)", "en": "Site (your-team in your-team.atlassian.net)" }, "placeholder": "acme", "required": true },
+  "errorField": "errorMessages",
+  "operations": [
+    {
+      "id": "createIssue",
+      "name": { "es": "Crear un issue", "en": "Create an issue" },
+      "method": "POST",
+      "path": "/issue",
+      "fields": [
+        { "name": "projectKey", "label": { "es": "Clave del proyecto", "en": "Project key" }, "placeholder": "OPS", "required": true },
+        { "name": "issueType", "label": { "es": "Tipo", "en": "Type" }, "placeholder": "Task", "required": true },
+        { "name": "summary", "label": { "es": "Resumen", "en": "Summary" }, "required": true },
+        { "name": "description", "label": { "es": "Descripción", "en": "Description" }, "multiline": true }
+      ],
+      "body": {
+        "fields": {
+          "project": { "key": "{{projectKey}}" },
+          "issuetype": { "name": "{{issueType}}" },
+          "summary": "{{summary}}",
+          "description": { "$when": "description", "type": "doc", "version": 1, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "{{description}}" }] }] }
+        }
+      }
+    },
+    {
+      "id": "search",
+      "name": { "es": "Buscar issues (JQL)", "en": "Search issues (JQL)" },
+      "method": "GET",
+      "path": "/search/jql",
+      "query": { "jql": "{{jql}}", "maxResults": "{{maxResults}}", "fields": "*navigable" },
+      "fields": [
+        { "name": "jql", "label": { "es": "JQL", "en": "JQL" }, "placeholder": "project = OPS AND status = \"To Do\"", "required": true },
+        { "name": "maxResults", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "50" }
+      ],
+      "result": "issues"
+    },
+    {
+      "id": "addComment",
+      "name": { "es": "Comentar un issue", "en": "Comment on an issue" },
+      "method": "POST",
+      "path": "/issue/{{issueKey}}/comment",
+      "fields": [
+        { "name": "issueKey", "label": { "es": "Issue", "en": "Issue" }, "placeholder": "OPS-12", "required": true },
+        { "name": "comment", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true, "required": true }
+      ],
+      "body": { "body": { "type": "doc", "version": 1, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "{{comment}}" }] }] } }
+    }
+  ]
+}

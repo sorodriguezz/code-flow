@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import {
   notesCountLinks,
@@ -300,6 +301,12 @@ interface NotesState {
 
   openNote: (id: string) => Promise<void>;
   closeNote: () => Promise<void>;
+  /**
+   * Another writer changed `noteId` (a flow's Note node): the list re-reads, and an open note takes
+   * the change — replaced when it has no unsaved edits; when it has, what was added at the end is
+   * carried onto them, since that node only ever creates a note or appends to one.
+   */
+  noteChangedElsewhere: (noteId: string | null) => Promise<void>;
   /** Edits the open note. The only write path the editor uses. */
   editDraft: (patch: Partial<Pick<NoteDraft, "title" | "content" | "tags">>) => void;
   /** Writes the draft now, if it is dirty. Called on close, on switch, and on the debounce. */
@@ -776,6 +783,37 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     } finally {
       if (get().openingId === id) set({ openingId: null });
     }
+  },
+
+  noteChangedElsewhere: async (noteId) => {
+    const before = noteId ? get().bodies[noteId] : undefined;
+    await get().refresh();
+    if (!noteId) return;
+    if (get().activeId !== noteId) {
+      // A cached body would reopen as it was before the change.
+      set((state) => {
+        const bodies = { ...state.bodies };
+        delete bodies[noteId];
+        return { bodies, bodyOrder: state.bodyOrder.filter((id) => id !== noteId) };
+      });
+      return;
+    }
+    const row = await notesGetNote(noteId).catch(() => null);
+    const draft = get().draft;
+    if (!row || !draft || get().activeId !== noteId) return;
+    if (!draft.dirty) {
+      set((state) => ({
+        draft: { ...draft, title: row.title, content: row.content, tags: parseTags(row.tags) },
+        ...cacheBody(state, noteId, row.content),
+      }));
+      return;
+    }
+    const base = (before ?? "").trimEnd();
+    const added = before !== undefined && row.content.startsWith(base) ? row.content.slice(base.length) : "";
+    set((state) => ({
+      draft: added ? { ...draft, content: draft.content.trimEnd() + added } : draft,
+      ...cacheBody(state, noteId, row.content),
+    }));
   },
 
   closeNote: async () => {
@@ -1822,3 +1860,9 @@ export function suggestNoteLinks(notes: Note[], query: string, limit = 12): Note
   );
   return scored.slice(0, limit).map((entry) => entry.note);
 }
+
+/** A flow wrote a note of this workspace — see `noteChangedElsewhere`. */
+void listen<{ workspaceId: string; noteId?: string }>("notes:changed", ({ payload }) => {
+  const state = useNotesStore.getState();
+  if (payload.workspaceId === state.workspaceId) void state.noteChangedElsewhere(payload.noteId ?? null);
+});

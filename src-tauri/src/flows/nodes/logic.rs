@@ -10,6 +10,7 @@ use std::time::Duration;
 use serde_json::{json, Map, Value};
 
 use super::{number, text, NodeCtx, NodeError};
+use crate::flows::engine::{WaitAnswer, WaitRequest};
 use crate::flows::run::{Item, Ports};
 use crate::flows::value::{as_object, get_path};
 
@@ -21,6 +22,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "logic.switch" => switch(ctx).await,
         "logic.merge" => merge(ctx),
         "logic.wait" => wait(ctx).await,
+        "logic.approval" => approval(ctx).await,
         "logic.stop" => {
             let params = ctx.resolve_once().await?;
             let message = text(&params, "message");
@@ -196,8 +198,91 @@ fn until_instant(raw: &str) -> Result<chrono::DateTime<chrono::Utc>, NodeError> 
     Err(NodeError::failed(format!("\"{raw}\" is not a date and time")))
 }
 
+/// Waits shorter than this stay in memory; longer ones are parked in the database, so the app
+/// restarting in between does not lose them.
+const PARK_AFTER: Duration = Duration::from_secs(60);
+
+/// An optional time limit given in hours; 0 is none.
+fn hours(params: &Value, name: &str) -> Option<Duration> {
+    number(params, name).filter(|h| *h > 0.0).map(|h| Duration::from_secs_f64(h.min(24.0 * 365.0) * 3600.0))
+}
+
+/// Parks the run at this node until the wait is decided.
+async fn park(ctx: &NodeCtx, kind: &str, message: String, timeout: Option<Duration>) -> Result<WaitAnswer, NodeError> {
+    let request = WaitRequest {
+        node_id: ctx.node.id.clone(),
+        node_name: ctx.node.name.clone(),
+        kind: kind.to_string(),
+        message,
+        timeout,
+        inputs: ctx.inputs.clone(),
+    };
+    ctx.run.host.wait_for(request, ctx.cancel.clone()).await.map_err(|error| {
+        if error.starts_with(crate::ai_runs::CANCELLED_MARKER) {
+            NodeError::Cancelled
+        } else {
+            NodeError::Failed(error)
+        }
+    })
+}
+
+/// What a decided wait hands on. Shared with a run picking up after a restart, which has no node
+/// running to ask: approved items leave by the first output and the rest by the second, each with
+/// the decision on it; a wait for a call or a time passes its items on with the call's body.
+pub fn decided_ports(type_id: &str, inputs: &Ports, answer: &WaitAnswer) -> Ports {
+    let object = |json: &Value| if json.is_object() { json.clone() } else { json!({ "value": json }) };
+    let items: Vec<&Item> = inputs.iter().flatten().collect();
+    if type_id == "logic.approval" {
+        let note = json!({
+            "decision": answer.decision,
+            "by": answer.by,
+            "at": answer.at,
+            "comment": answer.payload.as_str().unwrap_or_default(),
+        });
+        let out: Vec<Item> = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let mut json = object(&item.json);
+                json["approval"] = note.clone();
+                Item::paired(json, index)
+            })
+            .collect();
+        return if answer.decision == "approved" { vec![out, vec![]] } else { vec![vec![], out] };
+    }
+    let out = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let mut json = object(&item.json);
+            if !answer.payload.is_null() {
+                json["call"] = answer.payload.clone();
+            }
+            Item::paired(json, index)
+        })
+        .collect();
+    vec![out]
+}
+
+/// Pauses until somebody approves or rejects — in CodeFlow or on the phone.
+async fn approval(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let params = ctx.resolve_once().await?;
+    let answer = park(ctx, "approval", text(&params, "message"), hours(&params, "timeoutHours")).await?;
+    if answer.decision == "expired" && text(&params, "onTimeout") == "fail" {
+        return Err(NodeError::failed("Nobody decided before the time limit"));
+    }
+    Ok(decided_ports("logic.approval", &ctx.inputs, &answer))
+}
+
 async fn wait(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let params = ctx.resolve_once().await?;
+    if text(&params, "mode") == "webhook" {
+        let answer = park(ctx, "webhook", String::new(), hours(&params, "timeoutHours")).await?;
+        if answer.decision == "expired" {
+            return Err(NodeError::failed("No call arrived before the time limit"));
+        }
+        return Ok(decided_ports("logic.wait", &ctx.inputs, &answer));
+    }
     let duration = if text(&params, "mode") == "until" {
         let target = until_instant(&text(&params, "until"))?;
         (target - chrono::Utc::now()).to_std().unwrap_or_default()
@@ -211,15 +296,100 @@ async fn wait(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         };
         Duration::from_secs_f64((amount * unit).min(30.0 * 86_400.0))
     };
+    if duration >= PARK_AFTER {
+        park(ctx, "time", String::new(), Some(duration)).await?;
+        return Ok(vec![ctx.passthrough()]);
+    }
     tokio::select! {
         _ = tokio::time::sleep(duration) => Ok(vec![ctx.passthrough()]),
         _ = ctx.cancel.cancelled() => Err(NodeError::Cancelled),
     }
 }
 
+// ------------------------------------------------------------------------------------- rate limit
+
+/// A bucket of tokens per node of a flow, shared by every run of it: two runs a webhook started a
+/// second apart draw from the same bucket, which is what makes "N a minute" true of the flow and not
+/// of each run.
+struct Bucket {
+    tokens: f64,
+    capacity: f64,
+    per_second: f64,
+    refilled: std::time::Instant,
+}
+
+impl Bucket {
+    fn refill(&mut self) {
+        let now = std::time::Instant::now();
+        self.tokens = (self.tokens + now.duration_since(self.refilled).as_secs_f64() * self.per_second).min(self.capacity);
+        self.refilled = now;
+    }
+}
+
+static BUCKETS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Bucket>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Takes a token now, or says how long until one is there.
+fn take_token(key: &str, capacity: f64, per_second: f64) -> Result<(), Duration> {
+    let mut buckets = BUCKETS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let bucket = buckets.entry(key.to_string()).or_insert(Bucket { tokens: capacity, capacity, per_second, refilled: std::time::Instant::now() });
+    // A changed setting takes effect at once rather than after the old bucket drains.
+    bucket.capacity = capacity;
+    bucket.per_second = per_second;
+    bucket.refill();
+    if bucket.tokens >= 1.0 {
+        bucket.tokens -= 1.0;
+        Ok(())
+    } else {
+        Err(Duration::from_secs_f64((1.0 - bucket.tokens) / per_second))
+    }
+}
+
+/// Lets N items through per second, minute or hour; the rest wait their turn, or are dropped.
+pub async fn ratelimit(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let amount = number(&ctx.params, "amount").unwrap_or(1.0).max(1.0);
+    let window = match text(&ctx.params, "per").as_str() {
+        "minute" => 60.0,
+        "hour" => 3600.0,
+        _ => 1.0,
+    };
+    let drop = text(&ctx.params, "overflow") == "drop";
+    let key = format!("{}:{}", ctx.run.flow_id, ctx.node.id);
+    let mut passed = Vec::new();
+    for (index, item) in ctx.items().into_iter().enumerate() {
+        loop {
+            match take_token(&key, amount, amount / window) {
+                Ok(()) => {
+                    passed.push(Item::paired(item.json.clone(), index));
+                    break;
+                }
+                Err(_) if drop => break,
+                Err(wait) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
+                    }
+                }
+            }
+        }
+    }
+    Ok(vec![passed])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bucket_gives_its_capacity_then_refills() {
+        let key = format!("test:{}", uuid::Uuid::new_v4());
+        assert!(take_token(&key, 2.0, 10.0).is_ok());
+        assert!(take_token(&key, 2.0, 10.0).is_ok());
+        let wait = take_token(&key, 2.0, 10.0).unwrap_err();
+        assert!(wait <= Duration::from_millis(100), "{wait:?}");
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(take_token(&key, 2.0, 10.0).is_ok());
+    }
 
     #[test]
     fn combine_lets_the_winner_overwrite() {

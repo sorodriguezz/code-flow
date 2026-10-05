@@ -215,6 +215,16 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 # Adoptium ships it as a `.zip` for Windows — the crate above — and a `.tar.gz` for macOS: this, over
 # `flate2`. Already in the lockfile, so it adds a name to the manifest rather than a build.
 tar = "0.4"
+# Flujos' data nodes (milestone 4), all pure Rust. Convert reads and writes YAML and turns Markdown into
+# HTML; XML goes through `quick-xml`, already in the lockfile. Spreadsheet reads XLSX/XLS/ODS
+# (`calamine`) and writes XLSX (`rust_xlsxwriter`). Email speaks SMTP over rustls — STARTTLS or
+# implicit TLS, the system's roots — with `lettre`.
+yaml-rust2 = "0.13"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+quick-xml = "0.41"
+calamine = { version = "0.36", features = ["dates"] }
+rust_xlsxwriter = "0.99"
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls", "rustls-native-certs", "ring"] }
 # Wipes the derived key and the decrypted plaintext once they've served their purpose, so a
 # passphrase-derived key doesn't linger in freed memory for the rest of the session.
 zeroize = "1"
@@ -482,3 +492,13 @@ keyring = { version = "3", features = ["apple-native"] }
 # so local dev builds don't need Perl/NASM to build OpenSSL from source.
 git2 = { version = "0.19", features = ["vendored-openssl"] }
 
+
+# QuickJS, optimised in debug builds too. Flujos evaluates an expression per item per node, and the
+# unoptimised C interpreter made a dev build — `tauri dev` and `cargo test` alike — twice as slow on
+# a 10,000-item run as an optimised one (measured: 47 s against 24 s for 50 nodes). Release builds
+# optimise everything already; this costs one C library compiled at -O3 once.
+[profile.dev.package.rquickjs-sys]
+opt-level = 3
+
+[profile.dev.package.rquickjs-core]
+opt-level = 3

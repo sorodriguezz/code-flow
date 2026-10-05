@@ -1,0 +1,33 @@
+{
+  "id": "telegram",
+  "name": "Telegram",
+  "baseUrl": "https://api.telegram.org/bot{{secret}}",
+  "auth": "path",
+  "authHint": { "es": "Token del bot (de @BotFather) como credencial de tipo Bearer", "en": "Bot token (from @BotFather) as a Bearer credential" },
+  "okField": "ok",
+  "errorField": "description",
+  "operations": [
+    {
+      "id": "sendMessage",
+      "name": { "es": "Enviar un mensaje", "en": "Send a message" },
+      "method": "POST",
+      "path": "/sendMessage",
+      "fields": [
+        { "name": "chat_id", "label": { "es": "Chat", "en": "Chat" }, "placeholder": "123456789", "required": true },
+        { "name": "text", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true },
+        { "name": "parse_mode", "label": { "es": "Formato (Markdown, HTML)", "en": "Format (Markdown, HTML)" } }
+      ],
+      "body": { "chat_id": "{{chat_id}}", "text": "{{text}}", "parse_mode": "{{parse_mode}}" },
+      "result": "result"
+    },
+    {
+      "id": "getUpdates",
+      "name": { "es": "Leer mensajes recibidos", "en": "Read received messages" },
+      "method": "GET",
+      "path": "/getUpdates",
+      "query": { "offset": "{{offset}}" },
+      "fields": [{ "name": "offset", "label": { "es": "Desde el update", "en": "From update" } }],
+      "result": "result"
+    }
+  ]
+}

@@ -27,7 +27,7 @@ pub const INSTALL_SQL: &str = include_str!("supabase_schema.sql");
 /// The version of `supabase_schema.sql` this build was written against — what `cf_schema_version()`
 /// in the shipped script answers. A project that answers less has an older copy, and its host is
 /// asked to run the script again. The test below keeps the two numbers in step.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Whether a project running `version` of the script lacks something this build relies on.
 pub fn schema_outdated(version: i64) -> bool {

@@ -1,5 +1,5 @@
 import { createContext, lazy, Suspense, useContext, useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
-import { FolderOpen, KeyRound } from "lucide-react";
+import { CircleHelp, FolderOpen, KeyRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Checkbox } from "../common/Checkbox";
 import { Select, type SelectOption } from "../common/Select";
@@ -18,14 +18,24 @@ import {
   LocalModelField,
   McpServersField,
 } from "./AiFields";
+import { DbConnectionPicker, NotePicker, RemoteHostPicker, VaultItemPicker } from "./AppFields";
 import { serializeSpec } from "../../lib/flows/spec";
-import { flowsPreviewExpression, type FlowParamSpec, type FlowPreview } from "../../lib/tauri/flowsCommands";
+import {
+  CONNECTOR_CREDENTIALS,
+  flowsConnectors,
+  flowsPreviewExpression,
+  type FlowConnector,
+  type FlowConnectorCall,
+  type FlowLabel,
+  type FlowParamSpec,
+  type FlowPreview,
+} from "../../lib/tauri/flowsCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { listServices } from "../../lib/tauri/services";
 import type { ServiceRow } from "../../types/services";
 import { useFlowsStore } from "../../state/flowsStore";
 import { useFlowVaultStore } from "../../state/flowVaultStore";
-import { useT } from "../../state/languageStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 
 const CodeField = lazy(() => import("./CodeField"));
@@ -610,6 +620,109 @@ function ServicePicker({ value, onChange }: { value: unknown; onChange: (next: u
   );
 }
 
+/** The connectors, asked for once: their definitions ship with the app and never change in it. */
+let connectorList: Promise<FlowConnector[]> | null = null;
+
+function useConnectors(enabled = true): FlowConnector[] {
+  const [connectors, setConnectors] = useState<FlowConnector[]>([]);
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    connectorList ??= flowsConnectors().catch(() => {
+      connectorList = null;
+      return [];
+    });
+    void connectorList.then((list) => {
+      if (alive) setConnectors(list);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [enabled]);
+  return connectors;
+}
+
+function asCall(value: unknown): FlowConnectorCall {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const fields = record.fields && typeof record.fields === "object" && !Array.isArray(record.fields) ? (record.fields as Record<string, unknown>) : {};
+  return { connector: str(record.connector), operation: str(record.operation), fields };
+}
+
+/** The "Conector" node's call: the service, what to do with it, and that action's own fields —
+ *  each one fixed or an expression, like any field. Nothing secret is ever one of them: the token
+ *  is the credential below. */
+function ConnectorField({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
+  const t = useT();
+  const language = useLanguageStore((s) => s.language);
+  const connectors = useConnectors();
+  const call = asCall(value);
+  const connector = connectors.find((c) => c.id === call.connector);
+  const operation = connector?.operations.find((o) => o.id === call.operation);
+  const say = (label: FlowLabel) => (language === "es" ? label.es : label.en);
+  const fieldsOf = (c: FlowConnector | undefined, operationId: string) => {
+    const chosen = c?.operations.find((o) => o.id === operationId);
+    return c && chosen ? [...(c.siteField ? [c.siteField] : []), ...chosen.fields] : [];
+  };
+  const fields = fieldsOf(connector, call.operation);
+  const setField = (name: string, next: unknown) => onChange({ ...call, fields: { ...call.fields, [name]: next } });
+  // Another action keeps what the two have in common (the channel, the site) and drops the rest.
+  const pickOperation = (id: string) => {
+    const names = new Set(fieldsOf(connector, id).map((field) => field.name));
+    onChange({ ...call, operation: id, fields: Object.fromEntries(Object.entries(call.fields).filter(([name]) => names.has(name))) });
+  };
+  return (
+    <div className="flex flex-col gap-2.5">
+      <div className="flex items-center gap-1.5">
+        <div className="w-[130px] shrink-0">
+          <Select
+            value={call.connector}
+            onChange={(id) => onChange({ connector: id, operation: connectors.find((c) => c.id === id)?.operations[0]?.id ?? "", fields: {} })}
+            options={connectors.map((c) => ({ value: c.id, label: c.name }))}
+            size="sm"
+            ariaLabel={t("flows.connector.service")}
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <Select
+            value={operation ? call.operation : ""}
+            onChange={pickOperation}
+            options={(connector?.operations ?? []).map((o) => ({ value: o.id, label: say(o.name) }))}
+            size="sm"
+            ariaLabel={t("flows.connector.action")}
+          />
+        </div>
+        {connector && (
+          <span className="flex shrink-0 text-[var(--cf-text-faint)]" title={say(connector.authHint)} aria-label={say(connector.authHint)}>
+            <CircleHelp size={14} />
+          </span>
+        )}
+      </div>
+      {fields.map((field) => {
+        const current = call.fields[field.name];
+        return (
+          <div key={field.name} className="flex flex-col gap-1">
+            <div className="flex min-h-[20px] items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]">
+                {say(field.label)}
+                {field.required && <span className="text-[var(--cf-text-faint)]"> *</span>}
+              </span>
+              <ExpressionToggle value={current} onChange={(next) => setField(field.name, next)} />
+            </div>
+            <SmartInput
+              value={str(current)}
+              onChange={(next) => setField(field.name, next)}
+              multiline={field.multiline}
+              mono={field.json}
+              placeholder={field.placeholder}
+              ariaLabel={say(field.label)}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** One parameter: its label, the `fx` switch, the editor its kind calls for, and its preview. */
 function ParamField({
   spec,
@@ -619,6 +732,7 @@ function ParamField({
   nodeId,
   params,
   typeId,
+  credentialKinds,
 }: {
   spec: FlowParamSpec;
   value: unknown;
@@ -628,6 +742,8 @@ function ParamField({
   /** The node's other values — a field that depends on a sibling (the local model on its server). */
   params: Record<string, unknown>;
   typeId?: string;
+  /** Narrower credential kinds than the declaration's — those of the connector a call names. */
+  credentialKinds?: string[];
 }) {
   const t = useT();
   const expression = isExpression(value);
@@ -717,7 +833,7 @@ function ParamField({
         editor = <FolderField value={str(value)} onChange={onChange} />;
         break;
       case "credential":
-        editor = <CredentialPicker value={value} kinds={kind.kinds} onChange={onChange} />;
+        editor = <CredentialPicker value={value} kinds={credentialKinds ?? kind.kinds} onChange={onChange} />;
         break;
       case "multiSelect":
         editor = <MultiSelectField value={value} options={kind.options} onChange={onChange} />;
@@ -754,6 +870,21 @@ function ParamField({
         break;
       case "chainTemplate":
         editor = <ChainTemplatePicker value={value} onChange={onChange} />;
+        break;
+      case "dbConnection":
+        editor = <DbConnectionPicker value={value} onChange={onChange} kinds={kind.kinds} />;
+        break;
+      case "remoteHost":
+        editor = <RemoteHostPicker value={value} onChange={onChange} kinds={kind.kinds} />;
+        break;
+      case "note":
+        editor = <NotePicker value={value} onChange={onChange} />;
+        break;
+      case "vaultItem":
+        editor = <VaultItemPicker value={value} onChange={onChange} />;
+        break;
+      case "connector":
+        editor = <ConnectorField value={value} onChange={onChange} />;
         break;
     }
   }
@@ -795,6 +926,10 @@ export function ParamFields({
   typeId?: string;
 }) {
   const t = useT();
+  // A connector call decides which credentials fit, and whether one is asked for at all.
+  const connectors = useConnectors(typeId === "net.connector");
+  const callSpec = typeId === "net.connector" ? specs.find((spec) => spec.name === "call") : undefined;
+  const connector = callSpec ? connectors.find((c) => c.id === asCall(params.call ?? callSpec.default).connector) : undefined;
   if (specs.length === 0) {
     return <p className="text-[12px] text-[var(--cf-text-muted)]">{t("flows.param.none")}</p>;
   }
@@ -803,6 +938,7 @@ export function ParamFields({
     <div className="flex flex-col gap-3.5">
       {specs
         .filter((spec) => visible(spec, params, specs))
+        .filter((spec) => !(connector?.auth === "none" && spec.name === "credential"))
         .map((spec) => (
           <ParamField
             key={spec.name}
@@ -813,6 +949,7 @@ export function ParamFields({
             nodeId={nodeId}
             params={params}
             typeId={typeId}
+            credentialKinds={connector && spec.name === "credential" ? CONNECTOR_CREDENTIALS[connector.auth] : undefined}
           />
         ))}
     </div>

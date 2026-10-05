@@ -226,7 +226,9 @@ export interface DbDiagramColumn {
   data_type: string;
   nullable: boolean;
   primary_key: boolean;
-  /** Derived from the edge list on the backend, so the flag and the line can never disagree. */
+  /** Derived from the edge list on the backend, so the flag and the line agree — except for a key
+   *  into another schema, whose line the diagram leaves out (`erLayout.ownTablesOnly`) while the
+   *  column keeps its mark. */
   foreign_key: boolean;
   /**
    * Declared unique — the DBML canvas draws a badge for it and measures the row wider to fit one.

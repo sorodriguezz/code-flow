@@ -815,6 +815,13 @@ export function captureLaser(frame: HTMLIFrameElement | null, laser: LaserCaptur
 
   /** The pointer drawing a stroke, or `null`. */
   let live: number | null = null;
+  /**
+   * A right-button drag on the drawing, let through: draw.io pans with the right button (and opens
+   * its menu when nothing moved), so the laser keeps the way around the drawing (user ask). Cleared
+   * a tick after its release, once the mouse events that follow the pointer ones have gone by too —
+   * mxGraph listens to those on macOS.
+   */
+  let panning: number | null = null;
   const onDrawing = (target: EventTarget | null) =>
     target !== null && "nodeType" in target && drawing.contains(target as Node);
   const at = (event: { clientX: number; clientY: number }): FramePoint => [event.clientX, event.clientY];
@@ -830,6 +837,12 @@ export function captureLaser(frame: HTMLIFrameElement | null, laser: LaserCaptur
 
   const onDown = (event: PointerEvent) => {
     if (!onDrawing(event.target)) return;
+    if (event.button === 2 && live === null) {
+      panning = event.pointerId;
+      laser.hover(null);
+      echoPress(frame, event);
+      return;
+    }
     swallow(event);
     echoPress(frame, event);
     if (event.button !== 0 || live !== null) return;
@@ -845,6 +858,7 @@ export function captureLaser(frame: HTMLIFrameElement | null, laser: LaserCaptur
     laser.down(at(event), event.pointerId);
   };
   const onMove = (event: PointerEvent) => {
+    if (panning !== null) return;
     if (event.pointerId === live) {
       event.stopImmediatePropagation();
       // Every sample the browser merged into this event — see `LaserLayer`.
@@ -861,6 +875,10 @@ export function captureLaser(frame: HTMLIFrameElement | null, laser: LaserCaptur
     laser.hover(at(event));
   };
   const onUp = (event: PointerEvent) => {
+    if (panning !== null) {
+      if (event.pointerId === panning) win.setTimeout(() => (panning = null), 0);
+      return;
+    }
     if (event.pointerId !== live) {
       if (onDrawing(event.target)) swallow(event);
       return;
@@ -869,6 +887,7 @@ export function captureLaser(frame: HTMLIFrameElement | null, laser: LaserCaptur
     release(event.pointerId);
   };
   const onMouse = (event: Event) => {
+    if (panning !== null) return;
     if (live !== null || onDrawing(event.target)) swallow(event);
   };
   const onKey = (event: KeyboardEvent) => {

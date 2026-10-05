@@ -1724,6 +1724,16 @@ impl Session {
     /// pool with topology monitoring behind the single `Client` handle, so a server that restarted
     /// or a socket that dropped is rediscovered and replaced *inside* the client. Throwing the
     /// session away would discard a healthy pool to build an identical one.
+    /// Column types for a statement whose result arrived without them, where the engine can say
+    /// without running it again. Only Postgres needs and answers this; see
+    /// [`postgres::PgSession::describe_columns`].
+    pub async fn column_types(&self, statement: &str) -> Option<Vec<String>> {
+        match self {
+            Session::Postgres(s) => s.describe_columns(statement).await,
+            _ => None,
+        }
+    }
+
     pub fn is_alive(&self) -> bool {
         match self {
             Session::Postgres(s) => s.is_alive(),

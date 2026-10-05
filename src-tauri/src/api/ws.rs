@@ -33,7 +33,7 @@ use super::{
     WsCommand, WsConnectRequest, EVENT_STREAM_MESSAGE, EVENT_STREAM_STATUS,
 };
 
-pub(super) type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub async fn connect(app: AppHandle, id: String, req: WsConnectRequest) -> Result<(), String> {
     let (tx, rx) = mpsc::unbounded_channel::<WsCommand>();
@@ -187,7 +187,7 @@ async fn pump(
 /// The TLS policy is the one HTTP applies — the extra CA bundle, the client certificate (PEM,
 /// encrypted key or PKCS#12, see `tls`) and the verification switch — and a configured proxy is
 /// tunnelled through with `CONNECT`, which is how a WebSocket crosses an HTTP proxy at all.
-pub(super) async fn dial(
+pub(crate) async fn dial(
     url: &str,
     headers: &[(String, String)],
     subprotocols: &[String],
@@ -318,7 +318,7 @@ fn upgrade_request(
 
 /// Every WebSocket doc page writes the URL with the HTTP scheme it upgrades from, so rejecting
 /// `https://` would only ever be a papercut.
-pub(super) fn normalize_scheme(url: &str) -> String {
+pub(crate) fn normalize_scheme(url: &str) -> String {
     let trimmed = url.trim();
     let lower = trimmed.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix("https://") {

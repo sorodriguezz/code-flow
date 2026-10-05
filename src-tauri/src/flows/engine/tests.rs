@@ -35,6 +35,9 @@ struct Script {
     edits: Mutex<Vec<String>>,
     /// A file an editing agent appends to, relative to its folder — to have something to undo.
     touch: Mutex<Option<String>>,
+    /// How the waits of a run end, in order, and what they asked.
+    waits: Mutex<std::collections::VecDeque<WaitAnswer>>,
+    wait_calls: Mutex<Vec<WaitRequest>>,
 }
 
 impl Script {
@@ -92,11 +95,36 @@ impl RunHost for Host {
         Ok(())
     }
     fn credential(&self, id: &str) -> Result<Credential, String> {
-        if id == "token" {
-            Ok(Credential { kind: "bearer".into(), meta: json!({}), secret: "s3cret".into() })
-        } else {
-            Err(format!("No credential {id}"))
+        match id {
+            "token" => Ok(Credential { kind: "bearer".into(), meta: json!({}), secret: "s3cret".into() }),
+            "signing" => Ok(Credential { kind: "hmac".into(), meta: json!({}), secret: "key".into() }),
+            // A webhook URL credential pointing wherever the test's own server listens.
+            hook if hook.starts_with("webhook:") => {
+                Ok(Credential { kind: "webhook".into(), meta: json!({}), secret: hook["webhook:".len()..].into() })
+            }
+            // The SMTP catcher of the live tests (see `milestone4`): no login, no TLS.
+            "mail" => Ok(Credential {
+                kind: "smtp".into(),
+                meta: json!({"host": "127.0.0.1", "port": "51025", "security": "none", "from": "Flujos <flujos@example.com>"}),
+                secret: String::new(),
+            }),
+            _ => Err(format!("No credential {id}")),
         }
+    }
+    fn db_connection(&self, connection_id: &str) -> Result<crate::datasource::DbConnectionConfig, String> {
+        milestone4::connection(connection_id)
+    }
+    fn remote_host(&self, host_id: &str) -> Result<crate::remotes::RemoteHostSpec, String> {
+        milestone4::remote(host_id)
+    }
+    fn wait_for(&self, request: WaitRequest, _cancel: CancellationToken) -> HostFuture<'_, Result<WaitAnswer, String>> {
+        Box::pin(async move {
+            self.script.wait_calls.lock().unwrap().push(request);
+            self.script.waits.lock().unwrap().pop_front().ok_or_else(|| "the script has no decision".to_string())
+        })
+    }
+    fn resume_url(&self) -> Option<String> {
+        Some("http://127.0.0.1:47811/resume/run-1".into())
     }
     fn work_dir(&self) -> PathBuf {
         self.dir.clone()
@@ -203,6 +231,16 @@ impl Ran {
 
     fn status(&self, id: &str) -> NodeStatus {
         self.report(id).status
+    }
+
+    /// Every report a node sent, in order — one per batch inside a loop.
+    fn reports_of(&self, id: &str) -> Vec<NodeReport> {
+        self.memory.reports.lock().unwrap().iter().filter(|report| report.node_id == id).cloned().collect()
+    }
+
+    /// A node's last report: inside a loop, its last batch's.
+    fn last(&self, id: &str) -> NodeReport {
+        self.reports_of(id).pop().unwrap_or_else(|| panic!("no report for {id}"))
     }
 }
 
@@ -641,15 +679,23 @@ async fn sort_split_aggregate_and_dedupe() {
     assert_eq!(ran.output("unique", 0).len(), 2);
 }
 
+/// Milestone 6 brought the last nodes: the whole catalogue runs, the notebook (the last to arrive)
+/// reaching its own executor rather than the "arrives in milestone" refusal.
 #[tokio::test]
-async fn a_node_from_a_later_milestone_says_so() {
+async fn every_node_of_the_catalogue_runs() {
+    let later: Vec<&str> = crate::flows::catalog::CATALOG
+        .iter()
+        .filter(|descriptor| descriptor.milestone > crate::flows::catalog::RUNS_THROUGH)
+        .map(|descriptor| descriptor.type_id)
+        .collect();
+    assert!(later.is_empty(), "not running yet: {later:?}");
     let spec = flow(
-        vec![node("start", "trigger.manual", json!({})), node("gql", "net.graphql", json!({}))],
-        vec![wire("start", 0, "gql", 0)],
+        vec![node("start", "trigger.manual", json!({})), node("book", "code.notebook", json!({}))],
+        vec![wire("start", 0, "book", 0)],
     );
     let ran = run(spec).await;
     assert_eq!(ran.outcome.status, RunStatus::Error);
-    assert!(ran.outcome.error.as_deref().unwrap().contains("milestone 4"));
+    assert!(ran.outcome.error.as_deref().unwrap().contains("notebook's path"), "{:?}", ran.outcome.error);
 }
 
 /// A run something outside started: the trigger's output is what the event gave.
@@ -1028,3 +1074,7 @@ async fn review_and_commit_read_their_answers() {
     assert_eq!(calls.len(), 2, "an empty diff asks nobody");
     assert!(calls[0].data.starts_with("DIFF:\n+let token"));
 }
+
+mod milestone4;
+mod milestone5;
+mod milestone6;

@@ -188,7 +188,28 @@ function storedNoticesSeen(): number {
  * the branch screen shares `repo`. `review` and `chat` are apart from everything because they are
  * the two calls that hold the connection open for as long as an engine takes to answer.
  */
-export type BusyKey = "repo" | "analyze" | "chains" | "review" | "chat" | "pipelines" | "services";
+export type BusyKey = "repo" | "analyze" | "chains" | "review" | "chat" | "pipelines" | "services" | "flows";
+
+/** A run waiting for somebody, as the desktop shows it to a phone (`waits::phone_view`). */
+export interface FlowWait {
+  id: string;
+  flowName: string;
+  nodeName: string;
+  /** `approval`, `webhook` (waits for a call to its URL) or `time`. */
+  kind: string;
+  message: string;
+  createdAt: string;
+  expiresAt: string | null;
+}
+
+/** An armed flow's phone trigger: a button that starts it. */
+export interface PhoneFlow {
+  flowId: string;
+  nodeId: string;
+  flowName: string;
+  label: string;
+  workspaceId: string;
+}
 
 /** What one live run is printing, as the batches arrive. */
 export interface RunLog {
@@ -286,6 +307,12 @@ interface MobileState {
   servicesState: "loading" | "ready" | "error";
   servicesError: string | null;
 
+  /** Flujos: the runs waiting for somebody, every workspace's, and the flows this phone may start. */
+  flowWaits: FlowWait[];
+  phoneFlows: PhoneFlow[];
+  flowsState: "loading" | "ready" | "error";
+  flowsError: string | null;
+
   /** The desktop's notification centre, as its main window last published it. Newest first. */
   notices: RemoteNotice[];
   /** See [`NOTICES_SEEN_KEY`]. */
@@ -325,6 +352,7 @@ interface MobileState {
   refreshRepo: () => Promise<void>;
   refreshChains: () => Promise<void>;
   refreshServices: () => Promise<void>;
+  refreshFlows: () => Promise<void>;
   /** Folds one `services:runtime` frame in. */
   applyServiceRuntime: (view: ServiceRuntime) => void;
   refreshNotices: () => Promise<void>;
@@ -376,13 +404,18 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   servicesState: "loading",
   servicesError: null,
 
+  flowWaits: [],
+  phoneFlows: [],
+  flowsState: "loading",
+  flowsError: null,
+
   notices: [],
   noticesSeenAt: storedNoticesSeen(),
 
   logs: {},
   terminals: storedTerminals(),
 
-  busy: { repo: false, analyze: false, chains: false, review: false, chat: false, pipelines: false, services: false },
+  busy: { repo: false, analyze: false, chains: false, review: false, chat: false, pipelines: false, services: false, flows: false },
   error: null,
 
   /** The cold-start call. One round trip for what would otherwise be four — see `remote_bootstrap`
@@ -695,6 +728,22 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   applyServiceRuntime: (view) =>
     set((s) => ({ serviceRuntime: { ...s.serviceRuntime, [view.id]: view } })),
 
+  refreshFlows: async () => {
+    const [waits, buttons] = await Promise.all([
+      read(() => rpc<FlowWait[]>("flows_list_waits")),
+      read(() => rpc<PhoneFlow[]>("flows_phone_flows")),
+    ]);
+    if (anyUnpaired(waits, buttons)) {
+      set({ unpaired: true });
+      return;
+    }
+    if (!waits.ok || !buttons.ok) {
+      set({ flowsState: "error", flowsError: !waits.ok ? waits.error : !buttons.ok ? buttons.error : null });
+      return;
+    }
+    set({ flowWaits: waits.value, phoneFlows: buttons.value, flowsState: "ready", flowsError: null });
+  },
+
   refreshNotices: async () => {
     const notices = await read(() => rpc<RemoteNotice[]>("list_notifications"));
     if (!notices.ok) {
@@ -718,7 +767,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   },
 
   refreshAll: async () => {
-    await Promise.all([get().refreshRepo(), get().refreshChains(), get().refreshServices()]);
+    await Promise.all([get().refreshRepo(), get().refreshChains(), get().refreshServices(), get().refreshFlows()]);
   },
 
   /**

@@ -171,6 +171,8 @@ pub fn announce_for(cmd: &str) -> Announce {
         "cancel_pipeline" => Some("remote.action.pipelineCancelled"),
         // A process started or stopped on this machine from somewhere else — a dev server the person
         // at the desk is using can go away under them, and they should be told why.
+        "flows_decide_wait" => Some("remote.action.flowDecided"),
+        "flows_run_from_phone" => Some("remote.action.flowStarted"),
         "services_start" => Some("remote.action.servicesStarted"),
         "services_stop" => Some("remote.action.servicesStopped"),
         "services_restart" => Some("remote.action.servicesRestarted"),
@@ -462,6 +464,11 @@ pub const ALLOWED: &[&str] = &[
     "pipeline_run_detail",
     "rerun_pipeline",
     "cancel_pipeline",
+    // Flujos: the runs waiting for someone, and the flows a phone trigger lets it start.
+    "flows_list_waits",
+    "flows_decide_wait",
+    "flows_phone_flows",
+    "flows_run_from_phone",
     // Services.
     "list_services",
     "services_runtime",
@@ -1270,6 +1277,29 @@ pub async fn dispatch(
         //
         // `Invalidate::None`: the supervisor emits `services:runtime` for every change, which the
         // desktop already listens to and `bridge.rs` forwards to the phones.
+        // Flujos. A phone sees the open waits of every workspace (it is the machine's owner deciding)
+        // in a shape of its own (`waits::phone_view`), decides them as `phone`, and starts only the
+        // flows an armed phone trigger offers — `fire_from_phone` refuses anything else.
+        //
+        // `Invalidate::None`: the runs announce themselves (`flows:run`, `flows:wait`), which the
+        // desktop already listens to and `bridge.rs` forwards to the phones.
+        "flows_list_waits" => ok(crate::flows::waits::open_waits(app, None)?.iter().map(crate::flows::waits::phone_view).collect::<Vec<_>>()),
+        "flows_decide_wait" => {
+            let comment: Option<String> = opt(args, "comment")?;
+            let payload = comment.filter(|c| !c.trim().is_empty()).map_or(Value::Null, Value::String);
+            let row = crate::flows::waits::decide(app, &arg::<String>(args, "id")?, &arg::<String>(args, "decision")?, "phone", payload)?;
+            ok(crate::flows::waits::phone_view(&row))
+        }
+        "flows_phone_flows" => ok(crate::flows::triggers::phone_buttons()),
+        "flows_run_from_phone" => {
+            let text: Option<String> = opt(args, "text")?;
+            ok(crate::flows::triggers::fire_from_phone(
+                app,
+                &arg::<String>(args, "flowId")?,
+                &arg::<String>(args, "nodeId")?,
+                text.as_deref().unwrap_or_default(),
+            )?)
+        }
         "list_services" => ok(commands::services_cmd::list_services(
             app.state::<Db>(),
             arg(args, "workspaceId")?,

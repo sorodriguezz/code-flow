@@ -1,0 +1,39 @@
+{
+  "id": "notion",
+  "name": "Notion",
+  "baseUrl": "https://api.notion.com/v1",
+  "auth": "bearer",
+  "authHint": { "es": "Token de una integración interna como credencial Bearer", "en": "An internal integration token as a Bearer credential" },
+  "headers": { "Notion-Version": "2022-06-28" },
+  "operations": [
+    {
+      "id": "createPage",
+      "name": { "es": "Crear una página en una base de datos", "en": "Create a page in a database" },
+      "method": "POST",
+      "path": "/pages",
+      "fields": [
+        { "name": "databaseId", "label": { "es": "ID de la base de datos", "en": "Database ID" }, "required": true },
+        { "name": "titleProperty", "label": { "es": "Propiedad del título", "en": "Title property" }, "placeholder": "Name", "required": true },
+        { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
+        { "name": "content", "label": { "es": "Texto de la página", "en": "Page text" }, "multiline": true }
+      ],
+      "body": {
+        "parent": { "database_id": "{{databaseId}}" },
+        "properties": { "{{titleProperty}}": { "title": [{ "text": { "content": "{{title}}" } }] } },
+        "children": [{ "$when": "content", "object": "block", "type": "paragraph", "paragraph": { "rich_text": [{ "type": "text", "text": { "content": "{{content}}" } }] } }]
+      }
+    },
+    {
+      "id": "queryDatabase",
+      "name": { "es": "Consultar una base de datos", "en": "Query a database" },
+      "method": "POST",
+      "path": "/databases/{{databaseId}}/query",
+      "fields": [
+        { "name": "databaseId", "label": { "es": "ID de la base de datos", "en": "Database ID" }, "required": true },
+        { "name": "filter", "label": { "es": "Filtro (JSON de Notion)", "en": "Filter (Notion JSON)" }, "multiline": true, "json": true }
+      ],
+      "body": { "filter": "{{filter}}" },
+      "result": "results"
+    }
+  ]
+}

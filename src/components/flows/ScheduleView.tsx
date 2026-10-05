@@ -4,6 +4,7 @@ import { iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { nodeIcon } from "../../lib/flows/nodeIcons";
 import { autostartEnabled, setAutostart } from "../../lib/tauri/windows";
+import { getSetting, setSetting } from "../../lib/tauri/commands";
 import type { FlowArmedView, FlowTriggerView } from "../../lib/tauri/flowsCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
@@ -11,6 +12,7 @@ import { useFlowsStore } from "../../state/flowsStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { formatWhen } from "./runFormat";
+import { WaitCard } from "./WaitCard";
 
 /**
  * Programación: everything that can start a flow of this workspace on its own — the schedules on a
@@ -91,8 +93,10 @@ export function ScheduleView() {
   const t = useT();
   const language = useLanguageStore((s) => s.language);
   const armed = useFlowRunsStore((s) => s.triggers);
+  const waits = useFlowRunsStore((s) => s.waits);
   const flows = useFlowsStore((s) => s.flows);
   const [launchAtLogin, setLaunchAtLogin] = useState<boolean | null>(null);
+  const [background, setBackground] = useState(false);
   const [, setTick] = useState(0);
 
   useEffect(() => {
@@ -100,6 +104,9 @@ export function ScheduleView() {
     void autostartEnabled()
       .then(setLaunchAtLogin)
       .catch(() => setLaunchAtLogin(null));
+    void getSetting("flows_background_at_login")
+      .then((value) => setBackground(value === "1"))
+      .catch(() => {});
     const timer = setInterval(() => setTick((n) => n + 1), 30_000);
     return () => clearInterval(timer);
   }, []);
@@ -132,6 +139,17 @@ export function ScheduleView() {
             {Intl.DateTimeFormat().resolvedOptions().timeZone}
           </span>
         </div>
+
+        {waits.length > 0 && (
+          <section className="flex flex-col gap-2">
+            <h3 className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-muted)]">{t("flows.wait.section")}</h3>
+            {[...waits]
+              .sort((a, b) => Number(b.kind === "approval") - Number(a.kind === "approval"))
+              .map((wait) => (
+                <WaitCard key={wait.id} wait={wait} />
+              ))}
+          </section>
+        )}
 
         {schedules.length > 0 && <Ruler rows={schedules} />}
 
@@ -318,6 +336,18 @@ export function ScheduleView() {
           {t("settings.launchAtLogin")}
           <span className="text-[var(--cf-text-faint)]">· {t("flows.schedule.whileOpen")}</span>
         </label>
+        {launchAtLogin && (
+          <label className="-mt-2 ml-6 flex items-center gap-2 text-[12.5px] text-[var(--cf-text)]" title={t("flows.schedule.backgroundHint")}>
+            <Checkbox
+              checked={background}
+              onChange={(on) => {
+                setBackground(on);
+                void setSetting("flows_background_at_login", on ? "1" : "0").catch((error: unknown) => pushErrorToast(String(error)));
+              }}
+            />
+            {t("flows.schedule.background")}
+          </label>
+        )}
       </div>
     </div>
   );

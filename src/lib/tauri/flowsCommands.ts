@@ -54,7 +54,12 @@ export type FlowParamKind =
   | { type: "mcpServers" }
   | { type: "localModel" }
   | { type: "agent" }
-  | { type: "chainTemplate" };
+  | { type: "chainTemplate" }
+  | { type: "dbConnection"; kinds: string[] }
+  | { type: "remoteHost"; kinds: string[] }
+  | { type: "note" }
+  | { type: "vaultItem" }
+  | { type: "connector" };
 
 /** `engine::EngineChoice` — an AI node's engine. `provider: ""` is the Flows routing row's engine,
  *  `"local"` the local model of Settings; `account: ""` is automatic. */
@@ -101,6 +106,10 @@ export interface FlowMetaRow {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  /** What the flow would run, hashed (`spec::executable_hash`); empty when it runs nothing. */
+  exec_hash: string;
+  /** Whether what it runs is what the user trusted: written here, or reviewed and accepted. */
+  trusted: boolean;
 }
 
 export interface FlowRow extends FlowMetaRow {
@@ -135,15 +144,124 @@ export type FlowVersion = DocVersion;
 
 export const flowsNodeCatalog = () => invoke<FlowNodeDescriptor[]>("flows_node_catalog");
 
+/** `connectors::Label` — a definition's text in both languages. */
+export interface FlowLabel {
+  es: string;
+  en: string;
+}
+
+export interface FlowConnectorField {
+  name: string;
+  label: FlowLabel;
+  placeholder: string;
+  required: boolean;
+  multiline: boolean;
+  /** Parsed as JSON by the node (a Notion filter). */
+  json: boolean;
+}
+
+export interface FlowConnectorOperation {
+  id: string;
+  name: FlowLabel;
+  method: string;
+  fields: FlowConnectorField[];
+}
+
+/** `connectors::Connector`, the parts the form draws from. */
+export interface FlowConnector {
+  id: string;
+  name: string;
+  auth: "bearer" | "basic" | "path" | "url" | "none";
+  authHint: FlowLabel;
+  /** A field every operation has (Jira's site), shown first. */
+  siteField: FlowConnectorField | null;
+  operations: FlowConnectorOperation[];
+}
+
+/** `Connector::credential_kinds`: which credentials sign a connector in, by how it signs in. */
+export const CONNECTOR_CREDENTIALS: Record<FlowConnector["auth"], FlowCredentialKind[]> = {
+  bearer: ["bearer"],
+  path: ["bearer"],
+  basic: ["basic"],
+  url: ["webhook"],
+  none: [],
+};
+
+/** `{ connector, operation, fields }` — the "Conector" node's `call` parameter. */
+export interface FlowConnectorCall {
+  connector: string;
+  operation: string;
+  fields: Record<string, unknown>;
+}
+
+export const flowsConnectors = () => invoke<FlowConnector[]>("flows_connectors");
+
 export const flowsLoadTree = (workspaceId: string) => invoke<FlowsTree>("flows_load_tree", { workspaceId });
 
 export const flowsGetFlow = (id: string) => invoke<FlowRow | null>("flows_get_flow", { id });
 
+/** Writes a flow to a JSON file: its document and its credentials' names, never a secret. */
+export const flowsExportFlow = (id: string, path: string) => invoke<void>("flows_export_flow", { id, path });
+
+/** What an import had to change to fit this workspace. */
+export interface FlowImportNotes {
+  /** Credentials it named that this workspace has no match for (by name and kind). */
+  unmatchedCredentials: string[];
+  /** References to things that do not exist here, cleared: `node · parameter`. */
+  cleared: string[];
+  /** n8n nodes with no counterpart here, kept switched off: `Name (type)`. */
+  unmapped: string[];
+}
+
+/** Reads a flow file into a new, untrusted, inactive flow of the workspace. */
+export const flowsImportFlow = (workspaceId: string, folderId: string | null, path: string, fallbackName: string) =>
+  invoke<{ meta: FlowMetaRow; notes: FlowImportNotes }>("flows_import_flow", { workspaceId, folderId, path, fallbackName });
+
+/** Trusts what a flow runs, as reviewed — refused with `changed` when it changed since. */
+export const flowsTrustFlow = (id: string, execHash: string) => invoke<FlowMetaRow>("flows_trust_flow", { id, execHash });
+
+/** `spec::EXECUTABLE_TYPES`: the nodes whose parameters are code or commands — what a review shows. */
+export const EXECUTABLE_TYPES = new Set([
+  "code.shell",
+  "code.python",
+  "code.node",
+  "code.command",
+  "code.script",
+  "code.js",
+  "code.ssh",
+  "code.docker",
+  "app.terminal",
+  "app.agent",
+  "ai.agent",
+  "data.sql",
+  "data.mongo",
+  "data.redis",
+]);
+
 export const flowsCreateFlow = (workspaceId: string, folderId: string | null, name: string, spec?: string) =>
   invoke<FlowMetaRow>("flows_create_flow", { workspaceId, folderId, name, spec: spec ?? null });
 
-export const flowsSaveFlow = (id: string, spec: string, expectedVersion: number | null) =>
-  invoke<FlowSaved>("flows_save_flow", { id, spec, expectedVersion });
+/** `keepTrust: false` saves a change the user did not write (an accepted AI proposal). */
+export const flowsSaveFlow = (id: string, spec: string, expectedVersion: number | null, keepTrust = true) =>
+  invoke<FlowSaved>("flows_save_flow", { id, spec, expectedVersion, keepTrust });
+
+/** A flow the model wrote, checked by the backend — the whole document and what it says it did. */
+export interface FlowBuilt {
+  spec: string;
+  summary: string;
+}
+
+/** The AI builder (`flows::builder`): nothing is saved, the answer is a proposal to show. */
+export const flowsBuildWithAi = (args: {
+  workspaceId: string;
+  flowName: string;
+  prompt: string;
+  current: string;
+  language: string;
+  /** What each node type does, in the app's language. */
+  notes: Record<string, string>;
+  runId: string;
+}) => invoke<FlowBuilt>("flows_build_with_ai", args);
 
 export const flowsRenameFlow = (id: string, name: string) =>
   invoke<FlowMetaRow | null>("flows_rename_flow", { id, name });
@@ -187,7 +305,40 @@ export const flowsClearVersions = (id: string) => invoke<void>("flows_clear_vers
 /** `run::RunMode`. */
 export type FlowRunMode = { kind: "full" } | { kind: "upTo"; node: string } | { kind: "step"; node: string };
 
-export type FlowRunStatus = "running" | "success" | "error" | "canceled" | "interrupted";
+export type FlowRunStatus = "running" | "waiting" | "success" | "error" | "canceled" | "interrupted";
+
+/** `flow_run_queries::FlowWaitRow` — a run parked at a node until someone decides; also `flows:wait`. */
+export interface FlowWait {
+  id: string;
+  runId: string;
+  flowId: string;
+  workspaceId: string;
+  flowName: string;
+  nodeId: string;
+  nodeName: string;
+  kind: "approval" | "webhook" | "time";
+  message: string;
+  createdAt: string;
+  expiresAt: string | null;
+  /** `null` while it is open. */
+  decidedAt: string | null;
+  decision: string;
+  decidedBy: string;
+  payload: unknown;
+}
+
+/** The open waits of a workspace, oldest first. */
+export const flowsListWaits = (workspaceId: string) => invoke<FlowWait[]>("flows_list_waits", { workspaceId });
+
+/** Approves or rejects an approval; `resumed` lets a wait for a call or a time go on. Refused with
+ *  `already-decided` when the other device got there first. */
+export const flowsDecideWait = (id: string, decision: "approved" | "rejected" | "resumed", comment?: string) =>
+  invoke<FlowWait>("flows_decide_wait", { id, decision, comment: comment ?? null });
+
+/** Where a run's "wait for a call" node listens — the webhook server's address with `/resume/<run>`. */
+export function resumeUrlOf(webhookBase: string, runId: string): string {
+  return `${webhookBase.replace(/\/hooks\/?$/, "")}/resume/${runId}`;
+}
 export type FlowNodeRunStatus =
   | "running"
   | "success"
@@ -361,7 +512,7 @@ export const flowsDeleteVariable = (id: string) => invoke<void>("flows_delete_va
 export const flowsSetVariableScope = (id: string, global: boolean) =>
   invoke<void>("flows_set_variable_scope", { id, global });
 
-export type FlowCredentialKind = "bearer" | "basic" | "header" | "query" | "hmac";
+export type FlowCredentialKind = "bearer" | "basic" | "header" | "query" | "hmac" | "smtp" | "webhook";
 
 /** A credential as the frontend sees it: never the secret. */
 export interface FlowCredential {
@@ -370,7 +521,7 @@ export interface FlowCredential {
   scope: "workspace" | "global";
   name: string;
   kind: FlowCredentialKind;
-  meta: { user?: string; name?: string };
+  meta: { user?: string; name?: string; host?: string; port?: string; security?: string; from?: string };
   createdAt: string;
   updatedAt: string;
 }
@@ -447,6 +598,25 @@ export const flowsRunEdits = (runId: string) => invoke<FlowRunEdits[]>("flows_ru
 /** Puts back what the run's editing nodes changed; the paths it touched. */
 export const flowsUndoEdits = (runId: string) => invoke<string[]>("flows_undo_edits", { runId });
 
+/** Tries a credential for real: an SMTP account signs in; an HTTP one signs a GET to `url`. */
+export const flowsTestCredential = (id: string, url?: string) => invoke<string>("flows_test_credential", { id, url: url ?? null });
+
+/** `flows:open` — a flow asked the window to show one of its views. */
+export interface FlowOpenEvent {
+  kind: string;
+  target: string;
+  workspaceId: string;
+}
+
+/** `flows:terminal` — a flow asked for a visible terminal running a command. */
+export interface FlowTerminalEvent {
+  command: string;
+  cwd: string;
+  projectId: string;
+  title: string;
+  workspaceId: string;
+}
+
 /** The models a local server lists, for the Local model node. */
 export const flowsLocalModels = (server: string, url: string) => invoke<string[]>("flows_local_models", { server, url });
 
@@ -468,3 +638,55 @@ export interface FlowAgentEvent {
   flowRunId?: string;
   aborted?: boolean;
 }
+
+// ---------- sharing (the user's own Supabase project — `flows::share`) ----------
+
+/** `flow_share_queries::FlowShareRow`. */
+export interface FlowShareRow {
+  flowId: string;
+  projectUrl: string;
+  name: string;
+  role: "owner" | "member";
+  cursor: string;
+  base: string;
+  /** The remote version waiting while both sides changed, as JSON text. */
+  conflict: string | null;
+  conflictAt: string | null;
+  lastError: string;
+  syncedAt: string;
+}
+
+/** `share::Round`. */
+export interface FlowShareRound {
+  state: "synced" | "conflict";
+  applied: boolean;
+  pushed: boolean;
+  meta: FlowMetaRow | null;
+}
+
+/** `flows:shared` — a teammate's version was applied, or a conflict appeared. */
+export interface FlowSharedEvent {
+  flowId: string;
+  applied: boolean;
+  state: "synced" | "conflict";
+}
+
+export const flowsShares = () => invoke<FlowShareRow[]>("flows_shares");
+
+export const flowsShare = (url: string, flowId: string) =>
+  invoke<{ id: string; name: string; share_token: string }>("flows_share", { url, flowId });
+
+export const flowsJoinShared = (url: string, token: string, workspaceId: string, folderId: string | null) =>
+  invoke<FlowMetaRow>("flows_join_shared", { url, token, workspaceId, folderId });
+
+export const flowsShareTick = (flowId: string) => invoke<FlowShareRound | null>("flows_share_tick", { flowId });
+
+export const flowsShareSync = (flowId: string) => invoke<FlowShareRound>("flows_share_sync", { flowId });
+
+export const flowsShareResolve = (flowId: string, keepMine: boolean) =>
+  invoke<FlowShareRound>("flows_share_resolve", { flowId, keepMine });
+
+export const flowsShareRotate = (flowId: string) => invoke<string>("flows_share_rotate", { flowId });
+
+export const flowsShareLeave = (flowId: string) => invoke<void>("flows_share_leave", { flowId });
+

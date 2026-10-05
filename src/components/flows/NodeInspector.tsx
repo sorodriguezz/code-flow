@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { CircleAlert, Copy, Pencil, Pin, PinOff, Play, Radio, X } from "lucide-react";
+import { CircleAlert, CircleHelp, Copy, Pencil, Pin, PinOff, Play, Radio, X } from "lucide-react";
 import { Button, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
@@ -85,6 +85,15 @@ function PanelHead({ title, children }: { title: string; children?: ReactNode })
 
 function Empty({ children }: { children: ReactNode }) {
   return <div className="flex flex-1 flex-col items-center justify-center gap-2.5 px-6 text-center text-[12px] text-[var(--cf-text-muted)]">{children}</div>;
+}
+
+/** The one thing worth knowing about a node beyond what it does — only where there is one. */
+function nodeTip(type: string, params: Record<string, unknown>, t: (key: TranslationKey) => string): string {
+  if (type === "logic.wait" && params.mode === "webhook") return t("flows.help.waitWebhook");
+  if (type === "logic.loop") return t("flows.help.loop");
+  if (type === "logic.approval") return t("flows.help.approval");
+  if (type === "trigger.phone") return t("flows.help.phone");
+  return "";
 }
 
 export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onClose: () => void }) {
@@ -255,6 +264,14 @@ export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onC
           />
         )}
         <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-faint)]">{t(`flows.node.${node.type}` as TranslationKey)}</span>
+        {/* The node's help: what it does, and where it has one, the one thing worth knowing to use it. */}
+        <span
+          className="shrink-0 text-[var(--cf-text-faint)] hover:text-[var(--cf-text-muted)]"
+          title={[t(`flows.nodeDesc.${node.type}` as TranslationKey), nodeTip(node.type, node.params, t)].filter(Boolean).join("\n\n")}
+          aria-label={t(`flows.nodeDesc.${node.type}` as TranslationKey)}
+        >
+          <CircleHelp size={13} />
+        </span>
         <span className="flex-1" />
         {descriptor.milestone > RUNS_THROUGH && <span className="text-[11.5px] text-[var(--cf-text-muted)]">{t("flows.inspector.later", { n: descriptor.milestone })}</span>}
         <Button variant="primary" size="sm" onClick={() => void testStep()} disabled={running || descriptor.milestone > RUNS_THROUGH} data-tour="flows-test-step">

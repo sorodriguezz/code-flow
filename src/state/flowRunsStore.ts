@@ -11,10 +11,14 @@ import {
   flowsPinNode,
   flowsRun,
   flowsRunLog,
+  flowsListWaits,
   flowsTriggerStatus,
   flowsUnpinNode,
+  type FlowWait,
   type FlowAgentEvent,
   type FlowAiEvent,
+  type FlowOpenEvent,
+  type FlowTerminalEvent,
   type FlowArmedView,
   type FlowLogEvent,
   type FlowLogLine,
@@ -78,6 +82,11 @@ interface FlowRunsState {
   selectedRunNode: string | null;
   /** What the active flows of the workspace on screen listen for. */
   triggers: FlowArmedView[];
+  /** The workspace's runs waiting for someone — approvals, calls, times — oldest first. */
+  waits: FlowWait[];
+  /** A flow whose commands are up for review before it may run — and the run to start once trusted. */
+  trustPrompt: { flowId: string; then: { mode: FlowRunMode; trigger: string | null } | null } | null;
+  askTrust: (flowId: string | null, then?: { mode: FlowRunMode; trigger: string | null } | null) => void;
 
   start: (flowId: string, mode: FlowRunMode, trigger?: string | null) => Promise<FlowRunRow | null>;
   stop: (flowId: string) => Promise<void>;
@@ -95,6 +104,7 @@ interface FlowRunsState {
   selectRun: (runId: string | null, nodeId?: string | null) => void;
   selectRunNode: (nodeId: string | null) => void;
   loadTriggers: () => Promise<void>;
+  loadWaits: () => Promise<void>;
 }
 
 /** Runs this window started: their failures get a toast here, everyone else's only a notification. */
@@ -113,6 +123,9 @@ export const useFlowRunsStore = create<FlowRunsState>((set, get) => ({
   selectedRun: null,
   selectedRunNode: null,
   triggers: [],
+  waits: [],
+  trustPrompt: null,
+  askTrust: (flowId, then = null) => set({ trustPrompt: flowId ? { flowId, then } : null }),
 
   start: async (flowId, mode, trigger) => {
     if (isRunning(get().current[flowId]?.run)) return null;
@@ -123,6 +136,11 @@ export const useFlowRunsStore = create<FlowRunsState>((set, get) => ({
       return run;
     } catch (error) {
       const text = String(error);
+      // Somebody else's commands: they are shown first, and the run starts once they are trusted.
+      if (text === "untrusted") {
+        set({ trustPrompt: { flowId, then: { mode, trigger: trigger ?? null } } });
+        return null;
+      }
       pushErrorToast(text.includes("no-trigger") ? translate("flows.run.noTrigger") : text);
       return null;
     }
@@ -273,6 +291,20 @@ export const useFlowRunsStore = create<FlowRunsState>((set, get) => ({
       // The view shows what it had; the next change tries again.
     }
   },
+
+  loadWaits: async () => {
+    const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+    if (!workspaceId) {
+      set({ waits: [] });
+      return;
+    }
+    try {
+      const waits = await flowsListWaits(workspaceId);
+      if (useWorkspaceStore.getState().activeWorkspaceId === workspaceId) set({ waits });
+    } catch {
+      // As above: what is on screen stays until the next change.
+    }
+  },
 }));
 
 /** A run row arrived: it becomes its flow's current run if it is that run or a newer one. */
@@ -393,9 +425,35 @@ export function ensureFlowRunEvents(): void {
     triggerTimer = setTimeout(() => void useFlowRunsStore.getState().loadTriggers(), 250);
   });
   useWorkspaceStore.subscribe((state, previous) => {
-    if (state.activeWorkspaceId !== previous.activeWorkspaceId) void useFlowRunsStore.getState().loadTriggers();
+    if (state.activeWorkspaceId !== previous.activeWorkspaceId) {
+      void useFlowRunsStore.getState().loadTriggers();
+      void useFlowRunsStore.getState().loadWaits();
+    }
   });
   void useFlowRunsStore.getState().loadTriggers();
+  void useFlowRunsStore.getState().loadWaits();
+  // A run started or stopped waiting for someone. An approval that opens is also a notification:
+  // it is a question, and the person it is for may be in another app.
+  void listen<FlowWait>("flows:wait", (event) => {
+    const wait = event.payload;
+    const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+    if (wait.workspaceId === workspaceId) {
+      useFlowRunsStore.setState((state) => ({
+        waits: wait.decidedAt ? state.waits.filter((w) => w.id !== wait.id) : [...state.waits.filter((w) => w.id !== wait.id), wait],
+      }));
+    }
+    if (!wait.decidedAt && wait.kind === "approval" && isMainWindow()) {
+      notify({
+        source: "flows",
+        workspaceId: wait.workspaceId,
+        titleKey: "flows.wait.notifyTitle",
+        params: { flow: wait.flowName },
+        detail: wait.message || wait.nodeName,
+        status: "info",
+        target: { view: "flows" },
+      });
+    }
+  });
   // An AI node's model call is about to start: every window lists it under the flow's name, before
   // the engine's own banner would file it as a run nobody here started.
   void listen<FlowAiEvent>("flows:ai", (event) => {
@@ -420,6 +478,25 @@ export function ensureFlowRunEvents(): void {
       }
       await chains.reloadChains().catch(() => {});
       await useChainStore.getState().pump(chainId, { remote: true });
+    });
+  });
+  // A flow asked to show one of the app's views (URLs, files and folders open from Rust).
+  void listen<FlowOpenEvent>("flows:open", (event) => {
+    if (!isMainWindow()) return;
+    const { kind, target } = event.payload;
+    if (kind === "view" && target) {
+      void import("./uiStore").then(({ useUiStore }) => useUiStore.getState().setActiveView(target as never));
+    }
+  });
+  // A flow asked for a terminal the user can watch: a tab of the repository's (or the active one's)
+  // dock, running the command.
+  void listen<FlowTerminalEvent>("flows:terminal", (event) => {
+    if (!isMainWindow()) return;
+    const { command, cwd, projectId, title } = event.payload;
+    void Promise.all([import("./terminalStore"), import("./workspaceStore")]).then(([{ useTerminalStore }, { useWorkspaceStore }]) => {
+      const project = projectId || useWorkspaceStore.getState().activeProjectId || "";
+      if (!project) return;
+      void useTerminalStore.getState().runCommand(project, { cwd, command, reuseKey: `flow:${title}`, title });
     });
   });
   void listen<FlowNotifyEvent>("flows:notify", (event) => {

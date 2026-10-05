@@ -1,0 +1,20 @@
+{
+  "id": "discord",
+  "name": "Discord",
+  "baseUrl": "",
+  "auth": "url",
+  "authHint": { "es": "La URL de un webhook del canal, guardada como credencial «URL de webhook»", "en": "A channel's webhook URL, kept as a “Webhook URL” credential" },
+  "operations": [
+    {
+      "id": "webhookMessage",
+      "name": { "es": "Enviar por webhook", "en": "Send through a webhook" },
+      "method": "POST",
+      "url": "{{secret}}",
+      "fields": [
+        { "name": "content", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true },
+        { "name": "username", "label": { "es": "Nombre que firma", "en": "Name to post as" } }
+      ],
+      "body": { "content": "{{content}}", "username": "{{username}}" }
+    }
+  ]
+}

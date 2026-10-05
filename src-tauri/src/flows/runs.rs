@@ -21,7 +21,7 @@ use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -84,6 +84,7 @@ pub fn active_ids(workspace_id: Option<&str>) -> Vec<(String, String)> {
 /// The quit path: every run is stopped, and given `grace` to say so before the processes they
 /// started are ended directly. Blocking.
 pub fn shutdown(grace: Duration) {
+    super::waits::quitting();
     if let Ok(map) = ACTIVE.lock() {
         for run in map.values() {
             run.cancel.cancel();
@@ -286,6 +287,61 @@ pub(super) struct AppHost {
     depth: u32,
     lines: Mutex<Vec<LogLine>>,
     log_bytes: AtomicU64,
+    /// Secret values this run has read — its credentials, a Llavero item — kept out of everything it
+    /// stores. The items passed between nodes keep the real value; the files and the log do not.
+    secrets: Mutex<Vec<String>>,
+    /// Nodes that reported more than once — inside a loop — with what their batches add up to.
+    looped: Mutex<HashMap<String, Looped>>,
+    /// The flow as this run executes it — written beside the run when it waits, so a restart can
+    /// pick it up even if the flow was edited meanwhile.
+    pub(super) spec: Arc<FlowSpec>,
+}
+
+/// A node inside a loop: its batches so far, kept whole so the inspector shows all of them.
+#[derive(Default)]
+struct Looped {
+    /// `None` until a second batch arrives; the first one's data is read back from its file then.
+    data: Option<NodeData>,
+    items_in: i64,
+    items_out: Vec<i64>,
+    duration_ms: i64,
+    /// The data has batches its file does not.
+    dirty: bool,
+    written: Option<Instant>,
+    /// More than this many items on a port and later batches are only counted.
+    full: bool,
+}
+
+/// Items per port a looped node's record keeps; the counts go on past it.
+const LOOPED_ITEMS_KEPT: usize = 10_000;
+/// A looped node's file is rewritten at most this often while its loop runs.
+const LOOPED_WRITE_EVERY: Duration = Duration::from_secs(1);
+
+/// What a redacted secret reads as.
+const REDACTED_SECRET: &str = "••••••";
+
+/// Every string in `value` with `secrets` replaced, at any depth.
+fn redact_value(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::String(text) => {
+            if secrets.iter().any(|secret| text.contains(secret.as_str())) {
+                *text = redact_text(text, secrets);
+            }
+        }
+        Value::Array(list) => list.iter_mut().for_each(|entry| redact_value(entry, secrets)),
+        Value::Object(map) => map.values_mut().for_each(|entry| redact_value(entry, secrets)),
+        _ => {}
+    }
+}
+
+fn redact_text(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for secret in secrets {
+        if out.contains(secret.as_str()) {
+            out = out.replace(secret.as_str(), REDACTED_SECRET);
+        }
+    }
+    out
 }
 
 impl AppHost {
@@ -319,6 +375,19 @@ impl AppHost {
             "flows:node",
             NodeEvent { run_id: self.run_id.clone(), flow_id: self.flow_id.clone(), workspace_id: self.workspace_id.clone(), node: row },
         );
+    }
+
+    /// Writes what loops added to their nodes' records since the last write.
+    fn flush_looped(&self) {
+        let Ok(mut looped) = self.looped.lock() else { return };
+        for (node_id, entry) in looped.iter_mut() {
+            if entry.dirty {
+                if let Some(kept) = &entry.data {
+                    let _ = write_node_data(&self.run_id, node_id, kept);
+                }
+                entry.dirty = false;
+            }
+        }
     }
 
     /// Sends the buffered log lines to the window and appends them to the run's log file.
@@ -358,26 +427,97 @@ impl RunHost for AppHost {
     }
 
     fn node_finished(&self, node: &FlowNode, report: NodeReport) {
-        let data = NodeData {
+        let mut data = NodeData {
             inputs: (*report.inputs).clone(),
             origins: (*report.origins).clone(),
             outputs: (*report.outputs).clone(),
         };
-        if let Err(error) = write_node_data(&self.run_id, &report.node_id, &data) {
-            self.log(&node.id, LogStream::Info, &format!("Could not keep this node's data: {error}"));
+        let secrets = self.secrets.lock().map(|list| list.clone()).unwrap_or_default();
+        if !secrets.is_empty() {
+            for item in data.inputs.iter_mut().chain(data.outputs.iter_mut()).flatten() {
+                redact_value(&mut item.json, &secrets);
+            }
+        }
+        let mut items_in = report.inputs.iter().map(Vec::len).sum::<usize>() as i64;
+        let mut items_out: Vec<i64> = report.outputs.iter().map(|port| port.len() as i64).collect();
+        let mut duration_ms = report.duration_ms;
+        if report.iteration == 0 {
+            if let Err(error) = write_node_data(&self.run_id, &report.node_id, &data) {
+                self.log(&node.id, LogStream::Info, &format!("Could not keep this node's data: {error}"));
+            }
+            if let Ok(mut looped) = self.looped.lock() {
+                looped.insert(
+                    report.node_id.clone(),
+                    Looped { items_in, items_out: items_out.clone(), duration_ms: duration_ms.unwrap_or(0), ..Looped::default() },
+                );
+            }
+        } else if let Ok(mut looped) = self.looped.lock() {
+            // A later batch of a loop: the record grows rather than being replaced.
+            let entry = looped.entry(report.node_id.clone()).or_default();
+            let kept = entry.data.get_or_insert_with(|| {
+                let mut first = read_node_data(&self.run_id, &report.node_id).unwrap_or_default();
+                // Batches are told apart by position only; links to a source's items do not survive.
+                first.origins.clear();
+                first
+            });
+            if !entry.full {
+                for (port, items) in data.inputs.into_iter().enumerate() {
+                    if kept.inputs.len() <= port {
+                        kept.inputs.resize(port + 1, Vec::new());
+                    }
+                    kept.inputs[port].extend(items);
+                }
+                for (port, items) in data.outputs.into_iter().enumerate() {
+                    if kept.outputs.len() <= port {
+                        kept.outputs.resize(port + 1, Vec::new());
+                    }
+                    kept.outputs[port].extend(items);
+                }
+                if kept.inputs.iter().chain(kept.outputs.iter()).any(|port| port.len() > LOOPED_ITEMS_KEPT) {
+                    entry.full = true;
+                    self.log(&node.id, LogStream::Info, &format!("Only the first {LOOPED_ITEMS_KEPT} items of this node's batches are kept"));
+                }
+                entry.dirty = true;
+            }
+            entry.items_in += items_in;
+            if entry.items_out.len() < items_out.len() {
+                entry.items_out.resize(items_out.len(), 0);
+            }
+            for (port, count) in items_out.iter().enumerate() {
+                entry.items_out[port] += count;
+            }
+            entry.duration_ms += duration_ms.unwrap_or(0);
+            items_in = entry.items_in;
+            items_out = entry.items_out.clone();
+            duration_ms = Some(entry.duration_ms);
+            if entry.dirty && entry.written.is_none_or(|at| at.elapsed() >= LOOPED_WRITE_EVERY) {
+                if let Some(kept) = &entry.data {
+                    let _ = write_node_data(&self.run_id, &report.node_id, kept);
+                }
+                entry.dirty = false;
+                entry.written = Some(Instant::now());
+            }
         }
         let mut row = self.row(node, report.status, report.seq);
         row.started_at = report.started_at;
         row.finished_at = report.finished_at;
-        row.duration_ms = report.duration_ms;
-        row.items_in = report.inputs.iter().map(Vec::len).sum::<usize>() as i64;
-        row.items_out = report.outputs.iter().map(|port| port.len() as i64).collect();
+        row.duration_ms = duration_ms;
+        row.items_in = items_in;
+        row.items_out = items_out;
         row.attempts = report.attempts as i64;
         row.error = report.error.unwrap_or_default();
         self.publish(row);
     }
 
     fn log(&self, node_id: &str, stream: LogStream, text: &str) {
+        let secrets = self.secrets.lock().map(|list| list.clone()).unwrap_or_default();
+        let redacted;
+        let text = if secrets.iter().any(|secret| text.contains(secret.as_str())) {
+            redacted = redact_text(text, &secrets);
+            redacted.as_str()
+        } else {
+            text
+        };
         let line = LogLine {
             node_id: node_id.to_string(),
             stream,
@@ -440,7 +580,30 @@ impl RunHost for AppHost {
         }
         let secret = crate::secrets::get_secret(&crate::secrets::flow_credential_key(id))?
             .ok_or_else(|| format!("The credential \"{}\" has no secret stored on this computer", row.name))?;
+        self.secret_used(&secret);
         Ok(Credential { kind: row.kind, meta: row.meta, secret })
+    }
+
+    fn wait_for(&self, request: engine::WaitRequest, cancel: CancellationToken) -> engine::HostFuture<'_, Result<engine::WaitAnswer, String>> {
+        super::waits::wait_for(self, request, cancel)
+    }
+
+    fn resume_url(&self) -> Option<String> {
+        Some(super::triggers::webhook::resume_url(&self.run_id))
+    }
+
+    fn secret_used(&self, value: &str) {
+        // Shorter than this, a "secret" would redact ordinary words out of every output.
+        if value.chars().count() < 4 {
+            return;
+        }
+        if let Ok(mut list) = self.secrets.lock() {
+            if !list.iter().any(|known| known == value) {
+                list.push(value.to_string());
+                // Longest first, so a secret that contains another is replaced whole.
+                list.sort_by_key(|known| std::cmp::Reverse(known.len()));
+            }
+        }
     }
 
     fn work_dir(&self) -> PathBuf {
@@ -528,6 +691,19 @@ impl RunHost for AppHost {
 
     fn edits_recorded(&self, path: &str) {
         record_restore_point(&self.run_id, path);
+    }
+
+    fn db_connection(&self, connection_id: &str) -> Result<crate::datasource::DbConnectionConfig, String> {
+        super::app_ops::db_connection(self, connection_id)
+    }
+
+    fn remote_host(&self, host_id: &str) -> Result<crate::remotes::RemoteHostSpec, String> {
+        super::app_ops::remote_host(self, host_id)
+    }
+
+    fn app_call(&self, op: &str, args: Value, cancel: CancellationToken) -> engine::HostFuture<'_, Result<Value, String>> {
+        let op = op.to_string();
+        Box::pin(async move { super::app_ops::call(self, &op, args, cancel).await })
     }
 }
 
@@ -621,7 +797,7 @@ pub const DEFAULT_AI_PER_HOUR: u32 = 60;
 
 /// When a flow's runs end in a notification: never, when they fail, or always. Read from the flow's
 /// settings for the runs nobody is watching; a run started by hand answers to the window instead.
-fn notify_setting(spec: &FlowSpec, origin: RunOrigin) -> Option<String> {
+pub(super) fn notify_setting(spec: &FlowSpec, origin: RunOrigin) -> Option<String> {
     if origin == RunOrigin::Manual {
         return None;
     }
@@ -648,6 +824,10 @@ pub fn start_with(
     let (flow, parsed, pins, vars, locale, previous, mode) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let flow = flow_queries::get_flow(&conn, flow_id).map_err(|e| e.to_string())?.ok_or("This flow no longer exists")?;
+        // Nothing runs what the user has not trusted — by hand, from a trigger, or called by another flow.
+        if !flow.meta.trusted {
+            return Err("untrusted".into());
+        }
         let parsed = spec::parse(&flow.spec)?;
         // Pins are for designing: a run something else started is the real thing.
         let pins = if origin == RunOrigin::Manual { load_pins(&conn, flow_id).map_err(|e| e.to_string())? } else { HashMap::new() };
@@ -712,6 +892,29 @@ pub fn start_with(
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::insert_run(&conn, &row).map_err(|e| e.to_string())?;
     }
+    let done_rx = launch(app, Launch { row: row.clone(), parsed, plan, vars, locale, label: label.to_string(), origin, respond, depth, wait });
+    Ok((row, done_rx))
+}
+
+/// A run ready to execute: its row (new, or picked up after waiting) and everything it carries.
+pub(super) struct Launch {
+    pub row: FlowRunRow,
+    pub parsed: Arc<FlowSpec>,
+    pub plan: run::Plan,
+    pub vars: serde_json::Map<String, Value>,
+    pub locale: String,
+    pub label: String,
+    pub origin: RunOrigin,
+    pub respond: Option<tokio::sync::oneshot::Sender<engine::Reply>>,
+    pub depth: u32,
+    pub wait: bool,
+}
+
+/// Executes a run in the background and records how it ends; hands back a receiver for its end when
+/// `wait` asked for one.
+pub(super) fn launch(app: &AppHandle, launch: Launch) -> Option<tokio::sync::oneshot::Receiver<Finished>> {
+    let Launch { row, parsed, plan, vars, locale, label, origin, respond, depth, wait } = launch;
+    let run_id = row.id.clone();
     let cancel = CancellationToken::new();
     if let Ok(mut active) = ACTIVE.lock() {
         active.insert(
@@ -730,6 +933,9 @@ pub fn start_with(
         depth,
         lines: Mutex::new(Vec::new()),
         log_bytes: AtomicU64::new(0),
+        secrets: Mutex::new(Vec::new()),
+        looped: Mutex::new(HashMap::new()),
+        spec: parsed.clone(),
     });
     let timezone = parsed
         .settings
@@ -743,7 +949,7 @@ pub fn start_with(
         flow_id: row.flow_id.clone(),
         flow_name: row.flow_name.clone(),
         workspace_id: row.workspace_id.clone(),
-        mode: label.to_string(),
+        mode: label.clone(),
         vars,
         timezone,
         locale,
@@ -775,6 +981,14 @@ pub fn start_with(
         let outcome = engine::execute(parsed, plan, context).await;
         flusher.abort();
         host.flush();
+        host.flush_looped();
+        // Quitting while it waited: the run is not over — its row stays `waiting` for the next launch.
+        if super::waits::parked_by_quit(&app, &started.id) {
+            if let Ok(mut active) = ACTIVE.lock() {
+                active.remove(&started.id);
+            }
+            return;
+        }
 
         let finished_at = engine::now_text();
         let duration = chrono::DateTime::parse_from_rfc3339(&started.started_at)
@@ -808,7 +1022,25 @@ pub fn start_with(
         })
         .await;
     });
-    Ok((row, done_rx))
+    done_rx
+}
+
+/// The origin a stored run's `mode` stands for — for a run picked up after it waited.
+pub(super) fn origin_of(mode: &str) -> RunOrigin {
+    match mode {
+        "trigger" => RunOrigin::Trigger,
+        "subflow" => RunOrigin::Subflow,
+        "error" => RunOrigin::Error,
+        _ => RunOrigin::Manual,
+    }
+}
+
+/// The workspace variables and the language a run picked up after waiting starts again with.
+pub(super) fn run_environment(app: &AppHandle, workspace_id: &str) -> Result<(serde_json::Map<String, Value>, String), String> {
+    let db = app.state::<Db>();
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let vars = queries::variables_map(&conn, workspace_id).map_err(|e| e.to_string())?;
+    Ok((vars, locale(&conn)))
 }
 
 // ------------------------------------------------------------------------------------ retention
@@ -1023,5 +1255,28 @@ impl RunLookup for StoredRun {
         let data = self.data(&id)?;
         let origin = data.origins.iter().flatten().nth(index)?.clone();
         Some(json!({"name": self.name_of(&origin.node), "outputIndex": origin.output, "runIndex": 0}).to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn secrets_are_redacted_at_any_depth_longest_first() {
+        let secrets = vec!["s3cret-token-long".to_string(), "s3cret".to_string()];
+        let mut value = json!({
+            "headers": {"authorization": "Bearer s3cret-token-long"},
+            "list": ["a s3cret b", 7, null],
+            "plain": "nothing here",
+        });
+        redact_value(&mut value, &secrets);
+        assert_eq!(
+            value,
+            json!({"headers": {"authorization": "Bearer ••••••"}, "list": ["a •••••• b", 7, null], "plain": "nothing here"})
+        );
+        assert_eq!(redact_text("token=s3cret&x=1", &secrets), "token=••••••&x=1");
     }
 }

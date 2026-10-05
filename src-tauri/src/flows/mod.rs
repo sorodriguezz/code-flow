@@ -11,9 +11,13 @@
 //! depend on a window being open, visible, or the one that started it.
 
 pub mod ai_host;
+pub mod app_ops;
+pub mod builder;
 pub mod catalog;
+pub mod connectors;
 pub mod engine;
 pub mod expr;
+pub mod n8n;
 pub mod nodes;
 pub mod params;
 pub mod run;
@@ -21,6 +25,9 @@ pub mod runs;
 pub mod schedule;
 pub mod schema;
 pub mod services;
+pub mod share;
 pub mod spec;
+pub mod transfer;
 pub mod triggers;
 pub mod value;
+pub mod waits;

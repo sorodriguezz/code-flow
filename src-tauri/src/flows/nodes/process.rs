@@ -513,6 +513,58 @@ async fn run(ctx: &NodeCtx, label: String, invocation: Invocation) -> Result<Out
     Ok(Outcome { stdout, stderr, code: status.code(), truncated: out_cut || err_cut })
 }
 
+/// What a program said, for the nodes that run one of their own (git, docker, ssh).
+pub(super) struct ProgramOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub code: Option<i32>,
+}
+
+impl ProgramOutput {
+    /// The output, or a failure that quotes the end of what it said.
+    pub fn ok_or_fail(self, label: &str) -> Result<Self, NodeError> {
+        if self.code == Some(0) {
+            return Ok(self);
+        }
+        let detail = tail(if self.stderr.trim().is_empty() { &self.stdout } else { &self.stderr }, 8);
+        let how = match self.code {
+            Some(code) => format!("exited with code {code}"),
+            None => "was ended by a signal".to_string(),
+        };
+        Err(NodeError::failed(if detail.is_empty() { format!("{label} {how}") } else { format!("{label} {how}:\n{detail}") }))
+    }
+}
+
+/// A program's output as items, read the way the script nodes read theirs (`output`, `failOnExit`).
+pub(super) fn output_items(ctx: &NodeCtx, params: &Value, output: ProgramOutput, paired: Option<usize>) -> Result<Vec<Item>, NodeError> {
+    let outcome = Outcome { stdout: output.stdout.into_bytes(), stderr: output.stderr.into_bytes(), code: output.code, truncated: false };
+    read_output(ctx, params, outcome, paired)
+}
+
+/// Runs `program` (found on PATH) with the node's cancellation, log and process-group handling —
+/// the same path the script nodes take.
+pub(super) async fn run_program(
+    ctx: &NodeCtx,
+    program: &str,
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
+    env: Vec<(String, String)>,
+    stdin: Option<Vec<u8>>,
+) -> Result<ProgramOutput, NodeError> {
+    let resolved = require(program)?;
+    let label = Path::new(program).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| program.to_string());
+    let invocation = Invocation { program: resolved, args, cwd: cwd.unwrap_or_else(home), env, stdin, label: label.clone() };
+    let outcome = run(ctx, label, invocation).await?;
+    if outcome.truncated {
+        ctx.log(LogStream::Info, "Output past 32 MB was not kept");
+    }
+    Ok(ProgramOutput {
+        stdout: String::from_utf8_lossy(&outcome.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&outcome.stderr).into_owned(),
+        code: outcome.code,
+    })
+}
+
 // ----------------------------------------------------------------------------- reading the output
 
 fn tail(text: &str, lines: usize) -> String {

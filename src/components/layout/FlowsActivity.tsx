@@ -18,6 +18,15 @@ export function FlowsActivity() {
   const runningCount = useFlowRunsStore((s) => Object.values(s.current).filter((live) => live.run.status === "running").length);
 
   useEffect(() => ensureFlowRunEvents(), []);
+  // Shared flows sync in the background whether or not Flows is open (the poller runs in the main
+  // window only); a teammate's version reloads what is on screen. Loaded on demand, like the view.
+  useEffect(() => {
+    void import("../../state/flowShareStore").then(({ startFlowSharing }) =>
+      startFlowSharing((event) => {
+        if (event.applied) void import("../../state/flowsStore").then(({ useFlowsStore }) => useFlowsStore.getState().reloadShared(event.flowId));
+      }),
+    );
+  }, []);
 
   if (armed.length === 0 && runningCount === 0) return null;
   const next = armed

@@ -94,7 +94,7 @@ import {
   type DbStatementResult,
   type DbTransactionState,
 } from "../types/database";
-import type { DiagramColumnMode, DiagramDensity } from "../lib/db/erLayout";
+import { ownTablesOnly, type DiagramColumnMode, type DiagramDensity } from "../lib/db/erLayout";
 
 /**
  * The database workspace's state.
@@ -2684,7 +2684,7 @@ export const useDbStore = create<DbState>((set, get) => ({
     const runWorkspaceId = get().workspaceId;
     const started = Date.now();
     try {
-      const diagram = await dbSchemaDiagram(tab.connectionId, tab.node, runId);
+      const diagram = ownTablesOnly(await dbSchemaDiagram(tab.connectionId, tab.node, runId));
       patchTab<DbDiagramTab>(set, tabId, "diagram", (current) => ({ ...current, diagram }));
       // Two catalog queries the user never wrote, on the schema they are looking at — exactly the
       // kind of statement the log exists for. Logged as one line: what the panel *is*.

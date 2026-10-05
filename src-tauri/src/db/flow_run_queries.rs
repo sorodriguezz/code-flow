@@ -20,7 +20,8 @@ pub struct FlowRunRow {
     pub mode: String,
     pub trigger_node: String,
     pub target_node: String,
-    /// `running`, `success`, `error`, `canceled`, `interrupted`.
+    /// `running`, `waiting` (parked at a node until someone decides), `success`, `error`, `canceled`,
+    /// `interrupted`.
     pub status: String,
     pub error: String,
     pub error_node: String,
@@ -197,7 +198,113 @@ pub fn run_nodes(conn: &Connection, run_id: &str) -> rusqlite::Result<Vec<FlowRu
 
 pub fn delete_run(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM flow_runs WHERE id = ?1", params![id])?;
+    conn.execute("DELETE FROM flow_waits WHERE run_id = ?1", params![id])?;
     Ok(())
+}
+
+/// A run's status alone — `waiting` while it is parked at a node, `running` again once decided.
+pub fn set_run_status(conn: &Connection, id: &str, status: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE flow_runs SET status = ?2 WHERE id = ?1", params![id, status])?;
+    Ok(())
+}
+
+/// A run parked at a node — see `migrations::add_flow_waits`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowWaitRow {
+    pub id: String,
+    pub run_id: String,
+    pub flow_id: String,
+    pub workspace_id: String,
+    pub flow_name: String,
+    pub node_id: String,
+    pub node_name: String,
+    /// `approval`, `webhook` or `time`.
+    pub kind: String,
+    pub message: String,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub decided_at: Option<String>,
+    /// `approved`, `rejected`, `resumed`, `expired`, `canceled`; empty while open.
+    pub decision: String,
+    pub decided_by: String,
+    pub payload: Value,
+}
+
+const WAIT_COLUMNS: &str = "id, run_id, flow_id, workspace_id, flow_name, node_id, node_name, kind, message, \
+     created_at, expires_at, decided_at, decision, decided_by, payload";
+
+fn wait_row(row: &Row<'_>) -> rusqlite::Result<FlowWaitRow> {
+    let payload: String = row.get(14)?;
+    Ok(FlowWaitRow {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        flow_id: row.get(2)?,
+        workspace_id: row.get(3)?,
+        flow_name: row.get(4)?,
+        node_id: row.get(5)?,
+        node_name: row.get(6)?,
+        kind: row.get(7)?,
+        message: row.get(8)?,
+        created_at: row.get(9)?,
+        expires_at: row.get(10)?,
+        decided_at: row.get(11)?,
+        decision: row.get(12)?,
+        decided_by: row.get(13)?,
+        payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
+    })
+}
+
+pub fn insert_wait(conn: &Connection, wait: &FlowWaitRow) -> rusqlite::Result<()> {
+    conn.execute(
+        &format!("INSERT INTO flow_waits ({WAIT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"),
+        params![
+            wait.id,
+            wait.run_id,
+            wait.flow_id,
+            wait.workspace_id,
+            wait.flow_name,
+            wait.node_id,
+            wait.node_name,
+            wait.kind,
+            wait.message,
+            wait.created_at,
+            wait.expires_at,
+            wait.decided_at,
+            wait.decision,
+            wait.decided_by,
+            wait.payload.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_wait(conn: &Connection, id: &str) -> rusqlite::Result<Option<FlowWaitRow>> {
+    conn.query_row(&format!("SELECT {WAIT_COLUMNS} FROM flow_waits WHERE id = ?1"), params![id], wait_row).optional()
+}
+
+/// Waits nobody has decided yet, oldest first — of one workspace, or every one.
+pub fn open_waits(conn: &Connection, workspace_id: Option<&str>) -> rusqlite::Result<Vec<FlowWaitRow>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {WAIT_COLUMNS} FROM flow_waits WHERE decided_at IS NULL AND (?1 IS NULL OR workspace_id = ?1) ORDER BY created_at"
+    ))?;
+    let rows = statement.query_map(params![workspace_id], wait_row)?;
+    rows.collect()
+}
+
+pub fn waits_of_run(conn: &Connection, run_id: &str) -> rusqlite::Result<Vec<FlowWaitRow>> {
+    let mut statement = conn.prepare(&format!("SELECT {WAIT_COLUMNS} FROM flow_waits WHERE run_id = ?1 ORDER BY created_at"))?;
+    let rows = statement.query_map(params![run_id], wait_row)?;
+    rows.collect()
+}
+
+/// Settles an open wait. `false` when it was already settled — the other device got there first.
+pub fn decide_wait(conn: &Connection, id: &str, decision: &str, by: &str, payload: &Value, at: &str) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE flow_waits SET decided_at = ?2, decision = ?3, decided_by = ?4, payload = ?5 WHERE id = ?1 AND decided_at IS NULL",
+        params![id, at, decision, by, payload.to_string()],
+    )?;
+    Ok(changed == 1)
 }
 
 /// Every run of a flow — what deleting the flow takes with it.
@@ -248,7 +355,7 @@ pub fn runs_past_retention(
         "SELECT id FROM (
             SELECT id, status, started_at,
                    ROW_NUMBER() OVER (ORDER BY started_at DESC) AS position
-            FROM flow_runs WHERE flow_id = ?1 AND status != 'running'
+            FROM flow_runs WHERE flow_id = ?1 AND status NOT IN ('running', 'waiting')
          )
          WHERE position > ?2
             OR (status IN ('success', 'canceled') AND started_at < ?3)
@@ -268,7 +375,7 @@ pub fn flows_with_runs(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 /// Every finished run, oldest first, with the bytes its files take — what the size cap trims from.
 pub fn runs_by_age(conn: &Connection) -> rusqlite::Result<Vec<(String, i64)>> {
     let mut statement =
-        conn.prepare("SELECT id, data_bytes FROM flow_runs WHERE status != 'running' ORDER BY started_at ASC")?;
+        conn.prepare("SELECT id, data_bytes FROM flow_runs WHERE status NOT IN ('running', 'waiting') ORDER BY started_at ASC")?;
     let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
     rows.collect()
 }

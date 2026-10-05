@@ -4,17 +4,22 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Download,
   Folder,
   FolderInput,
   FolderOpen,
   FolderPlus,
   Globe,
+  LayoutTemplate,
   Pause,
   Pencil,
   Play,
   Plus,
   Search,
   Trash2,
+  Upload,
+  UserPlus,
+  Users,
   Waypoints,
   X,
 } from "lucide-react";
@@ -28,6 +33,9 @@ import { confirmAction } from "../../state/confirmStore";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowsStore, type FlowItem } from "../../state/flowsStore";
 import { useT } from "../../state/languageStore";
+import { TemplatesDialog } from "./TemplatesDialog";
+import { FlowShareDialog, JoinSharedDialog } from "./FlowShareDialog";
+import { useFlowShareStore } from "../../state/flowShareStore";
 import { promptAction } from "../../state/promptStore";
 
 const byName = (a: { name: string }, b: { name: string }) =>
@@ -50,6 +58,10 @@ export function FlowExplorer() {
   const workspaceId = useFlowsStore((s) => s.workspaceId);
   const catalogMap = useFlowsStore((s) => s.catalogMap);
   const t = useT();
+  const [templatesFor, setTemplatesFor] = useState<{ folderId: string | null } | null>(null);
+  const [shareFor, setShareFor] = useState<string | null>(null);
+  const [joining, setJoining] = useState(false);
+  const shares = useFlowShareStore((s) => s.shares);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; heading?: string } | null>(null);
   const searchField = useRef<HTMLInputElement>(null);
 
@@ -91,6 +103,8 @@ export function FlowExplorer() {
           ),
       },
       { label: t("flows.duplicate"), icon: Copy, onClick: () => void store().duplicateFlow(flow.id) },
+      { label: t("flows.export"), icon: Download, onClick: () => void store().exportFlow(flow.id) },
+      { label: t("flows.share.menu"), icon: Users, onClick: () => setShareFor(flow.id) },
     ];
     if (flow.triggers.some((type) => type !== "trigger.manual")) {
       items.push({
@@ -145,6 +159,8 @@ export function FlowExplorer() {
       y: event.clientY,
       items: [
         { label: t("flows.newFlowHere"), icon: Plus, onClick: () => void store().createFlow(folder.id) },
+        { label: t("flows.importHere"), icon: Upload, onClick: () => void store().importFlow(folder.id) },
+        { label: t("flows.tpl.here"), icon: LayoutTemplate, onClick: () => setTemplatesFor({ folderId: folder.id }) },
         {
           label: t("flows.rename"),
           icon: Pencil,
@@ -193,6 +209,14 @@ export function FlowExplorer() {
           )}
         </span>
         <span className="min-w-0 flex-1 truncate">{flow.name}</span>
+        {shares[flow.id] && (
+          <span
+            className={`shrink-0 ${shares[flow.id].conflict || shares[flow.id].lastError ? "text-[var(--cf-warning)]" : "text-[var(--cf-text-faint)]"}`}
+            title={shares[flow.id].conflict ? t("flows.share.conflictChip") : shares[flow.id].lastError || t("flows.share.shared")}
+          >
+            <Users size={12} />
+          </span>
+        )}
         {flow.scope === "global" && (
           <span className="shrink-0 text-[var(--cf-text-faint)]" title={t("flows.global")}>
             <Globe size={12} />
@@ -206,6 +230,9 @@ export function FlowExplorer() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {templatesFor && <TemplatesDialog folderId={templatesFor.folderId} onClose={() => setTemplatesFor(null)} />}
+      {shareFor && <FlowShareDialog flowId={shareFor} onClose={() => setShareFor(null)} />}
+      {joining && <JoinSharedDialog folderId={null} onClose={() => setJoining(false)} />}
       <div className={explorerHeadClass}>
         <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-muted)]">
           {t("flows.title")}
@@ -233,6 +260,35 @@ export function FlowExplorer() {
           }
         >
           <FolderPlus size={14} />
+        </button>
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm" })}
+          title={t("flows.import")}
+          aria-label={t("flows.import")}
+          onClick={() => void store().importFlow(null)}
+          data-tour="flows-import"
+        >
+          <Upload size={14} />
+        </button>
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm" })}
+          title={t("flows.tpl.title")}
+          aria-label={t("flows.tpl.title")}
+          onClick={() => setTemplatesFor({ folderId: null })}
+        >
+          <LayoutTemplate size={14} />
+        </button>
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm" })}
+          title={t("flows.share.joinTitle")}
+          aria-label={t("flows.share.joinTitle")}
+          onClick={() => setJoining(true)}
+          data-tour="flows-join"
+        >
+          <UserPlus size={14} />
         </button>
         <button
           type="button"

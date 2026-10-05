@@ -5,6 +5,7 @@ import { explorerClass } from "../common/recipes";
 import { FlowExplorer } from "./FlowExplorer";
 import { FlowVaultDialog } from "./FlowVaultDialog";
 import { ScheduleView } from "./ScheduleView";
+import { TrustDialog } from "./TrustDialog";
 import { ensureFlowRunEvents, useFlowRunsStore } from "../../state/flowRunsStore";
 import { ensureFlowsStoreLoaded, useFlowsStore } from "../../state/flowsStore";
 import { useFlowVaultStore } from "../../state/flowVaultStore";
@@ -84,6 +85,7 @@ export function FlowsView() {
         )}
       </div>
       <FlowVaultDialog />
+      <TrustDialog />
     </div>
   );
 }

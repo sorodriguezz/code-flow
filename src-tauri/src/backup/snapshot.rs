@@ -141,6 +141,7 @@ pub const TABLES: &[&str] = &[
     "flow_state",
     "flow_variables",
     "flow_credentials",
+    "flow_shares",
     // History, activity and agent work. Last because every one of them hangs off a project or a
     // workspace, and `agent_chain_steps` and `agent_chain_repos` hang off `agent_chains` in turn.
     "activity_log",
@@ -217,6 +218,7 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     "mcp_trust",
     "flow_runs",
     "flow_run_nodes",
+    "flow_waits",
 ];
 
 // ---------------------------------------------------------------------------
@@ -271,6 +273,9 @@ pub const CORE_TABLES: &[&str] = &[
     "flow_state",
     "flow_variables",
     "flow_credentials",
+    // Travels with the flows so a restored machine resumes each shared flow where this one left it
+    // (its base and cursor) instead of pulling it as a conflict with itself.
+    "flow_shares",
 ];
 
 /// The optional groups, in the order the panel lists them.

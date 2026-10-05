@@ -110,6 +110,10 @@ struct RawRun {
     path: Option<String>,
     #[serde(default)]
     actor: Option<RawActor>,
+    /// Who started *this* attempt. The same person as `actor` unless the run was re-run, and then
+    /// the one who re-ran it — which is who "ran it" in the list.
+    #[serde(default)]
+    triggering_actor: Option<RawActor>,
     /// Absent on a run whose head commit GitHub can no longer resolve (force-pushed away,
     /// deleted branch), so it is optional rather than assumed.
     #[serde(rename = "head_commit", default)]
@@ -365,7 +369,7 @@ fn map_run(host: &str, owner: &str, repo: &str, raw: RawRun) -> PipelineRun {
         branch: raw.head_branch.unwrap_or_default(),
         commit_sha: raw.head_sha,
         commit_title: raw.head_commit.and_then(|c| first_line(&c.message)),
-        actor: raw.actor.map(|a| a.login).filter(|login| !login.trim().is_empty()),
+        actor: [raw.triggering_actor, raw.actor].into_iter().flatten().map(|a| a.login).find(|login| !login.trim().is_empty()),
         event: non_empty(raw.event),
         created_at: raw.created_at,
         started_at: non_empty(raw.run_started_at),
@@ -679,6 +683,7 @@ mod tests {
             html_url: String::new(),
             path: Some(".github/workflows/ci.yml".to_string()),
             actor: None,
+            triggering_actor: None,
             head_commit: None,
         };
         assert_eq!(run_name(&raw), "CI");
@@ -712,6 +717,7 @@ mod tests {
             html_url: String::new(),
             path: Some(".github/workflows/ci.yml".to_string()),
             actor: Some(RawActor { login: "octocat".to_string() }),
+            triggering_actor: None,
             head_commit: Some(RawHeadCommit {
                 message: "fix the thing\n\nlong body".to_string(),
             }),
@@ -724,6 +730,13 @@ mod tests {
         assert_eq!(live.started_at.as_deref(), Some("2026-08-21T17:00:09Z"));
         assert_eq!(live.commit_title.as_deref(), Some("fix the thing"));
         assert_eq!(live.actor.as_deref(), Some("octocat"));
+        // Re-run by someone else: the list names who ran *this* attempt.
+        let rerun: RawRun = serde_json::from_value(serde_json::json!({
+            "id": 8, "status": "completed", "conclusion": "success", "head_sha": "abc123",
+            "actor": {"login": "octocat"}, "triggering_actor": {"login": "hubot"}
+        }))
+        .unwrap();
+        assert_eq!(map_run("github.com", "acme", "app", rerun).actor.as_deref(), Some("hubot"));
         assert_eq!(live.definition_path.as_deref(), Some(".github/workflows/ci.yml"));
         // No `html_url` on the wire, so the hand-built browser URL stands in.
         assert_eq!(live.web_url, "https://github.com/acme/app/actions/runs/7");
@@ -747,6 +760,7 @@ mod tests {
             html_url: "https://github.com/acme/app/actions/runs/7".to_string(),
             path: None,
             actor: None,
+            triggering_actor: None,
             head_commit: None,
         };
         let done = map_run("github.com", "acme", "app", raw);
@@ -1499,6 +1513,7 @@ mod launch_tests {
             html_url: String::new(),
             path: None,
             actor: None,
+            triggering_actor: None,
             head_commit: None,
         };
         assert!(map_run("github.com", "o", "r", make("waiting")).gated);
