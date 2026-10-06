@@ -5,6 +5,10 @@
   "baseUrl": "https://dev.azure.com/{{organization}}",
   "auth": "basic",
   "authHint": { "es": "Un token de acceso personal (PAT) como contraseña en una credencial Usuario y contraseña; el usuario puede ir vacío", "en": "A personal access token (PAT) as the password of a User and password credential; the user may be left empty" },
+  "tokenUrl": "https://learn.microsoft.com/azure/devops/organizations/accounts/use-personal-access-tokens-to-authenticate",
+  "userLabel": {"es": "Usuario (cualquiera)", "en": "User (any)"},
+  "secretLabel": {"es": "Token de acceso personal (PAT)", "en": "Personal access token (PAT)"},
+  "test": {"path": "/_apis/projects", "query": {"api-version": "7.1", "$top": "1"}, "result": "value", "label": "{{name}}"},
   "siteField": { "name": "organization", "label": { "es": "Organización (dev.azure.com/…)", "en": "Organization (dev.azure.com/…)" }, "placeholder": "acme", "required": true, "encode": true },
   "errorField": "message",
   "operations": [
@@ -16,7 +20,7 @@
       "query": { "api-version": "7.1" },
       "headers": { "Content-Type": "application/json-patch+json" },
       "fields": [
-        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true, "lookup": {"path": "/_apis/projects", "query": {"api-version": "7.1"}, "result": "value", "value": "name", "label": "{{name}}"} },
         { "name": "type", "label": { "es": "Tipo", "en": "Type" }, "placeholder": "Task", "required": true, "encode": true },
         { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
         { "name": "description", "label": { "es": "Descripción (HTML)", "en": "Description (HTML)" }, "multiline": true },
@@ -38,7 +42,7 @@
       "query": { "api-version": "7.1" },
       "headers": { "Content-Type": "application/json-patch+json" },
       "fields": [
-        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true, "lookup": {"path": "/_apis/projects", "query": {"api-version": "7.1"}, "result": "value", "value": "name", "label": "{{name}}"} },
         { "name": "id", "label": { "es": "Work item (id)", "en": "Work item (id)" }, "placeholder": "1234", "required": true },
         { "name": "state", "label": { "es": "Estado", "en": "State" }, "placeholder": "Done", "required": true },
         { "name": "comment", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true }
@@ -56,7 +60,7 @@
       "query": { "api-version": "7.1" },
       "headers": { "Content-Type": "application/json-patch+json" },
       "fields": [
-        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true, "lookup": {"path": "/_apis/projects", "query": {"api-version": "7.1"}, "result": "value", "value": "name", "label": "{{name}}"} },
         { "name": "id", "label": { "es": "Work item (id)", "en": "Work item (id)" }, "placeholder": "1234", "required": true },
         { "name": "comment", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true, "required": true }
       ],
@@ -69,7 +73,7 @@
       "path": "/{{project}}/_apis/wit/wiql",
       "query": { "api-version": "7.1", "$top": "{{top}}" },
       "fields": [
-        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true, "lookup": {"path": "/_apis/projects", "query": {"api-version": "7.1"}, "result": "value", "value": "name", "label": "{{name}}"} },
         { "name": "wiql", "label": { "es": "Consulta WIQL", "en": "WIQL query" }, "placeholder": "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'", "multiline": true, "required": true },
         { "name": "top", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "50" }
       ],
@@ -83,8 +87,8 @@
       "path": "/{{project}}/_apis/git/repositories/{{repository}}/pullRequests/{{pullRequestId}}/threads",
       "query": { "api-version": "7.1" },
       "fields": [
-        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
-        { "name": "repository", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "web-app", "required": true, "encode": true },
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true, "lookup": {"path": "/_apis/projects", "query": {"api-version": "7.1"}, "result": "value", "value": "name", "label": "{{name}}"} },
+        { "name": "repository", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "web-app", "required": true, "encode": true, "lookup": {"path": "/{{project}}/_apis/git/repositories", "query": {"api-version": "7.1"}, "result": "value", "value": "name", "label": "{{name}}", "needs": ["project"]} },
         { "name": "pullRequestId", "label": { "es": "Pull request (id)", "en": "Pull request (id)" }, "placeholder": "87", "required": true },
         { "name": "comment", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true, "required": true }
       ],
@@ -97,8 +101,8 @@
       "path": "/{{project}}/_apis/pipelines/{{pipelineId}}/runs",
       "query": { "api-version": "7.1" },
       "fields": [
-        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
-        { "name": "pipelineId", "label": { "es": "Pipeline (id)", "en": "Pipeline (id)" }, "placeholder": "12", "required": true },
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true, "lookup": {"path": "/_apis/projects", "query": {"api-version": "7.1"}, "result": "value", "value": "name", "label": "{{name}}"} },
+        { "name": "pipelineId", "label": { "es": "Pipeline", "en": "Pipeline" }, "placeholder": "12", "required": true, "lookup": {"path": "/{{project}}/_apis/pipelines", "query": {"api-version": "7.1"}, "result": "value", "value": "id", "label": "{{name}}", "needs": ["project"]} },
         { "name": "branch", "label": { "es": "Rama (vacío = la de siempre)", "en": "Branch (empty = the default)" }, "placeholder": "main" },
         { "name": "parameters", "label": { "es": "Parámetros (JSON)", "en": "Parameters (JSON)" }, "placeholder": "{\"env\": \"prod\"}", "json": true }
       ],

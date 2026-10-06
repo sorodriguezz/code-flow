@@ -55,6 +55,7 @@ import { LaserLayer, type LaserPan } from "../diagrams/Laser";
 import { useT } from "../../state/languageStore";
 import type { DbDiagramColumn } from "../../types/database";
 import type { DiagramColumnMode, DiagramDensity, DiagramNode } from "../../lib/db/erLayout";
+import type { DbmlView } from "./DbmlMinimap";
 
 /**
  * A DBML schema, drawn.
@@ -219,6 +220,8 @@ export interface DbmlCanvasHandle {
   layout: () => DbmlLayout;
   /** The middle of what the frame shows, in diagram coordinates — `null` while it has no size. */
   centre: () => { x: number; y: number } | null;
+  /** Moves the picture so this diagram point is in the middle of the frame, at the same zoom. */
+  centreOn: (x: number, y: number) => void;
 }
 
 export const DbmlCanvas = forwardRef<
@@ -263,6 +266,13 @@ export const DbmlCanvas = forwardRef<
     onOpen?: (id: string) => void;
     /** The live zoom, for a toolbar that wants to print it. Fires on pan and zoom alike. */
     onZoom?: (scale: number) => void;
+    /**
+     * Every move of the picture — each frame of a pan or a zoom, and a resize of the frame — with the
+     * frame's size: what the minimap draws its window from. Called outside React's render, often.
+     */
+    onView?: (view: DbmlView) => void;
+    /** The laid-out diagram, notes in its extent, each time it changes — the minimap's blocks. */
+    onLayout?: (layout: DbmlLayout) => void;
     mode: DiagramColumnMode;
     density: DiagramDensity;
     /** Curved cubics, or right angles that go around the boxes. Defaults to the curve every caller
@@ -392,6 +402,8 @@ export const DbmlCanvas = forwardRef<
     onSelect,
     onOpen,
     onZoom,
+    onView,
+    onLayout,
     mode,
     routing = "curved",
     density,
@@ -704,6 +716,14 @@ export const DbmlCanvas = forwardRef<
   // Held in refs so the two readouts are not dependencies of every callback that pans or searches.
   const zoomSink = useRef(onZoom);
   zoomSink.current = onZoom;
+  const viewSink = useRef(onView);
+  viewSink.current = onView;
+  /** The view as the minimap wants it: the transform and the frame's size. */
+  const emitView = useCallback(() => {
+    const frame = frameRef.current;
+    if (!frame || !viewSink.current) return;
+    viewSink.current({ ...viewRef.current, width: frame.clientWidth, height: frame.clientHeight });
+  }, []);
   const matchSink = useRef(onMatchCount);
   matchSink.current = onMatchCount;
 
@@ -712,7 +732,17 @@ export const DbmlCanvas = forwardRef<
     viewRef.current = next;
     canvasRef.current?.setAttribute("transform", `translate(${next.x} ${next.y}) scale(${next.k})`);
     if (changed) zoomSink.current?.(next.k);
-  }, []);
+    emitView();
+  }, [emitView]);
+
+  // The frame changes size when a side pane folds — the minimap's window with it.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame || typeof ResizeObserver === "undefined") return;
+    const watch = new ResizeObserver(() => emitView());
+    watch.observe(frame);
+    return () => watch.disconnect();
+  }, [emitView]);
 
   const commitView = useCallback(() => {
     if (commitTimer.current !== null) {
@@ -827,9 +857,24 @@ export const DbmlCanvas = forwardRef<
         const { x, y, k } = viewRef.current;
         return { x: (frame.clientWidth / 2 - x) / k, y: (frame.clientHeight / 2 - y) / k };
       },
+      centreOn: (x, y) => {
+        const frame = frameRef.current;
+        if (!frame) return;
+        const { k } = viewRef.current;
+        applyView({ k, x: frame.clientWidth / 2 - x * k, y: frame.clientHeight / 2 - y * k });
+        scheduleCommit();
+      },
     }),
-    [fit, zoomBy, focusTable, nextMatch, framed],
+    [fit, zoomBy, focusTable, nextMatch, framed, applyView, scheduleCommit],
   );
+
+  // The minimap's blocks: the layout each time it changes, and the view against it.
+  const layoutSink = useRef(onLayout);
+  layoutSink.current = onLayout;
+  useEffect(() => {
+    layoutSink.current?.(framed);
+    emitView();
+  }, [framed, emitView]);
 
   /**
    * Fits once, when the canvas first has something to fit — and on a density change, because

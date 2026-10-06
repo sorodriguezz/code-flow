@@ -5,6 +5,8 @@
   "baseUrl": "https://api.notion.com/v1",
   "auth": "bearer",
   "authHint": { "es": "Token de una integración interna como credencial Bearer", "en": "An internal integration token as a Bearer credential" },
+  "tokenUrl": "https://www.notion.so/my-integrations",
+  "test": {"path": "/users/me", "label": "{{name}} · {{bot.workspace_name}}"},
   "headers": { "Notion-Version": "2022-06-28" },
   "operations": [
     {
@@ -13,7 +15,7 @@
       "method": "POST",
       "path": "/pages",
       "fields": [
-        { "name": "databaseId", "label": { "es": "ID de la base de datos", "en": "Database ID" }, "required": true },
+        { "name": "databaseId", "label": { "es": "Base de datos", "en": "Database" }, "required": true, "lookup": {"method": "POST", "path": "/search", "body": {"filter": {"property": "object", "value": "database"}, "page_size": 100}, "result": "results", "value": "id", "label": "{{title.0.plain_text}}"} },
         { "name": "titleProperty", "label": { "es": "Propiedad del título", "en": "Title property" }, "placeholder": "Name", "required": true },
         { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
         { "name": "content", "label": { "es": "Texto de la página", "en": "Page text" }, "multiline": true }
@@ -30,7 +32,7 @@
       "method": "POST",
       "path": "/databases/{{databaseId}}/query",
       "fields": [
-        { "name": "databaseId", "label": { "es": "ID de la base de datos", "en": "Database ID" }, "required": true },
+        { "name": "databaseId", "label": { "es": "Base de datos", "en": "Database" }, "required": true, "lookup": {"method": "POST", "path": "/search", "body": {"filter": {"property": "object", "value": "database"}, "page_size": 100}, "result": "results", "value": "id", "label": "{{title.0.plain_text}}"} },
         { "name": "filter", "label": { "es": "Filtro (JSON de Notion)", "en": "Filter (Notion JSON)" }, "multiline": true, "json": true }
       ],
       "body": { "filter": "{{filter}}" },

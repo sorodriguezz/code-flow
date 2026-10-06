@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 use super::http::loggable;
 use super::{number, text, NodeCtx, NodeError};
 use crate::api::{HttpSendRequest, NetworkOptions};
-use crate::flows::connectors::{self, Connector, Operation};
+use crate::flows::connectors::{self, Choice, Connector, Field, Lookup, Operation};
 use crate::flows::engine::{Credential, LogStream};
 use crate::flows::run::{Item, Ports};
 
@@ -223,6 +223,45 @@ pub(super) fn request_for(
     Ok((request, url))
 }
 
+/// What a lookup answers, signed with `credential`: the choices a field can take or — a connector's
+/// `test` — who the credential signs in as. `values` are the node's fields, for the ones the lookup
+/// `needs` (a team's states need the team). A failure is the service's own message, as a call's is.
+pub(crate) async fn lookup(connector: &Connector, lookup: &Lookup, values: Map<String, Value>, credential: Option<&Credential>) -> Result<Vec<Choice>, String> {
+    let operation = lookup_operation(connector, lookup);
+    let (request, _) = request_for(connector, &operation, values, credential, 20_000).map_err(|e| e.to_string())?;
+    let response = crate::api::http::send(request, None, None).await?;
+    // The call's own checks — a 4xx, Slack's `ok: false`, a GraphQL `errors` — and then the list.
+    answer_items(connector, &operation, response.status, &response.body_text).map_err(|e| e.to_string())?;
+    Ok(lookup.choices(&parse_answer(&response.body_text)))
+}
+
+/// A lookup as the operation it is sent as: the fields it `needs`, required — the connector's own
+/// definitions of them, so `encode` still applies and a missing one is named as the form names it.
+fn lookup_operation(connector: &Connector, lookup: &Lookup) -> Operation {
+    let named: Vec<&Field> = connector.operations.iter().flat_map(|op| op.fields.iter()).collect();
+    let needs = lookup
+        .needs
+        .iter()
+        .map(|name| {
+            let mut field = named.iter().find(|field| field.name == *name).map(|field| (*field).clone()).unwrap_or_else(|| Field {
+                name: name.clone(),
+                label: connectors::Label { es: name.clone(), en: name.clone() },
+                placeholder: String::new(),
+                required: true,
+                multiline: false,
+                json: false,
+                encode: false,
+                default: String::new(),
+                lookup: None,
+            });
+            field.required = true;
+            field.lookup = None;
+            field
+        })
+        .collect();
+    lookup.operation(needs)
+}
+
 /// An answer as JSON: one document, or — ntfy's poll — one per line (NDJSON) read as a list.
 fn parse_answer(body: &str) -> Value {
     if body.trim().is_empty() {
@@ -301,6 +340,64 @@ mod tests {
 
     fn webhook(url: &str) -> Credential {
         Credential { kind: "webhook".into(), meta: json!({}), secret: url.into() }
+    }
+
+    fn field_lookup(connector: &str, operation: &str, field: &str) -> (&'static Connector, Operation) {
+        let (connector, op) = op(connector, operation);
+        let lookup = connector.fields_of(op).into_iter().find(|f| f.name == field).and_then(|f| f.lookup.as_ref()).unwrap();
+        (connector, lookup_operation(connector, lookup))
+    }
+
+    #[test]
+    fn lookups_are_sent_and_signed_the_way_calls_are() {
+        // Linear: a GraphQL POST with the bare key in its header.
+        let (connector, operation) = field_lookup("linear", "createIssue", "teamId");
+        let (request, _) = request_for(connector, &operation, Map::new(), Some(&token("lin_api_1", json!({}))), 20_000).unwrap();
+        assert_eq!((request.method.as_str(), request.url.as_str()), ("POST", "https://api.linear.app/graphql"));
+        assert_eq!(header(&request, "Authorization"), Some("lin_api_1"));
+        assert!(body(&request)["query"].as_str().unwrap().contains("teams"));
+
+        // Trello: the key and token in the query, as every Trello call carries them.
+        let (connector, operation) = field_lookup("trello", "createCard", "listId");
+        let basic = Credential { kind: "basic".into(), meta: json!({"user": "k1"}), secret: "t1".into() };
+        let (request, _) = request_for(connector, &operation, Map::new(), Some(&basic), 20_000).unwrap();
+        let url = url::Url::parse(&request.url).unwrap();
+        let query: Map<String, Value> = url.query_pairs().map(|(k, v)| (k.into_owned(), Value::String(v.into_owned()))).collect();
+        assert_eq!(url.path(), "/1/members/me/boards");
+        assert_eq!((query["key"].as_str(), query["token"].as_str(), query["lists"].as_str()), (Some("k1"), Some("t1"), Some("open")));
+
+        // Jira: a project's issue types need the project — named, not a broken URL.
+        let (connector, operation) = field_lookup("jira", "createIssue", "issueType");
+        let jira = Credential { kind: "basic".into(), meta: json!({"user": "ana@example.com"}), secret: "t".into() };
+        let error = request_for(connector, &operation, values(json!({"site": "acme"})), Some(&jira), 20_000).unwrap_err();
+        assert!(matches!(error, NodeError::Failed(ref text) if text.contains("Project")), "{error:?}");
+        let (request, _) = request_for(connector, &operation, values(json!({"site": "acme", "projectKey": "OPS"})), Some(&jira), 20_000).unwrap();
+        assert_eq!(request.url, "https://acme.atlassian.net/rest/api/3/project/OPS");
+
+        // Teams, signed in: a team's channels through Graph, with the account's token.
+        let (connector, operation) = field_lookup("teamsgraph", "channelMessage", "channelId");
+        let (request, _) = request_for(connector, &operation, values(json!({"teamId": "t-1"})), Some(&token("graph-token", json!({}))), 20_000).unwrap();
+        assert_eq!(request.url, "https://graph.microsoft.com/v1.0/teams/t-1/channels");
+        assert_eq!(header(&request, "Authorization"), Some("Bearer graph-token"));
+
+        // A GitLab project is percent-encoded in a lookup's path as in a call's.
+        let (connector, operation) = field_lookup("gitlab", "commentIssue", "iid");
+        let (request, _) = request_for(connector, &operation, values(json!({"project": "grupo/web"})), Some(&token("glpat", json!({}))), 20_000).unwrap();
+        assert!(request.url.starts_with("https://gitlab.com/api/v4/projects/grupo%2Fweb/issues?"), "{}", request.url);
+    }
+
+    #[test]
+    fn a_test_says_who_the_credential_is() {
+        let connector = connectors::find("telegram").unwrap();
+        let operation = lookup_operation(connector, connector.test.as_ref().unwrap());
+        let (request, _) = request_for(connector, &operation, Map::new(), Some(&token("123:ABC", json!({}))), 20_000).unwrap();
+        assert_eq!(request.url, "https://api.telegram.org/bot123:ABC/getMe");
+        let answer = r#"{"ok": true, "result": {"id": 1, "is_bot": true, "username": "avisos_bot"}}"#;
+        answer_items(connector, &operation, 200, answer).unwrap();
+        assert_eq!(connector.test.as_ref().unwrap().choices(&parse_answer(answer))[0].label, "@avisos_bot");
+        // The service's own refusal is the error, as a call's would be.
+        let refused = answer_items(connector, &operation, 401, r#"{"ok": false, "description": "Unauthorized"}"#).unwrap_err();
+        assert!(matches!(refused, NodeError::Failed(ref text) if text.contains("Unauthorized")), "{refused:?}");
     }
 
     #[test]
@@ -578,6 +675,6 @@ mod tests {
             assert!(!connector.operations.is_empty(), "{} has no operations", connector.id);
             assert!(!connector.credential_kinds().is_empty() || connector.auth == "none", "{} signs in with nothing it knows", connector.id);
         }
-        assert_eq!(connectors::CONNECTORS.len(), 24);
+        assert_eq!(connectors::CONNECTORS.len(), 25);
     }
 }

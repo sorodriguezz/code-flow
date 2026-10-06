@@ -557,11 +557,12 @@ async fn changes(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 // --------------------------------------------------------------------------------------- template
 
-/// A Jinja template (`{{ json.name }}`, `{% for item in items %}`) written into a field of each item
-/// — or, once, over all of them. `json` is the item, `items` every item's JSON, `vars` the run's
-/// variables, `now` the moment.
+/// A Jinja template (`{{ $json.name }}`, `{% for item in $items %}`) written into a field of each
+/// item — or, once, over all of them. `json` is the item, `items` every item's JSON, `vars` the
+/// run's variables, `now` the moment; each also with the `$` the rest of Flujos writes them with.
 async fn template(ctx: &NodeCtx) -> Result<Ports, NodeError> {
-    let source = ctx.param_str("template");
+    let written = ctx.param_str("template");
+    let source = jinja_source(&written);
     let mut env = minijinja::Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Chainable);
     env.add_template("t", &source).map_err(|e| NodeError::failed(format!("The template does not read: {e}")))?;
@@ -589,6 +590,108 @@ async fn template(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         out.push(Item::paired(next, index));
     }
     Ok(vec![out])
+}
+
+/// The names a template is given. Everywhere else in Flujos they are written `$json`, `$vars`… and a
+/// field dragged in from the input arrives as `{{ $json.campo }}`, so a template takes both.
+const TEMPLATE_NAMES: [&str; 4] = ["json", "items", "vars", "now"];
+
+/// `source` with the `$` dropped from [`TEMPLATE_NAMES`] inside its tags.
+///
+/// Jinja has no `$` in a name: outside a string, `$json` in a `{{ }}` or `{% %}` can only be a syntax
+/// error, so reading it as `json` changes no template that worked. Text, strings, comments and
+/// `{% raw %}` blocks stay as written, and so does any other `$name` — an error, as it was.
+fn jinja_source(source: &str) -> std::borrow::Cow<'_, str> {
+    if !source.contains('$') {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut copied = 0;
+    let mut raw = false;
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let kind = bytes[i + 1];
+        if bytes[i] != b'{' || !matches!(kind, b'{' | b'%' | b'#') || (raw && kind != b'%') {
+            i += 1;
+            continue;
+        }
+        let body = i + 2;
+        // Inside a raw block only `{% endraw %}` ends it, quotes and all; a comment ends at its `#}`.
+        let Some(end) = tag_end(bytes, body, kind, !raw && kind != b'#') else { break };
+        let inner = &source[body..end];
+        let word = inner.trim_start_matches(['-', '+']).trim_start();
+        let word = word.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+        if kind == b'%' && word == if raw { "endraw" } else { "raw" } {
+            raw = !raw;
+        } else if !raw && kind != b'#' {
+            out.push_str(&source[copied..body]);
+            unsigil(inner, &mut out);
+            copied = end;
+        }
+        i = end + 2;
+    }
+    out.push_str(&source[copied..]);
+    std::borrow::Cow::Owned(out)
+}
+
+/// Where the tag opened by `{` + `kind` just before `from` closes: the index of its `}}`, `%}` or
+/// `#}`. Strings are stepped over when `strings`, and braces nest, as Jinja's own reader does.
+fn tag_end(bytes: &[u8], from: usize, kind: u8, strings: bool) -> Option<usize> {
+    let close = match kind {
+        b'{' => b'}',
+        b'%' => b'%',
+        _ => b'#',
+    };
+    let mut depth = 0usize;
+    let mut i = from;
+    while i + 1 < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') if strings => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+                continue;
+            }
+            b'{' if strings => depth += 1,
+            b'}' if depth > 0 => depth -= 1,
+            c if c == close && bytes[i + 1] == b'}' => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// One tag's code, copied with the `$` of the template's own names left out (strings untouched).
+fn unsigil(code: &str, out: &mut String) {
+    let bytes = code.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'$' if i == 0 || !word(bytes[i - 1]) => {
+                let end = (i + 1..bytes.len()).find(|&j| !word(bytes[j])).unwrap_or(bytes.len());
+                if TEMPLATE_NAMES.contains(&&code[i + 1..end]) {
+                    out.push_str(&code[copied..i]);
+                    copied = i + 1;
+                }
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&code[copied..]);
 }
 
 // ------------------------------------------------------------------------------------------- JSON
@@ -765,6 +868,22 @@ async fn sql(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_template_takes_its_names_with_or_without_the_dollar() {
+        assert_eq!(jinja_source("Hola {{ json.nombre }}"), "Hola {{ json.nombre }}");
+        assert_eq!(
+            jinja_source("=== #{{ $json.id }} ===\n{% for s in $json.stats %}{{ s.stat.name }}: {{ s.base_stat }}\n{% endfor %}"),
+            "=== #{{ json.id }} ===\n{% for s in json.stats %}{{ s.stat.name }}: {{ s.base_stat }}\n{% endfor %}"
+        );
+        assert_eq!(jinja_source("{{- $items|length -}} {{ $now }} {% set a = {'x': $vars.k} %}"), "{{- items|length -}} {{ now }} {% set a = {'x': vars.k} %}");
+        // Text, strings, comments and raw blocks are as written.
+        assert_eq!(jinja_source("$json {{ '$json' ~ \"}}$json\" }} {# $json #}"), "$json {{ '$json' ~ \"}}$json\" }} {# $json #}");
+        assert_eq!(jinja_source("{% raw %}{{ $json }} {% if %}{%- endraw %}{{ $json }}"), "{% raw %}{{ $json }} {% if %}{%- endraw %}{{ json }}");
+        // Only the template's own names: `$input` stays the error it always was.
+        assert_eq!(jinja_source("{{ $input.all() }} {{ a$json }} {{ $jsonx }}"), "{{ $input.all() }} {{ a$json }} {{ $jsonx }}");
+        assert_eq!(jinja_source("{{ $json"), "{{ $json", "an unclosed tag is left to Jinja to report");
+    }
 
     #[test]
     fn statuses_and_hosts_are_read_the_way_people_write_them() {

@@ -5,6 +5,8 @@
   "baseUrl": "https://api.telegram.org/bot{{secret}}",
   "auth": "path",
   "authHint": { "es": "Token del bot (de @BotFather) como credencial de tipo Bearer", "en": "Bot token (from @BotFather) as a Bearer credential" },
+  "tokenUrl": "https://t.me/BotFather",
+  "test": {"path": "/getMe", "result": "result", "label": "@{{username}}"},
   "okField": "ok",
   "errorField": "description",
   "operations": [

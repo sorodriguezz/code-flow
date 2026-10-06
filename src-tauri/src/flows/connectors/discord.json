@@ -5,6 +5,8 @@
   "baseUrl": "",
   "auth": "url",
   "authHint": { "es": "La URL de un webhook del canal, guardada como credencial «URL de webhook»", "en": "A channel's webhook URL, kept as a “Webhook URL” credential" },
+  "tokenUrl": "https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks",
+  "test": {"url": "{{secret}}", "label": "{{name}}"},
   "operations": [
     {
       "id": "webhookMessage",

@@ -1,51 +1,77 @@
-import { useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 import { Braces, ChevronRight, Table2, ListTree } from "lucide-react";
 import { segItemClass, segTrackClass } from "../common/recipes";
+import { DRAG_THRESHOLD } from "../../lib/pointerDrag";
+import { KIND_MARK, jsPath, kindOf } from "../../lib/flows/exprAssist";
+import { useFlowFieldDragStore } from "../../state/flowFieldDragStore";
 import { useT } from "../../state/languageStore";
 
 /**
  * Items, three ways: a schema of their fields, a table, or the JSON itself.
  *
  * The schema is the default because it is what an expression needs — which fields exist, and what
- * kind of value each holds — and every field in it (and every table header) can be dragged onto a
- * parameter, where it lands as `{{ $json.path }}`. The JSON is the honest view: what the next node
- * receives, byte for byte.
+ * kind of value each holds — and on the input side every field in it (and every table header) can
+ * be dragged onto a parameter, where it is written the way that field reads it (`{{ $json.path }}`
+ * in a text box, `item["path"]` in Python…; `flowFieldDragStore`). The JSON is the honest view:
+ * what the next node receives, byte for byte.
  */
-
-export const FIELD_MIME = "application/x-cf-flow-field";
 
 export type DataMode = "schema" | "table" | "json";
 
 /** How a path is written inside an expression: dots where they are safe, brackets where not. */
-export function pathExpression(path: (string | number)[]): string {
-  let out = "$json";
-  for (const part of path) {
-    if (typeof part === "number") out += `[${part}]`;
-    else if (/^[A-Za-z_$][\w$]*$/.test(part)) out += `.${part}`;
-    else out += `[${JSON.stringify(part)}]`;
-  }
-  return out;
+export const pathExpression = (path: (string | number)[]): string => jsPath("$json", path);
+
+/**
+ * The pointer handlers that pick a field up — a press that travels `DRAG_THRESHOLD` is a drag (the
+ * click it would otherwise be does nothing here). Pointer capture is held from the press so the
+ * travel is heard, and let go once it is a drag, so the field under the pointer gets its own
+ * enter/leave and can light up.
+ */
+function fieldDragHandlers(path: (string | number)[], label: string) {
+  return {
+    onPointerDown: (event: ReactPointerEvent<HTMLElement>) => {
+      if (event.button !== 0) return;
+      // No text selection out of the press — it is a grab.
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      useFlowFieldDragStore.getState().press({ path, label }, event.clientX, event.clientY);
+    },
+    onPointerMove: (event: ReactPointerEvent<HTMLElement>) => {
+      if (event.buttons === 0) return;
+      const { origin, drag, begin } = useFlowFieldDragStore.getState();
+      if (!origin || drag) return;
+      if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < DRAG_THRESHOLD) return;
+      begin();
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    },
+  };
 }
 
-export function startFieldDrag(event: DragEvent, path: (string | number)[]): void {
-  const expression = `{{ ${pathExpression(path)} }}`;
-  event.dataTransfer.setData(FIELD_MIME, expression);
-  event.dataTransfer.setData("text/plain", expression);
-  event.dataTransfer.effectAllowed = "copy";
+/** The dragged field, following the pointer — drawn once, by whoever hosts the drop targets. */
+export function FieldDragGhost() {
+  const drag = useFlowFieldDragStore((s) => s.drag);
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!drag) {
+      setAt(null);
+      return;
+    }
+    const move = (event: PointerEvent) => setAt({ x: event.clientX, y: event.clientY });
+    window.addEventListener("pointermove", move, true);
+    return () => window.removeEventListener("pointermove", move, true);
+  }, [drag]);
+  if (!drag || !at) return null;
+  return createPortal(
+    <div
+      className="pointer-events-none fixed z-[10000] rounded-[5px] border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-1.5 py-[1px] font-mono text-[11.5px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
+      style={{ left: at.x + 12, top: at.y + 10 }}
+    >
+      {pathExpression(drag.path)}
+    </div>,
+    document.body,
+  );
 }
-
-const kindOf = (value: unknown): string =>
-  value === null ? "null" : Array.isArray(value) ? "array" : typeof value === "object" ? "object" : typeof value;
-
-const KIND_MARK: Record<string, string> = {
-  string: "T",
-  number: "#",
-  boolean: "✓",
-  object: "{}",
-  array: "[]",
-  null: "∅",
-  undefined: "?",
-};
 
 function preview(value: unknown): string {
   if (value === null) return "null";
@@ -92,7 +118,7 @@ function schemaOf(items: unknown[]): SchemaField[] {
   return root;
 }
 
-function SchemaRows({ fields, depth }: { fields: SchemaField[]; depth: number }) {
+function SchemaRows({ fields, depth, drag }: { fields: SchemaField[]; depth: number; drag: boolean }) {
   const [open, setOpen] = useState<Set<string | number>>(() => new Set(depth === 0 ? fields.map((f) => f.key) : []));
   return (
     <>
@@ -125,9 +151,10 @@ function SchemaRows({ fields, depth }: { fields: SchemaField[]; depth: number })
                 <span className="w-4 shrink-0" />
               )}
               <span
-                draggable
-                onDragStart={(event) => startFieldDrag(event, field.path)}
-                className="inline-flex min-w-0 cursor-grab items-center gap-1.5 rounded-[5px] bg-[var(--cf-hover)] px-1.5 py-[1px] font-mono text-[11.5px] text-[var(--cf-text)] active:cursor-grabbing"
+                {...(drag ? fieldDragHandlers(field.path, String(field.key)) : {})}
+                className={`inline-flex min-w-0 select-none items-center gap-1.5 rounded-[5px] bg-[var(--cf-hover)] px-1.5 py-[1px] font-mono text-[11.5px] text-[var(--cf-text)] ${
+                  drag ? "cursor-grab touch-none active:cursor-grabbing" : ""
+                }`}
                 title={`{{ ${pathExpression(field.path)} }}`}
               >
                 <span className="w-3 shrink-0 text-center text-[10px] text-[var(--cf-text-faint)]">{KIND_MARK[field.kind] ?? "?"}</span>
@@ -137,7 +164,7 @@ function SchemaRows({ fields, depth }: { fields: SchemaField[]; depth: number })
                 <span className="min-w-0 truncate font-mono text-[11.5px] text-[var(--cf-text-muted)]">{preview(field.sample)}</span>
               )}
             </div>
-            {nested && isOpen && <SchemaRows fields={field.children} depth={depth + 1} />}
+            {nested && isOpen && <SchemaRows fields={field.children} depth={depth + 1} drag={drag} />}
           </div>
         );
       })}
@@ -145,7 +172,7 @@ function SchemaRows({ fields, depth }: { fields: SchemaField[]; depth: number })
   );
 }
 
-function TableView({ items }: { items: unknown[] }) {
+function TableView({ items, drag }: { items: unknown[]; drag: boolean }) {
   const columns = useMemo(() => {
     const keys: string[] = [];
     for (const item of items.slice(0, 50)) {
@@ -163,7 +190,11 @@ function TableView({ items }: { items: unknown[] }) {
             <th className="w-8 text-right text-[var(--cf-text-faint)]">#</th>
             {columns.map((key) => (
               <th key={key}>
-                <span draggable onDragStart={(event) => startFieldDrag(event, [key])} className="cursor-grab" title={`{{ ${pathExpression([key])} }}`}>
+                <span
+                  {...(drag ? fieldDragHandlers([key], key) : {})}
+                  className={drag ? "cursor-grab touch-none select-none" : ""}
+                  title={`{{ ${pathExpression([key])} }}`}
+                >
                   {key}
                 </span>
               </th>
@@ -214,8 +245,11 @@ export function DataModeSwitch({ mode, onChange }: { mode: DataMode; onChange: (
   );
 }
 
-/** One list of items in the chosen mode. `total` is how many there were before the cut. */
-export function ItemsView({ items, total, mode }: { items: unknown[]; total: number; mode: DataMode }) {
+/**
+ * One list of items in the chosen mode. `total` is how many there were before the cut; `fieldDrag`
+ * lets its fields be dragged into the parameters — the input's, never an output's.
+ */
+export function ItemsView({ items, total, mode, fieldDrag = false }: { items: unknown[]; total: number; mode: DataMode; fieldDrag?: boolean }) {
   const t = useT();
   const schema = useMemo(() => (mode === "schema" ? schemaOf(items) : []), [items, mode]);
   if (items.length === 0) {
@@ -228,11 +262,11 @@ export function ItemsView({ items, total, mode }: { items: unknown[]; total: num
           {schema.length === 0 ? (
             <p className="px-1.5 py-1.5 text-[12px] text-[var(--cf-text-muted)]">{t("flows.data.noFields", { n: items.length })}</p>
           ) : (
-            <SchemaRows fields={schema} depth={0} />
+            <SchemaRows fields={schema} depth={0} drag={fieldDrag} />
           )}
         </div>
       )}
-      {mode === "table" && <TableView items={items} />}
+      {mode === "table" && <TableView items={items} drag={fieldDrag} />}
       {mode === "json" && (
         <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-[11.5px] leading-[1.5] text-[var(--cf-text)]">
           {JSON.stringify(items, null, 2)}

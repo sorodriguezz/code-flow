@@ -12,7 +12,7 @@
 mod ai;
 mod app;
 pub(crate) mod binary;
-mod connector;
+pub(crate) mod connector;
 pub(crate) mod data;
 pub(crate) mod feed;
 mod files;

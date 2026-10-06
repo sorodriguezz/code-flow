@@ -5,6 +5,8 @@
   "baseUrl": "https://api.github.com",
   "auth": "bearer",
   "authHint": { "es": "Un token de GitHub (fine-grained o clásico) como credencial Token", "en": "A GitHub token (fine-grained or classic) as a Token credential" },
+  "tokenUrl": "https://github.com/settings/personal-access-tokens/new",
+  "test": {"path": "/user", "label": "{{name}} (@{{login}})"},
   "headers": { "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "CodeFlow-Flujos" },
   "errorField": "message",
   "operations": [
@@ -15,7 +17,7 @@
       "path": "/repos/{{owner}}/{{repo}}/issues",
       "fields": [
         { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "lookup": {"path": "/user/repos", "query": {"per_page": "100", "sort": "updated"}, "value": "name", "label": "{{full_name}}", "fills": {"owner": "owner.login"}} },
         { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
         { "name": "body", "label": { "es": "Descripción", "en": "Description" }, "multiline": true },
         { "name": "labels", "label": { "es": "Etiquetas (JSON)", "en": "Labels (JSON)" }, "placeholder": "[\"bug\"]", "json": true },
@@ -30,8 +32,8 @@
       "path": "/repos/{{owner}}/{{repo}}/issues/{{number}}/comments",
       "fields": [
         { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
-        { "name": "number", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "lookup": {"path": "/user/repos", "query": {"per_page": "100", "sort": "updated"}, "value": "name", "label": "{{full_name}}", "fills": {"owner": "owner.login"}} },
+        { "name": "number", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true, "lookup": {"path": "/repos/{{owner}}/{{repo}}/issues", "query": {"state": "open", "per_page": "50"}, "value": "number", "label": "#{{number}} {{title}}", "needs": ["owner", "repo"]} },
         { "name": "body", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true, "required": true }
       ],
       "body": { "body": "{{body}}" }
@@ -43,8 +45,8 @@
       "path": "/repos/{{owner}}/{{repo}}/issues/{{number}}",
       "fields": [
         { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
-        { "name": "number", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "lookup": {"path": "/user/repos", "query": {"per_page": "100", "sort": "updated"}, "value": "name", "label": "{{full_name}}", "fills": {"owner": "owner.login"}} },
+        { "name": "number", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true, "lookup": {"path": "/repos/{{owner}}/{{repo}}/issues", "query": {"state": "all", "per_page": "50"}, "value": "number", "label": "#{{number}} {{title}}", "needs": ["owner", "repo"]} },
         { "name": "state", "label": { "es": "Estado (open o closed)", "en": "State (open or closed)" }, "placeholder": "closed" },
         { "name": "title", "label": { "es": "Título nuevo", "en": "New title" } },
         { "name": "labels", "label": { "es": "Etiquetas (JSON)", "en": "Labels (JSON)" }, "placeholder": "[\"done\"]", "json": true }
@@ -59,7 +61,7 @@
       "query": { "state": "{{state}}", "labels": "{{labels}}", "since": "{{since}}", "per_page": "{{perPage}}" },
       "fields": [
         { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "lookup": {"path": "/user/repos", "query": {"per_page": "100", "sort": "updated"}, "value": "name", "label": "{{full_name}}", "fills": {"owner": "owner.login"}} },
         { "name": "state", "label": { "es": "Estado (open, closed, all)", "en": "State (open, closed, all)" }, "placeholder": "open" },
         { "name": "labels", "label": { "es": "Etiquetas, separadas por comas", "en": "Labels, comma separated" }, "placeholder": "bug" },
         { "name": "since", "label": { "es": "Cambiados desde (ISO 8601)", "en": "Changed since (ISO 8601)" }, "placeholder": "2026-10-01T00:00:00Z" },
@@ -85,7 +87,7 @@
       "path": "/repos/{{owner}}/{{repo}}/releases",
       "fields": [
         { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "lookup": {"path": "/user/repos", "query": {"per_page": "100", "sort": "updated"}, "value": "name", "label": "{{full_name}}", "fills": {"owner": "owner.login"}} },
         { "name": "tag", "label": { "es": "Tag", "en": "Tag" }, "placeholder": "v1.4.0", "required": true },
         { "name": "name", "label": { "es": "Nombre", "en": "Name" } },
         { "name": "body", "label": { "es": "Notas", "en": "Notes" }, "multiline": true },
@@ -101,7 +103,7 @@
       "path": "/repos/{{owner}}/{{repo}}/releases/latest",
       "fields": [
         { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true }
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "lookup": {"path": "/user/repos", "query": {"per_page": "100", "sort": "updated"}, "value": "name", "label": "{{full_name}}", "fills": {"owner": "owner.login"}} }
       ]
     },
     {
@@ -111,7 +113,7 @@
       "path": "/repos/{{owner}}/{{repo}}/dispatches",
       "fields": [
         { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "lookup": {"path": "/user/repos", "query": {"per_page": "100", "sort": "updated"}, "value": "name", "label": "{{full_name}}", "fills": {"owner": "owner.login"}} },
         { "name": "eventType", "label": { "es": "Tipo de evento", "en": "Event type" }, "placeholder": "deploy", "required": true },
         { "name": "payload", "label": { "es": "Datos (JSON)", "en": "Payload (JSON)" }, "placeholder": "{\"env\": \"prod\"}", "json": true }
       ],

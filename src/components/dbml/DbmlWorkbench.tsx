@@ -24,6 +24,7 @@ import {
   GitCompare,
   History,
   LayoutGrid,
+  Map as MapIcon,
   Maximize2,
   Minimize,
   Search,
@@ -79,10 +80,12 @@ import {
   readLayout,
   splitFieldMarkKey,
   writeLayout,
+  type DbmlLayout,
   type DbmlMarkKind,
   type DbmlMarks,
   type LayoutSpot,
 } from "../../lib/dbml/layout";
+import { DbmlMinimap, type DbmlView } from "./DbmlMinimap";
 import { EMPTY_SCHEMA, stickyNoteId, type DbmlSchema } from "../../lib/dbml/types";
 import { smallestChange } from "../../lib/smallestChange";
 import { sandboxOf, useSandboxStore } from "../../state/sandboxStore";
@@ -159,6 +162,13 @@ const CHROME_FADE = "transition-opacity duration-200 motion-reduce:transition-no
  */
 const FLOAT_BAR =
   "flex items-center gap-0.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[3px] shadow-[var(--cf-shadow)]";
+
+/** The counts strip under the canvas. Its height is also how far the left fold tab is lifted, so the
+ *  two tabs sit level: the right one is centred on the canvas, the left on the canvas *and* this. */
+const STRIP_HEIGHT = 28;
+
+/** Whether the diagram's map is shown above the zoom — on unless hidden from "View". */
+const MINIMAP_KEY = "cf.dbml.minimap";
 
 /** How long after the last keystroke the document is re-parsed. */
 const PARSE_DEBOUNCE_MS = 260;
@@ -341,6 +351,37 @@ export function DbmlWorkbench({
    */
   const [laser, setLaser] = useState(false);
   const [laserColour, setLaserColour] = useState<LaserColour>(loadLaserColour);
+  /**
+   * The diagram's map, above "View" and the zoom (`DbmlMinimap`), in the same fading group. Its
+   * window follows the canvas through `onView` without a render here: the views go straight from
+   * the canvas to the map through `viewSink`, and only the layout passes through state.
+   */
+  const [minimap, setMinimap] = useState(() => {
+    try {
+      return localStorage.getItem(MINIMAP_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const [mapLayout, setMapLayout] = useState<DbmlLayout | null>(null);
+  const viewSink = useRef<((view: DbmlView) => void) | null>(null);
+  const lastView = useRef<DbmlView | null>(null);
+  const subscribeView = useCallback((draw: (view: DbmlView) => void) => {
+    viewSink.current = draw;
+    if (lastView.current) draw(lastView.current);
+    return () => {
+      if (viewSink.current === draw) viewSink.current = null;
+    };
+  }, []);
+  const toggleMinimap = () =>
+    setMinimap((shown) => {
+      try {
+        localStorage.setItem(MINIMAP_KEY, shown ? "0" : "1");
+      } catch {
+        // Private window: the choice lasts this session.
+      }
+      return !shown;
+    });
   /** The colour button's rect while its menu is open — a rect for the reason `viewAt` is one. */
   const [laserAt, setLaserAt] = useState<DOMRect | null>(null);
 
@@ -1849,6 +1890,9 @@ export function DbmlWorkbench({
             // text away is how a tool gets the width of the window, and burying the handle under
             // the panel would mean closing the tool to make room for it.
             above
+            // Level with the inspector's tab: that one is centred on the canvas, this container also
+            // holds the counts strip under it.
+            lift={surface === "diagram" && parser && (schema.tables.length > 0 || schema.enums.length > 0) ? STRIP_HEIGHT / 2 : 0}
             title={t(editorOpen ? "dbml.collapseEditor" : "dbml.expandEditor")}
             onClick={toggleEditorPane}
           />
@@ -1886,6 +1930,11 @@ export function DbmlWorkbench({
                           Math.round(scale * 100) === Math.round(current * 100) ? current : scale,
                         )
                       }
+                      onView={(view) => {
+                        lastView.current = view;
+                        viewSink.current?.(view);
+                      }}
+                      onLayout={setMapLayout}
                       mode={mode}
                       density={density}
                       routing={routing}
@@ -2016,9 +2065,21 @@ export function DbmlWorkbench({
                       toolbar, and they were the only overlay in the top-right corner — which is
                       where the boxes of a left-to-right layout end up. */}
                   <div
-                    className={`absolute bottom-3 right-4 flex items-center gap-1.5 ${CHROME_FADE}`}
+                    className={`absolute bottom-3 right-4 flex flex-col items-end gap-1.5 ${CHROME_FADE}`}
                     style={{ opacity: chromeHot || viewAt || laserAt ? 1 : DIMMED }}
                   >
+                    {/* The whole diagram, small: where the frame is in it, and a press to go
+                        somewhere else. Over the zoom it belongs to, fading with it. */}
+                    {minimap && mapLayout && mapLayout.nodes.length > 0 && (
+                      <DbmlMinimap
+                        layout={mapLayout}
+                        selected={selected}
+                        subscribe={subscribeView}
+                        onCentre={(x, y) => canvas.current?.centreOn(x, y)}
+                        label={t("dbml.minimap")}
+                      />
+                    )}
+                    <div className="flex items-center gap-1.5">
                     {/* The laser, as a split: the pointer itself, and beside it the narrow half that
                         picks its ink. Here rather than in the toolbar because the toolbar is for the
                         document and is gone in full screen — which is exactly where a laser is
@@ -2098,6 +2159,7 @@ export function DbmlWorkbench({
                         <ZoomIn size={15} />
                       </ZoomStep>
                     </div>
+                    </div>
                   </div>
 
                   {viewAt && (
@@ -2148,6 +2210,11 @@ export function DbmlWorkbench({
                             ),
                         },
                         {
+                          label: t(minimap ? "dbml.minimapHide" : "dbml.minimapShow"),
+                          icon: MapIcon,
+                          onClick: toggleMinimap,
+                        },
+                        {
                           label: t("dbml.autoLayout"),
                           icon: LayoutGrid,
                           onClick: rearrange,
@@ -2196,7 +2263,10 @@ export function DbmlWorkbench({
                       the same treatment as the line and character counts under the text pane. The
                       two numbers describe the document rather than the view, so they belong in
                       furniture that is always there and never in front of the drawing. */}
-                  <div className="flex h-7 shrink-0 items-center gap-3.5 border-t border-[var(--cf-border)] px-4 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+                  <div
+                    className="flex shrink-0 items-center gap-3.5 border-t border-[var(--cf-border)] px-4 text-[11px] tabular-nums text-[var(--cf-text-faint)]"
+                    style={{ height: STRIP_HEIGHT }}
+                  >
                     <span>{t("dbml.chipTables", { count: String(schema.tables.length) })}</span>
                     <span>{t("dbml.chipRefs", { count: String(schema.refs.length) })}</span>
                     {/* How the review is going. Only the two counts that are a to-do list — a
@@ -2490,6 +2560,7 @@ function EdgeTab({
   title,
   onClick,
   above = false,
+  lift = 0,
 }: {
   side: "left" | "right";
   open: boolean;
@@ -2497,6 +2568,8 @@ function EdgeTab({
   onClick: () => void;
   /** Draw over the tools drawer instead of under it — see the left tab's note. */
   above?: boolean;
+  /** How far above its container's middle it sits — level with the other tab, whose container is shorter. */
+  lift?: number;
 }) {
   // Pointing away from the canvas closes; pointing into it opens.
   const pointsLeft = side === "left" ? open : !open;
@@ -2508,6 +2581,7 @@ function EdgeTab({
         onClick={onClick}
         aria-label={title}
         aria-expanded={open}
+        style={lift ? { top: `calc(50% - ${lift}px)` } : undefined}
         className={`group/edge absolute top-1/2 ${above ? "z-40" : "z-20"} flex h-11 w-[22px] -translate-y-1/2 items-center ${
           side === "left" ? "left-0 justify-start" : "right-0 justify-end"
         }`}

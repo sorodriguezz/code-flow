@@ -5,6 +5,10 @@
   "baseUrl": "https://api.bitbucket.org/2.0",
   "auth": "basic",
   "authHint": { "es": "Tu correo de Atlassian y un token de API con permisos de Bitbucket, en una credencial Usuario y contraseña", "en": "Your Atlassian email and an API token with Bitbucket scopes, in a User and password credential" },
+  "tokenUrl": "https://id.atlassian.com/manage-profile/security/api-tokens",
+  "userLabel": {"es": "Correo de Atlassian", "en": "Atlassian email"},
+  "secretLabel": {"es": "Token de API", "en": "API token"},
+  "test": {"path": "/user", "label": "{{display_name}}"},
   "errorField": "error.message",
   "operations": [
     {
@@ -15,7 +19,7 @@
       "query": { "state": "{{state}}", "pagelen": "{{pagelen}}" },
       "fields": [
         { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true, "lookup": {"path": "/repositories", "query": {"role": "member", "pagelen": "100", "sort": "-updated_on"}, "result": "values", "value": "slug", "label": "{{full_name}}", "fills": {"workspace": "workspace.slug"}} },
         { "name": "state", "label": { "es": "Estado (OPEN, MERGED, DECLINED)", "en": "State (OPEN, MERGED, DECLINED)" }, "placeholder": "OPEN" },
         { "name": "pagelen", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "20" }
       ],
@@ -28,7 +32,7 @@
       "path": "/repositories/{{workspace}}/{{repo}}/pullrequests",
       "fields": [
         { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true, "lookup": {"path": "/repositories", "query": {"role": "member", "pagelen": "100", "sort": "-updated_on"}, "result": "values", "value": "slug", "label": "{{full_name}}", "fills": {"workspace": "workspace.slug"}} },
         { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
         { "name": "source", "label": { "es": "Desde la rama", "en": "From branch" }, "placeholder": "feature/login", "required": true },
         { "name": "destination", "label": { "es": "Hacia la rama (vacío = la principal)", "en": "Into branch (empty = the main one)" }, "placeholder": "main" },
@@ -48,7 +52,7 @@
       "path": "/repositories/{{workspace}}/{{repo}}/pullrequests/{{id}}/comments",
       "fields": [
         { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true, "lookup": {"path": "/repositories", "query": {"role": "member", "pagelen": "100", "sort": "-updated_on"}, "result": "values", "value": "slug", "label": "{{full_name}}", "fills": {"workspace": "workspace.slug"}} },
         { "name": "id", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true },
         { "name": "comment", "label": { "es": "Comentario (Markdown)", "en": "Comment (Markdown)" }, "multiline": true, "required": true }
       ],
@@ -61,7 +65,7 @@
       "path": "/repositories/{{workspace}}/{{repo}}/issues",
       "fields": [
         { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true, "lookup": {"path": "/repositories", "query": {"role": "member", "pagelen": "100", "sort": "-updated_on"}, "result": "values", "value": "slug", "label": "{{full_name}}", "fills": {"workspace": "workspace.slug"}} },
         { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
         { "name": "content", "label": { "es": "Descripción (Markdown)", "en": "Description (Markdown)" }, "multiline": true },
         { "name": "kind", "label": { "es": "Tipo (bug, enhancement, proposal, task)", "en": "Kind (bug, enhancement, proposal, task)" }, "placeholder": "bug" },
@@ -76,7 +80,7 @@
       "path": "/repositories/{{workspace}}/{{repo}}/issues/{{id}}/comments",
       "fields": [
         { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true, "lookup": {"path": "/repositories", "query": {"role": "member", "pagelen": "100", "sort": "-updated_on"}, "result": "values", "value": "slug", "label": "{{full_name}}", "fills": {"workspace": "workspace.slug"}} },
         { "name": "id", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true },
         { "name": "comment", "label": { "es": "Comentario (Markdown)", "en": "Comment (Markdown)" }, "multiline": true, "required": true }
       ],
@@ -89,7 +93,7 @@
       "path": "/repositories/{{workspace}}/{{repo}}/pipelines/",
       "fields": [
         { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
-        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true, "lookup": {"path": "/repositories", "query": {"role": "member", "pagelen": "100", "sort": "-updated_on"}, "result": "values", "value": "slug", "label": "{{full_name}}", "fills": {"workspace": "workspace.slug"}} },
         { "name": "branch", "label": { "es": "Rama", "en": "Branch" }, "placeholder": "main", "required": true },
         { "name": "variables", "label": { "es": "Variables (JSON)", "en": "Variables (JSON)" }, "placeholder": "[{\"key\": \"ENV\", \"value\": \"prod\"}]", "json": true }
       ],

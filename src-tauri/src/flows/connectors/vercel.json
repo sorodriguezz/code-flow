@@ -5,6 +5,8 @@
   "baseUrl": "https://api.vercel.com",
   "auth": "bearer",
   "authHint": { "es": "Un token de Vercel (Account Settings › Tokens) como credencial Token", "en": "A Vercel token (Account Settings › Tokens) as a Token credential" },
+  "tokenUrl": "https://vercel.com/account/tokens",
+  "test": {"path": "/v2/user", "result": "user", "label": "{{username}} · {{email}}"},
   "errorField": "error",
   "operations": [
     {
@@ -14,8 +16,8 @@
       "path": "/v6/deployments",
       "query": { "projectId": "{{projectId}}", "teamId": "{{teamId}}", "target": "{{target}}", "state": "{{state}}", "limit": "{{limit}}" },
       "fields": [
-        { "name": "projectId", "label": { "es": "Proyecto (id o nombre)", "en": "Project (id or name)" }, "required": true },
-        { "name": "teamId", "label": { "es": "Equipo (id, si es de un equipo)", "en": "Team (id, for a team project)" } },
+        { "name": "projectId", "label": { "es": "Proyecto", "en": "Project" }, "required": true, "lookup": {"path": "/v9/projects", "query": {"limit": "100", "teamId": "{{teamId}}"}, "result": "projects", "value": "id", "label": "{{name}}"} },
+        { "name": "teamId", "label": { "es": "Equipo (id, si es de un equipo)", "en": "Team (id, for a team project)" }, "lookup": {"path": "/v2/teams", "query": {"limit": "50"}, "result": "teams", "value": "id", "label": "{{name}} ({{slug}})"} },
         { "name": "target", "label": { "es": "Destino (production o preview)", "en": "Target (production or preview)" }, "placeholder": "production" },
         { "name": "state", "label": { "es": "Estado (READY, ERROR, BUILDING…)", "en": "State (READY, ERROR, BUILDING…)" } },
         { "name": "limit", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "10" }
@@ -30,7 +32,7 @@
       "query": { "teamId": "{{teamId}}" },
       "fields": [
         { "name": "deployment", "label": { "es": "Despliegue (id o URL)", "en": "Deployment (id or URL)" }, "required": true },
-        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" } }
+        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" }, "lookup": {"path": "/v2/teams", "query": {"limit": "50"}, "result": "teams", "value": "id", "label": "{{name}} ({{slug}})"} }
       ]
     },
     {
@@ -40,10 +42,10 @@
       "path": "/v13/deployments",
       "query": { "teamId": "{{teamId}}", "forceNew": "1" },
       "fields": [
-        { "name": "name", "label": { "es": "Proyecto (nombre)", "en": "Project (name)" }, "required": true },
+        { "name": "name", "label": { "es": "Proyecto (nombre)", "en": "Project (name)" }, "required": true, "lookup": {"path": "/v9/projects", "query": {"limit": "100", "teamId": "{{teamId}}"}, "result": "projects", "value": "name", "label": "{{name}}"} },
         { "name": "deploymentId", "label": { "es": "Despliegue a repetir (id)", "en": "Deployment to repeat (id)" }, "required": true },
         { "name": "target", "label": { "es": "Destino (production o preview)", "en": "Target (production or preview)" }, "placeholder": "production" },
-        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" } }
+        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" }, "lookup": {"path": "/v2/teams", "query": {"limit": "50"}, "result": "teams", "value": "id", "label": "{{name}} ({{slug}})"} }
       ],
       "body": { "name": "{{name}}", "deploymentId": "{{deploymentId}}", "target": "{{target}}" }
     },
@@ -55,7 +57,7 @@
       "query": { "teamId": "{{teamId}}" },
       "fields": [
         { "name": "deployment", "label": { "es": "Despliegue (id)", "en": "Deployment (id)" }, "required": true },
-        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" } }
+        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" }, "lookup": {"path": "/v2/teams", "query": {"limit": "50"}, "result": "teams", "value": "id", "label": "{{name}} ({{slug}})"} }
       ]
     },
     {
@@ -65,7 +67,7 @@
       "path": "/v9/projects",
       "query": { "teamId": "{{teamId}}", "limit": "{{limit}}" },
       "fields": [
-        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" } },
+        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" }, "lookup": {"path": "/v2/teams", "query": {"limit": "50"}, "result": "teams", "value": "id", "label": "{{name}} ({{slug}})"} },
         { "name": "limit", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "20" }
       ],
       "result": "projects"

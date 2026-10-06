@@ -5,6 +5,9 @@
   "baseUrl": "https://api.pushover.net/1",
   "auth": "body",
   "authHint": { "es": "Tu clave de usuario (o de grupo) como usuario y el token de tu aplicación como contraseña, en una credencial Usuario y contraseña", "en": "Your user (or group) key as the user and your application's token as the password, in a User and password credential" },
+  "tokenUrl": "https://pushover.net/apps/build",
+  "userLabel": {"es": "Clave de usuario (o de grupo)", "en": "User (or group) key"},
+  "secretLabel": {"es": "Token de la aplicación", "en": "Application token"},
   "errorField": "errors",
   "operations": [
     {

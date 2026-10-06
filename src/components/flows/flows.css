@@ -66,10 +66,17 @@
 }
 
 .cf-flow-canvas .react-flow__nodesselection-rect,
-.cf-flow-canvas .react-flow__selection {
+.cf-flow-canvas .react-flow__selection,
+.cf-flow-marquee {
   background: color-mix(in oklab, var(--cf-accent) 8%, transparent);
   border: 1px solid var(--cf-accent-line);
   border-radius: 6px;
+}
+/* The box a right-button drag draws (FlowEditor): over the canvas, never in the pointer's way. */
+.cf-flow-marquee {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
 }
 
 .cf-flow-canvas .react-flow__node:focus-visible {
@@ -348,6 +355,24 @@
 .cf-flow-node__pin {
   left: -6px;
   background: var(--cf-blue);
+}
+/* What a node still lacks (`nodeIssues`): bottom right, clear of the run badge and the pin. */
+.cf-flow-node__issue {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  z-index: 1;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--cf-warning);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 0 0 2px var(--cf-sunken);
 }
 
 .cf-flow-canvas .react-flow__handle.is-error-port {

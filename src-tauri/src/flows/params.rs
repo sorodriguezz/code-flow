@@ -801,7 +801,7 @@ const CHANGES: &[ParamSpec] = &[
 ];
 
 const TEMPLATE: &[ParamSpec] = &[
-    p("template", Kind::Code { lang: "markdown" }, "\"Hola {{ json.nombre }}\"").literal(),
+    p("template", Kind::Code { lang: "markdown" }, "\"Hola {{ $json.nombre }}\"").literal(),
     p("runFor", select(&["each", "once"]), "\"each\"").literal(),
     p("target", text("text"), "\"text\"").literal(),
 ];

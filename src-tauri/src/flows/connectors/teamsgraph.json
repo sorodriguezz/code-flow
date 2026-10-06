@@ -1,0 +1,77 @@
+{
+  "id": "teamsgraph",
+  "name": "Microsoft Teams",
+  "group": "appsChat",
+  "baseUrl": "https://graph.microsoft.com/v1.0",
+  "auth": "bearer",
+  "authHint": {
+    "es": "Tu cuenta de Microsoft de trabajo o escuela, conectada como credencial OAuth 2 de Microsoft (una app registrada en Entra, una vez)",
+    "en": "Your Microsoft work or school account, connected as a Microsoft OAuth 2 credential (an app registered in Entra, once)"
+  },
+  "tokenUrl": "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+  "oauth": {
+    "provider": "microsoft",
+    "scopes": "openid email offline_access User.Read Mail.Send Mail.ReadWrite Calendars.ReadWrite Files.ReadWrite ChannelMessage.Send Chat.ReadWrite Team.ReadBasic.All Channel.ReadBasic.All"
+  },
+  "errorField": "error.message",
+  "test": {
+    "path": "/me",
+    "label": "{{displayName}} · {{userPrincipalName}}"
+  },
+  "operations": [
+    {
+      "id": "channelMessage",
+      "name": { "es": "Enviar un mensaje a un canal", "en": "Send a message to a channel" },
+      "method": "POST",
+      "path": "/teams/{{teamId}}/channels/{{channelId}}/messages",
+      "fields": [
+        { "name": "teamId", "label": { "es": "Equipo", "en": "Team" }, "required": true, "lookup": {"path": "/me/joinedTeams", "result": "value", "value": "id", "label": "{{displayName}}"} },
+        { "name": "channelId", "label": { "es": "Canal", "en": "Channel" }, "required": true, "lookup": {"path": "/teams/{{teamId}}/channels", "result": "value", "value": "id", "label": "{{displayName}}", "needs": ["teamId"]} },
+        { "name": "subject", "label": { "es": "Asunto", "en": "Subject" } },
+        { "name": "message", "label": { "es": "Mensaje (HTML o texto)", "en": "Message (HTML or text)" }, "multiline": true, "required": true }
+      ],
+      "body": { "subject": "{{subject}}", "body": { "contentType": "html", "content": "{{message}}" } }
+    },
+    {
+      "id": "replyMessage",
+      "name": { "es": "Responder en el hilo de un mensaje", "en": "Reply in a message's thread" },
+      "method": "POST",
+      "path": "/teams/{{teamId}}/channels/{{channelId}}/messages/{{messageId}}/replies",
+      "fields": [
+        { "name": "teamId", "label": { "es": "Equipo", "en": "Team" }, "required": true, "lookup": {"path": "/me/joinedTeams", "result": "value", "value": "id", "label": "{{displayName}}"} },
+        { "name": "channelId", "label": { "es": "Canal", "en": "Channel" }, "required": true, "lookup": {"path": "/teams/{{teamId}}/channels", "result": "value", "value": "id", "label": "{{displayName}}", "needs": ["teamId"]} },
+        { "name": "messageId", "label": { "es": "Mensaje al que responder (id)", "en": "Message to reply to (id)" }, "placeholder": "{{ $json.id }}", "required": true },
+        { "name": "message", "label": { "es": "Mensaje (HTML o texto)", "en": "Message (HTML or text)" }, "multiline": true, "required": true }
+      ],
+      "body": { "body": { "contentType": "html", "content": "{{message}}" } }
+    },
+    {
+      "id": "chatMessage",
+      "name": { "es": "Enviar un mensaje a un chat", "en": "Send a message to a chat" },
+      "method": "POST",
+      "path": "/chats/{{chatId}}/messages",
+      "fields": [
+        { "name": "chatId", "label": { "es": "Chat", "en": "Chat" }, "required": true, "lookup": {"path": "/me/chats", "query": {"$expand": "members", "$top": "50"}, "result": "value", "value": "id", "label": "{{topic}} · {{members.displayName}}"} },
+        { "name": "message", "label": { "es": "Mensaje (HTML o texto)", "en": "Message (HTML or text)" }, "multiline": true, "required": true }
+      ],
+      "body": { "body": { "contentType": "html", "content": "{{message}}" } }
+    },
+    {
+      "id": "listChannels",
+      "name": { "es": "Listar los canales de un equipo", "en": "List a team's channels" },
+      "method": "GET",
+      "path": "/teams/{{teamId}}/channels",
+      "fields": [
+        { "name": "teamId", "label": { "es": "Equipo", "en": "Team" }, "required": true, "lookup": {"path": "/me/joinedTeams", "result": "value", "value": "id", "label": "{{displayName}}"} }
+      ],
+      "result": "value"
+    },
+    {
+      "id": "listTeams",
+      "name": { "es": "Listar mis equipos", "en": "List my teams" },
+      "method": "GET",
+      "path": "/me/joinedTeams",
+      "result": "value"
+    }
+  ]
+}

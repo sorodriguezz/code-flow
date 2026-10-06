@@ -5,6 +5,8 @@
   "baseUrl": "https://api.cloudflare.com/client/v4",
   "auth": "bearer",
   "authHint": { "es": "Un API token de Cloudflare con permisos de la zona como credencial Token", "en": "A Cloudflare API token with the zone's permissions as a Token credential" },
+  "tokenUrl": "https://dash.cloudflare.com/profile/api-tokens",
+  "test": {"path": "/user/tokens/verify", "result": "result", "label": "Token {{status}}"},
   "okField": "success",
   "errorField": "errors",
   "operations": [
@@ -22,7 +24,7 @@
       "name": { "es": "Purgar toda la caché", "en": "Purge the whole cache" },
       "method": "POST",
       "path": "/zones/{{zoneId}}/purge_cache",
-      "fields": [{ "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true }],
+      "fields": [{ "name": "zoneId", "label": { "es": "Zona", "en": "Zone" }, "required": true, "lookup": {"path": "/zones", "query": {"per_page": "50"}, "result": "result", "value": "id", "label": "{{name}}"} }],
       "body": { "purge_everything": true },
       "result": "result"
     },
@@ -32,7 +34,7 @@
       "method": "POST",
       "path": "/zones/{{zoneId}}/purge_cache",
       "fields": [
-        { "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true },
+        { "name": "zoneId", "label": { "es": "Zona", "en": "Zone" }, "required": true, "lookup": {"path": "/zones", "query": {"per_page": "50"}, "result": "result", "value": "id", "label": "{{name}}"} },
         { "name": "files", "label": { "es": "URLs (JSON)", "en": "URLs (JSON)" }, "placeholder": "[\"https://example.com/app.js\"]", "json": true, "required": true }
       ],
       "body": { "files": "{{files}}" },
@@ -45,7 +47,7 @@
       "path": "/zones/{{zoneId}}/dns_records",
       "query": { "type": "{{type}}", "name": "{{name}}" },
       "fields": [
-        { "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true },
+        { "name": "zoneId", "label": { "es": "Zona", "en": "Zone" }, "required": true, "lookup": {"path": "/zones", "query": {"per_page": "50"}, "result": "result", "value": "id", "label": "{{name}}"} },
         { "name": "type", "label": { "es": "Tipo (A, CNAME, TXT…)", "en": "Type (A, CNAME, TXT…)" } },
         { "name": "name", "label": { "es": "Nombre", "en": "Name" }, "placeholder": "api.example.com" }
       ],
@@ -57,7 +59,7 @@
       "method": "POST",
       "path": "/zones/{{zoneId}}/dns_records",
       "fields": [
-        { "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true },
+        { "name": "zoneId", "label": { "es": "Zona", "en": "Zone" }, "required": true, "lookup": {"path": "/zones", "query": {"per_page": "50"}, "result": "result", "value": "id", "label": "{{name}}"} },
         { "name": "type", "label": { "es": "Tipo", "en": "Type" }, "placeholder": "A", "required": true },
         { "name": "name", "label": { "es": "Nombre", "en": "Name" }, "placeholder": "api.example.com", "required": true },
         { "name": "content", "label": { "es": "Contenido", "en": "Content" }, "placeholder": "203.0.113.10", "required": true },
@@ -73,8 +75,8 @@
       "method": "PATCH",
       "path": "/zones/{{zoneId}}/dns_records/{{recordId}}",
       "fields": [
-        { "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true },
-        { "name": "recordId", "label": { "es": "Registro (id)", "en": "Record (id)" }, "required": true },
+        { "name": "zoneId", "label": { "es": "Zona", "en": "Zone" }, "required": true, "lookup": {"path": "/zones", "query": {"per_page": "50"}, "result": "result", "value": "id", "label": "{{name}}"} },
+        { "name": "recordId", "label": { "es": "Registro DNS", "en": "DNS record" }, "required": true, "lookup": {"path": "/zones/{{zoneId}}/dns_records", "query": {"per_page": "100"}, "result": "result", "value": "id", "label": "{{type}} {{name}} → {{content}}", "needs": ["zoneId"]} },
         { "name": "content", "label": { "es": "Contenido nuevo", "en": "New content" }, "required": true },
         { "name": "proxied", "label": { "es": "Con proxy (true/false)", "en": "Proxied (true/false)" }, "json": true }
       ],

@@ -5,6 +5,8 @@
   "baseUrl": "https://api.linear.app/graphql",
   "auth": "headers",
   "authHint": { "es": "Una API key personal de Linear (Ajustes › API) como credencial Token", "en": "A personal Linear API key (Settings › API) as a Token credential" },
+  "tokenUrl": "https://linear.app/settings/account/security",
+  "test": {"method": "POST", "body": {"query": "query { viewer { name email } }"}, "result": "data.viewer", "label": "{{name}} · {{email}}"},
   "headers": { "Authorization": "{{secret}}" },
   "errorField": "errors",
   "failOn": "errors",
@@ -14,7 +16,7 @@
       "name": { "es": "Crear un issue", "en": "Create an issue" },
       "method": "POST",
       "fields": [
-        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" }, "required": true },
+        { "name": "teamId", "label": { "es": "Equipo", "en": "Team" }, "required": true, "lookup": {"method": "POST", "body": {"query": "query { teams(first: 100) { nodes { id name key } } }"}, "result": "data.teams.nodes", "value": "id", "label": "{{name}} ({{key}})"} },
         { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
         { "name": "description", "label": { "es": "Descripción (Markdown)", "en": "Description (Markdown)" }, "multiline": true },
         { "name": "priority", "label": { "es": "Prioridad (0 a 4)", "en": "Priority (0 to 4)" }, "placeholder": "2", "json": true }
@@ -30,8 +32,8 @@
       "name": { "es": "Cambiar el estado de un issue", "en": "Change an issue's state" },
       "method": "POST",
       "fields": [
-        { "name": "issueId", "label": { "es": "Issue (id o identificador)", "en": "Issue (id or identifier)" }, "placeholder": "ENG-42", "required": true },
-        { "name": "stateId", "label": { "es": "Estado (id)", "en": "State (id)" }, "required": true }
+        { "name": "issueId", "label": { "es": "Issue (id o identificador)", "en": "Issue (id or identifier)" }, "placeholder": "ENG-42", "required": true, "lookup": {"method": "POST", "body": {"query": "query { issues(first: 50, orderBy: updatedAt) { nodes { identifier title } } }"}, "result": "data.issues.nodes", "value": "identifier", "label": "{{identifier}} · {{title}}"} },
+        { "name": "stateId", "label": { "es": "Estado", "en": "State" }, "required": true, "lookup": {"method": "POST", "body": {"query": "query { workflowStates(first: 250) { nodes { id name team { key } } } }"}, "result": "data.workflowStates.nodes", "value": "id", "label": "{{team.key}} · {{name}}"} }
       ],
       "body": {
         "query": "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success issue { id identifier state { name } } } }",
@@ -44,7 +46,7 @@
       "name": { "es": "Comentar un issue", "en": "Comment on an issue" },
       "method": "POST",
       "fields": [
-        { "name": "issueId", "label": { "es": "Issue (id o identificador)", "en": "Issue (id or identifier)" }, "placeholder": "ENG-42", "required": true },
+        { "name": "issueId", "label": { "es": "Issue (id o identificador)", "en": "Issue (id or identifier)" }, "placeholder": "ENG-42", "required": true, "lookup": {"method": "POST", "body": {"query": "query { issues(first: 50, orderBy: updatedAt) { nodes { identifier title } } }"}, "result": "data.issues.nodes", "value": "identifier", "label": "{{identifier}} · {{title}}"} },
         { "name": "body", "label": { "es": "Comentario (Markdown)", "en": "Comment (Markdown)" }, "multiline": true, "required": true }
       ],
       "body": {

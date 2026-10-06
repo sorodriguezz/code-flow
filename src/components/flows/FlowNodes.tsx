@@ -41,6 +41,8 @@ export interface CfNodeData extends Record<string, unknown> {
   time: string;
   pinned: boolean;
   pinnedTitle: string;
+  /** What it still needs before it can run (`nodeIssues`), a line each; `""` when nothing. */
+  issue?: string;
   /** What an AI proposal on screen does to it. */
   diff?: "added" | "changed" | "removed";
   diffTitle?: string;
@@ -122,7 +124,7 @@ function RunBadge({ status, title, waiting }: { status: FlowNodeRunStatus; title
 }
 
 export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNode>) {
-  const { descriptor, name, typeLabel, disabled, inputLabels, inputs, outputLabels, outputs, errorPort, run, time, pinned, pinnedTitle, diff, diffTitle, logo } = data;
+  const { descriptor, name, typeLabel, disabled, inputLabels, inputs, outputLabels, outputs, errorPort, run, time, pinned, pinnedTitle, diff, diffTitle, logo, issue } = data;
   const Icon = nodeIcon(descriptor.icon);
   const mark = logo ? appLogo(logo) : undefined;
   // AI by what the node is, not where the palette files it: "Analizar PR" lives under Git and PRs
@@ -159,6 +161,12 @@ export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNod
         {pinned && (
           <span className="cf-flow-node__pin" title={pinnedTitle}>
             <Pin size={9} strokeWidth={2.5} />
+          </span>
+        )}
+        {/* Unfinished: what it lacks, before a run finds out (beside a run's own mark, not over it). */}
+        {issue && (
+          <span className="cf-flow-node__issue" title={issue} aria-label={issue}>
+            !
           </span>
         )}
         {Array.from({ length: inputs }, (_, index) => (

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -28,6 +28,27 @@ export function FlowAiPanel({ flowId, diff, onClose }: { flowId: string; diff: F
   const run = useFlowsStore((s) => s.aiByFlow[flowId]);
   const empty = useFlowsStore((s) => (s.draft?.id === flowId ? s.draft.spec.nodes.length === 0 : true));
   const [prompt, setPrompt] = useState(run?.prompt ?? "");
+  const panel = useRef<HTMLDivElement>(null);
+  const field = useRef<HTMLTextAreaElement>(null);
+  // Room for a long request (the user's ask, 2026-10-06: "que se vaya agrandando hacia abajo mientras
+  // voy escribiendo hasta la mitad del lienzo, de ahí un scroll"): the box fits what is written, down
+  // to the middle of the canvas it floats over, and scrolls past that.
+  const fit = useCallback(() => {
+    const el = field.current;
+    const canvas = panel.current?.parentElement;
+    if (!el || !canvas) return;
+    const area = canvas.getBoundingClientRect();
+    const max = Math.max(72, Math.round(area.top + area.height / 2 - el.getBoundingClientRect().top));
+    el.style.height = "auto";
+    const wanted = el.scrollHeight + 2;
+    el.style.height = `${Math.min(wanted, max)}px`;
+    el.style.overflowY = wanted > max ? "auto" : "hidden";
+  }, []);
+  useLayoutEffect(fit, [prompt, fit]);
+  useEffect(() => {
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [fit]);
   const busy = run?.status === "running";
   const proposal = run?.status === "ready" ? run.proposal : null;
   const store = useFlowsStore.getState;
@@ -38,8 +59,9 @@ export function FlowAiPanel({ flowId, diff, onClose }: { flowId: string; diff: F
 
   return (
     <div
+      ref={panel}
       data-tour="flows-ai-panel"
-      className="absolute right-3 top-3 z-20 w-[360px] overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+      className="absolute right-3 top-3 z-20 w-[min(560px,calc(100%-24px))] overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
       onKeyDown={(event) => {
         if (event.key === "Escape" && !proposal) {
           event.stopPropagation();
@@ -65,6 +87,7 @@ export function FlowAiPanel({ flowId, diff, onClose }: { flowId: string; diff: F
 
       <div className="flex flex-col gap-2 p-2.5">
         <textarea
+          ref={field}
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
           onKeyDown={(event) => {
@@ -78,7 +101,7 @@ export function FlowAiPanel({ flowId, diff, onClose }: { flowId: string; diff: F
           autoFocus
           disabled={busy}
           placeholder={t(proposal ? "flows.builder.refinePlaceholder" : "flows.builder.placeholder")}
-          className="w-full resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:opacity-60"
+          className="w-full resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-2 text-[12.5px] leading-[1.5] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:opacity-60"
         />
 
         {proposal && (

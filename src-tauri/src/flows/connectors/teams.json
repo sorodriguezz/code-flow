@@ -1,10 +1,11 @@
 {
   "id": "teams",
-  "name": "Microsoft Teams",
+  "name": "Microsoft Teams Webhook",
   "group": "appsChat",
   "baseUrl": "",
   "auth": "url",
-  "authHint": { "es": "La URL del webhook del canal (flujo «Publicar en un canal cuando se recibe una solicitud de webhook») como credencial Webhook", "en": "The channel's webhook URL (the \"Post to a channel when a webhook request is received\" workflow) as a Webhook credential" },
+  "authHint": { "es": "Sin iniciar sesión: la URL del webhook del canal (flujo «Publicar en un canal cuando se recibe una solicitud de webhook») como credencial Webhook. Solo publica en ese canal; para elegir equipos, canales o chats con tu cuenta, usa «Microsoft Teams».", "en": "No sign-in: the channel's webhook URL (the \"Post to a channel when a webhook request is received\" workflow) as a Webhook credential. It only posts to that channel; to pick teams, channels or chats with your account, use \"Microsoft Teams\"." },
+  "tokenUrl": "https://support.microsoft.com/en-us/office/create-incoming-webhooks-with-workflows-for-microsoft-teams-8ae491c7-0394-4861-ba59-055e33f75498",
   "operations": [
     {
       "id": "sendMessage",

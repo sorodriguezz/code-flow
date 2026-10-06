@@ -5,6 +5,8 @@
   "baseUrl": "https://discord.com/api/v10",
   "auth": "headers",
   "authHint": { "es": "El token del bot, guardado como credencial de token (el mismo del disparador «Mensaje a un bot»)", "en": "The bot's token, kept as a token credential (the same one the “Bot message” trigger uses)" },
+  "tokenUrl": "https://discord.com/developers/applications",
+  "test": {"path": "/users/@me", "label": "{{username}}"},
   "headers": { "Authorization": "Bot {{secret}}" },
   "errorField": "message",
   "operations": [

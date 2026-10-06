@@ -5,6 +5,7 @@
   "baseUrl": "",
   "auth": "url",
   "authHint": { "es": "La URL del webhook del espacio (Aplicaciones e integraciones › Webhooks) como credencial Webhook", "en": "The space's webhook URL (Apps & integrations › Webhooks) as a Webhook credential" },
+  "tokenUrl": "https://developers.google.com/workspace/chat/quickstart/webhooks",
   "errorField": "error.message",
   "operations": [
     {

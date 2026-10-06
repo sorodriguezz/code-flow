@@ -42,7 +42,6 @@ const fold = (text: string) =>
 const DRAG_SLOP = 5;
 export function NodePalette({
   entries,
-  initialFamily,
   expanded,
   disabled = false,
   onPick,
@@ -52,8 +51,6 @@ export function NodePalette({
   onCollapse,
 }: {
   entries: PaletteEntry[];
-  /** The family to start unfolded — triggers for a flow that has none yet. */
-  initialFamily: FlowFamily | null;
   expanded: boolean;
   /** Folded and inert — while an AI proposal is on the canvas, nothing is added under it. */
   disabled?: boolean;
@@ -67,7 +64,9 @@ export function NodePalette({
 }) {
   const t = useT();
   const [query, setQuery] = useState("");
-  const [unfolded, setUnfolded] = useState<Set<FlowFamily>>(() => new Set(initialFamily ? [initialFamily] : []));
+  // Every family starts folded (the user's ask, 2026-10-06): the list is the families, and a click
+  // on one — here or on its mark in the folded rail — is what opens it.
+  const [unfolded, setUnfolded] = useState<Set<FlowFamily>>(() => new Set());
   const [active, setActive] = useState(0);
   const field = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);

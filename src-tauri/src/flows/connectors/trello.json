@@ -5,6 +5,10 @@
   "baseUrl": "https://api.trello.com/1",
   "auth": "query",
   "authHint": { "es": "Tu API key como usuario y tu token como contraseña, en una credencial Usuario y contraseña", "en": "Your API key as the user and your token as the password, in a User and password credential" },
+  "tokenUrl": "https://trello.com/power-ups/admin",
+  "userLabel": {"es": "API key", "en": "API key"},
+  "secretLabel": {"es": "Token", "en": "Token"},
+  "test": {"path": "/members/me", "query": {"fields": "fullName,username"}, "label": "{{fullName}} (@{{username}})"},
   "authQuery": { "key": "{{user}}", "token": "{{secret}}" },
   "operations": [
     {
@@ -13,7 +17,7 @@
       "method": "POST",
       "path": "/cards",
       "fields": [
-        { "name": "listId", "label": { "es": "Lista (id)", "en": "List (id)" }, "required": true },
+        { "name": "listId", "label": { "es": "Lista", "en": "List" }, "required": true, "lookup": {"path": "/members/me/boards", "query": {"filter": "open", "fields": "name", "lists": "open"}, "each": "lists", "value": "id", "label": "{{_parent.name}} › {{name}}"} },
         { "name": "name", "label": { "es": "Título", "en": "Title" }, "required": true },
         { "name": "desc", "label": { "es": "Descripción", "en": "Description" }, "multiline": true },
         { "name": "due", "label": { "es": "Vence (ISO 8601)", "en": "Due (ISO 8601)" }, "placeholder": "2026-10-10T12:00:00Z" },
@@ -28,7 +32,7 @@
       "path": "/cards/{{cardId}}",
       "fields": [
         { "name": "cardId", "label": { "es": "Tarjeta (id)", "en": "Card (id)" }, "required": true },
-        { "name": "listId", "label": { "es": "Lista destino (id)", "en": "Target list (id)" }, "required": true },
+        { "name": "listId", "label": { "es": "Lista destino", "en": "Target list" }, "required": true, "lookup": {"path": "/members/me/boards", "query": {"filter": "open", "fields": "name", "lists": "open"}, "each": "lists", "value": "id", "label": "{{_parent.name}} › {{name}}"} },
         { "name": "pos", "label": { "es": "Posición (top o bottom)", "en": "Position (top or bottom)" }, "placeholder": "top" }
       ],
       "body": { "idList": "{{listId}}", "pos": "{{pos}}" }
@@ -57,14 +61,14 @@
       "name": { "es": "Tarjetas de una lista", "en": "A list's cards" },
       "method": "GET",
       "path": "/lists/{{listId}}/cards",
-      "fields": [{ "name": "listId", "label": { "es": "Lista (id)", "en": "List (id)" }, "required": true }]
+      "fields": [{ "name": "listId", "label": { "es": "Lista", "en": "List" }, "required": true, "lookup": {"path": "/members/me/boards", "query": {"filter": "open", "fields": "name", "lists": "open"}, "each": "lists", "value": "id", "label": "{{_parent.name}} › {{name}}"} }]
     },
     {
       "id": "boardLists",
       "name": { "es": "Listas de un tablero", "en": "A board's lists" },
       "method": "GET",
       "path": "/boards/{{boardId}}/lists",
-      "fields": [{ "name": "boardId", "label": { "es": "Tablero (id o shortLink)", "en": "Board (id or shortLink)" }, "required": true }]
+      "fields": [{ "name": "boardId", "label": { "es": "Tablero", "en": "Board" }, "required": true, "lookup": {"path": "/members/me/boards", "query": {"filter": "open", "fields": "name"}, "value": "id", "label": "{{name}}"} }]
     },
     {
       "id": "addCheckItem",

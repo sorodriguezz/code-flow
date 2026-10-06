@@ -5,6 +5,10 @@
   "baseUrl": "https://api.twilio.com/2010-04-01/Accounts/{{user}}",
   "auth": "basic",
   "authHint": { "es": "Tu Account SID (AC…) como usuario y tu Auth Token como contraseña, en una credencial Usuario y contraseña", "en": "Your Account SID (AC…) as the user and your Auth Token as the password, in a User and password credential" },
+  "tokenUrl": "https://console.twilio.com/",
+  "userLabel": {"es": "Account SID", "en": "Account SID"},
+  "secretLabel": {"es": "Auth Token", "en": "Auth Token"},
+  "test": {"path": ".json", "label": "{{friendly_name}}"},
   "errorField": "message",
   "operations": [
     {

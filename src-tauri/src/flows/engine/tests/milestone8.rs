@@ -220,6 +220,15 @@ async fn templates_json_and_sql_shape_the_items() {
     ))
     .await;
     assert_eq!(ran.output("it", 0)[0]["informe"], "- Ana\n- Luis\n- Eva\n");
+    // Written the way every other field of Flujos is — `$json`, `$items` — and opening with `=`.
+    let ran = run(chain(
+        "transform.template",
+        json!({"runFor": "once", "template": "=== {{ $items|length }} ===\n{% for i in $items %}{{ i.nombre }}{% if not loop.last %}, {% endif %}{% endfor %}"}),
+    ))
+    .await;
+    assert_eq!(ran.output("it", 0)[0]["text"], "=== 3 ===\nAna, Luis, Eva");
+    let ran = run(chain("transform.template", json!({"template": "{{ $json.nombre }}: {% for c in $json.nombre|list %}{{ c }}.{% endfor %}"}))).await;
+    assert_eq!(ran.output("it", 0)[2]["text"], "Eva: E.v.a.");
 
     let ran = run(chain("transform.sql", json!({"itemsQuery": "SELECT region, SUM(total) AS total FROM items GROUP BY region ORDER BY total DESC"}))).await;
     assert_eq!(ran.output("it", 0), vec![json!({"region": "norte", "total": 12}), json!({"region": "sur", "total": 5})]);

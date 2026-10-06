@@ -5,6 +5,7 @@
   "baseUrl": "https://{{project}}.supabase.co",
   "auth": "headers",
   "authHint": { "es": "La anon key (o la service_role, si el flujo debe saltarse el RLS) como credencial Token", "en": "The anon key (or the service_role key, when the flow must bypass RLS) as a Token credential" },
+  "tokenUrl": "https://supabase.com/dashboard/projects",
   "siteField": { "name": "project", "label": { "es": "Proyecto (abcd en abcd.supabase.co)", "en": "Project (abcd in abcd.supabase.co)" }, "placeholder": "abcd", "required": true },
   "headers": { "apikey": "{{secret}}", "Authorization": "Bearer {{secret}}" },
   "errorField": "message",

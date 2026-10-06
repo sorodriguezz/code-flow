@@ -79,6 +79,7 @@ import {
 } from "../../lib/tauri/flowsCommands";
 import { diffSpecs } from "../../lib/flows/diff";
 import { useConnectors } from "../../lib/flows/connectorList";
+import { nodeIssues } from "../../lib/flows/nodeIssues";
 import { paletteEntries, serviceOf, type PaletteEntry } from "../../lib/flows/paletteEntries";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
@@ -92,6 +93,7 @@ import { useUiStore } from "../../state/uiStore";
 import { isViewFind } from "../../lib/useFindShortcut";
 import { isMac } from "../../lib/platform";
 import { familyColor } from "../../lib/flows/nodeIcons";
+import { DRAG_THRESHOLD } from "../../lib/pointerDrag";
 
 const NODE_TYPES: NodeTypes = { cf: FlowNodeView, note: NoteNodeView };
 const EDGE_TYPES: EdgeTypes = { cf: FlowEdgeView };
@@ -187,6 +189,9 @@ function Editor() {
   const catalog = useFlowsStore((s) => s.catalog);
   const catalogMap = useFlowsStore((s) => s.catalogMap);
   const connectors = useConnectors();
+  // What an unfinished node is missing — its credential checked against the workspace's.
+  const credentials = useFlowVaultStore((s) => s.credentials);
+  const credentialIds = useMemo(() => new Set(credentials.map((c) => c.id)), [credentials]);
   // What the palette lists — node types, and one entry per service in Apps.
   const entries = useMemo(
     () =>
@@ -203,7 +208,7 @@ function Editor() {
   const meta = useFlowsStore((s) => s.flows.find((flow) => flow.id === s.draft?.id) ?? null);
   const canUndo = useFlowsStore((s) => s.past.length > 0);
   const canRedo = useFlowsStore((s) => s.future.length > 0);
-  const { screenToFlowPosition, fitView, setCenter, getZoom } = useReactFlow();
+  const { screenToFlowPosition, fitView, setCenter, getZoom, getIntersectingNodes } = useReactFlow();
   const live = useFlowRunsStore((s) => s.current[draftId]);
   const pins = useFlowRunsStore((s) => s.pins[draftId]);
   const openWaits = useFlowRunsStore((s) => s.waits);
@@ -294,7 +299,8 @@ function Editor() {
       const mark = diff?.nodes.get(item.id);
       // Only a running node's clock moves; every other node keeps its cached object.
       const time = record ? nodeTime(record, now) : "";
-      const key = [item, selected, size, descriptor, language, record, pinned, waiting, mark, time];
+      const issue = descriptor ? nodeIssues(item, connectors, credentialIds, (label) => (language === "es" ? label.es : label.en), t).join("\n") : "";
+      const key = [item, selected, size, descriptor, language, record, pinned, waiting, mark, time, issue];
       const cached = nodeCache.current.get(item.id);
       if (cached && same(cached.key, key)) {
         out.push(cached.node);
@@ -342,6 +348,7 @@ function Editor() {
           time,
           pinned,
           pinnedTitle: t("flows.inspector.pinned"),
+          issue,
           diff: mark,
           diffTitle: mark ? t(`flows.builder.${mark}` as TranslationKey) : "",
         },
@@ -380,7 +387,7 @@ function Editor() {
     return out;
     // `measureTick` is the signal that `measured` (a ref) changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shown, diff, selection, measureTick, catalogMap, language, t, live, pins, waitingNodes, now]);
+  }, [shown, diff, selection, measureTick, catalogMap, language, t, live, pins, waitingNodes, now, connectors, credentialIds]);
 
   const edges = useMemo<Edge[]>(
     () =>
@@ -838,11 +845,15 @@ function Editor() {
 
   const openPaneMenu = (event: ReactMouseEvent | MouseEvent) => {
     event.preventDefault();
-    const point = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    openPaneMenuAt(event.clientX, event.clientY);
+  };
+
+  const openPaneMenuAt = (x: number, y: number) => {
+    const point = screenToFlowPosition({ x, y });
     const at: [number, number] = [point.x - 32, point.y - 32];
     setMenu({
-      x: event.clientX,
-      y: event.clientY,
+      x,
+      y,
       items: [
         { label: t("flows.addNode"), icon: Plus, onClick: () => setPalette({ at }) },
         { label: t("flows.addNote"), icon: StickyNote, onClick: () => addNoteAt(at) },
@@ -928,12 +939,103 @@ function Editor() {
     setMenu({ x: event.clientX, y: event.clientY, items });
   };
 
+  /** Several things selected, right-clicked: what can be done to all of them at once — no more. */
+  const openMultiMenu = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        { label: t("flows.duplicate"), icon: CopyPlus, onClick: duplicateSelection },
+        { label: t("flows.copy"), icon: Copy, onClick: () => void copySelection() },
+        { label: t("flows.delete"), icon: Trash2, danger: true, onClick: deleteSelection, separated: true },
+      ],
+    });
+  };
+
+  /** The menu for a right-click on `node`: the group's when it is one of several selected, its own otherwise. */
+  const openNodeMenu = (event: ReactMouseEvent, node: string) => {
+    const chosen = selectionRef.current;
+    if (chosen.has(node) && chosen.size > 1) return openMultiMenu(event);
+    if (!chosen.has(node)) {
+      select([node]);
+      // The menu is built now, before the render that selection brings — it must already count it.
+      selectionRef.current = new Set([node]);
+    }
+    openSelectionMenu(event, node);
+  };
+
+  // ---------- selecting with the right button ----------
+
+  /**
+   * A right-button press on the empty canvas (the user's ask, 2026-10-06): released where it was
+   * pressed it is the canvas menu, as always; dragged, it draws the selection box, and what lies
+   * wholly inside is selected (added to the selection with Shift, ⌘ or Ctrl) — no menu, the group
+   * simply stays selected until a click elsewhere. Shift + left drag still selects too.
+   *
+   * **The menu waits for the release.** macOS fires `contextmenu` on the *press*, before anyone can
+   * know a drag is coming, so while a right press is down the canvas menu is held back and opened
+   * on release only if the pointer stayed put. Windows fires it after the release — then a drag
+   * that just ended is what `rightDragEnded` swallows, wherever that `contextmenu` lands.
+   */
+  const rightPress = useRef<{ x: number; y: number; additive: boolean; dragged: boolean; menuAt: { x: number; y: number } | null } | null>(null);
+  const rightDragEnded = useRef(false);
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+
+  /** True when this `contextmenu` belongs to a right drag that just ended — it is eaten. */
+  const swallowDragMenu = (event: ReactMouseEvent | MouseEvent): boolean => {
+    if (!rightDragEnded.current) return false;
+    rightDragEnded.current = false;
+    event.preventDefault();
+    return true;
+  };
+
+  const selectInside = (x0: number, y0: number, x1: number, y1: number, additive: boolean) => {
+    const a = screenToFlowPosition({ x: Math.min(x0, x1), y: Math.min(y0, y1) });
+    const b = screenToFlowPosition({ x: Math.max(x0, x1), y: Math.max(y0, y1) });
+    const inside = getIntersectingNodes({ x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y }, false).map((node) => node.id);
+    select(additive ? [...new Set([...selectionRef.current, ...inside])] : inside);
+  };
+
+  // The window's listeners call through this, so they always reach this render's functions.
+  const rightDrag = useRef({ selectInside, openPaneMenuAt });
+  rightDrag.current = { selectInside, openPaneMenuAt };
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      const press = rightPress.current;
+      if (!press || (event.buttons & 2) === 0) return;
+      if (!press.dragged) {
+        if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < DRAG_THRESHOLD) return;
+        press.dragged = true;
+        setMenu(null);
+      }
+      setMarquee({ x0: press.x, y0: press.y, x1: event.clientX, y1: event.clientY });
+    };
+    const up = (event: PointerEvent) => {
+      const press = rightPress.current;
+      if (!press || event.button !== 2) return;
+      rightPress.current = null;
+      if (press.dragged) {
+        rightDragEnded.current = true;
+        setMarquee(null);
+        rightDrag.current.selectInside(press.x, press.y, event.clientX, event.clientY, press.additive);
+      } else if (press.menuAt) {
+        rightDrag.current.openPaneMenuAt(press.menuAt.x, press.menuAt.y);
+      }
+    };
+    window.addEventListener("pointermove", move, true);
+    window.addEventListener("pointerup", up, true);
+    return () => {
+      window.removeEventListener("pointermove", move, true);
+      window.removeEventListener("pointerup", up, true);
+    };
+  }, []);
+
   // ---------- render ----------
 
   if (!spec) return null;
 
   const status = saving ? t("flows.saving") : dirty ? t("flows.unsaved") : savedAt ? t("flows.saved") : "";
-  const hasTrigger = spec.nodes.some((n) => catalogMap.get(n.type)?.family === "trigger");
 
   const names = Object.fromEntries(spec.nodes.map((n) => [n.id, n.name]));
   const startedAt = live ? Date.parse(live.run.startedAt) : 0;
@@ -1157,7 +1259,18 @@ function Editor() {
         ) : (
           <div className="flex min-h-0 flex-1">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div ref={wrapper} className="relative min-h-0 flex-1" data-tour="flows-canvas">
+            <div
+              ref={wrapper}
+              className="relative min-h-0 flex-1"
+              data-tour="flows-canvas"
+              onPointerDown={(event) => {
+                rightDragEnded.current = false;
+                if (event.button !== 2 || diff) return;
+                const target = event.target as Element;
+                if (!target.closest(".react-flow__pane") || target.closest(".react-flow__node, .react-flow__edge, .react-flow__panel, .react-flow__minimap")) return;
+                rightPress.current = { x: event.clientX, y: event.clientY, additive: event.shiftKey || event.metaKey || event.ctrlKey, dragged: false, menuAt: null };
+              }}
+            >
               <ReactFlow<FlowCanvasNode, Edge>
                 className="cf-flow-canvas"
                 nodes={nodes}
@@ -1176,14 +1289,34 @@ function Editor() {
                 nodesConnectable={!diff}
                 elementsSelectable={!diff}
                 onNodeDoubleClick={(_, node) => !diff && node.type === "cf" && useFlowRunsStore.getState().openInspector(node.id)}
-                onPaneContextMenu={(event) => (diff ? event.preventDefault() : openPaneMenu(event))}
+                onPaneContextMenu={(event) => {
+                  if (diff) return event.preventDefault();
+                  if (swallowDragMenu(event)) return;
+                  const press = rightPress.current;
+                  if (press) {
+                    // macOS, on the press: a drag may be starting — the release decides.
+                    event.preventDefault();
+                    press.menuAt = { x: event.clientX, y: event.clientY };
+                    return;
+                  }
+                  openPaneMenu(event);
+                }}
                 onNodeContextMenu={(event, node) => {
                   if (diff) return event.preventDefault();
-                  if (!selectionRef.current.has(node.id)) select([node.id]);
-                  openSelectionMenu(event, node.id);
+                  if (swallowDragMenu(event)) return;
+                  openNodeMenu(event, node.id);
                 }}
-                onSelectionContextMenu={(event) => (diff ? event.preventDefault() : openSelectionMenu(event, null))}
-                onEdgeContextMenu={(event, edge) => (diff ? event.preventDefault() : openEdgeMenu(event, edge.id))}
+                onSelectionContextMenu={(event) => {
+                  if (diff) return event.preventDefault();
+                  if (swallowDragMenu(event)) return;
+                  if (selectionRef.current.size > 1) openMultiMenu(event);
+                  else openSelectionMenu(event, null);
+                }}
+                onEdgeContextMenu={(event, edge) => {
+                  if (diff) return event.preventDefault();
+                  if (swallowDragMenu(event)) return;
+                  openEdgeMenu(event, edge.id);
+                }}
                 onPaneClick={() => setMenu(null)}
                 fitView
                 fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
@@ -1209,6 +1342,20 @@ function Editor() {
                   />
                 )}
               </ReactFlow>
+              {marquee && wrapper.current && (() => {
+                const box = wrapper.current.getBoundingClientRect();
+                return (
+                  <div
+                    className="cf-flow-marquee"
+                    style={{
+                      left: Math.min(marquee.x0, marquee.x1) - box.left,
+                      top: Math.min(marquee.y0, marquee.y1) - box.top,
+                      width: Math.abs(marquee.x1 - marquee.x0),
+                      height: Math.abs(marquee.y1 - marquee.y0),
+                    }}
+                  />
+                );
+              })()}
               <div className="absolute bottom-3 left-3 z-10 flex items-center gap-2">
                 <ZoomControls />
                 <CanvasTools
@@ -1238,7 +1385,6 @@ function Editor() {
           {/* Docked beside the canvas, not over it — see `NodePalette`. */}
           <NodePalette
             entries={entries}
-            initialFamily={hasTrigger ? null : "trigger"}
             expanded={palette !== null}
             disabled={diff !== null}
             onPick={placeNode}

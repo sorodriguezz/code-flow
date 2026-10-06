@@ -14,6 +14,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useFlowVaultStore } from "../../state/flowVaultStore";
 import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { OAUTH_SCOPES } from "../../lib/flows/oauthScopes";
 
 /**
  * The workspace's `$vars` and its credentials, in one dialog with two tabs.
@@ -27,15 +28,6 @@ const KINDS: FlowCredentialKind[] = ["bearer", "basic", "header", "query", "oaut
 
 const OAUTH_PROVIDERS = ["google", "microsoft", "custom"] as const;
 
-/** What a new credential asks for, per provider — everything the Google and Microsoft nodes and
- *  Graph calls need; a person narrows it before connecting. */
-const OAUTH_SCOPES: Record<string, string> = {
-  google:
-    "openid email https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/drive",
-  // Mail.ReadWrite, not Mail.Read: the Microsoft 365 node marks mail read and moves it.
-  microsoft: "openid email offline_access User.Read Mail.Send Mail.ReadWrite Calendars.ReadWrite Files.ReadWrite",
-  custom: "",
-};
 
 function VariablesTab() {
   const t = useT();

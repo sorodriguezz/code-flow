@@ -5,6 +5,8 @@
   "baseUrl": "https://slack.com/api",
   "auth": "bearer",
   "authHint": { "es": "Token de bot (xoxb-…) como credencial Bearer", "en": "Bot token (xoxb-…) as a Bearer credential" },
+  "tokenUrl": "https://api.slack.com/apps",
+  "test": {"path": "/auth.test", "label": "{{user}} · {{team}}"},
   "okField": "ok",
   "errorField": "error",
   "operations": [
@@ -14,7 +16,7 @@
       "method": "POST",
       "path": "/chat.postMessage",
       "fields": [
-        { "name": "channel", "label": { "es": "Canal", "en": "Channel" }, "placeholder": "#general", "required": true },
+        { "name": "channel", "label": { "es": "Canal", "en": "Channel" }, "placeholder": "#general", "required": true, "lookup": {"path": "/conversations.list", "query": {"types": "public_channel", "exclude_archived": "true", "limit": "200"}, "result": "channels", "value": "id", "label": "#{{name}}"} },
         { "name": "text", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true },
         { "name": "thread_ts", "label": { "es": "Responder en el hilo (ts)", "en": "Reply in thread (ts)" } }
       ],
@@ -36,7 +38,7 @@
       "path": "/conversations.history",
       "query": { "channel": "{{channel}}", "limit": "{{limit}}" },
       "fields": [
-        { "name": "channel", "label": { "es": "ID del canal", "en": "Channel ID" }, "placeholder": "C0123456", "required": true },
+        { "name": "channel", "label": { "es": "ID del canal", "en": "Channel ID" }, "placeholder": "C0123456", "required": true, "lookup": {"path": "/conversations.list", "query": {"types": "public_channel", "exclude_archived": "true", "limit": "200"}, "result": "channels", "value": "id", "label": "#{{name}}"} },
         { "name": "limit", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "50" }
       ],
       "result": "messages"

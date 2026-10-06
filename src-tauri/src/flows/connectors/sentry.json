@@ -5,6 +5,8 @@
   "baseUrl": "https://sentry.io/api/0",
   "auth": "bearer",
   "authHint": { "es": "Un auth token de Sentry (con event:read y event:write) como credencial Token", "en": "A Sentry auth token (with event:read and event:write) as a Token credential" },
+  "tokenUrl": "https://sentry.io/settings/account/api/auth-tokens/",
+  "test": {"path": "/organizations/", "label": "{{name}}"},
   "errorField": "detail",
   "operations": [
     {
@@ -14,8 +16,8 @@
       "path": "/projects/{{org}}/{{project}}/issues/",
       "query": { "query": "{{query}}", "statsPeriod": "{{period}}", "limit": "{{limit}}" },
       "fields": [
-        { "name": "org", "label": { "es": "Organización (slug)", "en": "Organization (slug)" }, "required": true },
-        { "name": "project", "label": { "es": "Proyecto (slug)", "en": "Project (slug)" }, "required": true },
+        { "name": "org", "label": { "es": "Organización (slug)", "en": "Organization (slug)" }, "required": true, "lookup": {"path": "/organizations/", "value": "slug", "label": "{{name}} ({{slug}})"} },
+        { "name": "project", "label": { "es": "Proyecto (slug)", "en": "Project (slug)" }, "required": true, "lookup": {"path": "/projects/", "value": "slug", "label": "{{organization.slug}}/{{slug}}", "fills": {"org": "organization.slug"}} },
         { "name": "query", "label": { "es": "Búsqueda", "en": "Search" }, "placeholder": "is:unresolved level:error" },
         { "name": "period", "label": { "es": "Periodo", "en": "Period" }, "placeholder": "24h" },
         { "name": "limit", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "25" }
@@ -27,8 +29,8 @@
       "method": "GET",
       "path": "/organizations/{{org}}/issues/{{issueId}}/events/latest/",
       "fields": [
-        { "name": "org", "label": { "es": "Organización (slug)", "en": "Organization (slug)" }, "required": true },
-        { "name": "issueId", "label": { "es": "Issue (id)", "en": "Issue (id)" }, "required": true }
+        { "name": "org", "label": { "es": "Organización (slug)", "en": "Organization (slug)" }, "required": true, "lookup": {"path": "/organizations/", "value": "slug", "label": "{{name}} ({{slug}})"} },
+        { "name": "issueId", "label": { "es": "Issue (id)", "en": "Issue (id)" }, "required": true, "lookup": {"path": "/organizations/{{org}}/issues/", "query": {"query": "is:unresolved", "limit": "25"}, "value": "id", "label": "{{shortId}} · {{title}}", "needs": ["org"]} }
       ]
     },
     {
@@ -37,8 +39,8 @@
       "method": "PUT",
       "path": "/organizations/{{org}}/issues/{{issueId}}/",
       "fields": [
-        { "name": "org", "label": { "es": "Organización (slug)", "en": "Organization (slug)" }, "required": true },
-        { "name": "issueId", "label": { "es": "Issue (id)", "en": "Issue (id)" }, "required": true },
+        { "name": "org", "label": { "es": "Organización (slug)", "en": "Organization (slug)" }, "required": true, "lookup": {"path": "/organizations/", "value": "slug", "label": "{{name}} ({{slug}})"} },
+        { "name": "issueId", "label": { "es": "Issue (id)", "en": "Issue (id)" }, "required": true, "lookup": {"path": "/organizations/{{org}}/issues/", "query": {"query": "is:unresolved", "limit": "25"}, "value": "id", "label": "{{shortId}} · {{title}}", "needs": ["org"]} },
         { "name": "status", "label": { "es": "Estado (resolved, ignored, unresolved)", "en": "Status (resolved, ignored, unresolved)" }, "placeholder": "resolved", "required": true }
       ],
       "body": { "status": "{{status}}" }

@@ -168,6 +168,19 @@ export interface FlowConnectorField {
   multiline: boolean;
   /** Parsed as JSON by the node (a Notion filter). */
   json: boolean;
+  /** What an empty field stands for (ntfy's public server, gitlab.com) — so empty is not missing. */
+  default?: string;
+  /** Its value can be picked from what the service lists (`flowsConnectorOptions`) — once the
+   *  fields it `needs` are filled. */
+  lookup?: { needs?: string[] };
+}
+
+/** One thing a field can be (`connectors::Choice`): what it takes, what a person reads, and the
+ *  other fields it fills (a GitHub repository's owner). */
+export interface FlowChoice {
+  value: string;
+  label: string;
+  fills?: Record<string, string>;
 }
 
 export interface FlowConnectorOperation {
@@ -187,6 +200,15 @@ export interface FlowConnector {
   /** The credential may be left out (a public ntfy topic). */
   authOptional: boolean;
   authHint: FlowLabel;
+  /** Where a person gets the credential: the service's token page, or its guide. */
+  tokenUrl?: string;
+  /** What the two halves of a user-and-secret credential are here (an email and an API token). */
+  userLabel?: FlowLabel;
+  secretLabel?: FlowLabel;
+  /** Signed into with an account (OAuth 2) rather than a pasted token: the provider and scopes. */
+  oauth?: { provider: "google" | "microsoft"; scopes: string };
+  /** Present when the service can say who a credential is (`flowsConnectorTest`). */
+  test?: unknown;
   /** A field every operation has (Jira's site), shown first. */
   siteField: FlowConnectorField | null;
   operations: FlowConnectorOperation[];
@@ -212,6 +234,14 @@ export interface FlowConnectorCall {
 }
 
 export const flowsConnectors = () => invoke<FlowConnector[]>("flows_connectors");
+
+/** What a connector field can be, asked of the service with the node's credential and fields. */
+export const flowsConnectorOptions = (connector: string, operation: string, field: string, credential: string | null, fields: Record<string, unknown>) =>
+  invoke<FlowChoice[]>("flows_connector_options", { connector, operation, field, credential, fields });
+
+/** Who a credential signs in as for a connector ("Ana · ana@example.com"). */
+export const flowsConnectorTest = (connector: string, credential: string, fields?: Record<string, unknown>) =>
+  invoke<string>("flows_connector_test", { connector, credential, fields: fields ?? null });
 
 export const flowsLoadTree = (workspaceId: string) => invoke<FlowsTree>("flows_load_tree", { workspaceId });
 

@@ -1464,6 +1464,8 @@ pub fn run() {
             // ---- Diagrams (workspace-scoped, like Notes above it) ----
             commands::flows_cmd::flows_node_catalog,
             commands::flows_cmd::flows_connectors,
+            commands::flows_cmd::flows_connector_options,
+            commands::flows_cmd::flows_connector_test,
             commands::flows_cmd::flows_build_with_ai,
             commands::flows_cmd::flows_shares,
             commands::flows_cmd::flows_share,

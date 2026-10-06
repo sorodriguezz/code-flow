@@ -5,6 +5,8 @@
   "baseUrl": "https://graph.facebook.com/v23.0/{{phoneNumberId}}",
   "auth": "bearer",
   "authHint": { "es": "Un token de acceso de la WhatsApp Cloud API (de un usuario del sistema en Meta Business) como credencial Token", "en": "A WhatsApp Cloud API access token (from a Meta Business system user) as a Token credential" },
+  "tokenUrl": "https://business.facebook.com/settings/system-users",
+  "test": {"path": "", "label": "{{verified_name}} · {{display_phone_number}}"},
   "siteField": { "name": "phoneNumberId", "label": { "es": "Id del número de teléfono (no el número)", "en": "Phone number id (not the number)" }, "placeholder": "106540352242922", "required": true },
   "errorField": "error.message",
   "operations": [

@@ -55,6 +55,63 @@ pub fn flows_connectors() -> &'static [crate::flows::connectors::Connector] {
     crate::flows::connectors::all()
 }
 
+/// A flow credential the way a call outside a run signs with it — an OAuth 2 one as a fresh bearer
+/// token, the bundle itself never leaving the keychain.
+async fn signing_credential(db: &Db, id: &str) -> Result<crate::flows::engine::Credential, String> {
+    let row = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        flow_run_queries::get_credential(&conn, id).map_err(|e| e.to_string())?.ok_or("That credential no longer exists")?
+    };
+    let secret = crate::secrets::get_secret(&crate::secrets::flow_credential_key(id))?.ok_or("Its secret is not stored on this computer")?;
+    if row.kind == "oauth2" {
+        let token = crate::flows::oauth::access_token(id, &row.meta).await?;
+        return Ok(crate::flows::engine::Credential { kind: "bearer".into(), meta: row.meta, secret: token });
+    }
+    Ok(crate::flows::engine::Credential { kind: row.kind, meta: row.meta, secret })
+}
+
+/// What a connector's field can be — Linear's teams, a board's lists — asked of the service with
+/// the node's credential and the fields it `needs` (`connectors::Lookup`).
+#[tauri::command]
+pub async fn flows_connector_options(
+    db: State<'_, Db>,
+    connector: String,
+    operation: String,
+    field: String,
+    credential: Option<String>,
+    fields: serde_json::Map<String, Value>,
+) -> Result<Vec<crate::flows::connectors::Choice>, String> {
+    let definition = crate::flows::connectors::find(&connector).ok_or("That service is not one this build knows")?;
+    let lookup = definition
+        .operation(&operation)
+        .map(|op| definition.fields_of(op))
+        .unwrap_or_default()
+        .into_iter()
+        .find(|candidate| candidate.name == field)
+        .and_then(|candidate| candidate.lookup.as_ref())
+        .ok_or("That field has no list to pick from")?;
+    let signing = match credential.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => Some(signing_credential(&db, id).await?),
+        None => None,
+    };
+    crate::flows::nodes::connector::lookup(definition, lookup, fields, signing.as_ref()).await
+}
+
+/// Who a credential signs in as for a connector — its `test` lookup's first answer ("Ana · ana@…").
+#[tauri::command]
+pub async fn flows_connector_test(
+    db: State<'_, Db>,
+    connector: String,
+    credential: String,
+    fields: Option<serde_json::Map<String, Value>>,
+) -> Result<String, String> {
+    let definition = crate::flows::connectors::find(&connector).ok_or("That service is not one this build knows")?;
+    let test = definition.test.as_ref().ok_or("This service has no way to check a credential")?;
+    let signing = signing_credential(&db, credential.trim()).await?;
+    let found = crate::flows::nodes::connector::lookup(definition, test, fields.unwrap_or_default(), Some(&signing)).await?;
+    Ok(found.into_iter().next().map(|choice| choice.label).unwrap_or_else(|| definition.name.clone()))
+}
+
 #[tauri::command]
 pub fn flows_node_catalog() -> Vec<CatalogEntry> {
     catalog::CATALOG

@@ -150,8 +150,10 @@ const APP_LOGOS: Record<string, BrandLogo> = {
 
 /** Which `BRAND_LOGOS` entry a service id means, where the ids differ. */
 const BRAND_ALIASES: Record<string, string> = { azuredevops: "azure" };
+/** Two connectors to one service: Teams through a webhook, and through a signed-in account. */
+const APP_ALIASES: Record<string, string> = { teamsgraph: "teams" };
 
 /** The mark for a service id (a connector's, or `gmail`, `outlook`…), if any set has one. */
 export function appLogo(id: string): BrandLogo | undefined {
-  return APP_LOGOS[id] ?? BRAND_LOGOS[BRAND_ALIASES[id] ?? id];
+  return APP_LOGOS[APP_ALIASES[id] ?? id] ?? BRAND_LOGOS[BRAND_ALIASES[id] ?? id];
 }

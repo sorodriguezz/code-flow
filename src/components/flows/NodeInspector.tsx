@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { CircleAlert, CircleHelp, Copy, Globe, Pencil, Pin, PinOff, Play, Radio, X } from "lucide-react";
 import { Button, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { fieldClass, underlineStripClass, underlineTabClass } from "../common/recipes";
 import { AiGlyph, type AiGlyphName } from "../common/AiGlyph";
-import { DataModeSwitch, ItemsView, type DataMode } from "./DataView";
+import { AssistContext, type FlowAssist } from "./assist";
+import { DataModeSwitch, FieldDragGhost, ItemsView, type DataMode } from "./DataView";
 import { ParamFields } from "./ParamFields";
 import { familyColor, nodeIcon } from "../../lib/flows/nodeIcons";
 import {
@@ -31,6 +32,7 @@ import {
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowsStore } from "../../state/flowsStore";
+import { useFlowVaultStore } from "../../state/flowVaultStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 
@@ -40,12 +42,17 @@ import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
  * step around it, test the step, repeat.
  *
  * Data is the newest run's (pinned output wins on the right). Fields on the left drag into the
- * parameters as expressions. "Probar paso" saves the flow and runs this node on its last input — or,
- * when there is none, everything up to it.
+ * parameters, and every field suggests what can be written in it — from this data, handed down as
+ * `AssistContext`: the input, the other nodes (their output fetched when an expression names them)
+ * and the variables. "Probar paso" saves the flow and runs this node on its last input — or, when
+ * there is none, everything up to it.
  */
 
 const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "scan-eye", "messages-square", "pencil", "brain-circuit", "binary", "database-zap", "wand", "reply"]);
 const DATA_LIMIT = 200;
+/** Stable empties, so what is handed to the fields only changes when the data does. */
+const NO_PORTS: unknown[][] = [];
+const NO_ITEMS: unknown[] = [];
 
 const dataCache = new Map<string, FlowNodeData | null>();
 
@@ -152,7 +159,9 @@ export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onC
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !(event.target instanceof HTMLElement && event.target.closest(".monaco-editor"))) {
+      // Escape inside an editor, or in a field whose suggestions are open, is that field's own.
+      const own = event.target instanceof HTMLElement && (event.target.closest(".monaco-editor") || event.target.getAttribute("aria-expanded") === "true");
+      if (event.key === "Escape" && !own) {
         event.stopPropagation();
         onClose();
       }
@@ -193,15 +202,79 @@ export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onC
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [parentKey, descriptor, record?.status]);
 
-  if (!node || !descriptor) return null;
-
-  const isTrigger = descriptor.family === "trigger";
   const inputs: unknown[][] =
     own.data && (record?.status === "success" || record?.status === "error")
       ? own.data.inputs
       : parentData?.key === parentKey
         ? parentData.ports
-        : [];
+        : NO_PORTS;
+
+  // What the fields suggest. Another node's output is fetched the first time an expression names
+  // it (`want`), from the newest run — or its pinned output — and forgotten when a new run starts.
+  const flowNodes = useFlowsStore((s) => s.draft?.spec.nodes);
+  // By names alone, so typing in a parameter (a new spec each keystroke) leaves the suggestions be.
+  const nodeNames = (flowNodes ?? []).map((n) => `${n.id}\u0001${n.name}`).join("\u0002");
+  const variables = useFlowVaultStore((s) => s.variables);
+  const [nodeOutputs, setNodeOutputs] = useState<Record<string, unknown[]>>({});
+  const asked = useRef(new Set<string>());
+  const runId = live?.run.id;
+  useEffect(() => {
+    asked.current.clear();
+    setNodeOutputs({});
+  }, [runId]);
+  const want = useCallback(
+    (name: string) => {
+      if (asked.current.has(name)) return;
+      asked.current.add(name);
+      const target = useFlowsStore.getState().draft?.spec.nodes.find((n) => n.name === name);
+      if (!target) return;
+      const keep = (list: unknown[]) => setNodeOutputs((current) => ({ ...current, [name]: list }));
+      const pin = useFlowRunsStore.getState().pins[flowId]?.[target.id];
+      if (pin) return keep(pin[0] ?? []);
+      const run = useFlowRunsStore.getState().current[flowId];
+      const status = run?.nodes[target.id]?.status;
+      if (!run || (status !== "success" && status !== "error")) return;
+      void flowsRunNodeData(run.run.id, target.id, 20)
+        .then((data) => keep(data?.outputs[0] ?? []))
+        .catch(() => {});
+    },
+    [flowId],
+  );
+  const assist = useMemo<FlowAssist>(() => {
+    // The nodes upstream first, nearest first: those are the ones an expression here can read.
+    const distance = new Map<string, number>([[nodeId, 0]]);
+    const queue = [nodeId];
+    while (queue.length) {
+      const id = queue.shift() as string;
+      for (const link of connections) {
+        if (link.to === id && !distance.has(link.from)) {
+          distance.set(link.from, (distance.get(id) ?? 0) + 1);
+          queue.push(link.from);
+        }
+      }
+    }
+    const others = nodeNames
+      .split("\u0002")
+      .filter(Boolean)
+      .map((entry) => {
+        const [id, name] = entry.split("\u0001");
+        return { id, name };
+      })
+      .filter((n) => n.id !== nodeId);
+    others.sort((a, b) => (distance.get(a.id) ?? Infinity) - (distance.get(b.id) ?? Infinity));
+    return {
+      data: {
+        input: inputs.find((port) => port.length > 0) ?? NO_ITEMS,
+        nodes: others.map((n) => ({ name: n.name, output: nodeOutputs[n.name] })),
+        vars: Object.fromEntries(variables.map((v) => [v.name, v.value])),
+      },
+      want,
+    };
+  }, [inputs, nodeNames, connections, nodeId, nodeOutputs, variables, want]);
+
+  if (!node || !descriptor) return null;
+
+  const isTrigger = descriptor.family === "trigger";
   const inputCounts =
     own.data && (record?.status === "success" || record?.status === "error") ? own.data.inputCounts : parentData?.key === parentKey ? parentData.counts : [];
   const outputs: unknown[][] = pinned ?? own.data?.outputs ?? [];
@@ -335,7 +408,7 @@ export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onC
             </PanelHead>
             <PortTabs labels={inputLabels} counts={inputCounts} active={inPort} onChange={setInPort} />
             {inputs.some((port) => port.length > 0) ? (
-              <ItemsView items={inputs[inPort] ?? []} total={inputCounts[inPort] ?? 0} mode={inMode} />
+              <ItemsView items={inputs[inPort] ?? []} total={inputCounts[inPort] ?? 0} mode={inMode} fieldDrag />
             ) : (
               <Empty>
                 <span>{parentLinks.length === 0 ? t("flows.inspector.noParents") : t("flows.inspector.noInput")}</span>
@@ -362,17 +435,19 @@ export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onC
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3.5">
             {tab === "params" && isTrigger && node.type !== "trigger.manual" && <TriggerInfo flowId={flowId} node={node} />}
             {tab === "params" ? (
-              <ParamFields
-                specs={descriptor.params}
-                params={node.params ?? {}}
-                flowId={flowId}
-                nodeId={nodeId}
-                typeId={node.type}
-                onChange={(name, value) => {
-                  const doc = spec();
-                  if (doc) edit(setNodeParam(doc, nodeId, name, value, catalogMap));
-                }}
-              />
+              <AssistContext.Provider value={assist}>
+                <ParamFields
+                  specs={descriptor.params}
+                  params={node.params ?? {}}
+                  flowId={flowId}
+                  nodeId={nodeId}
+                  typeId={node.type}
+                  onChange={(name, value) => {
+                    const doc = spec();
+                    if (doc) edit(setNodeParam(doc, nodeId, name, value, catalogMap));
+                  }}
+                />
+              </AssistContext.Provider>
             ) : (
               <NodeSettingsForm node={node} descriptor={descriptor} settings={settings} onChange={setSetting} />
             )}
@@ -462,6 +537,7 @@ export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onC
           )}
         </section>
       </div>
+      <FieldDragGhost />
     </div>
   );
 }

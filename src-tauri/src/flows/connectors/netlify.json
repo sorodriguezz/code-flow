@@ -5,6 +5,8 @@
   "baseUrl": "https://api.netlify.com/api/v1",
   "auth": "bearer",
   "authHint": { "es": "Un token de acceso personal de Netlify como credencial Token", "en": "A Netlify personal access token as a Token credential" },
+  "tokenUrl": "https://app.netlify.com/user/applications#personal-access-tokens",
+  "test": {"path": "/user", "label": "{{full_name}} · {{email}}"},
   "errorField": "message",
   "operations": [
     {
@@ -21,7 +23,7 @@
       "path": "/sites/{{siteId}}/deploys",
       "query": { "per_page": "{{perPage}}" },
       "fields": [
-        { "name": "siteId", "label": { "es": "Sitio (id)", "en": "Site (id)" }, "required": true },
+        { "name": "siteId", "label": { "es": "Sitio", "en": "Site" }, "required": true, "lookup": {"path": "/sites", "query": {"per_page": "100"}, "value": "id", "label": "{{name}} · {{url}}"} },
         { "name": "perPage", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "10" }
       ]
     },
@@ -37,7 +39,7 @@
       "name": { "es": "Lanzar un build", "en": "Start a build" },
       "method": "POST",
       "path": "/sites/{{siteId}}/builds",
-      "fields": [{ "name": "siteId", "label": { "es": "Sitio (id)", "en": "Site (id)" }, "required": true }],
+      "fields": [{ "name": "siteId", "label": { "es": "Sitio", "en": "Site" }, "required": true, "lookup": {"path": "/sites", "query": {"per_page": "100"}, "value": "id", "label": "{{name}} · {{url}}"} }],
       "body": {}
     },
     {
@@ -46,8 +48,8 @@
       "method": "POST",
       "path": "/sites/{{siteId}}/deploys/{{deployId}}/restore",
       "fields": [
-        { "name": "siteId", "label": { "es": "Sitio (id)", "en": "Site (id)" }, "required": true },
-        { "name": "deployId", "label": { "es": "Despliegue (id)", "en": "Deploy (id)" }, "required": true }
+        { "name": "siteId", "label": { "es": "Sitio", "en": "Site" }, "required": true, "lookup": {"path": "/sites", "query": {"per_page": "100"}, "value": "id", "label": "{{name}} · {{url}}"} },
+        { "name": "deployId", "label": { "es": "Despliegue (id)", "en": "Deploy (id)" }, "required": true, "lookup": {"path": "/sites/{{siteId}}/deploys", "query": {"per_page": "30"}, "value": "id", "label": "{{created_at}} · {{state}} · {{branch}}", "needs": ["siteId"]} }
       ],
       "body": {}
     }
