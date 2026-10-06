@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CircleAlert, FileDiff, Square, Trash2, Undo2, Waypoints } from "lucide-react";
+import { CircleAlert, FileDiff, RotateCcw, Square, StepForward, Trash2, Undo2, Waypoints } from "lucide-react";
 import { Button, iconButtonClass } from "../common/Button";
 import { rowClass, underlineStripClass, underlineTabClass } from "../common/recipes";
 import { DataModeSwitch, ItemsView, type DataMode } from "./DataView";
@@ -8,12 +8,15 @@ import { MODE_KEY, NODE_STATUS_KEY, RUN_STATUS_KEY, formatDuration, formatWhen, 
 import { WaitCard } from "./WaitCard";
 import { familyColor, nodeIcon } from "../../lib/flows/nodeIcons";
 import {
+  flowsMetrics,
   flowsRunEdits,
   flowsRunLog,
   flowsRunNodeData,
   flowsCancelRun,
+  flowsRetryRun,
   flowsUndoEdits,
   type FlowLogLine,
+  type FlowMetrics,
   type FlowRunEdits,
   type FlowNodeData,
   type FlowRunNodeRow,
@@ -82,6 +85,7 @@ export function ExecutionsView() {
             <Trash2 size={14} />
           </button>
         </div>
+        <MetricsStrip flowId={flowId} version={`${rows.length}:${rows[0]?.id ?? ""}:${rows[0]?.status ?? ""}`} />
         <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
           {rows.length === 0 && !history?.loading && <p className="px-2 py-3 text-[12px] text-[var(--cf-text-muted)]">{t("flows.executions.none")}</p>}
           {rows.map((row) => (
@@ -119,6 +123,78 @@ export function ExecutionsView() {
   );
 }
 
+/** The last 30 local days, `0` = today's key. */
+function lastDays(count: number): string[] {
+  const out: string[] = [];
+  const day = new Date();
+  for (let i = count - 1; i >= 0; i--) {
+    const at = new Date(day.getFullYear(), day.getMonth(), day.getDate() - i);
+    out.push(`${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`);
+  }
+  return out;
+}
+
+/**
+ * How the flow has been doing over its last 30 days of kept executions: a bar per day (green the
+ * ones that went well, red the failed), the share without error and the typical time, and — when
+ * there is one — the node it fails at most and the slowest. Nothing at all before a first run.
+ */
+function MetricsStrip({ flowId, version }: { flowId: string; version: string }) {
+  const t = useT();
+  const language = useLanguageStore((s) => s.language);
+  const [metrics, setMetrics] = useState<FlowMetrics | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (flowId) void flowsMetrics(flowId, 30).then((next) => alive && setMetrics(next)).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [flowId, version]);
+  const days = useMemo(() => {
+    const byDate = new Map((metrics?.days ?? []).map((d) => [d.date, d]));
+    return lastDays(30).map((date) => ({ date, success: byDate.get(date)?.success ?? 0, error: byDate.get(date)?.error ?? 0 }));
+  }, [metrics]);
+  if (!metrics || metrics.runs === 0) return null;
+  const tallest = Math.max(1, ...days.map((d) => d.success + d.error));
+  const rate = Math.round((metrics.success / Math.max(1, metrics.success + metrics.error)) * 100);
+  const failing = metrics.failingNodes[0];
+  const slowest = metrics.slowNodes[0];
+  const dayLabel = (date: string) => new Date(`${date}T12:00:00`).toLocaleDateString(language, { day: "numeric", month: "short" });
+  return (
+    <div className="flex shrink-0 flex-col gap-1 border-b border-[var(--cf-border)] px-3 py-2" title={t("flows.metrics.window")}>
+      <div className="flex h-[26px] items-end gap-[2px]" aria-hidden>
+        {days.map((d) => (
+          <span
+            key={d.date}
+            className="flex min-w-0 flex-1 flex-col-reverse overflow-hidden rounded-[2px] bg-[color-mix(in_oklab,var(--cf-border)_45%,transparent)]"
+            style={{ height: `${Math.max(8, ((d.success + d.error) / tallest) * 100)}%` }}
+            title={t("flows.metrics.day", { date: dayLabel(d.date), ok: d.success, bad: d.error })}
+          >
+            <span style={{ height: `${((d.success) / Math.max(1, d.success + d.error)) * 100}%`, background: d.success + d.error ? "var(--cf-success)" : "transparent" }} />
+            <span style={{ height: `${(d.error / Math.max(1, d.success + d.error)) * 100}%`, background: "var(--cf-danger)" }} />
+          </span>
+        ))}
+      </div>
+      <span className="truncate text-[11px] tabular-nums text-[var(--cf-text-muted)]">{t("flows.metrics.summary", { runs: metrics.runs, rate })}</span>
+      {metrics.medianMs !== null && (
+        <span className="truncate text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+          {t("flows.metrics.timing", { median: formatDuration(metrics.medianMs), p95: formatDuration(metrics.p95Ms) })}
+        </span>
+      )}
+      {(failing || slowest) && (
+        <span
+          className="truncate text-[11px] text-[var(--cf-text-faint)]"
+          title={slowest ? t("flows.metrics.slowest", { node: slowest.name, time: formatDuration(slowest.avgMs) }) : undefined}
+        >
+          {failing
+            ? t("flows.metrics.failsAt", { node: failing.name, count: failing.count })
+            : slowest && t("flows.metrics.slowest", { node: slowest.name, time: formatDuration(slowest.avgMs) })}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function RunDetail({ runId, flowId }: { runId: string; flowId: string }) {
   const t = useT();
   const language = useLanguageStore((s) => s.language);
@@ -141,6 +217,16 @@ function RunDetail({ runId, flowId }: { runId: string; flowId: string }) {
   }, [running]);
 
   const nodes = useMemo(() => [...(detail?.nodes ?? [])].sort((a, b) => a.seq - b.seq || a.nodeName.localeCompare(b.nodeName)), [detail]);
+  /** Starts this run again and moves the list onto the new one. An untrusted flow is refused by
+   *  the backend with the same answer a manual run gets. */
+  const retry = async (fromFailed: boolean) => {
+    try {
+      const next = await flowsRetryRun(runId, fromFailed);
+      useFlowRunsStore.getState().selectRun(next.id);
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  };
   if (!detail) return <div className="flex-1" />;
   const { run } = detail;
   const start = Date.parse(run.startedAt);
@@ -187,6 +273,21 @@ function RunDetail({ runId, flowId }: { runId: string; flowId: string }) {
               <Waypoints size={12} />
               {t("flows.executions.showOnCanvas")}
             </Button>
+            {/* Again, with the input it had — a webhook's request cannot be sent twice by asking
+                the sender. From the failure reuses what succeeded, so an expensive step that
+                worked is not paid for again. The flow as it is *now*: fixing it is why you retry. */}
+            {run.triggerNode && (
+              <Button size="sm" title={t("flows.executions.retryHint")} onClick={() => void retry(false)}>
+                <RotateCcw size={12} />
+                {t("flows.executions.retry")}
+              </Button>
+            )}
+            {run.triggerNode && run.status === "error" && (
+              <Button size="sm" title={t("flows.executions.retryFailedHint")} onClick={() => void retry(true)}>
+                <StepForward size={12} />
+                {t("flows.executions.retryFailed")}
+              </Button>
+            )}
             <button
               type="button"
               className={iconButtonClass({ size: "sm" })}

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { DBML_COLORS } from "../../lib/dbml/palette";
 import {
   Check,
   ChevronDown,
@@ -156,6 +157,8 @@ export function DbmlInspector({
      *  every relationship that named it and its entry in any table group. Takes the **id**. */
     dropTable: (id: string) => void;
     setNote: (table: string, note: string) => void;
+    /** The table's `[headercolor: …]`, set or cleared; takes the **id**. */
+    setTableColor?: (id: string, color: string | null) => void;
     addRef: (from: RefEnd, to: RefEnd, cardinality: Cardinality) => void;
     dropRef: (from: RefEnd, to: RefEnd) => void;
   };
@@ -279,6 +282,42 @@ export function DbmlInspector({
                 facts that never scroll away rather than behind a fold. Three buttons and no words
                 on them: the colours are the legend the canvas already draws, the names are in their
                 tooltips, and a row of three words would be wider than the panel. */}
+            {/* The table's border colour — DBML's own `[headercolor: …]`, ten swatches. A property
+                of the whole table like the mark above, and as quick to set, so it sits beside it;
+                the active one pressed again clears it. Names in the tooltips, as the marks'. */}
+            {edit?.setTableColor && table && (
+              <div className="mt-2 flex items-center gap-1">
+                <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+                  {t("dbml.tableColor")}
+                </span>
+                <div className="flex flex-wrap items-center justify-end gap-[3px]">
+                  {DBML_COLORS.map((swatch) => {
+                    const on = table.color?.toLowerCase() === swatch.value;
+                    return (
+                      <Tooltip key={swatch.value} label={t(swatch.labelKey)} description={on ? t("color.none") : undefined}>
+                        <button
+                          type="button"
+                          aria-label={t(swatch.labelKey)}
+                          aria-pressed={on}
+                          disabled={edit.blocked}
+                          onClick={() => edit.setTableColor?.(table.id, on ? null : swatch.value)}
+                          className="flex h-4 w-4 items-center justify-center rounded-full disabled:opacity-40"
+                        >
+                          <span
+                            className="h-3 w-3 rounded-full"
+                            style={{
+                              background: swatch.value,
+                              boxShadow: on ? `0 0 0 1.5px var(--cf-surface), 0 0 0 3px ${swatch.value}` : undefined,
+                            }}
+                          />
+                        </button>
+                      </Tooltip>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {mark && table && (
               <div className="mt-2.5 flex items-center gap-0.5">
                 <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">

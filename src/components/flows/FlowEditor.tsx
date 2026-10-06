@@ -5,6 +5,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import {
   Background,
   BackgroundVariant,
+  MiniMap,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
@@ -16,7 +17,7 @@ import {
   type NodeChange,
   type NodeTypes,
 } from "@xyflow/react";
-import { ChevronDown, ClipboardPaste, Copy, CopyPlus, Globe, History, KeyRound, Network, Palette, PanelTop, Pencil, Pin, PinOff, Play, Plus, Power, Redo2, Scan, Scissors, ScrollText, Settings2, ShieldAlert, Square, StepForward, StickyNote, Trash2, Undo2, Users, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronDown, ClipboardPaste, Copy, CopyPlus, Globe, History, KeyRound, Map as MapIcon, Network, Palette, PanelTop, Pencil, Pin, PinOff, Play, Plus, Power, Redo2, Scan, Scissors, ScrollText, Search, Settings2, ShieldAlert, Square, StepForward, StickyNote, Trash2, Undo2, Users, X, ZoomIn, ZoomOut } from "lucide-react";
 import { AiWand } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Button, iconButtonClass } from "../common/Button";
@@ -46,17 +47,21 @@ import {
   addNode,
   addNote,
   autoLayout,
+  baseOutputCount,
   colorNotes,
   connect,
   connectionKey,
   connectionProblem,
-  hasErrorOutput,
-  outputCount,
   copyFragment,
+  hasErrorOutput,
+  inputCount,
   moveElements,
   noteColor,
+  outputCount,
   parseSpec,
   pasteFragment,
+  portLabels,
+  portText,
   removeElements,
   renameNode,
   setNodeDisabled,
@@ -73,6 +78,8 @@ import {
   type FlowNodeDescriptor,
 } from "../../lib/tauri/flowsCommands";
 import { diffSpecs } from "../../lib/flows/diff";
+import { useConnectors } from "../../lib/flows/connectorList";
+import { paletteEntries, serviceOf, type PaletteEntry } from "../../lib/flows/paletteEntries";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowVaultStore } from "../../state/flowVaultStore";
@@ -82,6 +89,9 @@ import { useLanguageStore, useT } from "../../state/languageStore";
 import { promptAction } from "../../state/promptStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useUiStore } from "../../state/uiStore";
+import { isViewFind } from "../../lib/useFindShortcut";
+import { isMac } from "../../lib/platform";
+import { familyColor } from "../../lib/flows/nodeIcons";
 
 const NODE_TYPES: NodeTypes = { cf: FlowNodeView, note: NoteNodeView };
 const EDGE_TYPES: EdgeTypes = { cf: FlowEdgeView };
@@ -129,11 +139,12 @@ const unknownDescriptor = (typeId: string): FlowNodeDescriptor => ({
   outputLabels: [],
   milestone: 1,
   params: [],
+  group: "",
 });
 
-/** Port names: a digit or a letter is shown as itself, a word through the translations. */
-const portLabel = (label: string, t: ReturnType<typeof useT>) =>
-  /^[0-9A-Z]$/.test(label) ? label : t(`flows.port.${label}` as TranslationKey);
+/** Port names: a digit or a letter is shown as itself, a user's name as written, a word through the
+ *  translations — `portText`. */
+const portLabel = (label: string, t: ReturnType<typeof useT>) => portText(label, (key) => t(key as TranslationKey));
 
 /** A selection with React Flow's select changes applied — the same set back when nothing moved. */
 function applySelects(before: Set<string>, selects: { id: string; selected: boolean }[]): Set<string> {
@@ -175,10 +186,24 @@ function Editor() {
   const savedAt = useFlowsStore((s) => s.savedAt);
   const catalog = useFlowsStore((s) => s.catalog);
   const catalogMap = useFlowsStore((s) => s.catalogMap);
+  const connectors = useConnectors();
+  // What the palette lists — node types, and one entry per service in Apps.
+  const entries = useMemo(
+    () =>
+      paletteEntries(
+        catalog,
+        connectors,
+        (d) => t(`flows.node.${d.typeId}` as TranslationKey),
+        (d) => t(`flows.nodeDesc.${d.typeId}` as TranslationKey),
+        (typeId, service) => t(`flows.appDesc.${typeId}.${service}` as TranslationKey),
+        (label) => (language === "es" ? label.es : label.en),
+      ),
+    [catalog, connectors, t, language],
+  );
   const meta = useFlowsStore((s) => s.flows.find((flow) => flow.id === s.draft?.id) ?? null);
   const canUndo = useFlowsStore((s) => s.past.length > 0);
   const canRedo = useFlowsStore((s) => s.future.length > 0);
-  const { screenToFlowPosition, fitView } = useReactFlow();
+  const { screenToFlowPosition, fitView, setCenter, getZoom } = useReactFlow();
   const live = useFlowRunsStore((s) => s.current[draftId]);
   const pins = useFlowRunsStore((s) => s.pins[draftId]);
   const openWaits = useFlowRunsStore((s) => s.waits);
@@ -226,6 +251,16 @@ function Editor() {
   edgeSelectionRef.current = edgeSelection;
   const measured = useRef(new Map<string, { width: number; height: number }>());
   const [measureTick, setMeasureTick] = useState(0);
+  /** A note dragged on its own carries what lies wholly inside it — a frame around a group: where
+   *  each of those started, and where the note did. */
+  const carried = useRef<{ note: string; start: Map<string, [number, number]>; from: [number, number] } | null>(null);
+  const [minimap, setMinimap] = useState(() => {
+    try {
+      return localStorage.getItem("cf.flows.minimap") === "1";
+    } catch {
+      return false;
+    }
+  });
   const palette = useFlowsStore((s) => s.palette);
   const setPalette = useFlowsStore((s) => s.setPalette);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
@@ -267,6 +302,7 @@ function Editor() {
         continue;
       }
       const d = descriptor ?? unknownDescriptor(item.type);
+      const labels = portLabels(item, d);
       const node: CfNode = {
         id: item.id,
         type: "cf",
@@ -278,14 +314,16 @@ function Editor() {
           name: item.name,
           typeLabel: descriptor ? t(`flows.node.${item.type}` as TranslationKey) : item.type,
           disabled: item.disabled === true,
-          inputLabels: d.inputLabels.map((label) => portLabel(label, t)),
+          inputLabels: labels.inputs.map((label) => portLabel(label, t)),
           outputLabels: [
-            ...d.outputLabels.map((label) => portLabel(label, t)),
+            ...labels.outputs.map((label) => portLabel(label, t)),
             ...(hasErrorOutput(item, descriptor)
-              ? [...Array.from({ length: d.outputLabels.length === 0 ? d.outputs : 0 }, () => ""), t("flows.port.error")]
+              ? [...Array.from({ length: labels.outputs.length === 0 ? baseOutputCount(item, d) : 0 }, () => ""), t("flows.port.error")]
               : []),
           ],
+          inputs: inputCount(item, d),
           outputs: outputCount(item, descriptor),
+          logo: d.family === "apps" ? serviceOf(item.type, item.params ?? {}) : "",
           errorPort: hasErrorOutput(item, descriptor),
           run: record
             ? {
@@ -329,8 +367,10 @@ function Editor() {
         height: note.size[1],
         selected,
         measured: size,
-        // Under the nodes: a note annotates the flow, it must never sit on top of a port.
-        zIndex: -1,
+        // Under the nodes: a note annotates the flow, it must never sit on top of a port — nor, as a
+        // frame, over what it holds. React Flow lifts a selected element by 1000; a selected note
+        // starts that much lower so it lands where it was.
+        zIndex: selected ? -1001 : -1,
         data: { text: note.text, placeholder: t("flows.notePlaceholder"), color: noteColor(note), locked: !!diff },
       };
       out.push(node);
@@ -408,6 +448,13 @@ function Editor() {
         (notes.has(change.id) ? removeNotes : removeNodes).push(change.id);
       }
     }
+    // A frame on the move: what it holds keeps its place inside it.
+    const carry = carried.current;
+    const framed = carry ? positions.get(carry.note) : undefined;
+    if (carry && framed) {
+      const [dx, dy] = [framed[0] - carry.from[0], framed[1] - carry.from[1]];
+      for (const [id, [x, y]] of carry.start) if (!positions.has(id)) positions.set(id, [x + dx, y + dy]);
+    }
     let next = doc;
     if (positions.size) next = moveElements(next, positions);
     for (const [id, size] of sizes) next = updateNote(next, id, { size });
@@ -460,6 +507,28 @@ function Editor() {
   );
 
   const checkpoint = useCallback(() => useFlowsStore.getState().checkpoint(), []);
+
+  /** A drag begins: its undo step, and — a note dragged alone — what the note frames. */
+  const startDrag = useCallback(
+    (_: unknown, node: FlowCanvasNode, dragged: FlowCanvasNode[]) => {
+      checkpoint();
+      carried.current = null;
+      const doc = current();
+      const note = node.type === "note" && dragged.length <= 1 ? doc?.notes.find((n) => n.id === node.id) : undefined;
+      if (!doc || !note) return;
+      const [left, top] = note.pos;
+      const [right, bottom] = [left + note.size[0], top + note.size[1]];
+      const start = new Map<string, [number, number]>();
+      const inside = (id: string, [x, y]: [number, number], fallback: { width: number; height: number }) => {
+        const size = measured.current.get(id) ?? fallback;
+        if (x >= left && y >= top && x + size.width <= right && y + size.height <= bottom) start.set(id, [x, y]);
+      };
+      for (const item of doc.nodes) inside(item.id, item.pos, { width: 64, height: 64 });
+      for (const other of doc.notes) if (other.id !== note.id) inside(other.id, other.pos, { width: other.size[0], height: other.size[1] });
+      if (start.size) carried.current = { note: note.id, start, from: [left, top] };
+    },
+    [checkpoint],
+  );
 
   /** One connection out — the canvas's remove button and the connection's menu. */
   const removeConnection = useCallback(
@@ -517,6 +586,36 @@ function Editor() {
     setSelection(new Set(ids));
     setEdgeSelection(new Set());
   };
+
+  /** What ⌘F finds: every node by its name, its type and its service, every note by its text. */
+  const findables = useMemo<Findable[]>(() => {
+    if (!spec) return [];
+    const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+    return [
+      ...spec.nodes.map((n) => {
+        const typeLabel = catalogMap.has(n.type) ? t(`flows.node.${n.type}` as TranslationKey) : n.type;
+        const service = serviceOf(n.type, n.params ?? {});
+        return { id: n.id, label: n.name, detail: typeLabel, words: fold([n.name, typeLabel, n.type, service].join(" ")) };
+      }),
+      ...spec.notes.map((note) => ({ id: note.id, label: note.text.split("\n")[0].slice(0, 60) || t("flows.find.note"), detail: t("flows.find.note"), words: fold(note.text) })),
+    ];
+  }, [spec, catalogMap, t]);
+
+  /** Shows one element: selected, and the view centred on it. */
+  const goTo = useCallback(
+    (id: string) => {
+      const doc = current();
+      const node = doc?.nodes.find((n) => n.id === id);
+      const note = doc?.notes.find((n) => n.id === id);
+      const pos = node?.pos ?? note?.pos;
+      if (!pos) return;
+      const size = measured.current.get(id) ?? (note ? { width: note.size[0], height: note.size[1] } : { width: 64, height: 64 });
+      setSelection(new Set([id]));
+      setEdgeSelection(new Set());
+      void setCenter(pos[0] + size.width / 2, pos[1] + size.height / 2, { zoom: Math.max(getZoom(), 0.9), duration: 250 });
+    },
+    [setCenter, getZoom],
+  );
 
   const viewportCenter = (): [number, number] => {
     const rect = wrapper.current?.getBoundingClientRect();
@@ -604,14 +703,14 @@ function Editor() {
    * right-click on the canvas); beside the one selected node, wired to its first output when that is
    * a legal connection — the way a flow is usually grown, left to right; or the middle of the view.
    */
-  const placeNode = (typeId: string) => {
+  const placeNode = (entry: PaletteEntry) => {
     const doc = current();
     if (!doc) return;
-    const name = t(`flows.node.${typeId}` as TranslationKey);
+    const typeId = entry.descriptor.typeId;
     const anchorId = selectedNodes().length === 1 ? selectedNodes()[0] : null;
     const anchor = anchorId ? doc.nodes.find((n) => n.id === anchorId) : undefined;
     const at: [number, number] = palette?.at ?? (anchor ? [anchor.pos[0] + 200, anchor.pos[1]] : viewportCenter());
-    const added = addNode(doc, typeId, name, at);
+    const added = addNode(doc, typeId, entry.name, at, entry.preset);
     let next = added.spec;
     if (!palette?.at && anchor) {
       const wired = connect(next, catalogMap, { from: anchor.id, out: 0, to: added.id, in: 0 });
@@ -633,12 +732,12 @@ function Editor() {
   };
 
   /** A node dragged in from the palette, centred where it was let go — on the grid, unwired. */
-  const dropNode = (typeId: string, x: number, y: number) => {
+  const dropNode = (entry: PaletteEntry, x: number, y: number) => {
     const doc = current();
     if (!doc || !canvasAt(x, y)) return;
     const point = screenToFlowPosition({ x, y });
     const snap = (n: number) => Math.round(n / 10) * 10;
-    const added = addNode(doc, typeId, t(`flows.node.${typeId}` as TranslationKey), [snap(point.x - 32), snap(point.y - 32)]);
+    const added = addNode(doc, entry.descriptor.typeId, entry.name, [snap(point.x - 32), snap(point.y - 32)], entry.preset);
     edit(added.spec);
     select([added.id]);
   };
@@ -1069,7 +1168,8 @@ function Editor() {
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
                 isValidConnection={isValidConnection}
-                onNodeDragStart={checkpoint}
+                onNodeDragStart={startDrag}
+                onNodeDragStop={() => (carried.current = null)}
                 onSelectionDragStart={checkpoint}
                 // A proposal is looked at, not edited: it is answered from the builder's window.
                 nodesDraggable={!diff}
@@ -1098,8 +1198,34 @@ function Editor() {
                 proOptions={{ hideAttribution: true }}
               >
                 <Background variant={BackgroundVariant.Dots} gap={20} size={1.3} />
+                {minimap && (
+                  <MiniMap<FlowCanvasNode>
+                    className="cf-flow-minimap"
+                    pannable
+                    zoomable
+                    nodeBorderRadius={6}
+                    nodeColor={(node) => (node.type === "note" ? (node.data.color || "var(--cf-note-default, #f5e27a)") : familyColor(node.data.descriptor.family))}
+                    ariaLabel={t("flows.minimap.label")}
+                  />
+                )}
               </ReactFlow>
-              <ZoomControls />
+              <div className="absolute bottom-3 left-3 z-10 flex items-center gap-2">
+                <ZoomControls />
+                <CanvasTools
+                  onScreen={onScreen && !inspector}
+                  findables={findables}
+                  onGo={goTo}
+                  minimap={minimap}
+                  onMinimap={(next) => {
+                    setMinimap(next);
+                    try {
+                      localStorage.setItem("cf.flows.minimap", next ? "1" : "0");
+                    } catch {
+                      // Private window: the choice lasts this session.
+                    }
+                  }}
+                />
+              </div>
               {(aiOpen || aiRun?.status === "ready") && <FlowAiPanel flowId={draftId} diff={diff} onClose={() => setAiOpen(false)} />}
               {inspector && !diff && spec.nodes.some((n) => n.id === inspector) && (
                 <Suspense fallback={null}>
@@ -1111,7 +1237,7 @@ function Editor() {
           </div>
           {/* Docked beside the canvas, not over it — see `NodePalette`. */}
           <NodePalette
-            catalog={catalog}
+            entries={entries}
             initialFamily={hasTrigger ? null : "trigger"}
             expanded={palette !== null}
             disabled={diff !== null}
@@ -1205,7 +1331,7 @@ function ZoomControls() {
   const { zoom } = useViewport();
   const button = iconButtonClass({ size: "sm" });
   return (
-    <div className="absolute bottom-3 left-3 z-10 flex items-center gap-px rounded-[9px] bg-[var(--cf-surface)] p-[3px] shadow-[var(--cf-shadow-lift),0_0_0_1px_var(--cf-border)]">
+    <div className="flex items-center gap-px rounded-[9px] bg-[var(--cf-surface)] p-[3px] shadow-[var(--cf-shadow-lift),0_0_0_1px_var(--cf-border)]">
       <button type="button" className={button} title={t("flows.zoomOut")} aria-label={t("flows.zoomOut")} onClick={() => void zoomOut({ duration: 120 })}>
         <ZoomOut size={14} />
       </button>
@@ -1221,6 +1347,131 @@ function ZoomControls() {
         onClick={() => void fitView({ padding: 0.25, maxZoom: 1, duration: 200 })}
       >
         <Scan size={14} />
+      </button>
+    </div>
+  );
+}
+
+interface Findable {
+  id: string;
+  label: string;
+  detail: string;
+  /** Name, type, service and text, folded (no case, no accents). */
+  words: string;
+}
+
+/**
+ * ⌘F on the canvas — find a node or a note and go to it (Enter: the next, ⇧Enter: the one before,
+ * Esc: close) — and the minimap's switch. Folded to one magnifier until asked for.
+ */
+function CanvasTools({
+  onScreen,
+  findables,
+  onGo,
+  minimap,
+  onMinimap,
+}: {
+  onScreen: boolean;
+  findables: Findable[];
+  onGo: (id: string) => void;
+  minimap: boolean;
+  onMinimap: (next: boolean) => void;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  /** The match on screen; -1 until Enter first goes to one. */
+  const [at, setAt] = useState(-1);
+  const field = useRef<HTMLInputElement>(null);
+  const button = iconButtonClass({ size: "sm" });
+  const matches = useMemo(() => {
+    const wanted = query.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+    return wanted ? findables.filter((f) => wanted.split(/\s+/).every((word) => f.words.includes(word))) : [];
+  }, [query, findables]);
+
+  useEffect(() => {
+    if (!onScreen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (!isViewFind(event, isMac())) return;
+      event.preventDefault();
+      setOpen(true);
+      requestAnimationFrame(() => {
+        field.current?.focus();
+        field.current?.select();
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onScreen]);
+
+  const close = () => {
+    setOpen(false);
+    setQuery("");
+    setAt(-1);
+  };
+  const step = (by: number) => {
+    if (!matches.length) return;
+    const next = at < 0 ? (by > 0 ? 0 : matches.length - 1) : (at + by + matches.length) % matches.length;
+    setAt(next);
+    onGo(matches[next].id);
+  };
+  const current = at >= 0 ? matches[at] : undefined;
+
+  return (
+    <div className="flex items-center gap-px rounded-[9px] bg-[var(--cf-surface)] p-[3px] shadow-[var(--cf-shadow-lift),0_0_0_1px_var(--cf-border)]">
+      {open ? (
+        <span className="flex items-center gap-1 pl-1.5">
+          <Search size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
+          <input
+            ref={field}
+            value={query}
+            autoFocus
+            spellCheck={false}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setAt(-1);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                step(event.shiftKey ? -1 : 1);
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                close();
+              }
+            }}
+            placeholder={t("flows.find.placeholder")}
+            aria-label={t("flows.find.placeholder")}
+            title={current ? `${current.label} · ${current.detail}` : undefined}
+            className="h-[24px] w-[150px] bg-transparent text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)]"
+          />
+          <span className="min-w-[30px] text-right text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+            {query.trim() ? (at >= 0 ? `${at + 1}/${matches.length}` : `${matches.length}`) : ""}
+          </span>
+          <button type="button" className={button} title={t("flows.find.close")} aria-label={t("flows.find.close")} onClick={close}>
+            <X size={13} />
+          </button>
+        </span>
+      ) : (
+        <button
+          type="button"
+          className={button}
+          title={`${t("flows.find.open")} (${isMac() ? "⌘F" : "Ctrl+F"})`}
+          aria-label={t("flows.find.open")}
+          onClick={() => setOpen(true)}
+        >
+          <Search size={14} />
+        </button>
+      )}
+      <button
+        type="button"
+        className={`${button} ${minimap ? "text-[var(--cf-accent)]" : ""}`}
+        title={minimap ? t("flows.minimap.hide") : t("flows.minimap.show")}
+        aria-label={minimap ? t("flows.minimap.hide") : t("flows.minimap.show")}
+        aria-pressed={minimap}
+        onClick={() => onMinimap(!minimap)}
+      >
+        <MapIcon size={14} />
       </button>
     </div>
   );

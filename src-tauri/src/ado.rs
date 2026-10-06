@@ -552,6 +552,26 @@ fn map_pull_request(org_enc: &str, project_enc: &str, pr: RawPullRequest) -> Pul
 /// whether it came back is whether another page exists, known rather than guessed from a full page.
 /// Its `status` filter takes one value, so `Closed` asks for `all` and drops the active ones — see
 /// [`PrListScope::admits`].
+/// The active pull requests of a repository the signed-in user is a reviewer on.
+pub async fn review_requested_ids(org: &str, project: &str, repo_id: &str, pat: &str) -> Result<Vec<i64>, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Hit {
+        pull_request_id: i64,
+    }
+    let me = authenticated_user_id(org, pat).await?;
+    let url = format!(
+        "https://dev.azure.com/{}/{}/_apis/git/repositories/{}/pullrequests\
+         ?searchCriteria.status=active&searchCriteria.reviewerId={}&$top=100&api-version={API_VERSION}",
+        encode_segment(&normalize_org(org)),
+        encode_segment(project),
+        encode_segment(repo_id),
+        encode_segment(&me),
+    );
+    let parsed: ListResponse<Hit> = get_json(&url, pat).await?;
+    Ok(parsed.value.into_iter().map(|hit| hit.pull_request_id).collect())
+}
+
 pub async fn list_pull_requests_page(
     org: &str,
     project: &str,

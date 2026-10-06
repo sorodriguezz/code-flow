@@ -184,6 +184,109 @@ pub fn list_runs(conn: &Connection, flow_id: &str, limit: i64, before: Option<&s
     rows.collect()
 }
 
+/// How a flow has been doing: its finished executions since a moment, counted, timed and by day.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowMetrics {
+    pub runs: i64,
+    pub success: i64,
+    pub error: i64,
+    pub canceled: i64,
+    pub median_ms: Option<i64>,
+    pub p95_ms: Option<i64>,
+    /// One entry per local day that had a run, oldest first.
+    pub days: Vec<DayCount>,
+    /// The nodes runs failed at most, most first (three at most).
+    pub failing_nodes: Vec<NodeCount>,
+    /// The nodes that take longest on average in successful runs (three at most).
+    pub slow_nodes: Vec<NodeTime>,
+    /// Runs by how they started: `manual`, `trigger`, `retry`, `subflow`…
+    pub by_mode: Vec<(String, i64)>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DayCount {
+    pub date: String,
+    pub success: i64,
+    pub error: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeCount {
+    pub node_id: String,
+    pub name: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeTime {
+    pub node_id: String,
+    pub name: String,
+    pub avg_ms: i64,
+}
+
+/// The value at `share` (0..=1) of sorted durations — nearest rank.
+fn percentile(sorted: &[i64], share: f64) -> Option<i64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let rank = ((share * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
+    Some(sorted[rank - 1])
+}
+
+/// A flow's finished executions since `since` (RFC 3339). Days are local: `offset_minutes` is how
+/// far the person's clock is from UTC (`-180` in Santiago in winter… as JavaScript's
+/// `getTimezoneOffset`, negated by the caller).
+pub fn flow_metrics(conn: &Connection, flow_id: &str, since: &str, offset_minutes: i64) -> rusqlite::Result<FlowMetrics> {
+    let mut metrics = FlowMetrics::default();
+    let finished = "flow_id = ?1 AND started_at >= ?2 AND status NOT IN ('running', 'waiting')";
+    let mut statement = conn.prepare(&format!("SELECT status, COUNT(*) FROM flow_runs WHERE {finished} GROUP BY status"))?;
+    for row in statement.query_map(params![flow_id, since], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
+        let (status, count) = row?;
+        metrics.runs += count;
+        match status.as_str() {
+            "success" => metrics.success += count,
+            "error" => metrics.error += count,
+            _ => metrics.canceled += count,
+        }
+    }
+    let mut statement = conn.prepare(&format!("SELECT duration_ms FROM flow_runs WHERE {finished} AND status = 'success' AND duration_ms IS NOT NULL ORDER BY duration_ms"))?;
+    let durations: Vec<i64> = statement.query_map(params![flow_id, since], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+    metrics.median_ms = percentile(&durations, 0.5);
+    metrics.p95_ms = percentile(&durations, 0.95);
+    let shift = format!("{offset_minutes:+} minutes");
+    let mut statement = conn.prepare(&format!(
+        "SELECT date(started_at, ?3) AS day, SUM(status = 'success'), SUM(status = 'error') FROM flow_runs WHERE {finished} GROUP BY day ORDER BY day"
+    ))?;
+    metrics.days = statement
+        .query_map(params![flow_id, since, shift], |row| Ok(DayCount { date: row.get(0)?, success: row.get(1)?, error: row.get(2)? }))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT r.error_node, COALESCE((SELECT n.node_name FROM flow_run_nodes n WHERE n.run_id = r.id AND n.node_id = r.error_node), r.error_node), COUNT(*) AS c
+         FROM flow_runs r WHERE r.{finished_r} AND r.status = 'error' AND r.error_node != ''
+         GROUP BY r.error_node ORDER BY c DESC LIMIT 3",
+        finished_r = "flow_id = ?1 AND r.started_at >= ?2"
+    ))?;
+    metrics.failing_nodes = statement
+        .query_map(params![flow_id, since], |row| Ok(NodeCount { node_id: row.get(0)?, name: row.get(1)?, count: row.get(2)? }))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut statement = conn.prepare(
+        "SELECT n.node_id, MAX(n.node_name), CAST(AVG(n.duration_ms) AS INTEGER) AS average
+         FROM flow_run_nodes n JOIN flow_runs r ON r.id = n.run_id
+         WHERE r.flow_id = ?1 AND r.started_at >= ?2 AND r.status = 'success' AND n.status = 'success' AND n.duration_ms IS NOT NULL
+         GROUP BY n.node_id ORDER BY average DESC LIMIT 3",
+    )?;
+    metrics.slow_nodes = statement
+        .query_map(params![flow_id, since], |row| Ok(NodeTime { node_id: row.get(0)?, name: row.get(1)?, avg_ms: row.get(2)? }))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut statement = conn.prepare(&format!("SELECT mode, COUNT(*) AS c FROM flow_runs WHERE {finished} GROUP BY mode ORDER BY c DESC"))?;
+    metrics.by_mode = statement.query_map(params![flow_id, since], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    Ok(metrics)
+}
+
 pub fn get_run(conn: &Connection, id: &str) -> rusqlite::Result<Option<FlowRunRow>> {
     conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM flow_runs WHERE id = ?1"), params![id], run_row)
         .optional()
@@ -729,6 +832,49 @@ mod tests {
             data_bytes: 0,
             notify: None,
         }
+    }
+
+    #[test]
+    fn metrics_count_time_and_bucket_finished_runs_by_local_day() {
+        let conn = conn();
+        let finished = |id: &str, status: &str, started: &str, ms: i64, error_node: &str| {
+            let mut row = run(id, status, started);
+            row.duration_ms = Some(ms);
+            row.error_node = error_node.into();
+            insert_run(&conn, &row).unwrap();
+        };
+        finished("a", "success", "2026-10-05T02:00:00Z", 1000, "");
+        finished("b", "success", "2026-10-05T15:00:00Z", 3000, "");
+        finished("c", "error", "2026-10-06T10:00:00Z", 500, "n2");
+        finished("d", "success", "2026-10-06T11:00:00Z", 2000, "");
+        insert_run(&conn, &run("e", "running", "2026-10-06T12:00:00Z")).unwrap();
+        finished("old", "error", "2026-09-01T10:00:00Z", 9, "n9");
+        let node = |run_id: &str, ms: i64| FlowRunNodeRow {
+            run_id: run_id.into(),
+            node_id: "n2".into(),
+            node_name: "Enviar".into(),
+            node_type: "net.email".into(),
+            status: "success".into(),
+            started_at: None,
+            finished_at: None,
+            duration_ms: Some(ms),
+            items_in: 1,
+            items_out: vec![1],
+            attempts: 1,
+            error: String::new(),
+            seq: 1,
+        };
+        upsert_run_node(&conn, &node("a", 800)).unwrap();
+        upsert_run_node(&conn, &node("b", 1200)).unwrap();
+        let metrics = flow_metrics(&conn, "f1", "2026-10-01T00:00:00Z", -180).unwrap();
+        assert_eq!((metrics.runs, metrics.success, metrics.error), (4, 3, 1), "running and old runs are left out");
+        assert_eq!((metrics.median_ms, metrics.p95_ms), (Some(2000), Some(3000)));
+        // 02:00 UTC on the 5th is still the 4th three hours west.
+        assert_eq!(metrics.days.iter().map(|d| (d.date.as_str(), d.success, d.error)).collect::<Vec<_>>(), vec![("2026-10-04", 1, 0), ("2026-10-05", 1, 0), ("2026-10-06", 1, 1)]);
+        assert_eq!(metrics.failing_nodes, vec![NodeCount { node_id: "n2".into(), name: "n2".into(), count: 1 }]);
+        assert_eq!(metrics.slow_nodes, vec![NodeTime { node_id: "n2".into(), name: "Enviar".into(), avg_ms: 1000 }]);
+        assert_eq!(metrics.by_mode, vec![("manual".to_string(), 4)]);
+        assert_eq!(percentile(&[], 0.5), None);
     }
 
     #[test]

@@ -509,6 +509,30 @@ async fn fetch_pr_page(link: &LinkedRepo, scope: ado::PrListScope, page: u32) ->
     }
 }
 
+/// The open pull requests of a project's repository whose review is asked of the signed-in user —
+/// what the Flujos pull-request trigger's "review requested" watches.
+pub async fn pr_review_requested(db: State<'_, Db>, project_id: String) -> Result<Vec<i64>, String> {
+    let project = load_project(&db, &project_id)?;
+    match linked_repo(&project)? {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(&org)?;
+            ado::review_requested_ids(&org, &ado_project, &repo_id, &pat).await
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            github::review_requested_numbers(&host, &owner, &repo, &token).await
+        }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(&host)?;
+            gitlab::review_requested_iids(&host, &path, &token).await
+        }
+        LinkedRepo::Bitbucket { workspace, repo } => {
+            let auth = bitbucket_auth(&workspace)?;
+            bitbucket::review_requested_ids(&workspace, &repo, &auth).await
+        }
+    }
+}
+
 /// One pull request of a linked repository, read directly by number — however old it is and
 /// whatever its state. Never looked up inside a list: a list is one page, and an open pull request
 /// a few weeks old is routinely not on the first one.
@@ -1140,7 +1164,7 @@ pub async fn review_pr_from_link(
     }
 
 
-    let result = crate::ai_runs::scoped(app, Some(job_id.clone()), async {
+    let result = crate::ai_runs::scoped(app.clone(), Some(job_id.clone()), async {
         ai::review_pull_request(
             &*config.engine,
             &config.binary,
@@ -1181,6 +1205,13 @@ pub async fn review_pr_from_link(
         );
     }
 
+    if result.is_ok() {
+        crate::flows::triggers::app_event(
+            &app,
+            "prReviewFinished",
+            serde_json::json!({"url": url, "level": level, "jobId": job_id}),
+        );
+    }
     result
 }
 
@@ -2195,6 +2226,14 @@ pub async fn review_pull_request(
         }
     };
 
+    // An analysed pull request is an event a flow can start from ("Evento de CodeFlow").
+    if result.is_ok() {
+        crate::flows::triggers::app_event(
+            &app,
+            "prReviewFinished",
+            serde_json::json!({"projectId": project_id, "prId": pr_id, "level": level, "jobId": job_id}),
+        );
+    }
     result
 }
 

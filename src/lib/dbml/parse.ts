@@ -1,9 +1,11 @@
 import { importer, Parser } from "@dbml/core";
-import { readLayout } from "./layout";
+import { blankMarkers } from "./layout";
 import { sqlToDbml } from "./sqlToDbml";
 import {
   EMPTY_SCHEMA,
+  hexColor,
   qualify,
+  stickyNoteId,
   type DbmlCardinality,
   type DbmlGroup,
   type DbmlEnum,
@@ -11,6 +13,7 @@ import {
   type DbmlIndex,
   type DbmlRef,
   type DbmlSchema,
+  type DbmlStickyNote,
   type DbmlTable,
 } from "./types";
 
@@ -88,6 +91,7 @@ interface CoreTable {
   name?: unknown;
   alias?: unknown;
   note?: unknown;
+  headerColor?: unknown;
   schema?: { name?: unknown };
   fields?: CoreField[];
   indexes?: CoreIndex[];
@@ -202,7 +206,10 @@ function cardinality(relation: unknown): DbmlCardinality {
 }
 
 function parseWithCore(source: string): DbmlSchema | null {
-  const database = Parser.parse(source, "dbmlv2") as { schemas?: CoreSchema[] };
+  const database = Parser.parse(source, "dbmlv2") as {
+    schemas?: CoreSchema[];
+    notes?: { name?: unknown; content?: unknown; color?: unknown }[];
+  };
   const tables: DbmlTable[] = [];
   const enums: DbmlEnum[] = [];
   const refs: DbmlRef[] = [];
@@ -242,6 +249,7 @@ function parseWithCore(source: string): DbmlSchema | null {
         note: note(table.note),
         fields: (table.fields ?? []).map(fieldOf),
         indexes: (table.indexes ?? []).map(indexOf),
+        ...(hexColor(table.headerColor) ? { color: hexColor(table.headerColor) } : {}),
       });
     }
     for (const ref of schema.refs ?? []) {
@@ -298,7 +306,17 @@ function parseWithCore(source: string): DbmlSchema | null {
   // it would stretch the group over empty canvas.
   for (const group of groups) group.tables = group.tables.filter((id: string) => known.has(id));
 
-  return { tables, enums, refs, groups, error: null, errorAt: null };
+  // Sticky notes are the database's, not a schema's: `Note name { … }` is top-level DBML.
+  const notes: DbmlStickyNote[] = (database.notes ?? [])
+    .filter((entry) => text(entry.name) !== "")
+    .map((entry) => ({
+      id: stickyNoteId(text(entry.name)),
+      name: text(entry.name),
+      content: note(entry.content),
+      ...(hexColor(entry.color) ? { color: hexColor(entry.color) } : {}),
+    }));
+
+  return { tables, enums, refs, groups, notes, error: null, errorAt: null };
 }
 
 /**
@@ -408,6 +426,18 @@ export function errorPosition(error: unknown): { line: number; column: number } 
  * it exists for, so "nine of the ten tables, and the tenth one when you finish typing it" is the
  * right answer — the error from the real parser is on screen the whole time saying what is wrong.
  */
+/**
+ * The text between a note's `'''` fences as the compiler hands it back: the first line break after
+ * the opening fence and the last one before the closing fence dropped, the common indentation of
+ * the rest removed. `@dbml/core` does the same, so a note reads the same whichever reader saw it.
+ */
+function fencedText(inner: string): string {
+  const lines = inner.replace(/^[ \t]*\n/, "").replace(/\n[ \t]*$/, "").split("\n");
+  const indents = lines.filter((line) => line.trim()).map((line) => /^[ \t]*/.exec(line)?.[0].length ?? 0);
+  const cut = indents.length > 0 ? Math.min(...indents) : 0;
+  return lines.map((line) => line.slice(cut)).join("\n");
+}
+
 function parseWithRegex(source: string): DbmlSchema {
   const tables: DbmlTable[] = [];
   const enums: DbmlEnum[] = [];
@@ -443,14 +473,18 @@ function parseWithRegex(source: string): DbmlSchema {
   //
   // The lookahead insists on the `{` of a block header, so a column that happens to be *named*
   // `table` or `enum` does not end the body it lives in.
+  // The settings bracket is allowed between the name and the brace — `[headercolor: …]`, `[note: …]` —
+  // or a table carrying one vanished from the canvas for as long as the document did not parse.
   const tableBlock =
-    /\btable\s+("[^"]+"|[\w.]+)\s*(?:as\s+(\w+)\s*)?\{((?:(?!\n\s*(?:table|enum|ref|tablegroup|project)\s+[^\n{]*\{)[\s\S])*?)\n\}/gi;
+    /\btable\s+("[^"]+"|[\w.]+)\s*(?:as\s+(\w+)\s*)?(?:\[([^\]\n]*)\]\s*)?\{((?:(?!\n\s*(?:table|enum|ref|tablegroup|project|note)\s+[^\n{]*\{)[\s\S])*?)\n\}/gi;
   while ((match = tableBlock.exec(clean)) !== null) {
     const [scope, name] = splitQualified(named(match[1]));
     const id = qualify(scope, name);
+    const color = hexColor(/\bheadercolor\s*:\s*(#[0-9a-f]{3,6})\b/i.exec(match[3] ?? "")?.[1]);
+    const alias = match[2] ?? null;
     const fields: DbmlField[] = [];
     // Note blocks first: they can hold anything, braces and field-shaped lines included.
-    const body = match[3]
+    const body = match[4]
       .replace(/\bnote\s*:\s*'''[\s\S]*?'''/gi, "")
       .replace(/\bnote\s*:\s*"""[\s\S]*?"""/gi, "")
       .replace(/\bnote\s*:\s*'[^']*'/gi, "")
@@ -492,7 +526,18 @@ function parseWithRegex(source: string): DbmlSchema {
         note: settings.match(/\bnote\s*:\s*['"]([^'"]*)['"]/i)?.[1] ?? "",
       });
     }
-    tables.push({ id, schema: scope, name, alias: match[2] ?? null, note: "", fields, indexes: [] });
+    tables.push({ id, schema: scope, name, alias, note: "", fields, indexes: [], ...(color ? { color } : {}) });
+  }
+
+  // Sticky notes, so a post-it does not vanish from the canvas while the document is mid-edit.
+  const notes: DbmlStickyNote[] = [];
+  const stickyBlock = /(?:^|\n)\s*note\s+("[^"]+"|[\w.]+)\s*(?:\[([^\]\n]*)\]\s*)?\{\s*('''[\s\S]*?'''|'(?:[^'\\\n]|\\.)*')\s*\}/gi;
+  while ((match = stickyBlock.exec(source)) !== null) {
+    const name = named(match[1]);
+    const raw = match[3];
+    const content = raw.startsWith("'''") ? fencedText(raw.slice(3, -3)) : raw.slice(1, -1).replace(/\\(.)/g, "$1");
+    const color = hexColor(/\bcolor\s*:\s*(#[0-9a-f]{3,6})\b/i.exec(match[2] ?? "")?.[1]);
+    notes.push({ id: stickyNoteId(name), name, content, ...(color ? { color } : {}) });
   }
 
   // `TableGroup billing { a\n b }` — a flat list of names, one per line. Same shape as an enum
@@ -549,7 +594,7 @@ function parseWithRegex(source: string): DbmlSchema {
   // drawn around, so it cannot contribute to the boundary.
   const declared = new Set(tables.map((table) => table.id));
   for (const group of groups) group.tables = group.tables.filter((id) => declared.has(id));
-  return { tables, enums, refs: unique, groups, error: null, errorAt: null };
+  return { tables, enums, refs: unique, groups, notes, error: null, errorAt: null };
 }
 
 /**
@@ -659,7 +704,9 @@ function splitQualified(raw: string): [string, string] {
  * happily find a `Table` inside a string.
  */
 export function parseDbml(doc: string): DbmlSchema {
-  const { source } = readLayout(doc);
+  // Blanked, not removed: the marker lines are visible in the editor, and a diagnostic has to name
+  // the line the editor shows.
+  const source = blankMarkers(doc);
   if (!source.trim()) return { ...EMPTY_SCHEMA };
   try {
     return parseWithCore(source) ?? { ...EMPTY_SCHEMA };

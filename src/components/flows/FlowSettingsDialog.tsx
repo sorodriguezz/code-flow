@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { Checkbox } from "../common/Checkbox";
 import { Settings2 } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";
 import { Button } from "../common/Button";
@@ -34,6 +35,7 @@ export function FlowSettingsDialog({ onClose }: { onClose: () => void }) {
   const [overlap, setOverlap] = useState(typeof settings.overlap === "string" ? settings.overlap : "skip");
   const [notifyOn, setNotifyOn] = useState(typeof settings.notifyOn === "string" ? settings.notifyOn : "failure");
   const [aiPerHour, setAiPerHour] = useState(typeof settings.aiPerHour === "number" ? String(settings.aiPerHour) : "60");
+  const [skipOnBattery, setSkipOnBattery] = useState(settings.skipOnBattery === true);
 
   const save = () => {
     const draft = useFlowsStore.getState().draft;
@@ -45,6 +47,8 @@ export function FlowSettingsDialog({ onClose }: { onClose: () => void }) {
     next.notifyOn = notifyOn;
     const cap = Number.parseInt(aiPerHour, 10);
     next.aiPerHour = Number.isFinite(cap) && cap >= 0 ? Math.min(cap, 10_000) : 60;
+    if (skipOnBattery) next.skipOnBattery = true;
+    else delete next.skipOnBattery;
     useFlowsStore.getState().edit({ ...draft.spec, settings: next });
     onClose();
   };
@@ -134,6 +138,11 @@ export function FlowSettingsDialog({ onClose }: { onClose: () => void }) {
           />,
           t("flows.settingsDialog.aiPerHourHint"),
         )}
+        {/* For the heavy flows — a local model, a build: a trigger on battery skips the run. */}
+        <label className="flex items-center gap-2 text-[12.5px]" title={t("flows.settingsDialog.skipOnBatteryHint")}>
+          <Checkbox checked={skipOnBattery} onChange={setSkipOnBattery} />
+          {t("flows.settingsDialog.skipOnBattery")}
+        </label>
       </div>
     </ApiModal>
   );

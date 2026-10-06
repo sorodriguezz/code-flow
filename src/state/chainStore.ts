@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { flowsAppEvent } from "../lib/tauri/flowsCommands";
 import { broadcast } from "../lib/windowBus";
 import { isMainWindow } from "../lib/windowIdentity";
 import { listen } from "@tauri-apps/api/event";
@@ -1076,6 +1077,16 @@ async function settleStep(
   // waits for the user, mid-plan, with the user usually elsewhere — the one pause nobody is watching
   // arrive. Said once, like the end of the plan.
   const enginePause = chain?.status === "paused" && isEnginePause(chain.last_reason);
+  if (chain && (chain.status === "done" || chain.status === "failed")) {
+    // The flows that start when a chain ends ("Evento de CodeFlow"). Best effort: a refusal here
+    // must not stop the notification below.
+    void flowsAppEvent("agentChainFinished", {
+      chainId: chain.id,
+      title: chain.title,
+      status: chain.status,
+      projectId: chain.project_id,
+    }).catch(() => {});
+  }
   if (chain && (chain.status === "done" || chain.status === "failed" || enginePause)) {
     notify({
       source: "agents",

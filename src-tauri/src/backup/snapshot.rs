@@ -142,6 +142,8 @@ pub const TABLES: &[&str] = &[
     "flow_variables",
     "flow_credentials",
     "flow_shares",
+    // Which repository file each flow is kept in (`flows::repo`): hangs off a flow and a project.
+    "flow_repo_links",
     // History, activity and agent work. Last because every one of them hangs off a project or a
     // workspace, and `agent_chain_steps` and `agent_chain_repos` hang off `agent_chains` in turn.
     "activity_log",
@@ -276,6 +278,9 @@ pub const CORE_TABLES: &[&str] = &[
     // Travels with the flows so a restored machine resumes each shared flow where this one left it
     // (its base and cursor) instead of pulling it as a conflict with itself.
     "flow_shares",
+    // The same for a flow kept in a repository: restored, it still knows its file and whether the
+    // file moved since, instead of offering the repository's copy as a flow nobody has.
+    "flow_repo_links",
 ];
 
 /// The optional groups, in the order the panel lists them.

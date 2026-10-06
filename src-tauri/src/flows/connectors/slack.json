@@ -1,6 +1,7 @@
 {
   "id": "slack",
   "name": "Slack",
+  "group": "appsChat",
   "baseUrl": "https://slack.com/api",
   "auth": "bearer",
   "authHint": { "es": "Token de bot (xoxb-…) como credencial Bearer", "en": "Bot token (xoxb-…) as a Bearer credential" },

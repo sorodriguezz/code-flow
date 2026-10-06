@@ -368,6 +368,24 @@ pub fn start(app: AppHandle, settings: Settings, request: RunRequest) -> Result<
         let summary = pipeline(Some(&app), settings, request, id.clone(), project_key, started_at, cancel).await;
         let _ = save(&summary);
         *active() = None;
+        // The Revisor's verdict is an event a flow can start from ("Evento de CodeFlow").
+        let verdict = match summary.status.as_str() {
+            "passed" => Some("reviewerPassed"),
+            "failed" => Some("reviewerFailed"),
+            _ => None,
+        };
+        if let Some(event) = verdict {
+            crate::flows::triggers::app_event(
+                &app,
+                event,
+                serde_json::json!({
+                    "projectId": summary.project_id,
+                    "runId": id,
+                    "status": summary.status,
+                    "gate": summary.gate.as_ref().map(|gate| gate.status.clone()),
+                }),
+            );
+        }
         let _ = app.emit(EVENT, RunEvent::Finished { run_id: id, project_id: summary.project_id.clone(), summary: Box::new(summary) });
     });
     Ok(run_id)

@@ -5,6 +5,8 @@ import { AiGlyph, type AiGlyphName } from "../common/AiGlyph";
 import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { familyColor, nodeIcon } from "../../lib/flows/nodeIcons";
+import { appLogo } from "../../lib/flows/appLogos";
+import { BrandGlyph } from "../ai/ProviderGlyph";
 import type { FlowNodeDescriptor, FlowNodeRunStatus } from "../../lib/tauri/flowsCommands";
 
 /**
@@ -24,9 +26,13 @@ export interface CfNodeData extends Record<string, unknown> {
   disabled: boolean;
   /** Translated port names, empty when the ports are unnamed. */
   inputLabels: string[];
+  /** Input ports — the catalogue's, or a Merge's `inputs` setting (`inputCount`). */
+  inputs: number;
   outputLabels: string[];
   /** Output ports on the canvas — the catalogue's, plus the error port when it routes failures. */
   outputs: number;
+  /** The service an Apps node calls (`serviceOf`), drawn as its mark; `""` for the node's glyph. */
+  logo: string;
   /** Whether the last port is the error port. */
   errorPort: boolean;
   /** What the run on screen did with it. */
@@ -88,7 +94,7 @@ export const CanvasActionsContext = createContext<CanvasActions>({
   noteColorNoneLabel: "",
 });
 
-const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "scan-eye", "messages-square", "pencil", "brain-circuit", "binary", "database-zap", "wand", "reply"]);
+const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "scan-eye", "messages-square", "pencil", "brain-circuit", "binary", "database-zap", "wand", "reply", "scan-search", "audio-lines"]);
 
 /** AI nodes that compute vectors rather than reason: no ThinkingOrb while they run. */
 const COMPUTES_ONLY = new Set<string>(["ai.embed", "ai.vectors"]);
@@ -116,14 +122,19 @@ function RunBadge({ status, title, waiting }: { status: FlowNodeRunStatus; title
 }
 
 export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNode>) {
-  const { descriptor, name, typeLabel, disabled, inputLabels, outputLabels, outputs, errorPort, run, time, pinned, pinnedTitle, diff, diffTitle } = data;
+  const { descriptor, name, typeLabel, disabled, inputLabels, inputs, outputLabels, outputs, errorPort, run, time, pinned, pinnedTitle, diff, diffTitle, logo } = data;
   const Icon = nodeIcon(descriptor.icon);
-  const glyph =
-    descriptor.family === "ai" && AI_GLYPHS.has(descriptor.icon) ? (
-      <AiGlyph name={descriptor.icon as AiGlyphName} size={26} />
-    ) : (
-      <Icon size={26} strokeWidth={1.75} />
-    );
+  const mark = logo ? appLogo(logo) : undefined;
+  // AI by what the node is, not where the palette files it: "Analizar PR" lives under Git and PRs
+  // and still reasons — its glyph and its orb come from the `ai.` id.
+  const isAi = descriptor.typeId.startsWith("ai.");
+  const glyph = mark ? (
+    <BrandGlyph id={logo} logo={mark} size={26} />
+  ) : isAi && AI_GLYPHS.has(descriptor.icon) ? (
+    <AiGlyph name={descriptor.icon as AiGlyphName} size={26} />
+  ) : (
+    <Icon size={26} strokeWidth={1.75} />
+  );
   return (
     <div
       className={`cf-flow-node ${descriptor.family === "trigger" ? "is-trigger" : ""} ${disabled ? "is-disabled" : ""} ${
@@ -135,7 +146,7 @@ export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNod
         {glyph}
         {run && <RunBadge status={run.status} title={run.title} waiting={run.waiting} />}
         {/* A model at work — the one mark the app keeps for reasoning, and only while it lasts. */}
-        {run?.status === "running" && descriptor.family === "ai" && !COMPUTES_ONLY.has(descriptor.typeId) && (
+        {run?.status === "running" && isAi && !COMPUTES_ONLY.has(descriptor.typeId) && (
           <span className="cf-flow-node__orb" title={run.title}>
             <ThinkingOrb size="sm" />
           </span>
@@ -150,20 +161,20 @@ export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNod
             <Pin size={9} strokeWidth={2.5} />
           </span>
         )}
-        {Array.from({ length: descriptor.inputs }, (_, index) => (
+        {Array.from({ length: inputs }, (_, index) => (
           <Handle
             key={`i${index}`}
             id={`i${index}`}
             type="target"
             position={Position.Left}
-            style={{ top: portTop(index, descriptor.inputs) }}
+            style={{ top: portTop(index, inputs) }}
           />
         ))}
         {inputLabels.map((label, index) => (
           <span
             key={`il${index}`}
             className="cf-flow-port-label is-input"
-            style={{ top: portTop(index, descriptor.inputs) }}
+            style={{ top: portTop(index, inputs) }}
           >
             {label}
           </span>

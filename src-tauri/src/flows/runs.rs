@@ -16,7 +16,7 @@
 //! and 2 GB for everything — applied after every run and at launch. A run still going is never
 //! touched.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -755,6 +755,10 @@ pub enum RunOrigin {
     Subflow,
     /// A flow's "when a flow fails" trigger, for another flow's failure.
     Error,
+    /// A past run started again from the executions list — its trigger's input replayed, and,
+    /// from where it failed, the nodes that had succeeded reused. Pins are ignored: what is being
+    /// retried was a real run.
+    Retry,
 }
 
 /// What a run ended with, for whoever is waiting on it.
@@ -778,11 +782,14 @@ pub struct StartRequest {
     pub depth: u32,
     /// Hand back a receiver for the run's end.
     pub wait: bool,
+    /// Outputs known from an earlier run, by node id — seeded instead of executed when the node is
+    /// in the plan. A retry from where a run failed.
+    pub reuse: HashMap<String, Ports>,
 }
 
 impl StartRequest {
     pub fn manual(mode: RunMode, trigger: Option<String>) -> Self {
-        Self { mode, trigger, trigger_items: None, form_input: None, origin: RunOrigin::Manual, respond: None, depth: 0, wait: false }
+        Self { mode, trigger, trigger_items: None, form_input: None, origin: RunOrigin::Manual, respond: None, depth: 0, wait: false, reuse: HashMap::new() }
     }
 
     pub fn fired(trigger: &str, items: Vec<Item>, origin: RunOrigin) -> Self {
@@ -795,8 +802,55 @@ impl StartRequest {
             respond: None,
             depth: 0,
             wait: false,
+            reuse: HashMap::new(),
         }
     }
+}
+
+/// Starts a past run again — the flow as it is now, from the trigger the run started at, with the
+/// input it had then. `from_failed` also reuses what every node that succeeded produced, so only the
+/// failed node and what follows it run again: the retry for a webhook whose request cannot be sent
+/// twice, or an expensive step that does not need repeating.
+///
+/// A node inside a loop's body is never reused: its output is one batch's, and the loop would read
+/// it as the whole.
+pub fn retry(app: &AppHandle, run_id: &str, from_failed: bool) -> Result<FlowRunRow, String> {
+    let db = app.state::<Db>();
+    let (row, nodes, parsed) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let row = queries::get_run(&conn, run_id).map_err(|e| e.to_string())?.ok_or("This run is no longer on record")?;
+        let nodes = queries::run_nodes(&conn, run_id).map_err(|e| e.to_string())?;
+        let flow = flow_queries::get_flow(&conn, &row.flow_id).map_err(|e| e.to_string())?.ok_or("This flow no longer exists")?;
+        (row, nodes, spec::parse(&flow.spec)?)
+    };
+    if row.trigger_node.is_empty() {
+        return Err("This run started from a step, not a trigger: there is no input to replay".into());
+    }
+    if !parsed.nodes.iter().any(|n| n.id == row.trigger_node && !n.disabled) {
+        return Err("The trigger this run started from is no longer in the flow, or is disabled".into());
+    }
+    let input = read_node_data(run_id, &row.trigger_node)
+        .and_then(|data| data.outputs.into_iter().next())
+        .ok_or("The run's input is no longer on record")?;
+    let mut request = StartRequest::fired(&row.trigger_node, input, RunOrigin::Retry);
+    if from_failed {
+        let in_loops: HashSet<String> = parsed
+            .nodes
+            .iter()
+            .filter(|n| n.type_id == crate::flows::catalog::LOOP_TYPE)
+            .flat_map(|n| run::downstream(&parsed, &n.id))
+            .collect();
+        let current: HashSet<&str> = parsed.nodes.iter().map(|n| n.id.as_str()).collect();
+        for node in nodes.iter().filter(|n| n.status == "success" || n.status == "reused") {
+            if node.node_id == row.trigger_node || in_loops.contains(&node.node_id) || !current.contains(node.node_id.as_str()) {
+                continue;
+            }
+            if let Some(data) = read_node_data(run_id, &node.node_id) {
+                request.reuse.insert(node.node_id.clone(), data.outputs);
+            }
+        }
+    }
+    start_with(app, &row.flow_id, request).map(|(row, _)| row)
 }
 
 /// AI calls a flow may make in an hour, from its settings — 60 when it never said, `0` for no cap.
@@ -813,7 +867,7 @@ pub const DEFAULT_AI_PER_HOUR: u32 = 60;
 /// When a flow's runs end in a notification: never, when they fail, or always. Read from the flow's
 /// settings for the runs nobody is watching; a run started by hand answers to the window instead.
 pub(super) fn notify_setting(spec: &FlowSpec, origin: RunOrigin) -> Option<String> {
-    if origin == RunOrigin::Manual {
+    if origin == RunOrigin::Manual || origin == RunOrigin::Retry {
         return None;
     }
     let chosen = spec.settings.get("notifyOn").and_then(Value::as_str).unwrap_or("failure");
@@ -870,7 +924,7 @@ pub fn start_with(
     flow_id: &str,
     request: StartRequest,
 ) -> Result<(FlowRunRow, Option<tokio::sync::oneshot::Receiver<Finished>>), String> {
-    let StartRequest { mode, trigger, trigger_items, form_input, origin, respond, depth, wait } = request;
+    let StartRequest { mode, trigger, trigger_items, form_input, origin, respond, depth, wait, reuse } = request;
     let db = app.state::<Db>();
     let (flow, parsed, pins, vars, locale, previous, mode) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -880,6 +934,13 @@ pub fn start_with(
             return Err("untrusted".into());
         }
         let parsed = spec::parse(&flow.spec)?;
+        // «No correr con batería»: a heavy flow waits for the cable — unless a person asked for it.
+        if !matches!(origin, RunOrigin::Manual | RunOrigin::Retry)
+            && parsed.settings.get("skipOnBattery").and_then(Value::as_bool) == Some(true)
+            && crate::power::status().is_some_and(|power| !power.plugged_in)
+        {
+            return Err("on-battery: this flow is set not to run on battery".into());
+        }
         // Pins are for designing: a run something else started is the real thing.
         let pins = if origin == RunOrigin::Manual { load_pins(&conn, flow_id).map_err(|e| e.to_string())? } else { HashMap::new() };
         let vars = queries::variables_map(&conn, &flow.meta.workspace_id).map_err(|e| e.to_string())?;
@@ -909,6 +970,12 @@ pub fn start_with(
         }
         Err(error) => return Err(error),
     };
+    // What an earlier run already produced, standing in for the nodes that produced it.
+    for (id, outputs) in reuse {
+        if plan.active.contains(&id) && !plan.seeds.contains_key(&id) {
+            plan.seeds.insert(id, (outputs, false));
+        }
+    }
     if let Some(items) = trigger_items {
         plan.trigger_output = Some(vec![items]);
     } else if let Some(input) = form_input {
@@ -925,6 +992,7 @@ pub fn start_with(
         RunOrigin::Trigger => "trigger",
         RunOrigin::Subflow => "subflow",
         RunOrigin::Error => "error",
+        RunOrigin::Retry => "retry",
     };
 
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -1090,6 +1158,7 @@ pub(super) fn origin_of(mode: &str) -> RunOrigin {
         "trigger" => RunOrigin::Trigger,
         "subflow" => RunOrigin::Subflow,
         "error" => RunOrigin::Error,
+        "retry" => RunOrigin::Retry,
         _ => RunOrigin::Manual,
     }
 }

@@ -1,6 +1,7 @@
 {
   "id": "vercel",
   "name": "Vercel",
+  "group": "appsDevops",
   "baseUrl": "https://api.vercel.com",
   "auth": "bearer",
   "authHint": { "es": "Un token de Vercel (Account Settings › Tokens) como credencial Token", "en": "A Vercel token (Account Settings › Tokens) as a Token credential" },

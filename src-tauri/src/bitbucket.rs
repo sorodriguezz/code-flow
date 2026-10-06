@@ -809,6 +809,20 @@ fn pull_requests_page_url(workspace: &str, repo: &str, scope: crate::ado::PrList
 }
 
 /// One page of the repository's pull requests.
+/// The open pull requests of a repository the signed-in account is a reviewer on.
+pub async fn review_requested_ids(workspace: &str, repo: &str, auth: &BitbucketAuth) -> Result<Vec<i64>, String> {
+    #[derive(Deserialize)]
+    struct Hit {
+        id: i64,
+    }
+    let me = get_authenticated_user(auth).await?;
+    let uuid = me.uuid.ok_or("Bitbucket did not say whose this token is, so it cannot tell which reviews are yours")?;
+    let query = format!("state=\"OPEN\" AND reviewers.uuid=\"{uuid}\"");
+    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    let raw: Paged<Hit> = get_json(&format!("{}/pullrequests?pagelen=50&q={encoded}", repo_root(workspace, repo)), auth).await?;
+    Ok(raw.values.into_iter().map(|hit| hit.id).collect())
+}
+
 pub async fn list_pull_requests_page(
     workspace: &str,
     repo: &str,

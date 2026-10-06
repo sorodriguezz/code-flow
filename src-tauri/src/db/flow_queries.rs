@@ -392,12 +392,59 @@ pub fn duplicate_flow(conn: &Connection, id: &str, name: &str) -> rusqlite::Resu
 pub fn delete_flow(conn: &Connection, id: &str) -> rusqlite::Result<usize> {
     let tx = conn.unchecked_transaction()?;
     version_queries::delete_versions(&tx, VERSION_KIND, id)?;
+    // The file stays in its repository; only the link to it goes.
+    tx.execute("DELETE FROM flow_repo_links WHERE flow_id = ?1", params![id])?;
     // Its executions have no foreign key to cascade from (see `add_flow_run_tables`); their files
     // are the caller's to remove, after the commit.
     super::flow_run_queries::delete_runs_of_flow(&tx, id)?;
     let deleted = tx.execute("DELETE FROM flows WHERE id = ?1", params![id])?;
     tx.commit()?;
     Ok(deleted)
+}
+
+// ---------- repository links ----------
+
+/// A flow linked to a file in one of the workspace's repositories — see `flows::repo`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoLink {
+    pub flow_id: String,
+    pub project_id: String,
+    pub path: String,
+    pub file_hash: String,
+    pub synced_at: String,
+}
+
+fn map_link(row: &rusqlite::Row) -> rusqlite::Result<RepoLink> {
+    Ok(RepoLink { flow_id: row.get(0)?, project_id: row.get(1)?, path: row.get(2)?, file_hash: row.get(3)?, synced_at: row.get(4)? })
+}
+
+pub fn repo_links(conn: &Connection) -> rusqlite::Result<Vec<RepoLink>> {
+    let mut statement = conn.prepare("SELECT flow_id, project_id, path, file_hash, synced_at FROM flow_repo_links")?;
+    let rows = statement.query_map([], map_link)?;
+    rows.collect()
+}
+
+pub fn repo_link(conn: &Connection, flow_id: &str) -> rusqlite::Result<Option<RepoLink>> {
+    conn.query_row("SELECT flow_id, project_id, path, file_hash, synced_at FROM flow_repo_links WHERE flow_id = ?1", params![flow_id], map_link)
+        .optional()
+}
+
+/// Links a flow to a file, or moves its link — a file is linked to one flow at most.
+pub fn put_repo_link(conn: &Connection, flow_id: &str, project_id: &str, path: &str, file_hash: &str) -> rusqlite::Result<RepoLink> {
+    let stamp = now();
+    conn.execute("DELETE FROM flow_repo_links WHERE project_id = ?1 AND path = ?2 AND flow_id != ?3", params![project_id, path, flow_id])?;
+    conn.execute(
+        "INSERT INTO flow_repo_links (flow_id, project_id, path, file_hash, synced_at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(flow_id) DO UPDATE SET project_id = ?2, path = ?3, file_hash = ?4, synced_at = ?5",
+        params![flow_id, project_id, path, file_hash, stamp],
+    )?;
+    Ok(RepoLink { flow_id: flow_id.into(), project_id: project_id.into(), path: path.into(), file_hash: file_hash.into(), synced_at: stamp })
+}
+
+pub fn delete_repo_link(conn: &Connection, flow_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM flow_repo_links WHERE flow_id = ?1", params![flow_id])?;
+    Ok(())
 }
 
 // ---------- folders ----------

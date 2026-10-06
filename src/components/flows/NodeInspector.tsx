@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { CircleAlert, CircleHelp, Copy, Pencil, Pin, PinOff, Play, Radio, X } from "lucide-react";
+import { CircleAlert, CircleHelp, Copy, Globe, Pencil, Pin, PinOff, Play, Radio, X } from "lucide-react";
 import { Button, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
@@ -8,8 +8,26 @@ import { AiGlyph, type AiGlyphName } from "../common/AiGlyph";
 import { DataModeSwitch, ItemsView, type DataMode } from "./DataView";
 import { ParamFields } from "./ParamFields";
 import { familyColor, nodeIcon } from "../../lib/flows/nodeIcons";
-import { RUNS_THROUGH, hasErrorOutput, outputCount, renameNode, setNodeParam, setNodeSettings, type FlowNodeSpec } from "../../lib/flows/spec";
-import { flowsRunNodeData, type FlowNodeData, type FlowNodeDescriptor, type FlowRunNodeRow } from "../../lib/tauri/flowsCommands";
+import {
+  RUNS_THROUGH,
+  baseOutputCount,
+  hasErrorOutput,
+  inputCount,
+  outputCount,
+  portLabels,
+  portText,
+  renameNode,
+  setNodeParam,
+  setNodeSettings,
+  type FlowNodeSpec,
+} from "../../lib/flows/spec";
+import {
+  flowsCliCommand,
+  flowsRunNodeData,
+  type FlowNodeData,
+  type FlowNodeDescriptor,
+  type FlowRunNodeRow,
+} from "../../lib/tauri/flowsCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowsStore } from "../../state/flowsStore";
@@ -56,7 +74,7 @@ function useNodeData(runId: string | null, node: FlowRunNodeRow | undefined): { 
 }
 
 function portName(label: string, t: ReturnType<typeof useT>): string {
-  return /^[0-9A-Z]$/.test(label) ? label : t(`flows.port.${label}` as TranslationKey);
+  return portText(label, (key) => t(key as TranslationKey));
 }
 
 function PortTabs({ labels, counts, active, onChange }: { labels: string[]; counts: number[]; active: number; onChange: (port: number) => void }) {
@@ -156,7 +174,7 @@ export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onC
   useEffect(() => {
     if (!live || !descriptor || record?.status === "success" || record?.status === "error" || parentLinks.length === 0) return;
     let alive = true;
-    const ports: unknown[][] = Array.from({ length: Math.max(descriptor.inputs, 1) }, () => []);
+    const ports: unknown[][] = Array.from({ length: Math.max(node ? inputCount(node, descriptor) : descriptor.inputs, 1) }, () => []);
     const counts = ports.map(() => 0);
     void Promise.all(
       parentLinks.map(async (link) => {
@@ -189,12 +207,15 @@ export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onC
   const outputs: unknown[][] = pinned ?? own.data?.outputs ?? [];
   const outputCounts = pinned ? pinned.map((port) => port.length) : own.data?.outputCounts ?? [];
 
+  const labels = portLabels(node, descriptor);
+  const inputTotal = inputCount(node, descriptor);
   const inputLabels =
-    descriptor.inputLabels.length > 0 ? descriptor.inputLabels.map((l) => portName(l, t)) : descriptor.inputs > 1 ? Array.from({ length: descriptor.inputs }, (_, i) => String(i + 1)) : [""];
+    labels.inputs.length > 0 ? labels.inputs.map((l) => portName(l, t)) : inputTotal > 1 ? Array.from({ length: inputTotal }, (_, i) => String(i + 1)) : [""];
   const ports = outputCount(node, descriptor);
+  const baseOutputs = baseOutputCount(node, descriptor);
   const outputLabels = Array.from({ length: ports }, (_, index) => {
-    if (hasErrorOutput(node, descriptor) && index === descriptor.outputs) return t("flows.port.error");
-    const label = descriptor.outputLabels[index];
+    if (hasErrorOutput(node, descriptor) && index === baseOutputs) return t("flows.port.error");
+    const label = labels.outputs[index];
     return label ? portName(label, t) : ports > 1 ? String(index + 1) : "";
   });
 
@@ -349,7 +370,7 @@ export default function NodeInspector({ nodeId, onClose }: { nodeId: string; onC
                 typeId={node.type}
                 onChange={(name, value) => {
                   const doc = spec();
-                  if (doc) edit(setNodeParam(doc, nodeId, name, value));
+                  if (doc) edit(setNodeParam(doc, nodeId, name, value, catalogMap));
                 }}
               />
             ) : (
@@ -479,6 +500,23 @@ function TriggerInfo({ flowId, node }: { flowId: string; node: FlowNodeSpec }) {
           </button>
         </span>
       )}
+      {listening && view?.publicUrl && (
+        // The same webhook on the internet, through the tunnel opened in Programación.
+        <span className="flex min-w-0 items-center gap-1.5">
+          <Globe size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+          <code className="min-w-0 flex-1 truncate text-[11.5px]">{view.publicUrl}</code>
+          <button
+            type="button"
+            className={iconButtonClass({ size: "xs" })}
+            title={t("flows.tunnel.copyPublic")}
+            aria-label={t("flows.tunnel.copyPublic")}
+            onClick={() => void navigator.clipboard?.writeText(view.publicUrl ?? "").then(() => pushSuccessToast(t("flows.schedule.copied")))}
+          >
+            <Copy size={12} />
+          </button>
+        </span>
+      )}
+      {listening && node.type === "trigger.link" && view?.detail && <LinkCommand name={view.detail.replace(/^codeflow --flow /, "")} />}
       {listening && view?.next && (
         <span className="text-[var(--cf-text-muted)]">
           {t("flows.trigger.next", { at: new Date(view.next).toLocaleString(language, { weekday: "short", hour: "2-digit", minute: "2-digit" }) })}
@@ -486,6 +524,35 @@ function TriggerInfo({ flowId, node }: { flowId: string; node: FlowNodeSpec }) {
       )}
       {view?.problem && <span className="text-[var(--cf-danger)]">{view.problem}</span>}
     </div>
+  );
+}
+
+/** The exact command line that starts this flow — this build's own executable, for a terminal, a
+ *  git hook or a launcher (Raycast, Alfred, Atajos). */
+function LinkCommand({ name }: { name: string }) {
+  const t = useT();
+  const [command, setCommand] = useState("");
+  useEffect(() => {
+    let alive = true;
+    void flowsCliCommand(name).then((text) => alive && setCommand(text)).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [name]);
+  if (!command) return null;
+  return (
+    <span className="flex min-w-0 items-center gap-1.5">
+      <code className="min-w-0 flex-1 truncate text-[11.5px]" title={command}>{command}</code>
+      <button
+        type="button"
+        className={iconButtonClass({ size: "xs" })}
+        title={t("flows.link.copy")}
+        aria-label={t("flows.link.copy")}
+        onClick={() => void navigator.clipboard?.writeText(command).then(() => pushSuccessToast(t("flows.schedule.copied")))}
+      >
+        <Copy size={12} />
+      </button>
+    </span>
   );
 }
 

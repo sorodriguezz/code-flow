@@ -1,6 +1,7 @@
 {
   "id": "notion",
   "name": "Notion",
+  "group": "appsProjects",
   "baseUrl": "https://api.notion.com/v1",
   "auth": "bearer",
   "authHint": { "es": "Token de una integración interna como credencial Bearer", "en": "An internal integration token as a Bearer credential" },

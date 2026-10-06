@@ -55,6 +55,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "ai.local" => local(ctx).await,
         "ai.classify" => classify(ctx).await,
         "ai.extract" => extract(ctx).await,
+        "ai.vision" => vision(ctx).await,
         "ai.summarize" => summarize(ctx).await,
         "ai.review" => review(ctx).await,
         "ai.prReview" => pr_review(ctx).await,
@@ -789,6 +790,11 @@ async fn classify(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
     let items = ctx.items();
     let mut out = Vec::with_capacity(resolved.len());
+    // Routed by category: one port per category in the listed order, then "other" when it is
+    // allowed — exactly the ports `catalog::output_count` gave the canvas.
+    let branch = crate::flows::catalog::routes_by_category(&ctx.params);
+    let port_count = crate::flows::catalog::output_count("ai.classify", &ctx.params) as usize;
+    let mut ports: Ports = if branch { vec![Vec::new(); port_count] } else { Vec::new() };
     for (index, params) in resolved.iter().enumerate() {
         let subject = text(params, "text");
         if subject.trim().is_empty() {
@@ -810,9 +816,34 @@ async fn classify(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let answer = if multiple { object.get("categories").cloned() } else { object.get("category").cloned() }.unwrap_or(Value::Null);
         let target = ctx.param_str("target");
         let target = if target.trim().is_empty() { if multiple { "categories" } else { "category" }.to_string() } else { target };
-        out.push(output_item(ctx, index, with_answer(items.get(index).copied(), &target, answer)));
+        let chosen: Vec<String> = match &answer {
+            Value::Array(list) => list.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            Value::String(one) => vec![one.clone()],
+            _ => Vec::new(),
+        };
+        let item = output_item(ctx, index, with_answer(items.get(index).copied(), &target, answer));
+        if branch {
+            let other = if allow_other { Some(port_count - 1) } else { None };
+            let mut sent = false;
+            for name in &chosen {
+                let at = listed.iter().position(|(listed_name, _)| listed_name == name).filter(|at| *at < port_count - usize::from(allow_other));
+                if let Some(at) = at.or(if name == OTHER_CATEGORY { other } else { None }) {
+                    if !ports[at].iter().any(|i: &Item| i.paired == item.paired && i.json == item.json) {
+                        ports[at].push(item.clone());
+                    }
+                    sent = true;
+                }
+            }
+            if !sent {
+                if let Some(other) = other {
+                    ports[other].push(item);
+                }
+            }
+        } else {
+            out.push(item);
+        }
     }
-    Ok(vec![out])
+    Ok(if branch { ports } else { vec![out] })
 }
 
 async fn extract(ctx: &NodeCtx) -> Result<Ports, NodeError> {
@@ -832,6 +863,106 @@ async fn extract(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         );
         let (_, object) = ask_text(ctx, prompt, subject, Some(schema.clone())).await?;
         out.push(output_item(ctx, index, with_answer(items.get(index).copied(), &ctx.param_str("target"), object.unwrap_or_default())));
+    }
+    Ok(vec![out])
+}
+
+/// «Ver una imagen»: the file handed to whichever engine the node names (`nodes::vision`). A CLI
+/// engine reads it from the scratch folder with its own read tool — read-only, as every shortcut.
+async fn vision(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let task = ctx.param_str("visionTask");
+    let via = ctx.param_str("visionEngine");
+    let schema = match task.as_str() {
+        "visionExtract" => Some(schema::from_fields(ctx.params.get("schemaFields").unwrap_or(&Value::Null)).map_err(NodeError::Failed)?),
+        _ => None,
+    };
+    if via == "visionSystem" && !matches!(task.as_str(), "" | "visionOcr") {
+        return Err(NodeError::failed("The system's OCR only transcribes text — pick an AI engine to describe, ask or extract"));
+    }
+    let resolved = ctx.resolve_each().await?;
+    let items = ctx.items();
+    let target = or(&ctx.param_str("target"), "vision");
+    let mut out = Vec::with_capacity(resolved.len());
+    for (index, params) in resolved.iter().enumerate() {
+        let path = super::vision::source(ctx, params, index).await?;
+        let pdf = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+        let mut prompt = super::vision::task_prompt(&task, &text(params, "question"), &text(params, "instructions"), if pdf { "el PDF" } else { "la imagen" });
+        if let Some(schema) = &schema {
+            prompt.push_str(&schema_instruction(schema));
+        }
+        let started = Instant::now();
+        let (answer, meta) = match via.as_str() {
+            "visionApi" | "visionLocal" => {
+                let media = super::vision::media(&path)?;
+                let by_api = via == "visionApi";
+                let call = |prompt: String| {
+                    let media = media.clone();
+                    let schema = schema.clone();
+                    async move {
+                        if by_api {
+                            super::vision::api(ctx, params, &media, &prompt, schema.as_ref()).await
+                        } else {
+                            super::vision::local(ctx, params, &media, &prompt, schema.as_ref()).await
+                        }
+                    }
+                };
+                let seen = call(prompt.clone()).await?;
+                match &schema {
+                    None => (json!(seen.text.trim()), seen.meta),
+                    Some(schema) => {
+                        let (object, problems) = problems_of(&seen.text, schema);
+                        match object {
+                            Some(object) if problems.is_empty() => (object, seen.meta),
+                            _ => {
+                                ctx.log(LogStream::Info, &format!("The answer did not follow the schema ({}) — asking once more", problems.join("; ")));
+                                let previous: String = seen.text.chars().take(4_000).collect();
+                                let retry = format!(
+                                    "{prompt}\n\nTu respuesta anterior no cumplió el esquema:\n- {}\n\nRespuesta anterior:\n{previous}\n\nResponde de nuevo SOLO con el objeto JSON corregido.",
+                                    problems.join("\n- ")
+                                );
+                                let again = call(retry).await?;
+                                let (object, problems) = problems_of(&again.text, schema);
+                                match object {
+                                    Some(object) if problems.is_empty() => (object, again.meta),
+                                    _ => return Err(NodeError::failed(format!("The answer did not follow the schema, even after a retry: {}", problems.join("; ")))),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "visionSystem" => {
+                let seen = super::vision::system_ocr(ctx, params, &path).await?;
+                (json!(seen.text), seen.meta)
+            }
+            _ => {
+                // The engine's own read tool opens the file — copied in, so the folder stays the run's.
+                let folder = scratch(ctx)?;
+                let name = format!("{index}-{}", super::google::safe_name(&path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "imagen".into())));
+                std::fs::copy(&path, Path::new(&folder).join(&name)).map_err(|e| NodeError::failed(format!("Could not hand {} to the model: {e}", path.display())))?;
+                let full = format!(
+                    "{prompt}\n\nEl archivo es «{name}», en tu carpeta de trabajo: ábrelo con tu herramienta para leer archivos (lee imágenes y PDF). No uses otra fuente."
+                );
+                let engines = engines(&ctx.params);
+                let question = Ask { prompt: full, data: String::new(), cwd: Some(folder), schema: schema.clone(), ..Default::default() };
+                let (reply, used) = ask(ctx, &engines, &question).await?;
+                let (reply, answer) = match &schema {
+                    Some(_) => conform(ctx, &engines, &question, reply, used).await?,
+                    None => {
+                        let text = json!(reply.text.trim());
+                        (reply, text)
+                    }
+                };
+                let mut meta = Map::new();
+                reply.stamp(&mut meta, started);
+                (answer, meta)
+            }
+        };
+        let mut json = with_answer(items.get(index).copied(), &target, answer);
+        if let Value::Object(map) = &mut json {
+            map.entry("ai").or_insert(Value::Object(meta));
+        }
+        out.push(output_item(ctx, index, json));
     }
     Ok(vec![out])
 }

@@ -1,4 +1,5 @@
-//! Shell, Python, Node, Command and Script — every node that starts a process.
+//! Shell, Python, Node, Command, Script and macOS automation (Shortcuts, AppleScript, JXA) — every
+//! node that starts a process.
 //!
 //! **Items in, items out, through the pipes.** The input items go to the process as a JSON array
 //! on stdin (one array per run, or a one-item array per item with "for each item"), and what the
@@ -13,6 +14,11 @@
 //!
 //! Scripts are written to files in the run's work directory and run from there — never passed in
 //! argv, where a long script meets the platform's limit and every script shows up in `ps`.
+//!
+//! **Packages.** A Python or Node node may name packages. Python's run through `uv run --with` when
+//! uv is installed, or in a virtual environment made once per set under the app's cache; Node's are
+//! installed once per set into a cache folder the script is written under (so its imports resolve
+//! there), Deno's go in an import map of `npm:` specifiers, and Bun installs on import by itself.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -223,6 +229,70 @@ fn python_interpreter(params: &Value, cwd: &Path) -> Result<PathBuf, NodeError> 
         .ok_or_else(|| NodeError::failed("No Python was found: install python3 or name an interpreter"))
 }
 
+/// Environments are made one at a time: two runs asking for the same set must not both install it.
+static PREPARING: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// A set of packages, as the folder name its environment lives under.
+fn package_key(packages: &[String], salt: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<String> = packages.iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+    sorted.sort();
+    sorted.dedup();
+    let digest = Sha256::digest(format!("{salt}\n{}", sorted.join("\n")).as_bytes());
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// A virtual environment of its own for `packages`, made with `base` once and kept in the cache.
+async fn python_env(ctx: &NodeCtx, base: &Path, packages: &[String]) -> Result<PathBuf, NodeError> {
+    let dir = crate::paths::cache_dir().join("flows").join("python").join(package_key(packages, &base.to_string_lossy()));
+    let python = if cfg!(windows) { dir.join("Scripts").join("python.exe") } else { dir.join("bin").join("python") };
+    let ready = dir.join(".codeflow-ready");
+    let _turn = PREPARING.lock().await;
+    if ready.is_file() && python.is_file() {
+        return Ok(python);
+    }
+    ctx.log(LogStream::Info, &format!("Preparing a Python environment with {} — once, then reused", packages.join(", ")));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| NodeError::failed(format!("Could not prepare {}: {e}", dir.display())))?;
+    run_program(ctx, &base.to_string_lossy(), vec!["-m".into(), "venv".into(), dir.to_string_lossy().into_owned()], None, Vec::new(), None)
+        .await?
+        .ok_or_fail("python -m venv")?;
+    let mut args: Vec<String> = ["-m", "pip", "install", "--disable-pip-version-check", "--quiet"].iter().map(|s| s.to_string()).collect();
+    args.extend(packages.iter().cloned());
+    run_program(ctx, &python.to_string_lossy(), args, Some(dir.clone()), Vec::new(), None).await?.ok_or_fail("pip install")?;
+    write_file(&ready, "")?;
+    Ok(python)
+}
+
+/// A cache folder with `packages` installed by npm, made once per set.
+async fn node_env(ctx: &NodeCtx, packages: &[String]) -> Result<PathBuf, NodeError> {
+    let dir = crate::paths::cache_dir().join("flows").join("node").join(package_key(packages, "npm"));
+    let ready = dir.join(".codeflow-ready");
+    let _turn = PREPARING.lock().await;
+    if ready.is_file() {
+        return Ok(dir);
+    }
+    ctx.log(LogStream::Info, &format!("Installing {} for the node — once, then reused", packages.join(", ")));
+    std::fs::create_dir_all(&dir).map_err(|e| NodeError::failed(format!("Could not prepare {}: {e}", dir.display())))?;
+    write_file(&dir.join("package.json"), "{\"name\": \"codeflow-flow-packages\", \"private\": true}\n")?;
+    let mut args: Vec<String> = ["install", "--no-audit", "--no-fund", "--loglevel=error"].iter().map(|s| s.to_string()).collect();
+    args.extend(packages.iter().cloned());
+    run_program(ctx, "npm", args, Some(dir.clone()), Vec::new(), None).await?.ok_or_fail("npm install")?;
+    write_file(&ready, "")?;
+    Ok(dir)
+}
+
+/// `lodash@4`, `@scope/pkg@^2` → the name an import uses and Deno's `npm:` specifier for it.
+pub fn deno_import(spec: &str) -> (String, String) {
+    let spec = spec.trim();
+    let split_at = if let Some(rest) = spec.strip_prefix('@') { rest.find('@').map(|i| i + 1) } else { spec.find('@') };
+    let name = match split_at {
+        Some(at) => spec[..at].to_string(),
+        None => spec.to_string(),
+    };
+    (name, format!("npm:{spec}"))
+}
+
 /// The package manager a folder uses, by its lockfile.
 fn package_manager(cwd: &Path) -> &'static str {
     if cwd.join("pnpm-lock.yaml").is_file() {
@@ -292,18 +362,29 @@ async fn build(ctx: &NodeCtx, params: &Value, stdin: Vec<u8>, items: &[&Value], 
             let dir = script_dir(ctx, index)?;
             let file = dir.join("main.py");
             write_file(&file, &code)?;
-            let program = python_interpreter(params, &cwd)?;
+            let mut program = python_interpreter(params, &cwd)?;
             env.push(("PYTHONUNBUFFERED".into(), "1".into()));
             env.push(("PYTHONIOENCODING".into(), "utf-8".into()));
-            let label = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "python".into());
-            Invocation {
-                program,
-                args: vec!["-c".into(), PYTHON_PRELUDE.into(), file.to_string_lossy().into_owned()],
-                cwd,
-                env,
-                stdin: Some(stdin),
-                label,
+            let mut args = vec!["-c".to_string(), PYTHON_PRELUDE.into(), file.to_string_lossy().into_owned()];
+            let packages = strings(params, "packages");
+            if !packages.is_empty() {
+                match which("uv") {
+                    // uv resolves the set into an environment of its own, cached by uv itself.
+                    Some(uv) => {
+                        let mut lead = vec!["run".to_string(), "--no-project".into(), "--quiet".into(), "--python".into(), program.to_string_lossy().into_owned()];
+                        for package in &packages {
+                            lead.extend(["--with".to_string(), package.clone()]);
+                        }
+                        lead.push("python".into());
+                        lead.extend(args);
+                        args = lead;
+                        program = uv;
+                    }
+                    None => program = python_env(ctx, &program, &packages).await?,
+                }
             }
+            let label = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "python".into());
+            Invocation { program, args, cwd, env, stdin: Some(stdin), label }
         }
         "code.node" => {
             let code = text(params, "code");
@@ -316,7 +397,16 @@ async fn build(ctx: &NodeCtx, params: &Value, stdin: Vec<u8>, items: &[&Value], 
                 _ => "node",
             };
             let typescript = text(params, "language") == "typescript";
-            let dir = script_dir(ctx, index)?;
+            let packages = strings(params, "packages");
+            // Node resolves a bare import from the script's own folder up: with packages, the script
+            // is written under the folder they were installed in.
+            let dir = if !packages.is_empty() && runtime == "node" {
+                let dir = node_env(ctx, &packages).await?.join("scripts").join(format!("{}-{}-{index}", ctx.run.flow_id, ctx.node.id));
+                std::fs::create_dir_all(&dir).map_err(|e| NodeError::failed(format!("Could not prepare a work folder: {e}")))?;
+                dir
+            } else {
+                script_dir(ctx, index)?
+            };
             let main = match (runtime, typescript) {
                 (_, false) => "main.mjs",
                 ("node", true) => "main.mts",
@@ -330,12 +420,19 @@ async fn build(ctx: &NodeCtx, params: &Value, stdin: Vec<u8>, items: &[&Value], 
             let entry = dir.join("run.mjs");
             write_file(&entry, &wrapper)?;
             let entry = entry.to_string_lossy().into_owned();
-            let args = match (runtime, typescript) {
+            let mut args = match (runtime, typescript) {
                 ("node", true) => vec!["--experimental-strip-types".into(), "--disable-warning=ExperimentalWarning".into(), entry],
                 ("node", false) => vec![entry],
                 ("deno", _) => vec!["run".into(), "-A".into(), "--quiet".into(), entry],
                 _ => vec!["run".into(), entry],
             };
+            if runtime == "deno" && !packages.is_empty() {
+                // Deno finds its config from the working directory, not the script's: named outright.
+                let imports: serde_json::Map<String, Value> = packages.iter().map(|spec| deno_import(spec)).map(|(name, target)| (name, json!(target))).collect();
+                let config = dir.join("deno.json");
+                write_file(&config, &serde_json::to_string_pretty(&json!({"imports": imports})).unwrap_or_default())?;
+                args.insert(1, format!("--config={}", config.to_string_lossy()));
+            }
             Invocation { program: require(runtime)?, args, cwd, env, stdin: Some(stdin), label: runtime.into() }
         }
         "code.command" => {
@@ -409,6 +506,52 @@ async fn build(ctx: &NodeCtx, params: &Value, stdin: Vec<u8>, items: &[&Value], 
                     }
                     let label = format!("{tool} {}", lead.join(" "));
                     Invocation { program: require(tool)?, args: lead, cwd, env, stdin: None, label }
+                }
+            }
+        }
+        "code.osascript" => {
+            if !cfg!(target_os = "macos") {
+                return Err(NodeError::failed("Shortcuts, AppleScript and JXA run only on macOS"));
+            }
+            let dir = script_dir(ctx, index)?;
+            // The items as the script's argument: one item's JSON, or the list with "once".
+            let data = (if items.len() == 1 { serde_json::to_string(items[0]) } else { serde_json::to_string(items) }).unwrap_or_else(|_| "{}".into());
+            match text(params, "osaKind").as_str() {
+                kind @ ("applescript" | "jxa") => {
+                    let jxa = kind == "jxa";
+                    let script = text(params, if jxa { "jxaScript" } else { "appleScript" });
+                    if script.trim().is_empty() {
+                        return Err(NodeError::failed("The script is empty"));
+                    }
+                    let file = dir.join(if jxa { "script.js" } else { "script.applescript" });
+                    write_file(&file, &script)?;
+                    let mut args = Vec::new();
+                    if jxa {
+                        args.extend(["-l".to_string(), "JavaScript".into()]);
+                    }
+                    args.extend([file.to_string_lossy().into_owned(), data]);
+                    Invocation { program: require("osascript")?, args, cwd, env, stdin: None, label: "osascript".into() }
+                }
+                _ => {
+                    let name = text(params, "shortcutName").trim().to_string();
+                    if name.is_empty() {
+                        return Err(NodeError::failed("Name the shortcut to run (as it is called in Shortcuts)"));
+                    }
+                    let input = dir.join("input.txt");
+                    let given = text(params, "shortcutInput");
+                    write_file(&input, if given.trim().is_empty() { &data } else { &given })?;
+                    let output = dir.join("output");
+                    let _ = std::fs::remove_file(&output);
+                    // `shortcuts` writes its result to a file: printed after, so it reads as stdout.
+                    let args = vec![
+                        "-c".to_string(),
+                        "shortcuts run \"$1\" --input-path \"$2\" --output-path \"$3\" && if [ -f \"$3\" ]; then cat \"$3\"; fi".into(),
+                        "shortcut".into(),
+                        name.clone(),
+                        input.to_string_lossy().into_owned(),
+                        output.to_string_lossy().into_owned(),
+                    ];
+                    Invocation { program: require("sh")?, args, cwd, env, stdin: None, label: format!("shortcuts run {name}") }
                 }
             }
         }

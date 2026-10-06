@@ -1,0 +1,53 @@
+{
+  "id": "whatsapp",
+  "name": "WhatsApp",
+  "group": "appsChat",
+  "baseUrl": "https://graph.facebook.com/v23.0/{{phoneNumberId}}",
+  "auth": "bearer",
+  "authHint": { "es": "Un token de acceso de la WhatsApp Cloud API (de un usuario del sistema en Meta Business) como credencial Token", "en": "A WhatsApp Cloud API access token (from a Meta Business system user) as a Token credential" },
+  "siteField": { "name": "phoneNumberId", "label": { "es": "Id del número de teléfono (no el número)", "en": "Phone number id (not the number)" }, "placeholder": "106540352242922", "required": true },
+  "errorField": "error.message",
+  "operations": [
+    {
+      "id": "sendText",
+      "name": { "es": "Enviar un mensaje", "en": "Send a message" },
+      "method": "POST",
+      "path": "/messages",
+      "fields": [
+        { "name": "to", "label": { "es": "Para (código de país y número)", "en": "To (country code and number)" }, "placeholder": "56912345678", "required": true },
+        { "name": "text", "label": { "es": "Mensaje (dentro de las 24 h de su último mensaje)", "en": "Message (within 24 h of their last one)" }, "multiline": true, "required": true },
+        { "name": "previewUrl", "label": { "es": "Vista previa de enlaces (true/false)", "en": "Link previews (true/false)" }, "placeholder": "false", "json": true }
+      ],
+      "body": { "messaging_product": "whatsapp", "recipient_type": "individual", "to": "{{to}}", "type": "text", "text": { "body": "{{text}}", "preview_url": "{{previewUrl}}" } },
+      "result": "messages"
+    },
+    {
+      "id": "sendTemplate",
+      "name": { "es": "Enviar una plantilla aprobada", "en": "Send an approved template" },
+      "method": "POST",
+      "path": "/messages",
+      "fields": [
+        { "name": "to", "label": { "es": "Para (código de país y número)", "en": "To (country code and number)" }, "placeholder": "56912345678", "required": true },
+        { "name": "template", "label": { "es": "Plantilla", "en": "Template" }, "placeholder": "aviso_deploy", "required": true },
+        { "name": "language", "label": { "es": "Idioma de la plantilla", "en": "Template language" }, "placeholder": "es", "required": true },
+        { "name": "components", "label": { "es": "Componentes (JSON)", "en": "Components (JSON)" }, "placeholder": "[{\"type\": \"body\", \"parameters\": [{\"type\": \"text\", \"text\": \"v2.1\"}]}]", "multiline": true, "json": true }
+      ],
+      "body": { "messaging_product": "whatsapp", "to": "{{to}}", "type": "template", "template": { "name": "{{template}}", "language": { "code": "{{language}}" }, "components": "{{components}}" } },
+      "result": "messages"
+    },
+    {
+      "id": "sendMedia",
+      "name": { "es": "Enviar una imagen o un documento", "en": "Send an image or a document" },
+      "method": "POST",
+      "path": "/messages",
+      "fields": [
+        { "name": "to", "label": { "es": "Para (código de país y número)", "en": "To (country code and number)" }, "placeholder": "56912345678", "required": true },
+        { "name": "kind", "label": { "es": "Tipo (image, document, audio, video)", "en": "Kind (image, document, audio, video)" }, "placeholder": "document", "required": true },
+        { "name": "link", "label": { "es": "Archivo (URL pública)", "en": "File (public URL)" }, "placeholder": "https://example.com/informe.pdf", "required": true },
+        { "name": "caption", "label": { "es": "Texto", "en": "Caption" } }
+      ],
+      "body": { "messaging_product": "whatsapp", "to": "{{to}}", "type": "{{kind}}", "{{kind}}": { "link": "{{link}}", "caption": "{{caption}}" } },
+      "result": "messages"
+    }
+  ]
+}

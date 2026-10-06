@@ -95,4 +95,8 @@ export const MODE_KEY: Record<string, TranslationKey> = {
   manual: "flows.mode.manual",
   partial: "flows.mode.partial",
   step: "flows.mode.step",
+  trigger: "flows.mode.trigger",
+  subflow: "flows.mode.subflow",
+  error: "flows.mode.error",
+  retry: "flows.mode.retry",
 };

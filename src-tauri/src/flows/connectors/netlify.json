@@ -1,6 +1,7 @@
 {
   "id": "netlify",
   "name": "Netlify",
+  "group": "appsDevops",
   "baseUrl": "https://api.netlify.com/api/v1",
   "auth": "bearer",
   "authHint": { "es": "Un token de acceso personal de Netlify como credencial Token", "en": "A Netlify personal access token as a Token credential" },

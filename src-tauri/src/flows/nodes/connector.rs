@@ -46,10 +46,10 @@ async fn call(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError> {
     let call = params.get("call").cloned().unwrap_or(Value::Null);
     let (connector, operation) = chosen(&call)?;
     let values: Map<String, Value> = call.get("fields").and_then(Value::as_object).cloned().unwrap_or_default();
-    let credential = if connector.auth == "none" {
+    let id = text(params, "credential");
+    let credential = if connector.auth == "none" || (connector.auth_optional && id.trim().is_empty()) {
         None
     } else {
-        let id = text(params, "credential");
         if id.trim().is_empty() {
             return Err(NodeError::failed(format!("Pick the credential for {}", connector.name)));
         }
@@ -86,6 +86,9 @@ pub(super) fn request_for(
     timeout_ms: u64,
 ) -> Result<(HttpSendRequest, url::Url), NodeError> {
     for field in connector.fields_of(operation) {
+        if !field.default.is_empty() && is_blank(values.get(&field.name).unwrap_or(&Value::Null)) {
+            values.insert(field.name.clone(), Value::String(field.default.clone()));
+        }
         if field.required && is_blank(values.get(&field.name).unwrap_or(&Value::Null)) {
             return Err(NodeError::failed(format!("Fill in “{}”", field.label.en)));
         }
@@ -98,13 +101,21 @@ pub(super) fn request_for(
     }
     match (connector.auth.as_str(), credential) {
         ("none", _) => {}
+        (_, None) if connector.auth_optional => {}
         (_, None) => return Err(NodeError::failed(format!("Pick the credential for {}", connector.name))),
         // Signed below, with the rest of the headers.
-        ("bearer" | "basic", Some(_)) => {}
+        ("bearer", Some(_)) => {}
+        // The user is no secret (an email, Twilio's account SID): templates may place it.
+        ("basic", Some(credential)) => {
+            let user = credential.meta.get("user").and_then(Value::as_str).unwrap_or_default();
+            values.insert("user".into(), Value::String(user.trim().to_string()));
+        }
         ("path" | "url" | "headers", Some(credential)) => {
             values.insert("secret".into(), Value::String(credential.secret.trim().to_string()));
         }
-        ("query", Some(credential)) => {
+        // `query`: placed by `authQuery`; `body`: placed by the body template (Pushover's token and
+        // user key travel in the message itself).
+        ("query" | "body", Some(credential)) => {
             let user = credential.meta.get("user").and_then(Value::as_str).unwrap_or_default();
             values.insert("user".into(), Value::String(user.trim().to_string()));
             values.insert("secret".into(), Value::String(credential.secret.trim().to_string()));
@@ -130,10 +141,22 @@ pub(super) fn request_for(
         headers.push((name.clone(), connectors::splice(value.as_str().unwrap_or_default(), &values)));
     }
 
+    // A field marked `encode` is percent-encoded in the URL only — the body keeps it as written.
+    let mut path_values = values.clone();
+    for field in connector.fields_of(operation).into_iter().filter(|f| f.encode) {
+        if let Some(Value::String(raw)) = values.get(&field.name) {
+            // One segment: a space as `%20` (never the form's `+`), a `/` as `%2F`.
+            path_values.insert(field.name.clone(), Value::String(crate::oauth::urlencode(raw.trim())));
+        }
+    }
     let text = if operation.url.is_empty() {
-        format!("{}{}", connectors::splice(&connector.base_url, &values), connectors::splice(&operation.path, &values))
+        // A server written with its trailing slash (`https://ntfy.example.com/`) still takes the path.
+        let base = connectors::splice(&connector.base_url, &path_values);
+        let path = connectors::splice(&operation.path, &path_values);
+        let base = if path.starts_with('/') { base.trim_end_matches('/') } else { base.as_str() };
+        format!("{base}{path}")
     } else {
-        connectors::splice(&operation.url, &values)
+        connectors::splice(&operation.url, &path_values)
     };
     // What the error shows of a URL that does not parse: never the query, never a secret in it.
     let shown = || if matches!(connector.auth.as_str(), "path" | "url") { connector.name.clone() } else { text.split('?').next().unwrap_or_default().to_string() };
@@ -162,10 +185,23 @@ pub(super) fn request_for(
             }
         }
     }
-    let body = match &operation.body {
-        Some(template) => connectors::render(template, &values, &json_fields).map_err(NodeError::Failed)?.map(|v| v.to_string()),
+    let rendered = match &operation.body {
+        Some(template) => connectors::render(template, &values, &json_fields).map_err(NodeError::Failed)?,
         None => None,
     };
+    // A form body: the rendered object's fields as pairs, strings as they are, the rest as JSON text.
+    let urlencoded = if operation.form {
+        rendered.as_ref().and_then(Value::as_object).map(|fields| {
+            fields
+                .iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(name, value)| (name.clone(), value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())))
+                .collect::<Vec<_>>()
+        })
+    } else {
+        None
+    };
+    let body = if operation.form { None } else { rendered.map(|v| v.to_string()) };
     if body.is_some() && !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type")) {
         headers.push(("Content-Type".into(), "application/json".into()));
     }
@@ -180,17 +216,32 @@ pub(super) fn request_for(
         body_base64: None,
         body_file: None,
         form_data: None,
-        urlencoded: None,
+        urlencoded,
         auth: None,
         options: NetworkOptions { timeout_ms, max_response_bytes: 64 * 1024 * 1024, ..NetworkOptions::default() },
     };
     Ok((request, url))
 }
 
+/// An answer as JSON: one document, or — ntfy's poll — one per line (NDJSON) read as a list.
+fn parse_answer(body: &str) -> Value {
+    if body.trim().is_empty() {
+        return Value::Null;
+    }
+    if let Ok(value) = serde_json::from_str(body) {
+        return value;
+    }
+    let lines: Option<Vec<Value>> = body.lines().filter(|line| !line.trim().is_empty()).map(|line| serde_json::from_str(line).ok()).collect();
+    match lines {
+        Some(list) if !list.is_empty() => Value::Array(list),
+        _ => json!({"text": body}),
+    }
+}
+
 /// What a call hands on: the answer's useful part (`result`), one item per entry of a list. A
 /// failure is the service's own message — from `errorField`, or Slack's `ok: false`.
 pub(super) fn answer_items(connector: &Connector, operation: &Operation, status: u16, body: &str) -> Result<Vec<Value>, NodeError> {
-    let answer: Value = serde_json::from_str(body).unwrap_or_else(|_| if body.trim().is_empty() { Value::Null } else { json!({"text": body}) });
+    let answer = parse_answer(body);
     let error_text = || {
         let found = (!connector.error_field.is_empty()).then(|| crate::flows::value::get_path(&answer, &connector.error_field)).flatten();
         // A message, wherever the service keeps it: a string, a list of them, or objects with one.
@@ -400,12 +451,133 @@ mod tests {
         assert_eq!(body(&request), json!({"estado": "listo"}));
     }
 
+    fn basic(user: &str, secret: &str) -> Credential {
+        Credential { kind: "basic".into(), meta: json!({"user": user}), secret: secret.into() }
+    }
+
+    #[test]
+    fn ntfy_needs_no_credential_takes_its_default_server_and_reads_ndjson() {
+        let (connector, operation) = op("ntfy", "publish");
+        let (request, _) = request_for(connector, operation, values(json!({"topic": "deploys", "message": "Listo", "priority": "4", "server": ""})), None, 30_000).unwrap();
+        assert_eq!(request.url, "https://ntfy.sh/");
+        assert_eq!(header(&request, "Authorization"), None);
+        assert_eq!(body(&request), json!({"topic": "deploys", "message": "Listo", "priority": 4}));
+        // A protected server: the token signs it, and its trailing slash does not double the path's.
+        let (request, _) = request_for(
+            connector,
+            operation,
+            values(json!({"topic": "t", "message": "m", "server": "https://ntfy.example.com/"})),
+            Some(&token("tk_1", json!({}))),
+            30_000,
+        )
+        .unwrap();
+        assert_eq!(request.url, "https://ntfy.example.com/");
+        assert_eq!(header(&request, "Authorization"), Some("Bearer tk_1"));
+
+        let (connector, operation) = op("ntfy", "poll");
+        let (_, url) = request_for(connector, operation, values(json!({"topic": "mis avisos", "since": "1h"})), None, 30_000).unwrap();
+        assert_eq!(url.path(), "/mis%20avisos/json");
+        assert_eq!(query_of(&url, "poll").as_deref(), Some("1"));
+        let ndjson = "{\"id\":\"a\",\"event\":\"message\",\"message\":\"uno\"}\n{\"id\":\"b\",\"event\":\"message\",\"message\":\"dos\"}\n";
+        let items = answer_items(connector, operation, 200, ndjson).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1]["message"], "dos");
+    }
+
+    #[test]
+    fn pushover_and_twilio_post_forms_and_place_their_credential_where_each_wants_it() {
+        let (connector, operation) = op("pushover", "send");
+        let (request, _) =
+            request_for(connector, operation, values(json!({"message": "Build roto", "priority": "1", "title": ""})), Some(&basic("uKEY", "aTOKEN")), 30_000).unwrap();
+        assert_eq!(request.url, "https://api.pushover.net/1/messages.json");
+        assert_eq!(header(&request, "Authorization"), None, "the token travels in the body");
+        assert_eq!(request.body_text, None);
+        let pairs = request.urlencoded.clone().unwrap();
+        assert!(pairs.contains(&("token".into(), "aTOKEN".into())) && pairs.contains(&("user".into(), "uKEY".into())), "{pairs:?}");
+        assert!(pairs.contains(&("priority".into(), "1".into())));
+        assert!(!pairs.iter().any(|(name, _)| name == "title"), "an empty optional is left out");
+        let error = answer_items(connector, operation, 400, r#"{"user":"invalid","errors":["user identifier is invalid"],"status":0}"#).unwrap_err();
+        assert_eq!(error, NodeError::Failed("Pushover answered 400: user identifier is invalid".into()));
+
+        let (connector, operation) = op("twilio", "sendWhatsApp");
+        let (request, _) =
+            request_for(connector, operation, values(json!({"to": "+56912345678", "from": "+14155238886", "body": "Hola"})), Some(&basic("AC123", "secret")), 30_000)
+                .unwrap();
+        assert_eq!(request.url, "https://api.twilio.com/2010-04-01/Accounts/AC123/Messages.json");
+        assert!(header(&request, "Authorization").unwrap().starts_with("Basic "));
+        let pairs = request.urlencoded.clone().unwrap();
+        assert!(pairs.contains(&("To".into(), "whatsapp:+56912345678".into())), "{pairs:?}");
+        assert!(pairs.contains(&("Body".into(), "Hola".into())));
+    }
+
+    #[test]
+    fn gitlab_azure_devops_and_bitbucket_build_their_paths_and_bodies() {
+        let (connector, operation) = op("gitlab", "createIssue");
+        let (request, _) =
+            request_for(connector, operation, values(json!({"project": "acme/app", "title": "Falla el login", "labels": "bug"})), Some(&token("glpat-1", json!({}))), 30_000)
+                .unwrap();
+        assert_eq!(request.url, "https://gitlab.com/api/v4/projects/acme%2Fapp/issues", "an empty host is gitlab.com, the project one segment");
+        assert_eq!(body(&request), json!({"title": "Falla el login", "labels": "bug"}));
+        let (request, _) = request_for(connector, operation, values(json!({"host": "git.example.com", "project": "7", "title": "x"})), Some(&token("t", json!({}))), 30_000)
+            .unwrap();
+        assert_eq!(request.url, "https://git.example.com/api/v4/projects/7/issues");
+
+        let (connector, operation) = op("azuredevops", "createWorkItem");
+        let (request, _) = request_for(
+            connector,
+            operation,
+            values(json!({"organization": "acme", "project": "Web App", "type": "User Story", "title": "Login", "tags": ""})),
+            Some(&basic("", "pat")),
+            30_000,
+        )
+        .unwrap();
+        assert_eq!(request.url, "https://dev.azure.com/acme/Web%20App/_apis/wit/workitems/$User%20Story?api-version=7.1");
+        assert_eq!(header(&request, "Content-Type"), Some("application/json-patch+json"));
+        assert_eq!(body(&request), json!([{"op": "add", "path": "/fields/System.Title", "value": "Login"}]), "empty fields add no patch operation");
+        let expected = base64::engine::general_purpose::STANDARD.encode(":pat");
+        assert_eq!(header(&request, "Authorization"), Some(format!("Basic {expected}").as_str()));
+
+        let (connector, operation) = op("bitbucket", "createPullRequest");
+        let (request, _) = request_for(
+            connector,
+            operation,
+            values(json!({"workspace": "acme", "repo": "app", "title": "Login", "source": "feature/login"})),
+            Some(&basic("ana@example.com", "token")),
+            30_000,
+        )
+        .unwrap();
+        assert_eq!(request.url, "https://api.bitbucket.org/2.0/repositories/acme/app/pullrequests");
+        assert_eq!(body(&request), json!({"title": "Login", "source": {"branch": {"name": "feature/login"}}}));
+        let error = answer_items(connector, operation, 400, r#"{"type":"error","error":{"message":"Bad request"}}"#).unwrap_err();
+        assert_eq!(error, NodeError::Failed("Bitbucket answered 400: Bad request".into()));
+    }
+
+    #[test]
+    fn whatsapp_names_the_media_key_after_its_kind() {
+        let (connector, operation) = op("whatsapp", "sendMedia");
+        let (request, _) = request_for(
+            connector,
+            operation,
+            values(json!({"phoneNumberId": "1065", "to": "56912345678", "kind": "document", "link": "https://example.com/a.pdf"})),
+            Some(&token("EAAG", json!({}))),
+            30_000,
+        )
+        .unwrap();
+        assert_eq!(request.url, "https://graph.facebook.com/v23.0/1065/messages");
+        assert_eq!(
+            body(&request),
+            json!({"messaging_product": "whatsapp", "to": "56912345678", "type": "document", "document": {"link": "https://example.com/a.pdf"}})
+        );
+        let error = answer_items(connector, operation, 400, r#"{"error":{"message":"(#131030) Recipient phone number not in allowed list","code":131030}}"#).unwrap_err();
+        assert!(matches!(error, NodeError::Failed(ref text) if text.contains("allowed list")), "{error:?}");
+    }
+
     #[test]
     fn every_shipped_connector_reads_and_fits_a_credential_kind() {
         for connector in connectors::CONNECTORS.iter() {
             assert!(!connector.operations.is_empty(), "{} has no operations", connector.id);
             assert!(!connector.credential_kinds().is_empty() || connector.auth == "none", "{} signs in with nothing it knows", connector.id);
         }
-        assert_eq!(connectors::CONNECTORS.len(), 16);
+        assert_eq!(connectors::CONNECTORS.len(), 24);
     }
 }

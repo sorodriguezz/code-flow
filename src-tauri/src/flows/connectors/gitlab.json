@@ -1,0 +1,118 @@
+{
+  "id": "gitlab",
+  "name": "GitLab",
+  "group": "appsProjects",
+  "baseUrl": "https://{{host}}/api/v4",
+  "auth": "bearer",
+  "authHint": { "es": "Un token de acceso personal, de grupo o de proyecto (glpat-…) con el permiso api, como credencial Token", "en": "A personal, group or project access token (glpat-…) with the api scope, as a Token credential" },
+  "siteField": { "name": "host", "label": { "es": "Servidor (vacío = gitlab.com)", "en": "Server (empty = gitlab.com)" }, "placeholder": "gitlab.com", "default": "gitlab.com" },
+  "errorField": "message",
+  "operations": [
+    {
+      "id": "createIssue",
+      "name": { "es": "Crear un issue", "en": "Create an issue" },
+      "method": "POST",
+      "path": "/projects/{{project}}/issues",
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto (grupo/repo o id)", "en": "Project (group/repo or id)" }, "placeholder": "acme/app", "required": true, "encode": true },
+        { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
+        { "name": "description", "label": { "es": "Descripción (Markdown)", "en": "Description (Markdown)" }, "multiline": true },
+        { "name": "labels", "label": { "es": "Etiquetas, separadas por comas", "en": "Labels, comma separated" }, "placeholder": "bug,urgente" },
+        { "name": "dueDate", "label": { "es": "Vence (AAAA-MM-DD)", "en": "Due (YYYY-MM-DD)" }, "placeholder": "2026-10-31" }
+      ],
+      "body": { "title": "{{title}}", "description": "{{description}}", "labels": "{{labels}}", "due_date": "{{dueDate}}" }
+    },
+    {
+      "id": "commentIssue",
+      "name": { "es": "Comentar un issue", "en": "Comment on an issue" },
+      "method": "POST",
+      "path": "/projects/{{project}}/issues/{{iid}}/notes",
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto (grupo/repo o id)", "en": "Project (group/repo or id)" }, "placeholder": "acme/app", "required": true, "encode": true },
+        { "name": "iid", "label": { "es": "Número del issue", "en": "Issue number" }, "placeholder": "42", "required": true },
+        { "name": "body", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true, "required": true }
+      ],
+      "body": { "body": "{{body}}" }
+    },
+    {
+      "id": "updateIssue",
+      "name": { "es": "Cerrar, reabrir o editar un issue", "en": "Close, reopen or edit an issue" },
+      "method": "PUT",
+      "path": "/projects/{{project}}/issues/{{iid}}",
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto (grupo/repo o id)", "en": "Project (group/repo or id)" }, "placeholder": "acme/app", "required": true, "encode": true },
+        { "name": "iid", "label": { "es": "Número del issue", "en": "Issue number" }, "placeholder": "42", "required": true },
+        { "name": "stateEvent", "label": { "es": "Estado (close o reopen)", "en": "State (close or reopen)" }, "placeholder": "close" },
+        { "name": "title", "label": { "es": "Título nuevo", "en": "New title" } },
+        { "name": "addLabels", "label": { "es": "Sumar etiquetas, separadas por comas", "en": "Add labels, comma separated" } },
+        { "name": "removeLabels", "label": { "es": "Quitar etiquetas, separadas por comas", "en": "Remove labels, comma separated" } }
+      ],
+      "body": { "state_event": "{{stateEvent}}", "title": "{{title}}", "add_labels": "{{addLabels}}", "remove_labels": "{{removeLabels}}" }
+    },
+    {
+      "id": "listIssues",
+      "name": { "es": "Listar issues", "en": "List issues" },
+      "method": "GET",
+      "path": "/projects/{{project}}/issues",
+      "query": { "state": "{{state}}", "labels": "{{labels}}", "updated_after": "{{updatedAfter}}", "per_page": "{{perPage}}" },
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto (grupo/repo o id)", "en": "Project (group/repo or id)" }, "placeholder": "acme/app", "required": true, "encode": true },
+        { "name": "state", "label": { "es": "Estado (opened, closed, all)", "en": "State (opened, closed, all)" }, "placeholder": "opened" },
+        { "name": "labels", "label": { "es": "Etiquetas, separadas por comas", "en": "Labels, comma separated" }, "placeholder": "bug" },
+        { "name": "updatedAfter", "label": { "es": "Cambiados desde (ISO 8601)", "en": "Changed since (ISO 8601)" }, "placeholder": "2026-10-01T00:00:00Z" },
+        { "name": "perPage", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "20" }
+      ]
+    },
+    {
+      "id": "listMergeRequests",
+      "name": { "es": "Listar merge requests", "en": "List merge requests" },
+      "method": "GET",
+      "path": "/projects/{{project}}/merge_requests",
+      "query": { "state": "{{state}}", "target_branch": "{{targetBranch}}", "per_page": "{{perPage}}" },
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto (grupo/repo o id)", "en": "Project (group/repo or id)" }, "placeholder": "acme/app", "required": true, "encode": true },
+        { "name": "state", "label": { "es": "Estado (opened, merged, closed, all)", "en": "State (opened, merged, closed, all)" }, "placeholder": "opened" },
+        { "name": "targetBranch", "label": { "es": "Hacia la rama", "en": "Into branch" }, "placeholder": "main" },
+        { "name": "perPage", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "20" }
+      ]
+    },
+    {
+      "id": "commentMergeRequest",
+      "name": { "es": "Comentar un merge request", "en": "Comment on a merge request" },
+      "method": "POST",
+      "path": "/projects/{{project}}/merge_requests/{{iid}}/notes",
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto (grupo/repo o id)", "en": "Project (group/repo or id)" }, "placeholder": "acme/app", "required": true, "encode": true },
+        { "name": "iid", "label": { "es": "Número del merge request", "en": "Merge request number" }, "placeholder": "7", "required": true },
+        { "name": "body", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true, "required": true }
+      ],
+      "body": { "body": "{{body}}" }
+    },
+    {
+      "id": "runPipeline",
+      "name": { "es": "Lanzar un pipeline", "en": "Run a pipeline" },
+      "method": "POST",
+      "path": "/projects/{{project}}/pipeline",
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto (grupo/repo o id)", "en": "Project (group/repo or id)" }, "placeholder": "acme/app", "required": true, "encode": true },
+        { "name": "ref", "label": { "es": "Rama o tag", "en": "Branch or tag" }, "placeholder": "main", "required": true },
+        { "name": "variables", "label": { "es": "Variables (JSON)", "en": "Variables (JSON)" }, "placeholder": "[{\"key\": \"ENV\", \"value\": \"prod\"}]", "json": true }
+      ],
+      "body": { "ref": "{{ref}}", "variables": "{{variables}}" }
+    },
+    {
+      "id": "createRelease",
+      "name": { "es": "Crear una release", "en": "Create a release" },
+      "method": "POST",
+      "path": "/projects/{{project}}/releases",
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto (grupo/repo o id)", "en": "Project (group/repo or id)" }, "placeholder": "acme/app", "required": true, "encode": true },
+        { "name": "tag", "label": { "es": "Tag", "en": "Tag" }, "placeholder": "v1.4.0", "required": true },
+        { "name": "ref", "label": { "es": "Desde (si el tag no existe)", "en": "From (if the tag does not exist)" }, "placeholder": "main" },
+        { "name": "name", "label": { "es": "Nombre", "en": "Name" } },
+        { "name": "description", "label": { "es": "Notas (Markdown)", "en": "Notes (Markdown)" }, "multiline": true }
+      ],
+      "body": { "tag_name": "{{tag}}", "ref": "{{ref}}", "name": "{{name}}", "description": "{{description}}" }
+    }
+  ]
+}

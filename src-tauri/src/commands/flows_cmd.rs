@@ -498,6 +498,68 @@ pub fn flows_run(app: AppHandle, flow_id: String, mode: RunMode, trigger: Option
     runs::start(&app, &flow_id, mode, trigger, input)
 }
 
+/// The window said yes to a `codeflow --flow` that asked first.
+#[tauri::command]
+pub fn flows_confirm_link(app: AppHandle, flow_id: String, node_id: String, item: serde_json::Value) -> Result<(), String> {
+    crate::flows::triggers::watchers::confirm_link(&app, &flow_id, &node_id, item)
+}
+
+/// How to start a flow from outside: this build's own executable with `--flow <name>`.
+#[tauri::command]
+pub fn flows_cli_command(name: String) -> String {
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "codeflow".into());
+    let quoted = if exe.contains(' ') { format!("\"{exe}\"") } else { exe };
+    format!("{quoted} --flow {name}")
+}
+
+/// The MCP server's address, its token and the tools on offer — see `flows::mcp`.
+#[tauri::command]
+pub fn flows_mcp_info() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "url": crate::flows::mcp::url(),
+        "token": crate::flows::mcp::token()?,
+        "tools": crate::flows::mcp::tools(),
+    }))
+}
+
+/// A new MCP token; clients configured with the old one are refused from now on.
+#[tauri::command]
+pub fn flows_mcp_rotate() -> Result<String, String> {
+    crate::flows::mcp::rotate()
+}
+
+/// The webhooks' public address, if a tunnel is up — see `flows::tunnel`.
+#[tauri::command]
+pub fn flows_tunnel_status() -> crate::flows::tunnel::TunnelStatus {
+    crate::flows::tunnel::status()
+}
+
+/// Turns the webhooks' tunnel on (`cloudflared`, `tailscale`) or `off`.
+#[tauri::command]
+pub fn flows_tunnel_set(app: AppHandle, kind: String) -> Result<crate::flows::tunnel::TunnelStatus, String> {
+    crate::flows::tunnel::set(&app, &kind)
+}
+
+/// An app event the *frontend* is the one to know about — an agents chain that finished is driven by
+/// the main window — handed to the "Evento de CodeFlow" triggers. Only the events listed here: the
+/// rest are raised in Rust where they happen.
+#[tauri::command]
+pub fn flows_app_event(app: AppHandle, event: String, payload: serde_json::Value) -> Result<(), String> {
+    const FROM_FRONTEND: &[&str] = &["agentChainFinished"];
+    if !FROM_FRONTEND.contains(&event.as_str()) {
+        return Err(format!("{event} is not an event the window raises"));
+    }
+    crate::flows::triggers::app_event(&app, &event, payload);
+    Ok(())
+}
+
+/// Starts a past run again — the same input, or (`from_failed`) from where it failed, reusing what
+/// succeeded. See `runs::retry`.
+#[tauri::command]
+pub fn flows_retry_run(app: AppHandle, run_id: String, from_failed: bool) -> Result<FlowRunRow, String> {
+    runs::retry(&app, &run_id, from_failed)
+}
+
 /// The main window's answer to a run's question (`flows::bridge`). `false` when nobody waits for it
 /// any more — the run ended, or the question timed out.
 #[tauri::command]
@@ -566,6 +628,190 @@ pub fn flows_import_flow(
     Ok(FlowImported { meta, notes })
 }
 
+// ------------------------------------------------------------------------------ in a repository
+
+/// A flow file of one of the workspace's repositories, and where it stands against its flow.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoFlowEntry {
+    project_id: String,
+    project_name: String,
+    #[serde(flatten)]
+    file: crate::flows::repo::FoundFile,
+    /// The flow linked to this file, if any.
+    flow_id: Option<String>,
+    /// The file changed on disk since it was last written or read here — a pull, a checkout.
+    file_changed: bool,
+    /// The flow was edited here since it was last saved to the file or brought from it.
+    flow_changed: bool,
+    /// The file the link points at is gone.
+    missing: bool,
+}
+
+/// Every flow file in the workspace's repositories (`.codeflow/flows/`), each with the flow linked
+/// to it and which side moved since they last agreed.
+#[tauri::command]
+pub fn flows_repo_scan(db: State<Db>, workspace_id: String) -> Result<Vec<RepoFlowEntry>, String> {
+    let (projects, links) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let projects = crate::db::queries::list_projects(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let links: Vec<(flow_queries::RepoLink, Option<String>)> = flow_queries::repo_links(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|link| {
+                let updated = flow_queries::get_flow(&conn, &link.flow_id).ok().flatten().map(|row| row.meta.updated_at);
+                (link, updated)
+            })
+            .collect();
+        (projects, links)
+    };
+    let mut out = Vec::new();
+    // Read outside the lock: a repository on a slow disk must not hold every other command.
+    for project in &projects {
+        let found = crate::flows::repo::scan(std::path::Path::new(&project.local_path));
+        for file in &found {
+            let link = links.iter().find(|(link, _)| link.project_id == project.id && link.path == file.path);
+            out.push(RepoFlowEntry {
+                project_id: project.id.clone(),
+                project_name: project.name.clone(),
+                flow_id: link.map(|(link, _)| link.flow_id.clone()),
+                file_changed: link.is_some_and(|(link, _)| link.file_hash != file.hash),
+                flow_changed: link.is_some_and(|(link, updated)| updated.as_deref().is_some_and(|at| at > link.synced_at.as_str())),
+                missing: false,
+                file: file.clone(),
+            });
+        }
+        for (link, updated) in links.iter().filter(|(link, _)| link.project_id == project.id && !found.iter().any(|f| f.path == link.path)) {
+            out.push(RepoFlowEntry {
+                project_id: project.id.clone(),
+                project_name: project.name.clone(),
+                file: crate::flows::repo::FoundFile {
+                    path: link.path.clone(),
+                    name: link.path.rsplit('/').next().unwrap_or_default().trim_end_matches(".json").to_string(),
+                    description: String::new(),
+                    node_count: 0,
+                    hash: String::new(),
+                    error: None,
+                },
+                flow_id: Some(link.flow_id.clone()),
+                file_changed: false,
+                flow_changed: updated.is_some(),
+                missing: true,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// A repository of the workspace and the root its files are under.
+fn repo_project(conn: &rusqlite::Connection, project_id: &str) -> Result<(crate::db::models::Project, std::path::PathBuf), String> {
+    let project = crate::db::queries::get_project(conn, project_id).map_err(|e| e.to_string())?.ok_or("That repository is no longer in CodeFlow")?;
+    let root = std::path::PathBuf::from(&project.local_path);
+    Ok((project, root))
+}
+
+/// A repository's flow file as a new flow of the workspace, linked to it — untrusted, inactive,
+/// credentials matched by name, like any import.
+#[tauri::command]
+pub fn flows_repo_import(db: State<Db>, workspace_id: String, project_id: String, path: String, folder_id: Option<String>) -> Result<FlowImported, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let (_, root) = repo_project(&conn, &project_id)?;
+    let path = crate::flows::repo::checked(&path)?;
+    let full = crate::flows::repo::file_in(&root, &path)?;
+    let bytes = std::fs::read(&full).map_err(|e| format!("Could not read {}: {e}", full.display()))?;
+    let (document, name, description, notes) = crate::flows::transfer::import(&conn, &workspace_id, &String::from_utf8_lossy(&bytes))?;
+    let stem = path.rsplit('/').next().unwrap_or("flujo").trim_end_matches(".json").trim_end_matches(".flow").to_string();
+    let name = clean_name(if name.trim().is_empty() { &stem } else { &name })?;
+    let text = serde_json::to_string(&document).map_err(|e| e.to_string())?;
+    let derived = spec::derive(&document);
+    let mut meta = flow_queries::create_flow(&conn, &workspace_id, folder_id.as_deref(), &name, &text, &derived, false).map_err(|e| e.to_string())?;
+    if !description.trim().is_empty() {
+        if let Some(updated) = flow_queries::set_description(&conn, &meta.id, description.trim()).map_err(|e| e.to_string())? {
+            meta = updated;
+        }
+    }
+    flow_queries::put_repo_link(&conn, &meta.id, &project_id, &path, &crate::flows::repo::hash(&bytes)).map_err(|e| e.to_string())?;
+    Ok(FlowImported { meta, notes })
+}
+
+/// Writes a flow into a repository — into the file it is linked to, or (`project_id`) a new one
+/// named after it in that repository's `.codeflow/flows/`. Refused with `changed` when the linked
+/// file moved on disk since this app last wrote or read it, unless `force`: a teammate's change is
+/// not overwritten without asking.
+#[tauri::command]
+pub fn flows_repo_save(db: State<Db>, flow_id: String, project_id: Option<String>, force: Option<bool>) -> Result<flow_queries::RepoLink, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let row = flow_queries::get_flow(&conn, &flow_id).map_err(|e| e.to_string())?.ok_or("This flow no longer exists")?;
+    let parsed = spec::parse(&row.spec)?;
+    let file = crate::flows::transfer::export(&conn, &row.meta.name, &row.meta.description, &parsed).map_err(|e| e.to_string())?;
+    let link = flow_queries::repo_link(&conn, &flow_id).map_err(|e| e.to_string())?;
+    let (project_id, path) = match (&link, project_id) {
+        (Some(link), None) => (link.project_id.clone(), link.path.clone()),
+        (Some(link), Some(project)) if link.project_id == project => (project, link.path.clone()),
+        (_, Some(project)) => {
+            let (_, root) = repo_project(&conn, &project)?;
+            let path = crate::flows::repo::free_path(&root, &row.meta.name);
+            (project, path)
+        }
+        (None, None) => return Err("Choose the repository to save the flow in".into()),
+    };
+    let (_, root) = repo_project(&conn, &project_id)?;
+    let full = crate::flows::repo::file_in(&root, &path)?;
+    if let (Some(link), false) = (&link, force.unwrap_or(false)) {
+        if link.path == path && full.is_file() {
+            let on_disk = std::fs::read(&full).map(|bytes| crate::flows::repo::hash(&bytes)).unwrap_or_default();
+            if on_disk != link.file_hash {
+                return Err("changed".into());
+            }
+        }
+    }
+    let hash = crate::flows::repo::write(&root, &path, &file)?;
+    flow_queries::put_repo_link(&conn, &flow_id, &project_id, &path, &hash).map_err(|e| e.to_string())
+}
+
+/// Brings a linked flow up to its file: the document replaced (credentials matched by name), its
+/// name and description too. Trust is not carried: a file that changed what the flow runs leaves it
+/// to be reviewed, and an active flow that can no longer arm is switched off with the reason.
+#[tauri::command]
+pub fn flows_repo_pull(app: AppHandle, db: State<Db>, flow_id: String) -> Result<FlowSaved, String> {
+    let mut saved = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let link = flow_queries::repo_link(&conn, &flow_id).map_err(|e| e.to_string())?.ok_or("This flow is not linked to a repository file")?;
+        let row = flow_queries::get_flow(&conn, &flow_id).map_err(|e| e.to_string())?.ok_or("This flow no longer exists")?;
+        let (_, root) = repo_project(&conn, &link.project_id)?;
+        let full = crate::flows::repo::file_in(&root, &link.path)?;
+        let bytes = std::fs::read(&full).map_err(|e| format!("Could not read {}: {e}", full.display()))?;
+        let (document, name, description, _) = crate::flows::transfer::import(&conn, &row.meta.workspace_id, &String::from_utf8_lossy(&bytes))?;
+        let text = serde_json::to_string(&document).map_err(|e| e.to_string())?;
+        let derived = spec::derive(&document);
+        let mut saved = flow_queries::save_spec(&conn, &flow_id, &text, &derived, None, false).map_err(|e| e.to_string())?;
+        if !name.trim().is_empty() && name.trim() != row.meta.name {
+            saved.meta = flow_queries::rename_flow(&conn, &flow_id, &clean_name(&name)?).map_err(|e| e.to_string())?.or(saved.meta);
+        }
+        if description.trim() != row.meta.description.trim() {
+            saved.meta = flow_queries::set_description(&conn, &flow_id, description.trim()).map_err(|e| e.to_string())?.or(saved.meta);
+        }
+        flow_queries::put_repo_link(&conn, &flow_id, &link.project_id, &link.path, &crate::flows::repo::hash(&bytes)).map_err(|e| e.to_string())?;
+        saved
+    };
+    if saved.meta.as_ref().is_some_and(|meta| meta.active) {
+        if let Err(error) = triggers::arm(&app, &flow_id) {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            saved.meta = flow_queries::set_active(&conn, &flow_id, false).map_err(|e| e.to_string())?;
+            triggers::disarm(&app, &flow_id);
+            saved.trigger_error = Some(error);
+        }
+    }
+    Ok(saved)
+}
+
+/// Forgets which file a flow came from or went to; the file stays where it is.
+#[tauri::command]
+pub fn flows_repo_unlink(db: State<Db>, flow_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_queries::delete_repo_link(&conn, &flow_id).map_err(|e| e.to_string())
+}
+
 /// Trusts what a flow runs, as reviewed: `exec_hash` is the hash the review was of, and a flow that
 /// changed since is refused with `changed` — what was looked at is not what it would run.
 #[tauri::command]
@@ -605,6 +851,15 @@ pub fn flows_active_runs(db: State<Db>, workspace_id: String) -> Result<Vec<Flow
 pub fn flows_list_runs(db: State<Db>, flow_id: String, limit: Option<i64>, before: Option<String>) -> Result<Vec<FlowRunRow>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     flow_run_queries::list_runs(&conn, &flow_id, limit.unwrap_or(50).clamp(1, 500), before.as_deref()).map_err(|e| e.to_string())
+}
+
+/// How a flow has been doing over its last `days` (of the executions kept): counts, timings, a bar
+/// per local day, where it fails and what is slow. `offset_minutes`: the person's clock minus UTC.
+#[tauri::command]
+pub fn flows_metrics(db: State<Db>, flow_id: String, days: Option<i64>, offset_minutes: Option<i64>) -> Result<flow_run_queries::FlowMetrics, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let since = (chrono::Utc::now() - chrono::Duration::days(days.unwrap_or(30).clamp(1, 365))).to_rfc3339();
+    flow_run_queries::flow_metrics(&conn, &flow_id, &since, offset_minutes.unwrap_or(0).clamp(-14 * 60, 14 * 60)).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]

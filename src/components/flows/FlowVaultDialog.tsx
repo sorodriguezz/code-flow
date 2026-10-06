@@ -32,7 +32,8 @@ const OAUTH_PROVIDERS = ["google", "microsoft", "custom"] as const;
 const OAUTH_SCOPES: Record<string, string> = {
   google:
     "openid email https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/drive",
-  microsoft: "openid email offline_access User.Read Mail.Send Mail.Read Calendars.ReadWrite Files.ReadWrite",
+  // Mail.ReadWrite, not Mail.Read: the Microsoft 365 node marks mail read and moves it.
+  microsoft: "openid email offline_access User.Read Mail.Send Mail.ReadWrite Calendars.ReadWrite Files.ReadWrite",
   custom: "",
 };
 

@@ -1,6 +1,7 @@
 {
   "id": "googlechat",
   "name": "Google Chat",
+  "group": "appsChat",
   "baseUrl": "",
   "auth": "url",
   "authHint": { "es": "La URL del webhook del espacio (Aplicaciones e integraciones › Webhooks) como credencial Webhook", "en": "The space's webhook URL (Apps & integrations › Webhooks) as a Webhook credential" },

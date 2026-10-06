@@ -1,6 +1,7 @@
 {
   "id": "telegram",
   "name": "Telegram",
+  "group": "appsChat",
   "baseUrl": "https://api.telegram.org/bot{{secret}}",
   "auth": "path",
   "authHint": { "es": "Token del bot (de @BotFather) como credencial de tipo Bearer", "en": "Bot token (from @BotFather) as a Bearer credential" },

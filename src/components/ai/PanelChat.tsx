@@ -400,7 +400,8 @@ export function PanelChat({
           />
         )}
 
-        <div ref={contentRef} className="space-y-2.5">
+        {/* `wrap-anywhere`: see the same class on the Chat app's column (`ChatTranscript`). */}
+        <div ref={contentRef} className="space-y-2.5 wrap-anywhere">
           {session.messages.map((message, i) => {
             const day = dayDivider(message, session.messages[i - 1], locale);
             return (

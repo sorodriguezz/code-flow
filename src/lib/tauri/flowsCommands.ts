@@ -8,7 +8,7 @@ import type { DocVersion } from "../../types/notes";
  */
 
 /** The palette's sections — `catalog::Family`, serialised lowercase. */
-export type FlowFamily = "trigger" | "ai" | "code" | "net" | "data" | "logic" | "transform" | "files" | "app";
+export type FlowFamily = "trigger" | "ai" | "code" | "git" | "net" | "messaging" | "apps" | "data" | "files" | "logic" | "transform" | "app";
 
 /** `catalog::NodeDescriptor`. The node's name and description are translations keyed by `typeId`. */
 export interface FlowNodeDescriptor {
@@ -20,8 +20,10 @@ export interface FlowNodeDescriptor {
   outputs: number;
   inputLabels: string[];
   outputLabels: string[];
-  /** The milestone that makes it run (1–6). */
+  /** The milestone that makes it run. */
   milestone: number;
+  /** The palette sub-heading it sits under in its family (`flows.group.<group>`); `""` for none. */
+  group: string;
   /** What the node can be told — `flows::params`. Empty for a node with nothing to set (or that
    *  does not run yet). */
   params: FlowParamSpec[];
@@ -179,7 +181,11 @@ export interface FlowConnectorOperation {
 export interface FlowConnector {
   id: string;
   name: string;
-  auth: "bearer" | "basic" | "path" | "url" | "none";
+  /** Its palette sub-heading in the Apps family (`flows.group.<group>`). */
+  group: string;
+  auth: "bearer" | "basic" | "path" | "url" | "headers" | "query" | "body" | "none";
+  /** The credential may be left out (a public ntfy topic). */
+  authOptional: boolean;
   authHint: FlowLabel;
   /** A field every operation has (Jira's site), shown first. */
   siteField: FlowConnectorField | null;
@@ -190,7 +196,10 @@ export interface FlowConnector {
 export const CONNECTOR_CREDENTIALS: Record<FlowConnector["auth"], FlowCredentialKind[]> = {
   bearer: ["bearer", "oauth2"],
   path: ["bearer"],
+  headers: ["bearer"],
   basic: ["basic"],
+  query: ["basic"],
+  body: ["basic"],
   url: ["webhook"],
   none: [],
 };
@@ -451,6 +460,91 @@ export interface FlowPreview {
 
 /** `input` is what the run's form was filled with (`flowsRunForm`); `null` lets the trigger use
  *  its fields' defaults. */
+/** A flow file in one of the workspace's repositories (`.codeflow/flows/`) and where it stands. */
+export interface RepoFlowEntry {
+  projectId: string;
+  projectName: string;
+  path: string;
+  name: string;
+  description: string;
+  nodeCount: number;
+  hash: string;
+  error: string | null;
+  flowId: string | null;
+  /** The file moved on disk since it was last written or read here (a pull, a checkout). */
+  fileChanged: boolean;
+  /** The flow was edited here since it last agreed with the file. */
+  flowChanged: boolean;
+  missing: boolean;
+}
+
+export interface RepoLink {
+  flowId: string;
+  projectId: string;
+  path: string;
+  fileHash: string;
+  syncedAt: string;
+}
+
+export const flowsRepoScan = (workspaceId: string) => invoke<RepoFlowEntry[]>("flows_repo_scan", { workspaceId });
+export const flowsRepoImport = (workspaceId: string, projectId: string, path: string, folderId: string | null) =>
+  invoke<{ meta: FlowMetaRow; notes: FlowImportNotes }>("flows_repo_import", { workspaceId, projectId, path, folderId });
+/** `changed` (as the error) when the linked file moved on disk and `force` is not set. */
+export const flowsRepoSave = (flowId: string, projectId: string | null, force = false) => invoke<RepoLink>("flows_repo_save", { flowId, projectId, force });
+export const flowsRepoPull = (flowId: string) => invoke<FlowSaved>("flows_repo_pull", { flowId });
+export const flowsRepoUnlink = (flowId: string) => invoke<void>("flows_repo_unlink", { flowId });
+
+/** `flow_run_queries::FlowMetrics`: a flow's finished executions over a window. */
+export interface FlowMetrics {
+  runs: number;
+  success: number;
+  error: number;
+  canceled: number;
+  medianMs: number | null;
+  p95Ms: number | null;
+  days: { date: string; success: number; error: number }[];
+  failingNodes: { nodeId: string; name: string; count: number }[];
+  slowNodes: { nodeId: string; name: string; avgMs: number }[];
+  byMode: [string, number][];
+}
+
+/** How a flow has been doing over its last `days`, bucketed by the person's own days. */
+export const flowsMetrics = (flowId: string, days = 30) =>
+  invoke<FlowMetrics>("flows_metrics", { flowId, days, offsetMinutes: -new Date().getTimezoneOffset() });
+
+/** Runs a flow a `codeflow --flow <name>` asked for, once the window said yes. */
+export const flowsConfirmLink = (flowId: string, nodeId: string, item: unknown) => invoke<void>("flows_confirm_link", { flowId, nodeId, item });
+
+/** This build's own command line to start a flow by its link name. */
+export const flowsCliCommand = (name: string) => invoke<string>("flows_cli_command", { name });
+
+/** `flows_mcp_info`: the MCP server flows are offered on, its token and the tools on offer. */
+export interface FlowMcpInfo {
+  url: string;
+  token: string;
+  tools: { name: string; description: string; flowId: string; flowName: string }[];
+}
+
+export const flowsMcpInfo = () => invoke<FlowMcpInfo>("flows_mcp_info");
+export const flowsMcpRotate = () => invoke<string>("flows_mcp_rotate");
+
+/** `flows::tunnel::TunnelStatus`: the webhooks' public address. */
+export interface FlowTunnelStatus {
+  kind: "off" | "cloudflared" | "tailscale";
+  url: string | null;
+  starting: boolean;
+  error: string | null;
+}
+
+export const flowsTunnelStatus = () => invoke<FlowTunnelStatus>("flows_tunnel_status");
+export const flowsTunnelSet = (kind: FlowTunnelStatus["kind"]) => invoke<FlowTunnelStatus>("flows_tunnel_set", { kind });
+
+/** An app event only the window knows about (an agents chain finishing), for "Evento de CodeFlow". */
+export const flowsAppEvent = (event: "agentChainFinished", payload: Record<string, unknown>) => invoke<void>("flows_app_event", { event, payload });
+
+/** Starts a past run again: the same input, or (`fromFailed`) only from where it failed. */
+export const flowsRetryRun = (runId: string, fromFailed: boolean) => invoke<FlowRunRow>("flows_retry_run", { runId, fromFailed });
+
 export const flowsRun = (flowId: string, mode: FlowRunMode, trigger?: string | null, input?: Record<string, unknown> | null) =>
   invoke<FlowRunRow>("flows_run", { flowId, mode, trigger: trigger ?? null, input: input ?? null });
 
@@ -611,6 +705,8 @@ export interface FlowTriggerView {
   typeId: string;
   detail: string;
   url: string | null;
+  /** The same webhook on the internet, while a tunnel is up (`flows::tunnel`). */
+  publicUrl: string | null;
   next: string | null;
   /** A schedule's occurrences in the next 24 hours. */
   upcoming: string[];

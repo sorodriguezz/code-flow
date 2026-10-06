@@ -749,7 +749,7 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
         let mut slots = graph.slots.lock().expect("fresh lock");
         for id in &plan.active {
             let Some(node) = graph.node(id) else { continue };
-            let inputs = super::catalog::find(&node.type_id).map(|d| d.inputs as usize).unwrap_or(0).max(1);
+            let inputs = (super::catalog::input_count(&node.type_id, &node.params) as usize).max(1);
             let pending = pending_of(id, None);
             slots.insert(id.clone(), Slot { inputs: vec![Vec::new(); inputs], origins: vec![Vec::new(); inputs], pending, outputs: None });
         }
@@ -900,7 +900,7 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
                         returned.remove(member);
                         if let Some(slot) = slots.get_mut(member) {
                             // Its inputs were taken when it ran: the port count comes from its type.
-                            let inputs = graph.node(member).and_then(|n| super::catalog::find(&n.type_id)).map_or(1, |d| (d.inputs as usize).max(1));
+                            let inputs = graph.node(member).map_or(1, |n| (super::catalog::input_count(&n.type_id, &n.params) as usize).max(1));
                             *slot = Slot { inputs: vec![Vec::new(); inputs], origins: vec![Vec::new(); inputs], pending: pending_of(member, Some(&members)), outputs: None };
                         }
                     }

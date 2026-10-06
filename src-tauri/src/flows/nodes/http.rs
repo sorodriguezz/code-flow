@@ -220,6 +220,7 @@ async fn send(ctx: &NodeCtx, params: &Value) -> Result<Answer, NodeError> {
     let has = |name: &str| headers.iter().any(|(key, _)| key.eq_ignore_ascii_case(name));
     let mut body_text = None;
     let mut urlencoded = None;
+    let mut body_file = None;
     match text(params, "body").as_str() {
         "json" => {
             let body = match params.get("bodyJson") {
@@ -242,6 +243,17 @@ async fn send(ctx: &NodeCtx, params: &Value) -> Result<Answer, NodeError> {
             body_text = Some(body);
         }
         "form" => urlencoded = Some(pairs(params, "bodyForm")),
+        // A file as the body, streamed from disk: a path, or a file reference handed on.
+        "binaryBody" => {
+            let path = params.get("bodyFile").and_then(super::binary::path_of).ok_or_else(|| NodeError::failed("Name the file to send"))?;
+            if !path.is_file() {
+                return Err(NodeError::failed(format!("{} is not a file", path.display())));
+            }
+            if !has("content-type") {
+                headers.push(("Content-Type".into(), super::google::mime_of(&path).into()));
+            }
+            body_file = Some(path.to_string_lossy().into_owned());
+        }
         "text" => {
             if !has("content-type") {
                 let kind = text(params, "contentType");
@@ -266,7 +278,7 @@ async fn send(ctx: &NodeCtx, params: &Value) -> Result<Answer, NodeError> {
         headers,
         body_text,
         body_base64: None,
-        body_file: None,
+        body_file,
         form_data: None,
         urlencoded,
         auth: None,
@@ -285,7 +297,16 @@ async fn send(ctx: &NodeCtx, params: &Value) -> Result<Answer, NodeError> {
         .map(|(_, value)| value.to_ascii_lowercase())
         .unwrap_or_default();
     let body: Value = if let Some(encoded) = &response.body_base64 {
-        json!({"data": encoded, "binary": true, "mimeType": content_type, "size": response.size_bytes})
+        if text(params, "binaryAs") == "binaryBase64" {
+            json!({"data": encoded, "binary": true, "mimeType": content_type, "size": response.size_bytes})
+        } else {
+            // Kept as a file of the run: the item carries where it is, not the bytes.
+            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|e| NodeError::failed(e.to_string()))?;
+            let disposition = response.headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("content-disposition")).map(|(_, v)| v.as_str()).unwrap_or_default();
+            let name = super::binary::name_for(disposition, &url.to_string(), &content_type);
+            let file = super::binary::keep(&ctx.run.host.work_dir().join("files"), &bytes, &name, &content_type).map_err(NodeError::Failed)?;
+            json!({"binary": true, "file": file, "mimeType": content_type, "size": bytes.len()})
+        }
     } else {
         let wants = text(params, "response");
         let looks_json = content_type.contains("json")

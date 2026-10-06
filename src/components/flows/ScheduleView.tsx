@@ -1,11 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlarmClock, Copy, Globe, Radio, Webhook } from "lucide-react";
+import { AlarmClock, Copy, Globe, KeyRound, Plus, Radio, Webhook, Wrench } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { Select } from "../common/Select";
 import { iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { nodeIcon } from "../../lib/flows/nodeIcons";
 import { autostartEnabled, setAutostart } from "../../lib/tauri/windows";
 import { getSetting, setSetting } from "../../lib/tauri/commands";
-import type { FlowArmedView, FlowTriggerView } from "../../lib/tauri/flowsCommands";
+import {
+  flowsMcpInfo,
+  flowsMcpRotate,
+  flowsTunnelSet,
+  flowsTunnelStatus,
+  type FlowArmedView,
+  type FlowMcpInfo,
+  type FlowTriggerView,
+  type FlowTunnelStatus,
+} from "../../lib/tauri/flowsCommands";
+import { mcpList, mcpSave } from "../../lib/tauri/mcpCommands";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowsStore } from "../../state/flowsStore";
@@ -88,6 +101,149 @@ const OUTCOME_KEY: Record<string, TranslationKey> = {
   queued: "flows.schedule.outcomeQueued",
   missed: "flows.schedule.outcomeMissed",
 };
+
+/** The name the flows' MCP server is registered under, in CodeFlow and in the commands shown. */
+const MCP_NAME = "codeflow-flujos";
+
+/**
+ * Flows as tools for AI agents (`flows::mcp`): where the server is, the token it wants, the ready
+ * lines for Claude Code and Codex, and one click to add it to CodeFlow's own MCP list — after which
+ * the Chat and an Agente CLI node can switch it on like any other server. The tools themselves are
+ * the active flows whose trigger is «Herramienta de IA», listed under it.
+ */
+function McpSection() {
+  const t = useT();
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const triggers = useFlowRunsStore((s) => s.triggers);
+  const [info, setInfo] = useState<FlowMcpInfo | null>(null);
+  // Re-read when the armed flows change: a tool appears when its flow is switched on.
+  useEffect(() => {
+    let alive = true;
+    void flowsMcpInfo()
+      .then((next) => alive && setInfo(next))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [triggers]);
+  if (!info) return null;
+  const copy = (text: string) => void navigator.clipboard?.writeText(text).then(() => pushSuccessToast(t("flows.schedule.copied")));
+  const claude = `claude mcp add --transport http ${MCP_NAME} ${info.url} --header "Authorization: Bearer ${info.token}"`;
+  // Codex reads the token from an environment variable rather than from its config file.
+  const codex = `# export CODEFLOW_FLUJOS_TOKEN=${info.token}\n[mcp_servers.${MCP_NAME.replace(/-/g, "_")}]\nurl = "${info.url}"\nbearer_token_env_var = "CODEFLOW_FLUJOS_TOKEN"`;
+  const addToCodeFlow = async () => {
+    if (!workspaceId) return;
+    try {
+      const existing = (await mcpList(workspaceId)).find((server) => server.name === MCP_NAME);
+      await mcpSave({
+        id: existing?.id ?? null,
+        workspaceId,
+        scope: "global",
+        name: MCP_NAME,
+        transport: "http",
+        command: "",
+        args: [],
+        env: {},
+        url: info.url,
+        headers: { Authorization: `Bearer ${info.token}` },
+        enabled: true,
+        defaultOn: false,
+        excluded: [],
+      });
+      pushSuccessToast(t("flows.mcp.added"));
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  };
+  return (
+    <section className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] p-3">
+      <h3 className="mb-2 flex items-center gap-2 text-[12.5px] font-semibold">
+        <Wrench size={14} />
+        <span className="min-w-0 flex-1 truncate">{t("flows.mcp.title")}</span>
+        <button type="button" className={iconButtonClass({ size: "xs" })} title={t("flows.mcp.copyClaude")} aria-label={t("flows.mcp.copyClaude")} onClick={() => copy(claude)}>
+          <Copy size={12} />
+        </button>
+        <button type="button" className={iconButtonClass({ size: "xs" })} title={t("flows.mcp.copyCodex")} aria-label={t("flows.mcp.copyCodex")} onClick={() => copy(codex)}>
+          <KeyRound size={12} />
+        </button>
+        <button type="button" className={iconButtonClass({ size: "xs" })} title={t("flows.mcp.addToCodeFlow")} aria-label={t("flows.mcp.addToCodeFlow")} onClick={() => void addToCodeFlow()}>
+          <Plus size={12} />
+        </button>
+      </h3>
+      <div className="flex min-w-0 items-center gap-2" title={t("flows.mcp.hint")}>
+        <code className="min-w-0 flex-1 truncate text-[12px]">{info.url}</code>
+        <button
+          type="button"
+          className="text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          title={t("flows.mcp.rotateHint")}
+          onClick={() =>
+            void flowsMcpRotate()
+              .then(() => flowsMcpInfo())
+              .then(setInfo)
+              .then(() => pushSuccessToast(t("flows.mcp.rotated")))
+              .catch((error) => pushErrorToast(String(error)))
+          }
+        >
+          {t("flows.mcp.rotate")}
+        </button>
+      </div>
+      {info.tools.map((tool) => (
+        <div key={tool.name} className="flex min-w-0 items-baseline gap-2 border-t border-[var(--cf-border)] py-1.5 first-of-type:border-t-0">
+          <code className="shrink-0 text-[12px] font-semibold">{tool.name}</code>
+          <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]" title={tool.description}>
+            {tool.flowName} · {tool.description}
+          </span>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+/**
+ * Whether the webhooks are reachable from the internet, and through what — `cloudflared`'s quick
+ * tunnel or Tailscale Funnel (`flows::tunnel`). A compact select in the section's header rather than a
+ * panel: it is one decision, and its consequence (a webhook without a credential is refused through
+ * it) is the tooltip.
+ */
+function TunnelControl() {
+  const t = useT();
+  const [status, setStatus] = useState<FlowTunnelStatus | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void flowsTunnelStatus()
+      .then((next) => alive && setStatus(next))
+      .catch(() => {});
+    const unlisten = listen<FlowTunnelStatus>("flows:tunnel", (event) => setStatus(event.payload));
+    return () => {
+      alive = false;
+      void unlisten.then((off) => off());
+    };
+  }, []);
+  if (!status) return null;
+  return (
+    <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-normal text-[var(--cf-text-muted)]" title={t("flows.tunnel.hint")}>
+      <Globe size={12} />
+      {status.starting ? t("flows.tunnel.starting") : status.error ? <span className="max-w-[180px] truncate text-[var(--cf-danger)]" title={status.error}>{status.error}</span> : null}
+      <div className="w-[150px]">
+        <Select
+          size="sm"
+          ariaLabel={t("flows.tunnel.title")}
+          value={status.kind}
+          onChange={(kind) =>
+            void flowsTunnelSet(kind as FlowTunnelStatus["kind"])
+              .then(setStatus)
+              .catch((error) => pushErrorToast(String(error)))
+          }
+          options={[
+            { value: "off", label: t("flows.tunnel.off") },
+            { value: "cloudflared", label: t("flows.tunnel.cloudflared") },
+            { value: "tailscale", label: t("flows.tunnel.tailscale") },
+          ]}
+        />
+      </div>
+    </span>
+  );
+}
 
 export function ScheduleView() {
   const t = useT();
@@ -273,7 +429,8 @@ export function ScheduleView() {
               <section className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] p-3">
                 <h3 className="mb-2 flex items-center gap-2 text-[12.5px] font-semibold">
                   <Webhook size={14} />
-                  {t("flows.schedule.webhooks")}
+                  <span className="min-w-0 flex-1 truncate">{t("flows.schedule.webhooks")}</span>
+                  <TunnelControl />
                 </h3>
                 {hooks.map(({ flow, trigger }) => (
                   <div key={`${flow.flowId}:${trigger.nodeId}`} className="flex flex-col gap-0.5 border-t border-[var(--cf-border)] py-2 first-of-type:border-t-0">
@@ -294,6 +451,23 @@ export function ScheduleView() {
                         <Copy size={12} />
                       </button>
                     </div>
+                    {trigger.publicUrl && (
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Globe size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+                        <code className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]" title={trigger.publicUrl}>
+                          {trigger.publicUrl}
+                        </code>
+                        <button
+                          type="button"
+                          className={iconButtonClass({ size: "xs" })}
+                          title={t("flows.tunnel.copyPublic")}
+                          aria-label={t("flows.tunnel.copyPublic")}
+                          onClick={() => void navigator.clipboard?.writeText(trigger.publicUrl ?? "").then(() => pushSuccessToast(t("flows.schedule.copied")))}
+                        >
+                          <Copy size={12} />
+                        </button>
+                      </div>
+                    )}
                     <span className="text-[11.5px] text-[var(--cf-text-muted)]">
                       {flow.flowName}
                       {trigger.lastFired ? ` · ${formatWhen(trigger.lastFired, language)}` : ""}
@@ -322,6 +496,8 @@ export function ScheduleView() {
             )}
           </div>
         )}
+
+        <McpSection />
 
         <label className="flex items-center gap-2 text-[12.5px] text-[var(--cf-text)]">
           <Checkbox

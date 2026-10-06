@@ -1617,6 +1617,68 @@ fn with_client_auth(
 ///
 /// `connection.await` would be shorter, but it discards `AsyncMessage`s — and those carry every
 /// `NOTICE` a function raised. Polling explicitly is what lets `messages` on a result be real.
+/// Waits on `LISTEN` for the given channels and hands every `NOTIFY` to `on` as `(channel, payload)`
+/// — what the Flujos «Evento de base de datos» trigger listens with. The connection is the saved
+/// one, TLS and the keychain's password included; returns when the server closes it or `cancel`
+/// fires.
+pub async fn listen(
+    config: &DbConnectionConfig,
+    channels: &[String],
+    on: impl Fn(String, String) + Send + Sync + 'static,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    let mut config = config.clone();
+    config.resolve_password();
+    let mut pg = pg_config(&config, None)?;
+    pg.application_name("CodeFlow · Flujos");
+    pg.connect_timeout(config.connect_timeout());
+    let encrypted = config.ssl != DbSslMode::Disable || pg.get_ssl_mode() != SslMode::Disable;
+    let statement = channels.iter().map(|channel| format!("LISTEN {};", quote_ident(channel, super::SqlDialect::Postgres))).collect::<String>();
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    let client = if encrypted {
+        let (client, connection) = pg.connect(tls_connector(&config)?).await.map_err(pg_connect_error)?;
+        forward_notifications(connection, sender);
+        client
+    } else {
+        let (client, connection) = pg.connect(tokio_postgres::NoTls).await.map_err(pg_connect_error)?;
+        forward_notifications(connection, sender);
+        client
+    };
+    client.batch_execute(&statement).await.map_err(|e| e.to_string())?;
+    loop {
+        tokio::select! {
+            received = receiver.recv() => match received {
+                Some((channel, payload)) => on(channel, payload),
+                None => return Ok(()),
+            },
+            _ = cancel.cancelled() => return Ok(()),
+        }
+    }
+}
+
+/// Drives a `LISTEN` connection and passes its notifications on; ends when the connection does.
+fn forward_notifications<S, T>(connection: tokio_postgres::Connection<S, T>, sender: tokio::sync::mpsc::UnboundedSender<(String, String)>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    T: tokio_postgres::tls::TlsStream + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut connection = connection;
+        let mut stream = futures_util::stream::poll_fn(move |cx| connection.poll_message(cx));
+        while let Some(message) = stream.next().await {
+            match message {
+                Ok(AsyncMessage::Notification(note)) => {
+                    if sender.send((note.channel().to_string(), note.payload().to_string())).is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+}
+
 fn spawn_driver<S, T>(
     connection: tokio_postgres::Connection<S, T>,
     alive: Arc<AtomicBool>,

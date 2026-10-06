@@ -65,6 +65,35 @@ export interface DbmlTable {
   note: string;
   fields: DbmlField[];
   indexes: DbmlIndex[];
+  /**
+   * DBML's own `[headercolor: #rrggbb]` — drawn as the box's border and header, the way the
+   * author marks which tables belong together. Absent when unset or not a hex colour.
+   */
+  color?: string;
+}
+
+/**
+ * A sticky note on the diagram: DBML's own top-level `Note name [color: #hex] { '…' }`, the block
+ * dbdiagram.io draws as a post-it. Part of the code, so it travels with a copy and paste; *where*
+ * it sits travels in the layout comment beside the tables, filed under `note:<name>`.
+ */
+export interface DbmlStickyNote {
+  /** `stickyNoteId(name)` — the key its position and size are filed under. */
+  id: string;
+  name: string;
+  content: string;
+  color?: string;
+}
+
+/** The layout key a sticky note's position is filed under. Cannot collide with a table id: a
+ *  table name holding a colon would have to be quoted, and is then `"…"`-free in its id. */
+export function stickyNoteId(name: string): string {
+  return `note:${name}`;
+}
+
+/** A colour as DBML writes one — `#rgb` or `#rrggbb` — or `undefined` for anything else. */
+export function hexColor(value: unknown): string | undefined {
+  return typeof value === "string" && /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(value.trim()) ? value.trim() : undefined;
 }
 
 export interface DbmlEnumValue {
@@ -116,6 +145,8 @@ export interface DbmlSchema {
   enums: DbmlEnum[];
   refs: DbmlRef[];
   groups: DbmlGroup[];
+  /** Sticky notes, in document order. Optional so every schema built by hand stays valid. */
+  notes?: DbmlStickyNote[];
   /** `null` when the document parsed. Multi-line when the parser reported several diagnostics. */
   error: string | null;
   /**
@@ -136,6 +167,7 @@ export const EMPTY_SCHEMA: DbmlSchema = {
   enums: [],
   refs: [],
   groups: [],
+  notes: [],
   error: null,
   errorAt: null,
 };

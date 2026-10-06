@@ -19,14 +19,17 @@
 //! The error trigger and the "called by another flow" trigger arm nothing: the first is fired from
 //! [`run_finished`] when another flow fails, the second by an Execute flow node.
 
+mod bots;
 mod github;
 mod inbox;
 mod listen;
 mod poll;
+mod queue;
 mod watch;
+pub mod watchers;
 pub mod webhook;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -34,7 +37,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio_util::sync::CancellationToken;
 
 use super::params;
@@ -61,6 +64,8 @@ pub struct TriggerView {
     pub detail: String,
     /// The webhook's full URL, for copying.
     pub url: Option<String>,
+    /// The same webhook's address on the internet, while a tunnel is up (`flows::tunnel`).
+    pub public_url: Option<String>,
     pub next: Option<String>,
     /// A schedule's occurrences in the next 24 hours, for the ruler.
     pub upcoming: Vec<String>,
@@ -98,6 +103,8 @@ struct Armed {
     error_watch: Vec<(String, Option<Vec<String>>)>,
     hotkeys: Vec<String>,
     queued: Option<(String, Vec<Item>)>,
+    /// "Evento de CodeFlow" triggers on something the app raises (`app_event`): node, event, params.
+    app_events: Vec<(String, String, Value)>,
 }
 
 static HUB: LazyLock<Mutex<HashMap<String, Armed>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -127,7 +134,18 @@ pub fn status(workspace_id: Option<&str>) -> Vec<ArmedFlowView> {
                 Overlap::Parallel => "parallel",
             }
             .to_string(),
-            triggers: armed.triggers.iter().filter_map(|t| t.lock().ok().map(|v| v.clone())).collect(),
+            triggers: armed
+                .triggers
+                .iter()
+                .filter_map(|t| t.lock().ok().map(|v| v.clone()))
+                .map(|mut view| {
+                    // Read now rather than stored: the tunnel comes up (and changes address) on its own clock.
+                    if view.type_id == "trigger.webhook" {
+                        view.public_url = view.url.as_deref().and_then(|url| crate::flows::tunnel::public_hook(url.trim_start_matches(&webhook::base_url())));
+                    }
+                    view
+                })
+                .collect(),
         })
         .collect();
     out.sort_by(|a, b| a.flow_name.to_lowercase().cmp(&b.flow_name.to_lowercase()));
@@ -181,6 +199,8 @@ pub fn disarm(app: &AppHandle, flow_id: &str) {
     if let Some(armed) = removed {
         armed.cancel.cancel();
         webhook::forget_flow(flow_id);
+        crate::flows::mcp::forget_flow(flow_id);
+        watchers::forget_links(flow_id);
         unbind_hotkeys(app, &armed.hotkeys);
         emit_changed(app);
     }
@@ -188,6 +208,20 @@ pub fn disarm(app: &AppHandle, flow_id: &str) {
 
 /// Startup: arms every active flow, then fires the "CodeFlow opened" triggers once.
 pub fn start(app: &AppHandle) {
+    // A terminal ending is announced by the terminal itself (generic over the runtime, so it cannot
+    // call `app_event`); its event carries what a "terminal ended" trigger filters on.
+    let listener = app.clone();
+    app.listen_any("terminal:exit", move |event| {
+        if let Ok(payload) = serde_json::from_str::<Value>(event.payload()) {
+            let item = json!({
+                "sessionId": payload.get("id").cloned().unwrap_or(Value::Null),
+                "owner": payload.get("owner").cloned().unwrap_or(Value::Null),
+                "code": payload.get("code").cloned().unwrap_or(Value::Null),
+                "seconds": payload.get("seconds").cloned().unwrap_or(json!(0)),
+            });
+            app_event(&listener, "terminalExited", item);
+        }
+    });
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         // After the window has had its moment; nothing here is urgent enough to compete with it.
@@ -222,6 +256,9 @@ pub fn start(app: &AppHandle) {
             let item = json!({"event": "appStart", "at": Utc::now().to_rfc3339(), "version": app.package_info().version.to_string()});
             let _ = fire(&app, &flow, &node, vec![Item::new(item)]);
         }
+        // A first launch by `codeflow --flow <name>`: the links are armed now.
+        let argv: Vec<String> = std::env::args().collect();
+        watchers::handle_args(&app, &argv);
     });
 }
 
@@ -287,6 +324,19 @@ pub fn validate(app: &AppHandle, flow_id: &str, spec: &FlowSpec) -> Result<(), S
             "trigger.webhook" => {
                 webhook::check(flow_id, node, &params).map_err(fail)?;
             }
+            "trigger.bot" => {
+                if param_text(&params, "credential").is_empty() {
+                    return Err(fail("choose the credential with the bot's token".into()));
+                }
+            }
+            "trigger.tool" => crate::flows::mcp::check(flow_id, node, &params).map_err(fail)?,
+            "trigger.feed" if param_text(&params, "feedUrl").is_empty() => return Err(fail("write the feed's address".into())),
+            "trigger.db" if param_text(&params, "connection").is_empty() => return Err(fail("pick the database connection".into())),
+            "trigger.remoteFile" if param_text(&params, "host").is_empty() => return Err(fail("pick the host".into())),
+            "trigger.google" if param_text(&params, "credential").is_empty() => return Err(fail("choose the Google sign-in".into())),
+            "trigger.queue" if param_text(&params, "broker") == "sqs" && param_text(&params, "credential").is_empty() => {
+                return Err(fail("choose the AWS credential".into()))
+            }
             "trigger.file" => {
                 let path = param_text(&params, "watchPath");
                 if path.is_empty() || !std::path::Path::new(&path).exists() {
@@ -342,6 +392,7 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
     let mut triggers = Vec::new();
     let mut error_watch = Vec::new();
     let mut hotkeys = Vec::new();
+    let mut app_events = Vec::new();
     let es = spanish(app);
     for node in parsed.nodes.iter().filter(|n| !n.disabled && is_automatic(&n.type_id)) {
         let params = trigger_params(node);
@@ -351,6 +402,7 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
             type_id: node.type_id.clone(),
             detail: String::new(),
             url: None,
+            public_url: None,
             next: None,
             upcoming: vec![],
             last_fired: None,
@@ -393,8 +445,12 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
             "trigger.app" => {
                 let event = param_text(&params, "event");
                 set_detail(event.clone());
-                if event != "appStart" {
-                    poll::spawn_services(app, flow_id, &node.id, &params, view.clone(), cancel.child_token());
+                match event.as_str() {
+                    "appStart" => {}
+                    "serviceReady" | "serviceFailed" | "serviceStopped" => {
+                        poll::spawn_services(app, flow_id, &node.id, &params, view.clone(), cancel.child_token());
+                    }
+                    _ => app_events.push((node.id.clone(), event, params.clone())),
                 }
             }
             "trigger.hotkey" => {
@@ -446,6 +502,61 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
                 set_detail(if mailbox.is_empty() { "INBOX".into() } else { mailbox });
                 inbox::spawn(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
             }
+            "trigger.feed" => {
+                set_detail(param_text(&params, "feedUrl"));
+                watchers::feed(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
+            "trigger.queue" => {
+                let broker = param_text(&params, "broker");
+                let target = match broker.as_str() {
+                    "kafka" => format!("Kafka · {}", param_text(&params, "topic")),
+                    "sqs" => format!("SQS · {}", param_text(&params, "queueUrl").rsplit('/').next().unwrap_or_default()),
+                    _ => format!("RabbitMQ · {}", param_text(&params, "queueName")),
+                };
+                set_detail(target);
+                queue::spawn(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
+            "trigger.db" => {
+                let event = param_text(&params, "dbEvent");
+                set_detail(match event.as_str() {
+                    "newRow" => format!("{} · {}", param_text(&params, "table"), param_text(&params, "watermark")),
+                    _ => param_text(&params, "channels"),
+                });
+                watchers::database(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
+            "trigger.remoteFile" => {
+                set_detail(param_text(&params, "remotePath"));
+                watchers::remote_file(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
+            "trigger.google" => {
+                set_detail(param_text(&params, "googleEvent"));
+                watchers::google(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
+            "trigger.system" => {
+                set_detail(param_text(&params, "systemEvent"));
+                watchers::system(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
+            "trigger.link" => {
+                let name = watchers::link_name(&params, &row.meta.name);
+                let ask = params.get("askFirst").and_then(Value::as_bool).unwrap_or(true);
+                watchers::register_link(flow_id, &node.id, &name, ask)?;
+                set_detail(format!("codeflow --flow {name}"));
+            }
+            "trigger.tool" => {
+                // The flow becomes a tool of the MCP server on the webhook port.
+                webhook::ensure_server(app)?;
+                let name = crate::flows::mcp::register(flow_id, &row.meta.name, node, &params)?;
+                set_detail(name);
+            }
+            "trigger.bot" => {
+                let platform = param_text(&params, "platform");
+                set_detail(match platform.as_str() {
+                    "botSlack" => "Slack · Socket Mode".to_string(),
+                    "botDiscord" => "Discord · Gateway".to_string(),
+                    _ => "Telegram".to_string(),
+                });
+                bots::spawn(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
             _ => {}
         }
         triggers.push(view);
@@ -463,11 +574,118 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
                 error_watch,
                 hotkeys,
                 queued: None,
+                app_events,
             },
         );
     }
     emit_changed(app);
     Ok(())
+}
+
+/// Something happened in CodeFlow itself — raised by the part of the app that knows (a commit made,
+/// a push, a branch switched, a terminal that ended, an agents chain that finished, the Revisor's
+/// verdict, a pull request analysed, an AI plan filling up) and matched here against every armed
+/// "Evento de CodeFlow" trigger's own filter. Cheap when nothing listens: one lock and a scan.
+///
+/// `payload` becomes the trigger's item, with `event` and `at` added.
+pub fn app_event(app: &AppHandle, event: &str, payload: Value) {
+    let listening: Vec<(String, String, Value)> = HUB
+        .lock()
+        .map(|hub| {
+            hub.iter()
+                .flat_map(|(flow, armed)| {
+                    armed
+                        .app_events
+                        .iter()
+                        .filter(|(_, wanted, _)| wanted == event)
+                        .map(|(node, _, params)| (flow.clone(), node.clone(), params.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if listening.is_empty() {
+        return;
+    }
+    for (flow, node, params) in listening {
+        if !app_event_matches(app, &flow, &node, event, &params, &payload) {
+            continue;
+        }
+        let mut item = payload.clone();
+        if let Some(fields) = item.as_object_mut() {
+            fields.insert("event".into(), json!(event));
+            fields.insert("at".into(), json!(Utc::now().to_rfc3339()));
+        }
+        let _ = fire(app, &flow, &node, vec![Item::new(item)]);
+    }
+}
+
+/// Quota windows each AI-quota trigger has already fired for — once per window, not per check.
+static QUOTA_FIRED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Whether an app event is one this trigger asked for: the repository and branch it names, a
+/// terminal that ran long enough, a plan past its threshold (once per window).
+fn app_event_matches(app: &AppHandle, flow: &str, node: &str, event: &str, params: &Value, payload: &Value) -> bool {
+    let project = param_text(params, "project");
+    if !project.is_empty() {
+        let by_id = payload.get("projectId").and_then(Value::as_str) == Some(project.as_str());
+        let by_path = payload.get("repoPath").and_then(Value::as_str).is_some_and(|path| {
+            let db = app.state::<Db>();
+            let found = db.0.lock().ok().and_then(|conn| crate::db::queries::get_project(&conn, &project).ok().flatten());
+            found.is_some_and(|p| same_path(&p.local_path, path))
+        });
+        if !by_id && !by_path {
+            return false;
+        }
+    }
+    let branch = param_text(params, "branch");
+    if !branch.is_empty() && matches!(event, "gitCommitted" | "gitPushed" | "branchSwitched") {
+        if payload.get("branch").and_then(Value::as_str) != Some(branch.as_str()) {
+            return false;
+        }
+    }
+    match event {
+        "terminalExited" => {
+            let floor = params.get("minSeconds").and_then(Value::as_f64).unwrap_or(0.0);
+            payload.get("seconds").and_then(Value::as_f64).unwrap_or(0.0) >= floor
+        }
+        "aiQuotaHigh" => {
+            let threshold = params.get("threshold").and_then(Value::as_f64).unwrap_or(80.0);
+            let used = payload.get("usedPercent").and_then(Value::as_f64).unwrap_or(0.0);
+            if used < threshold {
+                return false;
+            }
+            let window = format!(
+                "{flow}|{node}|{}|{}|{}",
+                payload.get("provider").and_then(Value::as_str).unwrap_or_default(),
+                payload.get("kind").and_then(Value::as_str).unwrap_or_default(),
+                payload.get("resetsAt").and_then(Value::as_str).unwrap_or_default()
+            );
+            QUOTA_FIRED.lock().map(|mut fired| fired.insert(window)).unwrap_or(false)
+        }
+        _ => true,
+    }
+}
+
+/// Two spellings of one folder — trailing separators and case on the file systems that ignore it.
+fn same_path(a: &str, b: &str) -> bool {
+    let tidy = |p: &str| {
+        let trimmed = p.trim_end_matches(['/', '\\']).to_string();
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            trimmed.to_lowercase()
+        } else {
+            trimmed
+        }
+    };
+    tidy(a) == tidy(b)
+}
+
+/// The branch a repository has checked out, for a git event's item — `""` when detached or unreadable.
+pub fn current_branch(repo_path: &str) -> String {
+    git2::Repository::open(repo_path)
+        .ok()
+        .and_then(|repo| repo.head().ok().and_then(|head| head.shorthand().map(str::to_string)))
+        .unwrap_or_default()
 }
 
 fn note_fire(flow_id: &str, node_id: &str, outcome: &str) {

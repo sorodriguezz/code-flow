@@ -1,6 +1,7 @@
 {
   "id": "supabase",
   "name": "Supabase",
+  "group": "appsData",
   "baseUrl": "https://{{project}}.supabase.co",
   "auth": "headers",
   "authHint": { "es": "La anon key (o la service_role, si el flujo debe saltarse el RLS) como credencial Token", "en": "The anon key (or the service_role key, when the flow must bypass RLS) as a Token credential" },

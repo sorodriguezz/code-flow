@@ -16,7 +16,7 @@ export const SPEC_SCHEMA = 1;
 /** The only node a cycle may pass through — `catalog::LOOP_TYPE`. */
 export const LOOP_TYPE = "logic.loop";
 /** `catalog::RUNS_THROUGH`: the last milestone whose nodes this build runs. */
-export const RUNS_THROUGH = 10;
+export const RUNS_THROUGH = 11;
 /** `spec::MAX_NAME`. */
 export const MAX_NODE_NAME = 120;
 
@@ -156,6 +156,7 @@ export function addNode(
   typeId: string,
   name: string,
   pos: [number, number],
+  params: Record<string, unknown> = {},
 ): { spec: FlowSpec; id: string } {
   const id = newId("n", allIds(spec));
   const node: FlowNodeSpec = {
@@ -163,7 +164,8 @@ export function addNode(
     type: typeId,
     name: uniqueName(name, spec.nodes.map((n) => n.name)),
     pos: [Math.round(pos[0]), Math.round(pos[1])],
-    params: {},
+    // A palette entry that is one service of a node (Slack, of the Conector) arrives preset.
+    params: structuredClone(params),
     settings: {},
   };
   return { spec: { ...spec, nodes: [...spec.nodes, node] }, id };
@@ -219,9 +221,103 @@ export function hasErrorOutput(node: FlowNodeSpec, descriptor: FlowNodeDescripto
   );
 }
 
-/** The ports a node has on the canvas: the catalogue's, plus the error port — `run::output_count`. */
+/** `catalog::MAX_ROUTES` / `MAX_MERGE_INPUTS`: most cases a Switch or a classifier routes to, most
+ *  inputs a Merge joins. */
+export const MAX_ROUTES = 20;
+export const MAX_MERGE_INPUTS = 10;
+
+function numberSetting(params: Record<string, unknown>, name: string): number | null {
+  const raw = params[name];
+  const value = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+  return Number.isFinite(value) ? Math.round(value) : null;
+}
+
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+
+/** A Switch's cases — its outputs before "other". `catalog::switch_cases`. */
+export function switchCases(params: Record<string, unknown>): number {
+  const n = numberSetting(params, "caseCount");
+  return n === null ? 3 : clamp(n, 1, MAX_ROUTES);
+}
+
+/** A classifier's category names, blank ones left out. `catalog::category_names`. */
+export function categoryNames(params: Record<string, unknown>): string[] {
+  const list = Array.isArray(params.categories) ? params.categories : [];
+  return list
+    .map((c) => (c && typeof c === "object" ? (c as Record<string, unknown>).name : undefined))
+    .filter((name): name is string => typeof name === "string")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+}
+
+/** Whether a classifier sends each item out of its category's port. `catalog::routes_by_category`. */
+export const routesByCategory = (params: Record<string, unknown>) => params.routing === "routeBranch";
+
+/** How many inputs a node has with its parameters — `catalog::input_count`: a Merge joins as many
+ *  as its `inputCount` says, 2 when unset. */
+export function inputCount(node: FlowNodeSpec, descriptor: FlowNodeDescriptor | undefined): number {
+  if (!descriptor) return 0;
+  if (node.type === "logic.merge") {
+    const n = numberSetting(node.params ?? {}, "inputCount");
+    return n === null ? 2 : clamp(n, 2, MAX_MERGE_INPUTS);
+  }
+  return descriptor.inputs;
+}
+
+/** How many outputs a node has with its parameters, the error port aside — `catalog::output_count`. */
+export function baseOutputCount(node: FlowNodeSpec, descriptor: FlowNodeDescriptor | undefined): number {
+  if (!descriptor) return 0;
+  const params = node.params ?? {};
+  if (node.type === "logic.switch") return switchCases(params) + 1;
+  if (node.type === "ai.classify" && routesByCategory(params)) {
+    const categories = clamp(categoryNames(params).length, 1, MAX_ROUTES);
+    return categories + (params.allowOther === false ? 0 : 1);
+  }
+  return descriptor.outputs;
+}
+
+/** The ports a node has on the canvas: the catalogue's (or its settings'), plus the error port —
+ *  `run::output_count`. */
 export function outputCount(node: FlowNodeSpec, descriptor: FlowNodeDescriptor | undefined): number {
-  return (descriptor?.outputs ?? 0) + (hasErrorOutput(node, descriptor) ? 1 : 0);
+  return baseOutputCount(node, descriptor) + (hasErrorOutput(node, descriptor) ? 1 : 0);
+}
+
+/**
+ * What a node's ports are called, the error port aside: translation tokens (`flows.port.<label>`),
+ * single digits or capitals shown as they are, or `raw:<text>` for a name the user wrote (a
+ * classifier's categories) — `portText` turns any of them into what is drawn.
+ */
+export function portLabels(node: FlowNodeSpec, descriptor: FlowNodeDescriptor): { inputs: string[]; outputs: string[] } {
+  const params = node.params ?? {};
+  const numbered = (n: number) => Array.from({ length: n }, (_, i) => String(i + 1));
+  const inputs = node.type === "logic.merge" ? numbered(inputCount(node, descriptor)) : descriptor.inputLabels;
+  if (node.type === "logic.switch") {
+    // Past nine cases a digit is no longer one character: shown raw, not looked up.
+    return { inputs, outputs: [...numbered(switchCases(params)).map((n) => (n.length > 1 ? `raw:${n}` : n)), "other"] };
+  }
+  if (node.type === "ai.classify" && routesByCategory(params)) {
+    const names = categoryNames(params).slice(0, MAX_ROUTES);
+    return { inputs, outputs: [...(names.length > 0 ? names : ["?"]).map((name) => `raw:${name}`), ...(params.allowOther === false ? [] : ["other"])] };
+  }
+  return { inputs, outputs: descriptor.outputLabels };
+}
+
+/** A port label as drawn — see `portLabels`. */
+export function portText(label: string, translate: (key: string) => string): string {
+  if (label.startsWith("raw:")) return label.slice(4);
+  return /^[0-9A-Z]$/.test(label) ? label : translate(`flows.port.${label}`);
+}
+
+/** Connections into or out of `id` that its ports no longer have — dropped when a setting shrinks
+ *  them, since the backend refuses a wire to a port that is gone. */
+function withoutLostPorts(spec: FlowSpec, catalog: Catalog, id: string): FlowSpec {
+  const node = spec.nodes.find((n) => n.id === id);
+  if (!node) return spec;
+  const descriptor = catalog.get(node.type);
+  const outs = outputCount(node, descriptor);
+  const ins = inputCount(node, descriptor);
+  const kept = spec.connections.filter((c) => !(c.from === id && c.out >= outs) && !(c.to === id && c.in >= ins));
+  return kept.length === spec.connections.length ? spec : { ...spec, connections: kept };
 }
 
 /** Why a connection may not be made, or `null` when it may. */
@@ -237,7 +333,7 @@ export function connectionProblem(
   const fromDescriptor = catalog.get(from.type);
   const toDescriptor = catalog.get(to.type);
   if (!fromDescriptor || !toDescriptor) return "missing";
-  if (c.out < 0 || c.out >= outputCount(from, fromDescriptor) || c.in < 0 || c.in >= toDescriptor.inputs) return "port";
+  if (c.out < 0 || c.out >= outputCount(from, fromDescriptor) || c.in < 0 || c.in >= inputCount(to, toDescriptor)) return "port";
   const key = connectionKey(c);
   if (spec.connections.some((existing) => connectionKey(existing) === key)) return "duplicate";
   if (hasCycleOutsideLoops(spec.nodes, [...spec.connections, c])) return "cycle";
@@ -300,9 +396,13 @@ export function setNodeDisabled(spec: FlowSpec, ids: Iterable<string>, disabled:
   return { ...spec, nodes: spec.nodes.map((n) => (set.has(n.id) ? { ...n, disabled } : n)) };
 }
 
-/** A node with one parameter changed. `undefined` removes it, so the default applies again. */
-export function setNodeParam(spec: FlowSpec, id: string, name: string, value: unknown): FlowSpec {
-  return {
+/**
+ * A node with one parameter changed. `undefined` removes it, so the default applies again. Given the
+ * catalogue, a change that takes ports away (fewer Switch cases, a category removed, fewer Merge
+ * inputs) takes their connections with them.
+ */
+export function setNodeParam(spec: FlowSpec, id: string, name: string, value: unknown, catalog?: Catalog): FlowSpec {
+  const next = {
     ...spec,
     nodes: spec.nodes.map((n) => {
       if (n.id !== id) return n;
@@ -312,6 +412,7 @@ export function setNodeParam(spec: FlowSpec, id: string, name: string, value: un
       return { ...n, params };
     }),
   };
+  return catalog ? withoutLostPorts(next, catalog, id) : next;
 }
 
 /**

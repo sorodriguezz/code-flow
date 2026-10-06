@@ -1,0 +1,99 @@
+{
+  "id": "bitbucket",
+  "name": "Bitbucket",
+  "group": "appsProjects",
+  "baseUrl": "https://api.bitbucket.org/2.0",
+  "auth": "basic",
+  "authHint": { "es": "Tu correo de Atlassian y un token de API con permisos de Bitbucket, en una credencial Usuario y contraseña", "en": "Your Atlassian email and an API token with Bitbucket scopes, in a User and password credential" },
+  "errorField": "error.message",
+  "operations": [
+    {
+      "id": "listPullRequests",
+      "name": { "es": "Listar pull requests", "en": "List pull requests" },
+      "method": "GET",
+      "path": "/repositories/{{workspace}}/{{repo}}/pullrequests",
+      "query": { "state": "{{state}}", "pagelen": "{{pagelen}}" },
+      "fields": [
+        { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "state", "label": { "es": "Estado (OPEN, MERGED, DECLINED)", "en": "State (OPEN, MERGED, DECLINED)" }, "placeholder": "OPEN" },
+        { "name": "pagelen", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "20" }
+      ],
+      "result": "values"
+    },
+    {
+      "id": "createPullRequest",
+      "name": { "es": "Abrir un pull request", "en": "Open a pull request" },
+      "method": "POST",
+      "path": "/repositories/{{workspace}}/{{repo}}/pullrequests",
+      "fields": [
+        { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
+        { "name": "source", "label": { "es": "Desde la rama", "en": "From branch" }, "placeholder": "feature/login", "required": true },
+        { "name": "destination", "label": { "es": "Hacia la rama (vacío = la principal)", "en": "Into branch (empty = the main one)" }, "placeholder": "main" },
+        { "name": "description", "label": { "es": "Descripción (Markdown)", "en": "Description (Markdown)" }, "multiline": true }
+      ],
+      "body": {
+        "title": "{{title}}",
+        "source": { "branch": { "name": "{{source}}" } },
+        "destination": { "$when": "destination", "branch": { "name": "{{destination}}" } },
+        "description": "{{description}}"
+      }
+    },
+    {
+      "id": "commentPullRequest",
+      "name": { "es": "Comentar un pull request", "en": "Comment on a pull request" },
+      "method": "POST",
+      "path": "/repositories/{{workspace}}/{{repo}}/pullrequests/{{id}}/comments",
+      "fields": [
+        { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "id", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true },
+        { "name": "comment", "label": { "es": "Comentario (Markdown)", "en": "Comment (Markdown)" }, "multiline": true, "required": true }
+      ],
+      "body": { "content": { "raw": "{{comment}}" } }
+    },
+    {
+      "id": "createIssue",
+      "name": { "es": "Crear un issue", "en": "Create an issue" },
+      "method": "POST",
+      "path": "/repositories/{{workspace}}/{{repo}}/issues",
+      "fields": [
+        { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
+        { "name": "content", "label": { "es": "Descripción (Markdown)", "en": "Description (Markdown)" }, "multiline": true },
+        { "name": "kind", "label": { "es": "Tipo (bug, enhancement, proposal, task)", "en": "Kind (bug, enhancement, proposal, task)" }, "placeholder": "bug" },
+        { "name": "priority", "label": { "es": "Prioridad (trivial a blocker)", "en": "Priority (trivial to blocker)" }, "placeholder": "major" }
+      ],
+      "body": { "title": "{{title}}", "content": { "$when": "content", "raw": "{{content}}" }, "kind": "{{kind}}", "priority": "{{priority}}" }
+    },
+    {
+      "id": "commentIssue",
+      "name": { "es": "Comentar un issue", "en": "Comment on an issue" },
+      "method": "POST",
+      "path": "/repositories/{{workspace}}/{{repo}}/issues/{{id}}/comments",
+      "fields": [
+        { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "id", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true },
+        { "name": "comment", "label": { "es": "Comentario (Markdown)", "en": "Comment (Markdown)" }, "multiline": true, "required": true }
+      ],
+      "body": { "content": { "raw": "{{comment}}" } }
+    },
+    {
+      "id": "runPipeline",
+      "name": { "es": "Lanzar un pipeline", "en": "Run a pipeline" },
+      "method": "POST",
+      "path": "/repositories/{{workspace}}/{{repo}}/pipelines/",
+      "fields": [
+        { "name": "workspace", "label": { "es": "Workspace", "en": "Workspace" }, "placeholder": "acme", "required": true, "encode": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true, "encode": true },
+        { "name": "branch", "label": { "es": "Rama", "en": "Branch" }, "placeholder": "main", "required": true },
+        { "name": "variables", "label": { "es": "Variables (JSON)", "en": "Variables (JSON)" }, "placeholder": "[{\"key\": \"ENV\", \"value\": \"prod\"}]", "json": true }
+      ],
+      "body": { "target": { "type": "pipeline_ref_target", "ref_type": "branch", "ref_name": "{{branch}}" }, "variables": "{{variables}}" }
+    }
+  ]
+}

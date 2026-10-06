@@ -362,6 +362,23 @@ pub async fn get_authenticated_user(host: &str, token: &str) -> Result<String, S
     Ok(user.username)
 }
 
+/// The open merge requests of `project` the signed-in user is a reviewer on.
+pub async fn review_requested_iids(host: &str, project: &str, token: &str) -> Result<Vec<i64>, String> {
+    #[derive(Deserialize)]
+    struct Hit {
+        iid: i64,
+    }
+    let me = get_authenticated_user(host, token).await?;
+    let encoded: String = url::form_urlencoded::byte_serialize(me.as_bytes()).collect();
+    let url = format!(
+        "{}/projects/{}/merge_requests?state=opened&reviewer_username={encoded}&per_page=100",
+        api_root(host),
+        encode_path(project)
+    );
+    let found: Vec<Hit> = get_json(&url, token).await?;
+    Ok(found.into_iter().map(|hit| hit.iid).collect())
+}
+
 /// The `/merge_requests` address for one page of a scope, newest first. GitLab's `state` takes one
 /// value, so "merged or closed" asks for `all` and is filtered — see `PrListScope::admits`.
 fn merge_requests_page_url(host: &str, project: &str, scope: crate::ado::PrListScope, page: u32) -> String {

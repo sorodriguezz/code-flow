@@ -463,6 +463,12 @@ export function nodeIdOf(schema: string, name: string): string {
  */
 const LAYOUT_MARKER = "// codeflow:layout ";
 
+/** A sticky note's sides, as the layout comment may carry them: anything outside is a hand-edit
+ *  that would draw a note nobody can grab, and is dropped back to the default size. */
+export const MIN_NOTE_SIDE = 60;
+export const MAX_NOTE_SIDE = 2000;
+export const DEFAULT_NOTE_SIZE = { w: 220, h: 130 };
+
 /**
  * The second sidecar line: what the reader has decided about each table and relationship.
  *
@@ -559,11 +565,22 @@ export function liveMarks(schema: DbmlSchema, marks: DbmlMarks): DbmlMarks {
   return live;
 }
 
+/**
+ * Where something sits on the canvas, as the layout comment records it: a table's dragged corner, or
+ * a sticky note's corner *and size* (`[x, y, w, h]` — a note is resized by hand, a table never is).
+ */
+export interface LayoutSpot {
+  x: number;
+  y: number;
+  w?: number;
+  h?: number;
+}
+
 export interface DbmlDocument {
-  /** The DBML itself, with the marker lines removed. This is what the parser and the editor see. */
+  /** The DBML itself, with the marker lines removed. This is what the parser sees. */
   source: string;
-  /** Table id → where the user dragged it. Empty when nothing has been dragged. */
-  positions: Record<string, { x: number; y: number }>;
+  /** Table id (or `note:<name>`) → where the user put it. Empty when nothing has been placed. */
+  positions: Record<string, LayoutSpot>;
   /** Table or ref id → how it has been marked. Empty when nothing has been marked. */
   marks: DbmlMarks;
 }
@@ -604,15 +621,22 @@ export function readLayout(doc: string): DbmlDocument {
    */
   if (rest.length > 0 && rest[rest.length - 1] === "") rest.pop();
 
-  const positions: Record<string, { x: number; y: number }> = {};
+  const positions: Record<string, LayoutSpot> = {};
   parse(payloads.get(LAYOUT_MARKER), (id, value) => {
-    // `[x, y]` and nothing else. A stored file is not a trusted input: it can be hand-edited,
-    // and a NaN reaching the layout puts a box at coordinates the canvas can never scroll to.
+    // `[x, y]`, or `[x, y, w, h]` for a sticky note, and nothing else. A stored file is not a
+    // trusted input: it can be hand-edited, and a NaN reaching the layout puts a box at coordinates
+    // the canvas can never scroll to.
     if (!Array.isArray(value) || value.length < 2) return;
-    const [x, y] = value;
+    const [x, y, w, h] = value;
     if (typeof x !== "number" || typeof y !== "number") return;
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    positions[id] = { x: Math.round(x), y: Math.round(y) };
+    const spot: LayoutSpot = { x: Math.round(x), y: Math.round(y) };
+    const size = (n: unknown) => typeof n === "number" && Number.isFinite(n) && n >= MIN_NOTE_SIDE && n <= MAX_NOTE_SIDE;
+    if (size(w) && size(h)) {
+      spot.w = Math.round(w as number);
+      spot.h = Math.round(h as number);
+    }
+    positions[id] = spot;
   });
 
   const marks: DbmlMarks = {};
@@ -623,6 +647,60 @@ export function readLayout(doc: string): DbmlDocument {
   });
 
   return { source: rest.join("\n"), positions, marks };
+}
+
+/**
+ * The document with its marker lines emptied rather than removed — for the parser.
+ *
+ * The markers are part of the code now, visible in the editor (so a copy carries them), and the
+ * editor's line numbers are the document's. Removing the lines would shift every diagnostic below
+ * a marker that sits mid-document; blanking them keeps a parse error on the line it is about, and
+ * keeps their JSON braces away from the forgiving reader's brace counting.
+ */
+export function blankMarkers(doc: string): string {
+  if (!doc.includes(LAYOUT_MARKER.trim()) && !doc.includes(MARKS_MARKER.trim())) return doc;
+  return doc
+    .split("\n")
+    .map((line) => {
+      const text = line.trimStart();
+      return text.startsWith(LAYOUT_MARKER) || text.startsWith(MARKS_MARKER) ? "" : line;
+    })
+    .join("\n");
+}
+
+/** A sticky note where the canvas draws it. */
+export interface StickyBox {
+  id: string;
+  name: string;
+  content: string;
+  color?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Where each sticky note goes: where the layout comment says, or — for one it has never placed, a
+ * note pasted from dbdiagram.io say — stacked down a column to the right of the tables, so it is
+ * on screen and over nothing.
+ */
+export function stickyBoxes(
+  notes: readonly { id: string; name: string; content: string; color?: string }[],
+  positions: Record<string, LayoutSpot>,
+  bounds: { width: number },
+): StickyBox[] {
+  let nextY = 0;
+  const column = Math.max(0, bounds.width) + 48;
+  return notes.map((note) => {
+    const spot = positions[note.id];
+    const w = spot?.w ?? DEFAULT_NOTE_SIZE.w;
+    const h = spot?.h ?? DEFAULT_NOTE_SIZE.h;
+    if (spot) return { ...note, x: spot.x, y: spot.y, w, h };
+    const box = { ...note, x: column, y: nextY, w, h };
+    nextY += h + 16;
+    return box;
+  });
 }
 
 /** Walks one marker's JSON payload, ignoring anything that is not an object. */
@@ -650,7 +728,7 @@ function parse(payload: string | undefined, take: (id: string, value: unknown) =
  */
 export function writeLayout(
   source: string,
-  positions: Record<string, { x: number; y: number }>,
+  positions: Record<string, LayoutSpot>,
   marks: DbmlMarks = {},
 ): string {
   const placed = Object.entries(positions);
@@ -667,7 +745,14 @@ export function writeLayout(
     lines.push(
       LAYOUT_MARKER +
         JSON.stringify(
-          Object.fromEntries(placed.map(([id, at]) => [id, [Math.round(at.x), Math.round(at.y)]])),
+          Object.fromEntries(
+            placed.map(([id, at]) => [
+              id,
+              at.w !== undefined && at.h !== undefined
+                ? [Math.round(at.x), Math.round(at.y), Math.round(at.w), Math.round(at.h)]
+                : [Math.round(at.x), Math.round(at.y)],
+            ]),
+          ),
         ),
     );
   }

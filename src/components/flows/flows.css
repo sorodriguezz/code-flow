@@ -501,3 +501,14 @@
   stroke-dasharray: 5 4;
   opacity: 0.6;
 }
+
+/* The minimap: the canvas's own surface, its view a soft window over a dimmed rest. */
+.cf-flow-canvas .react-flow__minimap.cf-flow-minimap {
+  background: var(--cf-surface);
+  border-radius: 9px;
+  box-shadow: var(--cf-shadow-lift), 0 0 0 1px var(--cf-border);
+  overflow: hidden;
+  --xy-minimap-mask-background-color: color-mix(in oklab, var(--cf-bg) 62%, transparent);
+  --xy-minimap-mask-stroke-color: var(--cf-accent);
+  --xy-minimap-mask-stroke-width: 1.5;
+}

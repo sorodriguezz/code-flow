@@ -1,10 +1,14 @@
-import { useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   CalendarClock,
   ChevronDown,
   ChevronRight,
   Copy,
   Download,
+  FileJson,
+  GitBranch,
+  GitPullRequestArrow,
+  Unlink,
   Folder,
   FolderInput,
   FolderOpen,
@@ -36,6 +40,8 @@ import { TemplatesDialog } from "./TemplatesDialog";
 import { FlowShareDialog } from "./FlowShareDialog";
 import { useFlowShareStore } from "../../state/flowShareStore";
 import { promptAction } from "../../state/promptStore";
+import { useFlowRepoStore } from "../../state/flowRepoStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 
 const byName = (a: { name: string }, b: { name: string }) =>
   a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true });
@@ -62,6 +68,19 @@ export function FlowExplorer() {
   const shares = useFlowShareStore((s) => s.shares);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; heading?: string } | null>(null);
   const searchField = useRef<HTMLInputElement>(null);
+  const repoEntries = useFlowRepoStore((s) => s.entries);
+  const projects = useWorkspaceStore((s) => (workspaceId ? s.projectsByWorkspace[workspaceId] : undefined)) ?? [];
+  const [repoOpen, setRepoOpen] = useState(true);
+
+  // The repositories' flow files: read when the explorer shows, and again when the window comes back
+  // — a `git pull` happens outside the app.
+  useEffect(() => {
+    void useFlowRepoStore.getState().scan(workspaceId);
+    const onFocus = () => void useFlowRepoStore.getState().scan(useFlowsStore.getState().workspaceId);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [workspaceId]);
+  const unlinked = useMemo(() => repoEntries.filter((entry) => !entry.flowId && !entry.missing), [repoEntries]);
 
   const needle = query.trim().toLowerCase();
   const groups = useMemo(() => {
@@ -104,6 +123,26 @@ export function FlowExplorer() {
       { label: t("flows.export"), icon: Download, onClick: () => void store().exportFlow(flow.id) },
       { label: t("flows.share.menu"), icon: Users, onClick: () => setShareFor(flow.id) },
     ];
+    // Kept in a repository: saved into its file, brought from it, or let go of it.
+    const link = repoEntries.find((entry) => entry.flowId === flow.id);
+    const repo = useFlowRepoStore.getState();
+    if (link) {
+      items.push(
+        { label: t("flows.repo.save"), icon: GitBranch, separated: true, onClick: () => void repo.save(flow.id, null) },
+        { label: t("flows.repo.pull"), icon: GitPullRequestArrow, disabled: link.missing, onClick: () => void repo.pull(flow.id) },
+        { label: t("flows.repo.unlink"), icon: Unlink, onClick: () => void repo.unlink(flow.id) },
+      );
+    } else if (own && projects.length > 0) {
+      items.push({
+        label: t("flows.repo.saveIn"),
+        icon: GitBranch,
+        separated: true,
+        onClick: () => {},
+        children: [...projects]
+          .sort(byName)
+          .map((project) => ({ label: project.name, onClick: () => void repo.save(flow.id, project.id) })),
+      });
+    }
     if (flow.triggers.some((type) => type !== "trigger.manual")) {
       items.push({
         label: flow.active ? t("flows.active.pause") : t("flows.active.activate"),
@@ -220,7 +259,27 @@ export function FlowExplorer() {
             <Globe size={12} />
           </span>
         )}
+        {linkBadge(flow.id)}
       </button>
+    );
+  };
+
+  /** A linked flow's mark: which file it is, and — amber — that the two sides no longer agree. */
+  const linkBadge = (flowId: string) => {
+    const link = repoEntries.find((entry) => entry.flowId === flowId);
+    if (!link) return null;
+    const where = `${link.projectName} · ${link.path}`;
+    const title = link.missing
+      ? t("flows.repo.missing", { where })
+      : link.fileChanged
+        ? t("flows.repo.fileChanged", { where })
+        : link.flowChanged
+          ? t("flows.repo.flowChanged", { where })
+          : t("flows.repo.linked", { where });
+    return (
+      <span className={`shrink-0 ${link.missing || link.fileChanged ? "text-[var(--cf-warning)]" : "text-[var(--cf-text-faint)]"}`} title={title}>
+        <GitBranch size={12} />
+      </span>
     );
   };
 
@@ -359,6 +418,40 @@ export function FlowExplorer() {
         })}
         {groups.root.map((flow) => flowRow(flow, false))}
         {empty && needle && <p className="px-2 py-4 text-center text-[12px] text-[var(--cf-text-muted)]">{t("flows.noMatches")}</p>}
+        {/* Flow files in the repositories no flow here is linked to: one click brings one in. */}
+        {unlinked.length > 0 && !needle && (
+          <div role="group" className="mt-1">
+            <button
+              type="button"
+              role="treeitem"
+              aria-expanded={repoOpen}
+              onClick={() => setRepoOpen((open) => !open)}
+              className={rowClass(false, "h-7 font-medium text-[var(--cf-text-muted)]")}
+              title={t("flows.repo.sectionHint")}
+            >
+              {repoOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+              <GitBranch size={14} className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{t("flows.repo.section")}</span>
+              <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-faint)]">{unlinked.length}</span>
+            </button>
+            {repoOpen &&
+              unlinked.map((entry) => (
+                <button
+                  key={`${entry.projectId}/${entry.path}`}
+                  type="button"
+                  role="treeitem"
+                  disabled={!!entry.error}
+                  onClick={() => void useFlowRepoStore.getState().importFile(entry, null)}
+                  title={entry.error ? `${entry.path}: ${entry.error}` : t("flows.repo.importHint", { name: entry.name, where: `${entry.projectName} · ${entry.path}` })}
+                  className={rowClass(false, "h-7 pl-7 disabled:opacity-50")}
+                >
+                  <FileJson size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+                  <span className="max-w-[45%] shrink-0 truncate text-[10.5px] text-[var(--cf-text-faint)]">{entry.projectName}</span>
+                </button>
+              ))}
+          </div>
+        )}
       </div>
 
       {menu && (

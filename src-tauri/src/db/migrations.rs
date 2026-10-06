@@ -1987,7 +1987,26 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_flow_waits(conn)?;
     add_trust_to_flows(conn)?;
     add_flow_shares(conn)?;
+    add_flow_repo_links(conn)?;
     Ok(())
+}
+
+/// Flows kept as files in a repository — see `flows::repo`. One row per linked flow: the project,
+/// the file's path inside it, and the hash of the bytes last written or read, which is how a pull or
+/// a checkout that changed the file is told from the file this app left there.
+pub(crate) fn add_flow_repo_links(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS flow_repo_links (
+            flow_id      TEXT PRIMARY KEY,
+            project_id   TEXT NOT NULL,
+            path         TEXT NOT NULL,
+            file_hash    TEXT NOT NULL DEFAULT '',
+            synced_at    TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_flow_repo_links_file ON flow_repo_links (project_id, path);
+        "#,
+    )
 }
 
 /// Flows shared through the user's own Supabase project — see `flows::share`. One row per shared

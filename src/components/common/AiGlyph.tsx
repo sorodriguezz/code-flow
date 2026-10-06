@@ -22,7 +22,9 @@ export type AiGlyphName =
   | "brain-circuit"
   | "binary"
   | "database-zap"
-  | "reply";
+  | "reply"
+  | "scan-search"
+  | "audio-lines";
 
 /**
  * An AI icon: the glyph cut out of the logo's stroke, with the stroke flowing through it — see

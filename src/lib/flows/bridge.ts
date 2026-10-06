@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { flowsBridgeAnswer } from "../tauri/flowsCommands";
+import { flowsBridgeAnswer, flowsConfirmLink } from "../tauri/flowsCommands";
 import { isMainWindow } from "../windowIdentity";
 import type { DbSchemaDiagram } from "../../types/database";
 import type { PrCommentThread } from "../../types/domain";
@@ -114,4 +114,15 @@ export function startFlowsBridge(): void {
   started = true;
   void listen<Ask>("flows:ask", ({ payload }) => void answer(payload));
   void listen<{ id: string }>("flows:ask-cancel", ({ payload }) => running.get(payload.id)?.abort());
+  // `codeflow --flow <name>` for a flow set to ask first: the person at the window says yes.
+  void listen<{ flowId: string; nodeId: string; name: string; item: unknown }>("flows:link-ask", ({ payload }) => void confirmLink(payload));
+}
+
+/** A run asked for from outside, confirmed here — the trigger's «Preguntar antes» is on. */
+async function confirmLink(ask: { flowId: string; nodeId: string; name: string; item: unknown }): Promise<void> {
+  const { confirmAction } = await import("../../state/confirmStore");
+  const { translate } = await import("../../state/languageStore");
+  const flow = (await import("../../state/flowsStore")).useFlowsStore.getState().flows.find((f) => f.id === ask.flowId);
+  const ok = await confirmAction(translate("flows.link.ask", { flow: flow?.name ?? ask.name, name: ask.name }), false, translate("flows.link.run"));
+  if (ok) await flowsConfirmLink(ask.flowId, ask.nodeId, ask.item).catch(() => {});
 }

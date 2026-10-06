@@ -237,7 +237,7 @@ fn plain_json(value: mongodb::bson::Bson) -> Value {
     }
 }
 
-pub(super) fn rows_of(result: &DbStatementResult) -> Vec<Value> {
+pub(crate) fn rows_of(result: &DbStatementResult) -> Vec<Value> {
     if !result.documents.is_empty() {
         // Documents arrive in the shell's dialect (`ObjectId("…")`), which only Mongo's own reader takes.
         return result

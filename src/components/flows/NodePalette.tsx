@@ -4,7 +4,10 @@ import { ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, Search } from "
 import { iconButtonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 import { FAMILIES, FAMILY_ICON, familyColor, nodeIcon } from "../../lib/flows/nodeIcons";
-import type { FlowFamily, FlowNodeDescriptor } from "../../lib/tauri/flowsCommands";
+import { appLogo } from "../../lib/flows/appLogos";
+import type { PaletteEntry } from "../../lib/flows/paletteEntries";
+import type { FlowFamily } from "../../lib/tauri/flowsCommands";
+import { BrandGlyph } from "../ai/ProviderGlyph";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useT } from "../../state/languageStore";
 
@@ -16,7 +19,9 @@ const fold = (text: string) =>
     .replace(/[̀-ͯ]/g, "");
 
 /**
- * The node palette: the catalogue by family, and a search across names and descriptions.
+ * The node palette: the catalogue by family — each family's entries under its sub-headings, the Apps
+ * family one entry per service (`lib/flows/paletteEntries`) — and a search across names and
+ * descriptions.
  *
  * **A panel docked at the canvas's right edge, collapsible** (the user's ask, 2026-10-05). It used
  * to be a drawer laid *over* the canvas, and it covered whatever else lives in that corner — the AI
@@ -36,7 +41,7 @@ const fold = (text: string) =>
 /** How far a press travels before it is a drag rather than a click. */
 const DRAG_SLOP = 5;
 export function NodePalette({
-  catalog,
+  entries,
   initialFamily,
   expanded,
   disabled = false,
@@ -46,17 +51,17 @@ export function NodePalette({
   onExpand,
   onCollapse,
 }: {
-  catalog: FlowNodeDescriptor[];
+  entries: PaletteEntry[];
   /** The family to start unfolded — triggers for a flow that has none yet. */
   initialFamily: FlowFamily | null;
   expanded: boolean;
   /** Folded and inert — while an AI proposal is on the canvas, nothing is added under it. */
   disabled?: boolean;
-  onPick: (typeId: string) => void;
+  onPick: (entry: PaletteEntry) => void;
   /** Whether a node let go at this client point would land on the canvas. */
   canDropAt: (x: number, y: number) => boolean;
   /** Places a dragged node where it was let go. */
-  onDropAt: (typeId: string, x: number, y: number) => void;
+  onDropAt: (entry: PaletteEntry, x: number, y: number) => void;
   onExpand: () => void;
   onCollapse: () => void;
 }) {
@@ -68,15 +73,15 @@ export function NodePalette({
   const list = useRef<HTMLDivElement>(null);
   const open = expanded && !disabled;
   /** The press on a row, until it is let go — a drag once it has travelled `DRAG_SLOP`. */
-  const press = useRef<{ typeId: string; pointerId: number; x: number; y: number; dragging: boolean } | null>(null);
+  const press = useRef<{ entry: PaletteEntry; pointerId: number; x: number; y: number; dragging: boolean } | null>(null);
   /** Set by a drag's release, so the click the browser sends after it is not a second add. */
   const dragged = useRef(false);
-  const [ghost, setGhost] = useState<{ descriptor: FlowNodeDescriptor; x: number; y: number; over: boolean } | null>(null);
+  const [ghost, setGhost] = useState<{ entry: PaletteEntry; x: number; y: number; over: boolean } | null>(null);
 
-  const dragHandlers = (d: FlowNodeDescriptor) => ({
+  const dragHandlers = (d: PaletteEntry) => ({
     onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => {
       if (event.button !== 0) return;
-      press.current = { typeId: d.typeId, pointerId: event.pointerId, x: event.clientX, y: event.clientY, dragging: false };
+      press.current = { entry: d, pointerId: event.pointerId, x: event.clientX, y: event.clientY, dragging: false };
       dragged.current = false;
     },
     onPointerMove: (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -88,7 +93,7 @@ export function NodePalette({
         // Captured once it is a drag, so the release is heard over the canvas as well.
         event.currentTarget.setPointerCapture(event.pointerId);
       }
-      setGhost({ descriptor: d, x: event.clientX, y: event.clientY, over: canDropAt(event.clientX, event.clientY) });
+      setGhost({ entry: d, x: event.clientX, y: event.clientY, over: canDropAt(event.clientX, event.clientY) });
     },
     onPointerUp: (event: ReactPointerEvent<HTMLButtonElement>) => {
       const current = press.current;
@@ -96,7 +101,7 @@ export function NodePalette({
       if (!current?.dragging) return;
       dragged.current = true;
       setGhost(null);
-      if (canDropAt(event.clientX, event.clientY)) onDropAt(current.typeId, event.clientX, event.clientY);
+      if (canDropAt(event.clientX, event.clientY)) onDropAt(current.entry, event.clientX, event.clientY);
     },
     onPointerCancel: () => {
       press.current = null;
@@ -109,16 +114,11 @@ export function NodePalette({
     if (open) field.current?.focus();
   }, [open]);
 
-  const nameOf = (d: FlowNodeDescriptor) => t(`flows.node.${d.typeId}` as TranslationKey);
-  const descriptionOf = (d: FlowNodeDescriptor) => t(`flows.nodeDesc.${d.typeId}` as TranslationKey);
-
   const hits = useMemo(() => {
     const needle = fold(query.trim());
     if (!needle) return null;
-    return catalog.filter((d) => fold(`${nameOf(d)} ${descriptionOf(d)} ${d.typeId}`).includes(needle));
-    // `t` changes identity with the language, which is exactly when the names do.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, catalog, t]);
+    return entries.filter((e) => fold(`${e.name} ${e.description} ${e.descriptor.typeId} ${e.keywords ?? ""}`).includes(needle));
+  }, [query, entries]);
 
   useEffect(() => setActive(0), [query]);
 
@@ -126,12 +126,11 @@ export function NodePalette({
     list.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: "nearest" });
   }, [active]);
 
-  const row = (d: FlowNodeDescriptor, index: number | null) => {
-    const Icon = nodeIcon(d.icon);
+  const row = (d: PaletteEntry, index: number | null) => {
     const highlighted = index !== null && index === active;
     return (
       <button
-        key={d.typeId}
+        key={d.key}
         type="button"
         data-index={index ?? undefined}
         {...dragHandlers(d)}
@@ -140,20 +139,20 @@ export function NodePalette({
             dragged.current = false;
             return;
           }
-          onPick(d.typeId);
+          onPick(d);
         }}
         onMouseEnter={() => index !== null && setActive(index)}
         className={`flex w-full items-start gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors ${
           highlighted ? "bg-[var(--cf-hover)]" : "hover:bg-[var(--cf-hover)]"
         }`}
-        style={{ "--node-color": familyColor(d.family) } as CSSProperties}
+        style={{ "--node-color": familyColor(d.descriptor.family) } as CSSProperties}
       >
         <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-[color-mix(in_oklab,var(--node-color)_12%,var(--cf-surface))] text-[var(--node-color)]">
-          <Icon size={14} />
+          <EntryGlyph entry={d} size={14} />
         </span>
         <span className="min-w-0">
-          <span className="block text-[12.5px] font-semibold text-[var(--cf-text)]">{nameOf(d)}</span>
-          <span className="block text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{descriptionOf(d)}</span>
+          <span className="block text-[12.5px] font-semibold text-[var(--cf-text)]">{d.name}</span>
+          <span className="block text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{d.description}</span>
         </span>
       </button>
     );
@@ -246,7 +245,7 @@ export function NodePalette({
               setActive((index) => Math.max(index - 1, 0));
             } else if (event.key === "Enter" && hits[active]) {
               event.preventDefault();
-              onPick(hits[active].typeId);
+              onPick(hits[active]);
             }
           }}
           placeholder={t("flows.paletteSearch")}
@@ -263,7 +262,7 @@ export function NodePalette({
             </p>
           ) : (
             FAMILIES.map((family) => {
-              const inFamily = hits.filter((d) => d.family === family);
+              const inFamily = hits.filter((d) => d.descriptor.family === family);
               if (inFamily.length === 0) return null;
               return (
                 <div key={family}>
@@ -278,7 +277,7 @@ export function NodePalette({
         ) : (
           FAMILIES.map((family) => {
             const FamilyIcon = FAMILY_ICON[family];
-            const nodes = catalog.filter((d) => d.family === family);
+            const nodes = entries.filter((d) => d.descriptor.family === family);
             const open = unfolded.has(family);
             return (
               <div key={family}>
@@ -303,7 +302,21 @@ export function NodePalette({
                   <span className="text-[11px] font-medium tabular-nums text-[var(--cf-text-faint)]">{nodes.length}</span>
                   {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                 </button>
-                {open && <div className="pb-1">{nodes.map((d) => row(d, null))}</div>}
+                {open && (
+                  <div className="pb-1">
+                    {nodes.map((d, index) => (
+                      <div key={d.key}>
+                        {/* A sub-heading where the group changes — the catalogue lists a family heading by heading. */}
+                        {d.group && d.group !== nodes[index - 1]?.group && (
+                          <div className="px-2 pb-0.5 pt-2 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+                            {t(`flows.group.${d.group}` as TranslationKey)}
+                          </div>
+                        )}
+                        {row(d, null)}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })
@@ -314,11 +327,11 @@ export function NodePalette({
           <div
             aria-hidden
             className="pointer-events-none fixed z-[10000] flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1 transition-opacity"
-            style={{ left: ghost.x, top: ghost.y, opacity: ghost.over ? 0.95 : 0.55, "--node-color": familyColor(ghost.descriptor.family) } as CSSProperties}
+            style={{ left: ghost.x, top: ghost.y, opacity: ghost.over ? 0.95 : 0.55, "--node-color": familyColor(ghost.entry.descriptor.family) } as CSSProperties}
           >
-            <GhostTile descriptor={ghost.descriptor} />
+            <GhostTile entry={ghost.entry} />
             <span className="rounded bg-[var(--cf-surface)] px-1.5 text-[11px] font-semibold text-[var(--cf-text)] shadow-[var(--cf-shadow-lift)]">
-              {nameOf(ghost.descriptor)}
+              {ghost.entry.name}
             </span>
           </div>,
           document.body,
@@ -327,12 +340,18 @@ export function NodePalette({
   );
 }
 
+/** An entry's mark: the service's own logo when it has one, the node type's glyph otherwise. */
+function EntryGlyph({ entry, size }: { entry: PaletteEntry; size: number }) {
+  const Icon = nodeIcon(entry.descriptor.icon);
+  const logo = entry.logo ? appLogo(entry.logo) : undefined;
+  return logo ? <BrandGlyph id={entry.logo ?? ""} logo={logo} size={size} /> : <Icon size={size} strokeWidth={size > 16 ? 1.75 : 2} />;
+}
+
 /** What is carried while a node is dragged: its tile, the way the canvas will draw it. */
-function GhostTile({ descriptor }: { descriptor: FlowNodeDescriptor }) {
-  const Icon = nodeIcon(descriptor.icon);
+function GhostTile({ entry }: { entry: PaletteEntry }) {
   return (
     <span className="flex h-12 w-12 items-center justify-center rounded-[11px] border border-[var(--cf-border-strong)] bg-[color-mix(in_oklab,var(--node-color)_14%,var(--cf-surface))] text-[var(--node-color)] shadow-[var(--cf-shadow)]">
-      <Icon size={22} strokeWidth={1.75} />
+      <EntryGlyph entry={entry} size={22} />
     </span>
   );
 }

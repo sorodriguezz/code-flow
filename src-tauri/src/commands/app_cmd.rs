@@ -120,6 +120,7 @@ pub fn ai_usage_stats(
 /// caches for half an hour (see [`crate::ai_quota::Trigger`]).
 #[tauri::command]
 pub async fn ai_quota_status(
+    app: tauri::AppHandle,
     db: State<'_, Db>,
     trigger: Option<String>,
 ) -> Result<crate::ai_quota::QuotaReport, String> {
@@ -175,10 +176,26 @@ pub async fn ai_quota_status(
         (engines, routed)
     };
 
-    Ok(crate::ai_quota::QuotaReport {
-        providers: crate::ai_quota::fetch_all(engines, trigger).await,
-        routed,
-    })
+    let providers = crate::ai_quota::fetch_all(engines, trigger).await;
+    // Every reading is offered to the flows that wait on a plan filling up ("Evento de CodeFlow");
+    // the trigger's own threshold, once per window, decides (`flows::triggers::app_event`).
+    for provider in &providers {
+        for limit in &provider.limits {
+            crate::flows::triggers::app_event(
+                &app,
+                "aiQuotaHigh",
+                serde_json::json!({
+                    "provider": provider.provider,
+                    "plan": provider.plan,
+                    "kind": limit.kind,
+                    "scope": limit.scope,
+                    "usedPercent": limit.used_percent,
+                    "resetsAt": limit.resets_at,
+                }),
+            );
+        }
+    }
+    Ok(crate::ai_quota::QuotaReport { providers, routed })
 }
 
 /// Battery level and whether the machine is on mains, or `None` on a machine with no battery.

@@ -18,12 +18,17 @@ import {
   fieldMarkKey,
   isCommented,
   layoutDbml,
+  MIN_NOTE_SIDE,
   NOTE_SLOT,
+  stickyBoxes,
   type DbmlBadge,
   type DbmlLayout,
   type DbmlMarkKind,
   type DbmlMarks,
+  type LayoutSpot,
+  type StickyBox,
 } from "../../lib/dbml/layout";
+import { DBML_COLORS, DEFAULT_NOTE_COLOR } from "../../lib/dbml/palette";
 import { highlightFor, type DbmlSchema } from "../../lib/dbml/types";
 import {
   ArrowLeftRight,
@@ -31,9 +36,11 @@ import {
   LayoutGrid,
   ListOrdered,
   Pencil,
+  Palette,
   Pin,
   PinOff,
   Plus,
+  StickyNote,
   Table2,
   Trash2,
   Waypoints,
@@ -230,8 +237,25 @@ export const DbmlCanvas = forwardRef<
      * renderer cannot evaluate.
      */
     rowCounts?: Record<string, number>;
-    /** Omit for a read-only canvas — the boxes then sit wherever the layout engine puts them. */
-    onMoveTable?: (id: string, x: number, y: number) => void;
+    /**
+     * Omit for a read-only canvas — the boxes then sit wherever the layout engine puts them.
+     * Called on every frame of a drag with `final` false, and once more on the release with it
+     * true: the caller writes the document on the release and only moves the picture before it.
+     */
+    onMoveTable?: (id: string, x: number, y: number, final?: boolean) => void;
+    /**
+     * The sticky notes' operations — `Note name { … }` blocks in the code, their places in the
+     * layout comment. Omitted on a read-only canvas, which still draws the notes.
+     */
+    notesEditing?: {
+      /** A new empty note with its corner here; returns its name, or `null` when none was added. */
+      add: (x: number, y: number) => string | null;
+      setText: (name: string, text: string) => void;
+      setColor: (name: string, color: string | null) => void;
+      drop: (name: string) => void;
+      /** Moved or resized; `final` as for `onMoveTable`. */
+      place: (id: string, spot: LayoutSpot, final: boolean) => void;
+    };
     /** The table whose neighbourhood is lit up, or `null`. Controlled: the inspector reads it too. */
     selected: string | null;
     onSelect: (id: string | null) => void;
@@ -350,6 +374,8 @@ export const DbmlCanvas = forwardRef<
       dropTable: (id: string) => void;
       addTable: () => void;
       addEnum: () => void;
+      /** A table's `[headercolor: …]`, set or cleared (`null`). Absent where colours cannot be written. */
+      setTableColor?: (id: string, color: string | null) => void;
       dropRef: (from: RefEnd, to: RefEnd) => void;
       flipRef: (from: RefEnd, to: RefEnd) => void;
     };
@@ -361,6 +387,7 @@ export const DbmlCanvas = forwardRef<
     positions,
     rowCounts,
     onMoveTable,
+    notesEditing,
     selected,
     onSelect,
     onOpen,
@@ -398,7 +425,9 @@ export const DbmlCanvas = forwardRef<
   const commitTimer = useRef<number | null>(null);
   const dragRef = useRef<
     | { kind: "canvas"; x: number; y: number; viewX: number; viewY: number; moved: boolean }
-    | { kind: "node"; id: string; x: number; y: number; nodeX: number; nodeY: number; moved: boolean }
+    | { kind: "node"; id: string; x: number; y: number; nodeX: number; nodeY: number; moved: boolean; lastX?: number; lastY?: number }
+    // A sticky note being moved (`resize` false) or resized from its corner (`resize` true).
+    | { kind: "sticky"; id: string; resize: boolean; x: number; y: number; box: StickyBox; moved: boolean; last?: LayoutSpot }
     // Dragging a relationship out of a column. Carries the diagram-space point it started from so
     // the provisional line has an anchor that survives a pan mid-gesture.
     | { kind: "port"; from: RefEnd; fromId: string; ox: number; oy: number; moved: boolean }
@@ -445,6 +474,8 @@ export const DbmlCanvas = forwardRef<
           name: string;
           isEnum: boolean;
           mark?: DbmlMarkKind;
+          /** Its `[headercolor: …]`, so the colour menu can leave the one in use out. */
+          color?: string;
           pinned: boolean;
         };
       }
@@ -462,8 +493,29 @@ export const DbmlCanvas = forwardRef<
         on: { kind: "field"; table: string; name: string; column: string; mark?: DbmlMarkKind };
       }
     | { x: number; y: number; on: { kind: "canvas" } }
+    | { x: number; y: number; on: { kind: "note"; id: string; name: string; content: string; color?: string } }
     | null
   >(null);
+  /**
+   * The sticky note whose text is being written, and where its box is. An HTML field over the
+   * frame, for the reason the rename field is one: inside the SVG it would ride the zoom.
+   */
+  const [noteEditing, setNoteEditing] = useState<{ id: string; name: string; content: string; box: { x: number; y: number; w: number; h: number } } | null>(null);
+  const noteAbandoned = useRef(false);
+  const noteField = useRef<HTMLTextAreaElement>(null);
+  // Focused a frame after it opens rather than by `autoFocus`: opened from the canvas menu, the
+  // menu's own close hands focus back to the frame *after* the field mounted, and the first
+  // keystrokes of the note went to the canvas.
+  useEffect(() => {
+    if (!noteEditing) return;
+    const frame = requestAnimationFrame(() => {
+      const field = noteField.current;
+      if (!field) return;
+      field.focus({ preventScroll: true });
+      field.setSelectionRange(field.value.length, field.value.length);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [noteEditing?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   /** The table whose name is being typed over, and the box it sits in. */
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
   /**
@@ -503,6 +555,35 @@ export const DbmlCanvas = forwardRef<
     () => new Map(layout.nodes.map((node) => [node.id, node])),
     [layout.nodes],
   );
+  /** Each table's own colour — DBML's `[headercolor: …]` — drawn as its border. */
+  const tableColors = useMemo(
+    () => new Map(schema.tables.filter((table) => table.color).map((table) => [table.id, table.color as string])),
+    [schema.tables],
+  );
+  /** The sticky notes where they are drawn: placed, or parked to the right of the tables. */
+  const stickies = useMemo(
+    () => stickyBoxes(schema.notes ?? [], positions, { width: layout.width === 0 ? 0 : layout.minX + layout.width }),
+    [schema.notes, positions, layout.minX, layout.width],
+  );
+  /**
+   * The picture's extent with the notes in it — what fitting, the dotted ground and an export frame.
+   * The tables' own `layout` stays what the router and `holdPlaces` read.
+   */
+  const framed = useMemo(() => {
+    if (stickies.length === 0) return layout;
+    const empty = layout.width === 0 && layout.height === 0;
+    let minX = empty ? Infinity : layout.minX;
+    let minY = empty ? Infinity : layout.minY;
+    let maxX = empty ? -Infinity : layout.minX + layout.width;
+    let maxY = empty ? -Infinity : layout.minY + layout.height;
+    for (const box of stickies) {
+      minX = Math.min(minX, box.x);
+      minY = Math.min(minY, box.y);
+      maxX = Math.max(maxX, box.x + box.w);
+      maxY = Math.max(maxY, box.y + box.h);
+    }
+    return { ...layout, minX, minY, width: maxX - minX, height: maxY - minY };
+  }, [layout, stickies]);
   /** Every reference by its id, so a line can read its own cardinality without scanning the list. */
   const refById = useMemo(
     () => new Map(schema.refs.map((ref) => [ref.id, ref])),
@@ -668,19 +749,20 @@ export const DbmlCanvas = forwardRef<
 
   const fit = useCallback(() => {
     const frame = frameRef.current;
-    if (!frame || layout.width === 0) return;
+    // `framed`, so the notes are in the picture a fit frames.
+    if (!frame || framed.width === 0) return;
     const scale = Math.max(
       ZOOM_MIN,
-      Math.min((frame.clientWidth - 24) / layout.width, (frame.clientHeight - 24) / layout.height, 1),
+      Math.min((frame.clientWidth - 24) / framed.width, (frame.clientHeight - 24) / framed.height, 1),
     );
     // Offset by the content's own origin — see `DiagramLayout.minX`.
     applyView({
       k: scale,
-      x: (frame.clientWidth - layout.width * scale) / 2 - layout.minX * scale,
-      y: (frame.clientHeight - layout.height * scale) / 2 - layout.minY * scale,
+      x: (frame.clientWidth - framed.width * scale) / 2 - framed.minX * scale,
+      y: (frame.clientHeight - framed.height * scale) / 2 - framed.minY * scale,
     });
     commitView();
-  }, [applyView, commitView, layout.width, layout.height, layout.minX, layout.minY]);
+  }, [applyView, commitView, framed.width, framed.height, framed.minX, framed.minY]);
 
   const zoomBy = useCallback(
     (factor: number, origin?: { x: number; y: number }) => {
@@ -736,7 +818,8 @@ export const DbmlCanvas = forwardRef<
       focusTable,
       nextMatch,
       element: () => svgRef.current,
-      layout: () => layout,
+      // The extent with the notes, so an export frames them too; the nodes are the tables' own.
+      layout: () => framed,
       // `viewRef`, not `view`: a pan still in flight has moved the picture but not committed it.
       centre: () => {
         const frame = frameRef.current;
@@ -745,7 +828,7 @@ export const DbmlCanvas = forwardRef<
         return { x: (frame.clientWidth / 2 - x) / k, y: (frame.clientHeight / 2 - y) / k };
       },
     }),
-    [fit, zoomBy, focusTable, nextMatch, layout],
+    [fit, zoomBy, focusTable, nextMatch, framed],
   );
 
   /**
@@ -875,10 +958,23 @@ export const DbmlCanvas = forwardRef<
       applyView({ ...viewRef.current, x: drag.viewX + dx, y: drag.viewY + dy });
       return;
     }
+    if (drag.kind === "sticky") {
+      if (!notesEditing) return;
+      drag.moved = true;
+      const k = viewRef.current.k;
+      const { box } = drag;
+      drag.last = drag.resize
+        ? { x: box.x, y: box.y, w: Math.max(MIN_NOTE_SIDE, Math.round(box.w + dx / k)), h: Math.max(MIN_NOTE_SIDE, Math.round(box.h + dy / k)) }
+        : { x: Math.round(box.x + dx / k), y: Math.round(box.y + dy / k), w: box.w, h: box.h };
+      notesEditing.place(drag.id, drag.last, false);
+      return;
+    }
     if (!onMoveTable) return;
     // Divided by the zoom, or a box races the cursor at anything but 100%.
     drag.moved = true;
-    onMoveTable(drag.id, Math.round(drag.nodeX + dx / viewRef.current.k), Math.round(drag.nodeY + dy / viewRef.current.k));
+    drag.lastX = Math.round(drag.nodeX + dx / viewRef.current.k);
+    drag.lastY = Math.round(drag.nodeY + dy / viewRef.current.k);
+    onMoveTable(drag.id, drag.lastX, drag.lastY, false);
   };
 
   /**
@@ -913,6 +1009,11 @@ export const DbmlCanvas = forwardRef<
       return;
     }
     if (drag?.kind === "canvas") commitView();
+    // The release is what writes the document — every frame before it only moved the picture.
+    if (drag?.kind === "node" && drag.moved && drag.lastX !== undefined && drag.lastY !== undefined) {
+      onMoveTable?.(drag.id, drag.lastX, drag.lastY, true);
+    }
+    if (drag?.kind === "sticky" && drag.moved && drag.last) notesEditing?.place(drag.id, drag.last, true);
     // A gesture that actually moved almost certainly left the line it started on — and it cannot
     // tell us so itself, because while the pointer is captured the browser stops delivering
     // enter/leave to the elements underneath. Without this the line stays lit for good. A press
@@ -1112,10 +1213,10 @@ export const DbmlCanvas = forwardRef<
           transform={`translate(${view.x} ${view.y}) scale(${view.k})`}
         >
           <rect
-            x={layout.minX - 2400}
-            y={layout.minY - 2400}
-            width={layout.width + 4800}
-            height={layout.height + 4800}
+            x={framed.minX - 2400}
+            y={framed.minY - 2400}
+            width={framed.width + 4800}
+            height={framed.height + 4800}
             fill="url(#cf-dbml-dots)"
             pointerEvents="none"
           />
@@ -1297,6 +1398,7 @@ export const DbmlCanvas = forwardRef<
               mark={marks[node.id]}
               marks={marks}
               markNames={markNames}
+              color={layout.enumIds.has(node.id) ? undefined : tableColors.get(node.id)}
               pinned={pinnedId === node.id}
               selected={selected === node.id}
               connect={
@@ -1324,6 +1426,7 @@ export const DbmlCanvas = forwardRef<
                           name: node.name,
                           isEnum: layout.enumIds.has(node.id),
                           mark: marks[node.id],
+                          color: tableColors.get(node.id),
                           // Read from the prop and not from `selected`: right-clicking a table
                           // while another one is held does not move the selection (`onSelect` is
                           // refused while pinned), so the two are not the same question.
@@ -1381,6 +1484,41 @@ export const DbmlCanvas = forwardRef<
               onNoteEnter={showNote}
               onNoteLeave={hideNote}
               onOpen={() => onOpen?.(node.id)}
+            />
+          ))}
+
+          {/* Sticky notes, over the tables: a post-it is put on top of what it is about. */}
+          {stickies.map((box) => (
+            <StickyNoteBox
+              key={box.id}
+              box={box}
+              editable={notesEditing !== undefined}
+              editingNow={noteEditing?.id === box.id}
+              hint={t("dbml.noteEditHint")}
+              placeholder={t("dbml.notePlaceholder")}
+              onPointerDown={(event, resize) => {
+                setNoteTip(null);
+                if (event.button !== 0) return;
+                event.stopPropagation();
+                if (!notesEditing) return;
+                event.preventDefault();
+                frameRef.current?.focus({ preventScroll: true });
+                frameRef.current?.setPointerCapture?.(event.pointerId);
+                dragRef.current = { kind: "sticky", id: box.id, resize, x: event.clientX, y: event.clientY, box, moved: false };
+              }}
+              onEdit={() => {
+                if (!notesEditing) return;
+                setNoteEditing({ id: box.id, name: box.name, content: box.content, box });
+              }}
+              onContextMenu={
+                notesEditing
+                  ? (event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setMenu({ x: event.clientX, y: event.clientY, on: { kind: "note", id: box.id, name: box.name, content: box.content, color: box.color } });
+                    }
+                  : undefined
+              }
             />
           ))}
 
@@ -1465,6 +1603,41 @@ export const DbmlCanvas = forwardRef<
         />
       )}
 
+      {/* A sticky note's text, written over the note. ⌘↵ or leaving the field saves; Escape
+          abandons. The DBML block is rewritten on save — one edit, one undo step. */}
+      {noteEditing && notesEditing && (
+        <textarea
+          ref={noteField}
+          defaultValue={noteEditing.content}
+          placeholder={t("dbml.notePlaceholder")}
+          spellCheck={false}
+          onBlur={(event) => {
+            if (noteAbandoned.current) {
+              noteAbandoned.current = false;
+              return;
+            }
+            const next = event.target.value.replace(/\s+$/, "");
+            if (next !== noteEditing.content) notesEditing.setText(noteEditing.name, next);
+            setNoteEditing(null);
+          }}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) event.currentTarget.blur();
+            if (event.key === "Escape") {
+              noteAbandoned.current = true;
+              setNoteEditing(null);
+            }
+          }}
+          style={{
+            left: view.x + noteEditing.box.x * view.k,
+            top: view.y + noteEditing.box.y * view.k,
+            width: Math.max(180, noteEditing.box.w * view.k),
+            height: Math.max(90, noteEditing.box.h * view.k),
+          }}
+          className="absolute z-20 resize-none rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] p-2 text-[12.5px] leading-snug text-[var(--cf-text)] shadow-[var(--cf-shadow)] outline-none"
+        />
+      )}
+
       {/* A column's comment, read where the column is.
 
           HTML over the frame for the same reason the rename field is: inside the SVG it would ride
@@ -1514,7 +1687,20 @@ export const DbmlCanvas = forwardRef<
           // still on screen beside the menu.
           heading={menu.on.kind === "field" ? `${menu.on.name}.${menu.on.column}` : undefined}
           onClose={() => setMenu(null)}
-          items={menuItems(menu.on, editing, t, beginRename, onOpen)}
+          items={menuItems(menu.on, editing, t, beginRename, onOpen, {
+            notes: notesEditing,
+            addNoteHere: () => {
+              if (!notesEditing) return;
+              const at = toDiagram(menu.x, menu.y);
+              const name = notesEditing.add(at.x, at.y);
+              // Straight into writing it: a new note is an empty square until it says something.
+              if (name) setNoteEditing({ id: `note:${name}`, name, content: "", box: { x: at.x, y: at.y, w: 220, h: 130 } });
+            },
+            editNote: (note) => {
+              const box = stickies.find((entry) => entry.id === note.id);
+              if (box) setNoteEditing({ id: box.id, name: box.name, content: box.content, box });
+            },
+          })}
         />
       )}
     </div>
@@ -1532,6 +1718,31 @@ export const DbmlCanvas = forwardRef<
  * or not the schema is currently valid.
  */
 
+/** A dot of a colour, for the rows of a colour submenu. */
+function Swatch({ colour }: { colour: string | null }) {
+  return (
+    <span
+      className="inline-block h-3 w-3 shrink-0 rounded-full border border-[var(--cf-border-strong)]"
+      style={{ background: colour ?? "transparent" }}
+    />
+  );
+}
+
+/** The ten colours plus "none", as submenu rows; the one in use is not offered again. */
+function colourRows(
+  current: string | undefined,
+  set: (colour: string | null) => void,
+  t: (key: Parameters<ReturnType<typeof useT>>[0]) => string,
+): MenuItem[] {
+  const now = current?.toLowerCase();
+  return [
+    ...(current ? [{ label: t("color.none"), leading: <Swatch colour={null} />, onClick: () => set(null) } satisfies MenuItem] : []),
+    ...DBML_COLORS.filter((swatch) => swatch.value !== now).map(
+      (swatch) => ({ label: t(swatch.labelKey), leading: <Swatch colour={swatch.value} />, onClick: () => set(swatch.value) }) satisfies MenuItem,
+    ),
+  ];
+}
+
 function menuItems(
   on:
     | {
@@ -1540,18 +1751,42 @@ function menuItems(
         name: string;
         isEnum: boolean;
         mark?: DbmlMarkKind;
+        color?: string;
         pinned: boolean;
       }
     | { kind: "ref"; id: string; from: RefEnd; to: RefEnd; mark?: DbmlMarkKind }
     | { kind: "field"; table: string; name: string; column: string; mark?: DbmlMarkKind }
+    | { kind: "note"; id: string; name: string; content: string; color?: string }
     | { kind: "canvas" },
   editing: NonNullable<React.ComponentProps<typeof DbmlCanvas>["editing"]>,
   t: (key: Parameters<ReturnType<typeof useT>>[0]) => string,
   beginRename: (id: string, name: string) => void,
   /** The jump to the declaration in the text pane. Absent on a canvas whose caller has no editor. */
   onOpen?: (id: string) => void,
+  extra?: {
+    notes?: React.ComponentProps<typeof DbmlCanvas>["notesEditing"];
+    /** A new note where the menu was opened. */
+    addNoteHere?: () => void;
+    editNote?: (note: { id: string; name: string }) => void;
+  },
 ): MenuItem[] {
   const off = editing.blocked;
+  // A sticky note: write it, colour it, take it away. None of it waits on a parse — a note is found
+  // by its lines.
+  if (on.kind === "note") {
+    const notes = extra?.notes;
+    if (!notes) return [];
+    return [
+      { label: t("dbml.editNote"), icon: Pencil, onClick: () => extra?.editNote?.(on) },
+      {
+        label: t("dbml.noteColor"),
+        icon: Palette,
+        onClick: () => {},
+        children: colourRows(on.color, (colour) => notes.setColor(on.name, colour), t),
+      },
+      { label: t("dbml.dropNote"), icon: Trash2, danger: true, separated: true, onClick: () => notes.drop(on.name) },
+    ];
+  }
   // A column, which is what a right-click on one of a box's rows lands on. Its own menu rather than
   // the table's, for the reason every file manager gives a file a different menu from its folder:
   // what you pointed at is what you meant. The table's own menu is a right-click away on the header
@@ -1602,11 +1837,23 @@ function menuItems(
             } satisfies MenuItem,
           ]
         : []),
+      ...(editing.setTableColor && !on.isEnum
+        ? [
+            {
+              label: t("dbml.tableColor"),
+              icon: Palette,
+              separated: true,
+              disabled: off,
+              onClick: () => {},
+              children: colourRows(on.color, (colour) => editing.setTableColor?.(on.id, colour), t),
+            } satisfies MenuItem,
+          ]
+        : []),
       {
         label: t("dbml.inspector.addField"),
         icon: Plus,
         disabled: off || on.isEnum,
-        separated: true,
+        separated: !(editing.setTableColor && !on.isEnum),
         onClick: () => editing.addField(on.name),
       },
       {
@@ -1653,6 +1900,10 @@ function menuItems(
   return [
     { label: t("dbml.addTable"), icon: Table2, disabled: off, onClick: editing.addTable },
     { label: t("dbml.addEnum"), icon: ListOrdered, disabled: off, onClick: editing.addEnum },
+    // Not gated on `blocked`: a note is its own block, added at the end, whatever the rest says.
+    ...(extra?.notes && extra.addNoteHere
+      ? [{ label: t("dbml.addNote"), icon: StickyNote, onClick: extra.addNoteHere } satisfies MenuItem]
+      : []),
     // Not gated on `blocked` either: it writes the sidecar comment and no DBML at all, same as the
     // marks. Arranging the boxes is often exactly what you want while the text is mid-edit.
     {
@@ -1770,6 +2021,154 @@ function CardinalityBadge({
   );
 }
 
+/** The sticky notes' type: the app's own sans, at the size a canvas annotation reads at. */
+const NOTE_FONT = '"Instrument Sans Variable", "Instrument Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+const NOTE_SIZE = 12.5;
+const NOTE_LINE = 17;
+const NOTE_PAD = 12;
+
+let measureContext: CanvasRenderingContext2D | null | undefined;
+/** Text width at the notes' font — a 2D context's `measureText`, which is the same shaping the SVG
+ *  gets. Falls back to an average advance where there is no canvas (a test). */
+function noteTextWidth(text: string): number {
+  if (measureContext === undefined) {
+    measureContext = typeof document === "undefined" ? null : document.createElement("canvas").getContext("2d");
+    if (measureContext) measureContext.font = `${NOTE_SIZE}px ${NOTE_FONT}`;
+  }
+  return measureContext ? measureContext.measureText(text).width : text.length * NOTE_SIZE * 0.55;
+}
+
+/**
+ * A note's text broken into the lines its box holds — the author's own line breaks kept, words
+ * wrapped, a word longer than the box cut — with an ellipsis on the last line when it does not fit.
+ * SVG has no wrapping of its own, and a `foreignObject` would not survive the PNG export.
+ */
+function wrapNote(content: string, width: number, maxLines: number): string[] {
+  const out: string[] = [];
+  for (const paragraph of content.split("\n")) {
+    let line = "";
+    for (const word of paragraph.split(/(\s+)/)) {
+      if (!word) continue;
+      const candidate = line + word;
+      if (noteTextWidth(candidate) <= width || !line.trim()) {
+        if (noteTextWidth(candidate) <= width) {
+          line = candidate;
+          continue;
+        }
+        // One word wider than the box: cut it where it stops fitting.
+        let piece = "";
+        for (const char of candidate) {
+          if (noteTextWidth(piece + char) > width && piece) {
+            out.push(piece);
+            piece = "";
+          }
+          piece += char;
+        }
+        line = piece;
+        continue;
+      }
+      out.push(line.trimEnd());
+      line = word.trimStart();
+    }
+    out.push(line.trimEnd());
+  }
+  if (out.length <= maxLines) return out;
+  const kept = out.slice(0, Math.max(1, maxLines));
+  let last = kept[kept.length - 1];
+  while (last && noteTextWidth(`${last}…`) > width) last = last.slice(0, -1);
+  kept[kept.length - 1] = `${last}…`;
+  return kept;
+}
+
+/**
+ * A sticky note: a square of colour with the author's words on it, over the tables.
+ *
+ * Drawn as the paper kind — the colour as a wash on the surface rather than a flood, so the text
+ * keeps the theme's own ink and contrast in both themes, a solid edge in the full colour and a
+ * folded corner. Moved by its body, resized from the corner, written by a double-click.
+ */
+const StickyNoteBox = memo(function StickyNoteBox({
+  box,
+  editable,
+  editingNow,
+  hint,
+  placeholder,
+  onPointerDown,
+  onEdit,
+  onContextMenu,
+}: {
+  box: StickyBox;
+  editable: boolean;
+  /** Its text field is open over it: the drawn text steps aside. */
+  editingNow: boolean;
+  hint: string;
+  placeholder: string;
+  onPointerDown: (event: React.PointerEvent, resize: boolean) => void;
+  onEdit: () => void;
+  onContextMenu?: (event: React.MouseEvent) => void;
+}) {
+  const colour = box.color ?? DEFAULT_NOTE_COLOR;
+  const lines = useMemo(
+    () => (box.content ? wrapNote(box.content, box.w - NOTE_PAD * 2, Math.max(1, Math.floor((box.h - NOTE_PAD * 2 + 4) / NOTE_LINE))) : []),
+    [box.content, box.w, box.h],
+  );
+  const fold = 14;
+  return (
+    <g
+      transform={`translate(${box.x} ${box.y})`}
+      onPointerDown={(event) => onPointerDown(event, false)}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        onEdit();
+      }}
+      onContextMenu={onContextMenu}
+      style={{ cursor: editable ? "move" : "default" }}
+    >
+      {editable && <title>{hint}</title>}
+      <path
+        d={`M0 0 H${box.w - fold} L${box.w} ${fold} V${box.h} H0 Z`}
+        fill="var(--cf-surface)"
+      />
+      <path
+        d={`M0 0 H${box.w - fold} L${box.w} ${fold} V${box.h} H0 Z`}
+        fill={colour}
+        fillOpacity={0.24}
+        stroke={colour}
+        strokeWidth={1.4}
+        strokeLinejoin="round"
+      />
+      <path d={`M${box.w - fold} 0 V${fold} H${box.w}`} fill={colour} fillOpacity={0.45} stroke={colour} strokeWidth={1.4} strokeLinejoin="round" />
+      {!editingNow &&
+        (lines.length > 0 ? (
+          <text x={NOTE_PAD} y={NOTE_PAD + NOTE_SIZE} fontSize={NOTE_SIZE} fontFamily={NOTE_FONT} fill="var(--cf-text)">
+            {lines.map((line, at) => (
+              <tspan key={at} x={NOTE_PAD} dy={at === 0 ? 0 : NOTE_LINE}>
+                {line || " "}
+              </tspan>
+            ))}
+          </text>
+        ) : (
+          <text x={NOTE_PAD} y={NOTE_PAD + NOTE_SIZE} fontSize={NOTE_SIZE} fontFamily={NOTE_FONT} fill="var(--cf-text-muted)" fontStyle="italic">
+            {placeholder}
+          </text>
+        ))}
+      {editable && (
+        // The resize grip: a corner triangle, its own press.
+        <path
+          d={`M${box.w} ${box.h - 12} L${box.w} ${box.h} L${box.w - 12} ${box.h} Z`}
+          fill={colour}
+          fillOpacity={0.6}
+          style={{ cursor: "nwse-resize" }}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            onPointerDown(event, true);
+          }}
+        />
+      )}
+    </g>
+  );
+});
+
 /**
  * One table or enum: a header band over a stack of rows.
  *
@@ -1780,6 +2179,7 @@ const SchemaBox = memo(function SchemaBox({
   node,
   isEnum,
   mark,
+  color,
   marks,
   markNames,
   pinned,
@@ -1803,6 +2203,12 @@ const SchemaBox = memo(function SchemaBox({
   isEnum: boolean;
   /** The review mark on this table, if it has one. */
   mark?: DbmlMarkKind;
+  /**
+   * The table's own colour — DBML's `[headercolor: …]` — drawn as a heavier border and the header
+   * band. A hex literal rather than a token, which the export resolver carries as it is. Distinct
+   * from the review mark, which is the spine down the left edge and is about the *reader*.
+   */
+  color?: string;
   /**
    * Every mark in the document, so each row can find its own under `fieldMarkKey`.
    *
@@ -1852,7 +2258,7 @@ const SchemaBox = memo(function SchemaBox({
   onNoteLeave?: () => void;
   onOpen: () => void;
 }) {
-  const accent = isEnum ? ENUM_COLOUR : "var(--cf-accent)";
+  const accent = isEnum ? ENUM_COLOUR : color ?? "var(--cf-accent)";
   const lit = selected || related;
   /**
    * The table carries a `Note: '…'` of its own.
@@ -1975,8 +2381,10 @@ const SchemaBox = memo(function SchemaBox({
         height={node.height}
         rx={12}
         fill="none"
-        stroke={lit ? accent : "var(--cf-border)"}
-        strokeWidth={selected ? 1.8 : related ? 1.15 : 1}
+        // A coloured table wears its colour whether or not it is lit — that is what it is for — and
+        // a little heavier than the hairline, so it reads at the zoom where thirty tables fit.
+        stroke={color ? color : lit ? accent : "var(--cf-border)"}
+        strokeWidth={color ? (selected ? 2.6 : 2) : selected ? 1.8 : related ? 1.15 : 1}
       />
 
       {/* The header: the band and everything printed on it, down to the column count.

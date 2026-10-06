@@ -696,6 +696,7 @@ pub async fn dispatch(
         "unstage_all" => ok_with(commands::git_ops::unstage_all(arg(args, "repoPath")?)?, Invalidate::Repo),
         "commit" => ok_with(
             commands::git_ops::commit(
+                app.clone(),
                 arg(args, "repoPath")?,
                 arg(args, "message")?,
                 opt(args, "authorName")?,
@@ -704,7 +705,7 @@ pub async fn dispatch(
             Invalidate::Repo,
         ),
         "checkout_local_branch" => ok_with(
-            commands::git_ops::checkout_local_branch(arg(args, "repoPath")?, arg(args, "name")?)?,
+            commands::git_ops::checkout_local_branch(app.clone(), arg(args, "repoPath")?, arg(args, "name")?)?,
             Invalidate::Repo,
         ),
         // The remote-only half of the branch picker. Without it the list a phone can *see* is
@@ -714,7 +715,7 @@ pub async fn dispatch(
         // branch" means everywhere else in the app, and it writes nothing that `create_branch`
         // plus `checkout_local_branch` would not have written by hand.
         "checkout_remote_tracking" => ok_with(
-            commands::git_ops::checkout_remote_tracking(arg(args, "repoPath")?, arg(args, "remoteBranch")?)?,
+            commands::git_ops::checkout_remote_tracking(app.clone(), arg(args, "repoPath")?, arg(args, "remoteBranch")?)?,
             Invalidate::Repo,
         ),
         "create_branch" => ok_with(
@@ -848,7 +849,7 @@ pub async fn dispatch(
         // subprocess on the desktop — on Windows that flashes a console window over whatever the
         // user is doing. See `ai_quota::Trigger`.
         "ai_quota_status" => ok(
-            commands::app_cmd::ai_quota_status(app.state::<Db>(), Some("poll".into())).await?,
+            commands::app_cmd::ai_quota_status(app.clone(), app.state::<Db>(), Some("poll".into())).await?,
         ),
         "list_job_history" => ok(commands::activity_cmd::list_job_history(
             app.state::<Db>(),

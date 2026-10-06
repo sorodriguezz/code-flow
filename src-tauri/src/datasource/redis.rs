@@ -385,6 +385,43 @@ const FALLBACK_ADMIN: &[&str] = &[
 // Connection plumbing
 // ---------------------------------------------------------------------------
 
+/// Subscribes to Redis channels (a `*` in a name makes it a pattern) and hands every message to `on`
+/// as `(channel, payload)` — the Flujos «Evento de base de datos» trigger. Returns when the server
+/// drops the subscription or `cancel` fires.
+pub async fn subscribe(
+    config: &DbConnectionConfig,
+    channels: &[String],
+    on: impl Fn(String, String) + Send + Sync + 'static,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+    let mut config = config.clone();
+    config.resolve_password();
+    let db: i64 = default_database(&config).parse().unwrap_or(0);
+    let client = build_client(&config, db)?;
+    let mut pubsub = client.get_async_pubsub().await.map_err(|e| describe_db_error(&config, "Connecting", &redis_error(&e)))?;
+    for channel in channels {
+        if channel.contains('*') || channel.contains('?') {
+            pubsub.psubscribe(channel.as_str()).await.map_err(|e| redis_error(&e))?;
+        } else {
+            pubsub.subscribe(channel.as_str()).await.map_err(|e| redis_error(&e))?;
+        }
+    }
+    let mut messages = pubsub.on_message();
+    loop {
+        tokio::select! {
+            message = messages.next() => match message {
+                Some(message) => {
+                    let payload: String = message.get_payload().unwrap_or_default();
+                    on(message.get_channel_name().to_string(), payload);
+                }
+                None => return Ok(()),
+            },
+            _ = cancel.cancelled() => return Ok(()),
+        }
+    }
+}
+
 fn default_database(config: &DbConnectionConfig) -> String {
     let named = config.database.trim();
     if named.is_empty() {

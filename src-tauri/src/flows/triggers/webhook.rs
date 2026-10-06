@@ -46,6 +46,14 @@ struct Route {
     credential: String,
     signature_header: String,
     respond: String,
+    /// Generic HMAC: `sha256` / `sha1` / `sha512`, and `hex` / `base64` for how the signature reads.
+    hmac_algorithm: String,
+    hmac_encoding: String,
+    /// Stripe and Slack sign a timestamp too: a request older (or newer) than this is a replay.
+    tolerance_secs: i64,
+    /// A header naming each delivery (`X-GitHub-Delivery`, `Idempotency-Key`): a second request
+    /// with an id already seen is answered and not run again.
+    dedupe_header: String,
 }
 
 static ROUTES: LazyLock<Mutex<HashMap<String, Route>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -137,6 +145,10 @@ pub fn register(app: &AppHandle, flow_id: &str, node: &FlowNode, params: &Value)
             if header.is_empty() { "X-Signature-256".to_string() } else { header }
         },
         respond: param(params, "respond"),
+        hmac_algorithm: param(params, "hmacAlgorithm"),
+        hmac_encoding: param(params, "hmacEncoding"),
+        tolerance_secs: params.get("toleranceSec").and_then(Value::as_i64).filter(|n| *n > 0).unwrap_or(300),
+        dedupe_header: param(params, "dedupeHeader"),
     };
     ROUTES.lock().map_err(|e| e.to_string())?.insert(key_of(&method, &path), route);
     Ok(format!("{}{}", base_url(), path))
@@ -149,12 +161,19 @@ pub fn forget_flow(flow_id: &str) {
 }
 
 pub fn shutdown() {
+    crate::flows::tunnel::stop();
     if let Ok(mut server) = SERVER.lock() {
         if let Some((_, cancel)) = server.take() {
             cancel.cancel();
         }
     }
 }
+
+/// The port the webhook server listens on — what a tunnel forwards to.
+pub fn port() -> u16 {
+    port_in_use()
+}
+
 
 pub(crate) fn ensure_server(app: &AppHandle) -> Result<(), String> {
     let mut server = SERVER.lock().map_err(|e| e.to_string())?;
@@ -177,6 +196,9 @@ pub(crate) fn ensure_server(app: &AppHandle) -> Result<(), String> {
     });
     *server = Some((port, cancel));
     crate::applog::info(&format!("flows: webhooks listening on 127.0.0.1:{port}"));
+    drop(server);
+    // A tunnel the user turned on comes back with the server it forwards to.
+    crate::flows::tunnel::resume(app);
     Ok(())
 }
 
@@ -225,15 +247,118 @@ fn authorise(app: &AppHandle, route: &Route, headers: &HeaderMap, body: &[u8]) -
             if same(header_text(headers, name).as_bytes(), secret.as_bytes()) { Ok(()) } else { Err("unauthorized") }
         }
         "hmac" => {
-            let presented = header_text(headers, &route.signature_header);
-            let presented = presented.strip_prefix("sha256=").unwrap_or(presented).trim().to_ascii_lowercase();
-            let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| "misconfigured")?;
-            mac.update(body);
-            let expected: String = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect();
+            let presented = header_text(headers, &route.signature_header).trim();
+            // `sha256=…`, `sha1=…`: the prefix some senders put before the digest.
+            let presented = presented.split_once('=').filter(|(algo, _)| algo.starts_with("sha")).map_or(presented, |(_, digest)| digest);
+            let raw = mac_bytes(&route.hmac_algorithm, secret.as_bytes(), body)?;
+            let ok = if route.hmac_encoding == "base64" {
+                same(presented.as_bytes(), base64::engine::general_purpose::STANDARD.encode(&raw).as_bytes())
+            } else {
+                same(presented.to_ascii_lowercase().as_bytes(), hex(&raw).as_bytes())
+            };
+            if ok { Ok(()) } else { Err("bad signature") }
+        }
+        // GitHub: `X-Hub-Signature-256: sha256=<hex>` over the body.
+        "githubSig" => {
+            let presented = header_text(headers, "x-hub-signature-256").trim();
+            let presented = presented.strip_prefix("sha256=").unwrap_or(presented).to_ascii_lowercase();
+            let expected = hex(&mac_bytes("sha256", secret.as_bytes(), body)?);
+            if same(presented.as_bytes(), expected.as_bytes()) { Ok(()) } else { Err("bad signature") }
+        }
+        // Stripe: `Stripe-Signature: t=<unix>,v1=<hex>[,v1=…]` over `<t>.<body>`, within the tolerance.
+        "stripeSig" => {
+            let header = header_text(headers, "stripe-signature");
+            let mut stamp: Option<i64> = None;
+            let mut signatures = Vec::new();
+            for part in header.split(',') {
+                match part.trim().split_once('=') {
+                    Some(("t", value)) => stamp = value.parse().ok(),
+                    Some(("v1", value)) => signatures.push(value.to_ascii_lowercase()),
+                    _ => {}
+                }
+            }
+            let stamp = stamp.ok_or("bad signature")?;
+            fresh(stamp, route.tolerance_secs)?;
+            let mut signed = format!("{stamp}.").into_bytes();
+            signed.extend_from_slice(body);
+            let expected = hex(&mac_bytes("sha256", secret.as_bytes(), &signed)?);
+            if signatures.iter().any(|candidate| same(candidate.as_bytes(), expected.as_bytes())) { Ok(()) } else { Err("bad signature") }
+        }
+        // Slack: `X-Slack-Signature: v0=<hex>` over `v0:<X-Slack-Request-Timestamp>:<body>`.
+        "slackSig" => {
+            let stamp: i64 = header_text(headers, "x-slack-request-timestamp").trim().parse().map_err(|_| "bad signature")?;
+            fresh(stamp, route.tolerance_secs)?;
+            let mut signed = format!("v0:{stamp}:").into_bytes();
+            signed.extend_from_slice(body);
+            let expected = format!("v0={}", hex(&mac_bytes("sha256", secret.as_bytes(), &signed)?));
+            let presented = header_text(headers, "x-slack-signature").trim().to_ascii_lowercase();
+            if same(presented.as_bytes(), expected.as_bytes()) { Ok(()) } else { Err("bad signature") }
+        }
+        // Shopify: `X-Shopify-Hmac-Sha256: <base64>` over the body.
+        "shopifySig" => {
+            let presented = header_text(headers, "x-shopify-hmac-sha256").trim();
+            let expected = base64::engine::general_purpose::STANDARD.encode(mac_bytes("sha256", secret.as_bytes(), body)?);
             if same(presented.as_bytes(), expected.as_bytes()) { Ok(()) } else { Err("bad signature") }
         }
         _ => Err("misconfigured"),
     }
+}
+
+/// An HMAC of `body` with `secret`, in the named algorithm (SHA-256 unless told otherwise).
+fn mac_bytes(algorithm: &str, secret: &[u8], body: &[u8]) -> Result<Vec<u8>, &'static str> {
+    Ok(match algorithm {
+        "sha1" => {
+            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret).map_err(|_| "misconfigured")?;
+            mac.update(body);
+            mac.finalize().into_bytes().to_vec()
+        }
+        "sha512" => {
+            let mut mac = Hmac::<sha2::Sha512>::new_from_slice(secret).map_err(|_| "misconfigured")?;
+            mac.update(body);
+            mac.finalize().into_bytes().to_vec()
+        }
+        _ => {
+            let mut mac = Hmac::<Sha256>::new_from_slice(secret).map_err(|_| "misconfigured")?;
+            mac.update(body);
+            mac.finalize().into_bytes().to_vec()
+        }
+    })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A signed timestamp close enough to now — what stops a captured request being sent again later.
+fn fresh(stamp: i64, tolerance: i64) -> Result<(), &'static str> {
+    let now = chrono::Utc::now().timestamp();
+    if (now - stamp).abs() <= tolerance { Ok(()) } else { Err("request too old") }
+}
+
+/// Whether a delivery id was seen before on this webhook — remembered in the flow's state (the last
+/// 500), so a sender retrying after a restart is still recognised. Records it when it was not.
+fn seen_before(app: &AppHandle, route: &Route, id: &str) -> bool {
+    const KEEP: usize = 500;
+    let db = app.state::<Db>();
+    let Ok(conn) = db.0.lock() else { return false };
+    let key = format!("hook:{}:delivered", route.node_id);
+    let mut list: Vec<Value> = flow_run_queries::state_get(&conn, &route.flow_id, &key).ok().flatten().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    if list.iter().any(|v| v.as_str() == Some(id)) {
+        return true;
+    }
+    list.push(json!(id));
+    if list.len() > KEEP {
+        let cut = list.len() - KEEP;
+        list.drain(..cut);
+    }
+    let _ = flow_run_queries::state_set(&conn, &route.flow_id, &key, &Value::Array(list), &crate::flows::engine::now_text());
+    false
+}
+
+/// A request that came in from the internet, through the tunnel — `cloudflared` stamps
+/// `Cf-Connecting-Ip` on everything it forwards, Tailscale Funnel `Tailscale-Funnel-Request`.
+fn through_tunnel(headers: &HeaderMap) -> bool {
+    headers.contains_key("cf-connecting-ip") || headers.contains_key("tailscale-funnel-request")
 }
 
 /// The request as the trigger's item.
@@ -258,10 +383,27 @@ fn item_of(method: &Method, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Val
                 .map(|(k, v)| (k.into_owned(), Value::String(v.into_owned())))
                 .collect(),
         )
+    } else if content_type.contains("multipart/form-data") {
+        // An upload form: its fields as text, its files kept as file references.
+        let dir = crate::flows::nodes::binary::incoming_dir();
+        crate::flows::nodes::binary::prune(&dir, std::time::Duration::from_secs(7 * 24 * 3600));
+        match crate::flows::nodes::binary::multipart(body, &content_type, &dir) {
+            Some(fields) => Value::Object(fields),
+            None => Value::String(String::from_utf8_lossy(body).into_owned()),
+        }
     } else {
         match std::str::from_utf8(body) {
             Ok(text) => Value::String(text.to_string()),
-            Err(_) => json!({"binary": true, "data": base64::engine::general_purpose::STANDARD.encode(body), "mimeType": content_type}),
+            // Bytes: kept as a file for the run to read, not carried as base64.
+            Err(_) => {
+                let dir = crate::flows::nodes::binary::incoming_dir();
+                crate::flows::nodes::binary::prune(&dir, std::time::Duration::from_secs(7 * 24 * 3600));
+                let name = crate::flows::nodes::binary::name_for(&header_text(headers, "content-disposition"), "", &content_type);
+                match crate::flows::nodes::binary::keep(&dir, body, &name, &content_type) {
+                    Ok(file) => json!({"binary": true, "file": file, "mimeType": content_type, "size": body.len()}),
+                    Err(_) => json!({"binary": true, "data": base64::engine::general_purpose::STANDARD.encode(body), "mimeType": content_type}),
+                }
+            }
         }
     };
     json!({
@@ -284,6 +426,10 @@ fn reply_of(items: &[Item]) -> Response {
 }
 
 async fn handle(State(app): State<AppHandle>, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
+    // Flows as tools for AI agents — see `flows::mcp`. Its own bearer token, through a tunnel too.
+    if uri.path().trim_end_matches('/') == "/mcp" {
+        return crate::flows::mcp::handle(&app, &method, &headers, &body).await;
+    }
     if let Some(rest) = uri.path().strip_prefix("/resume/") {
         let call = item_of(&method, &uri, &headers, &body);
         return match crate::flows::waits::resume_by_call(&app, rest.trim_end_matches('/'), call) {
@@ -302,9 +448,23 @@ async fn handle(State(app): State<AppHandle>, method: Method, uri: Uri, headers:
     let Some(route) = route else {
         return json_response(StatusCode::NOT_FOUND, json!({"error": "no active flow listens here"}));
     };
+    // Open to the internet only with a credential: a webhook that takes none was set up for this
+    // machine, and the tunnel must not make it everybody's.
+    if through_tunnel(&headers) && (route.auth.is_empty() || route.auth == "none") {
+        return json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": "this webhook takes no credential, so it is not open through the tunnel"}),
+        );
+    }
     if let Err(reason) = authorise(&app, &route, &headers, &body) {
         let status = if reason == "misconfigured" || reason == "unavailable" { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::UNAUTHORIZED };
         return json_response(status, json!({"error": reason}));
+    }
+    if !route.dedupe_header.is_empty() {
+        let id = header_text(&headers, &route.dedupe_header.to_ascii_lowercase()).trim().to_string();
+        if !id.is_empty() && seen_before(&app, &route, &id) {
+            return json_response(StatusCode::OK, json!({"duplicate": true, "id": id}));
+        }
     }
     let item = Item::new(item_of(&method, &uri, &headers, &body));
     match route.respond.as_str() {

@@ -1,4 +1,5 @@
 import { createContext, lazy, Suspense, useContext, useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useConnectors } from "../../lib/flows/connectorList";
 import { CircleHelp, FolderOpen, KeyRound } from "lucide-react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Checkbox } from "../common/Checkbox";
@@ -25,7 +26,6 @@ import { visible } from "../../lib/flows/paramVisibility";
 import { serializeSpec } from "../../lib/flows/spec";
 import {
   CONNECTOR_CREDENTIALS,
-  flowsConnectors,
   flowsPreviewExpression,
   type FlowConnector,
   type FlowConnectorCall,
@@ -644,28 +644,6 @@ function ServicePicker({ value, onChange }: { value: unknown; onChange: (next: u
       />
     </div>
   );
-}
-
-/** The connectors, asked for once: their definitions ship with the app and never change in it. */
-let connectorList: Promise<FlowConnector[]> | null = null;
-
-function useConnectors(enabled = true): FlowConnector[] {
-  const [connectors, setConnectors] = useState<FlowConnector[]>([]);
-  useEffect(() => {
-    if (!enabled) return;
-    let alive = true;
-    connectorList ??= flowsConnectors().catch(() => {
-      connectorList = null;
-      return [];
-    });
-    void connectorList.then((list) => {
-      if (alive) setConnectors(list);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [enabled]);
-  return connectors;
 }
 
 function asCall(value: unknown): FlowConnectorCall {

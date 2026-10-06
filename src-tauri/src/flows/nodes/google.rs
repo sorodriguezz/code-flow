@@ -142,7 +142,7 @@ pub fn doc_id(raw: &str) -> String {
     raw.to_string()
 }
 
-fn required(params: &Value, name: &str, what: &str) -> Result<String, NodeError> {
+pub(super) fn required(params: &Value, name: &str, what: &str) -> Result<String, NodeError> {
     let value = text(params, name);
     if value.trim().is_empty() {
         return Err(NodeError::failed(format!("Write {what}")));
@@ -150,7 +150,7 @@ fn required(params: &Value, name: &str, what: &str) -> Result<String, NodeError>
     Ok(value.trim().to_string())
 }
 
-fn limit_of(params: &Value, name: &str, fallback: usize) -> usize {
+pub(super) fn limit_of(params: &Value, name: &str, fallback: usize) -> usize {
     number(params, name).map(|n| n.max(0.0) as usize).filter(|n| *n > 0).unwrap_or(fallback)
 }
 
@@ -388,7 +388,7 @@ pub fn rows_to_items(values: &[Value], header: bool, limit: usize) -> Vec<Value>
         .collect()
 }
 
-fn cell_text(cell: &Value) -> String {
+pub(super) fn cell_text(cell: &Value) -> String {
     match cell {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
@@ -397,7 +397,7 @@ fn cell_text(cell: &Value) -> String {
 }
 
 /// A value as a cell takes it: numbers and booleans as they are, lists and objects as JSON.
-fn to_cell(value: &Value) -> Value {
+pub(super) fn to_cell(value: &Value) -> Value {
     match value {
         Value::Null => json!(""),
         Value::String(_) | Value::Number(_) | Value::Bool(_) => value.clone(),
@@ -406,7 +406,7 @@ fn to_cell(value: &Value) -> Value {
 }
 
 /// One item's row: the node's columns when it names any, else the item's own fields.
-fn row_of(params: &Value, item: Option<&Value>) -> Map<String, Value> {
+pub(super) fn row_of(params: &Value, item: Option<&Value>) -> Map<String, Value> {
     let columns = pairs(params, "columns");
     if !columns.is_empty() {
         return columns.into_iter().map(|(key, value)| (key, json!(value))).collect();
@@ -438,7 +438,7 @@ async fn sheets_read(google: &Google<'_>, params: &Value) -> Result<Vec<Value>, 
     Ok(rows_to_items(&values, flag(params, "header"), number(params, "rowLimit").map(|n| n.max(0.0) as usize).unwrap_or(0)))
 }
 
-fn headers_of(values: &[Value]) -> Vec<String> {
+pub(super) fn headers_of(values: &[Value]) -> Vec<String> {
     values.first().and_then(Value::as_array).map(|row| row.iter().map(cell_text).collect()).unwrap_or_default()
 }
 
@@ -676,7 +676,7 @@ pub fn export_format(native: &str, wanted: &str) -> Result<(&'static str, &'stat
     Ok(format)
 }
 
-fn mime_of(path: &Path) -> &'static str {
+pub(super) fn mime_of(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
         Some("pdf") => "application/pdf",
         Some("png") => "image/png",
@@ -698,14 +698,14 @@ fn mime_of(path: &Path) -> &'static str {
     }
 }
 
-fn safe_name(name: &str) -> String {
+pub(super) fn safe_name(name: &str) -> String {
     let cleaned: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '\0') { '_' } else { c }).collect();
     let trimmed = cleaned.trim().trim_start_matches('.').to_string();
     if trimmed.is_empty() { "file".into() } else { trimmed }
 }
 
 /// `folder/name`, or with ` (2)`, ` (3)`… before the extension while that is taken.
-fn free_path(folder: &Path, name: &str, overwrite: bool) -> PathBuf {
+pub(super) fn free_path(folder: &Path, name: &str, overwrite: bool) -> PathBuf {
     let first = folder.join(name);
     if overwrite || !first.exists() {
         return first;

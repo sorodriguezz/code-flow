@@ -1,6 +1,7 @@
 {
   "id": "trello",
   "name": "Trello",
+  "group": "appsProjects",
   "baseUrl": "https://api.trello.com/1",
   "auth": "query",
   "authHint": { "es": "Tu API key como usuario y tu token como contraseña, en una credencial Usuario y contraseña", "en": "Your API key as the user and your token as the password, in a User and password credential" },

@@ -297,6 +297,24 @@ pub async fn get_authenticated_user(host: &str, token: &str) -> Result<String, S
     Ok(user.login)
 }
 
+/// The open pull requests of `owner/repo` whose review is asked of the signed-in user — GitHub's own
+/// `review-requested:@me` search, one call for the whole repository rather than one per pull request.
+pub async fn review_requested_numbers(host: &str, owner: &str, repo: &str, token: &str) -> Result<Vec<i64>, String> {
+    #[derive(Deserialize)]
+    struct Hit {
+        number: i64,
+    }
+    #[derive(Deserialize)]
+    struct Found {
+        #[serde(default)]
+        items: Vec<Hit>,
+    }
+    let query = format!("repo:{owner}/{repo} is:pr is:open review-requested:@me");
+    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    let found: Found = get_json(&format!("{}/search/issues?per_page=100&q={encoded}", api_root(host)), token).await?;
+    Ok(found.items.into_iter().map(|hit| hit.number).collect())
+}
+
 #[derive(Deserialize)]
 struct RawRepoName {
     #[serde(default)]

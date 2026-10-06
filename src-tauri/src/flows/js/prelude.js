@@ -115,6 +115,7 @@
     "$ifEmpty",
     "$min",
     "$max",
+    "$jmespath",
     "DateTime",
     "Duration",
     "Interval",
@@ -282,6 +283,8 @@
       $ifEmpty: (value, fallback) => (isEmpty(value) ? fallback : value),
       $min: (...values) => Math.min(...values.flat().map(Number)),
       $max: (...values) => Math.max(...values.flat().map(Number)),
+      // `extensions.js`: JMESPath over any value — `$jmespath($json, "orders[?total > `100`].id")`.
+      $jmespath: (data, expression) => global.__cf_jmespath(data, expression),
     };
 
     /** The scope for item `index` of the node's input. */

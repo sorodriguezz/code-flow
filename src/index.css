@@ -89,10 +89,14 @@
   --cf-method-head: #0f766e;
   --cf-method-options: #be185d;
   --cf-method-trace: #4d7c0f;
-  /* The Flujos canvas: one hue per node family (components/flows). Seven reuse a token that already
-     switches with the theme; the two literals here have their dark pair in both dark blocks. */
+  /* The Flujos canvas: one hue per node family (components/flows). Eight reuse a token that already
+     switches with the theme; the four literals here have their dark pair in both dark blocks.
+     Messaging sits a step from Network's blue on purpose — siblings read as related. */
   --cf-flow-trigger: #c2410c;
   --cf-flow-logic: #475569;
+  --cf-flow-messaging: #0284c7;
+  --cf-flow-apps: #059669;
+  --cf-flow-git: var(--cf-violet);
   --cf-flow-ai: var(--cf-ai-b);
   --cf-flow-code: var(--cf-teal);
   --cf-flow-net: var(--cf-blue);
@@ -198,6 +202,8 @@
   --cf-method-trace: #a3e635;
   --cf-flow-trigger: #fb923c;
   --cf-flow-logic: #94a3b8;
+  --cf-flow-messaging: #38bdf8;
+  --cf-flow-apps: #34d399;
   /* Same five, lifted for a dark background — see the light theme's note. */
   --cf-bson-string: #6ee7a8;
   --cf-bson-number: #93b4fd;
@@ -254,6 +260,8 @@
     --cf-method-trace: #a3e635;
     --cf-flow-trigger: #fb923c;
     --cf-flow-logic: #94a3b8;
+    --cf-flow-messaging: #38bdf8;
+    --cf-flow-apps: #34d399;
     --cf-bson-string: #6ee7a8;
     --cf-bson-number: #93b4fd;
     --cf-bson-id: #fbbf5c;
@@ -938,6 +946,12 @@ textarea,
 }
 .cf-ai-reply {
   --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 18v-2a4 4 0 0 0-4-4H4'/><path d='m9 17-5-5 5-5'/></svg>");
+}
+.cf-ai-scan-search {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M3 7V5a2 2 0 0 1 2-2h2'/><path d='M17 3h2a2 2 0 0 1 2 2v2'/><path d='M21 17v2a2 2 0 0 1-2 2h-2'/><path d='M7 21H5a2 2 0 0 1-2-2v-2'/><circle cx='12' cy='12' r='3'/><path d='m16 16-1.9-1.9'/></svg>");
+}
+.cf-ai-audio-lines {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2 10v3'/><path d='M6 6v11'/><path d='M10 3v18'/><path d='M14 8v7'/><path d='M18 5v13'/><path d='M22 10v3'/></svg>");
 }
 
 .cf-ai-glyph {
@@ -3056,6 +3070,10 @@ body.cf-dragging * {
   color: var(--cf-text);
   font-size: 13.5px;
   line-height: 1.65;
+  /* A URL, a path or an inline `code` with no space in it breaks at the edge instead of running past
+   * it — the chats' bubbles are narrow, and a pasted stack trace is mostly such tokens. `<pre>` is
+   * untouched (it never wraps) and keeps its own sideways scroll. */
+  overflow-wrap: anywhere;
 }
 .cf-markdown-preview h1,
 .cf-markdown-preview h2,

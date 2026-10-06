@@ -69,15 +69,17 @@ async fn switch(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     });
     let answer = ctx.js_job(json!({"kind": "switch", "spec": spec}), CONDITION_TIMEOUT).await?;
     let routes = answer.as_array().cloned().unwrap_or_default();
-    let mut ports: Ports = vec![Vec::new(); 4];
+    // `caseCount` outputs, then "other" — 3 + 1 for every flow saved before it was a setting.
+    let cases = crate::flows::catalog::switch_cases(&ctx.params) as usize;
+    let mut ports: Ports = vec![Vec::new(); cases + 1];
     for (index, item) in ctx.items().into_iter().enumerate() {
         let hits: Vec<usize> = routes
             .get(index)
             .and_then(Value::as_array)
-            .map(|list| list.iter().filter_map(Value::as_u64).map(|n| n as usize).filter(|n| *n < 4).collect())
+            .map(|list| list.iter().filter_map(Value::as_u64).map(|n| n as usize).filter(|n| *n < cases).collect())
             .unwrap_or_default();
         if hits.is_empty() {
-            ports[3].push(Item::paired(item.json.clone(), index));
+            ports[cases].push(Item::paired(item.json.clone(), index));
         }
         for hit in hits {
             ports[hit].push(Item::paired(item.json.clone(), index));
@@ -95,19 +97,39 @@ fn combine(loser: &Value, winner: &Value) -> Value {
     Value::Object(merged)
 }
 
+/// Merge: as many inputs as `inputCount` (2 when unset). Appending and choosing take them in
+/// order; by position and by field fold them left to right, input 1 with input 2, that with input 3…
+/// `prefer` says who wins a field both sides have — `input1` the earlier input, `input2` the later.
 fn merge(ctx: &NodeCtx) -> Result<Ports, NodeError> {
-    let first: &[Item] = ctx.inputs.first().map(Vec::as_slice).unwrap_or(&[]);
-    let second: &[Item] = ctx.inputs.get(1).map(Vec::as_slice).unwrap_or(&[]);
-    let offset = first.len();
-    let prefer_second = text(&ctx.params, "prefer") != "input1";
-    let pair = |a: &Value, b: &Value| if prefer_second { combine(a, b) } else { combine(b, a) };
+    let inputs: Vec<&[Item]> = ctx.inputs.iter().map(Vec::as_slice).collect();
+    let empty: &[Item] = &[];
+    let port = |n: usize| inputs.get(n).copied().unwrap_or(empty);
+    // Where each input starts in the concatenation `paired` indexes into.
+    let offsets: Vec<usize> = inputs
+        .iter()
+        .scan(0usize, |sum, list| {
+            let at = *sum;
+            *sum += list.len();
+            Some(at)
+        })
+        .collect();
+    let offset = |n: usize| offsets.get(n).copied().unwrap_or(0);
+    let prefer_later = text(&ctx.params, "prefer") != "input1";
+    let pair = |a: &Value, b: &Value| if prefer_later { combine(a, b) } else { combine(b, a) };
+    let count = inputs.len().max(2);
     let out: Vec<Item> = match text(&ctx.params, "mode").as_str() {
-        "position" => first
-            .iter()
-            .zip(second.iter())
-            .enumerate()
-            .map(|(index, (a, b))| Item::paired(pair(&a.json, &b.json), index))
-            .collect(),
+        "position" => {
+            let rows = (0..count).map(|n| port(n).len()).min().unwrap_or(0);
+            (0..rows)
+                .map(|index| {
+                    let mut value = port(0)[index].json.clone();
+                    for n in 1..count {
+                        value = pair(&value, &port(n)[index].json);
+                    }
+                    Item::paired(value, index)
+                })
+                .collect()
+        }
         "field" => {
             let left_key = text(&ctx.params, "field1");
             let right_key = text(&ctx.params, "field2");
@@ -116,41 +138,44 @@ fn merge(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 return Err(NodeError::failed("Name the field to match on"));
             }
             let join = text(&ctx.params, "join");
-            let mut matched_right = vec![false; second.len()];
-            let mut out = Vec::new();
-            for (index, a) in first.iter().enumerate() {
-                let key = get_path(&a.json, &left_key);
-                let mut found = false;
-                for (position, b) in second.iter().enumerate() {
-                    if key.is_some() && get_path(&b.json, &right_key) == key {
-                        found = true;
-                        matched_right[position] = true;
-                        out.push(Item::paired(pair(&a.json, &b.json), index));
+            // (value, paired index) — the left side keeps pointing at input 1's items.
+            let mut acc: Vec<(Value, usize)> = port(0).iter().enumerate().map(|(i, item)| (item.json.clone(), i)).collect();
+            for n in 1..count {
+                let right = port(n);
+                let mut matched_right = vec![false; right.len()];
+                let mut next = Vec::new();
+                for (left, paired) in &acc {
+                    let key = get_path(left, &left_key);
+                    let mut found = false;
+                    for (position, b) in right.iter().enumerate() {
+                        if key.is_some() && get_path(&b.json, &right_key) == key {
+                            found = true;
+                            matched_right[position] = true;
+                            next.push((pair(left, &b.json), *paired));
+                        }
+                    }
+                    if !found && (join == "left" || join == "outer") {
+                        next.push((left.clone(), *paired));
                     }
                 }
-                if !found && (join == "left" || join == "outer") {
-                    out.push(Item::paired(a.json.clone(), index));
-                }
-            }
-            if join == "outer" {
-                for (position, b) in second.iter().enumerate() {
-                    if !matched_right[position] {
-                        out.push(Item::paired(b.json.clone(), offset + position));
+                if join == "outer" {
+                    for (position, b) in right.iter().enumerate() {
+                        if !matched_right[position] {
+                            next.push((b.json.clone(), offset(n) + position));
+                        }
                     }
                 }
+                acc = next;
             }
-            out
+            acc.into_iter().map(|(value, paired)| Item::paired(value, paired)).collect()
         }
         "choose" => {
-            if text(&ctx.params, "choose") == "input2" {
-                second.iter().enumerate().map(|(i, item)| Item::paired(item.json.clone(), offset + i)).collect()
-            } else {
-                first.iter().enumerate().map(|(i, item)| Item::paired(item.json.clone(), i)).collect()
-            }
+            let chosen = text(&ctx.params, "choose");
+            let n = chosen.strip_prefix("input").and_then(|d| d.parse::<usize>().ok()).unwrap_or(1).clamp(1, count) - 1;
+            port(n).iter().enumerate().map(|(i, item)| Item::paired(item.json.clone(), offset(n) + i)).collect()
         }
-        _ => first
-            .iter()
-            .chain(second.iter())
+        _ => (0..count)
+            .flat_map(|n| port(n).iter())
             .enumerate()
             .map(|(i, item)| Item::paired(item.json.clone(), i))
             .collect(),

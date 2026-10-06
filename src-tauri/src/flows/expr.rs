@@ -33,6 +33,7 @@ use tokio::sync::oneshot;
 
 const INTL: &str = include_str!("js/intl.js");
 const LUXON: &str = include_str!("js/luxon.min.js");
+const EXTENSIONS: &str = include_str!("js/extensions.js");
 const PRELUDE: &str = include_str!("js/prelude.js");
 
 /// What one run's JavaScript may hold at once. Generous — a Code node over ten thousand items
@@ -182,7 +183,7 @@ fn worker(
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
         context.with(|ctx| -> Result<(), String> {
             install_host(&ctx, lookup, &locale).map_err(|e| e.to_string())?;
-            for (name, source) in [("intl.js", INTL), ("luxon.js", LUXON), ("prelude.js", PRELUDE)] {
+            for (name, source) in [("intl.js", INTL), ("luxon.js", LUXON), ("extensions.js", EXTENSIONS), ("prelude.js", PRELUDE)] {
                 ctx.eval::<rquickjs::Value, _>(source)
                     .catch(&ctx)
                     .map_err(|e| format!("{name} failed to load: {e}"))?;
@@ -412,6 +413,66 @@ mod tests {
         assert_eq!(out[0]["bad"], json!(false));
         assert_eq!(out[0]["human"], json!("1 day and 2 hours"));
         assert_eq!(out[0]["now"], json!("America/Santiago"));
+    }
+
+    /// n8n's transformation functions and `$jmespath`, for expressions brought from there.
+    #[tokio::test]
+    async fn n8n_extension_functions_and_jmespath_work() {
+        let js = worker();
+        let item = json!({
+            "mail": "Escribe a ana.perez@example.com hoy", "name": "pedro de la fuente", "html": "<b>Hola</b> mundo",
+            "rows": [{"id": 1, "total": 10.5, "tag": "a"}, {"id": 2, "total": 4, "tag": "b"}, {"id": 1, "total": 10.5, "tag": "a"}],
+            "n": 1234.567, "when": "2026-10-06T12:00:00Z", "empty": {}, "url": "https://example.com/a/b?x=1",
+            "people": [{"name": "Ana", "age": 34}, {"name": "Bo", "age": 25}, {"name": "Cy", "age": 41}]
+        });
+        let job = json!({
+            "kind": "resolve", "context": context(), "items": [item],
+            "params": {
+                "email": "={{ $json.mail.extractEmail() }}",
+                "domain": "={{ $json.mail.extractEmail().extractDomain() }}",
+                "title": "={{ $json.name.toTitleCase() }}",
+                "snake": "={{ 'Hola Mundo Feliz'.toSnakeCase() }}",
+                "tags": "={{ $json.html.removeTags() }}",
+                "ids": "={{ $json.rows.pluck('id').unique() }}",
+                "sum": "={{ $json.rows.pluck('total').sum() }}",
+                "first": "={{ $json.rows.first().tag }}",
+                "rounded": "={{ $json.n.round(1) }}",
+                "es": "={{ $json.n.format('es', {maximumFractionDigits: 2}) }}",
+                "day": "={{ $json.when.toDateTime().setZone('UTC').format('dd/MM/yyyy') }}",
+                "isEmpty": "={{ $json.empty.isEmpty() }}",
+                "b64": "={{ 'señal'.base64Encode() }}",
+                "back": "={{ 'c2XDsWFs'.base64Decode() }}",
+                "path": "={{ $json.url.extractUrlPath() }}",
+                "chunks": "={{ [1, 2, 3, 4, 5].chunk(2) }}",
+                "older": "={{ $jmespath($json, \"people[?age > `30`].name\") }}",
+                "firstName": "={{ $jmespath($json, 'people[*].name | [0]') }}",
+                "shaped": "={{ $jmespath($json, 'people[1].{who: name, years: age}') }}",
+                "sorted": "={{ $jmespath($json, 'sort_by(people, &age)[*].name') }}",
+                "count": "={{ $jmespath($json, 'length(people)') }}"
+            }
+        });
+        let out = js.run(&job, SECOND).await.unwrap();
+        assert_eq!(out[0]["email"], json!("ana.perez@example.com"));
+        assert_eq!(out[0]["domain"], json!("example.com"));
+        assert_eq!(out[0]["title"], json!("Pedro De La Fuente"));
+        assert_eq!(out[0]["snake"], json!("hola_mundo_feliz"));
+        assert_eq!(out[0]["tags"], json!("Hola mundo"));
+        assert_eq!(out[0]["ids"], json!([1, 2]));
+        assert_eq!(out[0]["sum"], json!(25));
+        assert_eq!(out[0]["first"], json!("a"));
+        assert_eq!(out[0]["rounded"], json!(1234.6));
+        assert_eq!(out[0]["es"], json!("1.234,57"));
+        assert_eq!(out[0]["day"], json!("06/10/2026"));
+        assert_eq!(out[0]["isEmpty"], json!(true));
+        assert_eq!(out[0]["b64"], json!("c2XDsWFs"));
+        assert_eq!(out[0]["back"], json!("señal"));
+        assert_eq!(out[0]["path"], json!("/a/b"));
+        assert_eq!(out[0]["chunks"], json!([[1, 2], [3, 4], [5]]));
+        assert_eq!(out[0]["older"], json!(["Ana", "Cy"]));
+        assert_eq!(out[0]["firstName"], json!("Ana"));
+        assert_eq!(out[0]["shaped"], json!({"who": "Bo", "years": 25}));
+        assert_eq!(out[0]["sorted"], json!(["Bo", "Ana", "Cy"]));
+        assert_eq!(out[0]["count"], json!(3));
     }
 
     #[tokio::test]

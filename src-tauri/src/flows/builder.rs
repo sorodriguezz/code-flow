@@ -113,7 +113,9 @@ VALUES\n\
 - A value can be fixed or an expression. An expression is a string starting with \"=\": \
 \"={{ $json.total }}\", \"=Pedido {{ $json.id }}\" — the \"=\" is required everywhere, inside conditions and connector \
 fields too. Inside {{ }} is JavaScript: $json is the current item, \
-$('Node name').item.json an earlier node's item, $now a Luxon DateTime, $vars the workspace variables.\n\
+$('Node name').item.json an earlier node's item, $now a Luxon DateTime, $vars the workspace variables. \
+n8n's helpers work too: \"text\".extractEmail(), .toTitleCase(), .toDateTime(); list.pluck('id'), .unique(), .sum(); \
+number.round(2); $jmespath($json, \"orders[?total > `100`].id\").\n\
 - Code nodes (code.js) take JavaScript that returns the items: `return items.map((it) => ({ ...it.json, x: 1 }));`.\n\
 - NEVER write a secret (token, password, key, webhook URL) into a parameter. A node that signs in uses a \
 `credential` parameter: an id from the CREDENTIALS list, or \"\" when none fits — the user picks it later.\n\
@@ -186,10 +188,16 @@ pub fn catalogue_brief(notes: &HashMap<String, String>) -> String {
         }
         if descriptor.family == Family::Trigger {
             out.push_str(" [trigger]");
+        } else if descriptor.type_id == "logic.merge" {
+            out.push_str(" [inputs: as many as its `inputCount` param, 2 when unset]");
         } else if descriptor.inputs != 1 {
             out.push_str(&format!(" [inputs: {}]", descriptor.inputs));
         }
-        if !descriptor.output_labels.is_empty() {
+        if descriptor.type_id == "logic.switch" {
+            out.push_str(" [outputs: one per case — `caseCount` param, 3 when unset — numbered 0.., then other]");
+        } else if descriptor.type_id == "ai.classify" {
+            out.push_str(" [outputs: 1 (the category in a field); with routing=routeBranch, one per category in order, then other when allowOther]");
+        } else if !descriptor.output_labels.is_empty() {
             out.push_str(&format!(" [outputs: {}]", descriptor.output_labels.join(", ")));
         } else if descriptor.outputs == 0 {
             out.push_str(" [no output]");
@@ -214,7 +222,11 @@ pub fn catalogue_brief(notes: &HashMap<String, String>) -> String {
 pub fn connectors_brief() -> String {
     let mut out = String::from("CONNECTORS (net.connector's `call`)\n");
     for connector in connectors::all() {
-        let signs_in = if connector.auth == "none" { "no credential".to_string() } else { format!("credential {:?}", connector.credential_kinds()) };
+        let signs_in = match (connector.auth.as_str(), connector.auth_optional) {
+            ("none", _) => "no credential".to_string(),
+            (_, true) => format!("credential {:?}, optional", connector.credential_kinds()),
+            _ => format!("credential {:?}", connector.credential_kinds()),
+        };
         out.push_str(&format!("- {} ({signs_in})\n", connector.id));
         for operation in &connector.operations {
             let fields: Vec<String> = connector

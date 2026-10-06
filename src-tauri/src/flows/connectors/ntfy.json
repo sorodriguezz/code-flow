@@ -1,0 +1,41 @@
+{
+  "id": "ntfy",
+  "name": "ntfy",
+  "group": "appsChat",
+  "baseUrl": "{{server}}",
+  "auth": "bearer",
+  "authOptional": true,
+  "authHint": { "es": "Un tema público no pide credencial; uno protegido, un token de acceso (tk_…) como credencial Token", "en": "A public topic needs no credential; a protected one, an access token (tk_…) as a Token credential" },
+  "siteField": { "name": "server", "label": { "es": "Servidor (vacío = ntfy.sh)", "en": "Server (empty = ntfy.sh)" }, "placeholder": "https://ntfy.sh", "default": "https://ntfy.sh" },
+  "errorField": "error",
+  "operations": [
+    {
+      "id": "publish",
+      "name": { "es": "Enviar un aviso", "en": "Send a notification" },
+      "method": "POST",
+      "path": "/",
+      "fields": [
+        { "name": "topic", "label": { "es": "Tema", "en": "Topic" }, "placeholder": "mis-avisos", "required": true },
+        { "name": "message", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true },
+        { "name": "title", "label": { "es": "Título", "en": "Title" } },
+        { "name": "priority", "label": { "es": "Prioridad (1 a 5)", "en": "Priority (1 to 5)" }, "placeholder": "3", "json": true },
+        { "name": "tags", "label": { "es": "Etiquetas o emojis (JSON)", "en": "Tags or emojis (JSON)" }, "placeholder": "[\"warning\", \"rocket\"]", "json": true },
+        { "name": "click", "label": { "es": "Abrir al tocar (URL)", "en": "Open on tap (URL)" }, "placeholder": "https://example.com/deploys/42" },
+        { "name": "markdown", "label": { "es": "Markdown (true/false)", "en": "Markdown (true/false)" }, "placeholder": "false", "json": true },
+        { "name": "delay", "label": { "es": "Retrasar (30m, 9am, mañana)", "en": "Delay (30m, 9am, tomorrow)" } }
+      ],
+      "body": { "topic": "{{topic}}", "message": "{{message}}", "title": "{{title}}", "priority": "{{priority}}", "tags": "{{tags}}", "click": "{{click}}", "markdown": "{{markdown}}", "delay": "{{delay}}" }
+    },
+    {
+      "id": "poll",
+      "name": { "es": "Leer los mensajes de un tema", "en": "Read a topic's messages" },
+      "method": "GET",
+      "path": "/{{topic}}/json",
+      "query": { "poll": "1", "since": "{{since}}" },
+      "fields": [
+        { "name": "topic", "label": { "es": "Tema", "en": "Topic" }, "placeholder": "mis-avisos", "required": true, "encode": true },
+        { "name": "since", "label": { "es": "Desde (10m, all, un id)", "en": "Since (10m, all, an id)" }, "placeholder": "1h" }
+      ]
+    }
+  ]
+}

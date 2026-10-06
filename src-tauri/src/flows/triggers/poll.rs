@@ -113,6 +113,7 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node: &FlowNode, params: &Value, vi
         };
         let mut repo_memory = RepoMemory::default();
         let mut seen: Option<HashSet<String>> = None;
+        let mut pr_memory = PrMemory::default();
         loop {
             let project = {
                 let db = app.state::<Db>();
@@ -139,7 +140,7 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node: &FlowNode, params: &Value, vi
                     repo_memory = memory;
                     result
                 }
-                "trigger.pr" => pull_requests(&app, &project_id, &event, &mut seen).await,
+                "trigger.pr" => pull_requests(&app, &project_id, &event, &mut seen, &mut pr_memory).await,
                 _ => pipelines(&app, &project_id, &event, &text(&params, "branch"), &mut seen).await,
             };
             match found {
@@ -161,22 +162,150 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node: &FlowNode, params: &Value, vi
     });
 }
 
-/// New pull requests (or newly merged ones) since the last look; the first look only seeds.
-async fn pull_requests(app: &AppHandle, project_id: &str, event: &str, seen: &mut Option<HashSet<String>>) -> Result<Vec<Value>, String> {
+/// What the pull-request trigger remembers between looks, per pull request: the head it last saw,
+/// how many comments it had, and the verdict its checks gave on that head.
+#[derive(Default)]
+pub(super) struct PrMemory {
+    heads: HashMap<i64, String>,
+    comments: HashMap<i64, usize>,
+    verdicts: HashMap<i64, (String, &'static str)>,
+    /// Whether the first look has been taken — it seeds and fires nothing.
+    seeded: bool,
+}
+
+/// What happened to the repository's pull requests since the last look, for `event`; the first look
+/// only seeds.
+///
+/// `opened`, `merged`, `prClosed` and `reviewRequested` compare *sets* of pull requests between looks
+/// (one listing each). The others look *into* every open pull request — its head, its comments, its
+/// checks — which is one call per pull request per look; the trigger's interval is the brake.
+async fn pull_requests(
+    app: &AppHandle,
+    project_id: &str,
+    event: &str,
+    seen: &mut Option<HashSet<String>>,
+    memory: &mut PrMemory,
+) -> Result<Vec<Value>, String> {
     let db = app.state::<Db>();
-    let list = if event == "merged" {
-        crate::commands::ado_cmd::list_pull_requests_page(db, project_id.to_string(), Some("closed".into()), Some(1)).await?.items
-    } else {
-        crate::commands::ado_cmd::list_pull_requests(db, project_id.to_string()).await?
+    let item = |pr: &crate::ado::PullRequestSummary, extra: Value| -> Value {
+        let mut value = serde_json::to_value(pr).unwrap_or(Value::Null);
+        if let (Some(into), Value::Object(fields)) = (value.as_object_mut(), extra) {
+            into.insert("event".into(), json!(event));
+            into.extend(fields);
+        }
+        value
     };
-    let relevant: Vec<_> = list.into_iter().filter(|pr| event != "merged" || pr.status == "merged").collect();
-    let ids: HashSet<String> = relevant.iter().map(|pr| pr.id.to_string()).collect();
-    let Some(previous) = seen.replace(ids.clone()) else { return Ok(vec![]) };
-    Ok(relevant
-        .into_iter()
-        .filter(|pr| !previous.contains(&pr.id.to_string()))
-        .map(|pr| serde_json::to_value(&pr).unwrap_or(Value::Null))
-        .collect())
+    match event {
+        "merged" | "prClosed" | "opened" | "reviewRequested" => {
+            let (list, ids): (Vec<crate::ado::PullRequestSummary>, HashSet<String>) = match event {
+                "merged" | "prClosed" => {
+                    let wanted = if event == "merged" { "merged" } else { "closed" };
+                    let list: Vec<_> = crate::commands::ado_cmd::list_pull_requests_page(db, project_id.to_string(), Some("closed".into()), Some(1))
+                        .await?
+                        .items
+                        .into_iter()
+                        .filter(|pr| pr.status == wanted)
+                        .collect();
+                    let ids = list.iter().map(|pr| pr.id.to_string()).collect();
+                    (list, ids)
+                }
+                "reviewRequested" => {
+                    let asked = crate::commands::ado_cmd::pr_review_requested(app.state::<Db>(), project_id.to_string()).await?;
+                    let open = crate::commands::ado_cmd::list_pull_requests(db, project_id.to_string()).await?;
+                    let list: Vec<_> = open.into_iter().filter(|pr| asked.contains(&pr.id)).collect();
+                    let ids = asked.iter().map(i64::to_string).collect();
+                    (list, ids)
+                }
+                _ => {
+                    let list = crate::commands::ado_cmd::list_pull_requests(db, project_id.to_string()).await?;
+                    let ids = list.iter().map(|pr| pr.id.to_string()).collect();
+                    (list, ids)
+                }
+            };
+            let Some(previous) = seen.replace(ids) else { return Ok(vec![]) };
+            Ok(list.iter().filter(|pr| !previous.contains(&pr.id.to_string())).map(|pr| item(pr, json!({}))).collect())
+        }
+        _ => {
+            let open = crate::commands::ado_cmd::list_pull_requests(db, project_id.to_string()).await?;
+            let first = !memory.seeded;
+            memory.seeded = true;
+            let mut out = Vec::new();
+            for pr in &open {
+                match event {
+                    "prUpdated" | "prChecksFailed" | "prChecksPassed" => {
+                        let checks = match crate::commands::ado_cmd::pr_checks(app.state::<Db>(), project_id.to_string(), pr.id).await {
+                            Ok(checks) => checks,
+                            Err(_) => continue,
+                        };
+                        let head = checks.head_sha.clone().unwrap_or_default();
+                        if event == "prUpdated" {
+                            let before = memory.heads.insert(pr.id, head.clone());
+                            if !first && !head.is_empty() && before.as_deref().is_some_and(|b| b != head) {
+                                out.push(item(pr, json!({"headSha": head, "previousHeadSha": before})));
+                            }
+                            continue;
+                        }
+                        let list = serde_json::to_value(&checks.checks).unwrap_or(Value::Array(vec![]));
+                        let summary = crate::flows::pr_ops::checks_summary(list.as_array().map(Vec::as_slice).unwrap_or_default());
+                        let verdict: &'static str = if summary["checksFailed"].as_u64().unwrap_or(0) > 0 {
+                            "failed"
+                        } else if summary["checksPassing"].as_bool().unwrap_or(false) && !list.as_array().is_none_or(Vec::is_empty) {
+                            "passed"
+                        } else {
+                            "pending"
+                        };
+                        let before = memory.verdicts.insert(pr.id, (head.clone(), verdict));
+                        let wanted = if event == "prChecksFailed" { "failed" } else { "passed" };
+                        // Once per head and verdict: a re-run that fails again on the same commit is not news.
+                        if !first && verdict == wanted && before.as_ref() != Some(&(head.clone(), verdict)) {
+                            let mut extra = summary;
+                            extra["headSha"] = json!(head);
+                            extra["checks"] = list;
+                            out.push(item(pr, extra));
+                        }
+                    }
+                    "prCommented" => {
+                        let threads = match crate::commands::ado_cmd::list_pr_comment_threads(app.state::<Db>(), project_id.to_string(), pr.id).await {
+                            Ok(threads) => threads,
+                            Err(_) => continue,
+                        };
+                        let mut comments: Vec<(&crate::ado::PrThreadComment, &crate::ado::PrCommentThread)> =
+                            threads.iter().flat_map(|thread| thread.comments.iter().map(move |c| (c, thread))).collect();
+                        let count = comments.len();
+                        let before = memory.comments.insert(pr.id, count);
+                        if first || before.is_none_or(|b| count <= b) {
+                            continue;
+                        }
+                        comments.sort_by(|a, b| a.0.published_date.cmp(&b.0.published_date));
+                        let fresh: Vec<Value> = comments
+                            .iter()
+                            .rev()
+                            .take(count - before.unwrap_or(0))
+                            .rev()
+                            .map(|(comment, thread)| {
+                                json!({
+                                    "author": comment.author,
+                                    "content": comment.content,
+                                    "at": comment.published_date,
+                                    "threadId": thread.id,
+                                    "file": thread.file_path,
+                                    "line": thread.start_line,
+                                })
+                            })
+                            .collect();
+                        out.push(item(pr, json!({"commentCount": count, "newComments": fresh})));
+                    }
+                    _ => return Err(format!("unknown pull request event {event}")),
+                }
+            }
+            // A pull request that closed is forgotten, so a reopened one starts clean.
+            let open_ids: HashSet<i64> = open.iter().map(|pr| pr.id).collect();
+            memory.heads.retain(|id, _| open_ids.contains(id));
+            memory.comments.retain(|id, _| open_ids.contains(id));
+            memory.verdicts.retain(|id, _| open_ids.contains(id));
+            Ok(out)
+        }
+    }
 }
 
 /// Pipeline runs that finished since the last look, matching the event; the first look only seeds.

@@ -1,0 +1,108 @@
+{
+  "id": "azuredevops",
+  "name": "Azure DevOps",
+  "group": "appsProjects",
+  "baseUrl": "https://dev.azure.com/{{organization}}",
+  "auth": "basic",
+  "authHint": { "es": "Un token de acceso personal (PAT) como contraseña en una credencial Usuario y contraseña; el usuario puede ir vacío", "en": "A personal access token (PAT) as the password of a User and password credential; the user may be left empty" },
+  "siteField": { "name": "organization", "label": { "es": "Organización (dev.azure.com/…)", "en": "Organization (dev.azure.com/…)" }, "placeholder": "acme", "required": true, "encode": true },
+  "errorField": "message",
+  "operations": [
+    {
+      "id": "createWorkItem",
+      "name": { "es": "Crear un work item", "en": "Create a work item" },
+      "method": "POST",
+      "path": "/{{project}}/_apis/wit/workitems/${{type}}",
+      "query": { "api-version": "7.1" },
+      "headers": { "Content-Type": "application/json-patch+json" },
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "type", "label": { "es": "Tipo", "en": "Type" }, "placeholder": "Task", "required": true, "encode": true },
+        { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
+        { "name": "description", "label": { "es": "Descripción (HTML)", "en": "Description (HTML)" }, "multiline": true },
+        { "name": "assignedTo", "label": { "es": "Asignado a (correo)", "en": "Assigned to (email)" } },
+        { "name": "tags", "label": { "es": "Etiquetas, separadas por punto y coma", "en": "Tags, semicolon separated" }, "placeholder": "bug; flujos" }
+      ],
+      "body": [
+        { "op": "add", "path": "/fields/System.Title", "value": "{{title}}" },
+        { "$when": "description", "op": "add", "path": "/fields/System.Description", "value": "{{description}}" },
+        { "$when": "assignedTo", "op": "add", "path": "/fields/System.AssignedTo", "value": "{{assignedTo}}" },
+        { "$when": "tags", "op": "add", "path": "/fields/System.Tags", "value": "{{tags}}" }
+      ]
+    },
+    {
+      "id": "updateState",
+      "name": { "es": "Cambiar el estado de un work item", "en": "Change a work item's state" },
+      "method": "PATCH",
+      "path": "/{{project}}/_apis/wit/workitems/{{id}}",
+      "query": { "api-version": "7.1" },
+      "headers": { "Content-Type": "application/json-patch+json" },
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "id", "label": { "es": "Work item (id)", "en": "Work item (id)" }, "placeholder": "1234", "required": true },
+        { "name": "state", "label": { "es": "Estado", "en": "State" }, "placeholder": "Done", "required": true },
+        { "name": "comment", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true }
+      ],
+      "body": [
+        { "op": "add", "path": "/fields/System.State", "value": "{{state}}" },
+        { "$when": "comment", "op": "add", "path": "/fields/System.History", "value": "{{comment}}" }
+      ]
+    },
+    {
+      "id": "commentWorkItem",
+      "name": { "es": "Comentar un work item", "en": "Comment on a work item" },
+      "method": "PATCH",
+      "path": "/{{project}}/_apis/wit/workitems/{{id}}",
+      "query": { "api-version": "7.1" },
+      "headers": { "Content-Type": "application/json-patch+json" },
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "id", "label": { "es": "Work item (id)", "en": "Work item (id)" }, "placeholder": "1234", "required": true },
+        { "name": "comment", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true, "required": true }
+      ],
+      "body": [{ "op": "add", "path": "/fields/System.History", "value": "{{comment}}" }]
+    },
+    {
+      "id": "queryWiql",
+      "name": { "es": "Buscar work items (WIQL)", "en": "Search work items (WIQL)" },
+      "method": "POST",
+      "path": "/{{project}}/_apis/wit/wiql",
+      "query": { "api-version": "7.1", "$top": "{{top}}" },
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "wiql", "label": { "es": "Consulta WIQL", "en": "WIQL query" }, "placeholder": "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'", "multiline": true, "required": true },
+        { "name": "top", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "50" }
+      ],
+      "body": { "query": "{{wiql}}" },
+      "result": "workItems"
+    },
+    {
+      "id": "commentPullRequest",
+      "name": { "es": "Comentar un pull request", "en": "Comment on a pull request" },
+      "method": "POST",
+      "path": "/{{project}}/_apis/git/repositories/{{repository}}/pullRequests/{{pullRequestId}}/threads",
+      "query": { "api-version": "7.1" },
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "repository", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "web-app", "required": true, "encode": true },
+        { "name": "pullRequestId", "label": { "es": "Pull request (id)", "en": "Pull request (id)" }, "placeholder": "87", "required": true },
+        { "name": "comment", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true, "required": true }
+      ],
+      "body": { "comments": [{ "parentCommentId": 0, "content": "{{comment}}", "commentType": 1 }], "status": 1 }
+    },
+    {
+      "id": "runPipeline",
+      "name": { "es": "Lanzar un pipeline", "en": "Run a pipeline" },
+      "method": "POST",
+      "path": "/{{project}}/_apis/pipelines/{{pipelineId}}/runs",
+      "query": { "api-version": "7.1" },
+      "fields": [
+        { "name": "project", "label": { "es": "Proyecto", "en": "Project" }, "placeholder": "Web", "required": true, "encode": true },
+        { "name": "pipelineId", "label": { "es": "Pipeline (id)", "en": "Pipeline (id)" }, "placeholder": "12", "required": true },
+        { "name": "branch", "label": { "es": "Rama (vacío = la de siempre)", "en": "Branch (empty = the default)" }, "placeholder": "main" },
+        { "name": "parameters", "label": { "es": "Parámetros (JSON)", "en": "Parameters (JSON)" }, "placeholder": "{\"env\": \"prod\"}", "json": true }
+      ],
+      "body": { "resources": { "$when": "branch", "repositories": { "self": { "refName": "refs/heads/{{branch}}" } } }, "templateParameters": "{{parameters}}" }
+    }
+  ]
+}

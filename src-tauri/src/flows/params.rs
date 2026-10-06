@@ -196,6 +196,8 @@ const SHELL: &[ParamSpec] = &[
 const PYTHON: &[ParamSpec] = &[
     p("code", Kind::Code { lang: "python" }, "\"\""),
     p("interpreter", text("python3"), "\"\""),
+    // Installed once per set into an environment of their own (`uv` when there is one).
+    p("packages", Kind::Strings, "[]").literal(),
     CWD,
     ENV,
     RUN_FOR,
@@ -207,6 +209,7 @@ const NODE: &[ParamSpec] = &[
     p("runtime", raw_select(&["node", "deno", "bun"]), "\"node\""),
     p("language", select(&["javascript", "typescript"]), "\"javascript\""),
     p("code", Kind::Code { lang: "javascript" }, "\"\""),
+    p("packages", Kind::Strings, "[]").literal(),
     CWD,
     ENV,
     RUN_FOR,
@@ -249,12 +252,15 @@ const HTTP: &[ParamSpec] = &[
     p("credential", Kind::Credential { kinds: &["bearer", "basic", "header", "query", "oauth2"] }, "\"\"").literal(),
     p("query", Kind::KeyValue, "[]"),
     p("headers", Kind::KeyValue, "[]"),
-    p("body", select(&["none", "json", "form", "text"]), "\"none\""),
+    p("body", select(&["none", "json", "form", "text", "binaryBody"]), "\"none\""),
     p("bodyJson", Kind::Code { lang: "json" }, "\"{}\"").when("body", &["json"]),
+    p("bodyFile", file("{{ $json.file.path }}"), "\"\"").when("body", &["binaryBody"]),
     p("bodyForm", Kind::KeyValue, "[]").when("body", &["form"]),
     p("bodyText", long_text(""), "\"\"").when("body", &["text"]),
     p("contentType", text("text/plain"), "\"text/plain\"").when("body", &["text"]),
     p("response", select(&["auto", "json", "text"]), "\"auto\""),
+    // A binary answer: kept as a file of the run (its reference in the item), or inline as base64.
+    p("binaryAs", select(&["binaryFile", "binaryBase64"]), "\"binaryFile\"").literal(),
     p("splitArrays", Kind::Boolean, "true"),
     p("fullResponse", Kind::Boolean, "false"),
     p("neverError", Kind::Boolean, "false"),
@@ -275,12 +281,14 @@ const HTTP: &[ParamSpec] = &[
 // ------------------------------------------------------------------ data
 
 const STATE: &[ParamSpec] = &[
-    p("operation", select(&["get", "set", "increment", "delete"]), "\"get\"").literal(),
+    // `collect` and `takeAll` are the digest: collect across runs, hand everything over at once.
+    p("operation", select(&["get", "set", "increment", "delete", "collect", "takeAll"]), "\"get\"").literal(),
     p("key", text("lastId"), "\"\""),
-    p("value", text(""), "\"\"").when("operation", &["set"]),
+    p("value", text(""), "\"\"").when("operation", &["set", "collect"]),
     p("amount", NUMBER, "1").when("operation", &["increment"]),
     p("fallback", text(""), "\"\"").when("operation", &["get"]),
-    p("target", text("value"), "\"value\"").when("operation", &["get", "increment"]),
+    p("keepAtMost", COUNT, "1000").literal().when("operation", &["collect"]),
+    p("target", text("value"), "\"value\"").when("operation", &["get", "increment", "takeAll"]),
 ];
 
 const VARS: &[ParamSpec] = &[
@@ -300,6 +308,8 @@ const IF: &[ParamSpec] = &[p(
 .literal()];
 
 const SWITCH: &[ParamSpec] = &[
+    // How many case outputs it has before "other" — its ports (`catalog::output_count`).
+    p("caseCount", Kind::Number { min: Some(1.0), max: Some(20.0) }, "3").literal(),
     p("mode", select(&["rules", "expression"]), "\"rules\"").literal(),
     p("rules", Kind::Rules, r#"[{"output":0,"left":"","op":"equals","right":""}]"#).literal().when("mode", &["rules"]),
     p("output", text("{{ $json.priority }}"), "\"\"").when("mode", &["expression"]),
@@ -308,12 +318,16 @@ const SWITCH: &[ParamSpec] = &[
 ];
 
 const MERGE: &[ParamSpec] = &[
+    // How many inputs it joins — its ports (`catalog::input_count`).
+    p("inputCount", Kind::Number { min: Some(2.0), max: Some(10.0) }, "2").literal(),
     p("mode", select(&["append", "position", "field", "choose"]), "\"append\"").literal(),
     p("field1", text("id"), "\"\"").when("mode", &["field"]),
     p("field2", text("id"), "\"\"").when("mode", &["field"]),
     p("join", select(&["inner", "left", "outer"]), "\"inner\"").literal().when("mode", &["field"]),
     p("prefer", select(&["input1", "input2"]), "\"input2\"").literal().when("mode", &["position", "field"]),
-    p("choose", select(&["input1", "input2"]), "\"input1\"").literal().when("mode", &["choose"]),
+    p("choose", select(&["input1", "input2", "input3", "input4", "input5", "input6", "input7", "input8", "input9", "input10"]), "\"input1\"")
+        .literal()
+        .when("mode", &["choose"]),
 ];
 
 const WAIT: &[ParamSpec] = &[
@@ -446,9 +460,18 @@ const SCHEDULE: &[ParamSpec] = &[
 const WEBHOOK: &[ParamSpec] = &[
     p("method", raw_select(&["POST", "GET", "PUT", "PATCH", "DELETE", "ANY"]), "\"POST\"").literal(),
     p("hookPath", text("pagos/alerta"), "\"\"").literal(),
-    p("auth", select(&["none", "bearer", "header", "hmac"]), "\"none\"").literal(),
-    p("credential", Kind::Credential { kinds: &["bearer", "header", "hmac"] }, "\"\"").literal().when("auth", &["bearer", "header", "hmac"]),
+    // The senders' own signature schemes, so a GitHub, Stripe, Slack or Shopify webhook is checked
+    // the way they sign — the HMAC secret is the credential either way.
+    p("auth", select(&["none", "bearer", "header", "hmac", "githubSig", "stripeSig", "slackSig", "shopifySig"]), "\"none\"").literal(),
+    p("credential", Kind::Credential { kinds: &["bearer", "header", "hmac"] }, "\"\"")
+        .literal()
+        .when("auth", &["bearer", "header", "hmac", "githubSig", "stripeSig", "slackSig", "shopifySig"]),
     p("signatureHeader", text("X-Signature-256"), "\"X-Signature-256\"").literal().when("auth", &["hmac"]),
+    p("hmacAlgorithm", raw_select(&["sha256", "sha1", "sha512"]), "\"sha256\"").literal().when("auth", &["hmac"]),
+    p("hmacEncoding", select(&["hex", "base64"]), "\"hex\"").literal().when("auth", &["hmac"]),
+    p("toleranceSec", COUNT, "300").literal().when("auth", &["stripeSig", "slackSig"]),
+    // A header naming each delivery: a sender's retry of one already run is answered, not run again.
+    p("dedupeHeader", text("X-GitHub-Delivery"), "\"\"").literal(),
     p("respond", select(&["immediately", "lastNode", "respondNode"]), "\"immediately\"").literal(),
 ];
 
@@ -469,7 +492,12 @@ const REPO: &[ParamSpec] = &[
 
 const PR: &[ParamSpec] = &[
     p("project", Kind::Project, "\"\"").literal(),
-    p("event", select(&["opened", "merged"]), "\"opened\"").literal(),
+    p(
+        "event",
+        select(&["opened", "prUpdated", "prCommented", "reviewRequested", "prChecksFailed", "prChecksPassed", "merged", "prClosed"]),
+        "\"opened\"",
+    )
+    .literal(),
     p("intervalSec", Kind::Number { min: Some(60.0), max: None }, "120").literal(),
 ];
 
@@ -500,9 +528,32 @@ const PIPELINE: &[ParamSpec] = &[
     p("intervalSec", Kind::Number { min: Some(60.0), max: None }, "120").literal(),
 ];
 
+const APP_EVENTS: &[&str] = &[
+    "appStart",
+    "serviceReady",
+    "serviceFailed",
+    "serviceStopped",
+    "gitCommitted",
+    "gitPushed",
+    "branchSwitched",
+    "terminalExited",
+    "agentChainFinished",
+    "reviewerPassed",
+    "reviewerFailed",
+    "prReviewFinished",
+    "aiQuotaHigh",
+];
 const APP_EVENT: &[ParamSpec] = &[
-    p("event", select(&["appStart", "serviceReady", "serviceFailed", "serviceStopped"]), "\"appStart\"").literal(),
+    p("event", select(APP_EVENTS), "\"appStart\"").literal(),
     p("service", text("api"), "\"\"").literal().when("event", &["serviceReady", "serviceFailed", "serviceStopped"]),
+    // Which repository's commits, pushes, switches, Revisor runs or analyses — empty is any.
+    p("project", Kind::Project, "\"\"")
+        .literal()
+        .when("event", &["gitCommitted", "gitPushed", "branchSwitched", "reviewerPassed", "reviewerFailed", "prReviewFinished"]),
+    p("branch", text("main"), "\"\"").literal().when("event", &["gitCommitted", "gitPushed", "branchSwitched"]),
+    // A terminal that ran at least this long: the build you left running, not every `ls`.
+    p("minSeconds", COUNT, "60").literal().when("event", &["terminalExited"]),
+    p("threshold", Kind::Number { min: Some(1.0), max: Some(100.0) }, "80").literal().when("event", &["aiQuotaHigh"]),
 ];
 
 const HOTKEY: &[ParamSpec] = &[p("accelerator", text("CmdOrCtrl+Alt+F"), "\"\"").literal()];
@@ -594,6 +645,8 @@ const CLASSIFY: &[ParamSpec] = &[
     ENGINE,
     SUBJECT,
     p("categories", Kind::Categories, r#"[{"name":"","description":""}]"#).literal(),
+    // Into a field (one output), or out of the category's own port (`catalog::output_count`).
+    p("routing", select(&["routeField", "routeBranch"]), "\"routeField\"").literal(),
     p("multiple", Kind::Boolean, "false").literal(),
     p("allowOther", Kind::Boolean, "true").literal(),
     INSTRUCTIONS,
@@ -1397,7 +1450,218 @@ const GOOGLE: &[ParamSpec] = &[
     EACH,
 ];
 
+/// Outlook, Outlook Calendar, OneDrive and Excel (`nodes::microsoft`) — the Google node's twin: the
+/// same field names where the meaning is the same, so their labels are too.
+const MICROSOFT: &[ParamSpec] = &[
+    p("credential", Kind::Credential { kinds: &["oauth2"] }, "\"\"").literal(),
+    p("service", select(&["outlook", "calendar", "onedrive", "excel"]), "\"outlook\"").literal(),
+    p("outlookOp", select(&["outlookSend", "outlookSearch", "outlookGet", "outlookMarkRead", "outlookMove"]), "\"outlookSend\"").literal().when("service", &["outlook"]),
+    p("to", text("equipo@example.com"), "\"\"").when("outlookOp", &["outlookSend"]),
+    p("cc", text(""), "\"\"").when("outlookOp", &["outlookSend"]),
+    p("bcc", text(""), "\"\"").when("outlookOp", &["outlookSend"]),
+    p("subject", text(""), "\"\"").when("outlookOp", &["outlookSend"]),
+    p("body", long_text(""), "\"\"").when("outlookOp", &["outlookSend"]),
+    p("html", Kind::Boolean, "false").when("outlookOp", &["outlookSend"]),
+    p("attachments", Kind::Strings, "[]").when("outlookOp", &["outlookSend"]),
+    p("outlookQuery", text("from:facturas@example.com"), "\"\"").when("outlookOp", &["outlookSearch"]),
+    p("outlookFolder", text("inbox"), "\"\"").when("outlookOp", &["outlookSearch"]),
+    p("unreadOnly", Kind::Boolean, "false").when("outlookOp", &["outlookSearch"]),
+    p("maxResults", COUNT, "10").when("outlookOp", &["outlookSearch"]),
+    p("messageId", text("{{ $json.id }}"), "\"\"").when("outlookOp", &["outlookGet", "outlookMarkRead", "outlookMove"]),
+    p("targetMailbox", text("archive"), "\"\"").when("outlookOp", &["outlookMove"]),
+    p("attachmentsFolder", Kind::Folder, "\"\"").when("outlookOp", &["outlookSearch", "outlookGet"]),
+    p("calendarOp", select(&["calendarList", "calendarCreate"]), "\"calendarList\"").literal().when("service", &["calendar"]),
+    p("calendarId", text(""), "\"\"").when("service", &["calendar"]),
+    p("rangeStart", text("2026-10-05"), "\"\"").when("calendarOp", &["calendarList"]),
+    p("rangeEnd", text(""), "\"\"").when("calendarOp", &["calendarList"]),
+    p("eventSearch", text(""), "\"\"").when("calendarOp", &["calendarList"]),
+    p("eventLimit", COUNT, "50").when("calendarOp", &["calendarList"]),
+    p("eventTitle", text("Revisión del despliegue"), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("startTime", text("2026-10-05 09:30"), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("endTime", text(""), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("allDay", Kind::Boolean, "false").when("calendarOp", &["calendarCreate"]),
+    p("description", long_text(""), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("eventLocation", text(""), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("attendees", Kind::Strings, "[]").when("calendarOp", &["calendarCreate"]),
+    p("onlineMeeting", Kind::Boolean, "false").when("calendarOp", &["calendarCreate"]),
+    p("onedriveOp", select(&["driveList", "driveUpload", "driveDownload"]), "\"driveList\"").literal().when("service", &["onedrive"]),
+    p("onedriveFolder", text("Documentos/Informes"), "\"\"").when("onedriveOp", &["driveList", "driveUpload"]),
+    p("onedriveSearch", text("informe"), "\"\"").when("onedriveOp", &["driveList"]),
+    p("fileLimit", COUNT, "50").when("onedriveOp", &["driveList"]),
+    p("filePath", file("~/Documentos/informe.pdf"), "\"\"").when("onedriveOp", &["driveUpload"]),
+    p("onedriveFile", text("Documentos/informe.pdf"), "\"\"").when("onedriveOp", &["driveDownload"]),
+    p("folder", Kind::Folder, "\"\"").when("onedriveOp", &["driveDownload"]),
+    p("fileName", text(""), "\"\"").when("onedriveOp", &["driveUpload", "driveDownload"]),
+    p("overwrite", Kind::Boolean, "false").when("onedriveOp", &["driveUpload", "driveDownload"]),
+    p("excelOp", select(&["excelRead", "excelAppend", "excelUpdate"]), "\"excelRead\"").literal().when("service", &["excel"]),
+    p("workbook", text("Documentos/Ventas.xlsx"), "\"\"").when("service", &["excel"]),
+    p("worksheet", text("Hoja1"), "\"Hoja1\"").when("service", &["excel"]),
+    p("header", Kind::Boolean, "true").literal().when("excelOp", &["excelRead"]),
+    p("rowLimit", COUNT, "0").when("excelOp", &["excelRead"]),
+    p("columns", Kind::KeyValue, "[]").when("excelOp", &["excelAppend", "excelUpdate"]),
+    p("matchColumn", text("id"), "\"\"").literal().when("excelOp", &["excelUpdate"]),
+    p("matchValue", text(""), "\"\"").when("excelOp", &["excelUpdate"]),
+    p("ifMissing", select(&["skipRow", "appendRow"]), "\"skipRow\"").literal().when("excelOp", &["excelUpdate"]),
+    EACH,
+];
+
+/// «Ver una imagen» (`nodes::vision`): an image or a PDF described, transcribed or read into fields
+/// — by an AI CLI, a provider's API, a local model or this computer's own OCR.
+const VISION: &[ParamSpec] = &[
+    p("imagePath", file("{{ $json.path }}"), "\"\""),
+    p("visionTask", select(&["visionOcr", "visionDescribe", "visionExtract", "visionAsk"]), "\"visionOcr\"").literal(),
+    p("question", long_text("¿Qué total aparece en la factura?"), "\"\"").when("visionTask", &["visionAsk"]),
+    ANSWER_FIELDS.when("visionTask", &["visionExtract"]),
+    p("visionEngine", select(&["visionCli", "visionApi", "visionLocal", "visionSystem"]), "\"visionCli\"").literal(),
+    ENGINE.when("visionEngine", &["visionCli"]),
+    p("apiProvider", select(&["openaiApi", "anthropic", "gemini", "compatible"]), "\"openaiApi\"").literal().when("visionEngine", &["visionApi"]),
+    p("baseUrl", text("https://api.example.com/v1"), "\"\"").literal().when("visionEngine", &["visionApi"]).and_when("apiProvider", &["compatible"]),
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal().when("visionEngine", &["visionApi"]),
+    p("apiModel", Kind::ApiModel { purpose: "chat" }, "\"\"").literal().when("visionEngine", &["visionApi"]),
+    p("server", select(&["ollama", "openai"]), "\"ollama\"").literal().when("visionEngine", &["visionLocal"]),
+    p("url", text("http://127.0.0.1:11434"), "\"\"").when("visionEngine", &["visionLocal"]),
+    p("model", Kind::LocalModel, "\"\"").when("visionEngine", &["visionLocal"]),
+    p("ocrLanguages", text("es-ES, en-US"), "\"\"").when("visionEngine", &["visionSystem"]),
+    INSTRUCTIONS,
+    p("target", text("vision"), "\"vision\"").literal(),
+];
+
+/// «Transcribir audio» (`nodes::transcribe`): speech to text by OpenAI's or a compatible API (Groq…),
+/// Gemini, or Whisper on this computer (whisper.cpp or OpenAI's Python CLI).
+const TRANSCRIBE: &[ParamSpec] = &[
+    p("audioPath", file("{{ $json.path }}"), "\"\""),
+    p("transcribeEngine", select(&["openaiApi", "compatible", "gemini", "whisperLocal"]), "\"openaiApi\"").literal(),
+    p("baseUrl", text("https://api.groq.com/openai/v1"), "\"\"").literal().when("transcribeEngine", &["compatible"]),
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal().when("transcribeEngine", &["openaiApi", "compatible", "gemini"]),
+    p("transcribeModel", text("whisper-1"), "\"\"").literal().when("transcribeEngine", &["openaiApi", "compatible", "gemini"]),
+    p("whisperModel", text("base"), "\"\"").literal().when("transcribeEngine", &["whisperLocal"]),
+    p("audioLanguage", text("es"), "\"\""),
+    p("audioPrompt", long_text("CodeFlow, Supabase, Vercel"), "\"\""),
+    p("timestamps", Kind::Boolean, "false").literal(),
+    p("target", text("transcript"), "\"transcript\"").literal(),
+];
+
+/// «Ocultar datos sensibles» (`nodes::redact`): emails, phones, RUTs, cards, IBANs, IPs and secrets
+/// found in the items' text, replaced before they reach a model, a log or a message.
+const REDACT: &[ParamSpec] = &[
+    p("redactFields", Kind::Strings, "[]"),
+    p(
+        "detect",
+        Kind::MultiSelect { options: &["piiEmail", "piiPhone", "piiRut", "piiCard", "piiIban", "piiIp", "piiSecret"] },
+        r#"["piiEmail","piiPhone","piiRut","piiCard","piiIban","piiSecret"]"#,
+    )
+    .literal(),
+    p("customPatterns", Kind::Strings, "[]").literal(),
+    p("redactMode", select(&["redactPlaceholder", "redactMask", "redactHash", "redactRemove"]), "\"redactPlaceholder\"").literal(),
+    p("reportField", text("_redacted"), "\"\"").literal(),
+];
+
+/// «Atajo o AppleScript» (`nodes::process`, macOS): a Shortcuts shortcut by name, AppleScript or
+/// JavaScript for Automation — the item's JSON as the script's argument.
+const OSASCRIPT: &[ParamSpec] = &[
+    p("osaKind", select(&["shortcut", "applescript", "jxa"]), "\"shortcut\"").literal(),
+    p("shortcutName", text("Modo concentración"), "\"\"").when("osaKind", &["shortcut"]),
+    p("shortcutInput", long_text("{{ $json.text }}"), "\"\"").when("osaKind", &["shortcut"]),
+    p("appleScript", Kind::Code { lang: "applescript" }, "\"\"").when("osaKind", &["applescript"]),
+    p("jxaScript", Kind::Code { lang: "javascript" }, "\"\"").when("osaKind", &["jxa"]),
+    RUN_FOR,
+    OUTPUT,
+    FAIL_ON_EXIT,
+];
+
 const PHONE: &[ParamSpec] = &[p("label", text("Publicar el reporte"), "\"\"").literal()];
+
+/// «Leer feed»: an RSS/Atom feed's entries (`nodes::feed`).
+const FEED_READ: &[ParamSpec] = &[
+    p("feedUrl", text("https://example.com/feed.xml"), "\"\""),
+    p("entryLimit", COUNT, "20").literal(),
+];
+
+/// «Nuevo en un feed» (`triggers::watchers::feed`).
+const FEED_TRIGGER: &[ParamSpec] = &[
+    p("feedUrl", text("https://example.com/feed.xml"), "\"\"").literal(),
+    p("intervalMin", Kind::Number { min: Some(5.0), max: None }, "15").literal(),
+];
+
+/// «Mensaje en cola» (`triggers::queue`): the Cola de mensajes node's connection fields, consumed.
+const QUEUE_TRIGGER: &[ParamSpec] = &[
+    p("broker", select(&["rabbitmq", "kafka", "sqs"]), "\"rabbitmq\"").literal(),
+    p("credential", Kind::Credential { kinds: &["basic", "aws"] }, "\"\"").literal(),
+    p("amqpUrl", text("amqp://rabbit.example.com:5672/%2f"), "\"\"").literal().when("broker", &["rabbitmq"]),
+    p("queueName", text("pedidos"), "\"\"").literal().when("broker", &["rabbitmq"]),
+    p("brokers", text("kafka.example.com:9092"), "\"\"").literal().when("broker", &["kafka"]),
+    p("topic", text("pedidos"), "\"\"").literal().when("broker", &["kafka"]),
+    p("partition", COUNT, "0").literal().when("broker", &["kafka"]),
+    p("tls", Kind::Boolean, "false").literal().when("broker", &["kafka"]),
+    p("saslMechanism", select(&["plain", "scramSha256", "scramSha512"]), "\"plain\"").literal().when("broker", &["kafka"]),
+    p("startFrom", select(&["continue", "earliest"]), "\"continue\"").literal().when("broker", &["kafka"]),
+    p("queueUrl", text("https://sqs.us-east-1.amazonaws.com/123456789012/pedidos"), "\"\"").literal().when("broker", &["sqs"]),
+    p("ackOnSuccess", Kind::Boolean, "false").literal(),
+];
+
+/// «Evento de base de datos» (`triggers::watchers::database`).
+const DB_TRIGGER: &[ParamSpec] = &[
+    p("dbEvent", select(&["pgNotify", "redisChannel", "newRow"]), "\"newRow\"").literal(),
+    p("connection", Kind::DbConnection { kinds: DB_TRIGGER_ENGINES }, "\"\"").literal(),
+    p("channels", text("pedidos_nuevos"), "\"\"").literal().when("dbEvent", &["pgNotify", "redisChannel"]),
+    p("table", text("public.pedidos"), "\"\"").literal().when("dbEvent", &["newRow"]),
+    p("watermark", text("id"), "\"id\"").literal().when("dbEvent", &["newRow"]),
+    p("intervalSec", Kind::Number { min: Some(10.0), max: None }, "30").literal().when("dbEvent", &["newRow"]),
+];
+const DB_TRIGGER_ENGINES: &[&str] = &["postgres", "supabase", "sqlserver", "iris", "mysql", "mariadb", "sqlite", "oracle", "jdbc", "redis"];
+
+/// «Archivo remoto» (`triggers::watchers::remote_file`).
+const REMOTE_FILE: &[ParamSpec] = &[
+    p("host", Kind::RemoteHost { kinds: ALL_FILE_HOSTS }, "\"\"").literal(),
+    p("remotePath", text("/srv/entrada"), "\"\"").literal(),
+    p("pattern", text("*.csv"), "\"\"").literal(),
+    p("events", Kind::MultiSelect { options: &["created", "modified"] }, r#"["created"]"#).literal(),
+    p("intervalSec", Kind::Number { min: Some(30.0), max: None }, "60").literal(),
+];
+const ALL_FILE_HOSTS: &[&str] = &["ssh", "sftp", "ftp", "ftps", "smb", "s3", "azure", "azure_blob", "azure_files"];
+
+/// «Evento de Google» (`triggers::watchers::google`).
+const GOOGLE_TRIGGER: &[ParamSpec] = &[
+    p("credential", Kind::Credential { kinds: &["oauth2"] }, "\"\"").literal(),
+    p("googleEvent", select(&["calendarSoon", "sheetsNewRow"]), "\"calendarSoon\"").literal(),
+    p("calendarId", text("primary"), "\"primary\"").literal().when("googleEvent", &["calendarSoon"]),
+    p("leadMinutes", COUNT, "10").literal().when("googleEvent", &["calendarSoon"]),
+    p("spreadsheetId", text("1AbC…"), "\"\"").literal().when("googleEvent", &["sheetsNewRow"]),
+    p("sheetRange", text("Hoja1!A:Z"), "\"\"").literal().when("googleEvent", &["sheetsNewRow"]),
+    p("intervalSec", Kind::Number { min: Some(60.0), max: None }, "120").literal(),
+];
+
+/// «Evento del sistema» (`triggers::watchers::system`).
+const SYSTEM_TRIGGER: &[ParamSpec] = &[
+    p("systemEvent", select(&["wake", "networkChange", "powerPlugged", "powerUnplugged", "batteryLow"]), "\"wake\"").literal(),
+    p("batteryBelow", Kind::Number { min: Some(1.0), max: Some(99.0) }, "20").literal().when("systemEvent", &["batteryLow"]),
+];
+
+/// «Enlace o terminal» (`triggers::watchers::open_link`): the name `codeflow --flow <name>` uses, and
+/// whether the window asks before running it.
+const LINK_TRIGGER: &[ParamSpec] = &[
+    p("linkName", text("deploy"), "\"\"").literal(),
+    p("askFirst", Kind::Boolean, "true").literal(),
+];
+
+/// A flow offered as a tool to AI agents (`flows::mcp`): its name, what it does (the model picks
+/// tools by this), and its input as form fields.
+const TOOL: &[ParamSpec] = &[
+    p("toolName", text("crear_ticket"), "\"\"").literal(),
+    p("toolDescription", long_text("Crea un ticket en Jira con el título y la prioridad que se le den"), "\"\"").literal(),
+    p("fields", Kind::FormFields, "[]").literal(),
+];
+
+/// A bot with no public URL (`triggers::bots`): Telegram long polling, Slack Socket Mode, Discord
+/// Gateway. The credential is a bearer: the bot token (Telegram, Discord) or the app-level `xapp-`
+/// token (Slack).
+const BOT: &[ParamSpec] = &[
+    p("platform", select(&["botTelegram", "botSlack", "botDiscord"]), "\"botTelegram\"").literal(),
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal(),
+    p("chats", text("123456789, -1001234567890"), "\"\"").literal(),
+    p("textFilter", text("deploy"), "\"\"").literal(),
+    p("commandsOnly", Kind::Boolean, "false").literal(),
+];
 
 const LOOP: &[ParamSpec] = &[p("batchSize", Kind::Number { min: Some(1.0), max: None }, "10").literal()];
 
@@ -1516,8 +1780,23 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "logic.loop" => LOOP,
         "logic.approval" => APPROVAL,
         "trigger.phone" => PHONE,
+        "trigger.bot" => BOT,
+        "trigger.tool" => TOOL,
+        "trigger.feed" => FEED_TRIGGER,
+        "net.feed" => FEED_READ,
+        "trigger.queue" => QUEUE_TRIGGER,
+        "trigger.db" => DB_TRIGGER,
+        "trigger.remoteFile" => REMOTE_FILE,
+        "trigger.google" => GOOGLE_TRIGGER,
+        "trigger.system" => SYSTEM_TRIGGER,
+        "trigger.link" => LINK_TRIGGER,
         "net.connector" => CONNECTOR,
         "net.google" => GOOGLE,
+        "net.microsoft" => MICROSOFT,
+        "ai.vision" => VISION,
+        "ai.transcribe" => TRANSCRIBE,
+        "transform.redact" => REDACT,
+        "code.osascript" => OSASCRIPT,
         "net.imap" => IMAP,
         "net.queue" => QUEUE,
         "ai.api" => API_CHAT,

@@ -1,0 +1,31 @@
+{
+  "id": "pushover",
+  "name": "Pushover",
+  "group": "appsChat",
+  "baseUrl": "https://api.pushover.net/1",
+  "auth": "body",
+  "authHint": { "es": "Tu clave de usuario (o de grupo) como usuario y el token de tu aplicación como contraseña, en una credencial Usuario y contraseña", "en": "Your user (or group) key as the user and your application's token as the password, in a User and password credential" },
+  "errorField": "errors",
+  "operations": [
+    {
+      "id": "send",
+      "name": { "es": "Enviar un aviso", "en": "Send a notification" },
+      "method": "POST",
+      "path": "/messages.json",
+      "form": true,
+      "fields": [
+        { "name": "message", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true },
+        { "name": "title", "label": { "es": "Título", "en": "Title" } },
+        { "name": "link", "label": { "es": "Enlace", "en": "Link" }, "placeholder": "https://example.com/deploys/42" },
+        { "name": "linkTitle", "label": { "es": "Texto del enlace", "en": "Link text" } },
+        { "name": "priority", "label": { "es": "Prioridad (-2 a 2)", "en": "Priority (-2 to 2)" }, "placeholder": "0" },
+        { "name": "retry", "label": { "es": "Con prioridad 2: repetir cada (segundos)", "en": "With priority 2: repeat every (seconds)" }, "placeholder": "60" },
+        { "name": "expire", "label": { "es": "Con prioridad 2: dejar de repetir tras (segundos)", "en": "With priority 2: stop repeating after (seconds)" }, "placeholder": "3600" },
+        { "name": "sound", "label": { "es": "Sonido", "en": "Sound" }, "placeholder": "pushover" },
+        { "name": "device", "label": { "es": "Dispositivo (vacío = todos)", "en": "Device (empty = all)" } },
+        { "name": "html", "label": { "es": "HTML (1 = sí)", "en": "HTML (1 = yes)" }, "placeholder": "0" }
+      ],
+      "body": { "token": "{{secret}}", "user": "{{user}}", "message": "{{message}}", "title": "{{title}}", "url": "{{link}}", "url_title": "{{linkTitle}}", "priority": "{{priority}}", "retry": "{{retry}}", "expire": "{{expire}}", "sound": "{{sound}}", "device": "{{device}}", "html": "{{html}}" }
+    }
+  ]
+}

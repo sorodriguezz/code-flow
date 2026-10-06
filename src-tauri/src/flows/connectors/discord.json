@@ -1,6 +1,7 @@
 {
   "id": "discord",
   "name": "Discord",
+  "group": "appsChat",
   "baseUrl": "",
   "auth": "url",
   "authHint": { "es": "La URL de un webhook del canal, guardada como credencial «URL de webhook»", "en": "A channel's webhook URL, kept as a “Webhook URL” credential" },

@@ -1,5 +1,6 @@
-//! Declarative connectors — Slack, Discord, Telegram, Notion, Jira, GitHub, Trello, Linear, Vercel, Netlify,
-//! Cloudflare, Supabase, Sentry, Teams, Google Chat and Mattermost — as JSON, one node to call them.
+//! Declarative connectors — Slack, Discord, Telegram, WhatsApp, Teams, Google Chat, Mattermost, ntfy,
+//! Pushover, Twilio, Notion, Jira, GitHub, GitLab, Azure DevOps, Bitbucket, Trello, Linear, Vercel,
+//! Netlify, Cloudflare, Supabase and Sentry — as JSON, one node to call them.
 //!
 //! **A connector is data, not code.** Each file in `connectors/` names a service's base URL, how it
 //! signs in, and its operations — method, path, the fields a person fills in, the JSON body with
@@ -43,6 +44,13 @@ pub struct Field {
     /// Parsed as JSON when it fills a whole value (a Notion filter).
     #[serde(default)]
     pub json: bool,
+    /// Percent-encoded where it lands in the URL's path — a GitLab project written `group/repo`, an
+    /// Azure DevOps work item type with a space in it.
+    #[serde(default)]
+    pub encode: bool,
+    /// What an empty field stands for — ntfy's public server, gitlab.com.
+    #[serde(default)]
+    pub default: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +78,10 @@ pub struct Operation {
     /// Headers this operation adds to the connector's (Supabase's `Prefer`).
     #[serde(default)]
     pub headers: Map<String, Value>,
+    /// The body goes as `application/x-www-form-urlencoded` (Twilio) rather than JSON: each of the
+    /// rendered body's fields becomes one pair.
+    #[serde(default)]
+    pub form: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,13 +90,21 @@ pub struct Connector {
     pub id: String,
     pub name: String,
     pub base_url: String,
+    /// The palette sub-heading its entry sits under in the Apps family (`flows.group.<group>`).
+    #[serde(default)]
+    pub group: String,
     /// How it signs in, and so which credentials fit: `bearer` (a token in the header), `basic`
     /// (user and password), `path` (a token the URL carries as `{{secret}}`: Telegram), `url` (the
     /// whole URL is the secret: a Discord webhook), `headers` (a token placed by the connector's own
-    /// headers as `{{secret}}`: Linear's bare key, Supabase's two headers) or `query` (a user and a
-    /// secret placed in the query by `authQuery`: Trello's key and token). Never a field — what a
-    /// node's fields hold is saved in the flow, and a secret does not belong there.
+    /// headers as `{{secret}}`: Linear's bare key, Supabase's two headers), `query` (a user and a
+    /// secret placed in the query by `authQuery`: Trello's key and token) or `body` (a user and a
+    /// secret the body template places: Pushover's user key and app token). Never a field — what a
+    /// node's fields hold is saved in the flow, and a secret does not belong there. `basic` also
+    /// lends its user to the templates as `{{user}}` (Twilio's account SID is part of its paths).
     pub auth: String,
+    /// The credential may be left out: a public ntfy topic needs none, a protected one a token.
+    #[serde(default)]
+    pub auth_optional: bool,
     pub auth_hint: Label,
     /// A field every operation has, filled once (Jira's site).
     #[serde(default)]
@@ -112,7 +132,7 @@ impl Connector {
         match self.auth.as_str() {
             "bearer" => &["bearer", "oauth2"],
             "path" | "headers" => &["bearer"],
-            "basic" | "query" => &["basic"],
+            "basic" | "query" | "body" => &["basic"],
             "url" => &["webhook"],
             _ => &[],
         }
@@ -131,10 +151,18 @@ impl Connector {
 const SOURCES: &[&str] = &[
     include_str!("connectors/slack.json"),
     include_str!("connectors/discord.json"),
+    include_str!("connectors/discordbot.json"),
     include_str!("connectors/telegram.json"),
+    include_str!("connectors/whatsapp.json"),
+    include_str!("connectors/ntfy.json"),
+    include_str!("connectors/pushover.json"),
+    include_str!("connectors/twilio.json"),
     include_str!("connectors/notion.json"),
     include_str!("connectors/jira.json"),
     include_str!("connectors/github.json"),
+    include_str!("connectors/gitlab.json"),
+    include_str!("connectors/azuredevops.json"),
+    include_str!("connectors/bitbucket.json"),
     include_str!("connectors/trello.json"),
     include_str!("connectors/linear.json"),
     include_str!("connectors/vercel.json"),
@@ -254,7 +282,7 @@ mod tests {
 
     #[test]
     fn every_shipped_connector_parses_and_its_placeholders_name_its_fields() {
-        assert_eq!(all().len(), 16);
+        assert_eq!(all().len(), 24);
         for connector in all() {
             assert!(connector.auth == "none" || !connector.credential_kinds().is_empty(), "{} signs in with {}", connector.id, connector.auth);
             for operation in &connector.operations {

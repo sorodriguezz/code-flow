@@ -37,7 +37,7 @@ pub fn provider_id(raw: &str) -> String {
     }
 }
 
-fn client() -> Result<reqwest::Client, NodeError> {
+pub(super) fn client() -> Result<reqwest::Client, NodeError> {
     reqwest::Client::builder().timeout(Duration::from_secs(300)).build().map_err(|e| NodeError::failed(e.to_string()))
 }
 
@@ -58,7 +58,7 @@ pub fn base_of(provider: &str, written: &str) -> Result<String, String> {
 }
 
 /// A request with the provider's way of sending a key.
-fn signed(request: reqwest::RequestBuilder, provider: &str, key: Option<&str>) -> reqwest::RequestBuilder {
+pub(super) fn signed(request: reqwest::RequestBuilder, provider: &str, key: Option<&str>) -> reqwest::RequestBuilder {
     let Some(key) = key.filter(|k| !k.is_empty()) else { return request };
     match provider {
         "anthropic" => request.header("x-api-key", key).header("anthropic-version", "2023-06-01"),
@@ -67,7 +67,7 @@ fn signed(request: reqwest::RequestBuilder, provider: &str, key: Option<&str>) -
     }
 }
 
-async fn send(ctx: &NodeCtx, what: &str, request: reqwest::RequestBuilder) -> Result<Value, NodeError> {
+pub(super) async fn send(ctx: &NodeCtx, what: &str, request: reqwest::RequestBuilder) -> Result<Value, NodeError> {
     let started = Instant::now();
     let response = tokio::select! {
         response = request.send() => response.map_err(|e| NodeError::failed(format!("{what}: could not reach the provider: {e}")))?,
@@ -82,7 +82,7 @@ async fn send(ctx: &NodeCtx, what: &str, request: reqwest::RequestBuilder) -> Re
     serde_json::from_str(&body).map_err(|_| NodeError::failed(format!("{what} did not answer JSON")))
 }
 
-async fn api_key(ctx: &NodeCtx, provider: &str) -> Result<Option<String>, NodeError> {
+pub(super) async fn api_key(ctx: &NodeCtx, provider: &str) -> Result<Option<String>, NodeError> {
     let id = ctx.param_str("credential");
     if id.trim().is_empty() {
         return match provider {
@@ -187,7 +187,7 @@ pub fn read_answer(provider: &str, answer: &Value) -> Answer {
     }
 }
 
-fn chat_url(provider: &str, base: &str, model: &str) -> String {
+pub(super) fn chat_url(provider: &str, base: &str, model: &str) -> String {
     match provider {
         "anthropic" => format!("{base}/messages"),
         "gemini" => format!("{base}/models/{}:generateContent", model.trim_start_matches("models/")),

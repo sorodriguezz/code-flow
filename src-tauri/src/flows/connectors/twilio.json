@@ -1,0 +1,67 @@
+{
+  "id": "twilio",
+  "name": "Twilio",
+  "group": "appsChat",
+  "baseUrl": "https://api.twilio.com/2010-04-01/Accounts/{{user}}",
+  "auth": "basic",
+  "authHint": { "es": "Tu Account SID (AC…) como usuario y tu Auth Token como contraseña, en una credencial Usuario y contraseña", "en": "Your Account SID (AC…) as the user and your Auth Token as the password, in a User and password credential" },
+  "errorField": "message",
+  "operations": [
+    {
+      "id": "sendSms",
+      "name": { "es": "Enviar un SMS", "en": "Send an SMS" },
+      "method": "POST",
+      "path": "/Messages.json",
+      "form": true,
+      "fields": [
+        { "name": "to", "label": { "es": "Para (+código de país)", "en": "To (+country code)" }, "placeholder": "+56912345678", "required": true },
+        { "name": "from", "label": { "es": "Desde (tu número de Twilio)", "en": "From (your Twilio number)" }, "placeholder": "+15005550006" },
+        { "name": "messagingServiceSid", "label": { "es": "O un servicio de mensajería (MG…)", "en": "Or a messaging service (MG…)" } },
+        { "name": "body", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true },
+        { "name": "mediaUrl", "label": { "es": "Imagen (URL, MMS)", "en": "Image (URL, MMS)" } }
+      ],
+      "body": { "To": "{{to}}", "From": "{{from}}", "MessagingServiceSid": "{{messagingServiceSid}}", "Body": "{{body}}", "MediaUrl": "{{mediaUrl}}" }
+    },
+    {
+      "id": "sendWhatsApp",
+      "name": { "es": "Enviar un WhatsApp", "en": "Send a WhatsApp message" },
+      "method": "POST",
+      "path": "/Messages.json",
+      "form": true,
+      "fields": [
+        { "name": "to", "label": { "es": "Para (+código de país)", "en": "To (+country code)" }, "placeholder": "+56912345678", "required": true },
+        { "name": "from", "label": { "es": "Desde (tu número de WhatsApp en Twilio)", "en": "From (your WhatsApp number in Twilio)" }, "placeholder": "+14155238886", "required": true },
+        { "name": "body", "label": { "es": "Mensaje (dentro de las 24 h de su último mensaje)", "en": "Message (within 24 h of their last one)" }, "multiline": true },
+        { "name": "contentSid", "label": { "es": "O una plantilla (HX…)", "en": "Or a template (HX…)" } },
+        { "name": "contentVariables", "label": { "es": "Variables de la plantilla (JSON)", "en": "Template variables (JSON)" }, "placeholder": "{\"1\": \"Ana\"}" }
+      ],
+      "body": { "To": "whatsapp:{{to}}", "From": "whatsapp:{{from}}", "Body": "{{body}}", "ContentSid": "{{contentSid}}", "ContentVariables": "{{contentVariables}}" }
+    },
+    {
+      "id": "call",
+      "name": { "es": "Hacer una llamada", "en": "Make a call" },
+      "method": "POST",
+      "path": "/Calls.json",
+      "form": true,
+      "fields": [
+        { "name": "to", "label": { "es": "Para (+código de país)", "en": "To (+country code)" }, "placeholder": "+56912345678", "required": true },
+        { "name": "from", "label": { "es": "Desde (tu número de Twilio)", "en": "From (your Twilio number)" }, "placeholder": "+15005550006", "required": true },
+        { "name": "twiml", "label": { "es": "Qué hace (TwiML)", "en": "What it does (TwiML)" }, "placeholder": "<Response><Say language=\"es-MX\">El deploy falló</Say></Response>", "multiline": true, "required": true }
+      ],
+      "body": { "To": "{{to}}", "From": "{{from}}", "Twiml": "{{twiml}}" }
+    },
+    {
+      "id": "listMessages",
+      "name": { "es": "Listar mensajes", "en": "List messages" },
+      "method": "GET",
+      "path": "/Messages.json",
+      "query": { "To": "{{to}}", "From": "{{from}}", "PageSize": "{{pageSize}}" },
+      "fields": [
+        { "name": "to", "label": { "es": "Para", "en": "To" } },
+        { "name": "from", "label": { "es": "Desde", "en": "From" } },
+        { "name": "pageSize", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "20" }
+      ],
+      "result": "messages"
+    }
+  ]
+}

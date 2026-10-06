@@ -14,7 +14,7 @@
  * 1-based, so the one conversion happens where the two meet and nowhere else.
  */
 
-export type BlockKind = "table" | "enum" | "tablegroup" | "ref" | "other";
+export type BlockKind = "table" | "enum" | "tablegroup" | "ref" | "note" | "other";
 
 export interface DbmlBlock {
   kind: BlockKind;
@@ -30,8 +30,10 @@ export interface DbmlBlock {
   closed: boolean;
 }
 
+// `note` is a sticky note — `Note name { '…' }` at the top level. `Note:` inside a block, or a
+// project's, has a colon where the name would be and never matches.
 const DECLARATION =
-  /^(table|enum|tablegroup|tablepartial)\s+("[^"]*"|[\w.]+)(?:\s+as\s+("[^"]*"|[\w.]+))?/i;
+  /^(table|enum|tablegroup|tablepartial|note)\s+("[^"]*"|[\w.]+)(?:\s+as\s+("[^"]*"|[\w.]+))?/i;
 
 /** The relationship operator, as the only thing that tells a `Ref` statement it is finished. */
 const REF_ARROW = /<>|[<>-]/;

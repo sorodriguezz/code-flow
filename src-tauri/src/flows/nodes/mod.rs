@@ -11,10 +11,12 @@
 
 mod ai;
 mod app;
+pub(crate) mod binary;
 mod connector;
-mod data;
+pub(crate) mod data;
+pub(crate) mod feed;
 mod files;
-mod formats;
+pub(crate) mod formats;
 mod google;
 mod http;
 mod imap;
@@ -22,14 +24,18 @@ mod integrations;
 mod llm;
 mod logic;
 mod media;
+mod microsoft;
 mod net;
 mod notebook;
 mod process;
 mod prs;
-mod queue;
+pub(crate) mod queue;
+mod redact;
 mod remote;
+mod transcribe;
 mod transform;
 mod utils;
+mod vision;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -288,7 +294,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         )));
     }
     match ctx.node.type_id.as_str() {
-        "code.shell" | "code.python" | "code.node" | "code.command" | "code.script" => process::execute(ctx).await,
+        "code.shell" | "code.python" | "code.node" | "code.command" | "code.script" | "code.osascript" => process::execute(ctx).await,
         "code.js" => code(ctx).await,
         "net.http" => http::execute(ctx).await,
         "logic.if" | "logic.switch" | "logic.merge" | "logic.wait" | "logic.stop" | "logic.noop" | "logic.approval" => {
@@ -299,7 +305,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "app.notify" | "data.state" | "data.vars" | "net.respond" | "code.service" => app::execute(ctx).await,
         "logic.subflow" => logic::subflow(ctx).await,
         "ai.agent" | "ai.local" | "ai.classify" | "ai.extract" | "ai.summarize" | "ai.review" | "ai.prReview" | "ai.prFix" | "ai.prReply"
-        | "ai.chat" | "ai.commit" | "app.agent" => {
+        | "ai.chat" | "ai.commit" | "app.agent" | "ai.vision" => {
             ai::execute(ctx).await
         }
         "files.file" | "files.list" | "files.move" | "files.git" | "code.docker" => files::execute(ctx).await,
@@ -310,8 +316,12 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         }
         "net.connector" => connector::execute(ctx).await,
         "net.google" => google::execute(ctx).await,
+        "net.microsoft" => microsoft::execute(ctx).await,
+        "ai.transcribe" => transcribe::execute(ctx).await,
+        "transform.redact" => redact::execute(ctx).await,
         "net.imap" => imap::execute(ctx).await,
         "net.queue" => queue::execute(ctx).await,
+        "net.feed" => feed::execute(ctx).await,
         "ai.api" | "ai.embed" | "ai.vectors" => llm::execute(ctx).await,
         "app.prList" | "app.prDecide" | "app.prComments" | "app.prMemory" => prs::execute(ctx).await,
         "net.webPage" | "net.check" | "logic.until" | "transform.changes" | "transform.template" | "transform.json" | "transform.sql" => {

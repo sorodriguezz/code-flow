@@ -376,7 +376,13 @@ pub fn run() {
         // `recover_after_restart` and demote the other's live rows to `interrupted`, and the
         // per-repository lease that keeps two engines out of one working copy is a *per-process*
         // registry, so it would not see across them at all.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // `codeflow --flow <name>` from a terminal, a git hook or a launcher: a flow to start,
+            // not a window to show.
+            if argv.iter().any(|arg| arg == "--flow") {
+                crate::flows::triggers::watchers::handle_args(app, &argv);
+                return;
+            }
             tray::show_main_window(app);
         }))
         // After the single instance, never before it — see above. Neither of these is a reason to
@@ -1486,6 +1492,14 @@ pub fn run() {
             commands::flows_cmd::flows_delete_version,
             commands::flows_cmd::flows_clear_versions,
             commands::flows_cmd::flows_run,
+            commands::flows_cmd::flows_retry_run,
+            commands::flows_cmd::flows_app_event,
+            commands::flows_cmd::flows_tunnel_status,
+            commands::flows_cmd::flows_tunnel_set,
+            commands::flows_cmd::flows_mcp_info,
+            commands::flows_cmd::flows_mcp_rotate,
+            commands::flows_cmd::flows_confirm_link,
+            commands::flows_cmd::flows_cli_command,
             commands::flows_cmd::flows_run_form,
             commands::flows_cmd::flows_bridge_answer,
             commands::flows_cmd::flows_cancel_run,
@@ -1496,6 +1510,12 @@ pub fn run() {
             commands::flows_cmd::flows_decide_wait,
             commands::flows_cmd::flows_active_runs,
             commands::flows_cmd::flows_list_runs,
+            commands::flows_cmd::flows_metrics,
+            commands::flows_cmd::flows_repo_scan,
+            commands::flows_cmd::flows_repo_import,
+            commands::flows_cmd::flows_repo_save,
+            commands::flows_cmd::flows_repo_pull,
+            commands::flows_cmd::flows_repo_unlink,
             commands::flows_cmd::flows_get_run,
             commands::flows_cmd::flows_run_node_data,
             commands::flows_cmd::flows_run_log,

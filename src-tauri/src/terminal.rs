@@ -208,6 +208,9 @@ struct TerminalExitEvent {
     /// The process's exit code, when it could be collected. `None` for a session closed from this
     /// side (the kill is ours, so its code says nothing) and for a child that outlived its pty.
     code: Option<i32>,
+    /// How long the session ran, in whole seconds — what a flow waiting on "a long command ended"
+    /// filters on (`flows::triggers`, which listens to this event).
+    seconds: f64,
 }
 
 /// What a caller that runs a *program* — rather than a shell somebody types into — needs from the
@@ -469,6 +472,8 @@ pub fn open_pty<R: Runtime>(
     let watcher_app = app.clone();
     let watcher_outbox = Arc::clone(&outbox);
     let emitter_app = app;
+    // How long the session ran, carried by its exit event (see `TerminalExitEvent::seconds`).
+    let session_started = Instant::now();
     std::thread::spawn(move || {
         let (lock, ready) = &*outbox;
         // Far enough in the past that the very first byte of a session is emitted on sight rather
@@ -553,7 +558,7 @@ pub fn open_pty<R: Runtime>(
         }
         let _ = emitter_app.emit(
             "terminal:exit",
-            TerminalExitEvent { id: emitter_id, owner: emitter_owner, code },
+            TerminalExitEvent { id: emitter_id, owner: emitter_owner, code, seconds: session_started.elapsed().as_secs_f64().round() },
         );
     });
 

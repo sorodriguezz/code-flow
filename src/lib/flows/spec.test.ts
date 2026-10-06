@@ -31,6 +31,7 @@ import {
 const descriptor = (typeId: string, inputs: number, outputs: number): FlowNodeDescriptor => ({
   typeId,
   family: typeId.split(".")[0] as FlowNodeDescriptor["family"],
+  group: "",
   icon: "box",
   inputs,
   outputs,

@@ -126,12 +126,17 @@ async fn file(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         match operation.as_str() {
             "write" | "addToEnd" => {
                 let content = params.get("content").cloned().unwrap_or(Value::Null);
-                let bytes: Vec<u8> = match text(params, "writeAs").as_str() {
+                // A file reference handed on (a download, an upload) is copied as it is.
+                let referenced = super::binary::is_reference(&content).then(|| super::binary::path_of(&content)).flatten();
+                let bytes: Vec<u8> = match (referenced, text(params, "writeAs").as_str()) {
+                    (Some(source), _) => std::fs::read(&source).map_err(|e| NodeError::failed(format!("Could not read {}: {e}", source.display())))?,
+                    (None, kind) => match kind {
                     "json" => serde_json::to_vec_pretty(&content).unwrap_or_default(),
                     "base64" => base64::engine::general_purpose::STANDARD
                         .decode(to_text(&content).trim())
                         .map_err(|e| NodeError::failed(format!("The content is not base64: {e}")))?,
                     _ => to_text(&content).into_bytes(),
+                    },
                 };
                 let create = flag(params, "createFolders");
                 if operation == "addToEnd" && path.is_file() {

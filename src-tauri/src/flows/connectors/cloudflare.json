@@ -1,6 +1,7 @@
 {
   "id": "cloudflare",
   "name": "Cloudflare",
+  "group": "appsDevops",
   "baseUrl": "https://api.cloudflare.com/client/v4",
   "auth": "bearer",
   "authHint": { "es": "Un API token de Cloudflare con permisos de la zona como credencial Token", "en": "A Cloudflare API token with the zone's permissions as a Token credential" },

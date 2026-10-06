@@ -233,7 +233,9 @@ export function ChatTranscript({
   return (
     <div className="relative min-h-0 flex-1">
       <div ref={scrollRef} onScroll={onScroll} onContextMenu={textMenu.onText} className="h-full overflow-y-auto">
-        <div ref={contentRef} className={`${READING_COLUMN} ${COLUMN_GUTTER} space-y-5 py-8`}>
+        {/* `wrap-anywhere` for everything in the column — thinking, queued turns, error banners, the
+            continued-from legend — not only the bubbles: any of them can carry a path with no space. */}
+        <div ref={contentRef} className={`${READING_COLUMN} ${COLUMN_GUTTER} space-y-5 py-8 wrap-anywhere`}>
           {/* `session.loaded` and not just an empty array: a conversation whose transcript is
               still in flight also has no messages, and telling the reader "nothing asked yet" for
               two frames about a chat they can see in the sidebar is worse than showing nothing. */}

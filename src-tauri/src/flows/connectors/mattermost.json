@@ -1,6 +1,7 @@
 {
   "id": "mattermost",
   "name": "Mattermost",
+  "group": "appsChat",
   "baseUrl": "",
   "auth": "url",
   "authHint": { "es": "La URL del webhook entrante (Integraciones › Webhooks entrantes) como credencial Webhook", "en": "The incoming webhook's URL (Integrations › Incoming webhooks) as a Webhook credential" },

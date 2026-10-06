@@ -77,18 +77,24 @@ pub fn set_branch_locked(repo_path: String, name: String, locked: bool) -> Resul
 }
 
 #[tauri::command]
-pub fn checkout_local_branch(repo_path: String, name: String) -> Result<(), String> {
-    branch::checkout_local_branch(&repo_path, &name)
+pub fn checkout_local_branch(app: AppHandle, repo_path: String, name: String) -> Result<(), String> {
+    branch::checkout_local_branch(&repo_path, &name)?;
+    switched(&app, &repo_path);
+    Ok(())
 }
 
 #[tauri::command]
-pub fn checkout_detached(repo_path: String, refname: String) -> Result<(), String> {
-    branch::checkout_detached(&repo_path, &refname)
+pub fn checkout_detached(app: AppHandle, repo_path: String, refname: String) -> Result<(), String> {
+    branch::checkout_detached(&repo_path, &refname)?;
+    switched(&app, &repo_path);
+    Ok(())
 }
 
 #[tauri::command]
-pub fn checkout_remote_tracking(repo_path: String, remote_branch: String) -> Result<String, String> {
-    branch::checkout_remote_tracking(&repo_path, &remote_branch)
+pub fn checkout_remote_tracking(app: AppHandle, repo_path: String, remote_branch: String) -> Result<String, String> {
+    let local = branch::checkout_remote_tracking(&repo_path, &remote_branch)?;
+    switched(&app, &repo_path);
+    Ok(local)
 }
 
 #[tauri::command]
@@ -294,12 +300,38 @@ pub fn discard_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) 
 /// reads the index once, atomically, as it always has.
 #[tauri::command(async)]
 pub fn commit(
+    app: AppHandle,
     repo_path: String,
     message: String,
     author_name: Option<String>,
     author_email: Option<String>,
 ) -> Result<String, String> {
-    diff::commit(&repo_path, &message, author_name, author_email)
+    let oid = diff::commit(&repo_path, &message, author_name, author_email)?;
+    // A commit made here is an event a flow can start from ("Evento de CodeFlow").
+    crate::flows::triggers::app_event(
+        &app,
+        "gitCommitted",
+        serde_json::json!({"repoPath": repo_path, "oid": oid, "message": message, "branch": crate::flows::triggers::current_branch(&repo_path)}),
+    );
+    Ok(oid)
+}
+
+/// A checkout made from CodeFlow, for the flows that listen for one.
+fn switched(app: &AppHandle, repo_path: &str) {
+    crate::flows::triggers::app_event(
+        app,
+        "branchSwitched",
+        serde_json::json!({"repoPath": repo_path, "branch": crate::flows::triggers::current_branch(repo_path)}),
+    );
+}
+
+/// A push made from CodeFlow, for the flows that listen for one.
+fn pushed(app: &AppHandle, repo_path: &str, force: bool) {
+    crate::flows::triggers::app_event(
+        app,
+        "gitPushed",
+        serde_json::json!({"repoPath": repo_path, "branch": crate::flows::triggers::current_branch(repo_path), "force": force}),
+    );
 }
 
 #[tauri::command]
@@ -534,19 +566,25 @@ pub async fn git_pull_branch(app: AppHandle, repo_path: String, branch: String) 
 
 #[tauri::command]
 pub async fn git_push(app: AppHandle, repo_path: String, set_upstream: bool) -> Result<(), String> {
-    remote::push(app, repo_path, set_upstream).await
+    remote::push(app.clone(), repo_path.clone(), set_upstream).await?;
+    pushed(&app, &repo_path, false);
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn git_push_branch(app: AppHandle, repo_path: String, branch: String) -> Result<(), String> {
-    remote::push_branch(app, repo_path, branch).await
+    remote::push_branch(app.clone(), repo_path.clone(), branch).await?;
+    pushed(&app, &repo_path, false);
+    Ok(())
 }
 
 /// Force push with lease, offered only after a push came back rejected — see
 /// `remote::push_force_with_lease` for why it is never a bare `--force`.
 #[tauri::command]
 pub async fn git_push_force_with_lease(app: AppHandle, repo_path: String) -> Result<(), String> {
-    remote::push_force_with_lease(app, repo_path).await
+    remote::push_force_with_lease(app.clone(), repo_path.clone()).await?;
+    pushed(&app, &repo_path, true);
+    Ok(())
 }
 
 // ---------- lines — the Changes screen's gutter selection ----------

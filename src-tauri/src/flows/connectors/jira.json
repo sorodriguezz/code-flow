@@ -1,6 +1,7 @@
 {
   "id": "jira",
   "name": "Jira",
+  "group": "appsProjects",
   "baseUrl": "https://{{site}}.atlassian.net/rest/api/3",
   "auth": "basic",
   "authHint": { "es": "Tu correo y un token de API de Atlassian como credencial Usuario y contraseña", "en": "Your email and an Atlassian API token as a User and password credential" },

@@ -1,6 +1,7 @@
 {
   "id": "teams",
   "name": "Microsoft Teams",
+  "group": "appsChat",
   "baseUrl": "",
   "auth": "url",
   "authHint": { "es": "La URL del webhook del canal (flujo «Publicar en un canal cuando se recibe una solicitud de webhook») como credencial Webhook", "en": "The channel's webhook URL (the \"Post to a channel when a webhook request is received\" workflow) as a Webhook credential" },

@@ -70,6 +70,7 @@ import { hintFor } from "../../lib/dbml/errors";
 import { mergeDbml } from "../../lib/dbml/merge";
 import { pushRevision, type Revision, type RevisionCause } from "../../lib/dbml/history";
 import {
+  DEFAULT_NOTE_SIZE,
   fieldMarkKey,
   holdPlaces,
   layoutDbml,
@@ -80,8 +81,10 @@ import {
   writeLayout,
   type DbmlMarkKind,
   type DbmlMarks,
+  type LayoutSpot,
 } from "../../lib/dbml/layout";
-import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
+import { EMPTY_SCHEMA, stickyNoteId, type DbmlSchema } from "../../lib/dbml/types";
+import { smallestChange } from "../../lib/smallestChange";
 import { sandboxOf, useSandboxStore } from "../../state/sandboxStore";
 import type { SqlImportDialect } from "../../lib/dbml/parse";
 import { rasterize, standaloneSvg } from "../../lib/diagramSvg";
@@ -426,7 +429,9 @@ export function DbmlWorkbench({
   useEffect(() => {
     if (!parser) return;
     const timer = window.setTimeout(() => {
-      const parsed = parser.parseDbml(source);
+      // The whole text, as the editor shows it: `parseDbml` blanks the comment markers, so a
+      // diagnostic names the line the editor has.
+      const parsed = parser.parseDbml(doc ?? "");
       setSchema((current) =>
         // A failed parse that recovered nothing keeps the previous tables and takes the new error.
         // `errorAt` travels with `error` — they are one fact, and a stale caret pointing at a line
@@ -437,7 +442,7 @@ export function DbmlWorkbench({
       );
     }, PARSE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [parser, source]);
+  }, [parser, doc]);
 
   // The selection cannot outlive the table it names — renaming or deleting one would otherwise
   // leave the inspector open on nothing and the canvas dimmed around a table that is gone.
@@ -507,10 +512,51 @@ export function DbmlWorkbench({
   const sidecar = useRef({ positions, marks });
   sidecar.current = { positions, marks };
 
-  /** One edit to the DBML itself, with the dragged boxes and the marks carried through. */
-  const writeSource = useCallback(
-    (next: string) => editDoc(writeLayout(next, sidecar.current.positions, sidecar.current.marks)),
+  /**
+   * The document, written — the one way anything that is not a keystroke changes it.
+   *
+   * # The whole text is the editor's text
+   *
+   * The layout and marks comments used to be split off before Monaco saw the document, so the
+   * editor showed the schema without them and the code on screen was not the code stored: copying
+   * it out of the editor and pasting it into another diagram lost the arrangement, the marks and
+   * where the notes sat. Now the editor shows everything — the user's ask was that all of it live
+   * in the code — so a change made on the canvas is a text change like any other. It reaches Monaco
+   * as the smallest edit that turns the text it has into the new one (`smallestChange`), so the
+   * caret and the scroll stay put when the change is elsewhere, and ⌘Z takes it back.
+   *
+   * The store is written first and unconditionally — see `writeMark` for why one editor's change
+   * event must not decide whether a write happens. Monaco's own `onChange` then hands the same text
+   * back, and `editDoc` drops it as unchanged.
+   */
+  const commitDoc = useCallback(
+    (next: string) => {
+      editDoc(next);
+      const editor = editorRef.current;
+      const model = editor?.getModel();
+      if (!editor || !model) return;
+      const current = model.getValue();
+      if (current === next) return;
+      const change = smallestChange(current, next);
+      const from = model.getPositionAt(change.start);
+      const to = model.getPositionAt(change.end);
+      editor.pushUndoStop();
+      editor.executeEdits("cf-dbml", [
+        {
+          range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column },
+          text: change.text,
+          forceMoveMarkers: true,
+        },
+      ]);
+      editor.pushUndoStop();
+    },
     [editDoc],
+  );
+
+  /** One edit to the DBML itself, with the boxes' places and the marks carried through. */
+  const commitSource = useCallback(
+    (next: string) => commitDoc(writeLayout(next, sidecar.current.positions, sidecar.current.marks)),
+    [commitDoc],
   );
 
   /**
@@ -598,17 +644,9 @@ export function DbmlWorkbench({
       const next = edit(source);
       if (next === source) return;
       cause.current = "edited";
-
-      const editor = editorRef.current;
-      const model = editor?.getModel();
-      if (editor && model) {
-        editor.executeEdits("cf-dbml-visual", [{ range: model.getFullModelRange(), text: next }]);
-        editor.pushUndoStop();
-        return;
-      }
-      writeSource(next);
+      commitSource(next);
     },
-    [schema.error, source, writeSource],
+    [schema.error, source, commitSource],
   );
 
   /**
@@ -659,19 +697,9 @@ export function DbmlWorkbench({
       cause.current = "marked";
       sidecar.current = { positions: sidecar.current.positions, marks: next };
 
-      const nextSource = comment(source);
-      editDoc(writeLayout(nextSource, sidecar.current.positions, next));
-      if (nextSource === source) return;
-
-      const editor = editorRef.current;
-      const model = editor?.getModel();
-      if (!editor || !model) return;
-      editor.executeEdits("cf-dbml-mark", [
-        { range: model.getFullModelRange(), text: nextSource },
-      ]);
-      editor.pushUndoStop();
+      commitDoc(writeLayout(comment(source), sidecar.current.positions, next));
     },
-    [editDoc, source],
+    [commitDoc, source],
   );
 
   /**
@@ -731,18 +759,8 @@ export function DbmlWorkbench({
     cause.current = "marked";
     sidecar.current = { positions: sidecar.current.positions, marks: {} };
 
-    const nextSource = edits.stripMarkComments(source);
-    editDoc(writeLayout(nextSource, sidecar.current.positions, {}));
-    if (nextSource === source) return;
-
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    if (!editor || !model) return;
-    editor.executeEdits("cf-dbml-mark", [
-      { range: model.getFullModelRange(), text: nextSource },
-    ]);
-    editor.pushUndoStop();
-  }, [editDoc, source]);
+    commitDoc(writeLayout(edits.stripMarkComments(source), sidecar.current.positions, {}));
+  }, [commitDoc, source]);
 
   /** How the review is going, for the strip along the bottom — counting only what the canvas can
    *  draw, see `liveMarks`. */
@@ -878,6 +896,9 @@ export function DbmlWorkbench({
       },
       setNote: (table: string, note: string) =>
         applyEdit((current) => edits.setTableNote(current, table, note)),
+      // DBML's own `[headercolor: …]` on the declaration — in the code, so it travels with it.
+      setTableColor: (id: string, color: string | null) =>
+        applyEdit((current) => edits.setTableColor(current, id, color)),
       addRef: (from: edits.RefEnd, to: edits.RefEnd, cardinality: edits.Cardinality) =>
         applyEdit((current) => edits.addRef(current, from, to, cardinality)),
       dropRef: (from: edits.RefEnd, to: edits.RefEnd) =>
@@ -894,13 +915,80 @@ export function DbmlWorkbench({
     [applyEdit, holdBoxes, schema.error, schema.tables, source, t],
   );
 
-  /** One box moved. Only the layout comment changes, so Monaco's value does not — see the header. */
-  const moveTable = useCallback(
-    (id: string, x: number, y: number) => {
+  /**
+   * Boxes mid-drag, before they are written.
+   *
+   * A drag reports every frame. Writing each one would put sixty edits a second into the editor and
+   * onto its undo stack, so the frames move this overlay instead and only the release writes the
+   * layout comment — one edit, one undo step, the way a keystroke is one.
+   */
+  const [livePlaces, setLivePlaces] = useState<Record<string, LayoutSpot> | null>(null);
+  const shownPositions = useMemo(() => (livePlaces ? { ...positions, ...livePlaces } : positions), [positions, livePlaces]);
+
+  /** A box — a table, or a sticky note with its size — put somewhere. `final` is the release. */
+  const placeBox = useCallback(
+    (id: string, spot: LayoutSpot, final: boolean) => {
+      if (!final) {
+        setLivePlaces((current) => ({ ...(current ?? {}), [id]: spot }));
+        return;
+      }
+      setLivePlaces(null);
       cause.current = "moved";
-      editDoc(writeLayout(source, { ...positions, [id]: { x, y } }, marks));
+      sidecar.current = { ...sidecar.current, positions: { ...sidecar.current.positions, [id]: spot } };
+      commitDoc(writeLayout(source, sidecar.current.positions, sidecar.current.marks));
     },
-    [editDoc, source, positions, marks],
+    [commitDoc, source],
+  );
+
+  /** One table moved. A note keeps its size through `placeBox`'s spread. */
+  const moveTable = useCallback(
+    (id: string, x: number, y: number, final = true) =>
+      placeBox(id, { ...(sidecar.current.positions[id] ?? {}), x, y }, final),
+    [placeBox],
+  );
+
+  /**
+   * The sticky notes' operations — text edits on the `Note name { … }` blocks plus their places in
+   * the layout comment. Not gated on a parse, like the marks: they find their block by its lines,
+   * which a half-typed document still has.
+   */
+  const notes = useMemo(
+    () => ({
+      add: (x: number, y: number): string | null => {
+        const added = edits.addStickyNote(source, "");
+        const id = stickyNoteId(added.name);
+        cause.current = "edited";
+        sidecar.current = {
+          ...sidecar.current,
+          positions: { ...sidecar.current.positions, [id]: { x: Math.round(x), y: Math.round(y), ...DEFAULT_NOTE_SIZE } },
+        };
+        commitSource(added.source);
+        return added.name;
+      },
+      setText: (name: string, text: string) => {
+        const next = edits.updateStickyNote(source, name, { content: text });
+        if (next === source) return;
+        cause.current = "edited";
+        commitSource(next);
+      },
+      setColor: (name: string, color: string | null) => {
+        const next = edits.updateStickyNote(source, name, { color });
+        if (next === source) return;
+        cause.current = "edited";
+        commitSource(next);
+      },
+      drop: (name: string) => {
+        const next = edits.dropStickyNote(source, name);
+        if (next === source) return;
+        cause.current = "edited";
+        const rest = { ...sidecar.current.positions };
+        delete rest[stickyNoteId(name)];
+        sidecar.current = { ...sidecar.current, positions: rest };
+        commitSource(next);
+      },
+      place: (id: string, spot: LayoutSpot, final: boolean) => placeBox(id, spot, final),
+    }),
+    [commitSource, placeBox, source],
   );
 
   /**
@@ -953,7 +1041,7 @@ export function DbmlWorkbench({
     const formatted = formatDbml(source);
     if (formatted === source) return;
     cause.current = "formatted";
-    writeSource(formatted);
+    commitSource(formatted);
     useToastStore.getState().pushToast(t("dbml.formatted"), "success");
   };
 
@@ -967,14 +1055,17 @@ export function DbmlWorkbench({
    * dragged yet.
    */
   const rearrange = () => {
-    if (Object.keys(positions).length === 0) {
+    // The notes keep their places: the layout engine does not place them, so "back to the engine"
+    // would only pile them up in the column it parks unplaced ones in.
+    const notePlaces = Object.fromEntries(Object.entries(positions).filter(([id]) => id.startsWith("note:")));
+    if (Object.keys(positions).length === Object.keys(notePlaces).length) {
       canvas.current?.fit();
       useToastStore.getState().pushToast(t("dbml.layoutAlready"), "info");
       return;
     }
     cause.current = "rearranged";
     // The marks are about the model, not about where its boxes sit — a re-layout keeps them.
-    editDoc(writeLayout(source, {}, marks));
+    commitDoc(writeLayout(source, notePlaces, marks));
     useToastStore.getState().pushToast(t("dbml.layoutReset"), "success");
   };
 
@@ -1054,7 +1145,7 @@ export function DbmlWorkbench({
   /** Puts the document back to how it was before one recorded change. */
   const revert = (doc: string) => {
     cause.current = "reverted";
-    editDoc(doc);
+    commitDoc(doc);
     useToastStore.getState().pushToast(t("dbml.history.done"), "success");
   };
 
@@ -1652,10 +1743,11 @@ export function DbmlWorkbench({
             <Editor
               path={`cf-dbml:/${diagramId}.dbml`}
               language="dbml"
-              value={source}
+              // The whole document, the layout and marks comments included — see `commitDoc`.
+              value={doc}
               theme={monacoTheme}
               onMount={onEditorMount}
-              onChange={(value) => writeSource(value ?? "")}
+              onChange={(value) => editDoc(value ?? "")}
               options={{
                 ...OVERFLOW_SAFE_OPTIONS,
                 fontSize: 12.5,
@@ -1780,7 +1872,8 @@ export function DbmlWorkbench({
                     <DbmlCanvas
                       ref={canvas}
                       schema={schema}
-                      positions={positions}
+                      positions={shownPositions}
+                      notesEditing={notes}
                       rowCounts={sandbox.status?.counts}
                       onMoveTable={moveTable}
                       selected={selected}
@@ -1822,6 +1915,7 @@ export function DbmlWorkbench({
                           });
                         },
                         dropTable: editing.dropTable,
+                        setTableColor: editing.setTableColor,
                         addTable: () => editing.addTable(edits.freeName(declared, t("dbml.newTable"))),
                         addEnum: () => editing.addEnum(edits.freeName(declared, t("dbml.newEnum"))),
                         setMark,
@@ -2228,12 +2322,12 @@ export function DbmlWorkbench({
                     convert={parser.sqlToDbmlWithCore}
                     onReplace={(dbml) => {
                       cause.current = "imported";
-                      writeSource(dbml);
+                      commitSource(dbml);
                       setTool(null);
                     }}
                     onAppend={(dbml) => {
                       cause.current = "merged";
-                      editDoc(mergeDbml(doc, dbml));
+                      commitDoc(mergeDbml(doc, dbml));
                       setTool(null);
                     }}
                   />

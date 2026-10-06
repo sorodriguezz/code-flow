@@ -1,6 +1,7 @@
 {
   "id": "github",
   "name": "GitHub",
+  "group": "appsProjects",
   "baseUrl": "https://api.github.com",
   "auth": "bearer",
   "authHint": { "es": "Un token de GitHub (fine-grained o clásico) como credencial Token", "en": "A GitHub token (fine-grained or classic) as a Token credential" },

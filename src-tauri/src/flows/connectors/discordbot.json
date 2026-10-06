@@ -1,0 +1,24 @@
+{
+  "id": "discordbot",
+  "name": "Discord (bot)",
+  "group": "appsChat",
+  "baseUrl": "https://discord.com/api/v10",
+  "auth": "headers",
+  "authHint": { "es": "El token del bot, guardado como credencial de token (el mismo del disparador «Mensaje a un bot»)", "en": "The bot's token, kept as a token credential (the same one the “Bot message” trigger uses)" },
+  "headers": { "Authorization": "Bot {{secret}}" },
+  "errorField": "message",
+  "operations": [
+    {
+      "id": "sendMessage",
+      "name": { "es": "Enviar un mensaje", "en": "Send a message" },
+      "method": "POST",
+      "path": "/channels/{{channel}}/messages",
+      "fields": [
+        { "name": "channel", "label": { "es": "Canal", "en": "Channel" }, "placeholder": "123456789012345678", "required": true },
+        { "name": "content", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true },
+        { "name": "reply_to", "label": { "es": "En respuesta al mensaje (id)", "en": "In reply to message (id)" } }
+      ],
+      "body": { "content": "{{content}}", "message_reference": { "$when": "reply_to", "message_id": "{{reply_to}}" } }
+    }
+  ]
+}

@@ -101,11 +101,15 @@ impl NodeSettings {
     }
 }
 
-/// How many outputs a node has on the canvas: the catalogue's, plus "error" when it routes failures
-/// there. Triggers, Stop and No-op never do — nothing to route, or nowhere to route it from.
+/// How many outputs a node has on the canvas: the catalogue's (or, for a Switch or a classifier
+/// routing by category, what its settings make it — `catalog::output_count`), plus "error" when it
+/// routes failures there. Triggers, Stop and No-op never do — nothing to route, or nowhere to route
+/// it from.
 pub fn output_count(node: &FlowNode) -> u8 {
-    let Some(descriptor) = catalog::find(&node.type_id) else { return 0 };
-    descriptor.outputs + u8::from(has_error_output(node))
+    if catalog::find(&node.type_id).is_none() {
+        return 0;
+    }
+    catalog::output_count(&node.type_id, &node.params) + u8::from(has_error_output(node))
 }
 
 pub fn has_error_output(node: &FlowNode) -> bool {

@@ -1,6 +1,7 @@
 {
   "id": "linear",
   "name": "Linear",
+  "group": "appsProjects",
   "baseUrl": "https://api.linear.app/graphql",
   "auth": "headers",
   "authHint": { "es": "Una API key personal de Linear (Ajustes › API) como credencial Token", "en": "A personal Linear API key (Settings › API) as a Token credential" },

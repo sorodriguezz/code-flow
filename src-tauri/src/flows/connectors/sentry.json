@@ -1,6 +1,7 @@
 {
   "id": "sentry",
   "name": "Sentry",
+  "group": "appsDevops",
   "baseUrl": "https://sentry.io/api/0",
   "auth": "bearer",
   "authHint": { "es": "Un auth token de Sentry (con event:read y event:write) como credencial Token", "en": "A Sentry auth token (with event:read and event:write) as a Token credential" },

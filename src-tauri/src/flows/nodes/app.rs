@@ -126,6 +126,26 @@ async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
     let operation = text(&ctx.params, "operation");
     let items = ctx.items();
+    // The digest's other half: everything collected, once per run, cleared as it is handed over.
+    // Nothing collected is nothing out — the branch after it (the daily message) does not run.
+    if operation == "takeAll" {
+        let params = resolved.first().cloned().unwrap_or(Value::Null);
+        let key = text(&params, "key").trim().to_string();
+        if key.is_empty() || key.starts_with("__") {
+            return Err(NodeError::failed("Name the key the entries were collected under"));
+        }
+        let host = &ctx.run.host;
+        let list = host.state_get(&key).map_err(NodeError::failed)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        host.state_set(&key, None).map_err(NodeError::failed)?;
+        if list.is_empty() {
+            return Ok(vec![Vec::new()]);
+        }
+        let target = { let t = text(&params, "target"); if t.trim().is_empty() { "value".to_string() } else { t } };
+        let mut item = serde_json::Map::new();
+        item.insert("count".into(), json!(list.len()));
+        let produced = with_field(&Value::Object(item), &target, Value::Array(list));
+        return Ok(vec![vec![Item::new(produced)]]);
+    }
     let mut out = Vec::new();
     for index in 0..items.len().max(1) {
         let params = &resolved[index.min(resolved.len() - 1)];
@@ -152,6 +172,19 @@ async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             }
             "delete" => {
                 host.state_set(&key, None).map_err(NodeError::failed)?;
+                json
+            }
+            "collect" => {
+                // The item itself unless a value was written — what a digest usually collects.
+                let value = params.get("value").cloned().filter(|v| v != "" && !v.is_null()).unwrap_or_else(|| json.clone());
+                let mut list = host.state_get(&key).map_err(NodeError::failed)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+                list.push(value);
+                let keep = number(params, "keepAtMost").filter(|n| *n >= 1.0).map(|n| n as usize).unwrap_or(1000);
+                if list.len() > keep {
+                    let cut = list.len() - keep;
+                    list.drain(..cut);
+                }
+                host.state_set(&key, Some(&Value::Array(list))).map_err(NodeError::failed)?;
                 json
             }
             _ => {

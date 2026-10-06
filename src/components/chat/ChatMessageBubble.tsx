@@ -293,7 +293,11 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         // Selectable as a bubble rather than only through the markdown class inside it: a plain
         // (non-markdown) message — a user's own turn, a cancelled run's text — renders as a bare
         // string here and would otherwise be the one kind of message you couldn't quote back.
-        className={`group relative select-text ${shell}`}
+        //
+        // `wrap-anywhere`: a pasted log or stack trace is mostly paths with no space to break at, and
+        // without it each one ran straight through the bubble's edge (and off the panel). Code blocks
+        // keep their own sideways scroll — `white-space: pre` never wraps.
+        className={`group relative min-w-0 select-text wrap-anywhere ${shell}`}
       >
         {isUser && message.skill && (
           <span className="mb-1 flex items-center gap-1 font-mono text-[11px] text-[var(--cf-text-muted)]">

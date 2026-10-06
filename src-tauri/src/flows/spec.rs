@@ -137,8 +137,10 @@ pub fn validate(spec: &FlowSpec) -> Result<(), String> {
     let mut ids = HashSet::new();
     let mut names = HashSet::new();
     let mut nodes: HashMap<&str, &catalog::NodeDescriptor> = HashMap::new();
-    // Outputs per node, the error port included when a node routes its failures there.
+    // Ports per node — a Merge's inputs and a Switch's outputs are settings — the error port
+    // included when a node routes its failures there.
     let mut outputs: HashMap<&str, u8> = HashMap::new();
+    let mut inputs: HashMap<&str, u8> = HashMap::new();
     for node in &spec.nodes {
         if node.id.trim().is_empty() {
             return invalid("a node without an id".into());
@@ -164,6 +166,7 @@ pub fn validate(spec: &FlowSpec) -> Result<(), String> {
         };
         nodes.insert(node.id.as_str(), descriptor);
         outputs.insert(node.id.as_str(), super::run::output_count(node));
+        inputs.insert(node.id.as_str(), catalog::input_count(&node.type_id, &node.params));
     }
 
     let mut wires = HashSet::new();
@@ -177,7 +180,7 @@ pub fn validate(spec: &FlowSpec) -> Result<(), String> {
         if wire.out >= outputs.get(wire.from.as_str()).copied().unwrap_or(from.outputs) {
             return invalid(format!("{} has no output {}", wire.from, wire.out));
         }
-        if wire.input >= to.inputs {
+        if wire.input >= inputs.get(wire.to.as_str()).copied().unwrap_or(to.inputs) {
             return invalid(format!("{} has no input {}", wire.to, wire.input));
         }
         if !wires.insert((wire.from.as_str(), wire.out, wire.to.as_str(), wire.input)) {

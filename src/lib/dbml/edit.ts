@@ -319,6 +319,162 @@ function append(source: string, text: string): string {
   return trimmed ? `${trimmed}\n\n${text}\n${tail}` : `${text}\n${tail}`;
 }
 
+// ---- colours and sticky notes ---------------------------------------------
+
+/**
+ * Where a declaration line's settings bracket is — `Table users [headercolor: #f00] {`, `Note n
+ * [color: #fde68a] {` — as `[open, close]` indices, or `null` when it has none.
+ *
+ * Quote-aware, because a quoted name may hold a bracket (`Table "a[1]"`) and so may a setting's
+ * value (`[note: 'see [docs]']`): the first `[` outside quotes opens it, and the `]` that brings the
+ * depth back to zero closes it. Stops at the block's `{`, which is never inside the bracket.
+ */
+function settingsBracket(line: string): [number, number] | null {
+  let quote: string | null = null;
+  let open = -1;
+  let depth = 0;
+  for (let at = 0; at < line.length; at += 1) {
+    const char = line[at];
+    if (quote) {
+      if (char === "\\") at += 1;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") quote = char;
+    else if (char === "[") {
+      if (open < 0) open = at;
+      depth += 1;
+    } else if (char === "]" && open >= 0) {
+      depth -= 1;
+      if (depth === 0) return [open, at];
+    } else if (char === "{" && open < 0) return null;
+  }
+  return null;
+}
+
+/**
+ * The declaration line with one setting set, replaced or removed — every other setting kept as
+ * written, the bracket added when it is needed and dropped when it empties.
+ */
+function withSetting(line: string, key: string, value: string | null): string {
+  const bracket = settingsBracket(line);
+  const matches = (setting: string) => new RegExp(`^${key}\\s*:`, "i").test(setting.trim());
+  if (bracket) {
+    const [open, close] = bracket;
+    const kept = splitSettings(line.slice(open + 1, close))
+      .map((setting) => setting.trim())
+      .filter((setting) => !matches(setting));
+    if (value !== null) kept.push(`${key}: ${value}`);
+    const head = line.slice(0, open).replace(/\s+$/, "");
+    const tail = line.slice(close + 1);
+    return kept.length === 0 ? head + tail : `${head} [${kept.join(", ")}]${tail}`;
+  }
+  if (value === null) return line;
+  // No bracket yet: before the `{` when it is on this line, at the end of it otherwise.
+  const brace = braceOutsideQuotes(line);
+  if (brace >= 0) {
+    const head = line.slice(0, brace).replace(/\s+$/, "");
+    return `${head} [${key}: ${value}] ${line.slice(brace)}`;
+  }
+  return `${line.replace(/\s+$/, "")} [${key}: ${value}]`;
+}
+
+/** The first `{` on the line that is not inside quotes, or -1. */
+function braceOutsideQuotes(line: string): number {
+  let quote: string | null = null;
+  for (let at = 0; at < line.length; at += 1) {
+    const char = line[at];
+    if (quote) {
+      if (char === "\\") at += 1;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") quote = char;
+    else if (char === "{") return at;
+  }
+  return -1;
+}
+
+/**
+ * Sets or clears a table's colour — DBML's own `[headercolor: #rrggbb]`, which dbdiagram.io draws as
+ * the header and this canvas as the border. In the code, so it travels with a copy and paste; every
+ * other setting on the declaration (`note:`, an alias) stays as written.
+ */
+export function setTableColor(source: string, name: string, color: string | null): string {
+  const block = findBlock(blocksOf(source), name, "table");
+  if (!block) return source;
+  const lines = source.split("\n");
+  const next = withSetting(lines[block.from], "headercolor", color);
+  if (next === lines[block.from]) return source;
+  lines[block.from] = next;
+  return lines.join("\n");
+}
+
+/** The names the document's sticky notes already use. */
+export function stickyNoteNames(source: string): string[] {
+  return blocksOf(source)
+    .filter((block) => block.kind === "note")
+    .map((block) => block.name);
+}
+
+/**
+ * A sticky note's block, the way dbdiagram.io writes one: `Note name [color: …] { '…' }`. One line of
+ * text in `'…'`; several in a `'''` fence, indented under it (the compiler strips the common
+ * indentation back off).
+ */
+export function stickyNoteBlock(name: string, content: string, color?: string | null): string {
+  const head = `Note ${quoteName(name)}${color ? ` [color: ${color}]` : ""} {`;
+  const text = content.replace(/\r\n?/g, "\n");
+  if (!text.includes("\n")) return [head, `${INDENT}${quoteText(text)}`, "}"].join("\n");
+  const body = text
+    .split("\n")
+    .map((line) => (line ? `${INDENT}${INDENT}${line.replace(/\\/g, "\\\\").replace(/'''/g, "\\'''")}` : ""));
+  return [head, `${INDENT}'''`, ...body, `${INDENT}'''`, "}"].join("\n");
+}
+
+/** A new sticky note at the end of the document, under a name no other note has. Returns the
+ *  document and the name it got. */
+export function addStickyNote(source: string, content: string, color?: string | null): { source: string; name: string } {
+  const name = freeName(stickyNoteNames(source), "nota");
+  return { source: append(source, stickyNoteBlock(name, content, color)), name };
+}
+
+/** Rewrites one sticky note — its text and/or its colour — keeping where it is in the document.
+ *  `color: undefined` keeps the colour it has; `null` clears it. */
+export function updateStickyNote(
+  source: string,
+  name: string,
+  change: { content?: string; color?: string | null },
+): string {
+  const block = findBlock(blocksOf(source), name, "note");
+  if (!block) return source;
+  const lines = source.split("\n");
+  if (change.content === undefined) {
+    if (change.color === undefined) return source;
+    const next = withSetting(lines[block.from], "color", change.color);
+    if (next === lines[block.from]) return source;
+    lines[block.from] = next;
+    return lines.join("\n");
+  }
+  const color =
+    change.color === undefined
+      ? (/\bcolor\s*:\s*(#[0-9a-f]{3,6})\b/i.exec(lines[block.from])?.[1] ?? null)
+      : change.color;
+  const indent = /^[ \t]*/.exec(lines[block.from])?.[0] ?? "";
+  const replacement = stickyNoteBlock(block.name, change.content, color)
+    .split("\n")
+    .map((line) => (line ? indent + line : line));
+  const next = splice(source, block.from, block.to, replacement);
+  return next;
+}
+
+/** Removes one sticky note. Its position in the layout comment is the caller's to drop. */
+export function dropStickyNote(source: string, name: string): string {
+  const block = findBlock(blocksOf(source), name, "note");
+  if (!block) return source;
+  return trimBlank(splice(source, block.from, block.to, []));
+}
+
 // ---- tables ----------------------------------------------------------------
 
 /** A new table with one primary key, appended at the end of the document. */
