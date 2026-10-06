@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -548,23 +548,39 @@ export function ChangesPanel({
    */
   const [diffNonce, setDiffNonce] = useState(0);
 
+  /** Set when the selection crosses to the other list on its own — see the effect below — so the
+   *  blanking here leaves the diff on screen standing until the other side's copy lands. */
+  const followed = useRef(false);
+
   // Blanking is keyed on the *selection* alone, and refetching on the selection plus the signature.
   // That split is what keeps both halves of the feel right: picking a different file must never
   // leave the previous file's diff on screen while the new one is in flight, but a watcher tick on
   // the file you are already reading refetches underneath the pane without flashing it away.
   useEffect(() => {
+    if (followed.current) {
+      followed.current = false;
+      return;
+    }
     setSelectedDiff(null);
   }, [selected]);
 
   /**
-   * Drops the selection when the file it names stops having a change on that side.
+   * Keeps the selection on its file as the file moves between the two lists, and drops it only when
+   * the file has no change on either side any more.
    *
-   * The discard-all button hand-patches exactly this case a few hundred lines down, and that was enough
-   * while every route to it went through this component's own buttons. It no longer is: the editor's
-   * change peek stages and discards from the gutter, so a file can leave `status` entirely without this
-   * panel's `setSelected` ever being called — leaving the list scrolled to a row that is gone, the pane
-   * beside it holding "no changes" for a file with none, and the whole layout still pinned to
-   * `listWidth` for a diff nobody can act on.
+   * Staging the file you are reading takes it out of "Changes" and into "Staged", and this used to
+   * read that as the file going away: the pane closed under the button that had just been pressed,
+   * at the one moment you most want to see what you did. Now the selection crosses over with it — the
+   * row lights up in the other list, and the pane shows the same file from that side. Unstaging walks
+   * it back the same way. The diff already on screen stays up while the other side's copy is fetched:
+   * for a whole file that was staged it is the very same change, and blanking it would flash nothing
+   * between two identical pictures.
+   *
+   * Dropping is still needed for everything else that empties a row: the discard-all button
+   * hand-patches that case a few hundred lines down, but the editor's change peek stages and discards
+   * from the gutter, so a file can leave `status` entirely without this panel's `setSelected` ever being
+   * called — leaving the pane holding "no changes" for a file with none, and the whole layout still
+   * pinned to `listWidth` for a diff nobody can act on.
    *
    * Keyed on `status` rather than on the diff arrays because it is asking about *existence*, not about
    * content — a watcher tick that only changed some lines leaves the row exactly where it was, and this
@@ -572,10 +588,16 @@ export function ChangesPanel({
    */
   useEffect(() => {
     if (!selected) return;
-    const pool = selected.staged
-      ? (status?.staged ?? [])
-      : [...(status?.conflicted ?? []), ...(status?.unstaged ?? []), ...(status?.untracked ?? [])];
-    if (!pool.some((entry) => entry.path === selected.path)) setSelected(null);
+    const staged = status?.staged ?? [];
+    const working = [...(status?.conflicted ?? []), ...(status?.unstaged ?? []), ...(status?.untracked ?? [])];
+    const listed = (pool: FileStatusEntry[]) => pool.some((entry) => entry.path === selected.path);
+    if (listed(selected.staged ? staged : working)) return;
+    if (listed(selected.staged ? working : staged)) {
+      followed.current = true;
+      setSelected({ path: selected.path, staged: !selected.staged });
+    } else {
+      setSelected(null);
+    }
   }, [status, selected]);
 
   useEffect(() => {

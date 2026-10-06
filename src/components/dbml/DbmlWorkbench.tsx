@@ -71,6 +71,10 @@ import { mergeDbml } from "../../lib/dbml/merge";
 import { pushRevision, type Revision, type RevisionCause } from "../../lib/dbml/history";
 import {
   fieldMarkKey,
+  holdPlaces,
+  layoutDbml,
+  liveMarks,
+  placeNear,
   readLayout,
   splitFieldMarkKey,
   writeLayout,
@@ -740,12 +744,13 @@ export function DbmlWorkbench({
     editor.pushUndoStop();
   }, [editDoc, source]);
 
-  /** How the review is going, for the strip along the bottom. */
+  /** How the review is going, for the strip along the bottom — counting only what the canvas can
+   *  draw, see `liveMarks`. */
   const marked = useMemo(() => {
     const counts = { remove: 0, review: 0, keep: 0 };
-    for (const mark of Object.values(marks)) counts[mark] += 1;
+    for (const mark of Object.values(liveMarks(schema, marks))) counts[mark] += 1;
     return counts;
-  }, [marks]);
+  }, [marks, schema]);
 
   /** Every table and enum name in the document — what a new one has to avoid colliding with. */
   const declared = useMemo(
@@ -772,6 +777,44 @@ export function DbmlWorkbench({
   const tableIdOf = (name: string) =>
     schema.tables.find((entry) => entry.id === name || entry.name === name)?.id ?? name;
 
+  /**
+   * Keeps the picture still across a rename or an addition, and puts a new box where you are
+   * looking.
+   *
+   * The engine places boxes by name, so either edit re-deals the ones around it: a renamed table
+   * leapt to wherever its new name sorts, and a new one joined the shelf under the whole flow, off
+   * screen. So the edited schema is laid out here exactly as the canvas is about to lay it out, and
+   * whatever would land somewhere other than where it is drawn now is pinned there (`holdPlaces`);
+   * the box an addition brings is pinned in the middle of the frame (`placeNear`).
+   *
+   * Called inside an `applyEdit` callback, after `moveSidecarKey` and for the same reason: it writes
+   * `sidecar.current`, which `writeSource` reads when Monaco reports the edit. Anything it cannot do
+   * exactly — the canvas is not on screen, the parser has not loaded, the result does not parse —
+   * it leaves alone, and the edit lands the way it always did.
+   */
+  const holdBoxes = useCallback(
+    (next: string, edit: { renamedFrom?: string; centreNew?: boolean }) => {
+      const drawn = canvas.current?.layout();
+      if (!parser || !drawn) return;
+      const after = parser.parseDbml(next);
+      if (after.error) return;
+      const laid = layoutDbml(after, { mode, density, pinned: {}, counts: sandbox.status?.counts });
+      const known = new Set(drawn.nodes.map((node) => node.id));
+      // A rename is one id gone and one arrived; an addition is one arrived.
+      const added = laid.nodes.filter((node) => !known.has(node.id));
+      const fresh = added.length === 1 ? added[0] : null;
+      const renamed: Record<string, string> =
+        fresh && edit.renamedFrom !== undefined ? { [fresh.id]: edit.renamedFrom } : {};
+      let positions = holdPlaces(drawn.nodes, laid.nodes, sidecar.current.positions, renamed);
+      const centre = fresh && edit.centreNew ? canvas.current?.centre() : null;
+      if (fresh && centre) {
+        positions = { ...positions, [fresh.id]: placeNear(centre, fresh, drawn.nodes) };
+      }
+      sidecar.current = { positions, marks: sidecar.current.marks };
+    },
+    [parser, mode, density, sandbox.status],
+  );
+
   const editing = useMemo(
     () => ({
       blocked: Boolean(schema.error),
@@ -794,8 +837,18 @@ export function DbmlWorkbench({
           if (next !== current) moveFieldKey(tableIdOf(table), name, null);
           return next;
         }),
-      addTable: (name: string) => applyEdit((current) => edits.addTable(current, name)),
-      addEnum: (name: string) => applyEdit((current) => edits.addEnum(current, name)),
+      addTable: (name: string) =>
+        applyEdit((current) => {
+          const next = edits.addTable(current, name);
+          if (next !== current) holdBoxes(next, { centreNew: true });
+          return next;
+        }),
+      addEnum: (name: string) =>
+        applyEdit((current) => {
+          const next = edits.addEnum(current, name);
+          if (next !== current) holdBoxes(next, { centreNew: true });
+          return next;
+        }),
       // `from` and `name` are **ids**, not bare names — see `moveSidecarKey`. `edit.ts` finds the
       // block by either (`blocksOf` captures `core.users` whole and `findBlock` matches the full
       // name), so passing the id costs the text edit nothing and buys the sidecar correctness.
@@ -809,7 +862,10 @@ export function DbmlWorkbench({
         }
         applyEdit((current) => {
           const next = edits.renameTable(current, from, to);
-          if (next !== current) moveSidecarKey(from, to);
+          if (next !== current) {
+            moveSidecarKey(from, to);
+            holdBoxes(next, { renamedFrom: from });
+          }
           return next;
         });
       },
@@ -835,7 +891,7 @@ export function DbmlWorkbench({
     // `source` for the name check in `renameTable`. It does not widen anything in practice —
     // `applyEdit` already closes over the same string, so this memo was rebuilding per keystroke
     // regardless. `schema.tables` for `tableIdOf`, for the same reason.
-    [applyEdit, schema.error, schema.tables, source, t],
+    [applyEdit, holdBoxes, schema.error, schema.tables, source, t],
   );
 
   /** One box moved. Only the layout comment changes, so Monaco's value does not — see the header. */

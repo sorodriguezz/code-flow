@@ -79,6 +79,7 @@ export function ChangePeek({
   onNext,
   onPrev,
   onClose,
+  onCrossing,
 }: {
   /** Repo-relative, POSIX-separated — the form every git command here speaks. */
   path: string;
@@ -92,6 +93,9 @@ export function ChangePeek({
   onNext: () => void;
   onPrev: () => void;
   onClose: () => void;
+  /** A stage or unstage is about to start: the pane follows this hunk to the other side rather than
+   *  closing the panel when it gets there. Called before the action, never after — see `run`. */
+  onCrossing: () => void;
 }) {
   const t = useT();
   const busy = useRepoStore((s) => s.busy);
@@ -130,17 +134,29 @@ export function ChangePeek({
 
   const hunkRef = (): HunkRef => ({ file_path: path, header: block.header, lines: block.lines });
 
-  const run = async (action: () => Promise<void>) => {
+  /**
+   * One of the three verbs, and what becomes of the panel after it.
+   *
+   * A **stage or unstage** leaves it open. The hunk has only crossed the index, and closing the panel
+   * at that moment took away the one thing you wanted to see — that it worked. So the pane is told
+   * first (`onCrossing`, before the action, so it is already listening whichever refresh lands with the
+   * hunk on the other side) and re-points the panel at it there, where the header says staged or not
+   * and the same button now goes the other way.
+   *
+   * A **discard** closes it: those lines are gone from both sides. So does a **failure**, as every
+   * action here always did — the toast is the report, and a panel still offering the button that just
+   * failed invites pressing it again. `guarded` leaves the message in the store's `error`, cleared at
+   * the start of every action, which is what tells the two outcomes apart once the await returns.
+   */
+  const run = async (action: () => Promise<void>, crossing: boolean) => {
+    if (crossing) onCrossing();
     setRunning(true);
     try {
       await action();
     } finally {
       setRunning(false);
     }
-    // Unconditionally, and after the store has refreshed: on success the hunk this panel was about no
-    // longer exists on this side, and on failure the toast is the report and a panel still offering the
-    // button that just failed invites pressing it again.
-    onClose();
+    if (!crossing || useRepoStore.getState().error !== null) onClose();
   };
 
   // Read imperatively rather than subscribed: these are stable store actions, and subscribing to five
@@ -149,10 +165,10 @@ export function ChangePeek({
   const onStageClick = () => {
     const store = useRepoStore.getState();
     if (staged) {
-      void run(() => (wholeFile ? store.unstageFile(path) : store.unstageHunk(hunkRef())));
+      void run(() => (wholeFile ? store.unstageFile(path) : store.unstageHunk(hunkRef())), true);
       return;
     }
-    void run(() => (wholeFile ? store.stageFile(path) : store.stageHunk(hunkRef())));
+    void run(() => (wholeFile ? store.stageFile(path) : store.stageHunk(hunkRef())), true);
   };
 
   const onDiscardClick = async () => {
@@ -164,7 +180,7 @@ export function ChangePeek({
       t("peek.discardHunk"),
     );
     if (!ok) return;
-    void run(() => useRepoStore.getState().discardHunk(hunkRef()));
+    void run(() => useRepoStore.getState().discardHunk(hunkRef()), false);
   };
 
   const disabled = busy || running;

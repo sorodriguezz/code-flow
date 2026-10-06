@@ -210,6 +210,8 @@ export interface DbmlCanvasHandle {
   element: () => SVGSVGElement | null;
   /** The laid-out diagram, which the export needs for its viewBox. */
   layout: () => DbmlLayout;
+  /** The middle of what the frame shows, in diagram coordinates — `null` while it has no size. */
+  centre: () => { x: number; y: number } | null;
 }
 
 export const DbmlCanvas = forwardRef<
@@ -735,6 +737,13 @@ export const DbmlCanvas = forwardRef<
       nextMatch,
       element: () => svgRef.current,
       layout: () => layout,
+      // `viewRef`, not `view`: a pan still in flight has moved the picture but not committed it.
+      centre: () => {
+        const frame = frameRef.current;
+        if (!frame || frame.clientWidth === 0 || frame.clientHeight === 0) return null;
+        const { x, y, k } = viewRef.current;
+        return { x: (frame.clientWidth / 2 - x) / k, y: (frame.clientHeight / 2 - y) / k };
+      },
     }),
     [fit, zoomBy, focusTable, nextMatch, layout],
   );

@@ -67,6 +67,19 @@ window.MonacoEnvironment = {
 
 loader.config({ monaco });
 
+// Every editor types into a `<textarea>`, on every platform: Monaco's EditContext path is off.
+//
+// Monaco defaults to the browser's EditContext API wherever one exists, and of the webviews this
+// app runs in only WebView2 (Windows) has it — so there, and only there, the caret lives in a
+// `div.native-edit-context` instead of the textarea WebKit always gets on macOS and Linux. Every
+// "is the user typing?" check that looks for INPUT/TEXTAREA/contenteditable then takes a keystroke
+// in the editor for one aimed at the page. React Flow's is one: its Space-to-pan listener sits on
+// `window` for as long as Flujos is mounted, hidden or not, and on Windows it swallowed every space
+// typed in every editor in the app — first noticed in the DBML schema editor. Set here, before any
+// editor exists, through the same knob Monaco's standalone build sets its own defaults with
+// (`glyphMargin`, `autoIndent`), so diff editors' inner editors are covered too.
+monaco.editor.EditorOptions.editContext.defaultValue = false;
+
 // Monaco's TypeScript worker type-checks each open file *in isolation*: no tsconfig, no
 // node_modules, no sibling files. Every relative import therefore resolves to nothing and the
 // editor paints red squiggles under `export * from "./types"` (TS2792) and every library import

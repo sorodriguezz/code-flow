@@ -528,6 +528,37 @@ export function splitFieldMarkKey(key: string): { table: string; column: string 
   return at === -1 ? null : { table: key.slice(0, at), column: key.slice(at + 1) };
 }
 
+/**
+ * The marks that name something the schema still has — the ones the canvas can draw.
+ *
+ * The sidecar outlives what it names. A table or a column deleted or renamed *by typing*, rather
+ * than from the canvas or the inspector (which carry the mark across, see `moveSidecarKey`), leaves
+ * its mark filed under a key nothing will match again, and every later write carries it along. The
+ * canvas draws only what it finds, so the raw sidecar is not a count of anything on screen: counted
+ * as-is it reported "10 por eliminar" under a schema with nothing marked at all.
+ *
+ * Filtered rather than pruned. Retyping the name brings the mark back with it, which a pruned key
+ * could not do — and while a name is being typed, every intermediate spelling is a schema in which
+ * the table does not exist.
+ */
+export function liveMarks(schema: DbmlSchema, marks: DbmlMarks): DbmlMarks {
+  const refs = new Set(schema.refs.map((ref) => ref.id));
+  const boxes = new Set([...schema.tables, ...schema.enums].map((entry) => entry.id));
+  const columns = new Map(
+    schema.tables.map((table) => [table.id, new Set(table.fields.map((field) => field.name))]),
+  );
+  const live: DbmlMarks = {};
+  for (const [key, mark] of Object.entries(marks)) {
+    // A ref id first: it never holds a pipe, but it is the one kind that is not a table's name.
+    const field = refs.has(key) ? null : splitFieldMarkKey(key);
+    const named = field
+      ? (columns.get(field.table)?.has(field.column) ?? false)
+      : refs.has(key) || boxes.has(key);
+    if (named) live[key] = mark;
+  }
+  return live;
+}
+
 export interface DbmlDocument {
   /** The DBML itself, with the marker lines removed. This is what the parser and the editor see. */
   source: string;
@@ -646,6 +677,92 @@ export function writeLayout(
   // One run, one trailing newline — which is what `readLayout` undoes by dropping a single empty
   // element however many markers there were.
   return `${source}\n${lines.join("\n")}\n`;
+}
+
+// ---------------------------------------------------------------------------
+// Edits that would move boxes
+// ---------------------------------------------------------------------------
+
+type Spot = Pick<DiagramNode, "id" | "x" | "y">;
+type Rect = Pick<DiagramNode, "x" | "y" | "width" | "height">;
+
+/**
+ * Pins every box an edit would move, where it is drawn now.
+ *
+ * The engine deals each layer — and the shelf of unwired tables under the flow — in **name order**,
+ * so an edit that changes a name re-deals the boxes around it: renaming `users` to `accounts` sends
+ * it to the top of its column and pushes every box above its old slot down one. Nothing about the
+ * schema moved, only the alphabet, and to the person who just typed the name it reads as the
+ * diagram jumping. A new table does the same to the shelf it joins.
+ *
+ * `before` is what is on screen, pins applied. `after` is the engine's answer for the edited schema
+ * with **no pins**: a pin only ever moves its own box (`layoutDiagram` applies them after placing
+ * everything), so that is exactly where each unpinned box would land. Whatever would land anywhere
+ * else is pinned where it is now — the same pin a drag writes, so "Reorganizar" still hands it back
+ * to the engine. `renamed` maps an id in `after` back to the one it had in `before`.
+ */
+export function holdPlaces(
+  before: readonly Spot[],
+  after: readonly Spot[],
+  pinned: Record<string, { x: number; y: number }>,
+  renamed: Record<string, string> = {},
+): Record<string, { x: number; y: number }> {
+  const drawn = new Map(before.map((box) => [box.id, box]));
+  const next = { ...pinned };
+  for (const box of after) {
+    if (next[box.id]) continue;
+    const was = drawn.get(renamed[box.id] ?? box.id);
+    if (!was || (was.x === box.x && was.y === box.y)) continue;
+    next[box.id] = { x: Math.round(was.x), y: Math.round(was.y) };
+  }
+  return next;
+}
+
+/** The clearance `placeNear` keeps from the boxes already drawn, and the step it searches in. */
+const PLACE_GAP = 24;
+/** How many steps out `placeNear` looks before settling for an overlap — ~1900px each way. */
+const PLACE_REACH = 80;
+
+/** Every offset within reach, in steps, nearest first. Built on the first placement, then kept. */
+let nearestFirst: [number, number][] | null = null;
+
+/**
+ * Where a new box goes: centred on `at`, or on the nearest spot to it that covers no other box.
+ *
+ * `at` is the middle of what is on screen, so a table added from the canvas appears where the
+ * person is looking. Left to the engine, an unwired table joins the shelf under the whole flow,
+ * which on a schema of any size is off screen. Spots are tried nearest first, so the box lands
+ * beside whatever already sits in the middle rather than on top of it; with nothing free within
+ * reach it overlaps at the centre, which is still where it was asked for.
+ */
+export function placeNear(
+  at: { x: number; y: number },
+  size: { width: number; height: number },
+  others: readonly Rect[],
+): { x: number; y: number } {
+  const origin = { x: Math.round(at.x - size.width / 2), y: Math.round(at.y - size.height / 2) };
+  const free = (x: number, y: number) =>
+    others.every(
+      (box) =>
+        x + size.width + PLACE_GAP <= box.x ||
+        box.x + box.width + PLACE_GAP <= x ||
+        y + size.height + PLACE_GAP <= box.y ||
+        box.y + box.height + PLACE_GAP <= y,
+    );
+
+  if (!nearestFirst) {
+    nearestFirst = [];
+    for (let dx = -PLACE_REACH; dx <= PLACE_REACH; dx += 1) {
+      for (let dy = -PLACE_REACH; dy <= PLACE_REACH; dy += 1) nearestFirst.push([dx, dy]);
+    }
+    nearestFirst.sort(([ax, ay], [bx, by]) => ax * ax + ay * ay - (bx * bx + by * by));
+  }
+  for (const [dx, dy] of nearestFirst) {
+    const x = origin.x + dx * PLACE_GAP;
+    const y = origin.y + dy * PLACE_GAP;
+    if (free(x, y)) return { x, y };
+  }
+  return origin;
 }
 
 /** Re-exported so consumers take the layout vocabulary from here rather than reaching into `db/`. */

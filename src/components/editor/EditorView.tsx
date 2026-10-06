@@ -555,11 +555,15 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
    * "stage this" over a working hunk and "unstage this" over a staged one, and offering to discard a
    * staged hunk would be two operations behind one button with a scope nobody can predict. Returning
    * the merged answer without saying where it came from is what made that unanswerable.
+   *
+   * `side` asks for one side only, for the peek: it can be reading a hunk on the side the gutter is not
+   * showing, right after staging it from a file that still has unstaged changes.
    */
   const fileDiffFor = useCallback(
-    (path: string): { file: FileDiffInfo; staged: boolean } | undefined => {
-      const working = workingDiff.find((f) => (f.new_path ?? f.old_path) === path);
+    (path: string, side?: "working" | "staged"): { file: FileDiffInfo; staged: boolean } | undefined => {
+      const working = side === "staged" ? undefined : workingDiff.find((f) => (f.new_path ?? f.old_path) === path);
       if (working) return { file: working, staged: false };
+      if (side === "working") return undefined;
       const staged = stagedDiff.find((f) => (f.new_path ?? f.old_path) === path);
       return staged ? { file: staged, staged: true } : undefined;
     },

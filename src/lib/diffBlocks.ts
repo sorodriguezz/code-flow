@@ -203,3 +203,92 @@ function baseStartOf(block: ChangeBlock): number | null {
   }
   return null;
 }
+
+/**
+ * Where a line of the **index** sits in the buffer, given the file's working-tree diff.
+ *
+ * A staged hunk is numbered in the index — its `new_lineno` is a line of the index — while the editor
+ * numbers the working tree. The two agree until the file also has unstaged changes, and past each one
+ * of those the working tree is longer or shorter by what that hunk added or removed. Read off the
+ * working diff's own line pairs, like `baseStartOf`, rather than out of its `@@` headers.
+ *
+ * A line the working tree deleted has no line of its own, so it answers with the line that followed
+ * it — the same anchor a deletion's gutter wedge takes.
+ */
+export function bufferLineOf(working: FileDiffInfo | undefined, line: number): number {
+  if (!working) return line;
+  let shift = 0;
+  for (const hunk of working.hunks) {
+    const lines = hunk.lines.filter((entry) => !isEofMarker(entry.origin));
+    const olds = lines.flatMap((entry) => (entry.old_lineno === null ? [] : [entry.old_lineno]));
+    // An insertion into an empty index has no index line to place, before or after it.
+    if (olds.length === 0) continue;
+    if (line < olds[0]) break;
+    if (line > olds[olds.length - 1]) {
+      for (const entry of lines) shift += entry.origin === "+" ? 1 : entry.origin === "-" ? -1 : 0;
+      continue;
+    }
+    const at = lines.findIndex((entry) => entry.old_lineno === line);
+    for (let i = at; i < lines.length; i += 1) {
+      const target = lines[i].new_lineno;
+      if (target !== null) return target;
+    }
+    for (let i = at - 1; i >= 0; i -= 1) {
+      const target = lines[i].new_lineno;
+      if (target !== null) return target + 1;
+    }
+    return line + shift;
+  }
+  return line + shift;
+}
+
+/** A staged side's blocks, anchored on the buffer's lines rather than the index's — see
+ *  `bufferLineOf`. The same array back when there is no working diff to shift them by. */
+export function inBufferLines(blocks: ChangeBlock[], working: FileDiffInfo | undefined): ChangeBlock[] {
+  if (!working || working.hunks.length === 0) return blocks;
+  return blocks.map((block) => {
+    const firstLine = bufferLineOf(working, block.firstLine);
+    return { ...block, firstLine, lastLine: Math.max(firstLine, bufferLineOf(working, block.lastLine)) };
+  });
+}
+
+/**
+ * The block on the other side of the index that carries the change `acted` made — where a hunk went
+ * when the peek staged or unstaged it — or `-1`.
+ *
+ * Not `sameHunk`: crossing the index changes everything that identifies a hunk *on* a side. Its base
+ * becomes a different file (the index's lines turn into HEAD's, or the other way round), its context
+ * is read from that file, and a hunk staged next to one already staged merges with it into one. What
+ * survives the crossing is the change itself, the lines it removed and the lines it added, so that is
+ * what is looked for — in order, inside a possibly larger block. Two blocks that both carry it (the
+ * same edit made twice) are told apart by how far each sits from where the acted one was drawn, both
+ * numbered in the buffer.
+ */
+export function followHunk(list: readonly ChangeBlock[], acted: ChangeBlock): number {
+  const removed = changedLines(acted, "-");
+  const added = changedLines(acted, "+");
+  let found = -1;
+  let nearest = Infinity;
+  list.forEach((block, index) => {
+    if (!inOrder(changedLines(block, "-"), removed) || !inOrder(changedLines(block, "+"), added)) return;
+    const distance = Math.abs(block.firstLine - acted.firstLine);
+    if (distance < nearest) {
+      found = index;
+      nearest = distance;
+    }
+  });
+  return found;
+}
+
+function changedLines(block: ChangeBlock, origin: "+" | "-"): string[] {
+  return block.lines.filter((line) => line.origin === origin).map((line) => line.content);
+}
+
+/** Whether every line of `wanted` appears in `lines`, in the same order. */
+function inOrder(lines: string[], wanted: string[]): boolean {
+  let at = 0;
+  for (const line of lines) {
+    if (at < wanted.length && line === wanted[at]) at += 1;
+  }
+  return at === wanted.length;
+}

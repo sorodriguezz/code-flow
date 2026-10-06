@@ -81,9 +81,26 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { promptAction } from "../../state/promptStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { useUiStore } from "../../state/uiStore";
 
 const NODE_TYPES: NodeTypes = { cf: FlowNodeView, note: NoteNodeView };
 const EDGE_TYPES: EdgeTypes = { cf: FlowEdgeView };
+
+/**
+ * React Flow's keys, all off while Flujos is not on screen — these four, and `deleteKeyCode`, which
+ * its own prop switches off.
+ *
+ * It listens for them on `window` and `document`, not on its pane, and this view stays mounted while
+ * hidden — so a canvas nobody could see still answered the keyboard everywhere else in the app.
+ * Backspace pressed outside a text field in another view deleted the nodes left selected here, and
+ * Space-to-pan swallowed the spaces typed into any editable it did not recognise as a field.
+ */
+const KEYS_OFF_SCREEN = {
+  panActivationKeyCode: null,
+  selectionKeyCode: null,
+  multiSelectionKeyCode: null,
+  zoomActivationKeyCode: null,
+} as const;
 
 /** The node inspector and its form arrive the first time a node is opened. */
 const NodeInspector = lazy(() => import("./NodeInspector"));
@@ -171,6 +188,8 @@ function Editor() {
     [openWaits, live?.run.id],
   );
   const inspector = useFlowRunsStore((s) => s.inspector);
+  // `activeView` is "flows" in a detached Flujos window too — `AppWindow` writes it there.
+  const onScreen = useUiStore((s) => s.activeView === "flows");
   const logOpen = useFlowRunsStore((s) => s.logOpen);
   const pane = useFlowRunsStore((s) => s.pane);
   const running = live?.run.status === "running";
@@ -1072,7 +1091,8 @@ function Editor() {
                 maxZoom={2}
                 snapToGrid
                 snapGrid={[10, 10]}
-                deleteKeyCode={inspector || diff ? null : ["Backspace", "Delete"]}
+                deleteKeyCode={!onScreen || inspector || diff ? null : ["Backspace", "Delete"]}
+                {...(onScreen ? {} : KEYS_OFF_SCREEN)}
                 zoomOnDoubleClick={false}
                 connectionRadius={26}
                 proOptions={{ hideAttribution: true }}

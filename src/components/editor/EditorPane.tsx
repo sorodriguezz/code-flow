@@ -44,7 +44,14 @@ import { isScratchPath, scratchName } from "../../lib/scratchTabs";
 import { useFileLanguage } from "../../lib/useFileLanguage";
 import { FileGlyph } from "../common/FileGlyph";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
-import { changeBlocksOf, sameHunk, type ChangeBlock, type GutterMark } from "../../lib/diffBlocks";
+import {
+  changeBlocksOf,
+  followHunk,
+  inBufferLines,
+  sameHunk,
+  type ChangeBlock,
+  type GutterMark,
+} from "../../lib/diffBlocks";
 import { diffSignature, reconstructSides } from "../../lib/diffText";
 import { getCommitFileDiff, getFileDiff, quickDiffBase } from "../../lib/tauri/commands";
 import { liveGutterMarks } from "../../lib/liveGutter";
@@ -701,8 +708,9 @@ export function EditorPane({
   /** Only a signal that CSS variables were repainted, so colour-reading decorations re-resolve. */
   themeMode: "light" | "dark";
   /** The file's uncommitted change and which side it came from — see `EditorView`'s `fileDiffFor`.
-   *  The side is what the change peek needs to decide between "stage" and "unstage". */
-  fileDiffFor: (path: string) => { file: FileDiffInfo; staged: boolean } | undefined;
+   *  The side is what the change peek needs to decide between "stage" and "unstage"; `side` asks for
+   *  that side alone. */
+  fileDiffFor: (path: string, side?: "working" | "staged") => { file: FileDiffInfo; staged: boolean } | undefined;
   saving: boolean;
   reveal: RevealRequest | null;
   onRevealDone: () => void;
@@ -1168,13 +1176,35 @@ export function EditorPane({
    * peek's body. It is *also* why the store's narrow arrays are used rather than `fullActiveDiff` —
    * the whole-file fetch is pinned at a million context lines, which collapses a modified file into one
    * hunk covering everything and would leave the counter permanently reading "1 of 1".
+   *
+   * Cut per side, because the peek can be reading the side the gutter is not showing: staging a hunk
+   * from it moves the hunk to the staged side while the file's other unstaged changes keep the gutter
+   * where it was, and the panel follows the hunk across instead of closing (see `followRef`). The
+   * pane's own `blocks`/`marks` are one of the two — unstaged first, as `fileDiffFor` has it. The staged
+   * side is numbered in the index, which the buffer stops matching the moment the file also has
+   * unstaged changes, so the peek's copy of it is anchored on the buffer's lines (`inBufferLines`).
    */
   const diffKey = activeDiff ? diffSignature(activeDiff) : null;
-  const { blocks, marks } = useMemo(
-    () => changeBlocksOf(activeDiff),
+  const workingEntry = activePath ? fileDiffFor(activePath, "working") : undefined;
+  const stagedEntry = activePath ? fileDiffFor(activePath, "staged") : undefined;
+  const workingKey = workingEntry ? diffSignature(workingEntry.file) : null;
+  const stagedKey = stagedEntry ? diffSignature(stagedEntry.file) : null;
+  const workingSide = useMemo(
+    () => changeBlocksOf(workingEntry?.file),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [diffKey],
+    [workingKey],
   );
+  const stagedSide = useMemo(
+    () => changeBlocksOf(stagedEntry?.file),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [stagedKey],
+  );
+  const stagedBlocks = useMemo(
+    () => inBufferLines(stagedSide.blocks, workingEntry?.file),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [stagedSide, workingKey],
+  );
+  const { blocks, marks } = workingEntry ? workingSide : stagedSide;
 
   /**
    * The change marks drawn from the **buffer**, as it is typed, the way VS Code draws them — see
@@ -1304,21 +1334,41 @@ export function EditorPane({
    * (`lib/editorModel.ts`), so a peek keyed by model would be shared and closing one would blank the
    * other. Two panes reading two different hunks of one file is the correct answer, and it is the same
    * call the blame decoration makes one section down.
+   *
+   * `staged` is the side `blockIndex` counts in. Usually the gutter's, but not after a stage or unstage
+   * from the panel, which follows the hunk to the other side — see `followRef`.
    */
-  const peekRef = useRef<{ blockIndex: number; block: ChangeBlock; zoneId: string; dom: HTMLDivElement } | null>(
-    null,
-  );
+  const peekRef = useRef<{
+    blockIndex: number;
+    block: ChangeBlock;
+    staged: boolean;
+    zoneId: string;
+    dom: HTMLDivElement;
+  } | null>(null);
   /** The same thing as state, so React has somewhere to portal into. */
-  const [peek, setPeek] = useState<{ blockIndex: number; dom: HTMLDivElement } | null>(null);
+  const [peek, setPeek] = useState<{ blockIndex: number; staged: boolean; dom: HTMLDivElement } | null>(null);
   /** A **sixth** decoration id list, for the wash over the hunk being peeked. Its own list for the
    *  reason each of the other five has one: it changes on a click, which is neither a watcher tick nor
    *  a keystroke nor a caret move. */
   const peekDecorationsRef = useRef<string[]>([]);
+  /**
+   * A stage or unstage from the panel, in flight: the hunk it was showing, and the side it is crossing
+   * to. `ChangePeek` sets it before the action starts, so whichever refresh lands with the hunk on the
+   * other side finds it here and the survive-a-tick effect re-points the panel there instead of
+   * closing it. Cleared with the panel.
+   */
+  const followRef = useRef<{ block: ChangeBlock; staged: boolean } | null>(null);
 
   // Read by the gutter listener and by the shortcut nav, both of which are registered once and would
   // otherwise close over whichever change was on screen at mount.
   const blocksRef = useRef(blocks);
   blocksRef.current = blocks;
+  /** The gutter's side, which a peek opened from the gutter or the caret reads in. */
+  const paneStagedRef = useRef(false);
+  paneStagedRef.current = !workingEntry && !!stagedEntry;
+  /** Each side's hunks, for a peek reading either one. */
+  const sideBlocksRef = useRef({ working: workingSide.blocks, staged: stagedBlocks });
+  sideBlocksRef.current = { working: workingSide.blocks, staged: stagedBlocks };
   const marksRef = useRef<GutterMark[]>(shownMarks);
   marksRef.current = shownMarks;
 
@@ -1342,7 +1392,14 @@ export function EditorPane({
       }
     }
     peekRef.current = null;
+    followRef.current = null;
     setPeek(null);
+  }, []);
+
+  /** Told by the panel that a stage or unstage is starting — see `followRef`. */
+  const followCrossing = useCallback(() => {
+    const current = peekRef.current;
+    followRef.current = current ? { block: current.block, staged: !current.staged } : null;
   }, []);
 
   /**
@@ -1361,13 +1418,16 @@ export function EditorPane({
    * `afterLineNumber = firstLine - 1` puts the panel *above* the hunk with the changed lines still
    * visible under it; `0` is legal and means "before line 1", which is what a change at the top of the
    * file needs.
+   *
+   * `staged` is the side `blockIndex` counts in, and the gutter's when it is left out.
    */
-  const openPeek = useCallback((blockIndex: number, opts?: { reveal?: boolean }) => {
+  const openPeek = useCallback((blockIndex: number, opts?: { reveal?: boolean; staged?: boolean }) => {
     const ed = editorRef.current;
     const mon = monacoRef.current;
     const model = ed?.getModel();
     if (!ed || !mon || !model) return;
-    const block = blocksRef.current[blockIndex];
+    const staged = opts?.staged ?? paneStagedRef.current;
+    const block = (staged ? sideBlocksRef.current.staged : sideBlocksRef.current.working)[blockIndex];
     if (!block) return;
     const previous = peekRef.current;
     const dom = previous?.dom ?? document.createElement("div");
@@ -1385,8 +1445,8 @@ export function EditorPane({
     // After the batch, not before: `addZone` writes `width: 100%` onto the node itself — see
     // `sizePeekDom`, which is where that costs a wrong-width panel if this line moves back up.
     sizePeekDom(ed, dom);
-    peekRef.current = { blockIndex, block, zoneId, dom };
-    setPeek({ blockIndex, dom });
+    peekRef.current = { blockIndex, block, staged, zoneId, dom };
+    setPeek({ blockIndex, staged, dom });
     peekDecorationsRef.current = ed.deltaDecorations(peekDecorationsRef.current, [
       {
         range: new mon.Range(anchor, 1, Math.min(Math.max(block.lastLine, anchor), lineCount), 1),
@@ -1406,21 +1466,24 @@ export function EditorPane({
    * Next/previous change, wrapping — the buttons in the panel and ⌥F5/⇧⌥F5 both land here so the two
    * can never disagree about where "next" goes.
    *
-   * With a peek already up it steps from that hunk. With none it steps from the **caret**, which is
-   * what makes the shortcut mean "the next change from where I am" rather than "the first change in the
-   * file" every time it is pressed — the difference between navigation and a reset.
+   * With a peek already up it steps from that hunk, among the hunks of the side it is reading. With
+   * none it steps from the **caret**, among the gutter's, which is what makes the shortcut mean "the
+   * next change from where I am" rather than "the first change in the file" every time it is pressed —
+   * the difference between navigation and a reset.
    *
    * The caret is never moved. Moving it would fire the blame pass and rewrite the status bar for what
    * was, from the user's side, a mouse click on an arrow.
    */
   const gotoBlock = useCallback((delta: number) => {
-    const list = blocksRef.current;
-    if (list.length === 0) return;
-    const current = peekRef.current?.blockIndex;
-    if (current !== undefined) {
-      openPeekRef.current((current + delta + list.length) % list.length);
+    const open = peekRef.current;
+    if (open) {
+      const side = open.staged ? sideBlocksRef.current.staged : sideBlocksRef.current.working;
+      if (side.length === 0) return;
+      openPeekRef.current((open.blockIndex + delta + side.length) % side.length, { staged: open.staged });
       return;
     }
+    const list = blocksRef.current;
+    if (list.length === 0) return;
     const caret = editorRef.current?.getPosition()?.lineNumber ?? 1;
     // Hand-rolled rather than `findLastIndex`, which needs the ES2023 lib this project does not target.
     let found = -1;
@@ -1515,11 +1578,16 @@ export function EditorPane({
   /**
    * Whether the panel survives a watcher tick.
    *
-   * A tick that found the same change re-lays nothing — the memo above returned the same arrays, so this
-   * does not run. A tick that found a *different* change is the case that matters: the hunk on screen may
-   * not exist any more, and a panel offering to stage a hunk git no longer has is a button that will
-   * fail. So the peek survives only when the block at its index is still the same hunk, and otherwise
-   * closes — which is also what happens when the user stages it from the panel itself.
+   * A tick that found the same change re-lays nothing — the memos above returned the same arrays, so
+   * this does not run. A tick that found a *different* change is the case that matters: the hunk on
+   * screen may not exist any more, and a panel offering to stage a hunk git no longer has is a button
+   * that will fail. So the peek survives only when the block at its index is still the same hunk, and
+   * otherwise closes.
+   *
+   * Except when the panel itself just moved it. A stage or unstage from the panel leaves `followRef`
+   * naming the hunk and the side it went to, and once a refresh shows it there (`followHunk`) the panel
+   * is re-pointed at it rather than closed: same place, now reading "staged" — or not — with the
+   * button turned round. Until then the hunk is still where it was, and the ordinary rule keeps it.
    *
    * When it does survive it is re-laid rather than left alone: the same hunk one line longer needs a
    * taller zone, and the same hunk after an edit above it needs a different anchor.
@@ -1527,13 +1595,26 @@ export function EditorPane({
   useEffect(() => {
     const current = peekRef.current;
     if (!current) return;
-    const block = blocks[current.blockIndex];
+    const follow = followRef.current;
+    if (follow) {
+      const at = followHunk(follow.staged ? stagedBlocks : workingSide.blocks, follow.block);
+      if (at !== -1) {
+        followRef.current = null;
+        openPeekRef.current(at, { staged: follow.staged, reveal: false });
+        return;
+      }
+    }
+    const block = (current.staged ? stagedBlocks : workingSide.blocks)[current.blockIndex];
     if (!block || !sameHunk(block, current.block)) {
       closePeek();
       return;
     }
-    openPeekRef.current(current.blockIndex, { reveal: false });
-  }, [blocks, closePeek]);
+    openPeekRef.current(current.blockIndex, { staged: current.staged, reveal: false });
+  }, [workingSide, stagedBlocks, closePeek]);
+
+  /** What the open panel reads: the hunks of its side, and that side's entry for the file's status. */
+  const peekBlocks = peek?.staged ? stagedBlocks : workingSide.blocks;
+  const peekEntry = peek?.staged ? stagedEntry : workingEntry;
 
   // Breakpoints (which follow the code as it is edited) and the stopped line: their own decoration
   // set, on their own rhythm — see the hook.
@@ -2981,19 +3062,20 @@ export function EditorPane({
                 is mounted, but a render can land between a diff arriving and the survive-a-tick effect
                 running, and the block behind the index may have gone in that gap. */}
             {peek &&
-              activeDiffEntry &&
-              blocks[peek.blockIndex] &&
+              peekEntry &&
+              peekBlocks[peek.blockIndex] &&
               createPortal(
                 <ChangePeek
                   path={activeTab.path}
-                  status={activeDiffEntry.file.status}
-                  staged={activeDiffEntry.staged}
-                  block={blocks[peek.blockIndex]}
+                  status={peekEntry.file.status}
+                  staged={peek.staged}
+                  block={peekBlocks[peek.blockIndex]}
                   blockIndex={peek.blockIndex}
-                  total={blocks.length}
+                  total={peekBlocks.length}
                   onNext={() => gotoBlock(1)}
                   onPrev={() => gotoBlock(-1)}
                   onClose={closePeek}
+                  onCrossing={followCrossing}
                 />,
                 peek.dom,
               )}
