@@ -1,4 +1,4 @@
-import type { SavedFinding } from "../types/domain";
+import type { ReviewRunDetail, SavedFinding } from "../types/domain";
 
 export interface FindingLocation {
   file: string;
@@ -465,6 +465,48 @@ const DECISION_HEADING: Record<PrDecisionKind, string> = {
  * It never invents a verdict of its own: the Quality Gate is computed from the findings, the
  * resolved list comes from the stored run, and the decision is the one the human just took.
  */
+/** A stored JSON column (a run's `meta` / `findings`), or `null` when it can't be read — memory
+ * written by an older version is context to do without, never a crash. */
+function storedJson<T>(raw: string): T | null {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** A saved review run's memory, the way the decision summary reads it. */
+export function summaryMemoryOf(run: Pick<ReviewRunDetail, "findings" | "meta" | "iter" | "level">): SummaryMemory {
+  const saved: SavedFinding[] = storedJson<SavedFinding[]>(run.findings) ?? [];
+  const meta = storedJson<Record<string, unknown>>(run.meta) ?? {};
+  return {
+    all: saved,
+    resolved: saved.filter((f) => f.estado === "resuelto"),
+    discarded: saved.filter((f) => f.estado === "falso_positivo" || f.estado === "ignorado"),
+    iter: run.iter,
+    level: run.level,
+    engine: typeof meta.engine === "string" ? meta.engine : "",
+    model: typeof meta.model === "string" ? meta.model : "",
+    files: typeof meta.files === "number" ? meta.files : 0,
+    additions: typeof meta.additions === "number" ? meta.additions : 0,
+    deletions: typeof meta.deletions === "number" ? meta.deletions : 0,
+  };
+}
+
+/** The decision comment for a saved run — what the PR panel posts when it decides, with the run's
+ *  rejected findings left out of what still stands. Flujos' "Decidir PR" asks for it by run. */
+export function decisionCommentForRun(
+  run: Pick<ReviewRunDetail, "review_md" | "findings" | "meta" | "iter" | "level">,
+  decision: PrDecisionKind,
+  date: string,
+): string {
+  const memory = summaryMemoryOf(run);
+  const parsed = run.review_md.trim() ? parseAnalysis(run.review_md) : null;
+  const discarded = new Set(memory.discarded.map((f) => f.id));
+  const active = parsed ? { ...parsed, findings: parsed.findings.filter((f) => !discarded.has(f.id)) } : null;
+  return formatDecisionComment(decision, date, active, memory);
+}
+
 export function formatDecisionComment(
   decision: PrDecisionKind,
   date: string,

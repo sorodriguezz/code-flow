@@ -5,6 +5,7 @@ import { dbLoadTree } from "../../lib/tauri/dbCommands";
 import { remoteLoadTree } from "../../lib/tauri/remoteCommands";
 import { notesLoadTree } from "../../lib/tauri/notesCommands";
 import { keyvaultLoadTree } from "../../lib/tauri/keyvaultCommands";
+import { apiListEnvironments, apiLoadTree } from "../../lib/tauri/apiCommands";
 import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 
@@ -129,4 +130,50 @@ export function VaultItemPicker({ value, onChange }: { value: unknown; onChange:
       problem={null}
     />
   );
+}
+
+/** The workspace's saved HTTP requests, as "Collection / folder / request". */
+const loadApiRequests = async (workspaceId: string) => {
+  const tree = await apiLoadTree(workspaceId);
+  const folderName = new Map(tree.folders.map((folder) => [folder.id, folder] as const));
+  const path = (folderId: string | null) => {
+    const names: string[] = [];
+    const seen = new Set<string>();
+    let current = folderId;
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      const folder = folderName.get(current);
+      if (!folder) break;
+      names.unshift(folder.name);
+      current = folder.parent_id;
+    }
+    return names;
+  };
+  const collectionName = new Map(tree.collections.map((collection) => [collection.id, collection.name] as const));
+  return tree.requests
+    .filter((request) => request.protocol === "http")
+    .map((request) => ({
+      value: request.id,
+      label: [collectionName.get(request.collection_id) ?? "—", ...path(request.folder_id), request.name].join(" / "),
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+};
+
+export function ApiRequestPicker({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
+  const t = useT();
+  const { options, problem } = useRows("apiRequests", loadApiRequests);
+  return <Picker value={value} onChange={onChange} options={options} placeholder={t("flows.app.pickRequest")} empty={t("flows.app.noRequests")} problem={problem} />;
+}
+
+const loadEnvironments = async (workspaceId: string) => {
+  const environments = await apiListEnvironments(workspaceId);
+  return environments.filter((environment) => !environment.is_global).map((environment) => ({ value: environment.id, label: environment.name }));
+};
+
+/** `""` follows the environment active in the API client; `"none"` sends without one. */
+export function ApiEnvironmentPicker({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
+  const t = useT();
+  const { options, problem } = useRows("apiEnvironments", loadEnvironments);
+  const all = [{ value: "", label: t("flows.app.activeEnvironment") }, { value: "none", label: t("flows.app.noEnvironment") }, ...options];
+  return <Picker value={value} onChange={onChange} options={all} placeholder={t("flows.app.activeEnvironment")} empty={t("flows.app.activeEnvironment")} problem={problem} />;
 }

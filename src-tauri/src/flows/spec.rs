@@ -87,6 +87,18 @@ pub struct StickyNote {
     pub size: [f64; 2],
     #[serde(default)]
     pub text: String,
+    /// `#rrggbb` from the app's palette; empty is the default yellow. Only the canvas reads it.
+    #[serde(default, deserialize_with = "lenient_text", skip_serializing_if = "String::is_empty")]
+    pub color: String,
+}
+
+/// A value that should be text and is not (a newer build's, a hand edit) reads as empty instead of
+/// failing the whole document over a note's colour.
+fn lenient_text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(match Value::deserialize(deserializer)? {
+        Value::String(text) => text,
+        _ => String::new(),
+    })
 }
 
 /// The spec a new flow starts with.
@@ -416,10 +428,22 @@ mod tests {
     #[test]
     fn sticky_notes_need_a_size() {
         let mut flow = empty();
-        flow.notes.push(StickyNote { id: "s".into(), pos: [0.0, 0.0], size: [0.0, 40.0], text: String::new() });
+        flow.notes.push(StickyNote { id: "s".into(), pos: [0.0, 0.0], size: [0.0, 40.0], text: String::new(), color: String::new() });
         assert!(validate(&flow).is_err());
         flow.notes[0].size = [200.0, 80.0];
         assert!(validate(&flow).is_ok());
+    }
+
+    #[test]
+    fn a_note_keeps_its_colour_and_a_strange_one_does_not_break_the_flow() {
+        let painted = r##"{"schema":1,"notes":[{"id":"s","pos":[0,0],"size":[200,80],"text":"","color":"#3b82f6"}]}"##;
+        let flow = parse(painted).unwrap();
+        assert_eq!(flow.notes[0].color, "#3b82f6");
+        assert!(serde_json::to_string(&flow).unwrap().contains(r##""color":"#3b82f6""##));
+        let plain = parse(r#"{"schema":1,"notes":[{"id":"s","pos":[0,0],"size":[200,80]}]}"#).unwrap();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("color"), "the default is not written");
+        let odd = parse(r#"{"schema":1,"notes":[{"id":"s","pos":[0,0],"size":[200,80],"color":7}]}"#).unwrap();
+        assert_eq!(odd.notes[0].color, "");
     }
 
     #[test]

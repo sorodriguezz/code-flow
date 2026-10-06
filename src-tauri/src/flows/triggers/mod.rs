@@ -19,6 +19,8 @@
 //! The error trigger and the "called by another flow" trigger arm nothing: the first is fired from
 //! [`run_finished`] when another flow fails, the second by an Execute flow node.
 
+mod github;
+mod inbox;
 mod listen;
 mod poll;
 mod watch;
@@ -41,7 +43,7 @@ use super::runs::{self, Finished, RunOrigin, StartRequest};
 use super::schedule::{self, Decision};
 use super::spec::{self, FlowNode, FlowSpec};
 use crate::db::flow_run_queries::FlowRunRow;
-use crate::db::{flow_queries, Db};
+use crate::db::{flow_queries, flow_run_queries, Db};
 
 /// What starts a flow without a person: every trigger but the manual one.
 pub fn is_automatic(type_id: &str) -> bool {
@@ -242,6 +244,31 @@ fn param_text(params: &Value, key: &str) -> String {
     params.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string()
 }
 
+/// A credential a trigger of `flow_id` signs with, and its secret: one of `kinds`, of the flow's
+/// workspace or global — the same rule a run's nodes follow.
+fn credential_row(app: &AppHandle, flow_id: &str, id: &str, kinds: &[&str]) -> Result<(flow_run_queries::FlowCredential, String), String> {
+    let (row, workspace) = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let row = flow_run_queries::get_credential(&conn, id).map_err(|e| e.to_string())?.ok_or("The credential no longer exists")?;
+        let workspace = flow_queries::get_flow(&conn, flow_id).map_err(|e| e.to_string())?.map(|flow| flow.meta.workspace_id);
+        (row, workspace)
+    };
+    if row.scope != "global" && workspace.as_deref() != Some(row.workspace_id.as_str()) {
+        return Err(format!("The credential \"{}\" belongs to another workspace", row.name));
+    }
+    if !kinds.contains(&row.kind.as_str()) {
+        return Err(format!("A {} credential cannot be used here", row.kind));
+    }
+    let secret = crate::secrets::get_secret(&crate::secrets::flow_credential_key(id))?
+        .ok_or_else(|| format!("The credential \"{}\" has no secret stored on this computer", row.name))?;
+    Ok((row, secret))
+}
+
+fn credential_secret(app: &AppHandle, flow_id: &str, id: &str, kinds: &[&str]) -> Result<String, String> {
+    credential_row(app, flow_id, id, kinds).map(|(_, secret)| secret)
+}
+
 /// Checks that every automatic trigger of a flow can be armed, without arming any — what switching a
 /// flow on asks first.
 pub fn validate(app: &AppHandle, flow_id: &str, spec: &FlowSpec) -> Result<(), String> {
@@ -279,6 +306,8 @@ pub fn validate(app: &AppHandle, flow_id: &str, spec: &FlowSpec) -> Result<(), S
                 tauri_plugin_global_shortcut::Shortcut::from_str(&accelerator)
                     .map_err(|e| fail(format!("\"{accelerator}\" is not a shortcut: {e}")))?;
             }
+            "trigger.github" => github::check(app, flow_id, &params).map_err(fail)?,
+            "trigger.email" => inbox::check(app, flow_id, &params).map_err(fail)?,
             _ => {}
         }
     }
@@ -407,6 +436,15 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
                     format!("{label} {}", param_text(&params, "url"))
                 });
                 listen::spawn(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
+            "trigger.github" => {
+                set_detail(format!("{} · {}", param_text(&params, "repository"), param_text(&params, "event")));
+                github::spawn(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
+            }
+            "trigger.email" => {
+                let mailbox = param_text(&params, "mailbox");
+                set_detail(if mailbox.is_empty() { "INBOX".into() } else { mailbox });
+                inbox::spawn(app, flow_id, &node.id, &params, view.clone(), cancel.child_token())?;
             }
             _ => {}
         }

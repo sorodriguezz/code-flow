@@ -59,7 +59,7 @@ pub(super) fn loggable(url: &url::Url) -> String {
 
 /// Signs a request with a flow credential — a header or a query parameter, never the URL's user
 /// info. Shared by every node that speaks HTTP (and WebSocket, whose upgrade is one).
-pub(super) fn apply_credential(
+pub(super) async fn apply_credential(
     ctx: &NodeCtx,
     credential_id: &str,
     headers: &mut Vec<(String, String)>,
@@ -68,7 +68,7 @@ pub(super) fn apply_credential(
     if credential_id.trim().is_empty() {
         return Ok(());
     }
-    let credential = ctx.run.host.credential(credential_id.trim()).map_err(NodeError::failed)?;
+    let credential = ctx.credential(credential_id.trim()).await?;
     let meta_text = |key: &str| credential.meta.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
     match credential.kind.as_str() {
         "bearer" => headers.push(("Authorization".into(), format!("Bearer {}", credential.secret))),
@@ -86,13 +86,135 @@ pub(super) fn apply_credential(
     Ok(())
 }
 
+/// One answer of the server, before it is shaped into items.
+struct Answer {
+    status: u16,
+    status_text: String,
+    headers: Vec<(String, String)>,
+    body: Value,
+    truncated: bool,
+}
+
 async fn request(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError> {
+    match text(params, "pagination").as_str() {
+        "" | "none" => Ok(shape(params, send(ctx, params).await?)),
+        mode => paginate(ctx, params, mode).await,
+    }
+}
+
+// ------------------------------------------------------------------------------------ pagination
+
+/// The items of one page: at `field` when given, the body itself when it is a list, else the body.
+fn page_items(body: &Value, field: &str) -> Vec<Value> {
+    let at = if field.trim().is_empty() { Some(body) } else { crate::flows::value::get_path(body, field.trim()) };
+    match at {
+        Some(Value::Array(list)) => list.iter().map(|entry| if entry.is_object() { entry.clone() } else { json!({"value": entry}) }).collect(),
+        Some(Value::Null) | None => Vec::new(),
+        Some(other) if field.trim().is_empty() => vec![other.clone()],
+        Some(other) => vec![if other.is_object() { other.clone() } else { json!({"value": other}) }],
+    }
+}
+
+/// `<https://…?page=2>; rel="next"` out of a `Link` header — GitHub's and most REST APIs' way.
+fn link_next(headers: &[(String, String)]) -> Option<String> {
+    let header = headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("link"))?.1.clone();
+    header.split(',').find_map(|part| {
+        let (target, rest) = part.split_once(';')?;
+        rest.split(';')
+            .any(|attr| {
+                let attr = attr.trim().to_ascii_lowercase();
+                attr == "rel=\"next\"" || attr == "rel=next"
+            })
+            .then(|| target.trim().trim_start_matches('<').trim_end_matches('>').to_string())
+    })
+}
+
+/// A query parameter of the request set to `value` — replacing the row of that name, or added.
+fn set_query(params: &mut Value, name: &str, value: String) {
+    let mut rows: Vec<Value> = params.get("query").and_then(Value::as_array).cloned().unwrap_or_default();
+    rows.retain(|row| row.get("name").and_then(Value::as_str) != Some(name));
+    rows.push(json!({"name": name, "value": value}));
+    params["query"] = Value::Array(rows);
+}
+
+/// Every page, one request after another, their items joined: the next page's URL from a field or
+/// the `Link` header, a page number counted up until a page comes back empty, or a cursor carried
+/// from each answer to the next request — and never more than `maxPages`.
+async fn paginate(ctx: &NodeCtx, params: &Value, mode: &str) -> Result<Vec<Value>, NodeError> {
+    let max = number(params, "maxPages").unwrap_or(10.0).clamp(1.0, 1000.0) as usize;
+    let items_field = text(params, "itemsField");
+    let mut page_params = params.clone();
+    let mut page = number(params, "startPage").unwrap_or(1.0) as i64;
+    let page_param = Some(text(params, "pageParam")).filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "page".into());
+    let cursor_param = Some(text(params, "cursorParam")).filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "cursor".into());
+    if mode == "pageNumber" {
+        set_query(&mut page_params, &page_param, page.to_string());
+    }
+    let mut out = Vec::new();
+    for fetched in 1..=max {
+        let answer = send(ctx, &page_params).await?;
+        let items = page_items(&answer.body, &items_field);
+        let empty = items.is_empty();
+        out.extend(items);
+        let next = match mode {
+            "nextUrl" => {
+                let field = text(params, "nextField");
+                let from_body = if field.trim().is_empty() {
+                    None
+                } else {
+                    crate::flows::value::get_path(&answer.body, field.trim()).and_then(Value::as_str).map(str::to_string)
+                };
+                match from_body.or_else(|| link_next(&answer.headers)).filter(|url| !url.trim().is_empty()) {
+                    Some(next) => {
+                        // Relative to the page it came from (`</items?page=2>`); it carries its own query.
+                        let here = build_url(&text(&page_params, "url"), &[])?;
+                        let url = here.join(next.trim()).map_err(|e| NodeError::failed(format!("The next page's URL is not valid: {e}")))?;
+                        page_params["url"] = Value::String(url.to_string());
+                        page_params["query"] = json!([]);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            "cursor" => {
+                let cursor = crate::flows::value::get_path(&answer.body, text(params, "cursorField").trim())
+                    .map(crate::flows::value::to_text)
+                    .filter(|c| !c.trim().is_empty() && c != "null");
+                match cursor {
+                    Some(cursor) => {
+                        set_query(&mut page_params, &cursor_param, cursor);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            _ => {
+                if empty {
+                    false
+                } else {
+                    page += 1;
+                    set_query(&mut page_params, &page_param, page.to_string());
+                    true
+                }
+            }
+        };
+        if !next {
+            ctx.log(LogStream::Info, &format!("{fetched} page(s), {} item(s)", out.len()));
+            return Ok(out);
+        }
+    }
+    ctx.log(LogStream::Info, &format!("Stopped at the limit of {max} pages ({} items) — there were more", out.len()));
+    Ok(out)
+}
+
+/// One request, sent and read — failing on a 4xx/5xx unless asked not to.
+async fn send(ctx: &NodeCtx, params: &Value) -> Result<Answer, NodeError> {
     let method = text(params, "method").to_uppercase();
     let method = if method.is_empty() { "GET".to_string() } else { method };
     let mut query = pairs(params, "query");
     let mut headers = pairs(params, "headers");
 
-    apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query)?;
+    apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query).await?;
 
     let url = build_url(&text(params, "url"), &query)?;
     let has = |name: &str| headers.iter().any(|(key, _)| key.eq_ignore_ascii_case(name));
@@ -192,7 +314,12 @@ async fn request(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError>
     if response.truncated {
         ctx.log(LogStream::Info, "The response was larger than 64 MB and was cut");
     }
+    Ok(Answer { status: response.status, status_text: response.status_text, headers: response.headers, body, truncated: response.truncated })
+}
 
+/// An answer as items: the whole response, or its body — a list split into one item each.
+fn shape(params: &Value, response: Answer) -> Vec<Value> {
+    let body = response.body;
     if flag(params, "fullResponse") {
         let mut header_map: BTreeMap<String, Value> = BTreeMap::new();
         for (name, value) in &response.headers {
@@ -207,16 +334,16 @@ async fn request(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError>
                 }
             }
         }
-        return Ok(vec![json!({
+        return vec![json!({
             "statusCode": response.status,
             "statusMessage": response.status_text,
             "headers": header_map,
             "body": body,
             "truncated": response.truncated,
-        })]);
+        })];
     }
     let split = params.get("splitArrays").is_none() || flag(params, "splitArrays");
-    Ok(match body {
+    match body {
         Value::Array(list) if split => list
             .into_iter()
             .map(|entry| if entry.is_object() { entry } else { json!({"value": entry}) })
@@ -224,7 +351,7 @@ async fn request(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError>
         Value::Object(map) => vec![Value::Object(map)],
         Value::String(text) => vec![Value::Object(Map::from_iter([("data".to_string(), Value::String(text))]))],
         other => vec![json!({"data": other})],
-    })
+    }
 }
 
 #[cfg(test)]

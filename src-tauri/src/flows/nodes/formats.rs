@@ -527,6 +527,11 @@ fn mac(algorithm: &str, key: &[u8], bytes: &[u8]) -> Vec<u8> {
             mac.update(bytes);
             mac.finalize().into_bytes().to_vec()
         }
+        "sha384" => {
+            let mut mac = Hmac::<sha2::Sha384>::new_from_slice(key).expect("any key length");
+            mac.update(bytes);
+            mac.finalize().into_bytes().to_vec()
+        }
         _ => {
             let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).expect("any key length");
             mac.update(bytes);
@@ -543,6 +548,103 @@ fn encode(bytes: &[u8], encoding: &str) -> String {
     }
 }
 
+// ------------------------------------------------------------------------------------ JWT, AES
+
+const B64URL: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+fn jwt_hash(algorithm: &str) -> &'static str {
+    match algorithm {
+        "HS384" => "sha384",
+        "HS512" => "sha512",
+        _ => "sha256",
+    }
+}
+
+/// An HS-signed JWT of `claims`, with `iat` — and `exp` when `expires_in` is more than zero.
+pub(crate) fn jwt_sign(claims: &Value, algorithm: &str, secret: &[u8], expires_in: u64, now: i64) -> Result<String, String> {
+    let algorithm = match algorithm {
+        "HS384" | "HS512" => algorithm,
+        _ => "HS256",
+    };
+    let mut claims = match claims {
+        Value::Object(map) => map.clone(),
+        _ => return Err("The JWT payload must be a JSON object".into()),
+    };
+    claims.entry("iat").or_insert(json!(now));
+    if expires_in > 0 {
+        claims.entry("exp").or_insert(json!(now + expires_in as i64));
+    }
+    let header = B64URL.encode(json!({"alg": algorithm, "typ": "JWT"}).to_string());
+    let body = B64URL.encode(Value::Object(claims).to_string());
+    let signature = B64URL.encode(mac(jwt_hash(algorithm), secret, format!("{header}.{body}").as_bytes()));
+    Ok(format!("{header}.{body}.{signature}"))
+}
+
+/// Whether `token` was signed with `secret` and has not expired — and what it says either way.
+pub(crate) fn jwt_verify(token: &str, algorithm: &str, secret: &[u8], now: i64) -> Value {
+    let parts: Vec<&str> = token.trim().split('.').collect();
+    let fail = |error: &str, payload: Value| json!({"valid": false, "error": error, "payload": payload});
+    if parts.len() != 3 {
+        return fail("Not a JWT (three parts separated by dots)", Value::Null);
+    }
+    let payload: Value = B64URL
+        .decode(parts[1])
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(Value::Null);
+    let header: Value = B64URL.decode(parts[0]).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
+    let declared = header.get("alg").and_then(Value::as_str).unwrap_or_default();
+    if declared != algorithm {
+        // `alg` is the token's claim about itself — checking it against the node keeps a token from
+        // choosing how it is verified ("none", or another hash).
+        return fail(&format!("Signed with {declared}, not {algorithm}"), payload);
+    }
+    let expected = mac(jwt_hash(algorithm), secret, format!("{}.{}", parts[0], parts[1]).as_bytes());
+    let given = B64URL.decode(parts[2]).unwrap_or_default();
+    let same = expected.len() == given.len() && expected.iter().zip(&given).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+    if !same {
+        return fail("The signature does not match", payload);
+    }
+    if let Some(exp) = payload.get("exp").and_then(Value::as_i64) {
+        if now >= exp {
+            return fail("Expired", payload);
+        }
+    }
+    json!({"valid": true, "error": null, "payload": payload})
+}
+
+/// `cf1:` + base64(salt · nonce · AES-256-GCM ciphertext), the key Argon2id-derived from `passphrase`.
+pub(crate) fn encrypt_text(plain: &str, passphrase: &[u8]) -> Result<String, String> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    let salt: [u8; 16] = rand::random();
+    let nonce: [u8; 12] = rand::random();
+    let mut key = [0u8; 32];
+    argon2::Argon2::default().hash_password_into(passphrase, &salt, &mut key).map_err(|e| e.to_string())?;
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
+    let sealed = cipher.encrypt(aes_gcm::Nonce::from_slice(&nonce), plain.as_bytes()).map_err(|_| "Could not encrypt".to_string())?;
+    let mut blob = Vec::with_capacity(28 + sealed.len());
+    blob.extend_from_slice(&salt);
+    blob.extend_from_slice(&nonce);
+    blob.extend_from_slice(&sealed);
+    Ok(format!("cf1:{}", base64::engine::general_purpose::STANDARD.encode(blob)))
+}
+
+pub(crate) fn decrypt_text(sealed: &str, passphrase: &[u8]) -> Result<String, String> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    let encoded = sealed.trim().strip_prefix("cf1:").ok_or("Not something this node encrypted (it starts with cf1:)")?;
+    let blob = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|e| format!("Not base64: {e}"))?;
+    if blob.len() < 28 {
+        return Err("Too short to be encrypted text".into());
+    }
+    let mut key = [0u8; 32];
+    argon2::Argon2::default().hash_password_into(passphrase, &blob[..16], &mut key).map_err(|e| e.to_string())?;
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
+    let plain = cipher
+        .decrypt(aes_gcm::Nonce::from_slice(&blob[16..28]), &blob[28..])
+        .map_err(|_| "Wrong passphrase, or the text was changed".to_string())?;
+    String::from_utf8(plain).map_err(|_| "The decrypted bytes are not text".to_string())
+}
+
 async fn crypto(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let operation = ctx.param_str("operation");
     let credential = ctx.param_str("credential");
@@ -553,7 +655,39 @@ async fn crypto(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let value = text(params, "value");
         let algorithm = text(params, "algorithm");
         let encoding = text(params, "encoding");
+        let key = || -> Result<String, NodeError> {
+            let secret = if credential.trim().is_empty() {
+                text(params, "secret")
+            } else {
+                ctx.run.host.credential(&credential).map_err(NodeError::Failed)?.secret
+            };
+            if secret.is_empty() {
+                return Err(NodeError::failed("This needs a secret: pick a credential or write one"));
+            }
+            ctx.run.host.secret_used(&secret);
+            Ok(secret)
+        };
+        let now = chrono::Utc::now().timestamp();
         let (field, result) = match operation.as_str() {
+            "jwtSign" => {
+                let claims = match params.get("payload") {
+                    Some(Value::String(raw)) if raw.trim().is_empty() => json!({}),
+                    Some(Value::String(raw)) => {
+                        serde_json::from_str(raw).map_err(|e| NodeError::failed(format!("The payload is not valid JSON: {e}")))?
+                    }
+                    Some(other) => other.clone(),
+                    None => json!({}),
+                };
+                let expires = number(params, "expiresInSec").unwrap_or(3600.0).max(0.0) as u64;
+                let token = jwt_sign(&claims, &text(params, "jwtAlgorithm"), key()?.as_bytes(), expires, now).map_err(NodeError::Failed)?;
+                ("jwt", Value::String(token))
+            }
+            "jwtVerify" => {
+                let algorithm = Some(text(params, "jwtAlgorithm")).filter(|a| !a.is_empty()).unwrap_or_else(|| "HS256".into());
+                ("jwt", jwt_verify(&value, &algorithm, key()?.as_bytes(), now))
+            }
+            "encrypt" => ("encrypted", Value::String(encrypt_text(&value, key()?.as_bytes()).map_err(NodeError::Failed)?)),
+            "decrypt" => ("text", Value::String(decrypt_text(&value, key()?.as_bytes()).map_err(NodeError::Failed)?)),
             "hmac" => {
                 let secret = if credential.trim().is_empty() {
                     text(params, "secret")
@@ -915,5 +1049,34 @@ mod tests {
         assert!(unzip(&archive, &dir.join("out")).is_err());
         assert!(!dir.join("escape.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod crypto_tests {
+    use super::*;
+
+    #[test]
+    fn a_jwt_round_trips_and_a_wrong_secret_an_alg_swap_or_an_expiry_fail() {
+        let token = jwt_sign(&json!({"sub": "ana"}), "HS256", b"s3cret", 60, 1_000).unwrap();
+        let ok = jwt_verify(&token, "HS256", b"s3cret", 1_010);
+        assert_eq!((ok["valid"].as_bool(), ok["payload"]["sub"].as_str(), ok["payload"]["exp"].as_i64()), (Some(true), Some("ana"), Some(1_060)));
+        assert_eq!(jwt_verify(&token, "HS256", b"other", 1_010)["valid"], false);
+        assert_eq!(jwt_verify(&token, "HS512", b"s3cret", 1_010)["error"], "Signed with HS256, not HS512");
+        assert_eq!(jwt_verify(&token, "HS256", b"s3cret", 1_060)["error"], "Expired");
+        assert_eq!(jwt_verify("nope", "HS256", b"s3cret", 0)["valid"], false);
+        // A well-known HS256 vector (jwt.io's example): same signature.
+        let known = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        assert_eq!(jwt_verify(known, "HS256", b"your-256-bit-secret", 1_600_000_000)["valid"], true);
+    }
+
+    #[test]
+    fn encrypted_text_opens_only_with_its_passphrase() {
+        let sealed = encrypt_text("número secreto", b"clave larga").unwrap();
+        assert!(sealed.starts_with("cf1:"));
+        assert_ne!(encrypt_text("número secreto", b"clave larga").unwrap(), sealed, "a fresh salt and nonce each time");
+        assert_eq!(decrypt_text(&sealed, b"clave larga").unwrap(), "número secreto");
+        assert!(decrypt_text(&sealed, b"otra").unwrap_err().contains("Wrong passphrase"));
+        assert!(decrypt_text("hola", b"x").is_err());
     }
 }

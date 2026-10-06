@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Copy, GitMerge, RefreshCw, UserPlus, Users } from "lucide-react";
+import { Copy, GitMerge, RefreshCw, Users } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";
 import { Button } from "../common/Button";
 import { Select } from "../common/Select";
 import { fieldClass } from "../common/recipes";
 import { diffSpecs } from "../../lib/flows/diff";
 import { parseSpec, type FlowSpec } from "../../lib/flows/spec";
-import type { SupabaseProject } from "../../types/api";
 import { confirmAction } from "../../state/confirmStore";
-import { useFlowShareStore } from "../../state/flowShareStore";
+import { usableConnections, useFlowShareStore } from "../../state/flowShareStore";
 import { useFlowsStore } from "../../state/flowsStore";
 import { useT } from "../../state/languageStore";
 import { pushSuccessToast } from "../../state/toastStore";
@@ -23,8 +22,9 @@ function projectRef(url: string): string {
 }
 
 /**
- * Sharing one flow through a Supabase project — the projects set up for the API client's
- * collections. Not shared: pick a project and share. Shared: the invitation code to hand out (it is
+ * Sharing one flow through a Supabase project — one of Flujos' own, set up in its Collaboration
+ * window (`FlowCollabDialog`), which is one click away when there is none. Not shared: pick a
+ * project and share. Shared: the invitation code to hand out (it is
  * a credential: whoever holds it can read and change the flow), a new code to take access back
  * (host only), and leaving — the flow stays here, it just stops syncing.
  */
@@ -32,20 +32,27 @@ export function FlowShareDialog({ flowId, onClose }: { flowId: string; onClose: 
   const t = useT();
   const share = useFlowShareStore((s) => s.shares[flowId]);
   const name = useFlowsStore((s) => s.flows.find((flow) => flow.id === flowId)?.name ?? "");
-  const [projects, setProjects] = useState<SupabaseProject[] | null>(null);
+  const saved = useFlowShareStore((s) => s.saved);
+  const shares = useFlowShareStore((s) => s.shares);
+  const keys = useFlowShareStore((s) => s.keys);
+  /** False until the list and its keys have been read, so "no project" is never a guess. */
+  const [ready, setReady] = useState(false);
+  const projects = useMemo(() => usableConnections({ saved, shares, keys }), [saved, shares, keys]);
   const [project, setProject] = useState("");
   const [code, setCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const store = useFlowShareStore.getState;
 
   useEffect(() => {
-    void store()
-      .projects()
-      .then((list) => {
-        setProjects(list);
-        setProject((current) => current || list[0]?.url || "");
-      });
+    void (async () => {
+      await store().loadProjects();
+      await store().refreshKeys();
+      setReady(true);
+    })();
   }, [store]);
+  useEffect(() => {
+    setProject((current) => current || projects[0]?.url || "");
+  }, [projects]);
   useEffect(() => {
     if (share) void store().inviteCode(flowId).then(setCode);
   }, [share, flowId, store]);
@@ -60,8 +67,23 @@ export function FlowShareDialog({ flowId, onClose }: { flowId: string; onClose: 
     <ApiModal icon={Users} title={t("flows.share.title")} subtitle={name} width="max-w-md" busy={busy} onClose={onClose}>
       <div className="flex flex-col gap-3 p-4">
         {!share ? (
-          projects === null ? null : projects.length === 0 ? (
-            <p className="text-[12.5px] leading-snug text-[var(--cf-text-muted)]">{t("flows.share.noProject")}</p>
+          !ready ? null : projects.length === 0 ? (
+            <>
+              <p className="text-[12.5px] leading-snug text-[var(--cf-text-muted)]">{t("flows.share.noProject")}</p>
+              <div className="flex justify-end">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => {
+                    store().openCollab("project");
+                    onClose();
+                  }}
+                >
+                  <Users size={12} />
+                  {t("flows.share.setUp")}
+                </Button>
+              </div>
+            </>
           ) : (
             <>
               {projects.length > 1 && (
@@ -153,44 +175,6 @@ export function FlowShareDialog({ flowId, onClose }: { flowId: string; onClose: 
             </div>
           </>
         )}
-      </div>
-    </ApiModal>
-  );
-}
-
-/** Accepting an invitation: the flow lands in this workspace (and folder), not reviewed. */
-export function JoinSharedDialog({ folderId, onClose }: { folderId: string | null; onClose: () => void }) {
-  const t = useT();
-  const workspaceId = useFlowsStore((s) => s.workspaceId);
-  const [code, setCode] = useState("");
-  const [busy, setBusy] = useState(false);
-  const join = async () => {
-    if (!workspaceId || !code.trim()) return;
-    setBusy(true);
-    const id = await useFlowShareStore.getState().join(code, workspaceId, folderId);
-    setBusy(false);
-    if (!id) return;
-    await useFlowsStore.getState().refresh();
-    await useFlowsStore.getState().openFlow(id);
-    onClose();
-  };
-  return (
-    <ApiModal icon={UserPlus} title={t("flows.share.joinTitle")} width="max-w-md" busy={busy} onClose={onClose}>
-      <div className="flex flex-col gap-3 p-4">
-        <textarea
-          autoFocus
-          rows={3}
-          value={code}
-          onChange={(event) => setCode(event.target.value)}
-          placeholder="codeflow:…"
-          className={fieldClass({ size: "sm", className: "h-auto resize-none py-1.5 font-mono text-[11px]" })}
-          aria-label={t("flows.share.code")}
-        />
-        <div className="flex justify-end">
-          <Button variant="primary" size="sm" disabled={!code.trim() || busy} onClick={() => void join()}>
-            {t("flows.share.join")}
-          </Button>
-        </div>
       </div>
     </ApiModal>
   );

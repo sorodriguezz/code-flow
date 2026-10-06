@@ -1,4 +1,5 @@
-//! Declarative connectors: Slack, Discord, Telegram, Notion and Jira as JSON, one node to call them.
+//! Declarative connectors — Slack, Discord, Telegram, Notion, Jira, GitHub, Trello, Linear, Vercel, Netlify,
+//! Cloudflare, Supabase, Sentry, Teams, Google Chat and Mattermost — as JSON, one node to call them.
 //!
 //! **A connector is data, not code.** Each file in `connectors/` names a service's base URL, how it
 //! signs in, and its operations — method, path, the fields a person fills in, the JSON body with
@@ -62,9 +63,13 @@ pub struct Operation {
     pub fields: Vec<Field>,
     #[serde(default)]
     pub body: Option<Value>,
-    /// Where in the answer the result is (`messages`, `issues`); an array becomes one item each.
+    /// Where in the answer the result is (`messages`, `issues`, `data.issues.nodes`); an array
+    /// becomes one item each.
     #[serde(default)]
     pub result: String,
+    /// Headers this operation adds to the connector's (Supabase's `Prefer`).
+    #[serde(default)]
+    pub headers: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,9 +79,11 @@ pub struct Connector {
     pub name: String,
     pub base_url: String,
     /// How it signs in, and so which credentials fit: `bearer` (a token in the header), `basic`
-    /// (user and password), `path` (a token the URL carries as `{{secret}}`: Telegram) or `url` (the
-    /// whole URL is the secret: a Discord webhook). Never a field — what a node's fields hold is
-    /// saved in the flow, and a secret does not belong there.
+    /// (user and password), `path` (a token the URL carries as `{{secret}}`: Telegram), `url` (the
+    /// whole URL is the secret: a Discord webhook), `headers` (a token placed by the connector's own
+    /// headers as `{{secret}}`: Linear's bare key, Supabase's two headers) or `query` (a user and a
+    /// secret placed in the query by `authQuery`: Trello's key and token). Never a field — what a
+    /// node's fields hold is saved in the flow, and a secret does not belong there.
     pub auth: String,
     pub auth_hint: Label,
     /// A field every operation has, filled once (Jira's site).
@@ -84,9 +91,15 @@ pub struct Connector {
     pub site_field: Option<Field>,
     #[serde(default)]
     pub headers: Map<String, Value>,
+    /// With `auth: query`, the parameters that carry the credential: `{{user}}` and `{{secret}}`.
+    #[serde(default)]
+    pub auth_query: Map<String, Value>,
     /// A boolean the service answers with, `false` on failure (Slack's `ok`).
     #[serde(default)]
     pub ok_field: String,
+    /// A field whose presence means failure even on a 200 — a GraphQL `errors`.
+    #[serde(default)]
+    pub fail_on: String,
     /// Where the service puts its error message.
     #[serde(default)]
     pub error_field: String,
@@ -97,8 +110,9 @@ impl Connector {
     /// The credential kinds that can sign this connector in; empty when it needs none.
     pub fn credential_kinds(&self) -> &'static [&'static str] {
         match self.auth.as_str() {
-            "bearer" | "path" => &["bearer"],
-            "basic" => &["basic"],
+            "bearer" => &["bearer", "oauth2"],
+            "path" | "headers" => &["bearer"],
+            "basic" | "query" => &["basic"],
             "url" => &["webhook"],
             _ => &[],
         }
@@ -120,6 +134,17 @@ const SOURCES: &[&str] = &[
     include_str!("connectors/telegram.json"),
     include_str!("connectors/notion.json"),
     include_str!("connectors/jira.json"),
+    include_str!("connectors/github.json"),
+    include_str!("connectors/trello.json"),
+    include_str!("connectors/linear.json"),
+    include_str!("connectors/vercel.json"),
+    include_str!("connectors/netlify.json"),
+    include_str!("connectors/cloudflare.json"),
+    include_str!("connectors/supabase.json"),
+    include_str!("connectors/sentry.json"),
+    include_str!("connectors/teams.json"),
+    include_str!("connectors/googlechat.json"),
+    include_str!("connectors/mattermost.json"),
 ];
 
 pub static CONNECTORS: LazyLock<Vec<Connector>> =
@@ -229,13 +254,23 @@ mod tests {
 
     #[test]
     fn every_shipped_connector_parses_and_its_placeholders_name_its_fields() {
-        assert_eq!(all().len(), 5);
+        assert_eq!(all().len(), 16);
         for connector in all() {
             assert!(connector.auth == "none" || !connector.credential_kinds().is_empty(), "{} signs in with {}", connector.id, connector.auth);
             for operation in &connector.operations {
                 let names: Vec<String> =
-                    connector.fields_of(operation).iter().map(|f| f.name.clone()).chain(["secret".to_string()]).collect();
-                let text = format!("{} {} {} {} {}", connector.base_url, operation.path, operation.url, Value::Object(operation.query.clone()), operation.body.clone().unwrap_or(Value::Null));
+                    connector.fields_of(operation).iter().map(|f| f.name.clone()).chain(["secret".to_string(), "user".to_string()]).collect();
+                let text = format!(
+                    "{} {} {} {} {} {} {} {}",
+                    connector.base_url,
+                    operation.path,
+                    operation.url,
+                    Value::Object(operation.query.clone()),
+                    operation.body.clone().unwrap_or(Value::Null),
+                    Value::Object(connector.headers.clone()),
+                    Value::Object(operation.headers.clone()),
+                    Value::Object(connector.auth_query.clone()),
+                );
                 let mut rest = text.as_str();
                 while let Some(start) = rest.find("{{") {
                     let end = rest[start..].find("}}").unwrap();

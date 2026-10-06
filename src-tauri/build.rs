@@ -9,6 +9,31 @@ fn main() {
     }
     app_manifest();
     main_thread_stack();
+    quiet_eh_frame_warning();
+}
+
+/// Keeps the Apple linker's "__eh_frame section too large" note out of every dev build's output.
+///
+/// The unoptimised binary carries 25 MB of DWARF unwind info (measured 2026-10-06, a third of it
+/// this crate's own code), and the compact unwind table can only point 16 MB into it: past that, a
+/// panic unwinding through those functions finds their entries the slow way. Nothing in this app
+/// unwinds but a panic, so the cost is nil — `ld`'s own manual advises `-no_warn_eh_frame_too_large`
+/// for debug builds — while rustc turns the linker's stderr into a warning on every link. Release
+/// builds are optimised and far under the limit; they keep the warning, should they ever reach it.
+///
+/// Probed first: a linker that does not know an option refuses the whole link.
+fn quiet_eh_frame_warning() {
+    let vendor = std::env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
+    if vendor != "apple" || std::env::var("PROFILE").as_deref() != Ok("debug") {
+        return;
+    }
+    let known = std::process::Command::new("ld")
+        .args(["-no_warn_eh_frame_too_large", "-v"])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if known {
+        println!("cargo:rustc-link-arg=-Wl,-no_warn_eh_frame_too_large");
+    }
 }
 
 /// Gives the app's main thread on Windows the stack it has everywhere else.

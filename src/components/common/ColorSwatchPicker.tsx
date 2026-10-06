@@ -26,6 +26,7 @@ export function ColorSwatchPicker({
   align = "end",
   allowNone = false,
   noneTitle,
+  noneColor = "var(--cf-accent)",
 }: {
   value: string;
   onChange: (color: string) => void;
@@ -72,6 +73,11 @@ export function ColorSwatchPicker({
   allowNone?: boolean;
   /** Hover text for the none cell, since this component has no dictionary of its own. */
   noneTitle?: string;
+  /**
+   * What "none" falls back to, which is what the none cell is drawn in. A chat folder falls back
+   * to the app's accent (the default); a sticky note on the Flujos canvas to its own yellow.
+   */
+  noneColor?: string;
 }) {
   const [ownOpen, setOwnOpen] = useState(false);
   const controlled = openProp !== undefined;
@@ -171,12 +177,12 @@ export function ColorSwatchPicker({
                 }}
                 className="h-3.5 w-3.5 rounded-full"
                 style={{
-                  backgroundColor: "var(--cf-accent)",
+                  backgroundColor: noneColor,
                   backgroundImage:
                     "linear-gradient(45deg, transparent 42%, var(--cf-surface-raised) 42%, var(--cf-surface-raised) 58%, transparent 58%)",
                   boxShadow: value
                     ? undefined
-                    : "0 0 0 1.5px var(--cf-surface-raised), 0 0 0 3px var(--cf-accent)",
+                    : `0 0 0 1.5px var(--cf-surface-raised), 0 0 0 3px ${noneColor}`,
                 }}
               />
             )}

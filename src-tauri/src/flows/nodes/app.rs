@@ -56,6 +56,9 @@ async fn service(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         return Err(NodeError::failed("Choose a service"));
     }
     let action = text(&ctx.params, "action");
+    if matches!(action.as_str(), "readLog" | "waitForLine") {
+        return service_log(ctx, id.trim(), &action).await;
+    }
     let wait = ctx.params.get("wait").is_none() || flag(&ctx.params, "wait");
     let timeout = std::time::Duration::from_secs_f64(number(&ctx.params, "timeoutSec").unwrap_or(120.0).clamp(1.0, 3600.0));
     let work = ctx.run.host.service(id.trim(), if action.is_empty() { "start" } else { &action }, wait, timeout);
@@ -64,6 +67,39 @@ async fn service(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
     };
     Ok(vec![vec![Item::new(state)]])
+}
+
+/// What a service printed — its last lines, or the moment it prints one that matches. The log is the
+/// one the supervisor keeps (and the console replays), colours taken out.
+async fn service_log(ctx: &NodeCtx, id: &str, action: &str) -> Result<Ports, NodeError> {
+    let params = ctx.resolve_once().await?;
+    let args = if action == "readLog" {
+        json!({"serviceId": id, "lines": number(&params, "lines").unwrap_or(100.0).clamp(1.0, 10_000.0) as u64})
+    } else {
+        let pattern = text(&params, "waitText");
+        if pattern.trim().is_empty() {
+            return Err(NodeError::failed("Write the text to wait for"));
+        }
+        if flag(&params, "regex") {
+            regex::Regex::new(&pattern).map_err(|e| NodeError::failed(format!("The pattern is not a valid regular expression: {e}")))?;
+        }
+        json!({
+            "serviceId": id,
+            "pattern": pattern,
+            "regex": flag(&params, "regex"),
+            "onlyNew": params.get("onlyNew").is_none() || flag(&params, "onlyNew"),
+            "timeoutSec": number(&params, "timeoutSec").unwrap_or(120.0).clamp(1.0, 3600.0),
+        })
+    };
+    let op = if action == "readLog" { "service.log" } else { "service.waitFor" };
+    let answer = ctx.run.host.app_call(op, args, ctx.cancel.clone()).await.map_err(|error| {
+        if error.starts_with(crate::ai_runs::CANCELLED_MARKER) {
+            NodeError::Cancelled
+        } else {
+            NodeError::Failed(error)
+        }
+    })?;
+    Ok(vec![vec![Item::new(answer)]])
 }
 
 /// One notification for the node — or one per item, when asked — and the items pass through.

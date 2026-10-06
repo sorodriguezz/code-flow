@@ -1,0 +1,84 @@
+{
+  "id": "cloudflare",
+  "name": "Cloudflare",
+  "baseUrl": "https://api.cloudflare.com/client/v4",
+  "auth": "bearer",
+  "authHint": { "es": "Un API token de Cloudflare con permisos de la zona como credencial Token", "en": "A Cloudflare API token with the zone's permissions as a Token credential" },
+  "okField": "success",
+  "errorField": "errors",
+  "operations": [
+    {
+      "id": "listZones",
+      "name": { "es": "Zonas (dominios)", "en": "Zones (domains)" },
+      "method": "GET",
+      "path": "/zones",
+      "query": { "name": "{{name}}" },
+      "fields": [{ "name": "name", "label": { "es": "Dominio", "en": "Domain" }, "placeholder": "example.com" }],
+      "result": "result"
+    },
+    {
+      "id": "purgeEverything",
+      "name": { "es": "Purgar toda la caché", "en": "Purge the whole cache" },
+      "method": "POST",
+      "path": "/zones/{{zoneId}}/purge_cache",
+      "fields": [{ "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true }],
+      "body": { "purge_everything": true },
+      "result": "result"
+    },
+    {
+      "id": "purgeUrls",
+      "name": { "es": "Purgar unas URLs", "en": "Purge some URLs" },
+      "method": "POST",
+      "path": "/zones/{{zoneId}}/purge_cache",
+      "fields": [
+        { "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true },
+        { "name": "files", "label": { "es": "URLs (JSON)", "en": "URLs (JSON)" }, "placeholder": "[\"https://example.com/app.js\"]", "json": true, "required": true }
+      ],
+      "body": { "files": "{{files}}" },
+      "result": "result"
+    },
+    {
+      "id": "listDnsRecords",
+      "name": { "es": "Registros DNS", "en": "DNS records" },
+      "method": "GET",
+      "path": "/zones/{{zoneId}}/dns_records",
+      "query": { "type": "{{type}}", "name": "{{name}}" },
+      "fields": [
+        { "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true },
+        { "name": "type", "label": { "es": "Tipo (A, CNAME, TXT…)", "en": "Type (A, CNAME, TXT…)" } },
+        { "name": "name", "label": { "es": "Nombre", "en": "Name" }, "placeholder": "api.example.com" }
+      ],
+      "result": "result"
+    },
+    {
+      "id": "createDnsRecord",
+      "name": { "es": "Crear un registro DNS", "en": "Create a DNS record" },
+      "method": "POST",
+      "path": "/zones/{{zoneId}}/dns_records",
+      "fields": [
+        { "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true },
+        { "name": "type", "label": { "es": "Tipo", "en": "Type" }, "placeholder": "A", "required": true },
+        { "name": "name", "label": { "es": "Nombre", "en": "Name" }, "placeholder": "api.example.com", "required": true },
+        { "name": "content", "label": { "es": "Contenido", "en": "Content" }, "placeholder": "203.0.113.10", "required": true },
+        { "name": "ttl", "label": { "es": "TTL (1 = automático)", "en": "TTL (1 = automatic)" }, "placeholder": "1", "json": true },
+        { "name": "proxied", "label": { "es": "Con proxy (true/false)", "en": "Proxied (true/false)" }, "placeholder": "true", "json": true }
+      ],
+      "body": { "type": "{{type}}", "name": "{{name}}", "content": "{{content}}", "ttl": "{{ttl}}", "proxied": "{{proxied}}" },
+      "result": "result"
+    },
+    {
+      "id": "updateDnsRecord",
+      "name": { "es": "Cambiar un registro DNS", "en": "Change a DNS record" },
+      "method": "PATCH",
+      "path": "/zones/{{zoneId}}/dns_records/{{recordId}}",
+      "fields": [
+        { "name": "zoneId", "label": { "es": "Zona (id)", "en": "Zone (id)" }, "required": true },
+        { "name": "recordId", "label": { "es": "Registro (id)", "en": "Record (id)" }, "required": true },
+        { "name": "content", "label": { "es": "Contenido nuevo", "en": "New content" }, "required": true },
+        { "name": "proxied", "label": { "es": "Con proxy (true/false)", "en": "Proxied (true/false)" }, "json": true }
+      ],
+      "body": { "content": "{{content}}", "proxied": "{{proxied}}" },
+      "result": "result"
+    }
+  ]
+}

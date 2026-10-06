@@ -50,9 +50,15 @@ export type FlowParamKind =
   | { type: "engine" }
   | { type: "engines" }
   | { type: "outputFields" }
+  | { type: "formFields" }
+  | { type: "apiRequest" }
+  | { type: "apiEnvironment" }
+  | { type: "extractRules" }
   | { type: "categories" }
   | { type: "mcpServers" }
   | { type: "localModel" }
+  | { type: "file"; placeholder: string; save: string[] }
+  | { type: "apiModel"; purpose: "chat" | "embed" }
   | { type: "agent" }
   | { type: "chainTemplate" }
   | { type: "dbConnection"; kinds: string[] }
@@ -86,6 +92,8 @@ export interface FlowParamSpec {
   default: unknown;
   /** Shown only while `param` holds one of `values`. */
   showIf?: { param: string; values: string[] };
+  /** A second condition that must hold too. */
+  alsoIf?: { param: string; values: string[] };
   /** Whether the field can switch to an expression. */
   expr: boolean;
 }
@@ -180,7 +188,7 @@ export interface FlowConnector {
 
 /** `Connector::credential_kinds`: which credentials sign a connector in, by how it signs in. */
 export const CONNECTOR_CREDENTIALS: Record<FlowConnector["auth"], FlowCredentialKind[]> = {
-  bearer: ["bearer"],
+  bearer: ["bearer", "oauth2"],
   path: ["bearer"],
   basic: ["basic"],
   url: ["webhook"],
@@ -441,8 +449,34 @@ export interface FlowPreview {
   items: number;
 }
 
-export const flowsRun = (flowId: string, mode: FlowRunMode, trigger?: string | null) =>
-  invoke<FlowRunRow>("flows_run", { flowId, mode, trigger: trigger ?? null });
+/** `input` is what the run's form was filled with (`flowsRunForm`); `null` lets the trigger use
+ *  its fields' defaults. */
+export const flowsRun = (flowId: string, mode: FlowRunMode, trigger?: string | null, input?: Record<string, unknown> | null) =>
+  invoke<FlowRunRow>("flows_run", { flowId, mode, trigger: trigger ?? null, input: input ?? null });
+
+/** One field of a manual trigger's form — `flows::form::FormField`. */
+export interface FlowFormField {
+  name: string;
+  label: string;
+  type: "text" | "longText" | "number" | "boolean" | "select" | "date";
+  required: boolean;
+  default: unknown;
+  options: string[];
+}
+
+/** The form a run asks for before it starts, or `null` when its trigger has none. */
+export interface FlowRunForm {
+  triggerId: string;
+  triggerName: string;
+  fields: FlowFormField[];
+}
+
+export const flowsRunForm = (flowId: string, mode: FlowRunMode, trigger?: string | null) =>
+  invoke<FlowRunForm | null>("flows_run_form", { flowId, mode, trigger: trigger ?? null });
+
+/** The main window's answer to a run's question — `lib/flows/bridge.ts`. */
+export const flowsBridgeAnswer = (id: string, ok: boolean, value: unknown, error: string | null) =>
+  invoke<boolean>("flows_bridge_answer", { id, ok, value, error });
 
 export const flowsCancelRun = (runId: string) => invoke<boolean>("flows_cancel_run", { runId });
 
@@ -512,7 +546,7 @@ export const flowsDeleteVariable = (id: string) => invoke<void>("flows_delete_va
 export const flowsSetVariableScope = (id: string, global: boolean) =>
   invoke<void>("flows_set_variable_scope", { id, global });
 
-export type FlowCredentialKind = "bearer" | "basic" | "header" | "query" | "hmac" | "smtp" | "webhook";
+export type FlowCredentialKind = "bearer" | "basic" | "header" | "query" | "hmac" | "smtp" | "imap" | "webhook" | "oauth2" | "aws";
 
 /** A credential as the frontend sees it: never the secret. */
 export interface FlowCredential {
@@ -521,7 +555,27 @@ export interface FlowCredential {
   scope: "workspace" | "global";
   name: string;
   kind: FlowCredentialKind;
-  meta: { user?: string; name?: string; host?: string; port?: string; security?: string; from?: string };
+  meta: {
+    user?: string;
+    name?: string;
+    host?: string;
+    port?: string;
+    security?: string;
+    from?: string;
+    /** OAuth 2: who signs in (`google`, `microsoft`, `custom`) and as which client. */
+    provider?: string;
+    clientId?: string;
+    tenant?: string;
+    authUrl?: string;
+    tokenUrl?: string;
+    scopes?: string;
+    redirectUri?: string;
+    /** AWS: the region a request goes to when its address does not say. */
+    region?: string;
+    /** Set by `flows_oauth_connect`: the account it signed in as, and that it did. */
+    account?: string;
+    connected?: boolean;
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -541,6 +595,9 @@ export const flowsUpdateCredential = (id: string, name: string, meta: Record<str
   invoke<void>("flows_update_credential", { id, name, meta, secret });
 
 export const flowsDeleteCredential = (id: string) => invoke<void>("flows_delete_credential", { id });
+
+/** Signs an OAuth 2 credential in, in the browser; resolves once the tokens are in the keychain. */
+export const flowsOauthConnect = (id: string) => invoke<FlowCredential>("flows_oauth_connect", { id });
 
 export const flowsSetCredentialScope = (id: string, global: boolean) =>
   invoke<void>("flows_set_credential_scope", { id, global });
@@ -619,6 +676,10 @@ export interface FlowTerminalEvent {
 
 /** The models a local server lists, for the Local model node. */
 export const flowsLocalModels = (server: string, url: string) => invoke<string[]>("flows_local_models", { server, url });
+
+/** The models a provider's API offers (`chat` or `embed`), read with the node's credential. */
+export const flowsAiModels = (provider: string, baseUrl: string, credentialId: string | null, purpose: "chat" | "embed") =>
+  invoke<string[]>("flows_ai_models", { provider, baseUrl, credentialId, purpose });
 
 /** `flows:ai` — an AI node's model call is starting; the status bar adopts it under the flow's name. */
 export interface FlowAiEvent {

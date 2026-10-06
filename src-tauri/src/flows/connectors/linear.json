@@ -1,0 +1,78 @@
+{
+  "id": "linear",
+  "name": "Linear",
+  "baseUrl": "https://api.linear.app/graphql",
+  "auth": "headers",
+  "authHint": { "es": "Una API key personal de Linear (Ajustes › API) como credencial Token", "en": "A personal Linear API key (Settings › API) as a Token credential" },
+  "headers": { "Authorization": "{{secret}}" },
+  "errorField": "errors",
+  "failOn": "errors",
+  "operations": [
+    {
+      "id": "createIssue",
+      "name": { "es": "Crear un issue", "en": "Create an issue" },
+      "method": "POST",
+      "fields": [
+        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" }, "required": true },
+        { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
+        { "name": "description", "label": { "es": "Descripción (Markdown)", "en": "Description (Markdown)" }, "multiline": true },
+        { "name": "priority", "label": { "es": "Prioridad (0 a 4)", "en": "Priority (0 to 4)" }, "placeholder": "2", "json": true }
+      ],
+      "body": {
+        "query": "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier title url } } }",
+        "variables": { "input": { "teamId": "{{teamId}}", "title": "{{title}}", "description": "{{description}}", "priority": "{{priority}}" } }
+      },
+      "result": "data.issueCreate.issue"
+    },
+    {
+      "id": "updateState",
+      "name": { "es": "Cambiar el estado de un issue", "en": "Change an issue's state" },
+      "method": "POST",
+      "fields": [
+        { "name": "issueId", "label": { "es": "Issue (id o identificador)", "en": "Issue (id or identifier)" }, "placeholder": "ENG-42", "required": true },
+        { "name": "stateId", "label": { "es": "Estado (id)", "en": "State (id)" }, "required": true }
+      ],
+      "body": {
+        "query": "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success issue { id identifier state { name } } } }",
+        "variables": { "id": "{{issueId}}", "input": { "stateId": "{{stateId}}" } }
+      },
+      "result": "data.issueUpdate.issue"
+    },
+    {
+      "id": "commentIssue",
+      "name": { "es": "Comentar un issue", "en": "Comment on an issue" },
+      "method": "POST",
+      "fields": [
+        { "name": "issueId", "label": { "es": "Issue (id o identificador)", "en": "Issue (id or identifier)" }, "placeholder": "ENG-42", "required": true },
+        { "name": "body", "label": { "es": "Comentario (Markdown)", "en": "Comment (Markdown)" }, "multiline": true, "required": true }
+      ],
+      "body": {
+        "query": "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id url } } }",
+        "variables": { "input": { "issueId": "{{issueId}}", "body": "{{body}}" } }
+      },
+      "result": "data.commentCreate.comment"
+    },
+    {
+      "id": "searchIssues",
+      "name": { "es": "Buscar issues por título", "en": "Search issues by title" },
+      "method": "POST",
+      "fields": [
+        { "name": "text", "label": { "es": "Texto", "en": "Text" }, "required": true },
+        { "name": "first", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "25", "json": true }
+      ],
+      "body": {
+        "query": "query($text: String!, $first: Int) { issues(filter: { title: { containsIgnoreCase: $text } }, first: $first) { nodes { id identifier title url priority state { name } assignee { name } } } }",
+        "variables": { "text": "{{text}}", "first": "{{first}}" }
+      },
+      "result": "data.issues.nodes"
+    },
+    {
+      "id": "listTeams",
+      "name": { "es": "Equipos y sus estados", "en": "Teams and their states" },
+      "method": "POST",
+      "fields": [],
+      "body": { "query": "query { teams { nodes { id key name states { nodes { id name type } } } } }" },
+      "result": "data.teams.nodes"
+    }
+  ]
+}

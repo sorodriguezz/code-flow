@@ -26,7 +26,7 @@ import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
  * when there is none, everything up to it.
  */
 
-const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "pencil"]);
+const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "scan-eye", "messages-square", "pencil", "brain-circuit", "binary", "database-zap", "wand", "reply"]);
 const DATA_LIMIT = 200;
 
 const dataCache = new Map<string, FlowNodeData | null>();
@@ -93,6 +93,25 @@ function nodeTip(type: string, params: Record<string, unknown>, t: (key: Transla
   if (type === "logic.loop") return t("flows.help.loop");
   if (type === "logic.approval") return t("flows.help.approval");
   if (type === "trigger.phone") return t("flows.help.phone");
+  if (type === "ai.prReview") return t("flows.help.prReview");
+  if (type === "trigger.manual") return t("flows.help.manualForm");
+  if (type === "ai.chat") return t("flows.help.chat");
+  if (type === "data.dbml") return t("flows.help.dbml");
+  if (type === "app.apiRequest") return t("flows.help.apiRequest");
+  if (type === "transform.changes") return t("flows.help.changes");
+  if (type === "transform.template") return t("flows.help.template");
+  if (type === "transform.sql") return t("flows.help.sql");
+  if (type === "net.check") return t("flows.help.check");
+  if (type === "net.google") return t("flows.help.google");
+  if (type === "trigger.github") return t("flows.help.github");
+  if (type === "trigger.email" || type === "net.imap") return t("flows.help.email");
+  if (type === "net.queue") return t("flows.help.queue");
+  if (type === "ai.api") return t("flows.help.apiChat");
+  if (type === "ai.vectors") return t("flows.help.vectors");
+  if (type === "app.prDecide") return t("flows.help.prDecide");
+  if (type === "app.prMemory") return t("flows.help.prMemory");
+  if (type === "ai.prFix") return t("flows.help.prFix");
+  if (type === "ai.prReply") return t("flows.help.prReply");
   return "";
 }
 

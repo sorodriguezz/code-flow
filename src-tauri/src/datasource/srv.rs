@@ -100,6 +100,27 @@ fn split(url: &str) -> Option<Parts<'_>> {
     Some(Parts { userinfo, host, tail })
 }
 
+fn resolver_for(nameservers: Vec<IpAddr>) -> Result<TokioResolver, String> {
+    let config = ResolverConfig::from_parts(
+        None,
+        Vec::new(),
+        nameservers.into_iter().map(NameServerConfig::udp_and_tcp).collect(),
+    );
+    TokioResolver::builder_with_config(config, Default::default())
+        .build()
+        .map_err(|e| format!("Couldn't start a DNS resolver: {e}"))
+}
+
+/// A resolver on this machine's own nameservers — the ones `expand` asks, for anyone else who needs
+/// a lookup the OS resolver cannot do (a record type other than A/AAAA: Flujos' site check).
+pub(crate) fn system_resolver() -> Result<TokioResolver, String> {
+    let nameservers = system_nameservers();
+    if nameservers.is_empty() {
+        return Err("This machine's DNS configuration couldn't be read".to_string());
+    }
+    resolver_for(nameservers)
+}
+
 /// Turns a `mongodb+srv://` URL into a plain `mongodb://` one, doing the two lookups here.
 ///
 /// Follows the same rules the driver would: the members come from `_mongodb._tcp.<host>`, the
@@ -122,14 +143,7 @@ pub async fn expand(url: &str) -> Result<String, String> {
         );
     }
 
-    let config = ResolverConfig::from_parts(
-        None,
-        Vec::new(),
-        nameservers.into_iter().map(NameServerConfig::udp_and_tcp).collect(),
-    );
-    let resolver = TokioResolver::builder_with_config(config, Default::default())
-        .build()
-        .map_err(|e| format!("Couldn't start a DNS resolver: {e}"))?;
+    let resolver = resolver_for(nameservers)?;
 
     let srv_name = format!("_mongodb._tcp.{}.", parts.host);
     let records = resolver

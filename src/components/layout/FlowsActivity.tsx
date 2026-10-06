@@ -18,6 +18,10 @@ export function FlowsActivity() {
   const runningCount = useFlowRunsStore((s) => Object.values(s.current).filter((live) => live.run.status === "running").length);
 
   useEffect(() => ensureFlowRunEvents(), []);
+  // What a run asks of this window (a request of the API client, a schema as DBML) — main window only.
+  useEffect(() => {
+    void import("../../lib/flows/bridge").then(({ startFlowsBridge }) => startFlowsBridge());
+  }, []);
   // Shared flows sync in the background whether or not Flows is open (the poller runs in the main
   // window only); a teammate's version reloads what is on screen. Loaded on demand, like the view.
   useEffect(() => {

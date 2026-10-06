@@ -580,7 +580,14 @@ impl RunHost for AppHost {
         }
         let secret = crate::secrets::get_secret(&crate::secrets::flow_credential_key(id))?
             .ok_or_else(|| format!("The credential \"{}\" has no secret stored on this computer", row.name))?;
-        self.secret_used(&secret);
+        if row.kind == "oauth2" {
+            // The stored bundle is never sent whole; its client secret and refresh token could be.
+            let tokens = super::oauth::Tokens::read(&secret);
+            self.secret_used(&tokens.client_secret);
+            self.secret_used(&tokens.refresh_token);
+        } else {
+            self.secret_used(&secret);
+        }
         Ok(Credential { kind: row.kind, meta: row.meta, secret })
     }
 
@@ -705,6 +712,11 @@ impl RunHost for AppHost {
         let op = op.to_string();
         Box::pin(async move { super::app_ops::call(self, &op, args, cancel).await })
     }
+
+    fn oauth_token(&self, id: &str, meta: &Value) -> engine::HostFuture<'_, Result<String, String>> {
+        let (id, meta) = (id.to_string(), meta.clone());
+        Box::pin(async move { super::oauth::access_token(&id, &meta).await })
+    }
 }
 
 // ---------------------------------------------------------------------------------------- start
@@ -759,6 +771,8 @@ pub struct StartRequest {
     pub trigger: Option<String>,
     /// What an outside event gave the trigger — `None` lets a trigger make its own item.
     pub trigger_items: Option<Vec<Item>>,
+    /// What the run's form was filled with, when its manual trigger has one (`flows::form`).
+    pub form_input: Option<Value>,
     pub origin: RunOrigin,
     pub respond: Option<tokio::sync::oneshot::Sender<engine::Reply>>,
     pub depth: u32,
@@ -768,7 +782,7 @@ pub struct StartRequest {
 
 impl StartRequest {
     pub fn manual(mode: RunMode, trigger: Option<String>) -> Self {
-        Self { mode, trigger, trigger_items: None, origin: RunOrigin::Manual, respond: None, depth: 0, wait: false }
+        Self { mode, trigger, trigger_items: None, form_input: None, origin: RunOrigin::Manual, respond: None, depth: 0, wait: false }
     }
 
     pub fn fired(trigger: &str, items: Vec<Item>, origin: RunOrigin) -> Self {
@@ -776,6 +790,7 @@ impl StartRequest {
             mode: RunMode::Full,
             trigger: Some(trigger.to_string()),
             trigger_items: Some(items),
+            form_input: None,
             origin,
             respond: None,
             depth: 0,
@@ -808,9 +823,45 @@ pub(super) fn notify_setting(spec: &FlowSpec, origin: RunOrigin) -> Option<Strin
     })
 }
 
+/// The form a run of `flow_id` in `mode` asks for: the fields of the manual trigger its plan starts
+/// from — `None` when that trigger has none, is pinned, or is not a manual trigger.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunForm {
+    pub trigger_id: String,
+    pub trigger_name: String,
+    pub fields: Vec<crate::flows::form::FormField>,
+}
+
+pub fn run_form(app: &AppHandle, flow_id: &str, mode: &RunMode, trigger: Option<&str>) -> Result<Option<RunForm>, String> {
+    let db = app.state::<Db>();
+    let (parsed, pins) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let flow = flow_queries::get_flow(&conn, flow_id).map_err(|e| e.to_string())?.ok_or("This flow no longer exists")?;
+        (spec::parse(&flow.spec)?, load_pins(&conn, flow_id).map_err(|e| e.to_string())?)
+    };
+    let plan = match run::plan(&parsed, mode, trigger, &pins, &HashMap::new()) {
+        Ok(plan) => plan,
+        // A step with nothing to read from runs up to its node instead — so does its form.
+        Err(code) if code == "needs-upstream" => {
+            let node = mode.target().unwrap_or_default().to_string();
+            run::plan(&parsed, &RunMode::UpTo { node }, trigger, &pins, &HashMap::new())?
+        }
+        Err(_) => return Ok(None),
+    };
+    let Some(start) = plan.trigger.as_deref().and_then(|id| parsed.nodes.iter().find(|n| n.id == id)) else { return Ok(None) };
+    if start.type_id != "trigger.manual" || pins.contains_key(&start.id) {
+        return Ok(None);
+    }
+    let fields = crate::flows::form::fields_of(&start.params);
+    Ok((!fields.is_empty()).then(|| RunForm { trigger_id: start.id.clone(), trigger_name: start.name.clone(), fields }))
+}
+
 /// Starts a run of `flow_id` by hand. Returns as soon as it is under way; the rest arrives as events.
-pub fn start(app: &AppHandle, flow_id: &str, mode: RunMode, trigger: Option<String>) -> Result<FlowRunRow, String> {
-    start_with(app, flow_id, StartRequest::manual(mode, trigger)).map(|(row, _)| row)
+pub fn start(app: &AppHandle, flow_id: &str, mode: RunMode, trigger: Option<String>, input: Option<Value>) -> Result<FlowRunRow, String> {
+    let mut request = StartRequest::manual(mode, trigger);
+    request.form_input = input;
+    start_with(app, flow_id, request).map(|(row, _)| row)
 }
 
 /// Starts a run of `flow_id`, however it was asked for.
@@ -819,7 +870,7 @@ pub fn start_with(
     flow_id: &str,
     request: StartRequest,
 ) -> Result<(FlowRunRow, Option<tokio::sync::oneshot::Receiver<Finished>>), String> {
-    let StartRequest { mode, trigger, trigger_items, origin, respond, depth, wait } = request;
+    let StartRequest { mode, trigger, trigger_items, form_input, origin, respond, depth, wait } = request;
     let db = app.state::<Db>();
     let (flow, parsed, pins, vars, locale, previous, mode) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -860,6 +911,14 @@ pub fn start_with(
     };
     if let Some(items) = trigger_items {
         plan.trigger_output = Some(vec![items]);
+    } else if let Some(input) = form_input {
+        // The form's answers are the manual trigger's item — typed against its fields here.
+        if let Some(start) = plan.trigger.as_deref().and_then(|id| parsed.nodes.iter().find(|n| n.id == id)) {
+            if start.type_id == "trigger.manual" && !pins.contains_key(&start.id) {
+                let item = crate::flows::form::coerce(&crate::flows::form::fields_of(&start.params), &input)?;
+                plan.trigger_output = Some(vec![vec![Item::new(item)]]);
+            }
+        }
     }
     let label = match origin {
         RunOrigin::Manual => mode.label(),

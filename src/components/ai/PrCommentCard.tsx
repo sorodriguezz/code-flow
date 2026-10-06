@@ -7,6 +7,7 @@ import { buttonClass } from "../common/Button";
 import { Segmented } from "../common/Segmented";
 import { textAreaClass } from "./docParts";
 import { draftPrCommentReply } from "../../lib/tauri/commands";
+import { threadAsText, threadFixPrompt, threadLocation } from "../../lib/prThreadText";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { withExtraInstructions } from "../../lib/parseAnalysis";
 import { pushErrorToast } from "../../state/toastStore";
@@ -40,27 +41,7 @@ export function PrCommentsSkeleton({ label, rows = 2 }: { label: string; rows?: 
   );
 }
 
-function locationLabel(thread: PrCommentThread): string | null {
-  if (!thread.file_path || thread.start_line === null) return null;
-  const end = thread.end_line !== null && thread.end_line !== thread.start_line ? `-${thread.end_line}` : "";
-  return `${thread.file_path}:${thread.start_line}${end}`;
-}
-
-function buildFixPrompt(thread: PrCommentThread): string {
-  const lines = ["Comentario de revisión en el pull request:"];
-  const loc = locationLabel(thread);
-  if (loc) lines.push(`Ubicación: ${loc}`);
-  for (const c of thread.comments) lines.push(`${c.author}: ${c.content}`);
-  return lines.join("\n");
-}
-
-/** The conversation as plain text, for the model drafting a reply to it. Same shape the card
- * renders, minus the markup — what was said, by whom, and where. */
-function threadAsText(thread: PrCommentThread): string {
-  const loc = locationLabel(thread);
-  const head = loc ? `Ubicación: ${loc}\n` : "";
-  return head + thread.comments.map((c) => `${c.author}: ${c.content}`).join("\n\n");
-}
+const locationLabel = threadLocation;
 
 /** An existing PR comment thread — e.g. from a human reviewer (a tech lead leaving feedback
  * directly on Azure DevOps, not through CodeFlow) — shown alongside CodeFlow's own AI
@@ -257,7 +238,7 @@ export function PrCommentCard({
             resolution={resolution}
             runId={runId}
             runStartedAt={runStartedAt}
-            onClick={(extra) => void resolve(withExtraInstructions(buildFixPrompt(thread), extra))}
+            onClick={(extra) => void resolve(withExtraInstructions(threadFixPrompt(thread), extra))}
             onClear={clearResolution}
             trailing={
               onResolveThread && (

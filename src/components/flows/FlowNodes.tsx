@@ -1,7 +1,8 @@
 import { createContext, memo, useContext, useEffect, useRef, useState, type CSSProperties } from "react";
-import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
-import { Check, Hourglass, Minus, Pin, X } from "lucide-react";
+import { BaseEdge, EdgeLabelRenderer, getBezierPath, Handle, NodeResizer, Position, type EdgeProps, type Node, type NodeProps } from "@xyflow/react";
+import { Check, Hourglass, Minus, Pin, Trash2, X } from "lucide-react";
 import { AiGlyph, type AiGlyphName } from "../common/AiGlyph";
+import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { familyColor, nodeIcon } from "../../lib/flows/nodeIcons";
 import type { FlowNodeDescriptor, FlowNodeRunStatus } from "../../lib/tauri/flowsCommands";
@@ -30,6 +31,8 @@ export interface CfNodeData extends Record<string, unknown> {
   errorPort: boolean;
   /** What the run on screen did with it. */
   run: { status: FlowNodeRunStatus; error: string; title: string; waiting?: boolean } | null;
+  /** Its clock while it runs, what it took once it ran; `""` when there is nothing to show. */
+  time: string;
   pinned: boolean;
   pinnedTitle: string;
   /** What an AI proposal on screen does to it. */
@@ -40,7 +43,14 @@ export interface CfNodeData extends Record<string, unknown> {
 export interface NoteNodeData extends Record<string, unknown> {
   text: string;
   placeholder: string;
+  /** `noteColor`: a `#rrggbb`, or `""` for the default yellow. */
+  color: string;
+  /** A proposal is on the canvas: the note is looked at, not painted. */
+  locked: boolean;
 }
+
+/** A note's colour when it has none of its own — `.cf-flow-note`'s `--cf-note-ink` in flows.css. */
+export const NOTE_DEFAULT_INK = "#facc15";
 
 export type CfNode = Node<CfNodeData, "cf">;
 export type NoteNode = Node<NoteNodeData, "note">;
@@ -52,14 +62,36 @@ export interface CanvasActions {
   /** A resize begins — the editor records the undo step once, here. */
   beginGesture: () => void;
   commitNoteText: (id: string, text: string) => void;
+  /** One connection out, by its key — one undo step, like the Delete key. */
+  removeConnection: (id: string) => void;
+  /** The remove button's label, translated by the editor like the notes' placeholder. */
+  removeConnectionLabel: string;
+  /** Paints a note — the whole selection when the note is part of it. */
+  setNoteColor: (id: string, color: string) => void;
+  /** The note whose palette is open. Here rather than in the note, because the note's right-click
+   *  menu opens it too (the way the chat's folders do). */
+  noteColorFor: string | null;
+  setNoteColorFor: (id: string | null) => void;
+  noteColorLabel: string;
+  noteColorNoneLabel: string;
 }
 
 export const CanvasActionsContext = createContext<CanvasActions>({
   beginGesture: () => {},
   commitNoteText: () => {},
+  removeConnection: () => {},
+  removeConnectionLabel: "",
+  setNoteColor: () => {},
+  noteColorFor: null,
+  setNoteColorFor: () => {},
+  noteColorLabel: "",
+  noteColorNoneLabel: "",
 });
 
-const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "pencil"]);
+const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "scan-eye", "messages-square", "pencil", "brain-circuit", "binary", "database-zap", "wand", "reply"]);
+
+/** AI nodes that compute vectors rather than reason: no ThinkingOrb while they run. */
+const COMPUTES_ONLY = new Set<string>(["ai.embed", "ai.vectors"]);
 
 /** Where the `index`-th of `count` ports sits along the tile's edge. */
 const portTop = (index: number, count: number) => (count <= 1 ? "50%" : `${((index + 1) / (count + 1)) * 100}%`);
@@ -84,7 +116,7 @@ function RunBadge({ status, title, waiting }: { status: FlowNodeRunStatus; title
 }
 
 export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNode>) {
-  const { descriptor, name, typeLabel, disabled, inputLabels, outputLabels, outputs, errorPort, run, pinned, pinnedTitle, diff, diffTitle } = data;
+  const { descriptor, name, typeLabel, disabled, inputLabels, outputLabels, outputs, errorPort, run, time, pinned, pinnedTitle, diff, diffTitle } = data;
   const Icon = nodeIcon(descriptor.icon);
   const glyph =
     descriptor.family === "ai" && AI_GLYPHS.has(descriptor.icon) ? (
@@ -103,7 +135,7 @@ export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNod
         {glyph}
         {run && <RunBadge status={run.status} title={run.title} waiting={run.waiting} />}
         {/* A model at work — the one mark the app keeps for reasoning, and only while it lasts. */}
-        {run?.status === "running" && descriptor.family === "ai" && (
+        {run?.status === "running" && descriptor.family === "ai" && !COMPUTES_ONLY.has(descriptor.typeId) && (
           <span className="cf-flow-node__orb" title={run.title}>
             <ThinkingOrb size="sm" />
           </span>
@@ -159,6 +191,7 @@ export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNod
       <div className="cf-flow-node__label">
         <span className="cf-flow-node__name">{name}</span>
         {typeLabel !== name && <span className="cf-flow-node__type">{typeLabel}</span>}
+        {time && <span className={`cf-flow-node__time ${run?.status === "running" ? "is-live" : ""}`}>{time}</span>}
       </div>
     </div>
   );
@@ -167,6 +200,10 @@ export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNod
 /**
  * A sticky note: text on the canvas that runs nothing. Double-click to write; the change lands as
  * one undo step when the box loses focus, not one per keystroke.
+ *
+ * Its colour is a dot in the corner, shown on hover and while selected, that opens the app's
+ * palette (`ColorSwatchPicker`, as the chat's folders and the workspaces use) — the note's
+ * right-click menu opens the same one.
  */
 export const NoteNodeView = memo(function NoteNodeView({ id, data, selected }: NodeProps<NoteNode>) {
   const actions = useContext(CanvasActionsContext);
@@ -196,9 +233,29 @@ export const NoteNodeView = memo(function NoteNodeView({ id, data, selected }: N
         onResizeStart={actions.beginGesture}
       />
       <div
-        className={`cf-flow-note ${!editing && !data.text ? "is-empty" : ""}`}
+        className={`cf-flow-note ${editing ? "is-editing" : !data.text ? "is-empty" : ""}`}
+        style={data.color ? ({ "--cf-note-ink": data.color } as CSSProperties) : undefined}
         onDoubleClick={() => setEditing(true)}
       >
+        {!editing && !data.locked && (
+          <div
+            // `nodrag`/`nopan`: a press on the dot is the dot's, not the start of moving the note.
+            className={`cf-flow-note__color nodrag nopan ${actions.noteColorFor === id ? "is-open" : ""}`}
+            onDoubleClick={(event) => event.stopPropagation()}
+          >
+            <ColorSwatchPicker
+              value={data.color}
+              onChange={(color) => actions.setNoteColor(id, color)}
+              title={actions.noteColorLabel}
+              allowNone
+              noneTitle={actions.noteColorNoneLabel}
+              noneColor={NOTE_DEFAULT_INK}
+              open={actions.noteColorFor === id}
+              onOpenChange={(open) => actions.setNoteColorFor(open ? id : null)}
+              trigger={<span className="cf-flow-note__swatch" />}
+            />
+          </div>
+        )}
         {editing ? (
           <textarea
             ref={field}
@@ -221,6 +278,107 @@ export const NoteNodeView = memo(function NoteNodeView({ id, data, selected }: N
           data.text || data.placeholder
         )}
       </div>
+    </>
+  );
+});
+
+/** How long the remove button outlives the pointer leaving the line — enough to cross the gap
+ *  between the line and the button without it going away under the cursor. */
+const EDGE_LEAVE_MS = 160;
+
+/**
+ * A connection: React Flow's own bezier (the same path, label and hit area as its default edge),
+ * plus a button to take it out — shown while the pointer is on the line and while the connection is
+ * selected, at the middle of the line, under the items count when the last run left one there.
+ * The other ways out are the Delete key on a selected connection and its right-click menu.
+ *
+ * `deletable: false` (a proposal on the canvas) leaves just the line.
+ */
+export const FlowEdgeView = memo(function FlowEdgeView({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  selected,
+  deletable,
+  label,
+  labelStyle,
+  labelShowBg,
+  labelBgStyle,
+  labelBgPadding,
+  labelBgBorderRadius,
+  style,
+  markerStart,
+  markerEnd,
+  pathOptions,
+  interactionWidth,
+}: EdgeProps) {
+  const actions = useContext(CanvasActionsContext);
+  const [hot, setHot] = useState(false);
+  const leaving = useRef<number | undefined>(undefined);
+  const [path, labelX, labelY] = getBezierPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+    curvature: (pathOptions as { curvature?: number } | undefined)?.curvature,
+  });
+
+  useEffect(() => () => window.clearTimeout(leaving.current), []);
+
+  const enter = () => {
+    window.clearTimeout(leaving.current);
+    setHot(true);
+  };
+  const leave = () => {
+    window.clearTimeout(leaving.current);
+    leaving.current = window.setTimeout(() => setHot(false), EDGE_LEAVE_MS);
+  };
+
+  return (
+    <>
+      <g className={hot ? "cf-flow-edge is-hot" : "cf-flow-edge"} onPointerEnter={enter} onPointerLeave={leave}>
+        <BaseEdge
+          path={path}
+          labelX={labelX}
+          labelY={labelY}
+          label={label}
+          labelStyle={labelStyle}
+          labelShowBg={labelShowBg}
+          labelBgStyle={labelBgStyle}
+          labelBgPadding={labelBgPadding}
+          labelBgBorderRadius={labelBgBorderRadius}
+          style={style}
+          markerStart={markerStart}
+          markerEnd={markerEnd}
+          interactionWidth={interactionWidth}
+        />
+      </g>
+      {deletable !== false && (hot || selected) && (
+        <EdgeLabelRenderer>
+          <button
+            type="button"
+            // `nodrag`/`nopan`: a press here is the button's, not the start of a pan.
+            className="cf-flow-edge-remove nodrag nopan"
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY + (label ? 18 : 0)}px)` }}
+            title={actions.removeConnectionLabel}
+            aria-label={actions.removeConnectionLabel}
+            onPointerEnter={enter}
+            onPointerLeave={leave}
+            onClick={(event) => {
+              event.stopPropagation();
+              actions.removeConnection(id);
+            }}
+          >
+            <Trash2 size={11} strokeWidth={2.25} />
+          </button>
+        </EdgeLabelRenderer>
+      )}
     </>
   );
 });

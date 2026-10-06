@@ -1,0 +1,120 @@
+{
+  "id": "github",
+  "name": "GitHub",
+  "baseUrl": "https://api.github.com",
+  "auth": "bearer",
+  "authHint": { "es": "Un token de GitHub (fine-grained o clásico) como credencial Token", "en": "A GitHub token (fine-grained or classic) as a Token credential" },
+  "headers": { "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "CodeFlow-Flujos" },
+  "errorField": "message",
+  "operations": [
+    {
+      "id": "createIssue",
+      "name": { "es": "Crear un issue", "en": "Create an issue" },
+      "method": "POST",
+      "path": "/repos/{{owner}}/{{repo}}/issues",
+      "fields": [
+        { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
+        { "name": "body", "label": { "es": "Descripción", "en": "Description" }, "multiline": true },
+        { "name": "labels", "label": { "es": "Etiquetas (JSON)", "en": "Labels (JSON)" }, "placeholder": "[\"bug\"]", "json": true },
+        { "name": "assignees", "label": { "es": "Asignados (JSON)", "en": "Assignees (JSON)" }, "placeholder": "[\"octocat\"]", "json": true }
+      ],
+      "body": { "title": "{{title}}", "body": "{{body}}", "labels": "{{labels}}", "assignees": "{{assignees}}" }
+    },
+    {
+      "id": "commentIssue",
+      "name": { "es": "Comentar un issue o PR", "en": "Comment on an issue or PR" },
+      "method": "POST",
+      "path": "/repos/{{owner}}/{{repo}}/issues/{{number}}/comments",
+      "fields": [
+        { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "number", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true },
+        { "name": "body", "label": { "es": "Comentario", "en": "Comment" }, "multiline": true, "required": true }
+      ],
+      "body": { "body": "{{body}}" }
+    },
+    {
+      "id": "updateIssue",
+      "name": { "es": "Cerrar, reabrir o editar un issue", "en": "Close, reopen or edit an issue" },
+      "method": "PATCH",
+      "path": "/repos/{{owner}}/{{repo}}/issues/{{number}}",
+      "fields": [
+        { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "number", "label": { "es": "Número", "en": "Number" }, "placeholder": "42", "required": true },
+        { "name": "state", "label": { "es": "Estado (open o closed)", "en": "State (open or closed)" }, "placeholder": "closed" },
+        { "name": "title", "label": { "es": "Título nuevo", "en": "New title" } },
+        { "name": "labels", "label": { "es": "Etiquetas (JSON)", "en": "Labels (JSON)" }, "placeholder": "[\"done\"]", "json": true }
+      ],
+      "body": { "state": "{{state}}", "title": "{{title}}", "labels": "{{labels}}" }
+    },
+    {
+      "id": "listIssues",
+      "name": { "es": "Listar issues", "en": "List issues" },
+      "method": "GET",
+      "path": "/repos/{{owner}}/{{repo}}/issues",
+      "query": { "state": "{{state}}", "labels": "{{labels}}", "since": "{{since}}", "per_page": "{{perPage}}" },
+      "fields": [
+        { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "state", "label": { "es": "Estado (open, closed, all)", "en": "State (open, closed, all)" }, "placeholder": "open" },
+        { "name": "labels", "label": { "es": "Etiquetas, separadas por comas", "en": "Labels, comma separated" }, "placeholder": "bug" },
+        { "name": "since", "label": { "es": "Cambiados desde (ISO 8601)", "en": "Changed since (ISO 8601)" }, "placeholder": "2026-10-01T00:00:00Z" },
+        { "name": "perPage", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "30" }
+      ]
+    },
+    {
+      "id": "searchIssues",
+      "name": { "es": "Buscar issues y PRs", "en": "Search issues and PRs" },
+      "method": "GET",
+      "path": "/search/issues",
+      "query": { "q": "{{q}}", "per_page": "{{perPage}}" },
+      "fields": [
+        { "name": "q", "label": { "es": "Búsqueda", "en": "Search" }, "placeholder": "repo:acme/app is:issue is:open label:bug", "required": true },
+        { "name": "perPage", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "30" }
+      ],
+      "result": "items"
+    },
+    {
+      "id": "createRelease",
+      "name": { "es": "Crear una release", "en": "Create a release" },
+      "method": "POST",
+      "path": "/repos/{{owner}}/{{repo}}/releases",
+      "fields": [
+        { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "tag", "label": { "es": "Tag", "en": "Tag" }, "placeholder": "v1.4.0", "required": true },
+        { "name": "name", "label": { "es": "Nombre", "en": "Name" } },
+        { "name": "body", "label": { "es": "Notas", "en": "Notes" }, "multiline": true },
+        { "name": "draft", "label": { "es": "Borrador (true/false)", "en": "Draft (true/false)" }, "placeholder": "false", "json": true },
+        { "name": "generateNotes", "label": { "es": "Notas automáticas (true/false)", "en": "Automatic notes (true/false)" }, "placeholder": "true", "json": true }
+      ],
+      "body": { "tag_name": "{{tag}}", "name": "{{name}}", "body": "{{body}}", "draft": "{{draft}}", "generate_release_notes": "{{generateNotes}}" }
+    },
+    {
+      "id": "latestRelease",
+      "name": { "es": "La última release", "en": "The latest release" },
+      "method": "GET",
+      "path": "/repos/{{owner}}/{{repo}}/releases/latest",
+      "fields": [
+        { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true }
+      ]
+    },
+    {
+      "id": "dispatch",
+      "name": { "es": "Disparar un repository_dispatch", "en": "Send a repository_dispatch" },
+      "method": "POST",
+      "path": "/repos/{{owner}}/{{repo}}/dispatches",
+      "fields": [
+        { "name": "owner", "label": { "es": "Dueño", "en": "Owner" }, "placeholder": "acme", "required": true },
+        { "name": "repo", "label": { "es": "Repositorio", "en": "Repository" }, "placeholder": "app", "required": true },
+        { "name": "eventType", "label": { "es": "Tipo de evento", "en": "Event type" }, "placeholder": "deploy", "required": true },
+        { "name": "payload", "label": { "es": "Datos (JSON)", "en": "Payload (JSON)" }, "placeholder": "{\"env\": \"prod\"}", "json": true }
+      ],
+      "body": { "event_type": "{{eventType}}", "client_payload": "{{payload}}" }
+    }
+  ]
+}

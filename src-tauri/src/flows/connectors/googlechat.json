@@ -1,0 +1,18 @@
+{
+  "id": "googlechat",
+  "name": "Google Chat",
+  "baseUrl": "",
+  "auth": "url",
+  "authHint": { "es": "La URL del webhook del espacio (Aplicaciones e integraciones › Webhooks) como credencial Webhook", "en": "The space's webhook URL (Apps & integrations › Webhooks) as a Webhook credential" },
+  "errorField": "error.message",
+  "operations": [
+    {
+      "id": "sendMessage",
+      "name": { "es": "Enviar un mensaje al espacio", "en": "Send a message to the space" },
+      "method": "POST",
+      "url": "{{secret}}",
+      "fields": [{ "name": "text", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true }],
+      "body": { "text": "{{text}}" }
+    }
+  ]
+}

@@ -83,7 +83,7 @@ const SETTINGS_KEY = "api_settings";
  * per workspace — a shared key would put another workspace's tabs back on screen right after
  * the switch that was supposed to leave them behind.
  */
-const activeEnvironmentKey = (workspaceId: string) => `api_active_environment:${workspaceId}`;
+export const activeEnvironmentKey = (workspaceId: string) => `api_active_environment:${workspaceId}`;
 // The open tabs live under `api_open_tabs:<workspace>`, a key only the backend builds now — it is
 // read and written through `apiLoadOpenTabs`/`apiSaveOpenTabs`, which seal the drafts' credentials.
 
@@ -1574,7 +1574,7 @@ function pathOwnedBy(path: string, tabId: string): boolean {
  * The stored settings blob, which is whatever shape the version that wrote it used — including
  * fields this one has since dropped.
  */
-type StoredSettings = Partial<ApiSettings> & {
+export type StoredSettings = Partial<ApiSettings> & {
   syncCursors?: unknown;
   supabaseUrl?: string;
   supabaseReady?: boolean;
@@ -1599,7 +1599,7 @@ type StoredSettings = Partial<ApiSettings> & {
  *    list rather than to a nameless entry: never having set a project up is the normal state for
  *    someone who only ever accepted invitations.
  */
-function migrateSettings(stored: StoredSettings): ApiSettings | null {
+export function migrateSettings(stored: StoredSettings): ApiSettings | null {
   let blob = stored;
   let migrated = false;
 
@@ -1854,6 +1854,20 @@ function ancestorAuth(
   folderId: string | null,
 ): (AuthConfig | null)[] {
   const { folders, collections } = get();
+  return ancestorAuthIn(folders, collections, collectionId, folderId);
+}
+
+/**
+ * The auth a request inherits — its folders' innermost first, then its collection's — from any
+ * tree, not only the one this store holds: a flow runs requests of a workspace that may not be the
+ * one the API tab has open (`lib/api/savedRequest.ts`).
+ */
+export function ancestorAuthIn(
+  folders: ApiFolder[],
+  collections: ApiCollection[],
+  collectionId: string | null,
+  folderId: string | null,
+): (AuthConfig | null)[] {
   const chain: (AuthConfig | null)[] = [];
   const seen = new Set<string>();
   let current = folderId;
@@ -1874,16 +1888,16 @@ function ancestorAuth(
 // ---------------------------------------------------------------------------
 
 /** A row whose `spec` is corrupt still opens, as an empty request of its protocol. */
-function parseSpec(row: ApiRequestRow): ApiRequestSpec {
+export function parseSpec(row: ApiRequestRow): ApiRequestSpec {
   const fallback = defaultRequestSpec(row.protocol);
   return { ...fallback, ...parseJson<Partial<ApiRequestSpec>>(row.spec, {}) };
 }
 
-function parseAuth(json: string): AuthConfig | null {
+export function parseAuth(json: string): AuthConfig | null {
   return parseJson<AuthConfig | null>(json, null);
 }
 
-function parseVariables(json: string | undefined): ApiVariable[] {
+export function parseVariables(json: string | undefined): ApiVariable[] {
   const parsed = parseJson<ApiVariable[]>(json ?? null, []);
   return Array.isArray(parsed) ? parsed : [];
 }
@@ -1909,7 +1923,7 @@ function upsertVariable(variables: ApiVariable[], key: string, value: string): A
   return next;
 }
 
-function parseJson<T>(raw: string | null, fallback: T): T {
+export function parseJson<T>(raw: string | null, fallback: T): T {
   if (raw === null || raw === "") return fallback;
   try {
     return JSON.parse(raw) as T;

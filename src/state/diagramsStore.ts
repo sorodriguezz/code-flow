@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import {
   diagramsCreateDiagram,
@@ -1875,3 +1876,24 @@ export function filterDiagrams(
     }
   });
 }
+
+/**
+ * A flow wrote a diagram of this workspace (`data.dbml`): the list is read again, and the open one,
+ * when it is that one and holds no edit of its own, is read again too — so what is on screen is what
+ * the flow wrote, and no later autosave puts the old text back over it.
+ */
+void listen<{ workspaceId: string; diagramId?: string }>("diagrams:changed", ({ payload }) => {
+  const state = useDiagramsStore.getState();
+  if (payload.workspaceId !== state.workspaceId || state.loading) return;
+  void diagramsLoadTree(payload.workspaceId)
+    .then((tree) => {
+      if (useDiagramsStore.getState().workspaceId !== payload.workspaceId) return;
+      useDiagramsStore.setState({ diagrams: tree.diagrams.map(toDiagram), folders: tree.folders });
+    })
+    .catch(() => {});
+  const draft = state.draft;
+  if (payload.diagramId && draft?.id === payload.diagramId && !draft.dirty) {
+    useDiagramsStore.setState({ draft: null });
+    void useDiagramsStore.getState().openDiagram(payload.diagramId);
+  }
+});

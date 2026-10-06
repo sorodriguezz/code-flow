@@ -66,7 +66,7 @@ pub(crate) fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
 /// Review memory is only ever allowed to be read back for the *same* repository — see `repo_key`
 /// on `ReviewMeta`. Lower-cased because neither host treats these names case-sensitively, and a
 /// project re-linked with different capitalisation is the same repository.
-fn repo_key(link: &LinkedRepo) -> String {
+pub(crate) fn repo_key(link: &LinkedRepo) -> String {
     match link {
         LinkedRepo::GitHub { host, owner, repo } => {
             format!("github:{host}/{owner}/{repo}").to_lowercase()

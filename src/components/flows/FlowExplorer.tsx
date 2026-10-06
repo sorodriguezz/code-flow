@@ -18,7 +18,6 @@ import {
   Search,
   Trash2,
   Upload,
-  UserPlus,
   Users,
   Waypoints,
   X,
@@ -34,7 +33,7 @@ import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowsStore, type FlowItem } from "../../state/flowsStore";
 import { useT } from "../../state/languageStore";
 import { TemplatesDialog } from "./TemplatesDialog";
-import { FlowShareDialog, JoinSharedDialog } from "./FlowShareDialog";
+import { FlowShareDialog } from "./FlowShareDialog";
 import { useFlowShareStore } from "../../state/flowShareStore";
 import { promptAction } from "../../state/promptStore";
 
@@ -60,7 +59,6 @@ export function FlowExplorer() {
   const t = useT();
   const [templatesFor, setTemplatesFor] = useState<{ folderId: string | null } | null>(null);
   const [shareFor, setShareFor] = useState<string | null>(null);
-  const [joining, setJoining] = useState(false);
   const shares = useFlowShareStore((s) => s.shares);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; heading?: string } | null>(null);
   const searchField = useRef<HTMLInputElement>(null);
@@ -232,7 +230,6 @@ export function FlowExplorer() {
     <div className="flex h-full min-h-0 flex-col">
       {templatesFor && <TemplatesDialog folderId={templatesFor.folderId} onClose={() => setTemplatesFor(null)} />}
       {shareFor && <FlowShareDialog flowId={shareFor} onClose={() => setShareFor(null)} />}
-      {joining && <JoinSharedDialog folderId={null} onClose={() => setJoining(false)} />}
       <div className={explorerHeadClass}>
         <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-muted)]">
           {t("flows.title")}
@@ -283,12 +280,12 @@ export function FlowExplorer() {
         <button
           type="button"
           className={iconButtonClass({ size: "sm" })}
-          title={t("flows.share.joinTitle")}
-          aria-label={t("flows.share.joinTitle")}
-          onClick={() => setJoining(true)}
-          data-tour="flows-join"
+          title={t("flows.collab.title")}
+          aria-label={t("flows.collab.title")}
+          onClick={() => useFlowShareStore.getState().openCollab()}
+          data-tour="flows-collab"
         >
-          <UserPlus size={14} />
+          <Users size={14} />
         </button>
         <button
           type="button"

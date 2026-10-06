@@ -1,0 +1,54 @@
+{
+  "id": "netlify",
+  "name": "Netlify",
+  "baseUrl": "https://api.netlify.com/api/v1",
+  "auth": "bearer",
+  "authHint": { "es": "Un token de acceso personal de Netlify como credencial Token", "en": "A Netlify personal access token as a Token credential" },
+  "errorField": "message",
+  "operations": [
+    {
+      "id": "listSites",
+      "name": { "es": "Sitios", "en": "Sites" },
+      "method": "GET",
+      "path": "/sites",
+      "fields": []
+    },
+    {
+      "id": "listDeploys",
+      "name": { "es": "Despliegues de un sitio", "en": "A site's deploys" },
+      "method": "GET",
+      "path": "/sites/{{siteId}}/deploys",
+      "query": { "per_page": "{{perPage}}" },
+      "fields": [
+        { "name": "siteId", "label": { "es": "Sitio (id)", "en": "Site (id)" }, "required": true },
+        { "name": "perPage", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "10" }
+      ]
+    },
+    {
+      "id": "getDeploy",
+      "name": { "es": "Un despliegue y su estado", "en": "A deploy and its state" },
+      "method": "GET",
+      "path": "/deploys/{{deployId}}",
+      "fields": [{ "name": "deployId", "label": { "es": "Despliegue (id)", "en": "Deploy (id)" }, "required": true }]
+    },
+    {
+      "id": "triggerBuild",
+      "name": { "es": "Lanzar un build", "en": "Start a build" },
+      "method": "POST",
+      "path": "/sites/{{siteId}}/builds",
+      "fields": [{ "name": "siteId", "label": { "es": "Sitio (id)", "en": "Site (id)" }, "required": true }],
+      "body": {}
+    },
+    {
+      "id": "restoreDeploy",
+      "name": { "es": "Volver a un despliegue anterior", "en": "Roll back to an earlier deploy" },
+      "method": "POST",
+      "path": "/sites/{{siteId}}/deploys/{{deployId}}/restore",
+      "fields": [
+        { "name": "siteId", "label": { "es": "Sitio (id)", "en": "Site (id)" }, "required": true },
+        { "name": "deployId", "label": { "es": "Despliegue (id)", "en": "Deploy (id)" }, "required": true }
+      ],
+      "body": {}
+    }
+  ]
+}

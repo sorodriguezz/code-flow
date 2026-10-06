@@ -53,7 +53,7 @@ async fn call(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError> {
         if id.trim().is_empty() {
             return Err(NodeError::failed(format!("Pick the credential for {}", connector.name)));
         }
-        Some(ctx.run.host.credential(id.trim()).map_err(NodeError::Failed)?)
+        Some(ctx.credential(id.trim()).await?)
     };
     let timeout_ms = number(params, "timeoutMs").map(|n| n.max(0.0) as u64).filter(|n| *n > 0).unwrap_or(30_000);
     let (request, url) = request_for(connector, operation, values, credential.as_ref(), timeout_ms)?;
@@ -90,8 +90,6 @@ pub(super) fn request_for(
             return Err(NodeError::failed(format!("Fill in “{}”", field.label.en)));
         }
     }
-    let mut headers: Vec<(String, String)> =
-        connector.headers.iter().map(|(name, value)| (name.clone(), value.as_str().unwrap_or_default().to_string())).collect();
     if let Some(credential) = credential {
         let kinds = connector.credential_kinds();
         if !kinds.contains(&credential.kind.as_str()) {
@@ -101,18 +99,35 @@ pub(super) fn request_for(
     match (connector.auth.as_str(), credential) {
         ("none", _) => {}
         (_, None) => return Err(NodeError::failed(format!("Pick the credential for {}", connector.name))),
+        // Signed below, with the rest of the headers.
+        ("bearer" | "basic", Some(_)) => {}
+        ("path" | "url" | "headers", Some(credential)) => {
+            values.insert("secret".into(), Value::String(credential.secret.trim().to_string()));
+        }
+        ("query", Some(credential)) => {
+            let user = credential.meta.get("user").and_then(Value::as_str).unwrap_or_default();
+            values.insert("user".into(), Value::String(user.trim().to_string()));
+            values.insert("secret".into(), Value::String(credential.secret.trim().to_string()));
+        }
+        (other, _) => {
+            return Err(NodeError::failed(format!("{} signs in with “{other}”, which this build does not know", connector.name)))
+        }
+    }
+
+    // The connector's headers, then the operation's — `{{secret}}` and the fields placed in them.
+    let mut headers: Vec<(String, String)> = Vec::new();
+    match (connector.auth.as_str(), credential) {
         ("bearer", Some(credential)) => headers.push(("Authorization".into(), format!("Bearer {}", credential.secret))),
         ("basic", Some(credential)) => {
             let user = credential.meta.get("user").and_then(Value::as_str).unwrap_or_default();
             let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{}", credential.secret));
             headers.push(("Authorization".into(), format!("Basic {token}")));
         }
-        ("path" | "url", Some(credential)) => {
-            values.insert("secret".into(), Value::String(credential.secret.trim().to_string()));
-        }
-        (other, _) => {
-            return Err(NodeError::failed(format!("{} signs in with “{other}”, which this build does not know", connector.name)))
-        }
+        _ => {}
+    }
+    for (name, value) in connector.headers.iter().chain(operation.headers.iter()) {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), connectors::splice(value.as_str().unwrap_or_default(), &values)));
     }
 
     let text = if operation.url.is_empty() {
@@ -127,13 +142,23 @@ pub(super) fn request_for(
         return Err(NodeError::failed(format!("{} is not an http or https address", shown())));
     }
     let json_fields: Vec<&str> = connector.fields_of(operation).into_iter().filter(|f| f.json).map(|f| f.name.as_str()).collect();
-    if let Some(Value::Object(query)) =
-        connectors::render(&Value::Object(operation.query.clone()), &values, &json_fields).map_err(NodeError::Failed)?
-    {
+    let mut query_template = operation.query.clone();
+    if connector.auth == "query" {
+        query_template.extend(connector.auth_query.clone());
+    }
+    if let Some(Value::Object(query)) = connectors::render(&Value::Object(query_template), &values, &json_fields).map_err(NodeError::Failed)? {
         if !query.is_empty() {
             let mut pairs = url.query_pairs_mut();
             for (name, value) in query {
-                pairs.append_pair(&name, &value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string()));
+                let value = value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string());
+                if name == "$raw" {
+                    // A query written as text — PostgREST's `status=eq.active&order=id.desc`.
+                    for (key, raw) in url::form_urlencoded::parse(value.trim_start_matches('?').as_bytes()) {
+                        pairs.append_pair(&key, &raw);
+                    }
+                } else {
+                    pairs.append_pair(&name, &value);
+                }
             }
         }
     }
@@ -141,10 +166,12 @@ pub(super) fn request_for(
         Some(template) => connectors::render(template, &values, &json_fields).map_err(NodeError::Failed)?.map(|v| v.to_string()),
         None => None,
     };
-    if body.is_some() {
+    if body.is_some() && !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type")) {
         headers.push(("Content-Type".into(), "application/json".into()));
     }
-    headers.push(("Accept".into(), "application/json".into()));
+    if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("accept")) {
+        headers.push(("Accept".into(), "application/json".into()));
+    }
     let request = HttpSendRequest {
         method: operation.method.clone(),
         url: url.to_string(),
@@ -165,13 +192,16 @@ pub(super) fn request_for(
 pub(super) fn answer_items(connector: &Connector, operation: &Operation, status: u16, body: &str) -> Result<Vec<Value>, NodeError> {
     let answer: Value = serde_json::from_str(body).unwrap_or_else(|_| if body.trim().is_empty() { Value::Null } else { json!({"text": body}) });
     let error_text = || {
-        let found = (!connector.error_field.is_empty()).then(|| answer.get(&connector.error_field)).flatten();
+        let found = (!connector.error_field.is_empty()).then(|| crate::flows::value::get_path(&answer, &connector.error_field)).flatten();
+        // A message, wherever the service keeps it: a string, a list of them, or objects with one.
+        let message = |value: &Value| match value {
+            Value::String(text) => text.clone(),
+            Value::Object(map) => map.get("message").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| value.to_string()),
+            other => other.to_string(),
+        };
         match found {
-            Some(Value::String(text)) => text.clone(),
-            Some(Value::Array(list)) => {
-                list.iter().map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())).collect::<Vec<_>>().join("; ")
-            }
-            Some(other) => other.to_string(),
+            Some(Value::Array(list)) => list.iter().map(message).collect::<Vec<_>>().join("; "),
+            Some(other) => message(other),
             None => body.chars().take(300).collect(),
         }
     };
@@ -181,7 +211,11 @@ pub(super) fn answer_items(connector: &Connector, operation: &Operation, status:
     if !connector.ok_field.is_empty() && answer.get(&connector.ok_field) == Some(&Value::Bool(false)) {
         return Err(NodeError::failed(format!("{}: {}", connector.name, error_text())));
     }
-    let result = if operation.result.is_empty() { Some(&answer) } else { answer.get(&operation.result) };
+    let failed = (!connector.fail_on.is_empty()).then(|| answer.get(&connector.fail_on)).flatten();
+    if failed.is_some_and(|value| !value.is_null() && value.as_array().is_none_or(|list| !list.is_empty())) {
+        return Err(NodeError::failed(format!("{}: {}", connector.name, error_text())));
+    }
+    let result = if operation.result.is_empty() { Some(&answer) } else { crate::flows::value::get_path(&answer, &operation.result) };
     Ok(match result {
         Some(Value::Array(list)) => list.iter().map(|v| if v.is_object() { v.clone() } else { json!({"value": v}) }).collect(),
         Some(Value::Object(map)) => vec![Value::Object(map.clone())],
@@ -312,5 +346,66 @@ mod tests {
         let (connector, operation) = op("jira", "createIssue");
         let error = answer_items(connector, operation, 400, r#"{"errorMessages":["Project is required"],"errors":{}}"#).unwrap_err();
         assert_eq!(error, NodeError::Failed("Jira answered 400: Project is required".into()));
+    }
+
+    fn query_of(url: &url::Url, name: &str) -> Option<String> {
+        url.query_pairs().find(|(key, _)| key == name).map(|(_, value)| value.into_owned())
+    }
+
+    #[test]
+    fn trello_signs_in_with_its_key_and_token_in_the_query() {
+        let (connector, operation) = op("trello", "createCard");
+        let credential = Credential { kind: "basic".into(), meta: json!({"user": "key-1"}), secret: "token-2".into() };
+        let (request, url) = request_for(connector, operation, values(json!({"listId": "L1", "name": "Pedido 9"})), Some(&credential), 30_000).unwrap();
+        assert_eq!((query_of(&url, "key").as_deref(), query_of(&url, "token").as_deref()), (Some("key-1"), Some("token-2")));
+        assert_eq!(header(&request, "Authorization"), None);
+        assert_eq!(body(&request), json!({"idList": "L1", "name": "Pedido 9"}));
+        let wrong = request_for(connector, operation, values(json!({"listId": "L1", "name": "x"})), Some(&token("t", json!({}))), 30_000).unwrap_err();
+        assert!(matches!(wrong, NodeError::Failed(ref text) if text.contains("basic")), "{wrong:?}");
+    }
+
+    #[test]
+    fn linear_sends_its_bare_key_and_a_graphql_error_fails_the_call() {
+        let (connector, operation) = op("linear", "createIssue");
+        let (request, url) =
+            request_for(connector, operation, values(json!({"teamId": "T1", "title": "Bug", "priority": "2"})), Some(&token("lin_api_x", json!({}))), 30_000)
+                .unwrap();
+        assert_eq!(url.as_str(), "https://api.linear.app/graphql");
+        assert_eq!(header(&request, "Authorization"), Some("lin_api_x"), "no Bearer: Linear refuses it for a personal key");
+        let sent = body(&request);
+        assert_eq!(sent["variables"]["input"], json!({"teamId": "T1", "title": "Bug", "priority": 2}));
+        let ok = r#"{"data":{"issueCreate":{"success":true,"issue":{"identifier":"ENG-7"}}}}"#;
+        assert_eq!(answer_items(connector, operation, 200, ok).unwrap()[0]["identifier"], "ENG-7");
+        let failed = r#"{"data":null,"errors":[{"message":"Entity not found: Team"}]}"#;
+        let error = answer_items(connector, operation, 200, failed).unwrap_err();
+        assert!(matches!(error, NodeError::Failed(ref text) if text.contains("Entity not found: Team")), "{error:?}");
+    }
+
+    #[test]
+    fn supabase_carries_its_key_twice_and_its_filters_as_written() {
+        let (connector, operation) = op("supabase", "updateRows");
+        let (request, url) = request_for(
+            connector,
+            operation,
+            values(json!({"project": "abcd", "table": "pedidos", "filter": "id=eq.42&estado=neq.listo", "values": "{\"estado\": \"listo\"}"})),
+            Some(&token("anon-key", json!({}))),
+            30_000,
+        )
+        .unwrap();
+        assert_eq!(url.host_str(), Some("abcd.supabase.co"));
+        assert_eq!((query_of(&url, "id").as_deref(), query_of(&url, "estado").as_deref()), (Some("eq.42"), Some("neq.listo")));
+        assert_eq!(header(&request, "apikey"), Some("anon-key"));
+        assert_eq!(header(&request, "Authorization"), Some("Bearer anon-key"));
+        assert_eq!(header(&request, "Prefer"), Some("return=representation"));
+        assert_eq!(body(&request), json!({"estado": "listo"}));
+    }
+
+    #[test]
+    fn every_shipped_connector_reads_and_fits_a_credential_kind() {
+        for connector in connectors::CONNECTORS.iter() {
+            assert!(!connector.operations.is_empty(), "{} has no operations", connector.id);
+            assert!(!connector.credential_kinds().is_empty() || connector.auth == "none", "{} signs in with nothing it knows", connector.id);
+        }
+        assert_eq!(connectors::CONNECTORS.len(), 16);
     }
 }

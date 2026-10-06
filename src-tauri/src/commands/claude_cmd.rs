@@ -400,11 +400,35 @@ pub async fn draft_pr_comment_reply(
     run_id: Option<String>,
     workspace_id: Option<String>,
 ) -> Result<String, String> {
+    draft_reply_on(app, db, conversation, note, run_id, workspace_id, None).await
+}
+
+/// The engine a task runs on: one chosen by the caller (a Flujos node's picker), else the task's
+/// own routing.
+fn config_for(conn: &Connection, task: AiTask, workspace_id: Option<&str>, chosen: Option<(&str, &str)>) -> Result<AiConfig, String> {
+    match chosen {
+        Some((provider, model)) if !provider.trim().is_empty() => {
+            load_ai_config_as(conn, provider, model, ai_accounts::Choice::Auto, Some(task), workspace_id)
+        }
+        _ => load_ai_config_in(conn, task, workspace_id),
+    }
+}
+
+/// [`draft_pr_comment_reply`] on a chosen engine — Flujos' "Responder con IA".
+pub(crate) async fn draft_reply_on(
+    app: AppHandle,
+    db: State<'_, Db>,
+    conversation: String,
+    note: Option<String>,
+    run_id: Option<String>,
+    workspace_id: Option<String>,
+    engine: Option<(String, String)>,
+) -> Result<String, String> {
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         // The workspace the review is open in, when the caller says — what lets its account answer
         // rather than the provider's default.
-        load_ai_config_in(&conn, AiTask::Chat, workspace_id.as_deref())?
+        config_for(&conn, AiTask::Chat, workspace_id.as_deref(), engine.as_ref().map(|(p, m)| (p.as_str(), m.as_str())))?
     };
     ai_runs::scoped(app, run_id, async {
         ai::draft_comment_reply(&*config.engine, &config.binary, &config.model, &conversation, note.as_deref()).await
@@ -719,6 +743,18 @@ pub async fn resolve_finding_with_ai(
     finding_prompt: String,
     run_id: Option<String>,
 ) -> Result<String, String> {
+    resolve_finding_on(app, db, project_id, finding_prompt, run_id, None).await
+}
+
+/// [`resolve_finding_with_ai`] on a chosen engine — Flujos' "Resolver con IA".
+pub(crate) async fn resolve_finding_on(
+    app: AppHandle,
+    db: State<'_, Db>,
+    project_id: String,
+    finding_prompt: String,
+    run_id: Option<String>,
+    engine: Option<(String, String)>,
+) -> Result<String, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::get_project(&conn, &project_id)
@@ -735,7 +771,7 @@ pub async fn resolve_finding_with_ai(
 
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        load_ai_config_in(&conn, AiTask::Fix, Some(&project.workspace_id))?
+        config_for(&conn, AiTask::Fix, Some(&project.workspace_id), engine.as_ref().map(|(p, m)| (p.as_str(), m.as_str())))?
     };
 
     let checkpoint = checkpoint_before(&project.local_path, "fix-finding");

@@ -145,6 +145,18 @@
   line-height: 1.3;
   color: var(--cf-text-muted);
 }
+/* What the node took — or its clock, while it runs. */
+.cf-flow-node__time {
+  display: block;
+  margin-top: 1px;
+  font-size: 10px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  color: var(--cf-text-faint);
+}
+.cf-flow-node__time.is-live {
+  color: var(--cf-text-muted);
+}
 
 .cf-flow-port-label {
   position: absolute;
@@ -165,12 +177,16 @@
 /* ---- a sticky note ---- */
 
 .cf-flow-note {
+  /* The note's colour: this yellow (`NOTE_DEFAULT_INK`) unless the note has one of its own, set
+     inline. Mixed into the surface, so any hex of the palette reads on both themes. */
+  --cf-note-ink: #facc15;
+  position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
   border-radius: 8px;
-  background: color-mix(in oklab, #facc15 20%, var(--cf-surface));
-  box-shadow: 0 0 0 1px color-mix(in oklab, #facc15 45%, var(--cf-border));
+  background: color-mix(in oklab, var(--cf-note-ink) 20%, var(--cf-surface));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--cf-note-ink) 45%, var(--cf-border));
   padding: 10px 12px;
   font-size: 12px;
   line-height: 1.45;
@@ -183,6 +199,37 @@
 }
 .cf-flow-note.is-empty {
   color: var(--cf-text-faint);
+}
+/* The colour dot: in the corner, on hover and while selected (or while its palette is open). Hidden
+   with `visibility`, not opacity, so an unseen dot cannot take a press meant for the note. */
+.cf-flow-note__color {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  visibility: hidden;
+}
+.react-flow__node:hover .cf-flow-note__color,
+.react-flow__node.selected .cf-flow-note__color,
+.cf-flow-note__color.is-open {
+  visibility: visible;
+}
+/* Room for the dot on the first line, so it never sits on the words: a float, so only that line is
+   shorter, and always there, so the text does not reflow when the dot appears. Not while writing:
+   the textarea would be narrowed for its whole height. */
+.cf-flow-note:not(.is-editing)::before {
+  content: "";
+  float: right;
+  width: 16px;
+  height: 14px;
+}
+.cf-flow-note__swatch {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--cf-note-ink);
+  box-shadow: 0 0 0 1.5px var(--cf-surface), 0 0 0 2.5px color-mix(in oklab, var(--cf-note-ink) 55%, var(--cf-border-strong));
+  cursor: pointer;
 }
 .cf-flow-note textarea {
   display: block;
@@ -326,6 +373,36 @@
   fill: var(--cf-text-muted);
   font-size: 10.5px;
   font-weight: 600;
+}
+
+/* ---- taking a connection out (`FlowEdgeView`) ---- */
+
+/* The line under the pointer reads as the one the button acts on: thicker, its colour kept — the
+   colour says what the last run did with it. */
+.cf-flow-canvas .cf-flow-edge.is-hot .react-flow__edge-path {
+  stroke-width: 2.4;
+}
+/* In React Flow's label layer, which takes no pointer events of its own. */
+.cf-flow-canvas .cf-flow-edge-remove {
+  position: absolute;
+  pointer-events: all;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid var(--cf-border-strong);
+  background: var(--cf-surface-raised);
+  color: var(--cf-text-muted);
+  box-shadow: var(--cf-shadow);
+  cursor: pointer;
+  transition: color 100ms, border-color 100ms;
+}
+.cf-flow-canvas .cf-flow-edge-remove:hover,
+.cf-flow-canvas .cf-flow-edge-remove:focus-visible {
+  color: var(--cf-danger);
+  border-color: color-mix(in oklab, var(--cf-danger) 55%, var(--cf-border-strong));
+  outline: none;
 }
 
 /* ---- the inspector's data and fields ---- */

@@ -5,6 +5,7 @@ import {
   flowsDeleteVariable,
   flowsListCredentials,
   flowsListVariables,
+  flowsOauthConnect,
   flowsPutVariable,
   flowsRenameVariable,
   flowsSetCredentialScope,
@@ -38,6 +39,9 @@ interface FlowVaultState {
   updateCredential: (id: string, name: string, meta: Record<string, string>, secret: string | null) => Promise<boolean>;
   deleteCredential: (id: string) => Promise<void>;
   setCredentialScope: (id: string, global: boolean) => Promise<void>;
+  /** The OAuth 2 credential whose sign-in is open in the browser. */
+  connecting: string | null;
+  connectCredential: (id: string) => Promise<boolean>;
 }
 
 export const useFlowVaultStore = create<FlowVaultState>((set, get) => {
@@ -62,6 +66,7 @@ export const useFlowVaultStore = create<FlowVaultState>((set, get) => {
     variables: [],
     credentials: [],
     dialog: null,
+    connecting: null,
 
     load: async (workspaceId) => {
       if (get().workspaceId !== workspaceId) set({ workspaceId, variables: [], credentials: [] });
@@ -90,5 +95,13 @@ export const useFlowVaultStore = create<FlowVaultState>((set, get) => {
     updateCredential: (id, name, meta, secret) => attempt(() => flowsUpdateCredential(id, name, meta, secret)),
     deleteCredential: async (id) => void (await attempt(() => flowsDeleteCredential(id))),
     setCredentialScope: async (id, global) => void (await attempt(() => flowsSetCredentialScope(id, global))),
+    connectCredential: async (id) => {
+      set({ connecting: id });
+      try {
+        return await attempt(() => flowsOauthConnect(id));
+      } finally {
+        if (get().connecting === id) set({ connecting: null });
+      }
+    },
   };
 });

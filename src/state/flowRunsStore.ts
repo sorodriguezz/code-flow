@@ -10,6 +10,7 @@ import {
   flowsListRuns,
   flowsPinNode,
   flowsRun,
+  flowsRunForm,
   flowsRunLog,
   flowsListWaits,
   flowsTriggerStatus,
@@ -25,6 +26,7 @@ import {
   type FlowNodeEvent,
   type FlowNotifyEvent,
   type FlowRunDetail,
+  type FlowRunForm,
   type FlowRunMode,
   type FlowRunNodeRow,
   type FlowRunRow,
@@ -85,10 +87,14 @@ interface FlowRunsState {
   /** The workspace's runs waiting for someone — approvals, calls, times — oldest first. */
   waits: FlowWait[];
   /** A flow whose commands are up for review before it may run — and the run to start once trusted. */
-  trustPrompt: { flowId: string; then: { mode: FlowRunMode; trigger: string | null } | null } | null;
-  askTrust: (flowId: string | null, then?: { mode: FlowRunMode; trigger: string | null } | null) => void;
+  trustPrompt: { flowId: string; then: { mode: FlowRunMode; trigger: string | null; input?: Record<string, unknown> | null } | null } | null;
+  askTrust: (flowId: string | null, then?: { mode: FlowRunMode; trigger: string | null; input?: Record<string, unknown> | null } | null) => void;
+  /** A run waiting for its form (`FlowRunFormDialog`): the manual trigger it starts from has fields. */
+  formPrompt: { flowId: string; mode: FlowRunMode; trigger: string | null; form: FlowRunForm } | null;
+  answerForm: (values: Record<string, unknown> | null) => void;
 
-  start: (flowId: string, mode: FlowRunMode, trigger?: string | null) => Promise<FlowRunRow | null>;
+  /** `input` is the form's answers; left out, a run whose trigger has a form asks for it first. */
+  start: (flowId: string, mode: FlowRunMode, trigger?: string | null, input?: Record<string, unknown> | null) => Promise<FlowRunRow | null>;
   stop: (flowId: string) => Promise<void>;
   /** What a flow needs when it opens: its pins and its newest run (to paint). */
   loadFlow: (flowId: string, workspaceId: string) => Promise<void>;
@@ -127,10 +133,27 @@ export const useFlowRunsStore = create<FlowRunsState>((set, get) => ({
   trustPrompt: null,
   askTrust: (flowId, then = null) => set({ trustPrompt: flowId ? { flowId, then } : null }),
 
-  start: async (flowId, mode, trigger) => {
+  formPrompt: null,
+  answerForm: (values) => {
+    const prompt = get().formPrompt;
+    set({ formPrompt: null });
+    // Dismissed: nothing runs.
+    if (prompt && values) void get().start(prompt.flowId, prompt.mode, prompt.trigger, values);
+  },
+
+  start: async (flowId, mode, trigger, input) => {
     if (isRunning(get().current[flowId]?.run)) return null;
+    // Every way a person starts a run comes through here, so every one of them asks for the form —
+    // the plan decides which trigger a run starts from, so the backend says which form that is.
+    if (input === undefined) {
+      const form = await flowsRunForm(flowId, mode, trigger ?? null).catch(() => null);
+      if (form) {
+        set({ formPrompt: { flowId, mode, trigger: trigger ?? null, form } });
+        return null;
+      }
+    }
     try {
-      const run = await flowsRun(flowId, mode, trigger ?? null);
+      const run = await flowsRun(flowId, mode, trigger ?? null, input ?? null);
       startedHere.add(run.id);
       adoptRun(run);
       return run;
@@ -138,7 +161,8 @@ export const useFlowRunsStore = create<FlowRunsState>((set, get) => ({
       const text = String(error);
       // Somebody else's commands: they are shown first, and the run starts once they are trusted.
       if (text === "untrusted") {
-        set({ trustPrompt: { flowId, then: { mode, trigger: trigger ?? null } } });
+        // The form's answers wait with the run, so trusting it does not ask for them again.
+        set({ trustPrompt: { flowId, then: { mode, trigger: trigger ?? null, input: input ?? null } } });
         return null;
       }
       pushErrorToast(text.includes("no-trigger") ? translate("flows.run.noTrigger") : text);

@@ -3,7 +3,9 @@ import type { FlowNodeDescriptor } from "../tauri/flowsCommands";
 import {
   LOOP_TYPE,
   addNode,
+  addNote,
   autoLayout,
+  colorNotes,
   connect,
   connectionKey,
   connectionProblem,
@@ -11,6 +13,7 @@ import {
   emptySpec,
   hasErrorOutput,
   moveElements,
+  noteColor,
   outputCount,
   parseFragment,
   parseSpec,
@@ -114,6 +117,22 @@ describe("the flow document", () => {
     const moved = moveElements(spec, new Map([[spec.nodes[0].id, [40, 80] as [number, number]]]));
     expect(moved.nodes[0].pos).toEqual([40, 80]);
     expect(moved.nodes[1]).toBe(spec.nodes[1]);
+  });
+
+  it("paints notes in one step, puts them back to the default, and draws only colours it knows", () => {
+    const a = addNote(emptySpec(), [0, 0], "a");
+    const b = addNote(a.spec, [0, 200], "b");
+    const painted = colorNotes(b.spec, [a.id, b.id], "#3b82f6");
+    expect(painted.notes.map(noteColor)).toEqual(["#3b82f6", "#3b82f6"]);
+    // The same colour again is the same document: `edit` records nothing.
+    expect(colorNotes(painted, [a.id], "#3b82f6")).toBe(painted);
+    const back = colorNotes(painted, [a.id], "");
+    expect("color" in back.notes[0]).toBe(false);
+    expect(back.notes[1]).toBe(painted.notes[1]);
+    // Kept as written through a load and a save, drawn as the default.
+    const odd = parseSpec(serializeSpec({ ...back, notes: [{ ...back.notes[0], color: "amarillo" }] }));
+    expect(odd.notes[0].color).toBe("amarillo");
+    expect(noteColor(odd.notes[0])).toBe("");
   });
 });
 

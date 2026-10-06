@@ -390,6 +390,16 @@ pub fn flow_runs_dir() -> PathBuf {
     state_dir().join("flow-runs")
 }
 
+/// Flujos' own vector store (the "Base vectorial" node's local store): one SQLite file, its rows
+/// keyed by workspace and collection.
+///
+/// **State and not cache**: each vector is a paid embedding call to make again. Kept out of the
+/// main database because it grows with every document a flow stores, and out of backups for the
+/// same reason — it is rebuilt from the documents it was made from.
+pub fn flow_vectors_path() -> PathBuf {
+    state_dir().join("flow-vectors.sqlite")
+}
+
 /// The working directory a conversation that is about **no repository** runs its engine in.
 ///
 /// Every CLI this app drives takes a `cwd`, and none of them takes "nowhere". Left unset the

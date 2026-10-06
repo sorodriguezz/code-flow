@@ -57,6 +57,10 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "ai.extract" => extract(ctx).await,
         "ai.summarize" => summarize(ctx).await,
         "ai.review" => review(ctx).await,
+        "ai.prReview" => pr_review(ctx).await,
+        "ai.prFix" => pr_fix(ctx).await,
+        "ai.prReply" => pr_reply(ctx).await,
+        "ai.chat" => chat(ctx).await,
         "ai.commit" => commit(ctx).await,
         "app.agent" => agent_task(ctx).await,
         other => Err(NodeError::failed(format!("No executor for {other}"))),
@@ -1008,6 +1012,245 @@ async fn review(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         }
         reply.stamp(&mut json, started);
         out.push(output_item(ctx, index, Value::Object(json)));
+    }
+    Ok(vec![out])
+}
+
+/// CodeFlow's own PR analyzer — the one behind the pull request panel, not [`review`] above (one
+/// prompt over a local diff). Each item reviews one pull request: of a linked repository (by
+/// number, so `{{ $json.number }}` after the PR trigger) or, with no clone here, by its link. What
+/// the panel brings comes along: the workspace's levels and policy, reviewers in parallel by lens
+/// with a pass across files, the pull request's memory (a finding keeps its `F-NNN` from one
+/// iteration to the next) and, when asked, the new findings published as threads.
+///
+/// The engine is the "Revisión de PR" routing row's unless the node names one, and each review is
+/// one call against the flow's hourly cap — one decision to spend, however many reviewers it fans
+/// out to. The same pull request twice in one batch is reviewed once.
+async fn pr_review(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let resolved = ctx.resolve_each().await?;
+    let engine = engine_of(ctx.params.get("engine"));
+    if engine.is_local() {
+        return Err(NodeError::failed("CodeFlow's PR analyzer runs on a CLI engine, not on the local model"));
+    }
+    let mut done: Vec<(String, Value)> = Vec::new();
+    let mut out = Vec::with_capacity(resolved.len());
+    for (index, params) in resolved.iter().enumerate() {
+        let by_link = text(params, "source") == "link";
+        if by_link && text(params, "prUrl").trim().is_empty() {
+            return Err(NodeError::failed("Paste the pull request's link"));
+        }
+        if !by_link && text(params, "project").trim().is_empty() {
+            return Err(NodeError::failed("Choose the repository"));
+        }
+        let pr_id = params.get("prId").cloned().unwrap_or(Value::Null);
+        if !by_link && text(params, "prId").trim().is_empty() {
+            return Err(NodeError::failed("Say which pull request — its number"));
+        }
+        let args = json!({
+            "source": if by_link { "link" } else { "project" },
+            "projectId": text(params, "project").trim(),
+            "prId": pr_id,
+            "url": text(params, "prUrl").trim(),
+            "level": text(params, "level"),
+            "force": flag(params, "force"),
+            "publish": if by_link { String::new() } else { text(params, "publish") },
+            "minSeverity": text(params, "minSeverity"),
+            "provider": engine.provider,
+            "model": engine.model,
+            "nodeId": ctx.node.id,
+        });
+        let key = args.to_string();
+        if let Some((_, answer)) = done.iter().find(|(seen, _)| *seen == key) {
+            out.push(output_item(ctx, index, answer.clone()));
+            continue;
+        }
+        take_slot(ctx)?;
+        let what = if by_link { text(params, "prUrl") } else { format!("#{}", text(params, "prId").trim().trim_start_matches('#')) };
+        ctx.log(LogStream::Info, &format!("Reviewing pull request {what} with CodeFlow's analyzer"));
+        let started = Instant::now();
+        let mut answer = ctx.run.host.app_call("pr.review", args, ctx.cancel.clone()).await.map_err(|error| {
+            if is_cancel(&error) {
+                NodeError::Cancelled
+            } else {
+                NodeError::Failed(error)
+            }
+        })?;
+        if let Value::Object(map) = &mut answer {
+            map.insert("durationMs".into(), json!(started.elapsed().as_millis() as u64));
+        }
+        done.push((key, answer.clone()));
+        out.push(output_item(ctx, index, answer));
+    }
+    Ok(vec![out])
+}
+
+fn app_failure(error: String) -> NodeError {
+    if is_cancel(&error) {
+        NodeError::Cancelled
+    } else {
+        NodeError::Failed(error)
+    }
+}
+
+/// The PR's targets of a helper: the ids written, or — none written — what the analyzer lists:
+/// the review's findings still standing at `minSeverity` or above, or the open comment threads.
+async fn pr_targets(ctx: &NodeCtx, project: &str, pr: &Value, threads: bool, params: &Value) -> Result<Vec<String>, NodeError> {
+    let written = crate::flows::pr_ops::ids_of(params.get("ids"));
+    if !written.is_empty() {
+        return Ok(written);
+    }
+    if threads {
+        let listed = ctx.run.host.app_call("pr.threads", json!({"projectId": project, "prId": pr}), ctx.cancel.clone()).await.map_err(app_failure)?;
+        return Ok(listed.as_array().into_iter().flatten().filter_map(|t| t.get("id").map(|id| id.to_string())).collect());
+    }
+    let floor = match text(params, "minSeverity").as_str() {
+        "critical" => 3,
+        "info" => 1,
+        _ => 2,
+    };
+    let rank = |severity: &str| match severity {
+        "critical" => 3,
+        "warning" => 2,
+        _ => 1,
+    };
+    let standing = ctx
+        .run
+        .host
+        .app_call("pr.memoryFindings", json!({"projectId": project, "prId": pr, "state": "activeFindings"}), ctx.cancel.clone())
+        .await
+        .map_err(app_failure)?;
+    Ok(standing
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|f| rank(f["severity"].as_str().unwrap_or_default()) >= floor)
+        .filter_map(|f| f["id"].as_str().map(str::to_string))
+        .collect())
+}
+
+/// "Resolver con IA" — the analyzer's fix applied to the working copy, on the pull request's
+/// branch: one AI run per finding (or comment thread), each counted against the hourly cap. The
+/// changes are left uncommitted, as the panel leaves them; a Git node commits and pushes them.
+async fn pr_fix(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let resolved = ctx.resolve_each().await?;
+    let engine = engine_of(ctx.params.get("engine"));
+    if engine.is_local() {
+        return Err(NodeError::failed("Resolver con IA edits files, so it runs on a CLI engine, not on the local model"));
+    }
+    let mut out = Vec::new();
+    for (index, params) in resolved.iter().enumerate() {
+        let project = text(params, "project").trim().to_string();
+        if project.is_empty() {
+            return Err(NodeError::failed("Choose the repository"));
+        }
+        if text(params, "prId").trim().is_empty() {
+            return Err(NodeError::failed("Say which pull request — its number"));
+        }
+        let pr = params.get("prId").cloned().unwrap_or(Value::Null);
+        let threads = text(params, "fixSource") == "fixThreads";
+        let targets = pr_targets(ctx, &project, &pr, threads, params).await?;
+        if targets.is_empty() {
+            ctx.log(LogStream::Info, "Nothing to fix: no finding (or thread) left standing");
+        }
+        for target in targets {
+            take_slot(ctx)?;
+            ctx.log(LogStream::Info, &format!("Fixing {} {target} with AI", if threads { "comment thread" } else { "finding" }));
+            let started = Instant::now();
+            let args = json!({
+                "projectId": project,
+                "prId": pr,
+                "source": if threads { "fixThreads" } else { "fixFindings" },
+                "ids": [target],
+                "instructions": text(params, "instructions"),
+                "switchBranch": flag(params, "switchBranch"),
+                "provider": engine.provider,
+                "model": engine.model,
+            });
+            let answer = ctx.run.host.app_call("pr.fix", args, ctx.cancel.clone()).await.map_err(app_failure)?;
+            for mut item in answer.as_array().cloned().unwrap_or_default() {
+                if let Some(error) = item["error"].as_str() {
+                    ctx.log(LogStream::Stderr, &format!("{target}: {error}"));
+                }
+                item["durationMs"] = json!(started.elapsed().as_millis() as u64);
+                out.push(output_item(ctx, index, item));
+            }
+        }
+    }
+    Ok(vec![out])
+}
+
+/// "Responder con IA" — a reply to each comment thread, drafted by a model from the conversation
+/// and what the reply should carry. Only drafted: "Comentarios del PR" posts it (and closes the
+/// thread), so a flow can put a person in between.
+async fn pr_reply(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let resolved = ctx.resolve_each().await?;
+    let engine = engine_of(ctx.params.get("engine"));
+    let mut out = Vec::new();
+    for (index, params) in resolved.iter().enumerate() {
+        let project = text(params, "project").trim().to_string();
+        if project.is_empty() {
+            return Err(NodeError::failed("Choose the repository"));
+        }
+        if text(params, "prId").trim().is_empty() {
+            return Err(NodeError::failed("Say which pull request — its number"));
+        }
+        let pr = params.get("prId").cloned().unwrap_or(Value::Null);
+        for target in pr_targets(ctx, &project, &pr, true, params).await? {
+            take_slot(ctx)?;
+            let args = json!({
+                "projectId": project,
+                "prId": pr,
+                "ids": [target],
+                "note": text(params, "replyNote"),
+                "provider": engine.provider,
+                "model": engine.model,
+            });
+            let answer = ctx.run.host.app_call("pr.replyDraft", args, ctx.cancel.clone()).await.map_err(app_failure)?;
+            for item in answer.as_array().cloned().unwrap_or_default() {
+                out.push(output_item(ctx, index, item));
+            }
+        }
+    }
+    Ok(vec![out])
+}
+
+/// A turn of CodeFlow's Chat — the thread shows up in the Chat with its question and its answer, to
+/// be read or carried on by hand. One turn per item; each counts against the hourly cap.
+async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let resolved = ctx.resolve_each().await?;
+    let engine = engine_of(ctx.params.get("engine"));
+    if engine.is_local() {
+        return Err(NodeError::failed("The Chat runs on a CLI engine, not on the local model"));
+    }
+    let mut out = Vec::with_capacity(resolved.len());
+    for (index, params) in resolved.iter().enumerate() {
+        let message = text(params, "message");
+        if message.trim().is_empty() {
+            return Err(NodeError::failed("Write the message"));
+        }
+        let mode = text(params, "conversation");
+        if mode == "byId" && text(params, "conversationId").trim().is_empty() {
+            return Err(NodeError::failed("Say which conversation — its id"));
+        }
+        take_slot(ctx)?;
+        let args = json!({
+            "conversation": if mode.is_empty() { "byTitle".to_string() } else { mode },
+            "title": text(params, "title").trim(),
+            "conversationId": text(params, "conversationId").trim(),
+            "message": message,
+            "projectId": text(params, "project").trim(),
+            "wait": params.get("waitReply").is_none() || flag(params, "waitReply"),
+            "provider": engine.provider,
+            "model": engine.model,
+        });
+        let answer = ctx.run.host.app_call("chat.send", args, ctx.cancel.clone()).await.map_err(|error| {
+            if is_cancel(&error) {
+                NodeError::Cancelled
+            } else {
+                NodeError::Failed(error)
+            }
+        })?;
+        out.push(output_item(ctx, index, answer));
     }
     Ok(vec![out])
 }

@@ -24,8 +24,38 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     match ctx.node.type_id.as_str() {
         "data.sql" | "data.mongo" | "data.redis" => query(ctx).await,
         "data.sheet" => sheet(ctx).await,
+        "data.dbml" => dbml(ctx).await,
         other => Err(NodeError::failed(format!("No executor for {other}"))),
     }
+}
+
+/// A connection's schema as DBML — see `app_ops::schema_dbml`.
+async fn dbml(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let params = ctx.resolve_once().await?;
+    let connection = text(&params, "connection");
+    if connection.trim().is_empty() {
+        return Err(NodeError::failed("Choose the database connection"));
+    }
+    let save_to = text(&params, "saveTo");
+    if save_to == "dbmlFile" && text(&params, "path").trim().is_empty() {
+        return Err(NodeError::failed("Say where to write the .dbml file"));
+    }
+    let args = serde_json::json!({
+        "connectionId": connection.trim(),
+        "database": text(&params, "database").trim(),
+        "schema": text(&params, "schema").trim(),
+        "saveTo": save_to,
+        "title": text(&params, "title").trim(),
+        "path": text(&params, "path").trim(),
+    });
+    let answer = ctx.run.host.app_call("db.dbml", args, ctx.cancel.clone()).await.map_err(|error| {
+        if error.starts_with(crate::ai_runs::CANCELLED_MARKER) {
+            NodeError::Cancelled
+        } else {
+            NodeError::Failed(error)
+        }
+    })?;
+    Ok(vec![vec![crate::flows::run::Item::new(answer)]])
 }
 
 // ------------------------------------------------------------------------------- binding values
@@ -207,7 +237,7 @@ fn plain_json(value: mongodb::bson::Bson) -> Value {
     }
 }
 
-fn rows_of(result: &DbStatementResult) -> Vec<Value> {
+pub(super) fn rows_of(result: &DbStatementResult) -> Vec<Value> {
     if !result.documents.is_empty() {
         // Documents arrive in the shell's dialect (`ObjectId("…")`), which only Mongo's own reader takes.
         return result

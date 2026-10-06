@@ -1038,7 +1038,9 @@ pub fn gdrive_disconnect() -> Result<(), String> {
 /// button and the schema the code expects can never be two different things.
 ///
 /// Asked about one project (`url`), it also records this machine as the owner of every collection
-/// it already shares there — see `supabase::install_sql_for` for why that belongs in the script.
+/// — and every flow, which Flujos shares through the same tables — it already shares there; see
+/// `supabase::install_sql_for` for why that belongs in the script. One script for both apps: the
+/// API client's and Flujos' Collaboration panes each copy it for their own projects.
 #[tauri::command]
 pub fn supabase_install_sql(db: State<Db>, url: Option<String>) -> Result<String, String> {
     let Some(url) = url.filter(|url| !url.trim().is_empty()) else {
@@ -1046,12 +1048,17 @@ pub fn supabase_install_sql(db: State<Db>, url: Option<String>) -> Result<String
     };
     let owned: Vec<String> = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        api_queries::list_shared_collections(&conn)
+        let collections = api_queries::list_shared_collections(&conn)
             .map_err(|e| e.to_string())?
             .into_iter()
             .filter(|share| share.role == "owner" && supabase::same_project(&share.project_url, &url))
-            .map(|share| share.collection_id)
-            .collect()
+            .map(|share| share.collection_id);
+        let flows = crate::db::flow_share_queries::list(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|share| share.role == "owner" && supabase::same_project(&share.project_url, &url))
+            .map(|share| share.flow_id);
+        collections.chain(flows).collect()
     };
     supabase::install_sql_for(&owned)
 }

@@ -22,6 +22,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "app.open" | "app.terminal" => window(ctx).await,
         "app.clipboard" => clipboard(ctx).await,
         "app.vault" => vault(ctx).await,
+        "app.apiRequest" => api_request(ctx).await,
         other => Err(NodeError::failed(format!("No executor for {other}"))),
     }
 }
@@ -64,6 +65,39 @@ fn current_branch(ctx: &NodeCtx, project: &str) -> Option<String> {
     let repo = git2::Repository::open(path).ok()?;
     let head = repo.head().ok()?;
     head.shorthand().map(str::to_string)
+}
+
+// ---------------------------------------------------------------------------------- API client
+
+/// A saved request of the API client, per item (or once): its `{{…}}` filled from the node's
+/// variables first, sent by the API client itself (`api.request` → the window, `flows::bridge`).
+async fn api_request(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let once = text(&ctx.params, "runFor") == "once";
+    let resolved = if once { vec![ctx.resolve_once().await?] } else { ctx.resolve_each().await? };
+    let mut out = Vec::with_capacity(resolved.len());
+    for (index, params) in resolved.iter().enumerate() {
+        let request = text(params, "request");
+        if request.trim().is_empty() {
+            return Err(NodeError::failed("Choose the request"));
+        }
+        let variables: serde_json::Map<String, Value> = pairs(params, "variables").into_iter().map(|(k, v)| (k, Value::String(v))).collect();
+        let answer = call(
+            ctx,
+            "api.request",
+            json!({"requestId": request.trim(), "environmentId": text(params, "environment"), "variables": variables}),
+        )
+        .await?;
+        let status = answer.get("status").and_then(Value::as_u64).unwrap_or(0);
+        if flag(params, "failOnStatus") && status >= 400 {
+            return Err(NodeError::failed(format!("The request answered {status} {}", answer.get("statusText").and_then(Value::as_str).unwrap_or_default())));
+        }
+        let failed = answer.get("testsFailed").and_then(Value::as_u64).unwrap_or(0);
+        if flag(params, "failOnTests") && failed > 0 {
+            return Err(NodeError::failed(format!("{failed} of the request's tests failed")));
+        }
+        out.push(if once { Item::new(answer) } else { wrap(ctx, index, answer) });
+    }
+    Ok(vec![out])
 }
 
 // ------------------------------------------------------------------------------------ pull request
@@ -137,6 +171,130 @@ fn still_moving(status: &str) -> bool {
 async fn pipeline(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let params = ctx.resolve_once().await?;
     let project = need_project(&params)?;
+    match text(&params, "operation").as_str() {
+        "" | "launch" => start_pipeline(ctx, &params, &project).await,
+        operation => {
+            let run_id = text(&params, "runId").trim().to_string();
+            if run_id.is_empty() {
+                return Err(NodeError::failed("Say which run — its id, as the start or the pipeline trigger gave it"));
+            }
+            match operation {
+                "status" => {
+                    let detail = call(ctx, "pipeline.detail", json!({"projectId": project, "runId": run_id})).await?;
+                    Ok(vec![vec![Item::new(run_summary(&run_id, &detail))]])
+                }
+                "waitRun" => wait_for_run(ctx, &params, &project, &run_id, Value::Null, None).await,
+                "jobLogs" => job_logs(ctx, &params, &project, &run_id).await,
+                "artifacts" => artifacts(ctx, &params, &project, &run_id).await,
+                other => Err(NodeError::failed(format!("Unknown operation {other}"))),
+            }
+        }
+    }
+}
+
+/// A run as the flow reads it: where it is, and its jobs.
+fn run_summary(run_id: &str, detail: &Value) -> Value {
+    let jobs: Vec<Value> = detail
+        .get("jobs")
+        .and_then(Value::as_array)
+        .map(|jobs| {
+            jobs.iter()
+                .map(|job| {
+                    json!({
+                        "id": job.get("id"),
+                        "name": job.get("name"),
+                        "stage": job.get("stage"),
+                        "status": job.get("status"),
+                        "startedAt": job.get("started_at"),
+                        "finishedAt": job.get("finished_at"),
+                        "url": job.get("web_url"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "runId": run_id,
+        "status": detail.pointer("/run/status"),
+        "url": detail.pointer("/run/web_url"),
+        "ref": detail.pointer("/run/branch"),
+        "jobs": jobs,
+    })
+}
+
+/// The log of each job — the failed ones, or all — one item per job, ready for a model to read.
+async fn job_logs(ctx: &NodeCtx, params: &Value, project: &str, run_id: &str) -> Result<Ports, NodeError> {
+    let detail = call(ctx, "pipeline.detail", json!({"projectId": project, "runId": run_id})).await?;
+    let only_failed = text(params, "jobs") != "allJobs";
+    let max = number(params, "maxChars").unwrap_or(20_000.0).max(500.0) as u64;
+    let mut out = Vec::new();
+    for job in detail.get("jobs").and_then(Value::as_array).into_iter().flatten() {
+        let status = job.get("status").and_then(Value::as_str).unwrap_or_default();
+        if only_failed && status != "failed" {
+            continue;
+        }
+        let log = call(
+            ctx,
+            "pipeline.log",
+            json!({"projectId": project, "runId": run_id, "jobId": job.get("id"), "logRef": job.get("log_ref"), "maxChars": max}),
+        )
+        .await?;
+        out.push(Item::new(json!({
+            "runId": run_id,
+            "jobId": job.get("id"),
+            "job": job.get("name"),
+            "status": status,
+            "log": log.get("text"),
+            "truncated": log.get("truncated"),
+        })));
+    }
+    if out.is_empty() {
+        ctx.log(LogStream::Info, if only_failed { "No job of the run failed" } else { "The run has no jobs" });
+    }
+    Ok(vec![out])
+}
+
+/// A run's artifacts — listed, and with `download`, saved as the zips the host serves.
+async fn artifacts(ctx: &NodeCtx, params: &Value, project: &str, run_id: &str) -> Result<Ports, NodeError> {
+    let list = call(ctx, "pipeline.artifacts", json!({"projectId": project, "runId": run_id})).await?;
+    let download = flag(params, "download");
+    let folder = text(params, "folder");
+    if download && folder.trim().is_empty() {
+        return Err(NodeError::failed("Choose the folder to save the artifacts in"));
+    }
+    let dir = super::expand_path(folder.trim());
+    if download {
+        std::fs::create_dir_all(&dir).map_err(|e| NodeError::failed(format!("{}: {e}", dir.display())))?;
+    }
+    let mut out = Vec::new();
+    for artifact in list.as_array().into_iter().flatten() {
+        let name = artifact.get("name").and_then(Value::as_str).unwrap_or("artifact");
+        let mut item = json!({
+            "runId": run_id,
+            "id": artifact.get("id"),
+            "name": name,
+            "sizeBytes": artifact.get("size_bytes"),
+            "expiresAt": artifact.get("expires_at"),
+        });
+        if download {
+            let path = dir.join(crate::ci::artifact_file_name(name));
+            let saved = call(
+                ctx,
+                "pipeline.artifactDownload",
+                json!({"projectId": project, "runId": run_id, "artifactId": artifact.get("id"), "destination": path.to_string_lossy()}),
+            )
+            .await?;
+            item["path"] = json!(path.to_string_lossy());
+            item["bytes"] = saved.get("bytes").cloned().unwrap_or(Value::Null);
+        }
+        out.push(Item::new(item));
+    }
+    Ok(vec![out])
+}
+
+async fn start_pipeline(ctx: &NodeCtx, params: &Value, project: &str) -> Result<Ports, NodeError> {
+    let params = params.clone();
+    let project = project.to_string();
     let reference = {
         let written = text(&params, "ref");
         if written.trim().is_empty() { current_branch(ctx, &project).unwrap_or_else(|| "main".into()) } else { written.trim().to_string() }
@@ -160,7 +318,12 @@ async fn pipeline(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         ctx.log(LogStream::Info, "The host did not say which run it started, so the node cannot wait for it");
         return Ok(first());
     };
-    let limit = Duration::from_secs_f64(number(&params, "timeoutMin").unwrap_or(60.0).clamp(1.0, 24.0 * 60.0) * 60.0);
+    wait_for_run(ctx, &params, &project, &run_id, url, Some(reference)).await
+}
+
+/// Follows a run until it ends (or the node's time limit), every 15 s.
+async fn wait_for_run(ctx: &NodeCtx, params: &Value, project: &str, run_id: &str, url: Value, reference: Option<String>) -> Result<Ports, NodeError> {
+    let limit = Duration::from_secs_f64(number(params, "timeoutMin").unwrap_or(60.0).clamp(1.0, 24.0 * 60.0) * 60.0);
     let deadline = tokio::time::Instant::now() + limit;
     let mut last_status = String::new();
     loop {
@@ -175,13 +338,14 @@ async fn pipeline(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             last_status = status.clone();
         }
         if !still_moving(&status) {
-            let jobs: Vec<Value> = detail
-                .get("jobs")
-                .and_then(Value::as_array)
-                .map(|jobs| jobs.iter().map(|job| json!({"name": job.get("name"), "status": job.get("status")})).collect())
-                .unwrap_or_default();
-            let result = json!({"runId": run_id, "url": url, "status": status, "ref": reference, "jobs": jobs});
-            if matches!(status.as_str(), "failed" | "cancelled") && flag(&params, "failOnFailure") {
+            let mut result = run_summary(run_id, &detail);
+            if !url.is_null() {
+                result["url"] = url.clone();
+            }
+            if let Some(reference) = &reference {
+                result["ref"] = json!(reference);
+            }
+            if matches!(status.as_str(), "failed" | "cancelled") && flag(params, "failOnFailure") {
                 return Err(NodeError::failed(format!("The pipeline ended {status}")));
             }
             return Ok(vec![vec![Item::new(result)]]);

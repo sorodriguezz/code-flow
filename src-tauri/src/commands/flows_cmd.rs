@@ -48,7 +48,7 @@ pub struct CatalogEntry {
 }
 
 /// Every node a flow can hold. Static, so the frontend asks once per session.
-/// The declarative connectors (Slack, Discord, Telegram, Notion, Jira) the "Conector" node calls —
+/// The declarative connectors (Slack, GitHub, Trello, Linear, Supabase… — `flows/connectors/`) the "Conector" node calls —
 /// the definitions as shipped, which the node's form draws from.
 #[tauri::command]
 pub fn flows_connectors() -> &'static [crate::flows::connectors::Connector] {
@@ -494,8 +494,22 @@ pub fn flows_clear_versions(db: State<Db>, id: String) -> Result<(), String> {
 /// `no-trigger` (nothing starts this flow, or nothing that reaches the node) comes back as the error
 /// text itself, a code the frontend turns into a sentence.
 #[tauri::command]
-pub fn flows_run(app: AppHandle, flow_id: String, mode: RunMode, trigger: Option<String>) -> Result<FlowRunRow, String> {
-    runs::start(&app, &flow_id, mode, trigger)
+pub fn flows_run(app: AppHandle, flow_id: String, mode: RunMode, trigger: Option<String>, input: Option<serde_json::Value>) -> Result<FlowRunRow, String> {
+    runs::start(&app, &flow_id, mode, trigger, input)
+}
+
+/// The main window's answer to a run's question (`flows::bridge`). `false` when nobody waits for it
+/// any more — the run ended, or the question timed out.
+#[tauri::command]
+pub fn flows_bridge_answer(id: String, ok: bool, value: Option<serde_json::Value>, error: Option<String>) -> bool {
+    let result = if ok { Ok(value.unwrap_or(serde_json::Value::Null)) } else { Err(error.unwrap_or_else(|| "The window could not do it".to_string())) };
+    crate::flows::bridge::answer(&id, result)
+}
+
+/// The form a run would ask for before it starts — see `runs::run_form`.
+#[tauri::command]
+pub fn flows_run_form(app: AppHandle, flow_id: String, mode: RunMode, trigger: Option<String>) -> Result<Option<runs::RunForm>, String> {
+    runs::run_form(&app, &flow_id, &mode, trigger.as_deref())
 }
 
 #[tauri::command]
@@ -838,7 +852,7 @@ pub fn flows_set_variable_scope(db: State<Db>, id: String, global: bool) -> Resu
 
 // ---------- credentials ----------
 
-const CREDENTIAL_KINDS: &[&str] = &["bearer", "basic", "header", "query", "hmac", "smtp", "webhook"];
+const CREDENTIAL_KINDS: &[&str] = &["bearer", "basic", "header", "query", "hmac", "smtp", "imap", "webhook", "oauth2", "aws"];
 
 /// The parts of a credential that are safe to keep in the row, by kind; everything else is dropped.
 fn clean_meta(kind: &str, meta: &Value) -> Result<Value, String> {
@@ -868,8 +882,67 @@ fn clean_meta(kind: &str, meta: &Value) -> Result<Value, String> {
             };
             Ok(json!({"host": host, "port": port, "user": field("user"), "security": security, "from": field("from")}))
         }
+        "aws" => {
+            let access_key = field("user");
+            if access_key.is_empty() {
+                return Err("An AWS credential needs its access key ID".into());
+            }
+            Ok(json!({"user": access_key, "region": field("region")}))
+        }
+        "imap" => {
+            let host = field("host");
+            if host.is_empty() {
+                return Err("An IMAP account needs its server".into());
+            }
+            let port = field("port");
+            if !port.is_empty() && port.parse::<u16>().is_err() {
+                return Err(format!("{port} is not a port"));
+            }
+            let security = match field("security").as_str() {
+                "starttls" => "starttls",
+                "none" => "none",
+                _ => "tls",
+            };
+            Ok(json!({"host": host, "port": port, "user": field("user"), "security": security}))
+        }
+        "oauth2" => {
+            let provider = match field("provider").as_str() {
+                "google" => "google",
+                "microsoft" => "microsoft",
+                _ => "custom",
+            };
+            let client_id = field("clientId");
+            if client_id.is_empty() {
+                return Err("An OAuth 2 credential needs its client id".into());
+            }
+            let mut clean = json!({"provider": provider, "clientId": client_id, "scopes": field("scopes")});
+            if provider == "microsoft" && !field("tenant").is_empty() {
+                clean["tenant"] = json!(field("tenant"));
+            }
+            if provider == "custom" {
+                for key in ["authUrl", "tokenUrl"] {
+                    let url = field(key);
+                    if !matches!(url::Url::parse(&url).map(|u| u.scheme().to_string()).as_deref(), Ok("https" | "http")) {
+                        return Err("A custom OAuth 2 provider needs its authorization and token URLs".into());
+                    }
+                    clean[key] = json!(url);
+                }
+                let redirect = field("redirectUri");
+                if !redirect.is_empty() {
+                    crate::oauth::loopback_redirect(&redirect)?;
+                    clean["redirectUri"] = json!(redirect);
+                }
+            }
+            Ok(clean)
+        }
         _ => Ok(json!({})),
     }
+}
+
+/// Whether two `oauth2` metas sign in as the same client for the same thing — when not, the tokens
+/// the old one got are for someone else's client or scopes, and the credential must connect again.
+fn same_sign_in(before: &Value, after: &Value) -> bool {
+    ["provider", "clientId", "tenant", "authUrl", "tokenUrl", "scopes", "redirectUri"].iter().all(|key| before.get(*key) == after.get(*key))
 }
 
 /// Tries a credential for real: an SMTP account signs in to its server; an HTTP credential signs a
@@ -881,9 +954,17 @@ pub async fn flows_test_credential(db: State<'_, Db>, id: String, url: Option<St
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         flow_run_queries::get_credential(&conn, &id).map_err(|e| e.to_string())?.ok_or("That credential no longer exists")?
     };
-    let secret = crate::secrets::get_secret(&crate::secrets::flow_credential_key(&id))?.ok_or("Its secret is not stored on this computer")?;
+    let mut secret = crate::secrets::get_secret(&crate::secrets::flow_credential_key(&id))?.ok_or("Its secret is not stored on this computer")?;
+    let mut kind = row.kind.clone();
+    if kind == "oauth2" {
+        secret = crate::flows::oauth::access_token(&id, &row.meta).await?;
+        if url.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+            return Ok("The token is valid".into());
+        }
+        kind = "bearer".into();
+    }
     let meta = |key: &str| row.meta.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
-    match row.kind.as_str() {
+    match kind.as_str() {
         "smtp" => {
             use lettre::transport::smtp::authentication::Credentials;
             use lettre::{AsyncSmtpTransport, Tokio1Executor};
@@ -913,7 +994,7 @@ pub async fn flows_test_credential(db: State<'_, Db>, id: String, url: Option<St
                 return Err("Write a URL to try it against".into());
             }
             let mut request = reqwest::Client::new().get(url.trim()).timeout(std::time::Duration::from_secs(15));
-            match row.kind.as_str() {
+            match kind.as_str() {
                 "bearer" => request = request.bearer_auth(&secret),
                 "basic" => request = request.basic_auth(meta("user"), Some(&secret)),
                 "header" => request = request.header(meta("name").as_str(), secret.as_str()),
@@ -926,6 +1007,45 @@ pub async fn flows_test_credential(db: State<'_, Db>, id: String, url: Option<St
             } else {
                 Ok(format!("The server answered {status}"))
             }
+        }
+        "aws" => {
+            // STS answers who a key is without needing any permission.
+            let url = url::Url::parse("https://sts.amazonaws.com/").map_err(|e| e.to_string())?;
+            let body = "Action=GetCallerIdentity&Version=2011-06-15";
+            let headers = vec![("content-type".to_string(), "application/x-www-form-urlencoded; charset=utf-8".to_string())];
+            let signed = crate::sigv4::sigv4_headers(
+                "POST",
+                &url,
+                &headers,
+                &crate::sigv4::hex_sha256(body.as_bytes()),
+                &meta("user"),
+                &secret,
+                "",
+                "us-east-1",
+                "sts",
+                &chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+            )?;
+            let mut request = reqwest::Client::new().post(url.as_str()).timeout(std::time::Duration::from_secs(15)).body(body);
+            for (name, value) in headers.into_iter().chain(signed) {
+                request = request.header(name, value);
+            }
+            let response = request.send().await.map_err(|e| e.to_string())?;
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            let between = |open: &str, close: &str| text.split(open).nth(1).and_then(|rest| rest.split(close).next()).unwrap_or_default().to_string();
+            if status.is_success() {
+                Ok(format!("AWS knows the key as {}", between("<Arn>", "</Arn>")))
+            } else {
+                Err(format!("AWS refused it ({status}): {}", between("<Message>", "</Message>")))
+            }
+        }
+        "imap" => {
+            let account = crate::flows::mail::Account::of(&row.meta, secret)?;
+            let mut session = crate::flows::mail::open(&account).await?;
+            let inbox = session.examine("INBOX").await.map_err(|e| e.to_string());
+            let _ = session.logout().await;
+            let inbox = inbox?;
+            Ok(format!("{} accepted the account · INBOX has {} message(s)", account.host, inbox.exists))
         }
         "webhook" => {
             let parsed = url::Url::parse(secret.trim()).map_err(|_| "The webhook is not a URL".to_string())?;
@@ -971,12 +1091,19 @@ pub fn flows_create_credential(
     if !CREDENTIAL_KINDS.contains(&kind.as_str()) {
         return Err(format!("Unknown credential kind {kind}"));
     }
-    if secret.is_empty() {
+    if secret.is_empty() && kind != "oauth2" {
         return Err("The secret is empty".into());
     }
     let meta = clean_meta(&kind, &meta)?;
     let id = uuid::Uuid::new_v4().to_string();
-    crate::secrets::set_secret(&crate::secrets::flow_credential_key(&id), &secret)?;
+    // An OAuth 2 credential keeps its client secret (a public client has none) with the tokens
+    // `flows_oauth_connect` adds later.
+    let stored = if kind == "oauth2" {
+        serde_json::to_string(&crate::flows::oauth::Tokens { client_secret: secret, ..Default::default() }).map_err(|e| e.to_string())?
+    } else {
+        secret
+    };
+    crate::secrets::set_secret(&crate::secrets::flow_credential_key(&id), &stored)?;
     let now = crate::flows::engine::now_text();
     let credential = FlowCredential {
         id: id.clone(),
@@ -1008,11 +1135,75 @@ pub fn flows_update_credential(
     let name = clean_name(&name)?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let current = flow_run_queries::get_credential(&conn, &id).map_err(|e| e.to_string())?.ok_or("This credential no longer exists")?;
-    let meta = clean_meta(&current.kind, &meta)?;
-    if let Some(secret) = secret.filter(|s| !s.is_empty()) {
-        crate::secrets::set_secret(&crate::secrets::flow_credential_key(&id), &secret)?;
+    let mut meta = clean_meta(&current.kind, &meta)?;
+    let key = crate::secrets::flow_credential_key(&id);
+    if current.kind == "oauth2" {
+        let mut tokens = crate::flows::oauth::Tokens::read(&crate::secrets::get_secret(&key)?.unwrap_or_default());
+        let signed_in_as_before = same_sign_in(&current.meta, &meta);
+        if let Some(secret) = secret.filter(|s| !s.is_empty()) {
+            tokens.client_secret = secret;
+        }
+        if signed_in_as_before {
+            for key in ["account", "connected"] {
+                if let Some(value) = current.meta.get(key) {
+                    meta[key] = value.clone();
+                }
+            }
+        } else {
+            tokens = crate::flows::oauth::Tokens { client_secret: tokens.client_secret, ..Default::default() };
+        }
+        crate::secrets::set_secret(&key, &serde_json::to_string(&tokens).map_err(|e| e.to_string())?)?;
+    } else if let Some(secret) = secret.filter(|s| !s.is_empty()) {
+        crate::secrets::set_secret(&key, &secret)?;
     }
     flow_run_queries::update_credential(&conn, &id, &name, &meta, &crate::flows::engine::now_text()).map_err(|e| e.to_string())
+}
+
+/// The models a provider's API offers, for an AI node's model picker — read with the node's own
+/// credential (`purpose`: `chat` or `embed`).
+#[tauri::command]
+pub async fn flows_ai_models(
+    db: State<'_, Db>,
+    provider: String,
+    base_url: String,
+    credential_id: Option<String>,
+    purpose: String,
+) -> Result<Vec<String>, String> {
+    let key = match credential_id.filter(|id| !id.trim().is_empty()) {
+        Some(id) => {
+            {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                flow_run_queries::get_credential(&conn, &id).map_err(|e| e.to_string())?.ok_or("That credential no longer exists")?;
+            }
+            crate::secrets::get_secret(&crate::secrets::flow_credential_key(&id))?
+        }
+        None => None,
+    };
+    crate::flows::nodes::list_models(&provider, &base_url, key.as_deref(), &purpose).await
+}
+
+/// Signs an OAuth 2 credential in, in the browser (`flows::oauth::connect`), and labels it with the
+/// account it got — the credential, as the list shows it, comes back.
+#[tauri::command]
+pub async fn flows_oauth_connect(db: State<'_, Db>, id: String) -> Result<FlowCredential, String> {
+    let row = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        flow_run_queries::get_credential(&conn, &id).map_err(|e| e.to_string())?.ok_or("That credential no longer exists")?
+    };
+    if row.kind != "oauth2" {
+        return Err("Only an OAuth 2 credential connects".into());
+    }
+    let account = crate::flows::oauth::connect(&id, &row.meta).await?;
+    let mut meta = row.meta.clone();
+    match account {
+        Some(account) => meta["account"] = json!(account),
+        None => meta["account"] = json!(""),
+    }
+    meta["connected"] = json!(true);
+    let now = crate::flows::engine::now_text();
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_run_queries::update_credential(&conn, &id, &row.name, &meta, &now).map_err(|e| e.to_string())?;
+    Ok(FlowCredential { meta, updated_at: now, ..row })
 }
 
 #[tauri::command]

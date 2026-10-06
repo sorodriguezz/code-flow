@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FlaskConical, Globe, KeyRound, Pencil, Plus, Trash2, Variable } from "lucide-react";
+import { FlaskConical, Globe, KeyRound, Pencil, Plug, Plus, Trash2, Variable } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";
 import { Button, iconButtonClass } from "../common/Button";
 import { Select } from "../common/Select";
@@ -23,7 +23,18 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
  * keychain, and is never shown again — editing one means replacing it.
  */
 
-const KINDS: FlowCredentialKind[] = ["bearer", "basic", "header", "query", "hmac", "smtp", "webhook"];
+const KINDS: FlowCredentialKind[] = ["bearer", "basic", "header", "query", "oauth2", "hmac", "smtp", "imap", "aws", "webhook"];
+
+const OAUTH_PROVIDERS = ["google", "microsoft", "custom"] as const;
+
+/** What a new credential asks for, per provider — everything the Google and Microsoft nodes and
+ *  Graph calls need; a person narrows it before connecting. */
+const OAUTH_SCOPES: Record<string, string> = {
+  google:
+    "openid email https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/drive",
+  microsoft: "openid email offline_access User.Read Mail.Send Mail.Read Calendars.ReadWrite Files.ReadWrite",
+  custom: "",
+};
 
 function VariablesTab() {
   const t = useT();
@@ -126,6 +137,14 @@ interface CredentialDraft {
   port: string;
   security: string;
   from: string;
+  provider: string;
+  clientId: string;
+  tenant: string;
+  authUrl: string;
+  tokenUrl: string;
+  scopes: string;
+  redirectUri: string;
+  region: string;
 }
 
 const blankCredential = (): CredentialDraft => ({
@@ -139,6 +158,14 @@ const blankCredential = (): CredentialDraft => ({
   port: "",
   security: "starttls",
   from: "",
+  provider: "google",
+  clientId: "",
+  tenant: "",
+  authUrl: "",
+  tokenUrl: "",
+  scopes: OAUTH_SCOPES.google,
+  redirectUri: "",
+  region: "",
 });
 
 /** What a credential row keeps besides its secret, by kind — the backend drops anything else. */
@@ -151,6 +178,20 @@ function metaOf(draft: CredentialDraft): Record<string, string> {
       return { name: draft.field };
     case "smtp":
       return { host: draft.host, port: draft.port, user: draft.user, security: draft.security, from: draft.from };
+    case "imap":
+      return { host: draft.host, port: draft.port, user: draft.user, security: draft.security };
+    case "aws":
+      return { user: draft.user, region: draft.region };
+    case "oauth2":
+      return {
+        provider: draft.provider,
+        clientId: draft.clientId,
+        tenant: draft.tenant,
+        authUrl: draft.authUrl,
+        tokenUrl: draft.tokenUrl,
+        scopes: draft.scopes,
+        redirectUri: draft.redirectUri,
+      };
     default:
       return {};
   }
@@ -199,6 +240,7 @@ function CredentialTest({ credential }: { credential: FlowCredential }) {
 function CredentialsTab() {
   const t = useT();
   const credentials = useFlowVaultStore((s) => s.credentials);
+  const connecting = useFlowVaultStore((s) => s.connecting);
   const [draft, setDraft] = useState<CredentialDraft | null>(null);
   const store = useFlowVaultStore.getState;
 
@@ -217,6 +259,14 @@ function CredentialsTab() {
       port: credential.meta.port ?? "",
       security: credential.meta.security ?? "starttls",
       from: credential.meta.from ?? "",
+      provider: credential.meta.provider ?? "google",
+      clientId: credential.meta.clientId ?? "",
+      tenant: credential.meta.tenant ?? "",
+      authUrl: credential.meta.authUrl ?? "",
+      tokenUrl: credential.meta.tokenUrl ?? "",
+      scopes: credential.meta.scopes ?? "",
+      redirectUri: credential.meta.redirectUri ?? "",
+      region: credential.meta.region ?? "",
     });
 
   /** Takes the secret (and the user, where there is one) from a Llavero item. */
@@ -229,10 +279,11 @@ function CredentialsTab() {
       const pick = (...names: (keyof Omit<VaultSecret, "custom">)[]) => names.map((name) => item.secret[name]).find((v) => !!v) ?? "";
       setDraft({
         ...draft,
-        secret: pick("password", "apiKey", "token", "secretAccessKey", "privateKey") || draft.secret,
-        user: pick("username") || draft.user,
-        host: draft.kind === "smtp" ? pick("host") || draft.host : draft.host,
-        port: draft.kind === "smtp" ? pick("port") || draft.port : draft.port,
+        secret: (draft.kind === "aws" ? pick("secretAccessKey") : "") || pick("password", "apiKey", "token", "secretAccessKey", "privateKey") || draft.secret,
+        user: (draft.kind === "aws" ? pick("accessKeyId") : pick("username")) || draft.user,
+        host: draft.kind === "smtp" || draft.kind === "imap" ? pick("host") || draft.host : draft.host,
+        port: draft.kind === "smtp" || draft.kind === "imap" ? pick("port") || draft.port : draft.port,
+        region: draft.kind === "aws" ? pick("region") || draft.region : draft.region,
         name: draft.name || item.title,
       });
     } catch (error) {
@@ -243,23 +294,34 @@ function CredentialsTab() {
   const save = async () => {
     if (!draft) return;
     const meta = metaOf(draft);
-    const ok = draft.id
-      ? await store().updateCredential(draft.id, draft.name, meta, draft.secret || null)
-      : !!(await store().createCredential(draft.name, draft.kind, meta, draft.secret));
-    if (ok) setDraft(null);
+    if (draft.id) {
+      if (await store().updateCredential(draft.id, draft.name, meta, draft.secret || null)) setDraft(null);
+      return;
+    }
+    const created = await store().createCredential(draft.name, draft.kind, meta, draft.secret);
+    if (!created) return;
+    setDraft(null);
+    // A new OAuth 2 credential is no use until it signs in, so it does straight away.
+    if (created.kind === "oauth2") void store().connectCredential(created.id);
   };
 
   if (draft) {
     const secretLabel =
-      draft.kind === "basic" || draft.kind === "smtp"
+      draft.kind === "basic" || draft.kind === "smtp" || draft.kind === "imap"
         ? t("flows.vault.password")
+        : draft.kind === "aws"
+          ? t("flows.vault.awsSecret")
         : draft.kind === "bearer"
           ? t("flows.vault.token")
           : draft.kind === "hmac"
             ? t("flows.vault.signingSecret")
             : draft.kind === "webhook"
               ? t("flows.vault.webhookUrl")
-              : t("flows.vault.value");
+              : draft.kind === "oauth2"
+                ? t("flows.vault.clientSecret")
+                : t("flows.vault.value");
+    const setProvider = (provider: string) =>
+      setDraft({ ...draft, provider, scopes: !draft.scopes.trim() || Object.values(OAUTH_SCOPES).includes(draft.scopes) ? OAUTH_SCOPES[provider] : draft.scopes });
     return (
       <div className="flex flex-col gap-3">
         <label className="flex flex-col gap-1">
@@ -272,22 +334,32 @@ function CredentialsTab() {
             <Select
               value={draft.kind}
               disabled={draft.id !== null}
-              onChange={(kind) => setDraft({ ...draft, kind: kind as FlowCredentialKind })}
+              onChange={(kind) => setDraft({ ...draft, kind: kind as FlowCredentialKind, security: kind === "imap" ? "tls" : kind === "smtp" ? "starttls" : draft.security })}
               options={KINDS.map((kind) => ({ value: kind, label: t(`flows.cred.${kind}` as TranslationKey) }))}
               size="sm"
             />
           </div>
         </div>
-        {draft.kind === "smtp" && (
+        {(draft.kind === "smtp" || draft.kind === "imap") && (
           <>
             <div className="grid grid-cols-[minmax(0,1fr)_96px] gap-2">
               <label className="flex flex-col gap-1">
-                <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.smtpHost")}</span>
-                <input className={fieldClass({ size: "sm", className: "font-mono" })} value={draft.host} placeholder="smtp.example.com" onChange={(e) => setDraft({ ...draft, host: e.target.value })} />
+                <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{draft.kind === "imap" ? t("flows.vault.imapHost") : t("flows.vault.smtpHost")}</span>
+                <input
+                  className={fieldClass({ size: "sm", className: "font-mono" })}
+                  value={draft.host}
+                  placeholder={draft.kind === "imap" ? "imap.example.com" : "smtp.example.com"}
+                  onChange={(e) => setDraft({ ...draft, host: e.target.value })}
+                />
               </label>
               <label className="flex flex-col gap-1">
                 <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.smtpPort")}</span>
-                <input className={fieldClass({ size: "sm", className: "font-mono" })} value={draft.port} placeholder="587" onChange={(e) => setDraft({ ...draft, port: e.target.value })} />
+                <input
+                  className={fieldClass({ size: "sm", className: "font-mono" })}
+                  value={draft.port}
+                  placeholder={draft.kind === "imap" ? (draft.security === "tls" ? "993" : "143") : "587"}
+                  onChange={(e) => setDraft({ ...draft, port: e.target.value })}
+                />
               </label>
             </div>
             <div className="flex flex-col gap-1">
@@ -296,18 +368,90 @@ function CredentialsTab() {
                 <Select
                   value={draft.security}
                   onChange={(security) => setDraft({ ...draft, security })}
-                  options={["starttls", "tls", "none"].map((value) => ({ value, label: t(`flows.vault.security.${value}` as TranslationKey) }))}
+                  options={(draft.kind === "imap" ? ["tls", "starttls", "none"] : ["starttls", "tls", "none"]).map((value) => ({
+                    value,
+                    label: t(`flows.vault.security.${value}` as TranslationKey),
+                  }))}
+                  size="sm"
+                />
+              </div>
+            </div>
+            {draft.kind === "smtp" && (
+              <label className="flex flex-col gap-1">
+                <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.smtpFrom")}</span>
+                <input className={fieldClass({ size: "sm" })} value={draft.from} placeholder="Flujos <flujos@example.com>" onChange={(e) => setDraft({ ...draft, from: e.target.value })} />
+              </label>
+            )}
+          </>
+        )}
+        {draft.kind === "aws" && (
+          <>
+            <label className="flex flex-col gap-1">
+              <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.awsKeyId")}</span>
+              <input className={fieldClass({ size: "sm", className: "font-mono" })} value={draft.user} placeholder="AKIA…" onChange={(e) => setDraft({ ...draft, user: e.target.value })} />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.awsRegion")}</span>
+              <input className={fieldClass({ size: "sm", className: "font-mono" })} value={draft.region} placeholder="us-east-1" onChange={(e) => setDraft({ ...draft, region: e.target.value })} />
+            </label>
+          </>
+        )}
+        {draft.kind === "oauth2" && (
+          <>
+            <div className="flex flex-col gap-1">
+              <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.provider")}</span>
+              <div className="max-w-[260px]" title={t(`flows.vault.oauthHint.${draft.provider === "microsoft" || draft.provider === "custom" ? draft.provider : "google"}` as TranslationKey)}>
+                <Select
+                  value={draft.provider}
+                  onChange={setProvider}
+                  options={OAUTH_PROVIDERS.map((value) => ({ value, label: t(`flows.vault.provider.${value}` as TranslationKey) }))}
                   size="sm"
                 />
               </div>
             </div>
             <label className="flex flex-col gap-1">
-              <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.smtpFrom")}</span>
-              <input className={fieldClass({ size: "sm" })} value={draft.from} placeholder="Flujos <flujos@example.com>" onChange={(e) => setDraft({ ...draft, from: e.target.value })} />
+              <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.clientId")}</span>
+              <input
+                className={fieldClass({ size: "sm", className: "font-mono text-[11.5px]" })}
+                value={draft.clientId}
+                placeholder={draft.provider === "google" ? "1234-abc.apps.googleusercontent.com" : ""}
+                onChange={(e) => setDraft({ ...draft, clientId: e.target.value })}
+              />
+            </label>
+            {draft.provider === "microsoft" && (
+              <label className="flex flex-col gap-1">
+                <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.tenant")}</span>
+                <input className={fieldClass({ size: "sm", className: "font-mono text-[11.5px]" })} value={draft.tenant} placeholder="common" onChange={(e) => setDraft({ ...draft, tenant: e.target.value })} />
+              </label>
+            )}
+            {draft.provider === "custom" && (
+              <>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.authUrl")}</span>
+                  <input className={fieldClass({ size: "sm", className: "font-mono text-[11.5px]" })} value={draft.authUrl} placeholder="https://auth.example.com/oauth/authorize" onChange={(e) => setDraft({ ...draft, authUrl: e.target.value })} />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.tokenUrl")}</span>
+                  <input className={fieldClass({ size: "sm", className: "font-mono text-[11.5px]" })} value={draft.tokenUrl} placeholder="https://auth.example.com/oauth/token" onChange={(e) => setDraft({ ...draft, tokenUrl: e.target.value })} />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[12px] font-medium text-[var(--cf-text-muted)]" title={t("flows.vault.redirectUriHint")}>{t("flows.vault.redirectUri")}</span>
+                  <input className={fieldClass({ size: "sm", className: "font-mono text-[11.5px]" })} value={draft.redirectUri} placeholder="http://localhost:8976/callback" onChange={(e) => setDraft({ ...draft, redirectUri: e.target.value })} />
+                </label>
+              </>
+            )}
+            <label className="flex flex-col gap-1">
+              <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.scopes")}</span>
+              <textarea
+                rows={3}
+                className={fieldClass({ size: "sm", className: "h-auto resize-y py-1.5 font-mono text-[11px]" })}
+                value={draft.scopes}
+                onChange={(e) => setDraft({ ...draft, scopes: e.target.value })}
+              />
             </label>
           </>
         )}
-        {(draft.kind === "basic" || draft.kind === "smtp") && (
+        {(draft.kind === "basic" || draft.kind === "smtp" || draft.kind === "imap") && (
           <label className="flex flex-col gap-1">
             <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("flows.vault.user")}</span>
             <input className={fieldClass({ size: "sm" })} value={draft.user} onChange={(e) => setDraft({ ...draft, user: e.target.value })} />
@@ -342,8 +486,13 @@ function CredentialsTab() {
           <Button size="sm" onClick={() => setDraft(null)}>
             {t("common.cancel")}
           </Button>
-          <Button size="sm" variant="primary" onClick={() => void save()} disabled={!draft.name.trim() || (!draft.id && !draft.secret)}>
-            {t("common.save")}
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={() => void save()}
+            disabled={!draft.name.trim() || (draft.kind === "oauth2" ? !draft.clientId.trim() : !draft.id && !draft.secret)}
+          >
+            {draft.kind === "oauth2" && !draft.id ? t("flows.vault.saveAndConnect") : t("common.save")}
           </Button>
         </div>
       </div>
@@ -365,11 +514,41 @@ function CredentialsTab() {
           <KeyRound size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
           <span className="min-w-0 flex-1 truncate text-[12.5px]">{credential.name}</span>
           <span className="shrink-0 text-[11.5px] text-[var(--cf-text-muted)]">
-            {t(`flows.cred.${credential.kind}` as TranslationKey)}
-            {credential.meta.name ? ` · ${credential.meta.name}` : credential.meta.user ? ` · ${credential.meta.user}` : ""}
+            {credential.kind === "oauth2" && credential.meta.provider !== "custom"
+              ? t(`flows.vault.provider.${credential.meta.provider === "microsoft" ? "microsoft" : "google"}` as TranslationKey)
+              : t(`flows.cred.${credential.kind}` as TranslationKey)}
+            {credential.kind === "oauth2"
+              ? credential.meta.connected
+                ? credential.meta.account
+                  ? ` · ${credential.meta.account}`
+                  : ""
+                : ` · ${t("flows.vault.notConnected")}`
+              : credential.meta.name
+                ? ` · ${credential.meta.name}`
+                : credential.meta.user
+                  ? ` · ${credential.meta.user}`
+                  : ""}
           </span>
+          {credential.kind === "oauth2" && (connecting === credential.id || !credential.meta.connected) && (
+            <Button size="sm" onClick={() => void store().connectCredential(credential.id)} disabled={connecting !== null}>
+              <Plug size={12} />
+              {connecting === credential.id ? t("flows.vault.connecting") : t("flows.vault.connect")}
+            </Button>
+          )}
           {credential.scope === "global" && <Globe size={12} className="shrink-0 text-[var(--cf-text-faint)]" />}
           <span className="flex opacity-0 transition-opacity group-hover:opacity-100">
+            {credential.kind === "oauth2" && credential.meta.connected && connecting !== credential.id && (
+              <button
+                type="button"
+                className={iconButtonClass({ size: "xs" })}
+                title={t("flows.vault.reconnect")}
+                aria-label={t("flows.vault.reconnect")}
+                disabled={connecting !== null}
+                onClick={() => void store().connectCredential(credential.id)}
+              >
+                <Plug size={12} />
+              </button>
+            )}
             {credential.kind !== "hmac" && (
               <button
                 type="button"

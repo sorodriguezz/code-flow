@@ -16,7 +16,7 @@ export const SPEC_SCHEMA = 1;
 /** The only node a cycle may pass through — `catalog::LOOP_TYPE`. */
 export const LOOP_TYPE = "logic.loop";
 /** `catalog::RUNS_THROUGH`: the last milestone whose nodes this build runs. */
-export const RUNS_THROUGH = 6;
+export const RUNS_THROUGH = 10;
 /** `spec::MAX_NAME`. */
 export const MAX_NODE_NAME = 120;
 
@@ -42,6 +42,9 @@ export interface StickyNoteSpec {
   pos: [number, number];
   size: [number, number];
   text: string;
+  /** `#rrggbb` from the app's palette (`WORKSPACE_COLORS`); absent is the default yellow. Kept as
+   *  written by `parseSpec` like any other field — read it through `noteColor`. */
+  color?: string;
 }
 
 export interface FlowSpec {
@@ -331,6 +334,29 @@ export function setNodeSettings(spec: FlowSpec, catalog: Catalog, id: string, ch
     nodes: spec.nodes.map((n) => (n.id === id ? updated : n)),
     connections: spec.connections.filter((c) => c.from !== id || c.out < ports),
   };
+}
+
+/** A note's colour as the canvas draws it: a `#rrggbb`, or `""` for the default. Anything else a
+ *  document holds (a newer build's value, a hand edit) is kept in the document and drawn as the
+ *  default. */
+export function noteColor(note: StickyNoteSpec): string {
+  return typeof note.color === "string" && /^#[0-9a-f]{6}$/i.test(note.color) ? note.color.toLowerCase() : "";
+}
+
+/** Paints notes; `""` puts them back to the default. One document, so a whole selection is one
+ *  undo step — and the same document back when nothing changes, which `edit` skips. */
+export function colorNotes(spec: FlowSpec, ids: Iterable<string>, color: string): FlowSpec {
+  const targets = new Set(ids);
+  let changed = false;
+  const notes = spec.notes.map((note) => {
+    if (!targets.has(note.id) || (note.color ?? "") === color) return note;
+    changed = true;
+    const next = { ...note };
+    if (color) next.color = color;
+    else delete next.color;
+    return next;
+  });
+  return changed ? { ...spec, notes } : spec;
 }
 
 export function updateNote(

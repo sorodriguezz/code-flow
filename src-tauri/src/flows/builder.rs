@@ -119,8 +119,8 @@ $('Node name').item.json an earlier node's item, $now a Luxon DateTime, $vars th
 `credential` parameter: an id from the CREDENTIALS list, or \"\" when none fits — the user picks it later.\n\
 - Pickers of other CodeFlow things (repositories, database connections, hosts, notes, agents, services, \
 flows) take an id the user picks: leave them \"\".\n\
-- Prefer the dedicated node over code: net.http for an API, net.connector for Slack, Discord, Telegram, Notion \
-or Jira, logic.if to branch, transform.set to shape fields.\n\n\
+- Prefer the dedicated node over code: net.http for an API, net.connector for a service listed in CONNECTORS, \
+logic.if to branch, transform.set to shape fields.\n\n\
 THE SUMMARY\n\
 - One or two sentences in the user's language: what the flow does, or what you changed and why.";
 
@@ -147,6 +147,7 @@ fn kind_text(spec: &ParamSpec) -> String {
         Kind::Aggregations => "[{op: count|countUnique|sum|avg|min|max|first|last|concat|list, field, as}]".into(),
         Kind::Strings => "list of strings".into(),
         Kind::Folder => "folder path".into(),
+        Kind::File { placeholder, .. } => format!("file path, e.g. {placeholder:?}"),
         Kind::Credential { kinds } => format!("credential id of kind {kinds:?}, or \"\""),
         Kind::MultiSelect { options } => format!("list, any of {options:?}"),
         Kind::Engine => "{} = the automatic engine".into(),
@@ -154,6 +155,11 @@ fn kind_text(spec: &ParamSpec) -> String {
         Kind::OutputFields => "[{name, type: string|number|integer|boolean|array|object, description, required}]".into(),
         Kind::Categories => "[{name, description}]".into(),
         Kind::Connector => "{connector, operation, fields: {name: value}} — see CONNECTORS".into(),
+        Kind::ExtractRules => "[{name, selector: CSS, attribute: \"\"=text|\"html\"|an attribute name, all: bool}]".into(),
+        Kind::ApiModel { purpose } => format!("model id of the provider ({purpose})"),
+        Kind::FormFields => "[{name, label, type: text|longText|number|boolean|select|date, required, default, options: \"a, b\"}] \
+                             — what a manual run asks for"
+            .into(),
         Kind::Project
         | Kind::Flows { .. }
         | Kind::Service
@@ -164,7 +170,9 @@ fn kind_text(spec: &ParamSpec) -> String {
         | Kind::DbConnection { .. }
         | Kind::RemoteHost { .. }
         | Kind::Note
-        | Kind::VaultItem => "an id the user picks: \"\"".into(),
+        | Kind::VaultItem
+        | Kind::ApiRequest
+        | Kind::ApiEnvironment => "an id the user picks: \"\"".into(),
     }
 }
 
@@ -190,7 +198,11 @@ pub fn catalogue_brief(notes: &HashMap<String, String>) -> String {
         for spec in params::for_type(descriptor.type_id) {
             out.push_str(&format!("    {}: {} = {}", spec.name, kind_text(spec), spec.default));
             if let Some(show) = spec.show_if {
-                out.push_str(&format!(" (only when {} is {:?})", show.param, show.values));
+                out.push_str(&format!(" (only when {} is {:?}", show.param, show.values));
+                if let Some(also) = spec.also_if {
+                    out.push_str(&format!(" and {} is {:?}", also.param, also.values));
+                }
+                out.push(')');
             }
             out.push('\n');
         }

@@ -105,7 +105,7 @@ fn graphql<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn std
         let introspect = text(params, "operation") == "introspect";
         let mut headers = pairs(params, "headers");
         let mut query_params = Vec::new();
-        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query_params)?;
+        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query_params).await?;
         headers.push(("Content-Type".into(), "application/json".into()));
         headers.push(("Accept".into(), "application/json".into()));
         let url = build_url(&text(params, "url"), &query_params)?;
@@ -208,7 +208,7 @@ fn websocket<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn s
     Box::pin(async move {
         let mut headers = pairs(params, "headers");
         let mut query = Vec::new();
-        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query)?;
+        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query).await?;
         let mut url = build_url(&crate::api::ws::normalize_scheme(&text(params, "url")), &query)?;
         if !matches!(url.scheme(), "ws" | "wss") {
             let secure = url.scheme() == "https";
@@ -267,7 +267,7 @@ fn socketio<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn st
     Box::pin(async move {
         let mut headers = pairs(params, "headers");
         let mut query = Vec::new();
-        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query)?;
+        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query).await?;
         let path = text(params, "socketPath");
         let request = SocketIoConnectRequest {
             url: text(params, "url"),
@@ -299,7 +299,7 @@ fn grpc<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn std::f
     Box::pin(async move {
         let mut metadata = pairs(params, "metadata");
         let mut ignored = Vec::new();
-        apply_credential(ctx, &text(params, "credential"), &mut metadata, &mut ignored)?;
+        apply_credential(ctx, &text(params, "credential"), &mut metadata, &mut ignored).await?;
         // gRPC metadata keys are lowercase on the wire.
         let metadata = metadata.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
         let message = text(params, "message");
@@ -416,7 +416,7 @@ fn sse<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn std::fu
     Box::pin(async move {
         let mut headers = pairs(params, "headers");
         let mut query = Vec::new();
-        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query)?;
+        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query).await?;
         headers.push(("Accept".into(), "text/event-stream".into()));
         let url = build_url(&text(params, "url"), &query)?;
         let client = http_client(params)?;
@@ -468,7 +468,7 @@ fn download<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn st
     Box::pin(async move {
         let mut headers = pairs(params, "headers");
         let mut query = Vec::new();
-        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query)?;
+        apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query).await?;
         let url = build_url(&text(params, "url"), &query)?;
         let client = http_client(params)?;
         let send = client.get(url.clone()).headers(header_map(&headers)?).send();
@@ -551,7 +551,7 @@ fn download<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn st
 
 // ------------------------------------------------------------------------------------------ email
 
-fn mailboxes(raw: &str) -> Result<Vec<lettre::message::Mailbox>, NodeError> {
+pub(super) fn mailboxes(raw: &str) -> Result<Vec<lettre::message::Mailbox>, NodeError> {
     raw.split([',', ';'])
         .map(str::trim)
         .filter(|address| !address.is_empty())

@@ -12,14 +12,19 @@
 
 pub mod ai_host;
 pub mod app_ops;
+pub mod bridge;
 pub mod builder;
 pub mod catalog;
 pub mod connectors;
 pub mod engine;
 pub mod expr;
+pub mod form;
+pub mod mail;
 pub mod n8n;
 pub mod nodes;
+pub mod oauth;
 pub mod params;
+pub mod pr_ops;
 pub mod run;
 pub mod runs;
 pub mod schedule;

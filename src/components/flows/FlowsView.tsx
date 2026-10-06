@@ -4,6 +4,8 @@ import { ViewSkeleton } from "../common/ViewSkeleton";
 import { explorerClass } from "../common/recipes";
 import { FlowExplorer } from "./FlowExplorer";
 import { FlowVaultDialog } from "./FlowVaultDialog";
+import { FlowCollabDialog } from "./FlowCollabDialog";
+import { FlowRunFormDialog } from "./RunForm";
 import { ScheduleView } from "./ScheduleView";
 import { TrustDialog } from "./TrustDialog";
 import { ensureFlowRunEvents, useFlowRunsStore } from "../../state/flowRunsStore";
@@ -86,6 +88,9 @@ export function FlowsView() {
       </div>
       <FlowVaultDialog />
       <TrustDialog />
+      {/* Here rather than in the explorer: a flow's share dialog opens it too. */}
+      <FlowCollabDialog />
+      <FlowRunFormDialog />
     </div>
   );
 }

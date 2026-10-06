@@ -38,6 +38,9 @@ struct Script {
     /// How the waits of a run end, in order, and what they asked.
     waits: Mutex<std::collections::VecDeque<WaitAnswer>>,
     wait_calls: Mutex<Vec<WaitRequest>>,
+    /// What the app's operations (`app_call`) answer, in order, and what they were asked.
+    app_answers: Mutex<std::collections::VecDeque<Result<Value, String>>>,
+    app_calls: Mutex<Vec<(String, Value)>>,
 }
 
 impl Script {
@@ -97,6 +100,17 @@ impl RunHost for Host {
     fn credential(&self, id: &str) -> Result<Credential, String> {
         match id {
             "token" => Ok(Credential { kind: "bearer".into(), meta: json!({}), secret: "s3cret".into() }),
+            // An OAuth 2 credential: what is stored is never sent; `oauth_token` hands out the token.
+            "oauth" => Ok(Credential { kind: "oauth2".into(), meta: json!({"provider": "google", "account": "ana@example.com"}), secret: "{\"refreshToken\":\"r\"}".into() }),
+            "basic" => Ok(Credential { kind: "basic".into(), meta: json!({"user": "ana"}), secret: "pw".into() }),
+            // The live services of `milestone9`: GreenMail (any password), RabbitMQ, ElasticMQ.
+            "greenmail" => Ok(Credential {
+                kind: "imap".into(),
+                meta: json!({"host": "127.0.0.1", "port": "53143", "user": "ana@example.com", "security": "none"}),
+                secret: "ana@example.com".into(),
+            }),
+            "rabbit" => Ok(Credential { kind: "basic".into(), meta: json!({"user": "flujos"}), secret: "flujos".into() }),
+            "aws" => Ok(Credential { kind: "aws".into(), meta: json!({"user": "AKIAEXAMPLE", "region": "elasticmq"}), secret: "x".into() }),
             "signing" => Ok(Credential { kind: "hmac".into(), meta: json!({}), secret: "key".into() }),
             // A webhook URL credential pointing wherever the test's own server listens.
             hook if hook.starts_with("webhook:") => {
@@ -128,6 +142,13 @@ impl RunHost for Host {
     }
     fn work_dir(&self) -> PathBuf {
         self.dir.clone()
+    }
+    fn oauth_token(&self, id: &str, _meta: &Value) -> HostFuture<'_, Result<String, String>> {
+        let id = id.to_string();
+        Box::pin(async move { if id == "oauth" { Ok("ya29.fresh".to_string()) } else { Err(format!("{id} is not OAuth")) } })
+    }
+    fn vectors_path(&self) -> PathBuf {
+        self.dir.join("vectors.sqlite")
     }
     fn subflow(&self, flow_id: &str, items: Vec<Item>, wait: bool) -> HostFuture<'_, Result<Vec<Item>, String>> {
         let flow_id = flow_id.to_string();
@@ -182,6 +203,13 @@ impl RunHost for Host {
     }
     fn edits_recorded(&self, path: &str) {
         self.script.edits.lock().unwrap().push(path.to_string());
+    }
+    fn app_call(&self, op: &str, args: Value, _cancel: CancellationToken) -> HostFuture<'_, Result<Value, String>> {
+        let op = op.to_string();
+        Box::pin(async move {
+            self.script.app_calls.lock().unwrap().push((op.clone(), args));
+            self.script.app_answers.lock().unwrap().pop_front().unwrap_or_else(|| Err(format!("the script has no answer for {op}")))
+        })
     }
 }
 
@@ -1078,3 +1106,7 @@ async fn review_and_commit_read_their_answers() {
 mod milestone4;
 mod milestone5;
 mod milestone6;
+mod milestone7;
+mod milestone8;
+mod milestone9;
+mod milestone10;

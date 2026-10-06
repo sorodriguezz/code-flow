@@ -349,6 +349,16 @@ pub trait RunHost: Send + Sync {
         let op = op.to_string();
         Box::pin(async move { Err(format!("{op} is not available in this run")) })
     }
+    /// An access token of an `oauth2` credential good for at least another minute — renewed with
+    /// its refresh token, and stored, when it was not (`flows::oauth`).
+    fn oauth_token(&self, id: &str, meta: &Value) -> HostFuture<'_, Result<String, String>> {
+        let _ = (id, meta);
+        not_here("An OAuth 2 credential")
+    }
+    /// Where the "Base vectorial" node keeps its own store.
+    fn vectors_path(&self) -> PathBuf {
+        crate::paths::flow_vectors_path()
+    }
 }
 
 /// Everything about a run that is not the graph.

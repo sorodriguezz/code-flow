@@ -41,6 +41,9 @@ pub enum Kind {
     Strings,
     /// A directory, typed or picked.
     Folder,
+    /// A file on this computer: typed or pasted, or picked in the system's dialog — "save as" while
+    /// the node's `operation` is one of `save` (`*`: always), an open dialog otherwise.
+    File { placeholder: &'static str, save: &'static [&'static str] },
     /// A flow credential of one of these kinds; `""` is none.
     Credential { kinds: &'static [&'static str] },
     /// Any number of `options`, as a list of strings.
@@ -79,6 +82,18 @@ pub enum Kind {
     /// `{ connector, operation, fields }` — a call to one of `flows::connectors`, its form drawn
     /// from the connector's definition.
     Connector,
+    /// `[{ name, label, type, required, default, options }]` — what a manual run asks for before it
+    /// starts (`flows::form`).
+    FormFields,
+    /// A saved request of the API client of the workspace, by id.
+    ApiRequest,
+    /// An environment of the API client, by id — `""` is the one active there, `"none"` none.
+    ApiEnvironment,
+    /// `[{ name, selector, attribute, all }]` — what a web page node picks out, by CSS selector.
+    ExtractRules,
+    /// A provider's model, typed or picked from the list its API gives (`flows_ai_models`):
+    /// chat models, or embedding ones.
+    ApiModel { purpose: &'static str },
 }
 
 /// Shown only while another parameter holds one of `values`.
@@ -98,6 +113,9 @@ pub struct ParamSpec {
     pub default: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_if: Option<ShowIf>,
+    /// A second condition that must hold too — a field of one broker *and* one operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub also_if: Option<ShowIf>,
     /// Whether the field can be switched to an expression. Off for the few whose value is itself
     /// code or structure the engine reads (a Code node's source, a condition list).
     pub expr: bool,
@@ -108,7 +126,7 @@ fn as_json<S: Serializer>(text: &&'static str, serializer: S) -> Result<S::Ok, S
 }
 
 const fn p(name: &'static str, kind: Kind, default: &'static str) -> ParamSpec {
-    ParamSpec { name, kind, default, show_if: None, expr: true }
+    ParamSpec { name, kind, default, show_if: None, also_if: None, expr: true }
 }
 
 impl ParamSpec {
@@ -117,10 +135,25 @@ impl ParamSpec {
         self
     }
 
+    const fn and_when(mut self, param: &'static str, values: &'static [&'static str]) -> Self {
+        self.also_if = Some(ShowIf { param, values });
+        self
+    }
+
     const fn literal(mut self) -> Self {
         self.expr = false;
         self
     }
+}
+
+/// A file the node reads.
+const fn file(placeholder: &'static str) -> Kind {
+    Kind::File { placeholder, save: &[] }
+}
+
+/// A file the node writes — in every operation (`*`), or in the ones listed.
+const fn file_to_write(placeholder: &'static str, save: &'static [&'static str]) -> Kind {
+    Kind::File { placeholder, save }
 }
 
 const fn text(placeholder: &'static str) -> Kind {
@@ -200,7 +233,7 @@ const COMMAND: &[ParamSpec] = &[
 const SCRIPT: &[ParamSpec] = &[
     p("source", select(&["npm", "make", "mise", "file"]), "\"npm\""),
     p("name", text("build"), "\"\"").when("source", &["npm", "make", "mise"]),
-    p("path", text("scripts/deploy.sh"), "\"\"").when("source", &["file"]),
+    p("path", file("scripts/deploy.sh"), "\"\"").when("source", &["file"]),
     p("args", Kind::Strings, "[]"),
     CWD,
     ENV,
@@ -213,7 +246,7 @@ const SCRIPT: &[ParamSpec] = &[
 const HTTP: &[ParamSpec] = &[
     p("method", raw_select(&["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]), "\"GET\""),
     p("url", text("https://api.example.com/items"), "\"\""),
-    p("credential", Kind::Credential { kinds: &["bearer", "basic", "header", "query"] }, "\"\"").literal(),
+    p("credential", Kind::Credential { kinds: &["bearer", "basic", "header", "query", "oauth2"] }, "\"\"").literal(),
     p("query", Kind::KeyValue, "[]"),
     p("headers", Kind::KeyValue, "[]"),
     p("body", select(&["none", "json", "form", "text"]), "\"none\""),
@@ -228,6 +261,15 @@ const HTTP: &[ParamSpec] = &[
     p("timeoutMs", COUNT, "30000"),
     p("followRedirects", Kind::Boolean, "true"),
     p("verifySsl", Kind::Boolean, "true"),
+    // Pagination: every page, its items joined (`nodes::http::paginate`).
+    p("pagination", select(&["none", "nextUrl", "pageNumber", "cursor"]), "\"none\"").literal(),
+    p("itemsField", text("data"), "\"\"").literal().when("pagination", &["nextUrl", "pageNumber", "cursor"]),
+    p("nextField", text("links.next"), "\"\"").literal().when("pagination", &["nextUrl"]),
+    p("pageParam", text("page"), "\"page\"").literal().when("pagination", &["pageNumber"]),
+    p("startPage", COUNT, "1").literal().when("pagination", &["pageNumber"]),
+    p("cursorField", text("meta.next_cursor"), "\"\"").literal().when("pagination", &["cursor"]),
+    p("cursorParam", text("cursor"), "\"cursor\"").literal().when("pagination", &["cursor"]),
+    p("maxPages", COUNT, "10").literal().when("pagination", &["nextUrl", "pageNumber", "cursor"]),
 ];
 
 // ------------------------------------------------------------------ data
@@ -431,6 +473,26 @@ const PR: &[ParamSpec] = &[
     p("intervalSec", Kind::Number { min: Some(60.0), max: None }, "120").literal(),
 ];
 
+/// A GitHub repository's issues, comments and releases (`triggers::github`): a token is optional for
+/// a public repository, but without one GitHub allows 60 looks an hour.
+const GITHUB_TRIGGER: &[ParamSpec] = &[
+    p("repository", text("octo-org/app"), "\"\"").literal(),
+    p("event", select(&["issueOpened", "issueClosed", "issueComment", "release"]), "\"issueOpened\"").literal(),
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal(),
+    p("labelFilter", text("bug, urgente"), "\"\"").literal().when("event", &["issueOpened", "issueClosed"]),
+    p("intervalSec", Kind::Number { min: Some(60.0), max: None }, "120").literal(),
+];
+
+/// A mailbox over IMAP (`triggers::inbox`).
+const EMAIL_TRIGGER: &[ParamSpec] = &[
+    p("credential", Kind::Credential { kinds: &["imap"] }, "\"\"").literal(),
+    p("mailbox", text("INBOX"), "\"INBOX\"").literal(),
+    p("imapCriteria", text("UNSEEN FROM \"facturas@example.com\""), "\"UNSEEN\"").literal(),
+    p("markRead", Kind::Boolean, "false").literal(),
+    p("attachmentsFolder", Kind::Folder, "\"\"").literal(),
+    p("intervalSec", Kind::Number { min: Some(30.0), max: None }, "60").literal(),
+];
+
 const PIPELINE: &[ParamSpec] = &[
     p("project", Kind::Project, "\"\"").literal(),
     p("event", select(&["finished", "failed", "succeeded"]), "\"failed\"").literal(),
@@ -462,11 +524,18 @@ const RESPOND: &[ParamSpec] = &[
     p("headers", Kind::KeyValue, "[]"),
 ];
 
+/// The manual trigger: the form a run asks for, when it has fields.
+const MANUAL: &[ParamSpec] = &[p("fields", Kind::FormFields, "[]").literal()];
+
 const SERVICE: &[ParamSpec] = &[
     p("service", Kind::Service, "\"\"").literal(),
-    p("action", select(&["start", "stop", "restart", "status"]), "\"start\"").literal(),
+    p("action", select(&["start", "stop", "restart", "status", "readLog", "waitForLine"]), "\"start\"").literal(),
     p("wait", Kind::Boolean, "true").literal().when("action", &["start", "restart"]),
-    p("timeoutSec", COUNT, "120").literal().when("action", &["start", "restart"]),
+    p("timeoutSec", COUNT, "120").literal().when("action", &["start", "restart", "waitForLine"]),
+    p("lines", COUNT, "100").literal().when("action", &["readLog"]),
+    p("waitText", text("listening on"), "\"\"").when("action", &["waitForLine"]),
+    p("regex", Kind::Boolean, "false").literal().when("action", &["waitForLine"]),
+    p("onlyNew", Kind::Boolean, "true").literal().when("action", &["waitForLine"]),
 ];
 
 // ------------------------------------------------------------------ AI (milestone 3)
@@ -562,6 +631,163 @@ const REVIEW: &[ParamSpec] = &[
     FALLBACK_ENGINES,
 ];
 
+/// CodeFlow's own PR analyzer (`ai.prReview`). The engine follows the "Revisión de PR" routing row
+/// while it is left automatic — the analyzer's, not the "Flujos" one.
+const PR_REVIEW: &[ParamSpec] = &[
+    p("source", select(&["project", "link"]), "\"project\"").literal(),
+    p("project", Kind::Project, "\"\"").literal().when("source", &["project"]),
+    p("prId", text("{{ $json.number }}"), "\"\"").when("source", &["project"]),
+    p("prUrl", text("https://github.com/org/repo/pull/12"), "\"\"").when("source", &["link"]),
+    p("level", select(&["basico", "completo", "ultra"]), "\"completo\"").literal(),
+    p("force", Kind::Boolean, "false").literal().when("source", &["project"]),
+    p("publish", select(&["none", "findings", "findingsAndSummary"]), "\"none\"").literal().when("source", &["project"]),
+    p("minSeverity", select(&["critical", "warning", "info"]), "\"warning\"")
+        .literal()
+        .when("publish", &["findings", "findingsAndSummary"]),
+    ENGINE,
+];
+
+/// "Resolver con IA" (`ai.prFix`): the PR analyzer's fix, finding by finding or thread by thread,
+/// on the pull request's branch.
+const PR_FIX: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("prId", text("{{ $json.prId }}"), "\"\""),
+    p("fixSource", select(&["fixFindings", "fixThreads"]), "\"fixFindings\"").literal(),
+    p("ids", text("F-001, F-003"), "\"\""),
+    p("minSeverity", select(&["critical", "warning", "info"]), "\"warning\"").literal().when("fixSource", &["fixFindings"]),
+    INSTRUCTIONS,
+    p("switchBranch", Kind::Boolean, "true").literal(),
+    ENGINE,
+];
+
+/// "Responder con IA" (`ai.prReply`): a reply drafted per comment thread.
+const PR_REPLY: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("prId", text("{{ $json.prId }}"), "\"\""),
+    p("ids", text("{{ $json.id }}"), "\"\""),
+    p("replyNote", long_text("No aplica: es intencional, lo explica el ADR-12"), "\"\""),
+    ENGINE,
+];
+
+/// A turn of CodeFlow's Chat (`ai.chat`): in a new thread, in the one titled so (made the first
+/// time), or in one by id. The engine is the thread's own for an existing one unless the node names
+/// one; a new thread starts on the node's — or, automatic, on the Chat routing row's.
+const CHAT: &[ParamSpec] = &[
+    p("conversation", select(&["byTitle", "newThread", "byId"]), "\"byTitle\"").literal(),
+    p("title", text("Informe diario"), "\"\"").when("conversation", &["byTitle", "newThread"]),
+    p("conversationId", text("{{ $json.conversationId }}"), "\"\"").when("conversation", &["byId"]),
+    p("message", long_text("Resume esto en tres puntos: {{ $json.text }}"), "\"\""),
+    p("project", Kind::Project, "\"\"").literal().when("conversation", &["byTitle", "newThread"]),
+    p("waitReply", Kind::Boolean, "true").literal(),
+    ENGINE,
+];
+
+/// A database's schema as DBML (`data.dbml`) — read from a saved connection, written by the one
+/// DBML emitter (the window's), and kept where asked: a diagram of the workspace (made the first
+/// time, replaced after) or a `.dbml` file.
+const DBML: &[ParamSpec] = &[
+    p("connection", Kind::DbConnection { kinds: SQL_ENGINES }, "\"\"").literal(),
+    p("database", text(""), "\"\"").literal(),
+    p("schema", text("public"), "\"\"").literal(),
+    p("saveTo", select(&["noSave", "diagram", "dbmlFile"]), "\"diagram\"").literal(),
+    p("title", text("Esquema de producción"), "\"\"").when("saveTo", &["diagram"]),
+    p("path", file_to_write("~/esquemas/app.dbml", &["*"]), "\"\"").when("saveTo", &["dbmlFile"]),
+];
+
+/// A saved request of the API client (`app.apiRequest`), sent the way the API client sends it — see
+/// `lib/api/savedRequest.ts`. `variables` fill the request's `{{…}}` before the environment does.
+const API_REQUEST: &[ParamSpec] = &[
+    p("request", Kind::ApiRequest, "\"\"").literal(),
+    p("environment", Kind::ApiEnvironment, "\"\"").literal(),
+    p("variables", Kind::KeyValue, "[]"),
+    p("runFor", select(&["each", "once"]), "\"each\"").literal(),
+    p("failOnStatus", Kind::Boolean, "false").literal(),
+    p("failOnTests", Kind::Boolean, "false").literal(),
+];
+
+// ------------------------------------------------------------------ milestone 8: utilities
+
+const WEB_PAGE: &[ParamSpec] = &[
+    p("source", select(&["url", "html"]), "\"url\"").literal(),
+    p("url", text("https://example.com/blog"), "\"\"").when("source", &["url"]),
+    p("pageHtml", long_text("{{ $json.body }}"), "\"\"").when("source", &["html"]),
+    p("mode", select(&["markdown", "extract", "pageText", "links"]), "\"markdown\"").literal(),
+    p("mainOnly", Kind::Boolean, "true").literal().when("mode", &["markdown", "pageText"]),
+    p("fieldsToExtract", Kind::ExtractRules, r#"[{"name":"title","selector":"h1","attribute":"","all":false}]"#).when("mode", &["extract"]),
+    p("timeoutMs", COUNT, "20000").literal().when("source", &["url"]),
+];
+
+const SITE_CHECK: &[ParamSpec] = &[
+    p("check", select(&["httpCheck", "tlsCheck", "dnsCheck", "portCheck"]), "\"httpCheck\"").literal(),
+    p("siteTarget", text("https://example.com"), "\"\""),
+    p("expectStatus", text("200-399"), "\"\"").when("check", &["httpCheck"]),
+    p("port", COUNT, "443").when("check", &["tlsCheck", "portCheck"]),
+    p("warnDays", COUNT, "14").literal().when("check", &["tlsCheck"]),
+    p("recordType", raw_select(&["A", "AAAA", "CNAME", "MX", "TXT", "NS"]), "\"A\"").literal().when("check", &["dnsCheck"]),
+    p("timeoutMs", COUNT, "10000").literal(),
+];
+
+const UNTIL: &[ParamSpec] = &[
+    p("check", select(&["httpUntil", "commandUntil"]), "\"httpUntil\"").literal(),
+    p("url", text("https://example.com/health"), "\"\"").when("check", &["httpUntil"]),
+    p("expectStatus", text("200"), "\"200\"").when("check", &["httpUntil"]),
+    p("bodyContains", text("\"status\":\"ok\""), "\"\"").when("check", &["httpUntil"]),
+    p("command", Kind::Code { lang: "shell" }, "\"\"").when("check", &["commandUntil"]),
+    p("outputContains", text("ready"), "\"\"").when("check", &["commandUntil"]),
+    p("intervalSec", COUNT, "5").literal(),
+    p("timeoutSec", COUNT, "300").literal(),
+    p("failOnTimeout", Kind::Boolean, "true").literal(),
+];
+
+const CHANGES: &[ParamSpec] = &[
+    p("key", text("{{ $json.id }}"), "\"\""),
+    p("compare", select(&["wholeItem", "someFields"]), "\"wholeItem\"").literal(),
+    p("fields", Kind::Strings, "[]").literal().when("compare", &["someFields"]),
+    p("firstRun", select(&["emitAll", "emitNone"]), "\"emitAll\"").literal(),
+    p("memory", COUNT, "10000").literal(),
+];
+
+const TEMPLATE: &[ParamSpec] = &[
+    p("template", Kind::Code { lang: "markdown" }, "\"Hola {{ json.nombre }}\"").literal(),
+    p("runFor", select(&["each", "once"]), "\"each\"").literal(),
+    p("target", text("text"), "\"text\"").literal(),
+];
+
+const JSON_TOOL: &[ParamSpec] = &[
+    p("operation", select(&["validate", "jsonPath", "jsonDiff"]), "\"validate\"").literal(),
+    p("value", text("{{ $json }}"), "\"={{ $json }}\"").when("operation", &["validate", "jsonPath"]),
+    p("schema", Kind::Code { lang: "json" }, r#""{\n  \"type\": \"object\"\n}""#).literal().when("operation", &["validate"]),
+    p("jsonPathExpr", text("$.items[*].id"), "\"\"").when("operation", &["jsonPath"]),
+    p("left", text("{{ $json.antes }}"), "\"\"").when("operation", &["jsonDiff"]),
+    p("right", text("{{ $json.despues }}"), "\"\"").when("operation", &["jsonDiff"]),
+    p("target", text(""), "\"\"").literal(),
+];
+
+const SQL_ITEMS: &[ParamSpec] = &[p("itemsQuery", Kind::Code { lang: "sql" }, "\"SELECT * FROM items\"").literal()];
+
+const PDF: &[ParamSpec] = &[
+    p("operation", select(&["readPdf", "createPdf"]), "\"readPdf\"").literal(),
+    p("path", file("~/Documentos/factura.pdf"), "\"\"").when("operation", &["readPdf"]),
+    p("markdown", long_text("# Informe\n\n{{ $json.resumen }}"), "\"\"").when("operation", &["createPdf"]),
+    p("title", text("Informe"), "\"\"").when("operation", &["createPdf"]),
+    p("savePath", file_to_write("~/Documentos/informe.pdf", &["*"]), "\"\"").when("operation", &["createPdf"]),
+    p("pageSize", select(&["a4", "letter"]), "\"a4\"").literal().when("operation", &["createPdf"]),
+];
+
+const IMAGE: &[ParamSpec] = &[
+    p("operation", select(&["imageInfo", "resize", "convertImage", "crop", "rotate", "qrCreate", "qrRead"]), "\"resize\"").literal(),
+    p("path", file("{{ $json.path }}"), "\"\"").when("operation", &["imageInfo", "resize", "convertImage", "crop", "rotate", "qrRead"]),
+    p("qrText", text("https://example.com"), "\"\"").when("operation", &["qrCreate"]),
+    p("qrSize", COUNT, "512").literal().when("operation", &["qrCreate"]),
+    p("width", COUNT, "800").when("operation", &["resize", "crop"]),
+    p("height", COUNT, "0").when("operation", &["resize", "crop"]),
+    p("x", COUNT, "0").when("operation", &["crop"]),
+    p("y", COUNT, "0").when("operation", &["crop"]),
+    p("degrees", raw_select(&["90", "180", "270"]), "\"90\"").literal().when("operation", &["rotate"]),
+    p("savePath", file_to_write("~/Imágenes/salida.png", &["*"]), "\"\"").when("operation", &["resize", "convertImage", "crop", "rotate", "qrCreate"]),
+    p("quality", COUNT, "85").literal().when("operation", &["resize", "convertImage", "crop", "rotate"]),
+];
+
 const COMMIT: &[ParamSpec] = &[
     ENGINE,
     p("writeWhat", select(&["commitMessage", "prDescription"]), "\"commitMessage\"").literal(),
@@ -586,7 +812,7 @@ const AGENT_TASK: &[ParamSpec] = &[
 
 const EACH: ParamSpec = p("runFor", select(&["each", "once"]), "\"each\"").literal();
 const ONCE: ParamSpec = p("runFor", select(&["once", "each"]), "\"once\"").literal();
-const HTTP_CREDENTIAL: ParamSpec = p("credential", Kind::Credential { kinds: &["bearer", "basic", "header", "query"] }, "\"\"").literal();
+const HTTP_CREDENTIAL: ParamSpec = p("credential", Kind::Credential { kinds: &["bearer", "basic", "header", "query", "oauth2"] }, "\"\"").literal();
 const HEADERS: ParamSpec = p("headers", Kind::KeyValue, "[]");
 const VERIFY_SSL: ParamSpec = p("verifySsl", Kind::Boolean, "true");
 const TIMEOUT_MS: ParamSpec = p("timeoutMs", COUNT, "30000");
@@ -643,7 +869,7 @@ const SOCKETIO: &[ParamSpec] = &[
 const GRPC: &[ParamSpec] = &[
     p("endpoint", text("https://api.example.com:443"), "\"\""),
     p("source", select(&["reflection", "proto"]), "\"reflection\"").literal(),
-    p("protoPath", text("~/protos/pedidos.proto"), "\"\"").when("source", &["proto"]),
+    p("protoPath", file("~/protos/pedidos.proto"), "\"\"").when("source", &["proto"]),
     p("importPaths", Kind::Strings, "[]").when("source", &["proto"]),
     p("service", text("pedidos.v1.Pedidos"), "\"\""),
     p("method", text("Obtener"), "\"\""),
@@ -712,7 +938,7 @@ const TRANSFER: &[ParamSpec] = &[
     p("operation", select(TRANSFER_OPS), "\"list\"").literal(),
     p("remotePath", text("/srv/exportes"), "\"\""),
     p("prefix", text(""), "\"\"").when("operation", &["list"]),
-    p("localPath", text("~/Descargas/reporte.csv"), "\"\"").when("operation", &["download", "upload"]),
+    p("localPath", file_to_write("~/Descargas/reporte.csv", &["download"]), "\"\"").when("operation", &["download", "upload"]),
     p("overwrite", Kind::Boolean, "false").when("operation", &["download"]),
     p("newPath", text(""), "\"\"").when("operation", &["rename"]),
     p("isFolder", Kind::Boolean, "false").when("operation", &["delete"]),
@@ -723,7 +949,7 @@ const STORAGE: &[ParamSpec] = &[
     p("operation", select(TRANSFER_OPS), "\"list\"").literal(),
     p("remotePath", text("mi-bucket/reportes"), "\"\""),
     p("prefix", text(""), "\"\"").when("operation", &["list"]),
-    p("localPath", text("~/Descargas/reporte.csv"), "\"\"").when("operation", &["download", "upload"]),
+    p("localPath", file_to_write("~/Descargas/reporte.csv", &["download"]), "\"\"").when("operation", &["download", "upload"]),
     p("overwrite", Kind::Boolean, "false").when("operation", &["download"]),
     p("newPath", text(""), "\"\"").when("operation", &["rename"]),
     p("isFolder", Kind::Boolean, "false").when("operation", &["delete"]),
@@ -748,7 +974,7 @@ const DOCKER: &[ParamSpec] = &[
     p("remove", Kind::Boolean, "true").when("mode", &["runImage"]),
     p("container", text("api"), "\"\"").when("mode", &["exec"]),
     p("command", Kind::Code { lang: "shell" }, "\"\"").when("mode", &["exec"]),
-    p("composeFile", text("~/proyectos/api/compose.yaml"), "\"\"").when("mode", &["compose"]),
+    p("composeFile", file("~/proyectos/api/compose.yaml"), "\"\"").when("mode", &["compose"]),
     p("composeAction", select(&["up", "down", "ps", "logs"]), "\"up\"").when("mode", &["compose"]),
     ONCE,
     OUTPUT,
@@ -781,7 +1007,7 @@ const REDIS: &[ParamSpec] = &[
 
 const SHEET: &[ParamSpec] = &[
     p("operation", select(&["read", "write"]), "\"read\"").literal(),
-    p("path", text("~/Documentos/pedidos.xlsx"), "\"\""),
+    p("path", file_to_write("~/Documentos/pedidos.xlsx", &["write"]), "\"\""),
     p("fileFormat", select(&["auto", "csv", "tsv", "xlsx"]), "\"auto\"").literal(),
     p("sheet", text(""), "\"\""),
     p("header", Kind::Boolean, "true").literal(),
@@ -792,7 +1018,7 @@ const SHEET: &[ParamSpec] = &[
 
 const FILE_RW: &[ParamSpec] = &[
     p("operation", select(&["read", "write", "addToEnd"]), "\"read\"").literal(),
-    p("path", text("~/Documentos/notas.txt"), "\"\""),
+    p("path", file_to_write("~/Documentos/notas.txt", &["write"]), "\"\""),
     p("readAs", select(&["text", "json", "lines", "base64"]), "\"text\"").literal().when("operation", &["read"]),
     p("target", text("content"), "\"content\"").literal().when("operation", &["read"]),
     p("content", long_text("{{ $json.text }}"), "\"\"").when("operation", &["write", "addToEnd"]),
@@ -812,7 +1038,7 @@ const LIST: &[ParamSpec] = &[
 
 const MOVE: &[ParamSpec] = &[
     p("operation", select(&["move", "copy", "rename", "trash"]), "\"move\"").literal(),
-    p("source", text("{{ $json.file.path }}"), "\"\""),
+    p("source", file("{{ $json.file.path }}"), "\"\""),
     p("destPath", text("~/Documentos/procesados/"), "\"\"").when("operation", &["move", "copy"]),
     p("newName", text(""), "\"\"").when("operation", &["rename"]),
     p("overwrite", Kind::Boolean, "false").when("operation", &["move", "copy", "rename"]),
@@ -848,15 +1074,24 @@ const PULL_REQUEST: &[ParamSpec] = &[
     p("deleteSourceBranch", Kind::Boolean, "false").when("operation", &["merge"]),
 ];
 
+/// A pipeline of a linked repository: started, or a run followed — its status, its end, the logs
+/// of its jobs (the failed ones, for an AI to read) and its artifacts. A node saved before the
+/// operations existed has none, and starts one, as it always did.
 const PIPELINE_RUN: &[ParamSpec] = &[
+    p("operation", select(&["launch", "status", "waitRun", "jobLogs", "artifacts"]), "\"launch\"").literal(),
     p("project", Kind::Project, "\"\"").literal(),
-    p("definitionId", text("ci.yml"), "\"\""),
-    p("ref", text(""), "\"\""),
-    p("inputs", Kind::KeyValue, "[]"),
-    p("variables", Kind::KeyValue, "[]"),
-    p("waitEnd", Kind::Boolean, "true").literal(),
-    p("timeoutMin", COUNT, "60").literal(),
-    p("failOnFailure", Kind::Boolean, "true").literal(),
+    p("definitionId", text("ci.yml"), "\"\"").when("operation", &["launch"]),
+    p("ref", text(""), "\"\"").when("operation", &["launch"]),
+    p("inputs", Kind::KeyValue, "[]").when("operation", &["launch"]),
+    p("variables", Kind::KeyValue, "[]").when("operation", &["launch"]),
+    p("runId", text("{{ $json.runId }}"), "\"\"").when("operation", &["status", "waitRun", "jobLogs", "artifacts"]),
+    p("waitEnd", Kind::Boolean, "true").literal().when("operation", &["launch"]),
+    p("timeoutMin", COUNT, "60").literal().when("operation", &["launch", "waitRun"]),
+    p("failOnFailure", Kind::Boolean, "true").literal().when("operation", &["launch", "waitRun"]),
+    p("jobs", select(&["failedJobs", "allJobs"]), "\"failedJobs\"").literal().when("operation", &["jobLogs"]),
+    p("maxChars", COUNT, "20000").literal().when("operation", &["jobLogs"]),
+    p("download", Kind::Boolean, "false").literal().when("operation", &["artifacts"]),
+    p("folder", Kind::Folder, "\"\"").when("operation", &["artifacts"]),
 ];
 
 const NOTE: &[ParamSpec] = &[
@@ -914,11 +1149,22 @@ const CONVERT: &[ParamSpec] = &[
 ];
 
 const CRYPTO: &[ParamSpec] = &[
-    p("operation", select(&["hash", "hmac", "uuid", "base64Encode", "base64Decode", "random"]), "\"hash\"").literal(),
-    p("value", text("{{ $json.text }}"), "\"\"").when("operation", &["hash", "hmac", "base64Encode", "base64Decode"]),
+    p(
+        "operation",
+        select(&["hash", "hmac", "uuid", "base64Encode", "base64Decode", "random", "jwtSign", "jwtVerify", "encrypt", "decrypt"]),
+        "\"hash\"",
+    )
+    .literal(),
+    p("value", text("{{ $json.text }}"), "\"\"")
+        .when("operation", &["hash", "hmac", "base64Encode", "base64Decode", "jwtVerify", "encrypt", "decrypt"]),
     p("algorithm", raw_select(&["sha256", "sha512", "sha1", "md5"]), "\"sha256\"").literal().when("operation", &["hash", "hmac"]),
-    p("credential", Kind::Credential { kinds: &["hmac"] }, "\"\"").literal().when("operation", &["hmac"]),
-    p("secret", text(""), "\"\"").when("operation", &["hmac"]),
+    p("payload", Kind::Code { lang: "json" }, "\"{}\"").when("operation", &["jwtSign"]),
+    p("jwtAlgorithm", raw_select(&["HS256", "HS384", "HS512"]), "\"HS256\"").literal().when("operation", &["jwtSign", "jwtVerify"]),
+    p("expiresInSec", COUNT, "3600").when("operation", &["jwtSign"]),
+    p("credential", Kind::Credential { kinds: &["hmac"] }, "\"\"")
+        .literal()
+        .when("operation", &["hmac", "jwtSign", "jwtVerify", "encrypt", "decrypt"]),
+    p("secret", text(""), "\"\"").when("operation", &["hmac", "jwtSign", "jwtVerify", "encrypt", "decrypt"]),
     p("encoding", select(&["hex", "base64"]), "\"hex\"").literal().when("operation", &["hash", "hmac", "random"]),
     p("length", COUNT, "16").when("operation", &["random"]),
     p("target", text(""), "\"\"").literal(),
@@ -939,19 +1185,215 @@ const COMPARE: &[ParamSpec] = &[
 ];
 
 const NOTEBOOK: &[ParamSpec] = &[
-    p("path", text("~/Notebooks/informe.ipynb"), "\"\""),
+    p("path", file("~/Notebooks/informe.ipynb"), "\"\""),
     p("kernelName", text("python3"), "\"\"").literal(),
     p("notebookParams", Kind::Code { lang: "json" }, "\"{}\""),
     p("saveRun", select(&["none", "overwrite", "saveCopy"]), "\"none\"").literal(),
-    p("copyPath", text("~/Notebooks/informe-ejecutado.ipynb"), "\"\"").when("saveRun", &["saveCopy"]),
+    p("copyPath", file_to_write("~/Notebooks/informe-ejecutado.ipynb", &["*"]), "\"\"").when("saveRun", &["saveCopy"]),
     RUN_FOR,
 ];
 
 const CONNECTOR: &[ParamSpec] = &[
     p("call", Kind::Connector, r#"{"connector":"slack","operation":"postMessage","fields":{}}"#).literal(),
     // Narrowed to what the chosen connector takes (`Connector::credential_kinds`) by the form.
-    p("credential", Kind::Credential { kinds: &["bearer", "basic", "webhook"] }, "\"\"").literal(),
+    p("credential", Kind::Credential { kinds: &["bearer", "basic", "webhook", "oauth2"] }, "\"\"").literal(),
     TIMEOUT_MS,
+    EACH,
+];
+
+/// A chat model over its provider's API (`nodes::llm`): OpenAI, Anthropic, Gemini or any
+/// OpenAI-compatible server, with an API key.
+const API_CHAT: &[ParamSpec] = &[
+    p("apiProvider", select(&["openaiApi", "anthropic", "gemini", "compatible"]), "\"openaiApi\"").literal(),
+    p("baseUrl", text("https://api.example.com/v1"), "\"\"").literal().when("apiProvider", &["compatible"]),
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal(),
+    p("apiModel", Kind::ApiModel { purpose: "chat" }, "\"\"").literal(),
+    p("system", long_text(""), "\"\""),
+    p("prompt", long_text("Resume este texto en una línea: {{ $json.text }}"), "\"\""),
+    p("output", select(&["text", "json", "schema"]), "\"text\"").literal(),
+    ANSWER_FIELDS.when("output", &["json"]),
+    ANSWER_SCHEMA.when("output", &["schema"]),
+    p("temperature", Kind::Number { min: Some(0.0), max: Some(2.0) }, "0.2"),
+    p("maxTokens", Kind::Number { min: Some(16.0), max: None }, "1024"),
+    AI_RUN_FOR,
+];
+
+const EMBED_PROVIDER: ParamSpec = p("embedProvider", select(&["openaiApi", "gemini", "compatible", "ollama"]), "\"openaiApi\"").literal();
+const EMBED_URL: ParamSpec = p("embedUrl", text("http://127.0.0.1:11434"), "\"\"").literal().when("embedProvider", &["compatible", "ollama"]);
+const EMBED_MODEL: ParamSpec = p("embedModel", Kind::ApiModel { purpose: "embed" }, "\"\"").literal();
+
+/// Text to vectors (`nodes::llm`): one per item, written into the item.
+const EMBED: &[ParamSpec] = &[
+    EMBED_PROVIDER,
+    EMBED_URL,
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal(),
+    EMBED_MODEL,
+    p("embedText", long_text("{{ $json.text }}"), "\"={{ $json.text }}\""),
+    p("targetField", text("embedding"), "\"embedding\"").literal(),
+];
+
+/// Store and search documents by meaning (`nodes::llm`): CodeFlow's own store, Qdrant or pgvector,
+/// embedding with the model it names.
+const VECTORS: &[ParamSpec] = &[
+    p("vectorStore", select(&["local", "qdrant", "pgvector"]), "\"local\"").literal(),
+    p("vectorOp", select(&["vectorUpsert", "vectorQuery", "vectorDelete"]), "\"vectorUpsert\"").literal(),
+    p("collection", text("documentos"), "\"\"").literal(),
+    p("qdrantUrl", text("http://localhost:6333"), "\"\"").literal().when("vectorStore", &["qdrant"]),
+    p("storeCredential", Kind::Credential { kinds: &["header", "bearer"] }, "\"\"").literal().when("vectorStore", &["qdrant"]),
+    p("connection", Kind::DbConnection { kinds: &["postgres", "supabase"] }, "\"\"").literal().when("vectorStore", &["pgvector"]),
+    EMBED_PROVIDER.when("vectorOp", &["vectorUpsert", "vectorQuery"]),
+    EMBED_URL.and_when("vectorOp", &["vectorUpsert", "vectorQuery"]),
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal().when("vectorOp", &["vectorUpsert", "vectorQuery"]),
+    EMBED_MODEL.when("vectorOp", &["vectorUpsert", "vectorQuery"]),
+    p("docText", long_text("{{ $json.text }}"), "\"={{ $json.text }}\"").when("vectorOp", &["vectorUpsert"]),
+    p("docId", text("{{ $json.path }}"), "\"\"").when("vectorOp", &["vectorUpsert"]),
+    p("chunkSize", COUNT, "1000").when("vectorOp", &["vectorUpsert"]),
+    p("chunkOverlap", COUNT, "150").when("vectorOp", &["vectorUpsert"]),
+    p("keepItem", Kind::Boolean, "true").when("vectorOp", &["vectorUpsert"]),
+    p("queryText", long_text("{{ $json.question }}"), "\"={{ $json.question }}\"").when("vectorOp", &["vectorQuery"]),
+    p("topK", Kind::Number { min: Some(1.0), max: None }, "4").when("vectorOp", &["vectorQuery"]),
+    p("minScore", Kind::Number { min: Some(0.0), max: Some(1.0) }, "0").when("vectorOp", &["vectorQuery"]),
+    p("docIds", text("informe.pdf, guia.md"), "\"\"").when("vectorOp", &["vectorDelete"]),
+];
+
+/// The PR analyzer's pull requests (`nodes::prs`): a page of them, or one with its checks, the
+/// decision already given on it and where its last review stands.
+const PR_LIST: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("prOp", select(&["prList", "prGet"]), "\"prList\"").literal(),
+    p("prState", select(&["openPrs", "closedPrs", "allPrs"]), "\"openPrs\"").literal().when("prOp", &["prList"]),
+    p("maxResults", COUNT, "20").when("prOp", &["prList"]),
+    p("prId", text("{{ $json.id }}"), "\"\"").when("prOp", &["prGet"]),
+];
+
+/// Deciding on a pull request (`nodes::prs`) — by hand, or by the gate of its last review.
+const PR_DECIDE: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("prId", text("{{ $json.id }}"), "\"\""),
+    p("prDecision", select(&["byReview", "approvePr", "requestChanges", "closePr"]), "\"byReview\"").literal(),
+    p("decisionNote", long_text(""), "\"\""),
+    p("postSummary", Kind::Boolean, "true").literal(),
+];
+
+/// A pull request's comment threads (`nodes::prs`): read, or answered and closed.
+const PR_COMMENTS: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("prId", text("{{ $json.id }}"), "\"\""),
+    p("threadOp", select(&["listThreads", "resolveThread"]), "\"listThreads\"").literal(),
+    p("threadIds", text("{{ $json.id }}"), "\"\"").when("threadOp", &["resolveThread"]),
+    p("reply", long_text("{{ $json.draft }}"), "\"\"").when("threadOp", &["resolveThread"]),
+    p("wontFix", Kind::Boolean, "false").when("threadOp", &["resolveThread"]),
+];
+
+/// The review memory (`nodes::prs`): saved runs, their findings by state, a finding marked, and
+/// the repository's standing false positives.
+const PR_MEMORY: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("memoryOp", select(&["memoryFindings", "memoryMark", "memoryRuns", "memoryRules"]), "\"memoryFindings\"").literal(),
+    p("prId", text("{{ $json.id }}"), "\"\"").when("memoryOp", &["memoryFindings", "memoryMark", "memoryRuns"]),
+    p("findingState", select(&["activeFindings", "resolvedFindings", "discardedFindings", "allFindings"]), "\"activeFindings\"")
+        .literal()
+        .when("memoryOp", &["memoryFindings"]),
+    p("findingIds", text("{{ $json.id }}"), "\"\"").when("memoryOp", &["memoryMark"]),
+    p("markAs", select(&["falsePositive", "ignored", "unmark"]), "\"falsePositive\"").literal().when("memoryOp", &["memoryMark"]),
+    p("reason", text("Es intencional"), "\"\"").when("markAs", &["falsePositive", "ignored"]),
+    p("wholeRepo", Kind::Boolean, "false").literal().when("markAs", &["falsePositive"]),
+    p("notifyPr", Kind::Boolean, "true").literal().when("markAs", &["falsePositive", "ignored"]),
+];
+
+/// RabbitMQ, Kafka or SQS (`nodes::queue`): publish, or take messages. A field of one broker and one
+/// operation carries both conditions.
+const QUEUE: &[ParamSpec] = &[
+    p("broker", select(&["rabbitmq", "kafka", "sqs"]), "\"rabbitmq\"").literal(),
+    p("queueOp", select(&["queuePublish", "queueReceive"]), "\"queuePublish\"").literal(),
+    p("credential", Kind::Credential { kinds: &["basic", "aws"] }, "\"\"").literal(),
+    p("amqpUrl", text("amqp://rabbit.example.com:5672/%2f"), "\"\"").literal().when("broker", &["rabbitmq"]),
+    p("exchange", text(""), "\"\"").when("broker", &["rabbitmq"]).and_when("queueOp", &["queuePublish"]),
+    p("routingKey", text("pedidos"), "\"\"").when("broker", &["rabbitmq"]).and_when("queueOp", &["queuePublish"]),
+    p("persistent", Kind::Boolean, "true").when("broker", &["rabbitmq"]).and_when("queueOp", &["queuePublish"]),
+    p("queueName", text("pedidos"), "\"\"").when("broker", &["rabbitmq"]).and_when("queueOp", &["queueReceive"]),
+    p("brokers", text("kafka.example.com:9092"), "\"\"").literal().when("broker", &["kafka"]),
+    p("topic", text("pedidos"), "\"\"").literal().when("broker", &["kafka"]),
+    p("partition", COUNT, "0").literal().when("broker", &["kafka"]),
+    p("tls", Kind::Boolean, "false").literal().when("broker", &["kafka"]),
+    p("saslMechanism", select(&["plain", "scramSha256", "scramSha512"]), "\"plain\"").literal().when("broker", &["kafka"]),
+    p("messageKey", text("{{ $json.id }}"), "\"\"").when("broker", &["kafka"]).and_when("queueOp", &["queuePublish"]),
+    p("startFrom", select(&["continue", "earliest"]), "\"continue\"").literal().when("broker", &["kafka"]).and_when("queueOp", &["queueReceive"]),
+    p("queueUrl", text("https://sqs.us-east-1.amazonaws.com/123456789012/pedidos"), "\"\"").when("broker", &["sqs"]),
+    p("messageGroupId", text(""), "\"\"").when("broker", &["sqs"]).and_when("queueOp", &["queuePublish"]),
+    p("waitSeconds", Kind::Number { min: Some(0.0), max: Some(20.0) }, "0").when("broker", &["sqs"]).and_when("queueOp", &["queueReceive"]),
+    p("message", long_text("{{ JSON.stringify($json) }}"), "\"={{ JSON.stringify($json) }}\"").when("queueOp", &["queuePublish"]),
+    p("messageHeaders", Kind::KeyValue, "[]").when("queueOp", &["queuePublish"]),
+    p("messageLimit", Kind::Number { min: Some(1.0), max: None }, "10").when("queueOp", &["queueReceive"]),
+    p("leaveInQueue", Kind::Boolean, "false").when("broker", &["rabbitmq", "sqs"]).and_when("queueOp", &["queueReceive"]),
+    EACH,
+];
+
+/// A mailbox over IMAP (`nodes::imap`): read, mark read, move.
+const IMAP: &[ParamSpec] = &[
+    p("credential", Kind::Credential { kinds: &["imap"] }, "\"\"").literal(),
+    p("imapOp", select(&["imapRead", "imapMarkRead", "imapMove"]), "\"imapRead\"").literal(),
+    p("mailbox", text("INBOX"), "\"INBOX\""),
+    p("imapCriteria", text("UNSEEN FROM \"facturas@example.com\""), "\"UNSEEN\"").when("imapOp", &["imapRead"]),
+    p("maxResults", COUNT, "10").when("imapOp", &["imapRead"]),
+    p("markRead", Kind::Boolean, "false").when("imapOp", &["imapRead"]),
+    p("attachmentsFolder", Kind::Folder, "\"\"").when("imapOp", &["imapRead"]),
+    p("uids", text("{{ $json.uid }}"), "\"\"").when("imapOp", &["imapMarkRead", "imapMove"]),
+    p("targetMailbox", text("Archivo/Facturas"), "\"\"").when("imapOp", &["imapMove"]),
+    EACH,
+];
+
+/// Gmail, Sheets, Calendar and Drive (`nodes::google`): one operation picker per service, so each
+/// service's fields show only under it.
+const GOOGLE: &[ParamSpec] = &[
+    p("credential", Kind::Credential { kinds: &["oauth2"] }, "\"\"").literal(),
+    p("service", select(&["gmail", "sheets", "calendar", "drive"]), "\"gmail\"").literal(),
+    p("gmailOp", select(&["gmailSend", "gmailSearch", "gmailGet", "gmailMarkRead"]), "\"gmailSend\"").literal().when("service", &["gmail"]),
+    p("from", text(""), "\"\"").when("gmailOp", &["gmailSend"]),
+    p("to", text("equipo@example.com"), "\"\"").when("gmailOp", &["gmailSend"]),
+    p("cc", text(""), "\"\"").when("gmailOp", &["gmailSend"]),
+    p("bcc", text(""), "\"\"").when("gmailOp", &["gmailSend"]),
+    p("subject", text(""), "\"\"").when("gmailOp", &["gmailSend"]),
+    p("body", long_text(""), "\"\"").when("gmailOp", &["gmailSend"]),
+    p("html", Kind::Boolean, "false").when("gmailOp", &["gmailSend"]),
+    p("attachments", Kind::Strings, "[]").when("gmailOp", &["gmailSend"]),
+    p("gmailQuery", text("from:facturas@example.com is:unread"), "\"\"").when("gmailOp", &["gmailSearch"]),
+    p("maxResults", COUNT, "10").when("gmailOp", &["gmailSearch"]),
+    p("messageId", text(""), "\"\"").when("gmailOp", &["gmailGet", "gmailMarkRead"]),
+    p("attachmentsFolder", Kind::Folder, "\"\"").when("gmailOp", &["gmailSearch", "gmailGet"]),
+    p("sheetsOp", select(&["sheetsRead", "sheetsAppend", "sheetsUpdate"]), "\"sheetsRead\"").literal().when("service", &["sheets"]),
+    p("spreadsheetId", text("https://docs.google.com/spreadsheets/d/…"), "\"\"").when("service", &["sheets"]),
+    p("sheetRange", text("Hoja1"), "\"Hoja1\"").when("service", &["sheets"]),
+    p("header", Kind::Boolean, "true").literal().when("sheetsOp", &["sheetsRead"]),
+    p("rowLimit", COUNT, "0").when("sheetsOp", &["sheetsRead"]),
+    p("columns", Kind::KeyValue, "[]").when("sheetsOp", &["sheetsAppend", "sheetsUpdate"]),
+    p("matchColumn", text("id"), "\"\"").literal().when("sheetsOp", &["sheetsUpdate"]),
+    p("matchValue", text(""), "\"\"").when("sheetsOp", &["sheetsUpdate"]),
+    p("ifMissing", select(&["skipRow", "appendRow"]), "\"skipRow\"").literal().when("sheetsOp", &["sheetsUpdate"]),
+    p("calendarOp", select(&["calendarList", "calendarCreate"]), "\"calendarList\"").literal().when("service", &["calendar"]),
+    p("calendarId", text("primary"), "\"\"").when("service", &["calendar"]),
+    p("rangeStart", text("2026-10-05"), "\"\"").when("calendarOp", &["calendarList"]),
+    p("rangeEnd", text(""), "\"\"").when("calendarOp", &["calendarList"]),
+    p("eventSearch", text(""), "\"\"").when("calendarOp", &["calendarList"]),
+    p("eventLimit", COUNT, "50").when("calendarOp", &["calendarList"]),
+    p("eventTitle", text("Revisión del despliegue"), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("startTime", text("2026-10-05 09:30"), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("endTime", text(""), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("allDay", Kind::Boolean, "false").when("calendarOp", &["calendarCreate"]),
+    p("description", long_text(""), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("eventLocation", text(""), "\"\"").when("calendarOp", &["calendarCreate"]),
+    p("attendees", Kind::Strings, "[]").when("calendarOp", &["calendarCreate"]),
+    p("notifyAttendees", Kind::Boolean, "false").when("calendarOp", &["calendarCreate"]),
+    p("driveOp", select(&["driveList", "driveUpload", "driveDownload"]), "\"driveList\"").literal().when("service", &["drive"]),
+    p("driveQuery", text("name contains 'informe'"), "\"\"").when("driveOp", &["driveList"]),
+    p("driveFolder", text(""), "\"\"").when("driveOp", &["driveList", "driveUpload"]),
+    p("fileLimit", COUNT, "50").when("driveOp", &["driveList"]),
+    p("filePath", file("~/Documentos/informe.pdf"), "\"\"").when("driveOp", &["driveUpload"]),
+    p("fileId", text(""), "\"\"").when("driveOp", &["driveDownload"]),
+    p("folder", Kind::Folder, "\"\"").when("driveOp", &["driveDownload"]),
+    p("fileName", text(""), "\"\"").when("driveOp", &["driveUpload", "driveDownload"]),
+    p("exportAs", select(&["pdf", "docx", "xlsx", "csv", "pptx", "txt", "md", "png"]), "\"pdf\"").literal().when("driveOp", &["driveDownload"]),
+    p("overwrite", Kind::Boolean, "false").when("driveOp", &["driveDownload"]),
     EACH,
 ];
 
@@ -1006,6 +1448,8 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "trigger.file" => FILE,
         "trigger.repo" => REPO,
         "trigger.pr" => PR,
+        "trigger.github" => GITHUB_TRIGGER,
+        "trigger.email" => EMAIL_TRIGGER,
         "trigger.pipeline" => PIPELINE,
         "trigger.app" => APP_EVENT,
         "trigger.hotkey" => HOTKEY,
@@ -1019,6 +1463,20 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "ai.extract" => EXTRACT,
         "ai.summarize" => SUMMARIZE,
         "ai.review" => REVIEW,
+        "ai.prReview" => PR_REVIEW,
+        "ai.chat" => CHAT,
+        "data.dbml" => DBML,
+        "app.apiRequest" => API_REQUEST,
+        "net.webPage" => WEB_PAGE,
+        "net.check" => SITE_CHECK,
+        "logic.until" => UNTIL,
+        "transform.changes" => CHANGES,
+        "transform.template" => TEMPLATE,
+        "transform.json" => JSON_TOOL,
+        "transform.sql" => SQL_ITEMS,
+        "files.pdf" => PDF,
+        "files.image" => IMAGE,
+        "trigger.manual" => MANUAL,
         "ai.commit" => COMMIT,
         "app.agent" => AGENT_TASK,
         "net.graphql" => GRAPHQL,
@@ -1059,6 +1517,18 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "logic.approval" => APPROVAL,
         "trigger.phone" => PHONE,
         "net.connector" => CONNECTOR,
+        "net.google" => GOOGLE,
+        "net.imap" => IMAP,
+        "net.queue" => QUEUE,
+        "ai.api" => API_CHAT,
+        "ai.prFix" => PR_FIX,
+        "ai.prReply" => PR_REPLY,
+        "app.prList" => PR_LIST,
+        "app.prDecide" => PR_DECIDE,
+        "app.prComments" => PR_COMMENTS,
+        "app.prMemory" => PR_MEMORY,
+        "ai.embed" => EMBED,
+        "ai.vectors" => VECTORS,
         "code.notebook" => NOTEBOOK,
         _ => &[],
     }
@@ -1114,7 +1584,7 @@ mod tests {
                     spec.name,
                     spec.default
                 );
-                if let Some(show) = spec.show_if {
+                for show in spec.show_if.iter().chain(spec.also_if.iter()) {
                     assert!(
                         specs.iter().any(|other| other.name == show.param),
                         "{}.{} depends on {}, which the node does not have",

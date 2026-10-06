@@ -15,14 +15,21 @@ mod connector;
 mod data;
 mod files;
 mod formats;
+mod google;
 mod http;
+mod imap;
 mod integrations;
+mod llm;
 mod logic;
+mod media;
 mod net;
 mod notebook;
 mod process;
+mod prs;
+mod queue;
 mod remote;
 mod transform;
+mod utils;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +38,7 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use super::catalog::{self, Family};
-use super::engine::{LogStream, RunContext};
+use super::engine::{Credential, LogStream, RunContext};
 use super::expr::{has_expression, ExprWorker, JsError};
 use super::params;
 use super::run::{Item, Ports};
@@ -42,6 +49,8 @@ pub use process::shutdown as shutdown_processes;
 /// A path as a node writes it — `~` for the home folder.
 /// What a decided wait hands on — for a run picking up after a restart. See `logic::decided_ports`.
 pub use logic::decided_ports;
+
+pub use llm::list_models;
 
 pub fn expand_path(path: &str) -> std::path::PathBuf {
     files::expand(path)
@@ -117,6 +126,21 @@ impl NodeCtx {
     pub fn new(node: FlowNode, inputs: Ports, js: Arc<ExprWorker>, run: Arc<RunContext>, cancel: CancellationToken) -> Self {
         let params = params::with_defaults(&node.type_id, &node.params);
         Self { node, params, inputs, js, run, cancel, timeout: None }
+    }
+
+    /// A credential as a node sends it: an `oauth2` one comes back as a `bearer` holding a fresh
+    /// access token, so every node that signs with a bearer token takes it as it is.
+    pub async fn credential(&self, id: &str) -> Result<Credential, NodeError> {
+        let credential = self.run.host.credential(id).map_err(NodeError::Failed)?;
+        if credential.kind != "oauth2" {
+            return Ok(credential);
+        }
+        let token = tokio::select! {
+            token = self.run.host.oauth_token(id, &credential.meta) => token.map_err(NodeError::Failed)?,
+            _ = self.cancel.cancelled() => return Err(NodeError::Cancelled),
+        };
+        self.run.host.secret_used(&token);
+        Ok(Credential { kind: "bearer".into(), meta: credential.meta, secret: token })
     }
 
     /// Every input item, all ports in order — the list `paired` indexes into.
@@ -255,7 +279,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         return Err(NodeError::failed(format!("Unknown node type {}", ctx.node.type_id)));
     };
     if descriptor.family == Family::Trigger {
-        return Ok(vec![trigger_output(&ctx.node.type_id)]);
+        return Ok(vec![trigger_output(&ctx.node.type_id, &ctx.node.params).map_err(NodeError::Failed)?]);
     }
     if descriptor.milestone > catalog::RUNS_THROUGH {
         return Err(NodeError::failed(format!(
@@ -274,7 +298,8 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         | "transform.dedupe" | "transform.date" | "transform.text" => transform::execute(ctx).await,
         "app.notify" | "data.state" | "data.vars" | "net.respond" | "code.service" => app::execute(ctx).await,
         "logic.subflow" => logic::subflow(ctx).await,
-        "ai.agent" | "ai.local" | "ai.classify" | "ai.extract" | "ai.summarize" | "ai.review" | "ai.commit" | "app.agent" => {
+        "ai.agent" | "ai.local" | "ai.classify" | "ai.extract" | "ai.summarize" | "ai.review" | "ai.prReview" | "ai.prFix" | "ai.prReply"
+        | "ai.chat" | "ai.commit" | "app.agent" => {
             ai::execute(ctx).await
         }
         "files.file" | "files.list" | "files.move" | "files.git" | "code.docker" => files::execute(ctx).await,
@@ -284,10 +309,20 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             net::execute(ctx).await
         }
         "net.connector" => connector::execute(ctx).await,
+        "net.google" => google::execute(ctx).await,
+        "net.imap" => imap::execute(ctx).await,
+        "net.queue" => queue::execute(ctx).await,
+        "ai.api" | "ai.embed" | "ai.vectors" => llm::execute(ctx).await,
+        "app.prList" | "app.prDecide" | "app.prComments" | "app.prMemory" => prs::execute(ctx).await,
+        "net.webPage" | "net.check" | "logic.until" | "transform.changes" | "transform.template" | "transform.json" | "transform.sql" => {
+            utils::execute(ctx).await
+        }
+        "files.pdf" | "files.image" => media::execute(ctx).await,
         "code.notebook" => notebook::execute(ctx).await,
-        "data.sql" | "data.mongo" | "data.redis" | "data.sheet" => data::execute(ctx).await,
+        "data.sql" | "data.mongo" | "data.redis" | "data.sheet" | "data.dbml" => data::execute(ctx).await,
         "code.ssh" | "net.transfer" | "net.storage" => remote::execute(ctx).await,
-        "files.pr" | "files.pipeline" | "app.note" | "app.reviewer" | "app.open" | "app.terminal" | "app.clipboard" | "app.vault" => {
+        "files.pr" | "files.pipeline" | "app.note" | "app.reviewer" | "app.open" | "app.terminal" | "app.clipboard" | "app.vault"
+        | "app.apiRequest" => {
             integrations::execute(ctx).await
         }
         other => Err(NodeError::failed(format!("No executor for {other}"))),
@@ -296,17 +331,20 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 /// What a trigger emits when a run is started by hand: one item, the way n8n's manual trigger does,
 /// with the moment for the ones that are about time. A trigger that is pinned never gets here.
-fn trigger_output(type_id: &str) -> Vec<Item> {
+///
+/// A manual trigger with a form gives its fields' defaults here — the run was started from somewhere
+/// that did not ask (`flows::form`); the form's own answers arrive as the trigger's items instead.
+fn trigger_output(type_id: &str, params: &Value) -> Result<Vec<Item>, String> {
     let now = chrono::Utc::now();
     let json = match type_id {
         "trigger.schedule" => json!({
             "timestamp": now.to_rfc3339(),
             "manual": true,
         }),
-        "trigger.manual" => json!({}),
+        "trigger.manual" => crate::flows::form::defaults(&crate::flows::form::fields_of(params))?,
         _ => json!({"manual": true}),
     };
-    vec![Item::new(json)]
+    Ok(vec![Item::new(json)])
 }
 
 /// The Code node: JavaScript over the items, in the run's QuickJS.

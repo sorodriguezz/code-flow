@@ -66,7 +66,7 @@ export function TrustDialog() {
     setBusy(false);
     if (!trusted) return;
     close();
-    if (prompt.then) void useFlowRunsStore.getState().start(prompt.flowId, prompt.then.mode, prompt.then.trigger);
+    if (prompt.then) void useFlowRunsStore.getState().start(prompt.flowId, prompt.then.mode, prompt.then.trigger, prompt.then.input ?? undefined);
   };
 
   return (

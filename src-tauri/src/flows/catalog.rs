@@ -70,7 +70,7 @@ pub const LOOP_TYPE: &str = "logic.loop";
 
 /// The last milestone whose nodes this build runs. A node from a later one can be drawn and saved,
 /// and the engine says which milestone brings it when a run reaches it.
-pub const RUNS_THROUGH: u8 = 6;
+pub const RUNS_THROUGH: u8 = 10;
 
 const fn node(type_id: &'static str, family: Family, icon: &'static str, milestone: u8) -> NodeDescriptor {
     let inputs = if matches!(family, Family::Trigger) { 0 } else { 1 };
@@ -138,6 +138,8 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("trigger.subflow", Trigger, "route", 2),
     node("trigger.error", Trigger, "triangle-alert", 2),
     node("trigger.phone", Trigger, "smartphone", 5),
+    node("trigger.github", Trigger, "git-merge", 9),
+    node("trigger.email", Trigger, "inbox", 9),
     // AI — subscription CLIs and local models.
     node("ai.agent", Ai, "bot", 3),
     node("ai.local", Ai, "cpu", 3),
@@ -145,7 +147,14 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("ai.extract", Ai, "file-braces", 3),
     node("ai.summarize", Ai, "message-square-text", 3),
     node("ai.review", Ai, "eye", 3),
+    node("ai.prReview", Ai, "scan-eye", 7),
+    node("ai.prFix", Ai, "wand", 10),
+    node("ai.prReply", Ai, "reply", 10),
+    node("ai.chat", Ai, "messages-square", 7),
     node("ai.commit", Ai, "pencil", 3),
+    node("ai.api", Ai, "brain-circuit", 9),
+    node("ai.embed", Ai, "binary", 9),
+    node("ai.vectors", Ai, "database-zap", 9),
     // Code — processes and the embedded JavaScript sandbox.
     node("code.shell", Code, "square-terminal", 1),
     node("code.python", Code, "file-code", 1),
@@ -171,11 +180,17 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("net.storage", Net, "cloud-upload", 4),
     node("net.email", Net, "mail", 4),
     node("net.connector", Net, "blocks", 6),
+    node("net.webPage", Net, "scan-text", 8),
+    node("net.check", Net, "radar", 8),
+    node("net.google", Net, "layout-grid", 9),
+    node("net.imap", Net, "mails", 9),
+    node("net.queue", Net, "list-end", 9),
     // Data — the database workspace's connections, and the flow's own memory.
     node("data.sql", Data, "database", 4),
     node("data.mongo", Data, "boxes", 4),
     node("data.redis", Data, "box", 4),
     node("data.sheet", Data, "file-spreadsheet", 4),
+    node("data.dbml", Data, "table-2", 7),
     node("data.state", Data, "archive", 1),
     node("data.vars", Data, "variable", 1),
     // Logic — branching, joining, waiting.
@@ -197,6 +212,7 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("logic.subflow", Logic, "link", 2),
     terminal("logic.stop", Logic, "octagon-x", 1),
     node("logic.ratelimit", Logic, "gauge", 4),
+    node("logic.until", Logic, "timer", 8),
     terminal("logic.noop", Logic, "circle-dashed", 1),
     // Transform — reshaping items.
     node("transform.set", Transform, "rectangle-ellipsis", 1),
@@ -210,6 +226,10 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("transform.convert", Transform, "shuffle", 4),
     node("transform.crypto", Transform, "key", 4),
     node("transform.compress", Transform, "file-archive", 4),
+    branching("transform.changes", Transform, "diff", &["changed", "same"], 8),
+    node("transform.template", Transform, "scroll-text", 8),
+    node("transform.json", Transform, "file-json", 8),
+    node("transform.sql", Transform, "sheet", 8),
     NodeDescriptor {
         type_id: "transform.compare",
         family: Transform,
@@ -227,6 +247,8 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("files.git", Files, "git-branch", 4),
     node("files.pr", Files, "git-pull-request", 4),
     node("files.pipeline", Files, "play", 4),
+    node("files.pdf", Files, "file-type", 8),
+    node("files.image", Files, "image", 8),
     // CodeFlow itself.
     node("app.notify", App, "bell", 1),
     node("app.note", App, "notebook-pen", 4),
@@ -236,6 +258,11 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("app.terminal", App, "monitor", 4),
     node("app.clipboard", App, "clipboard-list", 4),
     node("app.vault", App, "key-round", 4),
+    node("app.apiRequest", App, "send", 7),
+    node("app.prList", App, "git-pull-request-arrow", 10),
+    node("app.prDecide", App, "gavel", 10),
+    node("app.prComments", App, "message-square-reply", 10),
+    node("app.prMemory", App, "book-marked", 10),
 ];
 
 /// The descriptor for a type, or `None` for one this build does not know.
@@ -260,7 +287,7 @@ mod tests {
                 descriptor.family
             );
             assert!(!descriptor.icon.is_empty(), "{} has no icon", descriptor.type_id);
-            assert!((1..=6).contains(&descriptor.milestone), "{} milestone", descriptor.type_id);
+            assert!((1..=RUNS_THROUGH).contains(&descriptor.milestone), "{} milestone", descriptor.type_id);
         }
     }
 
@@ -269,16 +296,16 @@ mod tests {
     #[test]
     fn the_catalogue_has_the_families_the_plan_lists() {
         let count = |family: Family| CATALOG.iter().filter(|d| d.family == family).count();
-        assert_eq!(count(Trigger), 13);
-        assert_eq!(count(Ai), 7);
+        assert_eq!(count(Trigger), 15);
+        assert_eq!(count(Ai), 14);
         assert_eq!(count(Code), 10);
-        assert_eq!(count(Net), 13);
-        assert_eq!(count(Data), 6);
-        assert_eq!(count(Logic), 10);
-        assert_eq!(count(Transform), 12);
-        assert_eq!(count(Files), 6);
-        assert_eq!(count(App), 8);
-        assert_eq!(CATALOG.len(), 85);
+        assert_eq!(count(Net), 18);
+        assert_eq!(count(Data), 7);
+        assert_eq!(count(Logic), 11);
+        assert_eq!(count(Transform), 16);
+        assert_eq!(count(Files), 8);
+        assert_eq!(count(App), 13);
+        assert_eq!(CATALOG.len(), 112);
     }
 
     #[test]

@@ -1,0 +1,73 @@
+{
+  "id": "vercel",
+  "name": "Vercel",
+  "baseUrl": "https://api.vercel.com",
+  "auth": "bearer",
+  "authHint": { "es": "Un token de Vercel (Account Settings › Tokens) como credencial Token", "en": "A Vercel token (Account Settings › Tokens) as a Token credential" },
+  "errorField": "error",
+  "operations": [
+    {
+      "id": "listDeployments",
+      "name": { "es": "Despliegues de un proyecto", "en": "A project's deployments" },
+      "method": "GET",
+      "path": "/v6/deployments",
+      "query": { "projectId": "{{projectId}}", "teamId": "{{teamId}}", "target": "{{target}}", "state": "{{state}}", "limit": "{{limit}}" },
+      "fields": [
+        { "name": "projectId", "label": { "es": "Proyecto (id o nombre)", "en": "Project (id or name)" }, "required": true },
+        { "name": "teamId", "label": { "es": "Equipo (id, si es de un equipo)", "en": "Team (id, for a team project)" } },
+        { "name": "target", "label": { "es": "Destino (production o preview)", "en": "Target (production or preview)" }, "placeholder": "production" },
+        { "name": "state", "label": { "es": "Estado (READY, ERROR, BUILDING…)", "en": "State (READY, ERROR, BUILDING…)" } },
+        { "name": "limit", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "10" }
+      ],
+      "result": "deployments"
+    },
+    {
+      "id": "getDeployment",
+      "name": { "es": "Un despliegue y su estado", "en": "A deployment and its state" },
+      "method": "GET",
+      "path": "/v13/deployments/{{deployment}}",
+      "query": { "teamId": "{{teamId}}" },
+      "fields": [
+        { "name": "deployment", "label": { "es": "Despliegue (id o URL)", "en": "Deployment (id or URL)" }, "required": true },
+        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" } }
+      ]
+    },
+    {
+      "id": "redeploy",
+      "name": { "es": "Volver a desplegar", "en": "Redeploy" },
+      "method": "POST",
+      "path": "/v13/deployments",
+      "query": { "teamId": "{{teamId}}", "forceNew": "1" },
+      "fields": [
+        { "name": "name", "label": { "es": "Proyecto (nombre)", "en": "Project (name)" }, "required": true },
+        { "name": "deploymentId", "label": { "es": "Despliegue a repetir (id)", "en": "Deployment to repeat (id)" }, "required": true },
+        { "name": "target", "label": { "es": "Destino (production o preview)", "en": "Target (production or preview)" }, "placeholder": "production" },
+        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" } }
+      ],
+      "body": { "name": "{{name}}", "deploymentId": "{{deploymentId}}", "target": "{{target}}" }
+    },
+    {
+      "id": "cancelDeployment",
+      "name": { "es": "Cancelar un despliegue", "en": "Cancel a deployment" },
+      "method": "PATCH",
+      "path": "/v12/deployments/{{deployment}}/cancel",
+      "query": { "teamId": "{{teamId}}" },
+      "fields": [
+        { "name": "deployment", "label": { "es": "Despliegue (id)", "en": "Deployment (id)" }, "required": true },
+        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" } }
+      ]
+    },
+    {
+      "id": "listProjects",
+      "name": { "es": "Proyectos", "en": "Projects" },
+      "method": "GET",
+      "path": "/v9/projects",
+      "query": { "teamId": "{{teamId}}", "limit": "{{limit}}" },
+      "fields": [
+        { "name": "teamId", "label": { "es": "Equipo (id)", "en": "Team (id)" } },
+        { "name": "limit", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "20" }
+      ],
+      "result": "projects"
+    }
+  ]
+}

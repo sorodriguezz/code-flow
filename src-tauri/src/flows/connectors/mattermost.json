@@ -1,0 +1,21 @@
+{
+  "id": "mattermost",
+  "name": "Mattermost",
+  "baseUrl": "",
+  "auth": "url",
+  "authHint": { "es": "La URL del webhook entrante (Integraciones › Webhooks entrantes) como credencial Webhook", "en": "The incoming webhook's URL (Integrations › Incoming webhooks) as a Webhook credential" },
+  "operations": [
+    {
+      "id": "sendMessage",
+      "name": { "es": "Enviar un mensaje", "en": "Send a message" },
+      "method": "POST",
+      "url": "{{secret}}",
+      "fields": [
+        { "name": "text", "label": { "es": "Mensaje (Markdown)", "en": "Message (Markdown)" }, "multiline": true, "required": true },
+        { "name": "channel", "label": { "es": "Canal (si el webhook lo permite)", "en": "Channel (when the webhook allows it)" }, "placeholder": "town-square" },
+        { "name": "username", "label": { "es": "Nombre que firma", "en": "Name it signs with" }, "placeholder": "Flujos" }
+      ],
+      "body": { "text": "{{text}}", "channel": "{{channel}}", "username": "{{username}}" }
+    }
+  ]
+}

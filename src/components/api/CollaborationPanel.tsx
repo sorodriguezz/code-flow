@@ -41,6 +41,7 @@ import {
   supabaseSetAnonKey,
 } from "../../lib/tauri/apiCommands";
 import { openExternalUrl } from "../../lib/tauri/commands";
+import { keyNeededBy } from "../../lib/collabKeys";
 import { encodeInvite, syncCollection } from "../../lib/api/sync";
 import {
   listConnections,
@@ -86,7 +87,7 @@ const PROJECT_STEPS: { url: string; labelKey: TranslationKey }[] = [
 ];
 
 /** Re-verify on open if the last check is older than this. Cheap, and keeps the dot honest. */
-const RECHECK_AFTER_MS = 5 * 60_000;
+export const RECHECK_AFTER_MS = 5 * 60_000;
 
 /**
  * The chevron of a row that unfolds: faint at rest, full text while the pointer is on the part of
@@ -218,9 +219,12 @@ export function CollaborationPanel() {
     });
   };
 
-  /** Drops the row and the stored key with it. Only ever offered for a connection nothing needs. */
+  /** Drops the row and the stored key with it. Only ever offered for a connection nothing needs —
+   *  and the key stays when Flujos is connected to the same project (`lib/collabKeys.ts`). */
   const forgetProject = async (url: string) => {
-    await supabaseSetAnonKey(url, "").catch((e: unknown) => pushErrorToast(String(e)));
+    if (!(await keyNeededBy("flows", url))) {
+      await supabaseSetAnonKey(url, "").catch((e: unknown) => pushErrorToast(String(e)));
+    }
     await updateSettings({
       supabaseProjects: useApiStore
         .getState()
@@ -425,26 +429,7 @@ export function CollaborationPanel() {
                   different job: those move between panes of a form, these each open a page in the
                   browser. Independent rather than sequential, because the console remembers where
                   you were and step two is where you go back to when you mislay the key. */}
-              <ol className="mb-2 flex items-stretch gap-1.5">
-                {PROJECT_STEPS.map(({ url, labelKey }, index) => (
-                  <li key={url} className="min-w-0 flex-1">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void openExternalUrl(url).catch((e: unknown) => pushErrorToast(String(e)))
-                      }
-                      title={url}
-                      className={buttonClass({ variant: "secondary", size: "sm", className: "w-full" })}
-                    >
-                      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--cf-hover)] text-[10.5px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
-                        {index + 1}
-                      </span>
-                      <span className="truncate">{t(labelKey)}</span>
-                      <ExternalLink size={11} className="shrink-0 text-[var(--cf-text-faint)]" />
-                    </button>
-                  </li>
-                ))}
-              </ol>
+              <ProjectSteps />
               <Note>{t("api.collab.connectionsAbout")}</Note>
               {/* Replaces a warning that said pointing the panel at another project would stop
                   every share syncing. It never did — a share carries the project it lives on, and
@@ -512,9 +497,48 @@ export function CollaborationPanel() {
   );
 }
 
+/** Supabase's three pages for setting a project up, each opened in the browser. Shared with
+ *  Flujos' own Collaboration pane, which sets up its projects the same way. */
+export function ProjectSteps() {
+  const t = useT();
+  return (
+    <ol className="mb-2 flex items-stretch gap-1.5">
+      {PROJECT_STEPS.map(({ url, labelKey }, index) => (
+        <li key={url} className="min-w-0 flex-1">
+          <button
+            type="button"
+            onClick={() => void openExternalUrl(url).catch((e: unknown) => pushErrorToast(String(e)))}
+            title={url}
+            className={buttonClass({ variant: "secondary", size: "sm", className: "w-full" })}
+          >
+            <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--cf-hover)] text-[10.5px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
+              {index + 1}
+            </span>
+            <span className="truncate">{t(labelKey)}</span>
+            <ExternalLink size={11} className="shrink-0 text-[var(--cf-text-faint)]" />
+          </button>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // One connection
 // ---------------------------------------------------------------------------
+
+/**
+ * The words a connection row uses for what hangs off a project and for letting go of it —
+ * collections in the API client, flows in Flujos. Everything else on the row is about the
+ * project itself and reads the same in both.
+ */
+export interface ConnectionLabels {
+  one: string;
+  many: (n: number) => string;
+  forgetBlocked: string;
+  editHint: string;
+  forgetConfirm: (ref: string) => string;
+}
 
 /**
  * A Supabase project, collapsed to its ref.
@@ -528,20 +552,30 @@ export function CollaborationPanel() {
  * how many collections are riding on it. The URL, the key and the install script are underneath,
  * because they are setup — done once, then in the way.
  */
-function ConnectionRow({
+export function ConnectionRow({
   connection,
   onCheck,
   onConnect,
   onForget,
   onCopySql,
+  labels: given,
 }: {
   connection: UsableConnection;
   onCheck: (silent: boolean) => Promise<boolean>;
   onConnect: (url: string, anonKey: string) => Promise<boolean>;
   onForget: () => Promise<void>;
   onCopySql: () => Promise<void>;
+  /** Omitted in the API client, whose words these defaults are. */
+  labels?: ConnectionLabels;
 }) {
   const t = useT();
+  const labels: ConnectionLabels = given ?? {
+    one: t("api.collab.oneCollection"),
+    many: (n) => t("api.collab.nCollections", { n: String(n) }),
+    forgetBlocked: t("api.collab.forgetBlocked"),
+    editHint: t("api.collab.editHint"),
+    forgetConfirm: (ref) => t("api.collab.forgetConfirm", { ref }),
+  };
   const [open, setOpen] = useState(false);
   /**
    * What the row is doing, or `null` when it is idle. Named rather than a flag so the button that
@@ -610,8 +644,7 @@ function ConnectionRow({
 
   const forget = () =>
     guard(async () => {
-      if (!(await confirmAction(t("api.collab.forgetConfirm", { ref: projectRef(connection.url) }))))
-        return;
+      if (!(await confirmAction(labels.forgetConfirm(projectRef(connection.url))))) return;
       await onForget();
     }, "forget");
 
@@ -648,9 +681,7 @@ function ConnectionRow({
               noticed every single time. */}
           {connection.shares > 0 && (
             <Tag icon={Users}>
-              {connection.shares === 1
-                ? t("api.collab.oneCollection")
-                : t("api.collab.nCollections", { n: String(connection.shares) })}
+              {connection.shares === 1 ? labels.one : labels.many(connection.shares)}
             </Tag>
           )}
         </button>
@@ -725,7 +756,7 @@ function ConnectionRow({
                   under a working connection, which reads as something being wrong. Re-checking a
                   connection that holds is the button on the row above. */}
               {locked ? (
-                <Tooltip label={t("api.collab.editHint")}>
+                <Tooltip label={labels.editHint}>
                   <Button size="sm" onClick={() => setEditing(true)}>
                     <Pencil size={13} />
                     {t("api.collab.replaceKey")}
@@ -757,7 +788,7 @@ function ConnectionRow({
                   beside the ones it is not one of. Those set the connection up; this one ends it.
                   The wrapper is what the reason lands on while the button is off: a disabled button
                   takes no pointer events, so a tooltip on the button itself would never open. */}
-              <Tooltip label={t("api.collab.forgetBlocked")} disabled={!pinned}>
+              <Tooltip label={labels.forgetBlocked} disabled={!pinned}>
                 <span className="ml-auto inline-flex">
                   <Button
                     variant="danger-ghost"
@@ -784,7 +815,7 @@ function ConnectionRow({
  * Its own component rather than an empty `ConnectionRow`, because the two are different shapes: a
  * row is collapsed by default and titled by a ref, and a project with no URL yet has neither.
  */
-function NewConnection({
+export function NewConnection({
   taken,
   onConnect,
   onCopySql,

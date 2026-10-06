@@ -16,7 +16,13 @@ export type AiGlyphName =
   | "file-braces"
   | "message-square-text"
   | "eye"
-  | "pencil";
+  | "pencil"
+  | "scan-eye"
+  | "messages-square"
+  | "brain-circuit"
+  | "binary"
+  | "database-zap"
+  | "reply";
 
 /**
  * An AI icon: the glyph cut out of the logo's stroke, with the stroke flowing through it — see

@@ -18,7 +18,7 @@ component's own licence wins — which is what section 6 says.
 | What ships | Count |
 |---|---|
 | npm packages (production tree) | 343 resolved versions of 314 packages |
-| Rust crates (resolved for macOS and Windows) | 721 resolved versions of 627 crates |
+| Rust crates (resolved for macOS and Windows) | 811 resolved versions of 710 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 10 |
@@ -626,7 +626,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### Apache-2.0 OR MIT — 383 crates
+### Apache-2.0 OR MIT — 423 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -642,8 +642,14 @@ because there the order carries meaning.
 | `asn1-rs` | 0.7.2 | Apache-2.0 OR MIT | <https://github.com/rusticata/asn1-rs> |
 | `asn1-rs-derive` | 0.6.0 | Apache-2.0 OR MIT | <https://github.com/rusticata/asn1-rs> |
 | `asn1-rs-impl` | 0.2.0 | Apache-2.0 OR MIT | <https://github.com/rusticata/asn1-rs> |
+| `async-channel` | 1.9.0, 2.5.0 | Apache-2.0 OR MIT | <https://github.com/smol-rs/async-channel> |
+| `async-compat` | 0.2.6 | Apache-2.0 OR MIT | <https://github.com/smol-rs/async-compat> |
 | `async-compression` | 0.4.42 | Apache-2.0 OR MIT | <https://github.com/Nullus157/async-compression> |
+| `async-executor` | 1.14.0 | Apache-2.0 OR MIT | <https://github.com/smol-rs/async-executor> |
+| `async-global-executor` | 3.1.0 | Apache-2.0 OR MIT | <https://github.com/Keruspe/async-global-executor> |
+| `async-imap` | 0.12.0 | Apache-2.0 OR MIT | <https://github.com/async-email/async-imap> |
 | `async-lock` | 3.4.2 | Apache-2.0 OR MIT | <https://github.com/smol-rs/async-lock> |
+| `async-task` | 4.7.1 | Apache-2.0 OR MIT | <https://github.com/smol-rs/async-task> |
 | `async-trait` | 0.1.91 | Apache-2.0 OR MIT | <https://github.com/dtolnay/async-trait> |
 | `atoi_simd` | 0.18.1 | Apache-2.0 OR MIT | <https://github.com/RoDmitry/atoi_simd> |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT | <https://github.com/smol-rs/atomic-waker> |
@@ -657,16 +663,19 @@ because there the order carries meaning.
 | `blake2` | 0.10.6 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/hashes> |
 | `block-buffer` | 0.10.4, 0.12.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `block-padding` | 0.3.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
+| `blocking` | 1.6.2 | Apache-2.0 OR MIT | <https://github.com/smol-rs/blocking> |
 | `bs58` | 0.5.1 | Apache-2.0 OR MIT | <https://github.com/Nullus157/bs58-rs> |
 | `bstr` | 1.13.0 | Apache-2.0 OR MIT | <https://github.com/BurntSushi/bstr> |
 | `btoi` | 0.5.0 | Apache-2.0 OR MIT | <https://github.com/niklasf/rust-btoi> |
 | `bumpalo` | 3.20.3 | Apache-2.0 OR MIT | <https://github.com/fitzgen/bumpalo> |
+| `bytecount` | 0.6.9 | Apache-2.0 OR MIT | <https://github.com/llogiq/bytecount> |
 | `camino` | 1.2.4 | Apache-2.0 OR MIT | <https://github.com/camino-rs/camino> |
 | `cargo-platform` | 0.1.9 | Apache-2.0 OR MIT | <https://github.com/rust-lang/cargo> |
 | `cargo_toml` | 0.22.3 | Apache-2.0 OR MIT | <https://gitlab.com/lib.rs/cargo_toml> |
 | `cbc` | 0.1.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/block-modes> |
 | `cc` | 1.3.0 | Apache-2.0 OR MIT | <https://github.com/rust-lang/cc-rs> |
 | `ccm` | 0.6.0-rc.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/AEADs> |
+| `cff-parser` | 0.2.0 | Apache-2.0 OR MIT | <https://github.com/jrmuizel/cff-parser> |
 | `cfg-if` | 1.0.4 | Apache-2.0 OR MIT | <https://github.com/rust-lang/cfg-if> |
 | `chacha20` | 0.10.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/stream-ciphers> |
 | `chrono` | 0.4.45 | Apache-2.0 OR MIT | <https://github.com/chronotope/chrono> |
@@ -690,6 +699,7 @@ because there the order carries meaning.
 | `core-graphics-types` | 0.2.0 | Apache-2.0 OR MIT | <https://github.com/servo/core-foundation-rs> |
 | `cpubits` | 0.1.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `cpufeatures` | 0.2.17, 0.3.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
+| `crc32c` | 0.6.8 | Apache-2.0 OR MIT | <https://github.com/zowens/crc32c> |
 | `crc32fast` | 1.5.0 | Apache-2.0 OR MIT | <https://github.com/srijs/rust-crc32fast> |
 | `critical-section` | 1.2.0 | Apache-2.0 OR MIT | <https://github.com/rust-embedded/critical-section> |
 | `crossbeam-channel` | 0.5.16 | Apache-2.0 OR MIT | <https://github.com/crossbeam-rs/crossbeam> |
@@ -731,7 +741,8 @@ because there the order carries meaning.
 | `equivalent` | 1.0.2 | Apache-2.0 OR MIT | <https://github.com/indexmap-rs/equivalent> |
 | `erased-serde` | 0.4.10 | Apache-2.0 OR MIT | <https://github.com/dtolnay/erased-serde> |
 | `errno` | 0.3.14 | Apache-2.0 OR MIT | <https://github.com/lambda-fairy/rust-errno> |
-| `event-listener` | 5.4.1 | Apache-2.0 OR MIT | <https://github.com/smol-rs/event-listener> |
+| `euclid` | 0.20.14 | Apache-2.0 OR MIT | <https://github.com/servo/euclid> |
+| `event-listener` | 2.5.3, 5.4.1 | Apache-2.0 OR MIT | <https://github.com/smol-rs/event-listener> |
 | `event-listener-strategy` | 0.5.4 | Apache-2.0 OR MIT | <https://github.com/smol-rs/event-listener-strategy> |
 | `fallible-iterator` | 0.2.0, 0.3.0 | Apache-2.0 OR MIT | <https://github.com/sfackler/rust-fallible-iterator> |
 | `fallible-streaming-iterator` | 0.1.9 | Apache-2.0 OR MIT | <https://github.com/sfackler/fallible-streaming-iterator> |
@@ -741,27 +752,35 @@ because there the order carries meaning.
 | `filetime` | 0.2.29 | Apache-2.0 OR MIT | <https://github.com/alexcrichton/filetime> |
 | `find-msvc-tools` | 0.1.9 | Apache-2.0 OR MIT | <https://github.com/rust-lang/cc-rs> |
 | `flate2` | 1.1.9 | Apache-2.0 OR MIT | <https://github.com/rust-lang/flate2-rs> |
-| `flume` | 0.11.1 | Apache-2.0 OR MIT | <https://github.com/zesterer/flume> |
+| `flume` | 0.11.1, 0.12.0 | Apache-2.0 OR MIT | <https://github.com/zesterer/flume> |
 | `fnv` | 1.0.7 | Apache-2.0 OR MIT | <https://github.com/servo/rust-fnv> |
 | `foreign-types` | 0.5.0 | Apache-2.0 OR MIT | <https://github.com/sfackler/foreign-types> |
 | `foreign-types-macros` | 0.2.3 | Apache-2.0 OR MIT | <https://github.com/sfackler/foreign-types> |
 | `foreign-types-shared` | 0.3.1 | Apache-2.0 OR MIT | <https://github.com/sfackler/foreign-types> |
 | `form_urlencoded` | 1.2.2 | Apache-2.0 OR MIT | <https://github.com/servo/rust-url> |
+| `fraction` | 0.17.0 | Apache-2.0 OR MIT | <https://github.com/dnsl48/fraction> |
 | `futures` | 0.3.33 | Apache-2.0 OR MIT | <https://github.com/rust-lang/futures-rs> |
 | `futures-channel` | 0.3.33 | Apache-2.0 OR MIT | <https://github.com/rust-lang/futures-rs> |
 | `futures-core` | 0.3.33 | Apache-2.0 OR MIT | <https://github.com/rust-lang/futures-rs> |
 | `futures-executor` | 0.3.33 | Apache-2.0 OR MIT | <https://github.com/rust-lang/futures-rs> |
 | `futures-io` | 0.3.33 | Apache-2.0 OR MIT | <https://github.com/rust-lang/futures-rs> |
+| `futures-lite` | 2.6.1 | Apache-2.0 OR MIT | <https://github.com/smol-rs/futures-lite> |
 | `futures-macro` | 0.3.33 | Apache-2.0 OR MIT | <https://github.com/rust-lang/futures-rs> |
+| `futures-rustls` | 0.26.0 | Apache-2.0 OR MIT | <https://github.com/quininer/futures-rustls> |
 | `futures-sink` | 0.3.33 | Apache-2.0 OR MIT | <https://github.com/rust-lang/futures-rs> |
 | `futures-task` | 0.3.33 | Apache-2.0 OR MIT | <https://github.com/rust-lang/futures-rs> |
 | `futures-util` | 0.3.33 | Apache-2.0 OR MIT | <https://github.com/rust-lang/futures-rs> |
+| `g2gen` | 1.2.2 | Apache-2.0 OR MIT | <https://github.com/WanzenBug/g2p> |
+| `g2p` | 1.2.2 | Apache-2.0 OR MIT | <https://github.com/WanzenBug/g2p> |
+| `g2poly` | 1.2.2 | Apache-2.0 OR MIT | <https://github.com/WanzenBug/g2p> |
 | `getrandom` | 0.2.17, 0.3.4, 0.4.3 | Apache-2.0 OR MIT | <https://github.com/rust-random/getrandom> |
 | `ghash` | 0.5.1, 0.6.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/universal-hashes> |
+| `gif` | 0.14.2 | Apache-2.0 OR MIT | <https://github.com/image-rs/image-gif> |
 | `git2` | 0.19.0 | Apache-2.0 OR MIT | <https://github.com/rust-lang/git2-rs> |
 | `glob` | 0.3.4 | Apache-2.0 OR MIT | <https://github.com/rust-lang/glob> |
 | `global-hotkey` | 0.8.0 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/global-hotkey> |
 | `hashbrown` | 0.12.3, 0.14.5, 0.17.1 | Apache-2.0 OR MIT | <https://github.com/rust-lang/hashbrown> |
+| `hashify` | 0.2.9 | Apache-2.0 OR MIT | <https://github.com/stalwartlabs/hashify> |
 | `hashlink` | 0.12.2, 0.9.1 | Apache-2.0 OR MIT | <https://github.com/djc/hashlink> |
 | `heck` | 0.5.0 | Apache-2.0 OR MIT | <https://github.com/withoutboats/heck> |
 | `hex` | 0.4.3 | Apache-2.0 OR MIT | <https://github.com/KokaKiwi/rust-hex> |
@@ -779,8 +798,12 @@ because there the order carries meaning.
 | `ident_case` | 1.0.1 | Apache-2.0 OR MIT | <https://github.com/TedDriggs/ident_case> |
 | `idna` | 1.1.0 | Apache-2.0 OR MIT | <https://github.com/servo/rust-url> |
 | `idna_adapter` | 1.2.2 | Apache-2.0 OR MIT | <https://github.com/hsivonen/idna_adapter> |
+| `image` | 0.25.10 | Apache-2.0 OR MIT | <https://github.com/image-rs/image> |
+| `image-webp` | 0.2.4 | Apache-2.0 OR MIT | <https://github.com/image-rs/image-webp> |
+| `imap-proto` | 0.17.0 | Apache-2.0 OR MIT | <https://github.com/djc/imap-proto> |
 | `indexmap` | 1.9.3, 2.14.0 | Apache-2.0 OR MIT | <https://github.com/indexmap-rs/indexmap> |
 | `inout` | 0.1.4, 0.2.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
+| `inventory` | 0.3.24 | Apache-2.0 OR MIT | <https://github.com/dtolnay/inventory> |
 | `ipconfig` | 0.3.4 | Apache-2.0 OR MIT | <https://github.com/liranringel/ipconfig> |
 | `ipnet` | 2.12.0 | Apache-2.0 OR MIT | <https://github.com/krisprice/ipnet> |
 | `itertools` | 0.14.0 | Apache-2.0 OR MIT | <https://github.com/rust-itertools/itertools> |
@@ -801,6 +824,7 @@ because there the order carries meaning.
 | `logos-codegen` | 0.15.1, 0.16.1 | Apache-2.0 OR MIT | <https://github.com/maciejhirsz/logos> |
 | `logos-derive` | 0.15.1, 0.16.1 | Apache-2.0 OR MIT | <https://github.com/maciejhirsz/logos> |
 | `mac-notification-sys` | 0.6.15 | Apache-2.0 OR MIT | <https://github.com/h4llow3En/mac-notification-sys> |
+| `mail-parser` | 0.11.9 | Apache-2.0 OR MIT | <https://github.com/stalwartlabs/mail-parser> |
 | `manyhow` | 0.11.4 | Apache-2.0 OR MIT | <https://github.com/ModProg/manyhow> |
 | `manyhow-macros` | 0.11.4 | Apache-2.0 OR MIT | <https://github.com/ModProg/manyhow> |
 | `markup5ever` | 0.38.0 | Apache-2.0 OR MIT | <https://github.com/servo/html5ever> |
@@ -814,15 +838,21 @@ because there the order carries meaning.
 | `mysql_common` | 0.37.3 | Apache-2.0 OR MIT | <https://github.com/blackbeam/rust_mysql_common> |
 | `notify-rust` | 4.18.0 | Apache-2.0 OR MIT | <https://github.com/hoodie/notify-rust> |
 | `ntapi` | 0.4.3 | Apache-2.0 OR MIT | <https://github.com/MSxDOS/ntapi> |
+| `num` | 0.4.3 | Apache-2.0 OR MIT | <https://github.com/rust-num/num> |
 | `num-bigint` | 0.4.8 | Apache-2.0 OR MIT | <https://github.com/rust-num/num-bigint> |
+| `num-cmp` | 0.1.0 | Apache-2.0 OR MIT | <https://github.com/lifthrasiir/num-cmp> |
+| `num-complex` | 0.4.6 | Apache-2.0 OR MIT | <https://github.com/rust-num/num-complex> |
 | `num-conv` | 0.2.2 | Apache-2.0 OR MIT | <https://github.com/jhpratt/num-conv> |
 | `num-integer` | 0.1.47 | Apache-2.0 OR MIT | <https://github.com/rust-num/num-integer> |
+| `num-iter` | 0.1.46 | Apache-2.0 OR MIT | <https://github.com/rust-num/num-iter> |
+| `num-rational` | 0.4.2 | Apache-2.0 OR MIT | <https://github.com/rust-num/num-rational> |
 | `num-traits` | 0.2.19 | Apache-2.0 OR MIT | <https://github.com/rust-num/num-traits> |
 | `oid-registry` | 0.8.1 | Apache-2.0 OR MIT | <https://github.com/rusticata/oid-registry> |
 | `once_cell` | 1.21.4 | Apache-2.0 OR MIT | <https://github.com/matklad/once_cell> |
 | `opaque-debug` | 0.3.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `openssl-src` | 300.6.1+3.6.3 | Apache-2.0 OR MIT | <https://github.com/alexcrichton/openssl-src-rs> |
 | `osakit` | 0.3.1 | Apache-2.0 OR MIT | <https://github.com/mdevils/rust-osakit> |
+| `p12-keystore` | 0.2.1 | Apache-2.0 OR MIT | <https://github.com/ancwrd1/p12-keystore> |
 | `parking` | 2.2.1 | Apache-2.0 OR MIT | <https://github.com/smol-rs/parking> |
 | `parking_lot` | 0.12.5 | Apache-2.0 OR MIT | <https://github.com/Amanieu/parking_lot> |
 | `parking_lot_core` | 0.9.12 | Apache-2.0 OR MIT | <https://github.com/Amanieu/parking_lot> |
@@ -834,6 +864,7 @@ because there the order carries meaning.
 | `pin-project-internal` | 1.1.13 | Apache-2.0 OR MIT | <https://github.com/taiki-e/pin-project> |
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT | <https://github.com/taiki-e/pin-project-lite> |
 | `pin-utils` | 0.1.0 | Apache-2.0 OR MIT | <https://github.com/rust-lang-nursery/pin-utils> |
+| `piper` | 0.2.5 | Apache-2.0 OR MIT | <https://github.com/smol-rs/piper> |
 | `pkcs12` | 0.1.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/pkcs12> |
 | `pkcs5` | 0.7.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/pkcs5> |
 | `pkcs8` | 0.10.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/pkcs8> |
@@ -843,6 +874,7 @@ because there the order carries meaning.
 | `portable-atomic` | 1.14.0 | Apache-2.0 OR MIT | <https://github.com/taiki-e/portable-atomic> |
 | `postgres-protocol` | 0.6.12 | Apache-2.0 OR MIT | <https://github.com/rust-postgres/rust-postgres> |
 | `postgres-types` | 0.2.14 | Apache-2.0 OR MIT | <https://github.com/rust-postgres/rust-postgres> |
+| `postscript` | 0.14.1 | Apache-2.0 OR MIT | <https://github.com/bodoni/postscript> |
 | `powerfmt` | 0.2.0 | Apache-2.0 OR MIT | <https://github.com/jhpratt/powerfmt> |
 | `ppv-lite86` | 0.2.21 | Apache-2.0 OR MIT | <https://github.com/cryptocorrosion/cryptocorrosion> |
 | `prefix-trie` | 0.8.4 | Apache-2.0 OR MIT | <https://github.com/tiborschneider/prefix-trie> |
@@ -852,14 +884,17 @@ because there the order carries meaning.
 | `prost-reflect` | 0.16.5 | Apache-2.0 OR MIT | <https://github.com/andrewhickman/prost-reflect> |
 | `protox` | 0.9.1 | Apache-2.0 OR MIT | <https://github.com/andrewhickman/protox> |
 | `protox-parse` | 0.9.0 | Apache-2.0 OR MIT | <https://github.com/andrewhickman/protox> |
+| `qrcode` | 0.14.1 | Apache-2.0 OR MIT | <https://github.com/kennytm/qrcode-rust> |
+| `quick-error` | 2.0.1 | Apache-2.0 OR MIT | <http://github.com/tailhook/quick-error> |
 | `quinn` | 0.11.11 | Apache-2.0 OR MIT | <https://github.com/quinn-rs/quinn> |
 | `quinn-proto` | 0.11.16 | Apache-2.0 OR MIT | <https://github.com/quinn-rs/quinn> |
 | `quinn-udp` | 0.5.15 | Apache-2.0 OR MIT | <https://github.com/quinn-rs/quinn> |
 | `quote` | 1.0.47 | Apache-2.0 OR MIT | <https://github.com/dtolnay/quote> |
-| `rand` | 0.10.2, 0.9.5 | Apache-2.0 OR MIT | <https://github.com/rust-random/rand> |
-| `rand_chacha` | 0.9.0 | Apache-2.0 OR MIT | <https://github.com/rust-random/rand> |
+| `rand` | 0.10.2, 0.8.8, 0.9.5 | Apache-2.0 OR MIT | <https://github.com/rust-random/rand> |
+| `rand_chacha` | 0.3.1, 0.9.0 | Apache-2.0 OR MIT | <https://github.com/rust-random/rand> |
 | `rand_core` | 0.10.1, 0.6.4, 0.9.5 | Apache-2.0 OR MIT | <https://github.com/rust-random/rand_core> |
 | `rand_pcg` | 0.10.2 | Apache-2.0 OR MIT | <https://github.com/rust-random/rngs> |
+| `rangemap` | 1.8.0 | Apache-2.0 OR MIT | <https://github.com/jeffparsons/rangemap> |
 | `rc2` | 0.8.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/block-ciphers> |
 | `rcgen` | 0.14.10 | Apache-2.0 OR MIT | <https://github.com/rustls/rcgen> |
 | `ref-cast` | 1.0.26 | Apache-2.0 OR MIT | <https://github.com/dtolnay/ref-cast> |
@@ -870,6 +905,8 @@ because there the order carries meaning.
 | `relative-path` | 2.0.1 | Apache-2.0 OR MIT | <https://github.com/udoprog/relative-path> |
 | `reqwest` | 0.12.28, 0.13.4 | Apache-2.0 OR MIT | <https://github.com/seanmonstar/reqwest> |
 | `resolv-conf` | 0.7.6 | Apache-2.0 OR MIT | <https://github.com/hickory-dns/resolv-conf> |
+| `rsasl` | 2.3.1 | Apache-2.0 OR MIT | <https://codeberg.org/dequbed/rsasl> |
+| `rskafka` | 0.6.0 | Apache-2.0 OR MIT | <https://github.com/influxdata/rskafka> |
 | `rust_xlsxwriter` | 0.99.1 | Apache-2.0 OR MIT | <https://github.com/jmcnamara/rust_xlsxwriter> |
 | `rustc-hash` | 2.1.3 | Apache-2.0 OR MIT | <https://github.com/rust-lang/rustc-hash> |
 | `rustc_version` | 0.4.1 | Apache-2.0 OR MIT | <https://github.com/djc/rustc-version-rs> |
@@ -912,6 +949,7 @@ because there the order carries meaning.
 | `softbuffer` | 0.4.8 | Apache-2.0 OR MIT | <https://github.com/rust-windowing/softbuffer> |
 | `spki` | 0.7.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/spki> |
 | `stable_deref_trait` | 1.2.1 | Apache-2.0 OR MIT | <https://github.com/storyyeller/stable_deref_trait> |
+| `stop-token` | 0.7.0 | Apache-2.0 OR MIT | <https://github.com/async-rs/stop-token> |
 | `string_cache` | 0.9.0 | Apache-2.0 OR MIT | <https://github.com/servo/string-cache> |
 | `string_cache_codegen` | 0.6.1 | Apache-2.0 OR MIT | <https://github.com/servo/string-cache> |
 | `stringprep` | 0.1.5 | Apache-2.0 OR MIT | <https://github.com/sfackler/rust-stringprep> |
@@ -960,6 +998,7 @@ because there the order carries meaning.
 | `toml_parser` | 1.1.2+spec-1.1.0 | Apache-2.0 OR MIT | <https://github.com/toml-rs/toml> |
 | `toml_writer` | 1.1.2+spec-1.1.0 | Apache-2.0 OR MIT | <https://github.com/toml-rs/toml> |
 | `tray-icon` | 0.24.1 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/tray-icon> |
+| `ttf-parser` | 0.25.1 | Apache-2.0 OR MIT | <https://github.com/harfbuzz/ttf-parser> |
 | `tungstenite` | 0.29.0, 0.30.0 | Apache-2.0 OR MIT | <https://github.com/snapview/tungstenite-rs> |
 | `typed-builder` | 0.22.0 | Apache-2.0 OR MIT | <https://github.com/idanarye/rust-typed-builder> |
 | `typed-builder-macro` | 0.22.0 | Apache-2.0 OR MIT | <https://github.com/idanarye/rust-typed-builder> |
@@ -986,6 +1025,7 @@ because there the order carries meaning.
 | `vcpkg` | 0.2.15 | Apache-2.0 OR MIT | <https://github.com/mcgoo/vcpkg-rs> |
 | `version_check` | 0.9.5 | Apache-2.0 OR MIT | <https://github.com/SergioBenitez/version_check> |
 | `web_atoms` | 0.2.5 | Apache-2.0 OR MIT | <https://github.com/servo/html5ever> |
+| `weezl` | 0.1.12 | Apache-2.0 OR MIT | <https://github.com/image-rs/weezl> |
 | `widestring` | 1.2.1 | Apache-2.0 OR MIT | <https://github.com/VoidStarKat/widestring-rs> |
 | `winapi` | 0.3.9 | Apache-2.0 OR MIT | <https://github.com/retep998/winapi-rs> |
 | `window-vibrancy` | 0.6.0 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/tauri-plugin-vibrancy> |
@@ -1014,10 +1054,11 @@ because there the order carries meaning.
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `zeroize_derive` | 1.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 
-### MIT — 138 crates
+### MIT — 162 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
+| `adobe-cmap-parser` | 0.4.1 | MIT | <https://github.com/jrmuizel/adobe-cmap-parser> |
 | `asynchronous-codec` | 0.6.2, 0.7.0 | MIT | <https://github.com/mxinden/asynchronous-codec> |
 | `auto-launch` | 0.5.0 | MIT | <https://github.com/zzzgydi/auto-launch> |
 | `axum` | 0.8.9 | MIT | <https://github.com/tokio-rs/axum> |
@@ -1031,8 +1072,10 @@ because there the order carries meaning.
 | `cargo_metadata` | 0.19.2 | MIT | <https://github.com/oli-obk/cargo_metadata> |
 | `cfb` | 0.7.3 | MIT | <https://github.com/mdsteele/rust-cfb> |
 | `cfg_aliases` | 0.2.2 | MIT | <https://github.com/katharostech/cfg_aliases> |
+| `color_quant` | 1.1.0 | MIT | <https://github.com/image-rs/color_quant> |
 | `combine` | 4.6.7 | MIT | <https://github.com/Marwes/combine> |
 | `convert_case` | 0.10.0 | MIT | <https://github.com/rutrum/convert-case> |
+| `cookie-factory` | 0.3.3 | MIT | <https://github.com/rust-bakery/cookie-factory> |
 | `croner` | 4.0.1 | MIT | <https://github.com/hexagon/croner-rust> |
 | `crunchy` | 0.2.4 | MIT | <https://github.com/eira-fransham/crunchy> |
 | `darling` | 0.20.11, 0.23.0 | MIT | <https://github.com/TedDriggs/darling> |
@@ -1043,9 +1086,12 @@ because there the order carries meaning.
 | `derive_more` | 2.1.1 | MIT | <https://github.com/JelteF/derive_more> |
 | `derive_more-impl` | 2.1.1 | MIT | <https://github.com/JelteF/derive_more> |
 | `dom_query` | 0.27.0 | MIT | <https://github.com/niklak/dom_query> |
+| `ecb` | 0.1.2 | MIT | <https://github.com/magic-akari/ecb> |
 | `email_address` | 0.2.9 | MIT | <https://github.com/johnstonskj/rust-email_address> |
 | `embed-resource` | 3.0.11 | MIT | <https://github.com/nabijaczleweli/rust-embed-resource> |
+| `fancy-regex` | 0.19.2 | MIT | <https://github.com/fancy-regex/fancy-regex> |
 | `filedescriptor` | 0.8.3 | MIT | <https://github.com/wezterm/wezterm> |
+| `fluent-uri` | 0.4.1 | MIT | <https://github.com/yescallop/fluent-uri-rs> |
 | `fsevent-sys` | 4.1.0 | MIT | <https://github.com/octplane/fsevent-rust/tree/master/fsevent-sys> |
 | `funty` | 2.0.0 | MIT | <https://github.com/myrrlyn/funty> |
 | `generic-array` | 0.14.7 | MIT | <https://github.com/fizyk20/generic-array> |
@@ -1058,12 +1104,18 @@ because there the order carries meaning.
 | `hyper-util` | 0.1.20 | MIT | <https://github.com/hyperium/hyper-util> |
 | `ico` | 0.5.0 | MIT | <https://github.com/mdsteele/rust-ico> |
 | `infer` | 0.19.0 | MIT | <https://github.com/bojand/infer> |
+| `integer-encoding` | 4.1.0 | MIT | <https://github.com/dermesser/integer-encoding-rs> |
 | `ioctl-rs` | 0.1.6 | MIT | <https://github.com/dcuddeback/ioctl-rs> |
+| `jsonschema` | 0.58.5 | MIT | <https://github.com/Stranger6667/jsonschema> |
+| `jsonschema-regex` | 0.58.5 | MIT | <https://github.com/Stranger6667/jsonschema> |
+| `jsonschema-value` | 0.58.5 | MIT | <https://github.com/Stranger6667/jsonschema> |
 | `keyed_priority_queue` | 0.4.2 | MIT | <https://github.com/AngelicosPhosphoros/keyed_priority_queue> |
+| `lapin` | 4.12.0 | MIT | <https://github.com/amqp-rs/lapin> |
 | `lazy-regex` | 3.6.1 | MIT | <https://github.com/Canop/lazy-regex> |
 | `lazy-regex-proc_macros` | 3.6.1 | MIT | <https://github.com/Canop/lazy-regex/tree/main/src/proc_macros> |
 | `lettre` | 0.11.23 | MIT | <https://github.com/lettre/lettre> |
 | `libsqlite3-sys` | 0.30.1 | MIT | <https://github.com/rusqlite/rusqlite> |
+| `lopdf` | 0.42.0 | MIT | <https://github.com/J-F-Liu/lopdf> |
 | `lru` | 0.18.5 | MIT | <https://github.com/jeromefroe/lru-rs> |
 | `lz4_flex` | 0.13.1 | MIT | <https://github.com/pseitz/lz4_flex> |
 | `macro_magic` | 0.5.1 | MIT | <https://github.com/sam0x17/macro_magic> |
@@ -1071,6 +1123,7 @@ because there the order carries meaning.
 | `macro_magic_core_macros` | 0.5.1 | MIT | <https://github.com/sam0x17/macro_magic> |
 | `macro_magic_macros` | 0.5.1 | MIT | <https://github.com/sam0x17/macro_magic> |
 | `memoffset` | 0.6.5 | MIT | <https://github.com/Gilnaa/memoffset> |
+| `micromap` | 0.3.0 | MIT | <https://github.com/yegor256/micromap> |
 | `mime_guess` | 2.0.5 | MIT | <https://github.com/abonander/mime_guess> |
 | `minisign-verify` | 0.2.5 | MIT | <https://github.com/jedisct1/rust-minisign-verify> |
 | `mio` | 1.2.2 | MIT | <https://github.com/tokio-rs/mio> |
@@ -1084,6 +1137,8 @@ because there the order carries meaning.
 | `openssl-sys` | 0.9.117 | MIT | <https://github.com/rust-openssl/rust-openssl> |
 | `ordered-float` | 2.10.1 | MIT | <https://github.com/reem/rust-ordered-float> |
 | `os_info` | 3.15.0 | MIT | <https://github.com/stanislav-tkach/os_info> |
+| `outref` | 0.5.2 | MIT | <https://github.com/Nugine/outref> |
+| `pdf-extract` | 0.12.1 | MIT | <https://github.com/jrmuizel/pdf-extract> |
 | `pem` | 4.0.0 | MIT | <https://github.com/jcreekmore/pem-rs> |
 | `phf` | 0.12.1, 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | `phf_codegen` | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
@@ -1091,6 +1146,7 @@ because there the order carries meaning.
 | `phf_macros` | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | `phf_shared` | 0.12.1, 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | `plist` | 1.10.0 | MIT | <https://github.com/ebarnard/rust-plist> |
+| `pom` | 1.1.0 | MIT | <https://github.com/J-F-Liu/pom> |
 | `portable-pty` | 0.8.1 | MIT | <https://github.com/wez/wezterm> |
 | `precomputed-hash` | 0.1.1 | MIT | <https://github.com/emilio/precomputed-hash> |
 | `pretty-hex` | 0.3.0 | MIT | <https://github.com/wolandr/pretty-hex> |
@@ -1098,6 +1154,7 @@ because there the order carries meaning.
 | `pulldown-cmark-escape` | 0.11.0 | MIT | <https://github.com/raphlinus/pulldown-cmark> |
 | `quick-xml` | 0.41.0 | MIT | <https://github.com/tafia/quick-xml> |
 | `radium` | 0.7.0 | MIT | <https://github.com/bitvecto-rs/radium> |
+| `referencing` | 0.58.5 | MIT | <https://github.com/Stranger6667/jsonschema> |
 | `rfd` | 0.16.0 | MIT | <https://github.com/PolyMeilex/rfd> |
 | `rquickjs` | 0.14.0 | MIT | <https://github.com/DelSkayn/rquickjs> |
 | `rquickjs-core` | 0.14.0 | MIT | <https://github.com/DelSkayn/rquickjs> |
@@ -1109,6 +1166,10 @@ because there the order carries meaning.
 | `schemars` | 0.8.22, 0.9.0, 1.2.1 | MIT | <https://github.com/GREsau/schemars> |
 | `schemars_derive` | 0.8.22 | MIT | <https://github.com/GREsau/schemars> |
 | `serde-value` | 0.7.0 | MIT | <https://github.com/arcnmx/serde-value> |
+| `serde_json_path` | 0.7.2 | MIT | <https://github.com/hiltontj/serde_json_path> |
+| `serde_json_path_core` | 0.2.2 | MIT | <https://github.com/hiltontj/serde_json_path> |
+| `serde_json_path_macros` | 0.1.6 | MIT | <https://github.com/hiltontj/serde_json_path> |
+| `serde_json_path_macros_internal` | 0.1.2 | MIT | <https://github.com/hiltontj/serde_json_path> |
 | `serial` | 0.4.0 | MIT | <https://github.com/dcuddeback/serial-rs> |
 | `serial-core` | 0.4.0 | MIT | <https://github.com/dcuddeback/serial-rs> |
 | `serial-unix` | 0.4.0 | MIT | <https://github.com/dcuddeback/serial-rs> |
@@ -1117,8 +1178,8 @@ because there the order carries meaning.
 | `slab` | 0.4.12 | MIT | <https://github.com/tokio-rs/slab> |
 | `spin` | 0.9.9 | MIT | <https://github.com/mvdnes/spin-rs> |
 | `strsim` | 0.11.1 | MIT | <https://github.com/rapidfuzz/strsim-rs> |
-| `strum` | 0.27.2 | MIT | <https://github.com/Peternator7/strum> |
-| `strum_macros` | 0.27.2 | MIT | <https://github.com/Peternator7/strum> |
+| `strum` | 0.27.2, 0.28.0 | MIT | <https://github.com/Peternator7/strum> |
+| `strum_macros` | 0.27.2, 0.28.0 | MIT | <https://github.com/Peternator7/strum> |
 | `synstructure` | 0.13.2 | MIT | <https://github.com/mystor/synstructure> |
 | `sysinfo` | 0.39.6 | MIT | <https://github.com/GuillaumeGomez/sysinfo> |
 | `take_mut` | 0.2.2 | MIT | <https://github.com/Sgeo/take_mut> |
@@ -1143,7 +1204,10 @@ because there the order carries meaning.
 | `trash` | 5.2.6 | MIT | <https://github.com/ArturKovacs/trash> |
 | `try-lock` | 0.2.5 | MIT | <https://github.com/seanmonstar/try-lock> |
 | `twox-hash` | 2.1.4 | MIT | <https://github.com/shepmaster/twox-hash> |
+| `type1-encoding-parser` | 0.1.1 | MIT | <https://github.com/jrmuizel/type1-encoding-parser> |
 | `urlpattern` | 0.3.0 | MIT | <https://github.com/denoland/rust-urlpattern> |
+| `uuid-simd` | 0.8.0 | MIT | <https://github.com/Nugine/simd> |
+| `vsimd` | 0.8.0 | MIT | <https://github.com/Nugine/simd> |
 | `vswhom` | 0.1.0 | MIT | <https://github.com/nabijaczleweli/vswhom.rs> |
 | `vswhom-sys` | 0.1.3 | MIT | <https://github.com/nabijaczleweli/vswhom-sys.rs> |
 | `want` | 0.3.1 | MIT | <https://github.com/seanmonstar/want> |
@@ -1157,15 +1221,17 @@ because there the order carries meaning.
 | `zip` | 4.6.1, 8.6.0 | MIT | <https://github.com/zip-rs/zip2> |
 | `zmij` | 1.0.23 | MIT | <https://github.com/dtolnay/zmij> |
 
-### Apache-2.0 — 20 crates
+### Apache-2.0 — 23 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `backon` | 1.6.0 | Apache-2.0 | <https://github.com/Xuanwo/backon> |
 | `flagset` | 0.4.7 | Apache-2.0 | <https://github.com/enarx/flagset> |
 | `gethostname` | 1.1.0 | Apache-2.0 | <https://codeberg.org/swsnr/gethostname.rs> |
+| `memo-map` | 0.3.4 | Apache-2.0 | <https://github.com/mitsuhiko/memo-map> |
 | `miette` | 7.6.0 | Apache-2.0 | <https://github.com/zkat/miette> |
 | `miette-derive` | 7.6.0 | Apache-2.0 | <https://github.com/zkat/miette> |
+| `minijinja` | 2.24.0 | Apache-2.0 | <https://github.com/mitsuhiko/minijinja> |
 | `mongocrypt` | 0.4.0 | Apache-2.0 | <https://github.com/mongodb/libmongocrypt-rust> |
 | `mongocrypt-sys` | 0.1.6+1.18.2 | Apache-2.0 | <https://github.com/mongodb/libmongocrypt-rust> |
 | `mongodb` | 3.8.0 | Apache-2.0 | <https://github.com/mongodb/mongo-rust-driver> |
@@ -1180,7 +1246,33 @@ because there the order carries meaning.
 | `sdd` | 4.8.11 | Apache-2.0 | <https://codeberg.org/wvwwvwwv/scalable-delayed-dealloc> |
 | `sync_wrapper` | 1.0.2 | Apache-2.0 | <https://github.com/Actyx/sync_wrapper> |
 | `tao` | 0.35.3 | Apache-2.0 | <https://github.com/tauri-apps/tao> |
+| `unicode-general-category` | 1.1.0 | Apache-2.0 | <https://github.com/yeslogic/unicode-general-category> |
 | `zopfli` | 0.8.3 | Apache-2.0 | <https://github.com/zopfli-rs/zopfli> |
+
+### Apache-2.0 OR MIT OR Zlib — 20 crates
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `arcstr` | 1.2.0 | Apache-2.0 OR MIT OR Zlib | <https://github.com/thomcc/arcstr> |
+| `bytemuck` | 1.25.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Lokathor/bytemuck> |
+| `dispatch2` | 0.3.1 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `lru-slab` | 0.1.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Ralith/lru-slab> |
+| `miniz_oxide` | 0.8.9 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
+| `objc2-app-kit` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-core-foundation` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-core-graphics` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-exception-helper` | 0.1.1 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-io-kit` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-io-surface` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-osa-kit` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-quartz-core` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-system-configuration` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-web-kit` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `raw-window-handle` | 0.6.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/rust-windowing/raw-window-handle> |
+| `tinyvec` | 1.12.0 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Lokathor/tinyvec> |
+| `tinyvec_macros` | 0.1.1 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Soveu/tinyvec_macros> |
+| `zune-core` | 0.5.3 | Apache-2.0 OR MIT OR Zlib | <https://github.com/etemesi254/zune-image> |
+| `zune-jpeg` | 0.5.15 | Apache-2.0 OR MIT OR Zlib | <https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg> |
 
 ### Unicode-3.0 — 18 crates
 
@@ -1205,40 +1297,31 @@ because there the order carries meaning.
 | `zerovec` | 0.11.6 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `zerovec-derive` | 0.11.3 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 
-### Apache-2.0 OR MIT OR Zlib — 17 crates
-
-| Component | Version | Licence (SPDX) | Project |
-|---|---|---|---|
-| `arcstr` | 1.2.0 | Apache-2.0 OR MIT OR Zlib | <https://github.com/thomcc/arcstr> |
-| `dispatch2` | 0.3.1 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `lru-slab` | 0.1.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Ralith/lru-slab> |
-| `miniz_oxide` | 0.8.9 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
-| `objc2-app-kit` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `objc2-core-foundation` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `objc2-core-graphics` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `objc2-exception-helper` | 0.1.1 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `objc2-io-kit` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `objc2-io-surface` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `objc2-osa-kit` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `objc2-quartz-core` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `objc2-system-configuration` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `objc2-web-kit` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
-| `raw-window-handle` | 0.6.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/rust-windowing/raw-window-handle> |
-| `tinyvec` | 1.12.0 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Lokathor/tinyvec> |
-| `tinyvec_macros` | 0.1.1 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Soveu/tinyvec_macros> |
-
-### MIT OR Unlicense — 8 crates
+### MIT OR Unlicense — 9 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `aho-corasick` | 1.1.4 | MIT OR Unlicense | <https://github.com/BurntSushi/aho-corasick> |
 | `byteorder` | 1.5.0 | MIT OR Unlicense | <https://github.com/BurntSushi/byteorder> |
+| `byteorder-lite` | 0.1.0 | MIT OR Unlicense | <https://github.com/image-rs/byteorder-lite> |
 | `globset` | 0.4.19 | MIT OR Unlicense | <https://github.com/BurntSushi/ripgrep/tree/master/crates/globset> |
 | `memchr` | 2.8.3 | MIT OR Unlicense | <https://github.com/BurntSushi/memchr> |
 | `same-file` | 1.0.6 | MIT OR Unlicense | <https://github.com/BurntSushi/same-file> |
 | `termcolor` | 1.4.1 | MIT OR Unlicense | <https://github.com/BurntSushi/termcolor> |
 | `walkdir` | 2.5.0 | MIT OR Unlicense | <https://github.com/BurntSushi/walkdir> |
 | `winapi-util` | 0.1.11 | MIT OR Unlicense | <https://github.com/BurntSushi/winapi-util> |
+
+### BSD-2-Clause — 7 crates
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `amq-protocol` | 10.6.3 | BSD-2-Clause | <https://github.com/amqp-rs/amq-protocol> |
+| `amq-protocol-tcp` | 10.6.3 | BSD-2-Clause | <https://github.com/amqp-rs/amq-protocol> |
+| `amq-protocol-types` | 10.6.3 | BSD-2-Clause | <https://github.com/amqp-rs/amq-protocol> |
+| `amq-protocol-uri` | 10.6.3 | BSD-2-Clause | <https://github.com/amqp-rs/amq-protocol> |
+| `async-rs` | 0.8.13 | BSD-2-Clause | <https://github.com/amqp-rs/async-rs> |
+| `rustls-connector` | 0.23.8 | BSD-2-Clause | <https://github.com/amqp-rs/rustls-connector> |
+| `tcp-stream` | 0.34.14 | BSD-2-Clause | <https://github.com/amqp-rs/tcp-stream> |
 
 ### BSD-3-Clause — 6 crates
 
@@ -1286,6 +1369,13 @@ because there the order carries meaning.
 | `mach2` | 0.6.0 | Apache-2.0 OR BSD-2-Clause OR MIT | <https://github.com/JohnTitor/mach2> |
 | `zerocopy` | 0.8.55 | Apache-2.0 OR BSD-2-Clause OR MIT | <https://github.com/google/zerocopy> |
 
+### Apache-2.0 OR BSD-3-Clause — 2 crates
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `moxcms` | 0.8.1 | Apache-2.0 OR BSD-3-Clause | <https://github.com/awxkee/moxcms> |
+| `pxfm` | 0.1.30 | Apache-2.0 OR BSD-3-Clause | <https://github.com/awxkee/pxfm> |
+
 ### Apache-2.0 OR BSD-3-Clause OR MIT — 2 crates
 
 | Component | Version | Licence (SPDX) | Project |
@@ -1318,6 +1408,12 @@ because there the order carries meaning.
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `moka` | 0.12.15 | (MIT OR Apache-2.0) AND Apache-2.0 | <https://github.com/moka-rs/moka> |
+
+### (MIT OR Apache-2.0) AND ISC — 1 crate
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `rqrr` | 0.11.0 | (MIT OR Apache-2.0) AND ISC | <https://github.com/WanzenBug/rqrr> |
 
 ### (MIT OR Apache-2.0) AND Unicode-3.0 — 1 crate
 
@@ -1373,6 +1469,12 @@ because there the order carries meaning.
 |---|---|---|---|
 | `dunce` | 1.0.5 | Apache-2.0 OR CC0-1.0 OR MIT-0 | <https://gitlab.com/kornelski/dunce> |
 
+### Apache-2.0 OR GPL-2.0-only — 1 crate
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `self_cell` | 1.3.0 | Apache-2.0 OR GPL-2.0-only | <https://github.com/Voultapher/self_cell> |
+
 ### BSD-3-Clause AND MIT — 1 crate
 
 | Component | Version | Licence (SPDX) | Project |
@@ -1402,6 +1504,12 @@ because there the order carries meaning.
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `matchit` | 0.8.4 | MIT AND BSD-3-Clause | <https://github.com/ibraheemdev/matchit> |
+
+### MIT-0 — 1 crate
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `borrow-or-share` | 0.2.4 | MIT-0 | <https://github.com/yescallop/borrow-or-share> |
 
 ## Notices the components carry themselves
 

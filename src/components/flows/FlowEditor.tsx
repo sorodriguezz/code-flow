@@ -12,10 +12,11 @@ import {
   type Connection,
   type Edge,
   type EdgeChange,
+  type EdgeTypes,
   type NodeChange,
   type NodeTypes,
 } from "@xyflow/react";
-import { ChevronDown, ClipboardPaste, Copy, CopyPlus, Globe, History, KeyRound, Network, PanelTop, Pencil, Pin, PinOff, Play, Plus, Power, Redo2, Scan, Scissors, ScrollText, Settings2, ShieldAlert, Square, StepForward, StickyNote, Trash2, Undo2, Users, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronDown, ClipboardPaste, Copy, CopyPlus, Globe, History, KeyRound, Network, Palette, PanelTop, Pencil, Pin, PinOff, Play, Plus, Power, Redo2, Scan, Scissors, ScrollText, Settings2, ShieldAlert, Square, StepForward, StickyNote, Trash2, Undo2, Users, ZoomIn, ZoomOut } from "lucide-react";
 import { AiWand } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Button, iconButtonClass } from "../common/Button";
@@ -25,6 +26,7 @@ import { VersionHistoryModal } from "../common/VersionHistoryModal";
 import { toolbarClass } from "../common/recipes";
 import {
   CanvasActionsContext,
+  FlowEdgeView,
   FlowNodeView,
   NoteNodeView,
   type CanvasActions,
@@ -39,11 +41,12 @@ import { useFlowShareStore } from "../../state/flowShareStore";
 import { FlowSettingsDialog } from "./FlowSettingsDialog";
 import { ExecutionsView } from "./ExecutionsView";
 import { RunLog } from "./RunLog";
-import { NODE_STATUS_KEY, formatDuration, itemsLabel } from "./runFormat";
+import { NODE_STATUS_KEY, formatDuration, itemsLabel, nodeTime } from "./runFormat";
 import {
   addNode,
   addNote,
   autoLayout,
+  colorNotes,
   connect,
   connectionKey,
   connectionProblem,
@@ -51,6 +54,7 @@ import {
   outputCount,
   copyFragment,
   moveElements,
+  noteColor,
   parseSpec,
   pasteFragment,
   removeElements,
@@ -79,6 +83,7 @@ import { promptAction } from "../../state/promptStore";
 import { pushErrorToast } from "../../state/toastStore";
 
 const NODE_TYPES: NodeTypes = { cf: FlowNodeView, note: NoteNodeView };
+const EDGE_TYPES: EdgeTypes = { cf: FlowEdgeView };
 
 /** The node inspector and its form arrive the first time a node is opened. */
 const NodeInspector = lazy(() => import("./NodeInspector"));
@@ -194,6 +199,8 @@ function Editor() {
 
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const [edgeSelection, setEdgeSelection] = useState<Set<string>>(() => new Set());
+  /** The note whose palette is open — see `CanvasActions.noteColorFor`. */
+  const [noteColorFor, setNoteColorFor] = useState<string | null>(null);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
   const edgeSelectionRef = useRef(edgeSelection);
@@ -231,7 +238,9 @@ function Editor() {
       const pinned = pins?.[item.id] !== undefined;
       const waiting = waitingNodes.has(item.id);
       const mark = diff?.nodes.get(item.id);
-      const key = [item, selected, size, descriptor, language, record, pinned, waiting, mark];
+      // Only a running node's clock moves; every other node keeps its cached object.
+      const time = record ? nodeTime(record, now) : "";
+      const key = [item, selected, size, descriptor, language, record, pinned, waiting, mark, time];
       const cached = nodeCache.current.get(item.id);
       if (cached && same(cached.key, key)) {
         out.push(cached.node);
@@ -273,6 +282,7 @@ function Editor() {
                     }`,
               }
             : null,
+          time,
           pinned,
           pinnedTitle: t("flows.inspector.pinned"),
           diff: mark,
@@ -285,7 +295,7 @@ function Editor() {
     for (const note of shown.notes) {
       const selected = selection.has(note.id);
       const size = measured.current.get(note.id);
-      const key = [note, selected, size, language];
+      const key = [note, selected, size, language, !!diff];
       const cached = nodeCache.current.get(note.id);
       if (cached && same(cached.key, key)) {
         out.push(cached.node);
@@ -302,7 +312,7 @@ function Editor() {
         measured: size,
         // Under the nodes: a note annotates the flow, it must never sit on top of a port.
         zIndex: -1,
-        data: { text: note.text, placeholder: t("flows.notePlaceholder") },
+        data: { text: note.text, placeholder: t("flows.notePlaceholder"), color: noteColor(note), locked: !!diff },
       };
       out.push(node);
       next.set(note.id, { key, node });
@@ -311,7 +321,7 @@ function Editor() {
     return out;
     // `measureTick` is the signal that `measured` (a ref) changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shown, diff, selection, measureTick, catalogMap, language, t, live, pins, waitingNodes]);
+  }, [shown, diff, selection, measureTick, catalogMap, language, t, live, pins, waitingNodes, now]);
 
   const edges = useMemo<Edge[]>(
     () =>
@@ -325,11 +335,14 @@ function Editor() {
         const fromErrorPort = !!source && hasErrorOutput(source, descriptor) && c.out === (descriptor?.outputs ?? 0);
         return {
           id,
+          type: "cf",
           source: c.from,
           sourceHandle: `o${c.out}`,
           target: c.to,
           targetHandle: `i${c.in}`,
           selected: edgeSelection.has(id),
+          // A proposal is answered from the builder's window, not edited on the canvas.
+          deletable: !diff,
           label: count !== undefined && count > 0 ? itemsLabel(t, count) : undefined,
           labelBgPadding: [5, 2] as [number, number],
           labelBgBorderRadius: 4,
@@ -429,6 +442,22 @@ function Editor() {
 
   const checkpoint = useCallback(() => useFlowsStore.getState().checkpoint(), []);
 
+  /** One connection out — the canvas's remove button and the connection's menu. */
+  const removeConnection = useCallback(
+    (id: string) => {
+      const doc = current();
+      if (doc) edit(removeElements(doc, { connections: [id] }));
+      // Keys are rebuilt from the ends, so the same wire drawn again would come back selected.
+      setEdgeSelection((before) => {
+        if (!before.has(id)) return before;
+        const next = new Set(before);
+        next.delete(id);
+        return next;
+      });
+    },
+    [edit],
+  );
+
   const actions = useMemo<CanvasActions>(
     () => ({
       beginGesture: checkpoint,
@@ -436,8 +465,22 @@ function Editor() {
         const doc = current();
         if (doc) edit(updateNote(doc, id, { text }));
       },
+      removeConnection,
+      removeConnectionLabel: t("flows.removeConnection"),
+      setNoteColor: (id, color) => {
+        const doc = current();
+        if (!doc) return;
+        // The whole selection when the note is part of it, like the menu's other commands.
+        const chosen = selectionRef.current;
+        const ids = chosen.has(id) ? doc.notes.filter((n) => chosen.has(n.id)).map((n) => n.id) : [id];
+        edit(colorNotes(doc, ids, color));
+      },
+      noteColorFor,
+      setNoteColorFor,
+      noteColorLabel: t("flows.noteColor"),
+      noteColorNoneLabel: t("flows.noteColorNone"),
     }),
-    [checkpoint, edit],
+    [checkpoint, edit, removeConnection, noteColorFor, t],
   );
 
   // ---------- commands ----------
@@ -698,12 +741,28 @@ function Editor() {
     });
   };
 
+  /** A connection's menu: it is selected, like a node under a right-click, and can be taken out. */
+  const openEdgeMenu = (event: ReactMouseEvent, id: string) => {
+    event.preventDefault();
+    setSelection(new Set());
+    setEdgeSelection(new Set([id]));
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [{ label: t("flows.removeConnection"), icon: Trash2, danger: true, onClick: () => removeConnection(id) }],
+    });
+  };
+
   const openSelectionMenu = (event: ReactMouseEvent, single: string | null) => {
     event.preventDefault();
     const doc = current();
     const ids = selectedNodes();
     const disabled = !!doc && ids.length > 0 && doc.nodes.filter((n) => ids.includes(n.id)).every((n) => n.disabled);
     const items: MenuItem[] = [];
+    if (single && doc?.notes.some((n) => n.id === single)) {
+      // Opens the dot's palette, on this note — one palette, two ways in.
+      items.push({ label: t("flows.noteColor"), icon: Palette, onClick: () => setNoteColorFor(single) });
+    }
     if (single && doc?.nodes.some((n) => n.id === single)) {
       const isTriggerNode = catalogMap.get(doc.nodes.find((n) => n.id === single)?.type ?? "")?.family === "trigger";
       const isPinned = useFlowRunsStore.getState().pins[draftId]?.[single] !== undefined;
@@ -896,19 +955,6 @@ function Editor() {
               {aiRun?.status === "running" && !aiOpen ? <ThinkingOrb size="sm" /> : <AiWand size={15} />}
             </button>
           )}
-          {pane === "editor" && (
-            <button
-              type="button"
-              className={iconButtonClass({ size: "sm", active: palette !== null })}
-              title={`${t("flows.addNode")} (Tab)`}
-              aria-label={t("flows.addNode")}
-              aria-expanded={palette !== null}
-              onClick={() => setPalette(palette ? null : { at: null })}
-              data-tour="flows-add-node"
-            >
-              <Plus size={16} />
-            </button>
-          )}
           </span>
           <span className="mx-0.5 h-[18px] w-px shrink-0 bg-[var(--cf-border)]" />
           {share?.conflict ? (
@@ -999,6 +1045,7 @@ function Editor() {
                 nodes={nodes}
                 edges={edges}
                 nodeTypes={NODE_TYPES}
+                edgeTypes={EDGE_TYPES}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
@@ -1017,6 +1064,7 @@ function Editor() {
                   openSelectionMenu(event, node.id);
                 }}
                 onSelectionContextMenu={(event) => (diff ? event.preventDefault() : openSelectionMenu(event, null))}
+                onEdgeContextMenu={(event, edge) => (diff ? event.preventDefault() : openEdgeMenu(event, edge.id))}
                 onPaneClick={() => setMenu(null)}
                 fitView
                 fitViewOptions={{ padding: 0.25, maxZoom: 1 }}

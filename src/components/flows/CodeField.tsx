@@ -20,6 +20,7 @@ const LANGUAGES: Record<string, string> = {
   typescript: "typescript",
   json: "json",
   sql: "sql",
+  markdown: "markdown",
 };
 
 /**
@@ -66,7 +67,7 @@ export default function CodeField({
   latest.current = onChange;
   useEffect(installMarkerFilter, []);
   const language = LANGUAGES[lang] ?? "plaintext";
-  const extension = { shell: "sh", python: "py", javascript: "js", typescript: "ts", json: "json", sql: "sql" }[lang] ?? "txt";
+  const extension = { shell: "sh", python: "py", javascript: "js", typescript: "ts", json: "json", sql: "sql", markdown: "md" }[lang] ?? "txt";
 
   const onMount: OnMount = (editor) => {
     // ⌘S inside the editor would otherwise reach the browser's "save page".

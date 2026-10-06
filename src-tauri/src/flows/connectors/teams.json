@@ -1,0 +1,34 @@
+{
+  "id": "teams",
+  "name": "Microsoft Teams",
+  "baseUrl": "",
+  "auth": "url",
+  "authHint": { "es": "La URL del webhook del canal (flujo «Publicar en un canal cuando se recibe una solicitud de webhook») como credencial Webhook", "en": "The channel's webhook URL (the \"Post to a channel when a webhook request is received\" workflow) as a Webhook credential" },
+  "operations": [
+    {
+      "id": "sendMessage",
+      "name": { "es": "Enviar un mensaje al canal", "en": "Send a message to the channel" },
+      "method": "POST",
+      "url": "{{secret}}",
+      "fields": [
+        { "name": "title", "label": { "es": "Título", "en": "Title" } },
+        { "name": "text", "label": { "es": "Mensaje (Markdown)", "en": "Message (Markdown)" }, "multiline": true, "required": true }
+      ],
+      "body": {
+        "type": "message",
+        "attachments": [{
+          "contentType": "application/vnd.microsoft.card.adaptive",
+          "content": {
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard",
+            "version": "1.4",
+            "body": [
+              { "$when": "title", "type": "TextBlock", "text": "{{title}}", "weight": "Bolder", "size": "Medium", "wrap": true },
+              { "type": "TextBlock", "text": "{{text}}", "wrap": true }
+            ]
+          }
+        }]
+      }
+    }
+  ]
+}

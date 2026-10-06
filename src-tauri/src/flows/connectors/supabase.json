@@ -1,0 +1,84 @@
+{
+  "id": "supabase",
+  "name": "Supabase",
+  "baseUrl": "https://{{project}}.supabase.co",
+  "auth": "headers",
+  "authHint": { "es": "La anon key (o la service_role, si el flujo debe saltarse el RLS) como credencial Token", "en": "The anon key (or the service_role key, when the flow must bypass RLS) as a Token credential" },
+  "siteField": { "name": "project", "label": { "es": "Proyecto (abcd en abcd.supabase.co)", "en": "Project (abcd in abcd.supabase.co)" }, "placeholder": "abcd", "required": true },
+  "headers": { "apikey": "{{secret}}", "Authorization": "Bearer {{secret}}" },
+  "errorField": "message",
+  "operations": [
+    {
+      "id": "selectRows",
+      "name": { "es": "Leer filas", "en": "Read rows" },
+      "method": "GET",
+      "path": "/rest/v1/{{table}}",
+      "query": { "select": "{{select}}", "$raw": "{{filter}}" },
+      "fields": [
+        { "name": "table", "label": { "es": "Tabla", "en": "Table" }, "placeholder": "pedidos", "required": true },
+        { "name": "select", "label": { "es": "Columnas", "en": "Columns" }, "placeholder": "*" },
+        { "name": "filter", "label": { "es": "Filtros (PostgREST)", "en": "Filters (PostgREST)" }, "placeholder": "estado=eq.pendiente&order=id.desc&limit=50" }
+      ]
+    },
+    {
+      "id": "insertRows",
+      "name": { "es": "Insertar filas", "en": "Insert rows" },
+      "method": "POST",
+      "path": "/rest/v1/{{table}}",
+      "headers": { "Prefer": "return=representation" },
+      "fields": [
+        { "name": "table", "label": { "es": "Tabla", "en": "Table" }, "required": true },
+        { "name": "rows", "label": { "es": "Filas (JSON: un objeto o una lista)", "en": "Rows (JSON: an object or a list)" }, "placeholder": "{\"cliente\": \"ACME\", \"total\": 10}", "json": true, "required": true }
+      ],
+      "body": "{{rows}}"
+    },
+    {
+      "id": "updateRows",
+      "name": { "es": "Actualizar filas", "en": "Update rows" },
+      "method": "PATCH",
+      "path": "/rest/v1/{{table}}",
+      "query": { "$raw": "{{filter}}" },
+      "headers": { "Prefer": "return=representation" },
+      "fields": [
+        { "name": "table", "label": { "es": "Tabla", "en": "Table" }, "required": true },
+        { "name": "filter", "label": { "es": "Qué filas (PostgREST)", "en": "Which rows (PostgREST)" }, "placeholder": "id=eq.42", "required": true },
+        { "name": "values", "label": { "es": "Valores (JSON)", "en": "Values (JSON)" }, "placeholder": "{\"estado\": \"listo\"}", "json": true, "required": true }
+      ],
+      "body": "{{values}}"
+    },
+    {
+      "id": "deleteRows",
+      "name": { "es": "Borrar filas", "en": "Delete rows" },
+      "method": "DELETE",
+      "path": "/rest/v1/{{table}}",
+      "query": { "$raw": "{{filter}}" },
+      "headers": { "Prefer": "return=representation" },
+      "fields": [
+        { "name": "table", "label": { "es": "Tabla", "en": "Table" }, "required": true },
+        { "name": "filter", "label": { "es": "Qué filas (PostgREST)", "en": "Which rows (PostgREST)" }, "placeholder": "id=eq.42", "required": true }
+      ]
+    },
+    {
+      "id": "rpc",
+      "name": { "es": "Llamar una función SQL (rpc)", "en": "Call an SQL function (rpc)" },
+      "method": "POST",
+      "path": "/rest/v1/rpc/{{function}}",
+      "fields": [
+        { "name": "function", "label": { "es": "Función", "en": "Function" }, "required": true },
+        { "name": "args", "label": { "es": "Argumentos (JSON)", "en": "Arguments (JSON)" }, "placeholder": "{\"desde\": \"2026-10-01\"}", "json": true }
+      ],
+      "body": "{{args}}"
+    },
+    {
+      "id": "edgeFunction",
+      "name": { "es": "Llamar una Edge Function", "en": "Call an Edge Function" },
+      "method": "POST",
+      "path": "/functions/v1/{{function}}",
+      "fields": [
+        { "name": "function", "label": { "es": "Función", "en": "Function" }, "required": true },
+        { "name": "payload", "label": { "es": "Datos (JSON)", "en": "Payload (JSON)" }, "json": true }
+      ],
+      "body": "{{payload}}"
+    }
+  ]
+}

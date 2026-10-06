@@ -83,7 +83,8 @@ export function sameProject(a: string, b: string): boolean {
  */
 export function listConnections(
   projects: SupabaseProject[],
-  shares: SharedCollectionRow[],
+  // Only the two fields it reads, so Flujos' shares (`flows_share`) can be listed the same way.
+  shares: Pick<SharedCollectionRow, "role" | "project_url">[],
 ): Connection[] {
   const byHost = new Map<string, Connection>();
 

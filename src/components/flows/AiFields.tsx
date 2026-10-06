@@ -6,7 +6,7 @@ import { Select } from "../common/Select";
 import { iconButtonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 import { Rows, asRows, str } from "./fieldRows";
-import { flowsLocalModels, type FlowEngineChoice } from "../../lib/tauri/flowsCommands";
+import { flowsAiModels, flowsLocalModels, type FlowEngineChoice } from "../../lib/tauri/flowsCommands";
 import { mcpList, type McpServer } from "../../lib/tauri/mcpCommands";
 import { aiReadOnlyEngines, listChainTemplates, listWorkspaceAgents } from "../../lib/tauri/commands";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
@@ -36,7 +36,7 @@ export function engineOf(value: unknown): FlowEngineChoice {
 }
 
 /** The account a node's choice runs as, for the chip: `""` resolves the way the run will. */
-function useShownAccount(provider: string, account: string): string | null {
+function useShownAccount(provider: string, account: string, task: "flows" | "review" | "chat" | "fix" = "flows"): string | null {
   const accounts = useAiAccountsStore((s) => s.accounts);
   const taskPins = useAiAccountsStore((s) => s.taskPins);
   const workspaceDefaults = useAiAccountsStore((s) => s.workspaceDefaults);
@@ -44,25 +44,34 @@ function useShownAccount(provider: string, account: string): string | null {
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   if (account === SYSTEM_ACCOUNT) return null;
   if (account) return account;
-  return resolveAccount({ accounts, taskPins, workspaceDefaults, providerDefaults }, provider, "flows", workspaceId);
+  return resolveAccount({ accounts, taskPins, workspaceDefaults, providerDefaults }, provider, task, workspaceId);
 }
 
-/** The node's engine: the model picker, bound to the node. */
-export function EngineField({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
+/** The node's engine: the model picker, bound to the node. `task` is the routing row an automatic
+ *  node follows — "Flujos", "Revisión de PR" for the PR analyzer, "Chat" for a Chat turn. */
+export function EngineField({
+  value,
+  onChange,
+  task = "flows",
+}: {
+  value: unknown;
+  onChange: (next: unknown) => void;
+  task?: "flows" | "review" | "chat" | "fix";
+}) {
   const t = useT();
   const engine = engineOf(value);
-  const routedProvider = useTaskProvider("flows");
-  const routedModel = useAiProviderStore((s) => s.taskModels.flows ?? s.model);
+  const routedProvider = useTaskProvider(task);
+  const routedModel = useAiProviderStore((s) => s.taskModels[task] ?? s.model);
   const automatic = engine.provider === "";
   const provider = automatic ? routedProvider : engine.provider;
   const model = automatic ? routedModel : engine.model;
-  const account = useShownAccount(provider, engine.account);
+  const account = useShownAccount(provider, engine.account, task);
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-2">
       <ChatModelPicker
         liveModel={null}
         chatActive={false}
-        task="flows"
+        task={task}
         bound={{ provider, model, account }}
         onPick={(nextProvider, nextModel, nextAccount) =>
           onChange({
@@ -73,7 +82,17 @@ export function EngineField({ value, onChange }: { value: unknown; onChange: (ne
         }
       />
       {automatic ? (
-        <span className="text-[11.5px] text-[var(--cf-text-faint)]">{t("flows.ai.automatic")}</span>
+        <span className="text-[11.5px] text-[var(--cf-text-faint)]">
+          {t(
+            task === "review"
+              ? "flows.ai.automaticReview"
+              : task === "chat"
+                ? "flows.ai.automaticChat"
+                : task === "fix"
+                  ? "flows.ai.automaticFix"
+                  : "flows.ai.automatic",
+          )}
+        </span>
       ) : (
         <button
           type="button"
@@ -357,6 +376,83 @@ export function LocalModelField({
           className={iconButtonClass({ size: "sm" })}
           title={t("flows.ai.reloadModels")}
           aria-label={t("flows.ai.reloadModels")}
+          onClick={() => setTick((n) => n + 1)}
+        >
+          <RefreshCw size={13} />
+        </button>
+      </div>
+      {problem && <span className="text-[11.5px] text-[var(--cf-text-muted)]">{problem}</span>}
+    </div>
+  );
+}
+
+/** A model of a provider's API: typed, or picked from the list the provider gives with the node's
+ *  credential — reread when the provider, its address or the credential changes. */
+export function ApiModelField({
+  value,
+  onChange,
+  provider,
+  baseUrl,
+  credentialId,
+  purpose,
+}: {
+  value: unknown;
+  onChange: (next: unknown) => void;
+  provider: string;
+  baseUrl: string;
+  credentialId: string;
+  purpose: "chat" | "embed";
+}) {
+  const t = useT();
+  const listId = useId();
+  const [models, setModels] = useState<string[]>([]);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  // The hosted APIs list nothing without a key; a local or compatible server may not need one.
+  const askable = !!credentialId || provider === "compatible" || provider === "ollama";
+  useEffect(() => {
+    if (!askable || (provider === "compatible" && !baseUrl.trim())) {
+      setModels([]);
+      setProblem(null);
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(() => {
+      void flowsAiModels(provider, baseUrl, credentialId || null, purpose)
+        .then((list) => {
+          if (!alive) return;
+          setModels(list);
+          setProblem(null);
+        })
+        .catch((error) => alive && setProblem(String(error)));
+    }, 300);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [askable, provider, baseUrl, credentialId, purpose, tick]);
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <input
+          list={listId}
+          className={fieldClass({ size: "sm", className: "min-w-0 flex-1 font-mono text-[11.5px]" })}
+          value={str(value)}
+          placeholder={askable ? t("flows.ai.pickModel") : t("flows.ai.modelNeedsKey")}
+          aria-label={t("flows.param.apiModel")}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <datalist id={listId}>
+          {models.map((model) => (
+            <option key={model} value={model} />
+          ))}
+        </datalist>
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm" })}
+          title={t("flows.ai.reloadModels")}
+          aria-label={t("flows.ai.reloadModels")}
+          disabled={!askable}
           onClick={() => setTick((n) => n + 1)}
         >
           <RefreshCw size={13} />

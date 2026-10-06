@@ -1,0 +1,46 @@
+{
+  "id": "sentry",
+  "name": "Sentry",
+  "baseUrl": "https://sentry.io/api/0",
+  "auth": "bearer",
+  "authHint": { "es": "Un auth token de Sentry (con event:read y event:write) como credencial Token", "en": "A Sentry auth token (with event:read and event:write) as a Token credential" },
+  "errorField": "detail",
+  "operations": [
+    {
+      "id": "listIssues",
+      "name": { "es": "Issues de un proyecto", "en": "A project's issues" },
+      "method": "GET",
+      "path": "/projects/{{org}}/{{project}}/issues/",
+      "query": { "query": "{{query}}", "statsPeriod": "{{period}}", "limit": "{{limit}}" },
+      "fields": [
+        { "name": "org", "label": { "es": "Organización (slug)", "en": "Organization (slug)" }, "required": true },
+        { "name": "project", "label": { "es": "Proyecto (slug)", "en": "Project (slug)" }, "required": true },
+        { "name": "query", "label": { "es": "Búsqueda", "en": "Search" }, "placeholder": "is:unresolved level:error" },
+        { "name": "period", "label": { "es": "Periodo", "en": "Period" }, "placeholder": "24h" },
+        { "name": "limit", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "25" }
+      ]
+    },
+    {
+      "id": "latestEvent",
+      "name": { "es": "El último evento de un issue", "en": "An issue's latest event" },
+      "method": "GET",
+      "path": "/organizations/{{org}}/issues/{{issueId}}/events/latest/",
+      "fields": [
+        { "name": "org", "label": { "es": "Organización (slug)", "en": "Organization (slug)" }, "required": true },
+        { "name": "issueId", "label": { "es": "Issue (id)", "en": "Issue (id)" }, "required": true }
+      ]
+    },
+    {
+      "id": "updateIssue",
+      "name": { "es": "Resolver o ignorar un issue", "en": "Resolve or ignore an issue" },
+      "method": "PUT",
+      "path": "/organizations/{{org}}/issues/{{issueId}}/",
+      "fields": [
+        { "name": "org", "label": { "es": "Organización (slug)", "en": "Organization (slug)" }, "required": true },
+        { "name": "issueId", "label": { "es": "Issue (id)", "en": "Issue (id)" }, "required": true },
+        { "name": "status", "label": { "es": "Estado (resolved, ignored, unresolved)", "en": "Status (resolved, ignored, unresolved)" }, "placeholder": "resolved", "required": true }
+      ],
+      "body": { "status": "{{status}}" }
+    }
+  ]
+}

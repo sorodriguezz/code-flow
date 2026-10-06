@@ -434,6 +434,21 @@ rquickjs = "0.14"
 croner = "4"
 chrono-tz = "0.10"
 iana-time-zone = "0.1"
+dom_query = "0.27"
+pdf-extract = "0.12.1"
+minijinja = "2.24.0"
+serde_json_path = "0.7.2"
+qrcode = "0.14.1"
+rqrr = "0.11.0"
+jsonschema = { version = "0.58.5", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+lopdf = { version = "0.42", default-features = false }
+# Flujos — incoming mail (IMAP trigger and node): the client and the message parser.
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+mail-parser = "0.11"
+# Flujos — message queues (the Queue node): AMQP 0.9.1 for RabbitMQ, and Kafka's own protocol.
+lapin = { version = "4.12", default-features = false, features = ["tokio", "rustls--ring", "rustls-native-certs"] }
+rskafka = { version = "0.6", default-features = false, features = ["transport-tls"] }
 
 # Sending a signal to a *process group*, which is what stopping an AI run needs: `child.kill()`
 # reaches the CLI and nothing it started, and every one of these CLIs is a Node process that spawns

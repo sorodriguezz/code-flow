@@ -42,6 +42,7 @@ import {
   parseAnalysis,
   type AnalysisFinding,
   type SummaryMemory,
+  summaryMemoryOf,
 } from "../../lib/parseAnalysis";
 import { jobPrUrl } from "../../lib/activityEntries";
 import { useIsQueued } from "../../lib/repoQueue";
@@ -96,7 +97,6 @@ import type {
   PrCommentThread,
   PublishOutcome,
   PullRequestSummary,
-  SavedFinding,
   VcsProvider,
 } from "../../types/domain";
 
@@ -105,16 +105,6 @@ const EMPTY_FLAGS: Record<string, boolean> = {};
 const EMPTY_FINDINGS: AnalysisFinding[] = [];
 const EMPTY_IDS: string[] = [];
 const LEVELS: ReviewLevel[] = ["basico", "completo", "ultra"];
-
-/** A stored JSON column (a run's `meta` / `findings`), or `null` when it can't be read — memory
- * written by an older version is context to do without, never a crash. */
-function safeJson<T>(raw: string): T | null {
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * A run that finished without producing a review: the plan stopped to ask (a draft, a merged PR),
@@ -281,20 +271,7 @@ export function PrDocument({
     try {
       const run = await getReviewRun(runId);
       if (!run || memoryReqRef.current !== token) return;
-      const saved: SavedFinding[] = safeJson<SavedFinding[]>(run.findings) ?? [];
-      const meta = safeJson<Record<string, unknown>>(run.meta) ?? {};
-      setRunMemory({
-        all: saved,
-        resolved: saved.filter((f) => f.estado === "resuelto"),
-        discarded: saved.filter((f) => f.estado === "falso_positivo" || f.estado === "ignorado"),
-        iter: run.iter,
-        level: run.level,
-        engine: typeof meta.engine === "string" ? meta.engine : "",
-        model: typeof meta.model === "string" ? meta.model : "",
-        files: typeof meta.files === "number" ? meta.files : 0,
-        additions: typeof meta.additions === "number" ? meta.additions : 0,
-        deletions: typeof meta.deletions === "number" ? meta.deletions : 0,
-      });
+      setRunMemory(summaryMemoryOf(run));
     } catch {
       // The summary simply loses its "already fixed" half — never a reason to break the review.
     }

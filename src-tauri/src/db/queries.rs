@@ -236,6 +236,17 @@ pub fn list_review_runs(conn: &Connection, workspace_id: &str) -> rusqlite::Resu
 }
 
 /// The full content of one run, for the viewer / export.
+/// The newest saved review of one pull request of a project — what a re-review that found nothing
+/// new (same commit, no new comments) still has to say.
+pub fn latest_review_run_id(conn: &Connection, project_id: &str, pr_id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT id FROM review_runs WHERE project_id = ?1 AND pr_id = ?2 ORDER BY iter DESC, created_at DESC LIMIT 1",
+        params![project_id, pr_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 pub fn get_review_run(conn: &Connection, id: &str) -> rusqlite::Result<Option<ReviewRunDetail>> {
     conn.query_row(
         "SELECT id, project_id, pr_id, iter, level, meta, review_md, diff, findings, created_at

@@ -281,6 +281,20 @@ fn map_node(kind: &str, version: f64, params: &Value) -> Option<(&'static str, V
 }
 
 /// A node id that is valid here and unique: n8n's own when it has one, a counter otherwise.
+/// n8n's seven sticky colours (`parameters.color`; 1, or none, is its yellow) as the nearest of the
+/// app's palette — its yellow is the default here too.
+fn sticky_colour(params: &Value) -> &'static str {
+    match params.get("color").and_then(Value::as_u64) {
+        Some(2) => "#f97316",
+        Some(3) => "#ef4444",
+        Some(4) => "#22c55e",
+        Some(5) => "#3b82f6",
+        Some(6) => "#8b5cf6",
+        Some(7) => "#64748b",
+        _ => "",
+    }
+}
+
 fn node_id(raw: Option<&str>, taken: &mut HashSet<String>, counter: &mut usize) -> String {
     let base: String = raw.unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(36).collect();
     let mut id = if base.is_empty() {
@@ -316,7 +330,13 @@ pub fn convert(value: &Value) -> Result<Converted, String> {
         if kind.ends_with(".stickyNote") {
             let width = params.get("width").and_then(Value::as_f64).unwrap_or(240.0);
             let height = params.get("height").and_then(Value::as_f64).unwrap_or(120.0);
-            notes.push(StickyNote { id: format!("note{}", notes.len() + 1), pos, size: [width, height], text: text(&params, "content") });
+            notes.push(StickyNote {
+                id: format!("note{}", notes.len() + 1),
+                pos,
+                size: [width, height],
+                text: text(&params, "content"),
+                color: sticky_colour(&params).to_string(),
+            });
             continue;
         }
         let version = raw.get("typeVersion").and_then(Value::as_f64).unwrap_or(1.0);
@@ -373,7 +393,7 @@ mod tests {
                 {"id": "a5", "name": "Lotes", "type": "n8n-nodes-base.splitInBatches", "typeVersion": 3, "position": [400, 200], "parameters": {"batchSize": 5}},
                 {"id": "a6", "name": "Llamar", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [600, 200],
                  "parameters": {"method": "POST", "url": "https://api.example.com/x", "sendBody": true, "specifyBody": "json", "jsonBody": "={{ JSON.stringify($json) }}"}},
-                {"id": "a7", "name": "Nota", "type": "n8n-nodes-base.stickyNote", "position": [0, 300], "parameters": {"content": "Hola", "width": 300, "height": 100}},
+                {"id": "a7", "name": "Nota", "type": "n8n-nodes-base.stickyNote", "position": [0, 300], "parameters": {"content": "Hola", "width": 300, "height": 100, "color": 5}},
             ],
             "connections": {
                 "Webhook": {"main": [[{"node": "Grandes", "type": "main", "index": 0}]]},
@@ -401,6 +421,7 @@ mod tests {
         assert_eq!(node("Lotes").type_id, "logic.loop");
         assert_eq!(node("Llamar").params["bodyJson"], "={{ JSON.stringify($json) }}");
         assert_eq!(converted.spec.notes.len(), 1);
+        assert_eq!(converted.spec.notes[0].color, "#3b82f6", "n8n's blue sticky stays blue");
         // The loop's "loop" output is its first here, n8n's second.
         let wire = converted.spec.connections.iter().find(|w| w.from == node("Lotes").id).unwrap();
         assert_eq!((wire.out, wire.to.clone()), (0, node("Llamar").id));

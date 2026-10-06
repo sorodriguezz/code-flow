@@ -1,11 +1,12 @@
 import { createContext, lazy, Suspense, useContext, useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { CircleHelp, FolderOpen, KeyRound } from "lucide-react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Checkbox } from "../common/Checkbox";
 import { Select, type SelectOption } from "../common/Select";
 import { iconButtonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 import { FIELD_MIME } from "./DataView";
+import { ExtractRulesEditor, FormFieldsEditor } from "./RunForm";
 import { Rows, asRows, str, type Row } from "./fieldRows";
 import {
   AccessHint,
@@ -16,9 +17,11 @@ import {
   EngineField,
   EnginesField,
   LocalModelField,
+  ApiModelField,
   McpServersField,
 } from "./AiFields";
-import { DbConnectionPicker, NotePicker, RemoteHostPicker, VaultItemPicker } from "./AppFields";
+import { DbConnectionPicker, NotePicker, RemoteHostPicker, VaultItemPicker, ApiEnvironmentPicker, ApiRequestPicker } from "./AppFields";
+import { visible } from "../../lib/flows/paramVisibility";
 import { serializeSpec } from "../../lib/flows/spec";
 import {
   CONNECTOR_CREDENTIALS,
@@ -505,6 +508,29 @@ function FolderField({ value, onChange }: { value: string; onChange: (next: stri
   );
 }
 
+/** A file on this computer: written or pasted, or picked in the system's dialog — "save as" when
+ *  the node writes it there, an open dialog when it reads it. */
+function FileField({ value, onChange, placeholder, saving }: { value: string; onChange: (next: string) => void; placeholder: string; saving: boolean }) {
+  const t = useT();
+  const label = saving ? t("flows.param.pickSaveFile") : t("flows.param.pickFile");
+  const pick = async () => {
+    // Where the dialog opens: the file already written, when it is a full path.
+    const start = /^(\/|[A-Za-z]:[\\/])/.test(value.trim()) ? value.trim() : undefined;
+    const picked = saving ? await saveDialog({ defaultPath: start }) : await openDialog({ directory: false, multiple: false, defaultPath: start });
+    if (typeof picked === "string") onChange(picked);
+  };
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className="min-w-0 flex-1">
+        <SmartInput value={value} onChange={onChange} placeholder={placeholder} mono />
+      </div>
+      <button type="button" className={iconButtonClass({ size: "sm" })} title={label} aria-label={label} onClick={() => void pick()}>
+        <FolderOpen size={14} />
+      </button>
+    </div>
+  );
+}
+
 /** Any number of options, as toggles in a row — the weekdays of a schedule, a watcher's events. */
 function MultiSelectField({ value, options, onChange }: { value: unknown; options: string[]; onChange: (next: unknown) => void }) {
   const t = useT();
@@ -832,6 +858,16 @@ function ParamField({
       case "folder":
         editor = <FolderField value={str(value)} onChange={onChange} />;
         break;
+      case "file":
+        editor = (
+          <FileField
+            value={str(value)}
+            onChange={onChange}
+            placeholder={kind.placeholder}
+            saving={kind.save.includes("*") || kind.save.includes(str(params.operation))}
+          />
+        );
+        break;
       case "credential":
         editor = <CredentialPicker value={value} kinds={credentialKinds ?? kind.kinds} onChange={onChange} />;
         break;
@@ -848,13 +884,26 @@ function ParamField({
         editor = <ServicePicker value={value} onChange={onChange} />;
         break;
       case "engine":
-        editor = <EngineField value={value} onChange={onChange} />;
+        // The PR analyzer follows its own routing row, "Revisión de PR", while left automatic.
+        editor = (
+          <EngineField
+            value={value}
+            onChange={onChange}
+            task={typeId === "ai.prReview" ? "review" : typeId === "ai.chat" || typeId === "ai.prReply" ? "chat" : typeId === "ai.prFix" ? "fix" : "flows"}
+          />
+        );
         break;
       case "engines":
         editor = <EnginesField value={value} onChange={onChange} />;
         break;
       case "outputFields":
         editor = <AnswerFieldsEditor value={value} onChange={onChange} />;
+        break;
+      case "formFields":
+        editor = <FormFieldsEditor value={value} onChange={onChange} />;
+        break;
+      case "extractRules":
+        editor = <ExtractRulesEditor value={value} onChange={onChange} />;
         break;
       case "categories":
         editor = <CategoriesEditor value={value} onChange={onChange} />;
@@ -864,6 +913,14 @@ function ParamField({
         break;
       case "localModel":
         editor = <LocalModelField value={value} onChange={onChange} server={str(params.server ?? "auto")} url={str(params.url)} />;
+        break;
+      case "apiModel":
+        editor =
+          kind.purpose === "embed" ? (
+            <ApiModelField value={value} onChange={onChange} purpose="embed" provider={str(params.embedProvider ?? "openaiApi")} baseUrl={str(params.embedUrl)} credentialId={str(params.credential)} />
+          ) : (
+            <ApiModelField value={value} onChange={onChange} purpose="chat" provider={str(params.apiProvider ?? "openaiApi")} baseUrl={str(params.baseUrl)} credentialId={str(params.credential)} />
+          );
         break;
       case "agent":
         editor = <AgentPicker value={value} onChange={onChange} />;
@@ -883,6 +940,12 @@ function ParamField({
       case "vaultItem":
         editor = <VaultItemPicker value={value} onChange={onChange} />;
         break;
+      case "apiRequest":
+        editor = <ApiRequestPicker value={value} onChange={onChange} />;
+        break;
+      case "apiEnvironment":
+        editor = <ApiEnvironmentPicker value={value} onChange={onChange} />;
+        break;
       case "connector":
         editor = <ConnectorField value={value} onChange={onChange} />;
         break;
@@ -899,14 +962,6 @@ function ParamField({
       {typeId === "ai.agent" && spec.name === "access" && <AccessHint params={params} />}
     </div>
   );
-}
-
-/** Whether a parameter is on screen given the node's other values. */
-export function visible(spec: FlowParamSpec, values: Record<string, unknown>, specs: FlowParamSpec[]): boolean {
-  if (!spec.showIf) return true;
-  const other = specs.find((s) => s.name === spec.showIf!.param);
-  const current = values[spec.showIf.param] ?? other?.default;
-  return typeof current === "string" && spec.showIf.values.includes(current);
 }
 
 export function ParamFields({
