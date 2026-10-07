@@ -692,6 +692,7 @@ export function EditorPane({
   registerChangeNav,
   onSplit,
   onCloseGroup,
+  onNewUntitled,
   onDetach,
   tabMenu,
 }: {
@@ -762,6 +763,9 @@ export function EditorPane({
   onSplit: (() => void) | null;
   /** `null` for the only group; a group you can't close is one without a close button. */
   onCloseGroup: (() => void) | null;
+  /** A double-click on the empty group opens a blank tab here. `null` where that has no meaning — a
+   *  floating editor holds its one file. */
+  onNewUntitled: (() => void) | null;
   /** A tab let go outside the window, at that point on the screen — passed straight through to the
    *  strip. Absent where a tab cannot become a floating editor. */
   onDetach?: (payload: TabDrag, screen: { x: number; y: number }) => void;
@@ -3086,9 +3090,14 @@ export function EditorPane({
         // to open a file, and dragging one over is the obvious gesture. Plain block, *not* a flex
         // row: `EmptyState` centres itself inside whatever box it's given, so as a row child it
         // would shrink to its text and sit against the left edge instead of the middle.
-        <div className="relative min-h-0 flex-1" {...bodyDropProps}>
+        // A double-click there is a blank tab to write in, as in VS Code (`EditorView.newUntitled`).
+        <div className="relative min-h-0 flex-1" {...bodyDropProps} onDoubleClick={onNewUntitled ?? undefined}>
           {dropOverlay}
-          <EmptyState icon={FileCode} title={t("editor.selectFile")} subtitle={t("editor.selectFileHint")} />
+          <EmptyState
+            icon={FileCode}
+            title={t("editor.selectFile")}
+            subtitle={t(onNewUntitled ? "editor.selectFileOrNewHint" : "editor.selectFileHint")}
+          />
         </div>
       )}
       {/* The script menu, at the arrow that opened it. Its heading is the ambiguity when there is

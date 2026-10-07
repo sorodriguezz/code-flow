@@ -391,6 +391,67 @@ pub fn flows_duplicate_flow(db: State<Db>, id: String, name: String) -> Result<O
     flow_queries::duplicate_flow(&conn, &id, &name).map_err(|e| e.to_string())
 }
 
+// ---------- templates ----------
+
+/// The user's saved templates, by name — see `migrations::add_flow_templates`.
+#[tauri::command]
+pub fn flows_list_templates(db: State<Db>) -> Result<Vec<flow_queries::FlowTemplateMeta>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_queries::list_templates(&conn).map_err(|e| e.to_string())
+}
+
+/// Saves a flow as a template: a new one, or over `replace`. The caller writes the flow's unsaved
+/// edits first, as an export does — what is saved is the document on disk.
+#[tauri::command]
+pub fn flows_save_template(db: State<Db>, flow_id: String, name: String, replace: Option<String>) -> Result<flow_queries::FlowTemplateMeta, String> {
+    let name = clean_name(&name)?;
+    let flow = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        flow_queries::get_flow(&conn, &flow_id).map_err(|e| e.to_string())?.ok_or("The flow no longer exists")?
+    };
+    // Parsed outside the lock, like a save.
+    let derived = spec::derive(&spec::parse(&flow.spec)?);
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_queries::save_template(&conn, &flow, &name, replace.as_deref(), &derived).map_err(|e| e.to_string())
+}
+
+/// Renames a template and rewrites its description.
+#[tauri::command]
+pub fn flows_update_template(db: State<Db>, id: String, name: String, description: String) -> Result<flow_queries::FlowTemplateMeta, String> {
+    let name = clean_name(&name)?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_queries::update_template(&conn, &id, &name, description.trim())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "The template no longer exists".to_string())
+}
+
+#[tauri::command]
+pub fn flows_delete_template(db: State<Db>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_queries::delete_template(&conn, &id).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// A new flow from a saved template — trusted only while it runs what the user trusted when the
+/// template was saved (`flow_queries::template_trusted`); anything else is reviewed first.
+#[tauri::command]
+pub fn flows_create_from_template(
+    db: State<Db>,
+    workspace_id: String,
+    folder_id: Option<String>,
+    template_id: String,
+    name: String,
+) -> Result<FlowMeta, String> {
+    let name = clean_name(&name)?;
+    let (text, trusted_hash) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        flow_queries::template_document(&conn, &template_id).map_err(|e| e.to_string())?.ok_or("The template no longer exists")?
+    };
+    let derived = spec::derive(&spec::parse(&text)?);
+    let trusted = flow_queries::template_trusted(&trusted_hash, &derived);
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_queries::create_flow(&conn, &workspace_id, folder_id.as_deref(), &name, &text, &derived, trusted).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn flows_delete_flow(app: AppHandle, db: State<Db>, id: String) -> Result<(), String> {
     triggers::disarm(&app, &id);
@@ -932,6 +993,16 @@ pub fn flows_metrics(db: State<Db>, flow_id: String, days: Option<i64>, offset_m
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let since = (chrono::Utc::now() - chrono::Duration::days(days.unwrap_or(30).clamp(1, 365))).to_rfc3339();
     flow_run_queries::flow_metrics(&conn, &flow_id, &since, offset_minutes.unwrap_or(0).clamp(-14 * 60, 14 * 60)).map_err(|e| e.to_string())
+}
+
+/// The workspace's executions by `unit` (`week` or `month`) over the last `count` of them, for
+/// Programación — from the day counters, which outlive the executions (`migrations::add_flow_run_days`).
+#[tauri::command]
+pub fn flows_run_periods(db: State<Db>, workspace_id: String, unit: String, count: Option<i64>) -> Result<Vec<flow_run_queries::RunPeriod>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let today = chrono::Local::now().date_naive();
+    let count = count.unwrap_or(12).clamp(1, 60) as usize;
+    flow_run_queries::run_periods(&conn, &workspace_id, flow_run_queries::PeriodUnit::parse(&unit), count, today).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]

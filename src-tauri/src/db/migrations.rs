@@ -2002,6 +2002,87 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_flow_repo_links(conn)?;
     add_repo_origin_to_notes(conn)?;
     seed_manual_flow_order(conn)?;
+    add_flow_run_days(conn)?;
+    add_flow_templates(conn)?;
+    Ok(())
+}
+
+/// The user's own flow templates, beside the ones the app ships (`lib/flows/templates.ts`): a flow
+/// saved as a starting point, offered in every workspace — a template is the person's library, not
+/// one workspace's, so a row has no workspace and no scope.
+///
+/// `trusted_hash` carries the source flow's trust the way a duplicate does: the executable hash the
+/// flow had when it was saved, if the user had trusted it, else empty. A flow made from the template
+/// starts trusted only while it runs exactly that; anything else is reviewed first, like an import.
+pub(crate) fn add_flow_templates(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS flow_templates (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            icon         TEXT NOT NULL DEFAULT '',
+            spec         TEXT NOT NULL,
+            node_count   INTEGER NOT NULL DEFAULT 0,
+            trusted_hash TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        "#,
+    )
+}
+
+/// A count per flow and per local day of its finished executions — what Programación's weeks and
+/// months are drawn from. The executions themselves are trimmed (`flows::runs::prune`: 100 per flow,
+/// successes after 14 days, failures after 30), so a flow that runs every minute keeps less than two
+/// hours of them; these counters are never trimmed, one row per flow per day it ran.
+///
+/// **Kept by a trigger, not by `finish_run`.** A run reaches its end on more than one path — its task
+/// finishing, a parked run decided or expired (`flows::waits`), `mark_interrupted` at launch — and a
+/// counter one of them forgets is wrong for good. The trigger counts the step out of `running` or
+/// `waiting`, once, whichever path takes it. The day is the local one (`'localtime'`), the day the
+/// person saw it run.
+///
+/// Seeded once, from the executions still kept; what was trimmed before this existed is gone.
+pub(crate) fn add_flow_run_days(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "flow_runs")? {
+        return Ok(());
+    }
+    let seed = !table_exists(conn, "flow_run_days")?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS flow_run_days (
+            flow_id  TEXT NOT NULL,
+            day      TEXT NOT NULL,
+            success  INTEGER NOT NULL DEFAULT 0,
+            error    INTEGER NOT NULL DEFAULT 0,
+            canceled INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (flow_id, day)
+        );
+        CREATE INDEX IF NOT EXISTS idx_flow_run_days_day ON flow_run_days (day);
+        CREATE TRIGGER IF NOT EXISTS flow_run_days_count
+        AFTER UPDATE OF status ON flow_runs
+        WHEN OLD.status IN ('running', 'waiting') AND NEW.status NOT IN ('running', 'waiting')
+        BEGIN
+            INSERT INTO flow_run_days (flow_id, day, success, error, canceled)
+            VALUES (NEW.flow_id, date(NEW.started_at, 'localtime'),
+                    NEW.status = 'success', NEW.status = 'error', NEW.status NOT IN ('success', 'error'))
+            ON CONFLICT (flow_id, day) DO UPDATE SET
+                success = success + excluded.success,
+                error = error + excluded.error,
+                canceled = canceled + excluded.canceled;
+        END;
+        "#,
+    )?;
+    if seed {
+        conn.execute_batch(
+            "INSERT INTO flow_run_days (flow_id, day, success, error, canceled)
+             SELECT flow_id, date(started_at, 'localtime'),
+                    SUM(status = 'success'), SUM(status = 'error'), SUM(status NOT IN ('success', 'error'))
+             FROM flow_runs WHERE status NOT IN ('running', 'waiting')
+             GROUP BY flow_id, date(started_at, 'localtime');",
+        )?;
+    }
     Ok(())
 }
 

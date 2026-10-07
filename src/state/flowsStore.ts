@@ -3,6 +3,9 @@ import {
   flowsBuildWithAi,
   flowsCreateFlow,
   flowsCreateFolder,
+  flowsCreateFromTemplate,
+  flowsListTemplates,
+  flowsSaveTemplate,
   flowsDeleteFlow,
   flowsDeleteFolder,
   flowsDuplicateFlow,
@@ -31,7 +34,8 @@ import { FLOW_TEMPLATES } from "../lib/flows/templates";
 import type { TranslationKey } from "../lib/i18n/translations";
 import { notifyUnsavedChanged, registerUnsavedProvider } from "../lib/unsavedWork";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
-import { chooseAction } from "./confirmStore";
+import { chooseAction, confirmAction } from "./confirmStore";
+import { promptAction } from "./promptStore";
 import { translate, useLanguageStore } from "./languageStore";
 import { notify } from "./notificationStore";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
@@ -140,6 +144,10 @@ interface FlowsState {
   duplicateFlow: (id: string) => Promise<string | null>;
   /** A new flow from one of the built-in templates, opened. */
   createFromTemplate: (templateId: string, folderId: string | null) => Promise<string | null>;
+  /** A flow from one of the user's own templates (`flowsCreateFromTemplate`), named after it and opened. */
+  createFromSavedTemplate: (templateId: string, name: string, folderId: string | null) => Promise<string | null>;
+  /** Saves a flow as one of the user's templates: asks the name, and before replacing one of that name. */
+  saveAsTemplate: (id: string) => Promise<void>;
   /** Saves the flow as a JSON file the user picks. */
   exportFlow: (id: string) => Promise<void>;
   /** Reads a flow file into a new flow (untrusted, inactive) and opens it. */
@@ -598,6 +606,45 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
       } catch (error) {
         pushErrorToast(String(error));
         return null;
+      }
+    },
+
+    createFromSavedTemplate: async (templateId, templateName, folderId) => {
+      const workspaceId = get().workspaceId;
+      if (!workspaceId) return null;
+      const name = uniqueName(templateName, get().flows.map((flow) => flow.name));
+      try {
+        const row = await flowsCreateFromTemplate(workspaceId, folderId, templateId, name);
+        if (get().workspaceId !== workspaceId) return null;
+        set((state) => ({ flows: [...state.flows, toItem(row)] }));
+        await get().openFlow(row.id);
+        return row.id;
+      } catch (error) {
+        pushErrorToast(String(error));
+        return null;
+      }
+    },
+
+    saveAsTemplate: async (id) => {
+      const flow = get().flows.find((item) => item.id === id);
+      if (!flow) return;
+      const name = await promptAction(translate("flows.tpl.savePrompt"), {
+        initial: flow.name,
+        confirmLabel: translate("flows.tpl.saveConfirm"),
+      });
+      if (!name) return;
+      try {
+        // A template of that name is replaced, not doubled — after asking, since it may be another flow's.
+        const same = (await flowsListTemplates()).find((tpl) => tpl.name.trim().toLowerCase() === name.toLowerCase());
+        if (same && !(await confirmAction(translate("flows.tpl.replaceConfirm", { name: same.name }), false, translate("flows.tpl.replace")))) {
+          return;
+        }
+        // What is saved is the document on disk: the open flow's unsaved edits first, as an export does.
+        if (get().activeId === id) await get().flush();
+        const saved = await flowsSaveTemplate(id, name, same?.id ?? null);
+        pushSuccessToast(translate("flows.tpl.saved", { name: saved.name }));
+      } catch (error) {
+        pushErrorToast(String(error));
       }
     },
 

@@ -68,20 +68,38 @@ export function SettingsSkeleton() {
 }
 
 /**
- * The shape the small keyboard-reachable dialogs share — command palette, branch switcher, PR
- * link, shortcuts: a dim backdrop with a narrow card hanging from the top. Same `pt-24`,
- * `bg-black/30` and raised surface those four use, so the card doesn't jump when the real one
- * takes its place.
+ * A lazily loaded dialog's stand-in, in the dialog's own place: its backdrop, its anchor (hanging
+ * from the top, or centred) and a card of its width — and of its height, where the dialog has a
+ * fixed one. Without `panelClass` it is the backdrop alone: for a centred dialog whose height follows
+ * what it lists, a card of a guessed height would only trade the jump for a resize.
+ *
+ * The classes are each dialog's own, copied at the call site. They all used to load under one
+ * narrow card hanging from the top, and the centred ones — the branch switcher, the shortcuts,
+ * "Nuevo proyecto" — then appeared in the middle of the window.
  */
+export function DialogSkeleton({ overlayClass, panelClass }: { overlayClass: string; panelClass?: string }) {
+  return (
+    <div className={`fixed inset-0 z-50 flex justify-center ${overlayClass}`}>
+      {panelClass && (
+        <div
+          className={`flex flex-col gap-2 overflow-hidden rounded-[14px] border border-[var(--cf-border)] p-3 shadow-[var(--cf-shadow-modal)] ${panelClass}`}
+        >
+          <Skeleton className="h-7 w-full" />
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-5" style={{ width: `${50 + ((i * 21) % 45)}%` }} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The command palette's stand-in — its `pt-[12vh]` and its 600 px. */
 export function PaletteSkeleton() {
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24">
-      <div className="flex w-[440px] max-w-[92vw] flex-col gap-2 overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-shadow-modal)]">
-        <Skeleton className="h-7 w-full" />
-        {Array.from({ length: 6 }).map((_, i) => (
-          <Skeleton key={i} className="h-5" style={{ width: `${50 + ((i * 21) % 45)}%` }} />
-        ))}
-      </div>
-    </div>
+    <DialogSkeleton
+      overlayClass="items-start bg-black/30 pt-[12vh]"
+      panelClass="w-[600px] max-w-[calc(100vw-2rem)] bg-[var(--cf-surface-raised)]"
+    />
   );
 }

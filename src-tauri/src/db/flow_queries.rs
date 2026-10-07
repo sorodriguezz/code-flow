@@ -435,6 +435,7 @@ pub fn delete_flow(conn: &Connection, id: &str) -> rusqlite::Result<usize> {
     // Its executions have no foreign key to cascade from (see `add_flow_run_tables`); their files
     // are the caller's to remove, after the commit.
     super::flow_run_queries::delete_runs_of_flow(&tx, id)?;
+    tx.execute("DELETE FROM flow_run_days WHERE flow_id = ?1", params![id])?;
     let deleted = tx.execute("DELETE FROM flows WHERE id = ?1", params![id])?;
     tx.commit()?;
     Ok(deleted)
@@ -483,6 +484,107 @@ pub fn put_repo_link(conn: &Connection, flow_id: &str, project_id: &str, path: &
 pub fn delete_repo_link(conn: &Connection, flow_id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM flow_repo_links WHERE flow_id = ?1", params![flow_id])?;
     Ok(())
+}
+
+// ---------- templates ----------
+
+/// A template the user saved from a flow — see `migrations::add_flow_templates`. Listed without its
+/// document, as the flows are.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowTemplateMeta {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// The node type whose glyph stands for it: the first trigger of the flow it was saved from.
+    pub icon: String,
+    pub node_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+const TEMPLATE_COLUMNS: &str = "id, name, description, icon, node_count, created_at, updated_at";
+
+fn map_template(row: &rusqlite::Row) -> rusqlite::Result<FlowTemplateMeta> {
+    Ok(FlowTemplateMeta {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        icon: row.get(3)?,
+        node_count: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+/// Every saved template, by name.
+pub fn list_templates(conn: &Connection) -> rusqlite::Result<Vec<FlowTemplateMeta>> {
+    let mut statement = conn.prepare(&format!("SELECT {TEMPLATE_COLUMNS} FROM flow_templates ORDER BY name COLLATE NOCASE, created_at"))?;
+    let rows = statement.query_map([], map_template)?;
+    rows.collect()
+}
+
+pub fn get_template(conn: &Connection, id: &str) -> rusqlite::Result<Option<FlowTemplateMeta>> {
+    conn.query_row(&format!("SELECT {TEMPLATE_COLUMNS} FROM flow_templates WHERE id = ?1"), params![id], map_template)
+        .optional()
+}
+
+/// A template's document and the trust it carries: `(spec, trusted_hash)`.
+pub fn template_document(conn: &Connection, id: &str) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row("SELECT spec, trusted_hash FROM flow_templates WHERE id = ?1", params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()
+}
+
+/// Whether a flow made from a template starts trusted: when it runs nothing, or exactly what the
+/// user had trusted in the flow the template was saved from — a duplicate's rule, across time.
+pub fn template_trusted(trusted_hash: &str, derived: &Derived) -> bool {
+    derived.exec_hash.is_empty() || (!trusted_hash.is_empty() && trusted_hash == derived.exec_hash)
+}
+
+/// Saves `flow` (its document as stored, read with [`get_flow`]) as a template called `name`: a new
+/// one, taking the flow's description, or over `replace` — the same row, so it keeps its place and
+/// the name and description it was given; only what it contains changes. A `replace` that no longer
+/// exists is saved as a new one. The flow's trust comes along only for the document it was given on.
+pub fn save_template(
+    conn: &Connection,
+    flow: &FlowRow,
+    name: &str,
+    replace: Option<&str>,
+    derived: &Derived,
+) -> rusqlite::Result<FlowTemplateMeta> {
+    let trusted_hash = if flow.meta.trusted && derived.exec_hash == flow.meta.exec_hash { derived.exec_hash.as_str() } else { "" };
+    let icon = derived.trigger_types.first().map(String::as_str).unwrap_or_default();
+    let stamp = now();
+    if let Some(id) = replace {
+        let updated = conn.execute(
+            "UPDATE flow_templates SET icon = ?2, spec = ?3, node_count = ?4, trusted_hash = ?5, updated_at = ?6 WHERE id = ?1",
+            params![id, icon, flow.spec, derived.node_count, trusted_hash, stamp],
+        )?;
+        if updated > 0 {
+            return Ok(get_template(conn, id)?.expect("the row was just written"));
+        }
+    }
+    let id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO flow_templates (id, name, description, icon, spec, node_count, trusted_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        params![id, name, flow.meta.description, icon, flow.spec, derived.node_count, trusted_hash, stamp],
+    )?;
+    Ok(get_template(conn, &id)?.expect("the row was just written"))
+}
+
+/// Renames a template and rewrites its description. `None` when it is gone.
+pub fn update_template(conn: &Connection, id: &str, name: &str, description: &str) -> rusqlite::Result<Option<FlowTemplateMeta>> {
+    conn.execute(
+        "UPDATE flow_templates SET name = ?2, description = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, name, description, now()],
+    )?;
+    get_template(conn, id)
+}
+
+/// Deletes a template. Flows made from it are their own and stay as they are.
+pub fn delete_template(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute("DELETE FROM flow_templates WHERE id = ?1", params![id])? > 0)
 }
 
 // ---------- folders ----------
@@ -809,5 +911,54 @@ mod tests {
         let left: Vec<String> = load_tree(&conn, "w2").unwrap().flows.into_iter().map(|f| f.id).collect();
         assert_eq!(left, vec![global.id]);
         assert!(get_meta(&conn, &local.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_template_carries_trust_only_from_a_trusted_flow() {
+        let conn = workspaces();
+        let (text, derived) = shell("make deploy", 0);
+        let mine = create_flow(&conn, "w1", None, "Desplegar", &text, &derived, true).unwrap();
+        let imported = create_flow(&conn, "w1", None, "Importado", &text, &derived, false).unwrap();
+        let from_mine = save_template(&conn, &get_flow(&conn, &mine.id).unwrap().unwrap(), "Desplegar", None, &derived).unwrap();
+        let from_imported = save_template(&conn, &get_flow(&conn, &imported.id).unwrap().unwrap(), "Importado", None, &derived).unwrap();
+        assert_eq!((from_mine.icon.as_str(), from_mine.node_count), ("trigger.manual", 2));
+
+        let (kept, trusted_hash) = template_document(&conn, &from_mine.id).unwrap().unwrap();
+        assert_eq!(kept, text);
+        assert!(template_trusted(&trusted_hash, &derived), "the user's own, unchanged, starts trusted");
+        let (_, untrusted) = template_document(&conn, &from_imported.id).unwrap().unwrap();
+        assert!(!template_trusted(&untrusted, &derived), "an unreviewed flow's template is reviewed too");
+        // A template that runs nothing needs no review, whoever saved it.
+        let quiet = spec::derive(&spec::parse(&spec::empty_text()).unwrap());
+        assert!(template_trusted("", &quiet));
+        // And one whose commands are not the ones trusted is reviewed, however it got that way.
+        let (_, other) = shell("rm -rf build", 0);
+        assert!(!template_trusted(&trusted_hash, &other));
+    }
+
+    #[test]
+    fn saving_over_a_template_keeps_its_place_and_its_words() {
+        let conn = workspaces();
+        let (text, derived) = shell("make deploy", 0);
+        let flow = create_flow(&conn, "w1", None, "Desplegar", &text, &derived, true).unwrap();
+        let first = save_template(&conn, &get_flow(&conn, &flow.id).unwrap().unwrap(), "Desplegar", None, &derived).unwrap();
+        update_template(&conn, &first.id, "Desplegar a producción", "Sube la rama principal").unwrap();
+
+        let (changed, changed_derived) = shell("make release", 40);
+        let mut row = get_flow(&conn, &flow.id).unwrap().unwrap();
+        row.spec = changed.clone();
+        let replaced = save_template(&conn, &row, "Desplegar", Some(&first.id), &changed_derived).unwrap();
+        assert_eq!(replaced.id, first.id);
+        assert_eq!((replaced.name.as_str(), replaced.description.as_str()), ("Desplegar a producción", "Sube la rama principal"));
+        assert_eq!(template_document(&conn, &first.id).unwrap().unwrap().0, changed);
+        assert_eq!(list_templates(&conn).unwrap().len(), 1);
+
+        // Deleting it leaves the flows made from it alone; a replace aimed at it saves a new one.
+        assert!(delete_template(&conn, &first.id).unwrap());
+        assert!(!delete_template(&conn, &first.id).unwrap());
+        assert!(get_meta(&conn, &flow.id).unwrap().is_some());
+        let again = save_template(&conn, &row, "Desplegar", Some(&first.id), &changed_derived).unwrap();
+        assert_ne!(again.id, first.id);
+        assert_eq!(list_templates(&conn).unwrap(), vec![again]);
     }
 }

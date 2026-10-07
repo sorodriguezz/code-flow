@@ -27,8 +27,8 @@ const DOTS = {
  * Flujos — node-based automations. The explorer on the left, the open flow's canvas beside it (or
  * its executions). With no flow open the canvas is simply empty — the explorer's `+` is the way in.
  *
- * Still "alpha" in the rail and the title row: flows run by hand from milestone 1; triggers that
- * start them on their own arrive with the next one.
+ * Marked "beta" in the rail and the title row: it runs end to end — by hand, on a schedule, from a
+ * webhook — and is still new.
  */
 export function FlowsView() {
   const loading = useFlowsStore((s) => s.loading);

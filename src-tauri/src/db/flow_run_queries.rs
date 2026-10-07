@@ -287,6 +287,127 @@ pub fn flow_metrics(conn: &Connection, flow_id: &str, since: &str, offset_minute
     Ok(metrics)
 }
 
+/// Weeks or months, for [`run_periods`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeriodUnit {
+    Week,
+    Month,
+}
+
+impl PeriodUnit {
+    pub fn parse(text: &str) -> Self {
+        if text == "month" {
+            Self::Month
+        } else {
+            Self::Week
+        }
+    }
+
+    /// The first day of the period `day` falls in: its Monday, or the 1st.
+    fn start_of(self, day: chrono::NaiveDate) -> chrono::NaiveDate {
+        use chrono::Datelike;
+        match self {
+            Self::Week => day - chrono::Days::new(u64::from(day.weekday().num_days_from_monday())),
+            Self::Month => day.with_day(1).unwrap_or(day),
+        }
+    }
+
+    /// The start of the period `back` periods before the one starting at `start`.
+    fn back(self, start: chrono::NaiveDate, back: u32) -> chrono::NaiveDate {
+        match self {
+            Self::Week => start - chrono::Days::new(7 * u64::from(back)),
+            Self::Month => start.checked_sub_months(chrono::Months::new(back)).unwrap_or(start),
+        }
+    }
+}
+
+/// One week or month of a workspace's executions, from the day counters (`flow_run_days`).
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPeriod {
+    /// Its first day, `YYYY-MM-DD`: a Monday, or the 1st.
+    pub start: String,
+    pub success: i64,
+    pub error: i64,
+    /// Canceled and interrupted, as [`flow_metrics`] counts them.
+    pub canceled: i64,
+    /// Each flow that ran in it, most runs first.
+    pub flows: Vec<FlowPeriodCount>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowPeriodCount {
+    pub flow_id: String,
+    pub name: String,
+    pub success: i64,
+    pub error: i64,
+    pub canceled: i64,
+}
+
+/// The last `count` weeks or months up to the one holding `today`, oldest first and every one of
+/// them, empty or not: the executions of the flows `workspace_id` sees — its own and the global
+/// ones, as Programación lists them. A deleted flow's runs go with it; nothing would name them.
+pub fn run_periods(
+    conn: &Connection,
+    workspace_id: &str,
+    unit: PeriodUnit,
+    count: usize,
+    today: chrono::NaiveDate,
+) -> rusqlite::Result<Vec<RunPeriod>> {
+    let current = unit.start_of(today);
+    let starts: Vec<chrono::NaiveDate> = (0..count.max(1) as u32).rev().map(|back| unit.back(current, back)).collect();
+    let mut periods: Vec<RunPeriod> = starts
+        .iter()
+        .map(|start| RunPeriod { start: start.format("%Y-%m-%d").to_string(), ..RunPeriod::default() })
+        .collect();
+    let from = periods[0].start.clone();
+    let mut statement = conn.prepare(
+        "SELECT d.flow_id, f.name, d.day, d.success, d.error, d.canceled
+         FROM flow_run_days d JOIN flows f ON f.id = d.flow_id
+         WHERE (f.workspace_id = ?1 OR f.scope = 'global') AND d.day >= ?2",
+    )?;
+    let rows = statement.query_map(params![workspace_id, from], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (flow_id, name, day, success, error, canceled) = row?;
+        let Ok(day) = chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d") else { continue };
+        // A day past the current period (a clock set back) belongs to none of them.
+        let Some(index) = starts.iter().position(|start| *start == unit.start_of(day)) else { continue };
+        let period = &mut periods[index];
+        period.success += success;
+        period.error += error;
+        period.canceled += canceled;
+        match period.flows.iter_mut().find(|flow| flow.flow_id == flow_id) {
+            Some(flow) => {
+                flow.success += success;
+                flow.error += error;
+                flow.canceled += canceled;
+            }
+            None => period.flows.push(FlowPeriodCount { flow_id, name, success, error, canceled }),
+        }
+    }
+    for period in &mut periods {
+        period.flows.sort_by(|a, b| {
+            (b.success + b.error + b.canceled).cmp(&(a.success + a.error + a.canceled)).then_with(|| a.name.cmp(&b.name))
+        });
+    }
+    Ok(periods)
+}
+
+/// Day counts whose flow no longer exists — deleted, or replaced by a restore.
+pub fn delete_orphan_run_days(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute("DELETE FROM flow_run_days WHERE flow_id NOT IN (SELECT id FROM flows)", [])
+}
+
 pub fn get_run(conn: &Connection, id: &str) -> rusqlite::Result<Option<FlowRunRow>> {
     conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM flow_runs WHERE id = ?1"), params![id], run_row)
         .optional()
@@ -928,6 +1049,121 @@ mod tests {
         assert_eq!(gone, vec!["old-bad", "old-ok"]);
         assert_eq!(mark_interrupted(&conn, "2026-10-03T00:00:00Z").unwrap(), 1);
         assert_eq!(get_run(&conn, "live").unwrap().unwrap().status, "interrupted");
+    }
+
+    /// The local day SQLite files a run under — whatever zone the test runs in.
+    fn local_day(conn: &Connection, at: &str) -> String {
+        conn.query_row("SELECT date(?1, 'localtime')", params![at], |row| row.get(0)).unwrap()
+    }
+
+    fn day_counts(conn: &Connection) -> Vec<(String, String, i64, i64, i64)> {
+        let mut statement = conn.prepare("SELECT flow_id, day, success, error, canceled FROM flow_run_days ORDER BY flow_id, day").unwrap();
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    fn date(text: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn a_run_is_counted_once_on_the_day_it_started() {
+        let conn = conn();
+        let noon = "2026-10-06T12:00:00Z";
+        let day = local_day(&conn, noon);
+        insert_run(&conn, &run("ok", "running", noon)).unwrap();
+        assert!(day_counts(&conn).is_empty(), "a run still going counts for nothing");
+        finish_run(&conn, "ok", "success", "", "", noon, 10, 0).unwrap();
+        // Written twice, counted once.
+        finish_run(&conn, "ok", "success", "", "", noon, 10, 0).unwrap();
+        insert_run(&conn, &run("bad", "running", noon)).unwrap();
+        finish_run(&conn, "bad", "error", "boom", "n1", noon, 10, 0).unwrap();
+        // Parked and picked up again is not an end; being canceled while parked is.
+        insert_run(&conn, &run("parked", "running", noon)).unwrap();
+        set_run_status(&conn, "parked", "waiting").unwrap();
+        set_run_status(&conn, "parked", "running").unwrap();
+        set_run_status(&conn, "parked", "waiting").unwrap();
+        finish_run(&conn, "parked", "canceled", "", "", noon, 10, 0).unwrap();
+        // The app ending under a run: interrupted, counted with the canceled ones.
+        insert_run(&conn, &run("cut", "running", noon)).unwrap();
+        mark_interrupted(&conn, noon).unwrap();
+        assert_eq!(day_counts(&conn), vec![("f1".into(), day, 1, 1, 2)]);
+    }
+
+    #[test]
+    fn the_counters_start_from_the_runs_still_kept() {
+        let conn = conn();
+        let noon = "2026-10-01T12:00:00Z";
+        insert_run(&conn, &run("a", "success", noon)).unwrap();
+        insert_run(&conn, &run("b", "error", noon)).unwrap();
+        insert_run(&conn, &run("c", "running", noon)).unwrap();
+        conn.execute_batch("DROP TRIGGER flow_run_days_count; DROP TABLE flow_run_days;").unwrap();
+        crate::db::migrations::add_flow_run_days(&conn).unwrap();
+        let seeded = vec![("f1".to_string(), local_day(&conn, noon), 1, 1, 0)];
+        assert_eq!(day_counts(&conn), seeded);
+        // Every launch runs the list again; the seed happens once.
+        crate::db::migrations::add_flow_run_days(&conn).unwrap();
+        assert_eq!(day_counts(&conn), seeded);
+    }
+
+    #[test]
+    fn weeks_start_on_monday_and_empty_ones_are_kept() {
+        let conn = conn();
+        conn.execute_batch(
+            "INSERT INTO flow_run_days (flow_id, day, success, error, canceled) VALUES
+               ('f1', '2026-10-05', 3, 0, 0),
+               ('f1', '2026-10-04', 0, 2, 0),
+               ('f1', '2026-09-07', 1, 0, 1),
+               ('f1', '2026-08-01', 9, 9, 9);",
+        )
+        .unwrap();
+        // Wednesday 2026-10-07: six weeks back to Monday 2026-08-31; August 1st is before them.
+        let weeks = run_periods(&conn, "w1", PeriodUnit::Week, 6, date("2026-10-07")).unwrap();
+        let starts: Vec<&str> = weeks.iter().map(|week| week.start.as_str()).collect();
+        assert_eq!(starts, ["2026-08-31", "2026-09-07", "2026-09-14", "2026-09-21", "2026-09-28", "2026-10-05"]);
+        let totals: Vec<(i64, i64, i64)> = weeks.iter().map(|week| (week.success, week.error, week.canceled)).collect();
+        // Sunday the 4th closes the week of the 28th.
+        assert_eq!(totals, [(0, 0, 0), (1, 0, 1), (0, 0, 0), (0, 0, 0), (0, 2, 0), (3, 0, 0)]);
+        assert_eq!(weeks[5].flows, vec![FlowPeriodCount { flow_id: "f1".into(), name: "Demo".into(), success: 3, error: 0, canceled: 0 }]);
+    }
+
+    #[test]
+    fn months_count_the_flows_the_workspace_sees() {
+        let conn = conn();
+        conn.execute_batch(
+            "INSERT INTO flows (id, workspace_id, name, spec, created_at, updated_at) VALUES
+               ('f2', 'w2', 'Ajeno', '{\"schema\":1}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+               ('f3', 'w2', 'Global', '{\"schema\":1}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+             UPDATE flows SET scope = 'global' WHERE id = 'f3';
+             INSERT INTO flow_run_days (flow_id, day, success, error, canceled) VALUES
+               ('f1', '2026-10-01', 2, 0, 0),
+               ('f1', '2026-10-06', 0, 1, 0),
+               ('f2', '2026-10-02', 50, 0, 0),
+               ('f3', '2026-10-03', 4, 1, 0),
+               ('f1', '2026-08-31', 7, 0, 0);",
+        )
+        .unwrap();
+        let months = run_periods(&conn, "w1", PeriodUnit::Month, 3, date("2026-10-07")).unwrap();
+        let starts: Vec<&str> = months.iter().map(|month| month.start.as_str()).collect();
+        assert_eq!(starts, ["2026-08-01", "2026-09-01", "2026-10-01"]);
+        assert_eq!((months[0].success, months[1].success), (7, 0));
+        // Its own flow and the global one, never another workspace's; most runs first.
+        let october = &months[2];
+        assert_eq!((october.success, october.error), (6, 2));
+        let names: Vec<&str> = october.flows.iter().map(|flow| flow.name.as_str()).collect();
+        assert_eq!(names, ["Global", "Demo"]);
+    }
+
+    #[test]
+    fn day_counts_go_with_their_flow() {
+        let conn = conn();
+        conn.execute_batch(
+            "INSERT INTO flow_run_days (flow_id, day, success) VALUES ('f1', '2026-10-01', 1), ('gone', '2026-10-01', 1);",
+        )
+        .unwrap();
+        assert_eq!(delete_orphan_run_days(&conn).unwrap(), 1);
+        crate::db::flow_queries::delete_flow(&conn, "f1").unwrap();
+        assert!(day_counts(&conn).is_empty());
     }
 
     #[test]

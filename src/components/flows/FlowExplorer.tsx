@@ -217,6 +217,7 @@ export function FlowExplorer() {
           ),
       },
       { label: t("flows.duplicate"), icon: Copy, onClick: () => void store().duplicateFlow(flow.id) },
+      { label: t("flows.tpl.save"), icon: LayoutTemplate, onClick: () => void store().saveAsTemplate(flow.id) },
       { label: t("flows.export"), icon: Download, onClick: () => void store().exportFlow(flow.id) },
       { label: t("flows.share.menu"), icon: Users, onClick: () => setShareFor(flow.id) },
     ];
@@ -424,6 +425,19 @@ export function FlowExplorer() {
         <button
           type="button"
           className={iconButtonClass({ size: "sm" })}
+          title={t("flows.collab.title")}
+          aria-label={t("flows.collab.title")}
+          onClick={() => useFlowShareStore.getState().openCollab()}
+          data-tour="flows-collab"
+        >
+          <Users size={14} />
+        </button>
+        {/* Two groups: what spans every flow of the workspace (Programación, Colaboración), then what
+            adds to the tree — the `+` last, where every explorer keeps it. */}
+        <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" />
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm" })}
           title={t("flows.newFolder")}
           aria-label={t("flows.newFolder")}
           onClick={() =>
@@ -452,16 +466,6 @@ export function FlowExplorer() {
           onClick={() => setTemplatesFor({ folderId: null })}
         >
           <LayoutTemplate size={14} />
-        </button>
-        <button
-          type="button"
-          className={iconButtonClass({ size: "sm" })}
-          title={t("flows.collab.title")}
-          aria-label={t("flows.collab.title")}
-          onClick={() => useFlowShareStore.getState().openCollab()}
-          data-tour="flows-collab"
-        >
-          <Users size={14} />
         </button>
         <button
           type="button"

@@ -144,6 +144,8 @@ pub const TABLES: &[&str] = &[
     "flow_shares",
     // Which repository file each flow is kept in (`flows::repo`): hangs off a flow and a project.
     "flow_repo_links",
+    // The user's own flow templates: hang off nothing, and are as much a definition as a flow.
+    "flow_templates",
     // History, activity and agent work. Last because every one of them hangs off a project or a
     // workspace, and `agent_chain_steps` and `agent_chain_repos` hang off `agent_chains` in turn.
     "activity_log",
@@ -206,7 +208,8 @@ pub const TABLES: &[&str] = &[
 /// `flow_runs` and `flow_run_nodes` are the fourth pair, and theirs is the bench's reason: a run is
 /// a record of what happened on *this* machine — its processes, its network, its disk — and the
 /// items it produced are files under this machine's state root that a backup does not carry. A run
-/// row restored without them is an execution whose every node opens empty.
+/// row restored without them is an execution whose every node opens empty. `flow_run_days` counts
+/// those same runs, so it stays where they ran too.
 ///
 /// Read only by [`covers_every_table`], and that is the point rather than an oversight: nothing at
 /// runtime consults this, because excluding a table is *not* an action the exporter takes — it is
@@ -221,6 +224,7 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     "flow_runs",
     "flow_run_nodes",
     "flow_waits",
+    "flow_run_days",
 ];
 
 // ---------------------------------------------------------------------------
@@ -281,6 +285,8 @@ pub const CORE_TABLES: &[&str] = &[
     // The same for a flow kept in a repository: restored, it still knows its file and whether the
     // file moved since, instead of offering the repository's copy as a flow nobody has.
     "flow_repo_links",
+    // Templates saved from flows: worked out once, like the flows themselves.
+    "flow_templates",
 ];
 
 /// The optional groups, in the order the panel lists them.

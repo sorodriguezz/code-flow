@@ -41,12 +41,18 @@ const DANGER_OUTLINE = "shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-dang
 const CLOSE_BEHAVIOR_KEY = "close_behavior";
 type CloseBehavior = "tray" | "quit";
 
+/** Whether a launch at login keeps the window hidden — `lib.rs`'s `launched_in_background` reads it.
+ *  Named for Flujos, where the option first lived: the app then runs from the tray, flows armed. */
+const LAUNCH_HIDDEN_KEY = "flows_background_at_login";
+
 /**
- * What closing the window does, and whether the app starts with the session.
+ * What closing the window does, and whether the app starts with the session — and, when it does,
+ * whether it starts with its window or only in the tray.
  *
  * The close button used to hide to the tray with no way to choose otherwise, and launch-at-login was
  * registered in the backend with nothing that could switch it on. Both are read back from where they
- * live — the setting, and the system's own login items — rather than remembered here.
+ * live — the setting, and the system's own login items — rather than remembered here. The same box
+ * also sat in Flujos › Programación; it lives here alone now, so the two can never disagree.
  */
 function CloseAndLaunch() {
   const t = useT();
@@ -54,6 +60,7 @@ function CloseAndLaunch() {
   const [behavior, setBehavior] = useState<CloseBehavior>("tray");
   // `null` until the system answers, or when it cannot: the box is disabled rather than guessed.
   const [launch, setLaunch] = useState<boolean | null>(null);
+  const [hidden, setHidden] = useState(false);
 
   useEffect(() => {
     void getSetting(CLOSE_BEHAVIOR_KEY)
@@ -62,6 +69,9 @@ function CloseAndLaunch() {
     void autostartEnabled()
       .then(setLaunch)
       .catch(() => setLaunch(null));
+    void getSetting(LAUNCH_HIDDEN_KEY)
+      .then((value) => setHidden(value === "1"))
+      .catch(() => {});
   }, []);
 
   return (
@@ -96,6 +106,21 @@ function CloseAndLaunch() {
         />
         {t("settings.launchAtLogin")}
       </label>
+      {launch && (
+        <label
+          className="-mt-1.5 ml-6 flex w-fit cursor-pointer items-center gap-2 text-[13px] text-[var(--cf-text)]"
+          title={t("settings.launchHiddenHint")}
+        >
+          <Checkbox
+            checked={hidden}
+            onChange={(on) => {
+              setHidden(on);
+              void setSetting(LAUNCH_HIDDEN_KEY, on ? "1" : "0").catch((e: unknown) => pushToast(String(e)));
+            }}
+          />
+          {t("settings.launchHidden")}
+        </label>
+      )}
     </div>
   );
 }

@@ -142,6 +142,19 @@ export function splitGroups(
 }
 
 /**
+ * Every group's tab for `from` shows `to` instead, in the same slot and pinned or active as it was —
+ * a scratch buffer saved as a file of the project becomes that file's tab where it stood.
+ */
+export function retargetInGroups(groups: EditorGroup[], from: string, to: string): EditorGroup[] {
+  const swap = (p: string) => (p === from ? to : p);
+  return groups.map((group) =>
+    group.paths.includes(from)
+      ? { ...group, paths: group.paths.map(swap), pinned: group.pinned.map(swap), activePath: group.activePath === from ? to : group.activePath }
+      : group,
+  );
+}
+
+/**
  * Closes one tab in one group. An emptied group folds away — unless it's the last one, since that
  * would leave nowhere for the next file to open.
  */

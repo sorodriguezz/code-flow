@@ -1,19 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AlarmClock, Copy, Globe, KeyRound, Plus, Radio, Webhook, Wrench } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Select } from "../common/Select";
 import { iconButtonClass } from "../common/Button";
-import { Checkbox } from "../common/Checkbox";
 import { nodeIcon } from "../../lib/flows/nodeIcons";
-import { autostartEnabled, setAutostart } from "../../lib/tauri/windows";
-import { getSetting, setSetting } from "../../lib/tauri/commands";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
 import {
   flowsMcpInfo,
   flowsMcpRotate,
+  flowsRunPeriods,
   flowsTunnelSet,
   flowsTunnelStatus,
   type FlowArmedView,
   type FlowMcpInfo,
+  type FlowPeriodUnit,
+  type FlowRunPeriod,
+  type FlowRunRow,
   type FlowTriggerView,
   type FlowTunnelStatus,
 } from "../../lib/tauri/flowsCommands";
@@ -25,13 +28,15 @@ import { useFlowsStore } from "../../state/flowsStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { formatWhen } from "./runFormat";
+import { rulerMarks } from "./rulerMarks";
+import { columnBars, periodRuns, PLOT_PX, successRate } from "./runPeriods";
 import { WaitCard } from "./WaitCard";
 
 /**
  * Programación: everything that can start a flow of this workspace on its own — the schedules on a
  * ruler of the next 24 hours, the webhooks with their URLs, and what is being watched or polled — with
- * the switch that turns each flow on or off. And the one setting that decides whether any of it runs
- * after a restart: opening CodeFlow at login.
+ * the switch that turns each flow on or off. Whether any of it runs after a restart — opening CodeFlow
+ * at login — is in Settings › General, and only there.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -60,6 +65,7 @@ function Ruler({ rows }: { rows: { flow: FlowArmedView; trigger: FlowTriggerView
   const now = Date.now();
   const marks = Array.from({ length: 8 }, (_, i) => now + ((i + 1) * DAY_MS) / 8);
   const left = (at: number) => `${Math.min(Math.max((at - now) / DAY_MS, 0), 1) * 100}%`;
+  const percent = (fraction: number) => `${fraction * 100}%`;
   return (
     <div className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] px-4 py-3">
       <div className="mb-2 grid grid-cols-[180px_minmax(0,1fr)] items-end gap-3">
@@ -80,17 +86,183 @@ function Ruler({ rows }: { rows: { flow: FlowArmedView; trigger: FlowTriggerView
             <span className="truncate">{flow.flowName}</span>
           </span>
           <span className="relative h-[14px] rounded-[4px] bg-[var(--cf-hover)]">
-            {trigger.upcoming.map((at) => (
-              <span
-                key={at}
-                className={`absolute top-[2px] -translate-x-1/2 rounded-full bg-[var(--cf-accent)] ${trigger.upcoming.length > 30 ? "h-[10px] w-[2px]" : "h-[10px] w-[10px]"}`}
-                style={{ left: left(Date.parse(at)) }}
-                title={clock(at, language)}
-              />
-            ))}
+            {rulerMarks(trigger, now).map((mark) =>
+              mark.kind === "band" ? (
+                <span
+                  key={`band:${mark.from}`}
+                  className="absolute top-[2px] h-[10px] min-w-[2px] rounded-full bg-[var(--cf-accent)]"
+                  style={{ left: percent(mark.left), width: percent(mark.width) }}
+                  title={`${clock(mark.from, language)} – ${clock(mark.to, language)}`}
+                />
+              ) : (
+                <span
+                  key={mark.at}
+                  className={`absolute top-[2px] -translate-x-1/2 rounded-full bg-[var(--cf-accent)] ${mark.kind === "tick" ? "h-[10px] w-[2px]" : "h-[10px] w-[10px]"}`}
+                  style={{ left: percent(mark.left) }}
+                  title={clock(mark.at, language)}
+                />
+              ),
+            )}
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** A count beside the short stroke of its series' colour — the tooltip's key, not a swatch. */
+function Keyed({ color, children }: { color: string; children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className="h-[2px] w-2.5 shrink-0 rounded-full" style={{ background: color }} />
+      {children}
+    </span>
+  );
+}
+
+/**
+ * What already ran: the workspace's executions by week or by month — the ruler above says what is
+ * coming, this what came. Drawn from day counters that outlive the executions themselves
+ * (`migrations::add_flow_run_days`), so a month is the whole month even for a flow that runs every
+ * minute. Successes below, errors on top; a column's tooltip names the flows behind it.
+ */
+function RunStats() {
+  const t = useT();
+  const language = useLanguageStore((s) => s.language);
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const [unit, setUnit] = useState<FlowPeriodUnit>("week");
+  const [periods, setPeriods] = useState<FlowRunPeriod[] | null>(null);
+  const [version, setVersion] = useState(0);
+
+  // A finished run changes the counts; a burst of them (a flow every second) reloads once.
+  useEffect(() => {
+    let timer: number | null = null;
+    const stop = listen<FlowRunRow>("flows:run", (event) => {
+      if (event.payload.status === "running" || event.payload.status === "waiting") return;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => setVersion((n) => n + 1), 1500);
+    });
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      void stop.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    let alive = true;
+    void flowsRunPeriods(workspaceId, unit)
+      .then((next) => alive && setPeriods(next))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [workspaceId, unit, version]);
+
+  if (!periods || periods.every((period) => periodRuns(period) === 0)) return null;
+  const tallest = Math.max(...periods.map((period) => period.success + period.error));
+  const current = periods[periods.length - 1];
+  const rate = successRate(current);
+  const count = (n: number) => n.toLocaleString(language);
+  const date = (start: string, options: Intl.DateTimeFormatOptions) => new Date(`${start}T12:00:00`).toLocaleDateString(language, options);
+  const tick = (start: string) =>
+    unit === "week"
+      ? date(start, { day: "numeric", month: "short" })
+      : date(start, start.endsWith("-01-01") ? { month: "short", year: "numeric" } : { month: "short" });
+  const name = (start: string) => {
+    if (unit === "week") return t("flows.stats.weekOf", { date: date(start, { day: "numeric", month: "short" }) });
+    const month = date(start, { month: "long", year: "numeric" });
+    return month.charAt(0).toUpperCase() + month.slice(1);
+  };
+  return (
+    <div className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] px-4 py-3">
+      <div className="mb-2 flex items-center gap-3">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">{t("flows.stats.title")}</span>
+        <span className="flex items-center gap-3 text-[11px] text-[var(--cf-text-muted)]">
+          <span className="flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-[2px] bg-[var(--cf-success)]" />
+            {t("flows.stats.ok")}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-[2px] bg-[var(--cf-danger)]" />
+            {t("flows.stats.failed")}
+          </span>
+        </span>
+        <span className="flex-1" />
+        <Segmented
+          size="sm"
+          layoutId="cf-flows-stats-unit"
+          ariaLabel={t("flows.stats.unit")}
+          value={unit}
+          onChange={setUnit}
+          options={[
+            { value: "week", label: t("flows.stats.week") },
+            { value: "month", label: t("flows.stats.month") },
+          ]}
+        />
+      </div>
+      <div className="flex gap-[2px] border-b border-[var(--cf-border)]" style={{ height: PLOT_PX }}>
+        {periods.map((period) => {
+          const { ok, bad } = columnBars(period, tallest);
+          const runs = periodRuns(period);
+          const shown = period.flows.slice(0, 5);
+          const heading = `${name(period.start)} · ${t("flows.stats.runs", { runs: count(runs) })}`;
+          return (
+            <Tooltip
+              key={period.start}
+              label={heading}
+              description={
+                runs > 0 && (
+                  <span className="flex flex-col gap-0.5">
+                    <span className="flex flex-wrap items-center gap-x-2.5 tabular-nums">
+                      <Keyed color="var(--cf-success)">
+                        {count(period.success)} {t("flows.stats.ok")}
+                      </Keyed>
+                      <Keyed color="var(--cf-danger)">
+                        {count(period.error)} {t("flows.stats.failed")}
+                      </Keyed>
+                      {period.canceled > 0 && <span>{t("flows.stats.canceled", { count: count(period.canceled) })}</span>}
+                    </span>
+                    {shown.map((flow) => (
+                      <span key={flow.flowId} className="flex min-w-0 gap-1.5">
+                        <span className="shrink-0 font-medium tabular-nums text-[var(--cf-text)]">{count(periodRuns(flow))}</span>
+                        <span className="min-w-0 truncate">{flow.name}</span>
+                      </span>
+                    ))}
+                    {period.flows.length > shown.length && <span>{t("flows.stats.more", { count: period.flows.length - shown.length })}</span>}
+                  </span>
+                )
+              }
+            >
+              <div
+                tabIndex={0}
+                role="img"
+                aria-label={`${heading} · ${count(period.success)} ${t("flows.stats.ok")}, ${count(period.error)} ${t("flows.stats.failed")}`}
+                className="flex h-full min-w-0 flex-1 items-end justify-center rounded-[4px] outline-none hover:bg-[var(--cf-hover)] focus-visible:bg-[var(--cf-hover)]"
+              >
+                <span className="flex w-full max-w-[24px] flex-col-reverse gap-[2px] overflow-hidden rounded-t-[4px]">
+                  {ok > 0 && <span className="bg-[var(--cf-success)]" style={{ height: ok }} />}
+                  {bad > 0 && <span className="bg-[var(--cf-danger)]" style={{ height: bad }} />}
+                </span>
+              </div>
+            </Tooltip>
+          );
+        })}
+      </div>
+      <div className="mt-1 flex gap-[2px]">
+        {periods.map((period, index) => (
+          <span
+            key={period.start}
+            className={`min-w-0 flex-1 truncate text-center text-[10.5px] tabular-nums ${index === periods.length - 1 ? "font-medium text-[var(--cf-text-muted)]" : "text-[var(--cf-text-faint)]"}`}
+          >
+            {tick(period.start)}
+          </span>
+        ))}
+      </div>
+      <div className="mt-1.5 text-[11.5px] tabular-nums text-[var(--cf-text-muted)]">
+        {t(unit === "week" ? "flows.stats.thisWeek" : "flows.stats.thisMonth", { runs: count(periodRuns(current)) })}
+        {rate !== null && ` · ${t("flows.stats.rate", { rate })}`}
+      </div>
     </div>
   );
 }
@@ -251,18 +423,10 @@ export function ScheduleView() {
   const armed = useFlowRunsStore((s) => s.triggers);
   const waits = useFlowRunsStore((s) => s.waits);
   const flows = useFlowsStore((s) => s.flows);
-  const [launchAtLogin, setLaunchAtLogin] = useState<boolean | null>(null);
-  const [background, setBackground] = useState(false);
   const [, setTick] = useState(0);
 
   useEffect(() => {
     void useFlowRunsStore.getState().loadTriggers();
-    void autostartEnabled()
-      .then(setLaunchAtLogin)
-      .catch(() => setLaunchAtLogin(null));
-    void getSetting("flows_background_at_login")
-      .then((value) => setBackground(value === "1"))
-      .catch(() => {});
     const timer = setInterval(() => setTick((n) => n + 1), 30_000);
     return () => clearInterval(timer);
   }, []);
@@ -308,6 +472,7 @@ export function ScheduleView() {
         )}
 
         {schedules.length > 0 && <Ruler rows={schedules} />}
+        <RunStats />
 
         <div className="overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)]">
           <table className="w-full border-collapse text-[12.5px]">
@@ -498,32 +663,6 @@ export function ScheduleView() {
         )}
 
         <McpSection />
-
-        <label className="flex items-center gap-2 text-[12.5px] text-[var(--cf-text)]">
-          <Checkbox
-            checked={launchAtLogin === true}
-            disabled={launchAtLogin === null}
-            onChange={(on) =>
-              void setAutostart(on)
-                .then(setLaunchAtLogin)
-                .catch((error: unknown) => pushErrorToast(t("settings.launchAtLoginFailed", { reason: String(error) })))
-            }
-          />
-          {t("settings.launchAtLogin")}
-          <span className="text-[var(--cf-text-faint)]">· {t("flows.schedule.whileOpen")}</span>
-        </label>
-        {launchAtLogin && (
-          <label className="-mt-2 ml-6 flex items-center gap-2 text-[12.5px] text-[var(--cf-text)]" title={t("flows.schedule.backgroundHint")}>
-            <Checkbox
-              checked={background}
-              onChange={(on) => {
-                setBackground(on);
-                void setSetting("flows_background_at_login", on ? "1" : "0").catch((error: unknown) => pushErrorToast(String(error)));
-              }}
-            />
-            {t("flows.schedule.background")}
-          </label>
-        )}
       </div>
     </div>
   );

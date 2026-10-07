@@ -316,17 +316,12 @@ mod tests {
             }
         });
 
-        let scripts = || {
-            std::fs::read_dir(std::env::temp_dir())
-                .unwrap()
-                .flatten()
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with("codeflow-scaffold-"))
-                .count()
-        };
-        let before = scripts();
         let cwd = std::env::temp_dir().join(format!("cf-run-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&cwd);
-        let script = "set -e\nprintf '%s' \"$PATH\" > path.txt\necho made > marker\nexit 3\n";
+        // `$0` is the script file itself, so the test follows its own file. Counting every
+        // `codeflow-scaffold-*` in the temp folder raced: the other tests here write and remove
+        // theirs in parallel — and so does anything else on the machine that scaffolds.
+        let script = "set -e\nprintf '%s' \"$PATH\" > path.txt\nprintf '%s' \"$0\" > script.txt\necho made > marker\nexit 3\n";
         let id = run_script(app.handle().clone(), &registry, &cwd.to_string_lossy(), script).unwrap();
 
         let exit = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("the pty exits");
@@ -336,8 +331,15 @@ mod tests {
         // The child saw the initializer's PATH, not a bare launchd one.
         let path = std::fs::read_to_string(cwd.join("path.txt")).unwrap();
         assert!(path.split(':').count() > 4, "{path}");
+        // `on_exit` removes the file before `terminal:exit` goes out, so one look is enough.
+        let ran = PathBuf::from(std::fs::read_to_string(cwd.join("script.txt")).unwrap());
+        assert!(
+            ran.file_name().is_some_and(|name| name.to_string_lossy().starts_with("codeflow-scaffold-")),
+            "{}",
+            ran.display()
+        );
+        assert!(!ran.exists(), "the script file is removed when the session ends");
         let _ = std::fs::remove_dir_all(&cwd);
-        assert_eq!(scripts(), before, "the script file is removed when the session ends");
     }
 
     /// The run is over when the script's shell exits — even when a step left a process behind that

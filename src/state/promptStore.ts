@@ -22,6 +22,8 @@ interface PromptRequest {
   confirmLabel?: string;
   /** The reason this value is not acceptable, or `null` when it is. Runs on every keystroke. */
   validate?: (value: string) => string | null;
+  /** An empty answer is an answer — a description cleared on purpose — rather than nothing yet. */
+  allowEmpty?: boolean;
   resolve: (value: string | null) => void;
 }
 
@@ -59,6 +61,7 @@ export const promptAction = (
     placeholder?: string;
     confirmLabel?: string;
     validate?: (value: string) => string | null;
+    allowEmpty?: boolean;
   } = {},
 ) =>
   usePromptStore.getState().ask({
@@ -67,4 +70,5 @@ export const promptAction = (
     placeholder: options.placeholder,
     confirmLabel: options.confirmLabel,
     validate: options.validate,
+    allowEmpty: options.allowEmpty,
   });

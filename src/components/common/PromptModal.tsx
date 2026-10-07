@@ -53,7 +53,7 @@ export function PromptModal() {
 
   const trimmed = value.trim();
   const problem = trimmed ? (request.validate?.(trimmed) ?? null) : null;
-  const ready = trimmed.length > 0 && !problem;
+  const ready = (trimmed.length > 0 || request.allowEmpty === true) && !problem;
 
   return (
     <div

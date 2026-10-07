@@ -26,7 +26,7 @@ import { NotificationPopups } from "./components/layout/NotificationPopups";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
 import { TourOverlay } from "./components/tour/TourOverlay";
-import { PaletteSkeleton, SettingsSkeleton, ViewSkeleton } from "./components/common/ViewSkeleton";
+import { DialogSkeleton, PaletteSkeleton, SettingsSkeleton, ViewSkeleton } from "./components/common/ViewSkeleton";
 import { useThemeStore } from "./state/themeStore";
 import { useUiStore, type MainView } from "./state/uiStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectionsStore";
@@ -1240,10 +1240,11 @@ export default function App() {
           <SettingsView />
         </Suspense>
       )}
-      {/* All four are reachable from the keyboard anywhere in the app, so they're mounted at the
+      {/* All five are reachable from the keyboard anywhere in the app, so they're mounted at the
           root rather than inside whichever panel happens to have a button for them. A boundary
           each, never a shared one — a shared boundary would blank whichever of them was already
-          open while another loaded. */}
+          open while another loaded. Each stand-in sits where its dialog will (`DialogSkeleton`):
+          the backdrop and anchor are copied from the dialog, so keep them in step. */}
       {commandPaletteOpen && (
         <Suspense fallback={<PaletteSkeleton />}>
           <CommandPalette scope={commandPaletteScope} onClose={closeCommandPalette} />
@@ -1252,22 +1253,31 @@ export default function App() {
       {/* Draws nothing until its chord is held — see `SwitcherLock`. */}
       <SwitcherLock />
       {shortcutsModalOpen && (
-        <Suspense fallback={<PaletteSkeleton />}>
+        <Suspense fallback={<DialogSkeleton overlayClass="items-center bg-black/40 p-6" />}>
           <ShortcutsModal onClose={closeShortcutsModal} />
         </Suspense>
       )}
       {branchSwitcherOpen && (
-        <Suspense fallback={<PaletteSkeleton />}>
+        <Suspense fallback={<DialogSkeleton overlayClass="items-center bg-black/30" />}>
           <BranchSwitcherModal onClose={closeBranchSwitcher} />
         </Suspense>
       )}
       {prLinkModalOpen && (
-        <Suspense fallback={<PaletteSkeleton />}>
+        <Suspense
+          fallback={<DialogSkeleton overlayClass="items-start bg-black/30 pt-24" panelClass="w-[480px] bg-[var(--cf-surface-raised)]" />}
+        >
           <OpenPrLinkModal onClose={closePrLinkModal} />
         </Suspense>
       )}
       {projectInitOpen && (
-        <Suspense fallback={<PaletteSkeleton />}>
+        <Suspense
+          fallback={
+            <DialogSkeleton
+              overlayClass="items-center bg-black/30 p-4"
+              panelClass="h-[680px] max-h-[90vh] w-[1000px] max-w-[94vw] bg-[var(--cf-surface)]"
+            />
+          }
+        >
           <ProjectInitModal onClose={closeProjectInit} />
         </Suspense>
       )}

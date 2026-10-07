@@ -340,6 +340,33 @@ export const flowsMoveToWorkspace = (id: string, workspaceId: string) =>
 export const flowsDuplicateFlow = (id: string, name: string) =>
   invoke<FlowMetaRow | null>("flows_duplicate_flow", { id, name });
 
+/** `flow_queries::FlowTemplateMeta`: a template the user saved from a flow, offered in every workspace. */
+export interface FlowTemplateMeta {
+  id: string;
+  name: string;
+  description: string;
+  /** The node type whose glyph stands for it: the first trigger of the flow it came from. */
+  icon: string;
+  nodeCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const flowsListTemplates = () => invoke<FlowTemplateMeta[]>("flows_list_templates");
+
+/** Saves a flow as a template — a new one, or over `replace`, which keeps its name and description. */
+export const flowsSaveTemplate = (flowId: string, name: string, replace: string | null) =>
+  invoke<FlowTemplateMeta>("flows_save_template", { flowId, name, replace });
+
+export const flowsUpdateTemplate = (id: string, name: string, description: string) =>
+  invoke<FlowTemplateMeta>("flows_update_template", { id, name, description });
+
+export const flowsDeleteTemplate = (id: string) => invoke<void>("flows_delete_template", { id });
+
+/** A flow from one of the user's templates — trusted only while it runs what was trusted when saved. */
+export const flowsCreateFromTemplate = (workspaceId: string, folderId: string | null, templateId: string, name: string) =>
+  invoke<FlowMetaRow>("flows_create_from_template", { workspaceId, folderId, templateId, name });
+
 export const flowsDeleteFlow = (id: string) => invoke<void>("flows_delete_flow", { id });
 
 export const flowsCreateFolder = (workspaceId: string, name: string) =>
@@ -550,6 +577,25 @@ export interface FlowMetrics {
   byMode: [string, number][];
 }
 
+/** `flow_run_queries::RunPeriod`: one week or month of a workspace's executions. */
+export interface FlowRunPeriod {
+  /** Its first day, `YYYY-MM-DD`: a Monday, or the 1st. */
+  start: string;
+  success: number;
+  error: number;
+  /** Canceled and interrupted. */
+  canceled: number;
+  /** Each flow that ran in it, most runs first. */
+  flows: { flowId: string; name: string; success: number; error: number; canceled: number }[];
+}
+
+export type FlowPeriodUnit = "week" | "month";
+
+/** The workspace's executions by week or month, oldest first — from day counters that outlive the
+ *  executions themselves, so a month is a whole month. */
+export const flowsRunPeriods = (workspaceId: string, unit: FlowPeriodUnit, count = 12) =>
+  invoke<FlowRunPeriod[]>("flows_run_periods", { workspaceId, unit, count });
+
 /** How a flow has been doing over its last `days`, bucketed by the person's own days. */
 export const flowsMetrics = (flowId: string, days = 30) =>
   invoke<FlowMetrics>("flows_metrics", { flowId, days, offsetMinutes: -new Date().getTimezoneOffset() });
@@ -750,8 +796,10 @@ export interface FlowTriggerView {
   /** The same webhook on the internet, while a tunnel is up (`flows::tunnel`). */
   publicUrl: string | null;
   next: string | null;
-  /** A schedule's occurrences in the next 24 hours. */
+  /** A schedule's occurrences in the day from its next one (`schedule::outlook`). */
   upcoming: string[];
+  /** Instead of `upcoming`, for a schedule too busy to list: the stretches that hold any. */
+  busy: { from: string; to: string }[];
   lastFired: string | null;
   /** `started`, `skipped`, `queued`, `missed`. */
   lastOutcome: string | null;

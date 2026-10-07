@@ -52,10 +52,12 @@ import {
   moveTabInGroups,
   newGroup,
   openInGroups,
+  retargetInGroups,
   splitGroups,
   togglePinInGroups,
   type EditorGroup,
 } from "../../lib/editorGroups";
+import { relativeInside } from "../../lib/folderPath";
 import {
   copyIntoRepo,
   readEditorFile,
@@ -677,6 +679,21 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     );
   }, []);
 
+  /**
+   * A blank tab to write in — a double-click on a group with nothing open, as in VS Code. A scratch
+   * buffer like the one above: nothing exists on disk until ⌘S asks where it goes (`saveScratchAs`),
+   * and the cursor is in it at once.
+   */
+  const newUntitled = useCallback((groupId: string) => {
+    const path = freeScratchPath(tRef.current("editor.untitled"), (candidate) => tabsRef.current.some((tab) => tab.path === candidate));
+    const outcome = openInGroups(groupsRef.current, groupId, path, true, () => false);
+    setGroups(outcome.groups);
+    setActiveGroupId(groupId);
+    setTabs((prev) => [...prev, { ...loadingTab(path, false), content: "", originalContent: "", loading: false }]);
+    revealNonce.current += 1;
+    setReveal({ groupId, request: { path, line: 1, column: 1, nonce: revealNonce.current } });
+  }, []);
+
   const closeTab = useCallback(async (groupId: string, path: string) => {
     const tab = tabsRef.current.find((item) => item.path === path);
     if (!tab) return;
@@ -870,23 +887,39 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
 
   /**
    * Save, on a scratch tab, is Save As: there is no file behind it to write back to, so the user picks
-   * one — offered in the project's folder, which is where a tree of the project usually ends up. The
-   * tab stays a buffer, now clean; what was written is an ordinary file wherever it landed, and the
-   * explorer shows it when that is inside the project.
+   * one — offered in the project's folder, which is where a tree of the project usually ends up.
+   *
+   * Saved inside the project, the tab becomes that file's, in the same slot: the next ⌘S writes it
+   * back instead of asking again, as an untitled tab does in VS Code. Anywhere else it stays a buffer,
+   * now clean — the editor cannot open a file outside the repository — and so does it when typing
+   * went on while the dialog was up (swapping the tab would drop that typing) or when the file is
+   * already open in another tab (the watcher brings that one up to date).
    */
-  const saveScratchAs = useCallback(async (repoPath: string, path: string, text: string) => {
-    try {
-      const target = await saveDialog({ defaultPath: `${repoPath}/${scratchName(path)}` });
-      if (!target) return;
-      await writeFileBytes(target, new TextEncoder().encode(text));
-      // Against the text that was written, not the tab's latest: typing done while the dialog was up
-      // is still unsaved, and the dot has to go on saying so.
-      setTabs((prev) => prev.map((item) => (item.path === path ? { ...item, originalContent: text } : item)));
-      void useRepoStore.getState().refreshStatus();
-    } catch (e) {
-      pushErrorToast(String(e));
-    }
-  }, []);
+  const saveScratchAs = useCallback(
+    async (repoPath: string, path: string, text: string) => {
+      try {
+        const target = await saveDialog({ defaultPath: `${repoPath}/${scratchName(path)}` });
+        if (!target) return;
+        await writeFileBytes(target, new TextEncoder().encode(text));
+        void useRepoStore.getState().refreshStatus();
+        const relative = relativeInside(repoPath, target);
+        const unchanged = tabsRef.current.find((item) => item.path === path)?.content === text;
+        if (relative && unchanged && !tabsRef.current.some((item) => item.path === relative)) {
+          groupsRef.current = retargetInGroups(groupsRef.current, path, relative);
+          setGroups(groupsRef.current);
+          setTabs((prev) => prev.map((item) => (item.path === path ? loadingTab(relative, false) : item)));
+          await readInto(relative);
+          return;
+        }
+        // Against the text that was written, not the tab's latest: typing done while the dialog was
+        // up is still unsaved, and the dot has to go on saying so.
+        setTabs((prev) => prev.map((item) => (item.path === path ? { ...item, originalContent: text } : item)));
+      } catch (e) {
+        pushErrorToast(String(e));
+      }
+    },
+    [readInto],
+  );
 
   /**
    * `setTabs`, with `tabsRef` brought up to date at once instead of at the next render — for writes
@@ -2475,6 +2508,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       // file and nothing beside it.
       onSplit={group.activePath && islandPath === null ? () => splitGroup(group.id) : null}
       onCloseGroup={groups.length > 1 ? () => closeGroup(group.id) : null}
+      onNewUntitled={islandPath === null ? () => newUntitled(group.id) : null}
       // Dragged out of the window, a tab becomes a floating editor where it was let go — the main
       // window's editor only, the one floating editors hand their files back to.
       onDetach={canDetach ? (payload, screen) => void detachTab(payload.path, screen) : undefined}

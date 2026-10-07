@@ -158,6 +158,68 @@ pub fn next_of(schedules: &[Schedule], after: DateTime<Utc>) -> Option<DateTime<
     schedules.iter().filter_map(|s| s.next_after(after)).min()
 }
 
+/// How far ahead the Programación view's ruler looks.
+pub const OUTLOOK: Duration = Duration::hours(24);
+
+/// Occurrences the ruler gets one by one. A schedule busier than this in a day (every minute is
+/// 1440, a cron with seconds up to 86 400) gets [`Outlook::busy`] stretches instead.
+const OUTLOOK_POINTS: usize = 300;
+
+/// The ruler's grain for a busy schedule: five minutes, 288 slices a day, on the clock's own marks
+/// (every zone's offset is a multiple of fifteen minutes, so they are local marks too).
+const SLICE_MS: i64 = 5 * 60 * 1000;
+
+/// A schedule's next day, the way the ruler draws it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Outlook {
+    /// Every occurrence, when there are few enough to draw one by one.
+    pub points: Vec<DateTime<Utc>>,
+    /// Otherwise the stretches holding at least one occurrence: five-minute slices, neighbours merged.
+    pub busy: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+}
+
+/// The [`OUTLOOK`] after `first`, the schedule's next occurrence: every occurrence in it or, past
+/// [`OUTLOOK_POINTS`], the stretches that have any.
+///
+/// **From `first`, not from now.** The loop recomputes this only when the schedule fires, while the
+/// ruler keeps sliding with the clock: a weekday 09:00 computed on Friday must already hold Monday's
+/// run when the ruler is looked at on Sunday. Nothing fires between now and `first`, so a day from
+/// `first` covers every "next 24 hours" the ruler can show until the list is computed again.
+///
+/// **Stretches cost slices, not occurrences.** Each step asks for the first occurrence after the
+/// slice it just marked, so a day is at most ~290 lookups however often the schedule fires — and
+/// "every minute from 9 to 18" shows 9 to 18 rather than a bar across the day.
+pub fn outlook(schedules: &[Schedule], first: DateTime<Utc>) -> Outlook {
+    let horizon = first + OUTLOOK;
+    let mut points = Vec::new();
+    let mut at = Some(first);
+    while let Some(t) = at.filter(|t| *t <= horizon) {
+        if points.len() == OUTLOOK_POINTS {
+            return Outlook { points: Vec::new(), busy: busy_stretches(schedules, first, horizon) };
+        }
+        points.push(t);
+        at = next_of(schedules, t);
+    }
+    Outlook { points, busy: Vec::new() }
+}
+
+fn busy_stretches(schedules: &[Schedule], first: DateTime<Utc>, horizon: DateTime<Utc>) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    let mut busy: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::new();
+    let mut at = Some(first);
+    while let Some(t) = at.filter(|t| *t <= horizon) {
+        let start = t - Duration::milliseconds(t.timestamp_millis().rem_euclid(SLICE_MS));
+        let end = start + Duration::milliseconds(SLICE_MS);
+        match busy.last_mut() {
+            Some(last) if last.1 >= start => last.1 = last.1.max(end),
+            _ => busy.push((start, end)),
+        }
+        // Occurrences fall on whole seconds, so the first one after `end - 1 s` is the first from
+        // `end` on — and never one before `t`, so the walk always moves forward.
+        at = next_of(schedules, (end - Duration::seconds(1)).max(t));
+    }
+    busy
+}
+
 /// What the loop does when it looks at the clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -316,6 +378,63 @@ mod tests {
             Decision::Skip { scheduled: pending, next: Some(utc("2026-10-05T08:15:00Z")) }
         );
         assert_eq!(decide(&s, pending, utc("2026-10-05T02:59:00Z"), true), Decision::Wait(pending));
+    }
+
+    #[test]
+    fn a_sparse_schedule_is_listed_one_by_one() {
+        let s = parse_all(&params(json!({"mode": "interval", "every": 15, "unit": "minutes", "timezone": "UTC"})), None).unwrap();
+        let first = utc("2026-10-06T22:15:00Z");
+        let outlook = outlook(&s, first);
+        assert!(outlook.busy.is_empty());
+        // Both ends included: 22:15 today to 22:15 tomorrow is 96 steps, 97 runs.
+        assert_eq!(outlook.points.len(), 97);
+        assert_eq!(outlook.points.first(), Some(&first));
+        assert_eq!(outlook.points.last(), Some(&utc("2026-10-07T22:15:00Z")));
+    }
+
+    /// The ruler's old bug: every minute is 1440 runs a day, the list stopped at 300 — five hours of
+    /// bar, then a day that looked empty and was not.
+    #[test]
+    fn every_minute_is_busy_the_whole_day() {
+        let s = parse_all(&params(json!({"mode": "interval", "every": 1, "unit": "minutes", "timezone": "UTC"})), None).unwrap();
+        let outlook = outlook(&s, utc("2026-10-06T22:12:00Z"));
+        assert!(outlook.points.is_empty());
+        assert_eq!(outlook.busy, vec![(utc("2026-10-06T22:10:00Z"), utc("2026-10-07T22:15:00Z"))]);
+    }
+
+    #[test]
+    fn a_busy_schedule_keeps_its_gaps() {
+        // Every minute from 09:00 to 17:59: 540 a day, busy only during those hours.
+        let s = parse_all(&params(json!({"mode": "cron", "cron": "* 9-17 * * *", "timezone": "UTC"})), None).unwrap();
+        let first = next_of(&s, utc("2026-10-06T08:00:00Z")).unwrap();
+        assert_eq!(
+            outlook(&s, first).busy,
+            vec![
+                (utc("2026-10-06T09:00:00Z"), utc("2026-10-06T18:00:00Z")),
+                // A day after the first run, both ends included.
+                (utc("2026-10-07T09:00:00Z"), utc("2026-10-07T09:05:00Z")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cron_every_second_walks_slices_not_seconds() {
+        let s = parse_all(&params(json!({"mode": "cron", "cron": "* * * * * *", "timezone": "UTC"})), None).unwrap();
+        let outlook = outlook(&s, utc("2026-10-06T22:12:07Z"));
+        assert_eq!(outlook.busy, vec![(utc("2026-10-06T22:10:00Z"), utc("2026-10-07T22:15:00Z"))]);
+    }
+
+    #[test]
+    fn the_outlook_runs_a_day_past_the_next_occurrence() {
+        // Weekdays at 09:00 in Santiago, computed on Friday evening: the list starts at Monday's
+        // run, so the ruler already has it on Sunday afternoon.
+        let s = parse_all(
+            &params(json!({"mode": "times", "at": ["09:00"], "days": ["mon", "tue", "wed", "thu", "fri"], "timezone": "America/Santiago"})),
+            None,
+        )
+        .unwrap();
+        let first = next_of(&s, utc("2026-10-09T21:00:00Z")).unwrap();
+        assert_eq!(outlook(&s, first).points, vec![utc("2026-10-12T12:00:00Z"), utc("2026-10-13T12:00:00Z")]);
     }
 
     #[test]

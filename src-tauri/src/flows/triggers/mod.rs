@@ -67,11 +67,20 @@ pub struct TriggerView {
     /// The same webhook's address on the internet, while a tunnel is up (`flows::tunnel`).
     pub public_url: Option<String>,
     pub next: Option<String>,
-    /// A schedule's occurrences in the next 24 hours, for the ruler.
+    /// A schedule's occurrences in the day from its next one, for the ruler (`schedule::outlook`).
     pub upcoming: Vec<String>,
+    /// Instead of `upcoming`, for a schedule too busy to list: the stretches that hold any.
+    pub busy: Vec<Stretch>,
     pub last_fired: Option<String>,
     pub last_outcome: Option<String>,
     pub problem: Option<String>,
+}
+
+/// A stretch of a busy schedule's day in which every five minutes run at least once.
+#[derive(Debug, Clone, Serialize)]
+pub struct Stretch {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -405,6 +414,7 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
             public_url: None,
             next: None,
             upcoming: vec![],
+            busy: vec![],
             last_fired: None,
             last_outcome: None,
             problem: None,
@@ -816,21 +826,11 @@ fn spawn_schedule(
     let node_id = node_id.to_string();
     tauri::async_runtime::spawn(async move {
         let set_next = |next: Option<DateTime<Utc>>| {
-            let mut upcoming = Vec::new();
-            if let Some(first) = next {
-                let horizon = Utc::now() + chrono::Duration::hours(24);
-                let mut at = first;
-                while at <= horizon && upcoming.len() < 300 {
-                    upcoming.push(at.to_rfc3339());
-                    match schedule::next_of(&schedules, at) {
-                        Some(following) => at = following,
-                        None => break,
-                    }
-                }
-            }
+            let outlook = next.map(|first| schedule::outlook(&schedules, first)).unwrap_or_default();
             if let Ok(mut v) = view.lock() {
                 v.next = next.map(|n| n.to_rfc3339());
-                v.upcoming = upcoming;
+                v.upcoming = outlook.points.iter().map(|at| at.to_rfc3339()).collect();
+                v.busy = outlook.busy.iter().map(|(from, to)| Stretch { from: from.to_rfc3339(), to: to.to_rfc3339() }).collect();
             }
         };
         let Some(mut pending) = schedule::next_of(&schedules, Utc::now()) else {

@@ -48,8 +48,7 @@ export interface WorkspaceApp {
   descriptionKey: TranslationKey;
   /** Marks an app that is still settling, so the rail says so before it is opened rather than
    * after something behaves unexpectedly inside it — the word under the icon, a chip in the tooltip
-   * and in the title row's crumb. Flujos ships as `"alpha"`: it draws and saves flows before it can
-   * run them. */
+   * and in the title row's crumb. Flujos is `"beta"`: it runs end to end, and is still new. */
   stage?: "alpha" | "beta";
   /** What the stage means for this app, as the chip's tooltip in the title row. */
   stageHintKey?: TranslationKey;
@@ -150,14 +149,15 @@ export const APPS: WorkspaceApp[] = [
   },
   // Node-based automations — schedules, scripts, APIs and AI. Workspace-scoped like the API client
   // and the databases whose transports and connections its nodes reuse. Last because it is the
-  // newest, and marked alpha: milestone 0 draws and saves flows, and running them comes after.
+  // newest, and marked beta (the user's call, 2026-10-06): it runs end to end — triggers, AI,
+  // connectors — but it is new and still changing.
   {
     id: "flows",
     icon: Waypoints,
     labelKey: "tabbar.flows",
     descriptionKey: "tabbar.flowsDescription",
-    stage: "alpha",
-    stageHintKey: "flows.alphaHint",
+    stage: "beta",
+    stageHintKey: "flows.betaHint",
   },
 ];
 

@@ -1203,6 +1203,8 @@ pub fn prune(conn: &rusqlite::Connection) -> usize {
         let _ = queries::delete_run(conn, id);
         remove_run_files(id);
     }
+    // The day counters outlive the runs on purpose, but not their flow.
+    let _ = queries::delete_orphan_run_days(conn);
     doomed.len()
 }
 
