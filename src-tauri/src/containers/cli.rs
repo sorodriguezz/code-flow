@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 /// What a finished command printed.
 #[derive(Debug, Clone)]
@@ -237,7 +237,7 @@ pub fn parse_engine_env(output: &str, wanted: &[&str]) -> Vec<(String, String)> 
 }
 
 /// Runs `program` with `args`, feeding `stdin` when given, and collects what it prints. A command
-/// still running at `timeout` is killed and reported as such.
+/// still running at `timeout` is killed — with everything it started — and reported as such.
 pub async fn run(program: &str, args: &[String], stdin: Option<&str>, timeout: Duration) -> Result<Output, String> {
     run_with(program, args, stdin, timeout, &[]).await
 }
@@ -255,6 +255,11 @@ pub async fn run_with(program: &str, args: &[String], stdin: Option<&str>, timeo
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // A group of its own, so that a timeout stops what it started as well. kubectl runs an auth
+    // plugin as its child — kubelogin waiting for somebody to type a device code, `aws sso` waiting
+    // for a browser — and killing kubectl alone left the plugin waiting for a quarter of an hour, one
+    // more each time the panel looked at that cluster again.
+    crate::proc::own_process_group(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("could not start {program}: {e}"))?;
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
         let body = text.as_bytes().to_vec();
@@ -263,15 +268,34 @@ pub async fn run_with(program: &str, args: &[String], stdin: Option<&str>, timeo
             let _ = pipe.shutdown().await;
         });
     }
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => Ok(Output {
-            code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    let finished = tokio::time::timeout(timeout, async {
+        // Both pipes read to their end while the program runs — one left full would stall it.
+        let (stdout, stderr) = tokio::join!(read_all(stdout), read_all(stderr));
+        (child.wait().await, stdout, stderr)
+    })
+    .await;
+    match finished {
+        Ok((Ok(status), stdout, stderr)) => Ok(Output {
+            code: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
         }),
-        Ok(Err(error)) => Err(format!("{program}: {error}")),
-        Err(_) => Err(format!("{program} did not answer within {} s", timeout.as_secs())),
+        Ok((Err(error), _, _)) => Err(format!("{program}: {error}")),
+        Err(_) => {
+            crate::ai_runs::kill_tree(&mut child).await;
+            Err(format!("{program} did not answer within {} s", timeout.as_secs()))
+        }
     }
+}
+
+/// Everything a pipe gives until it closes; nothing when there is no pipe.
+async fn read_all(pipe: Option<impl AsyncRead + Unpin>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_end(&mut bytes).await;
+    }
+    bytes
 }
 
 /// Runs and insists on success: the tool's complaint otherwise.
@@ -326,6 +350,31 @@ mod tests {
             "an empty value is unset, and a variable not asked about is never taken"
         );
         assert!(parse_engine_env("DOCKER_HOST=x", &["DOCKER_HOST"]).is_empty(), "no markers, no answer");
+    }
+
+    /// What a hung auth plugin is to kubectl: a child that outlives it. A timeout must take both.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timeout_stops_what_the_command_started_too() {
+        let pid_file = std::env::temp_dir().join(format!("cf-cli-tree-{}", uuid::Uuid::new_v4().simple()));
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let started = std::time::Instant::now();
+        let error = run("sh", &["-c".into(), script], None, Duration::from_millis(800)).await.unwrap_err();
+        assert!(error.contains("did not answer within"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10), "the timeout is not the child's 30 s");
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        let _ = std::fs::remove_file(&pid_file);
+        // Reaped by init once its group was killed; give it a moment to go.
+        let mut gone = false;
+        for _ in 0..50 {
+            // SAFETY: signal 0 only asks whether the pid exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(gone, "the grandchild {pid} is still running");
     }
 
     #[test]

@@ -145,7 +145,9 @@ pub async fn contexts() -> Result<(Vec<KubeContext>, Option<String>), String> {
 
 /// Whether the context's cluster answers, and its version.
 pub async fn reach(target: &KubeTarget) -> Result<String, String> {
-    let out = target.run(vec!["version".into(), "-o".into(), "json".into(), "--request-timeout=5s".into()], None, Duration::from_secs(10)).await?;
+    // The request gives up at 5 s; the rest is for an auth plugin — kubelogin asking `az` for a token
+    // starts Python on Windows, which alone can take several seconds.
+    let out = target.run(vec!["version".into(), "-o".into(), "json".into(), "--request-timeout=5s".into()], None, Duration::from_secs(20)).await?;
     let doc: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
     doc.pointer("/serverVersion/gitVersion").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "the cluster did not answer".to_string())
 }

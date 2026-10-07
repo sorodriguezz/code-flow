@@ -323,3 +323,10 @@ export interface KubeTest {
   error: string | null;
   hint: string | null;
 }
+
+/** A context switched to the Azure CLI's sign-in: the kubeconfig kubelogin rewrote, and the copy
+ *  taken first. */
+export interface AzureCliSwitch {
+  file: string;
+  backup: string;
+}

@@ -1,13 +1,14 @@
-import { Fragment, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { CheckCircle2, Crosshair, Loader2, MoreHorizontal, Plus, Trash2, XCircle } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { CheckCircle2, Crosshair, KeyRound, LogIn, Loader2, MoreHorizontal, Plus, Trash2, XCircle } from "lucide-react";
 import { Button } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { RowAction, StateDot, ago } from "./containerBits";
 import { kubeMenu } from "./containerActions";
 import { KubeTestLine, kubeHintText } from "./KubeAddCluster";
 import { DataTable, EmptyLine, LiveMark, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
-import { containersKubeOrigins, containersKubeRemove, containersKubeTest } from "../../lib/tauri/containersCommands";
+import { containersKubeOrigins, containersKubeRemove, containersKubeTest, containersKubeUseAzureCli } from "../../lib/tauri/containersCommands";
 import { confirmAction } from "../../state/confirmStore";
+import { useContainersJobsStore } from "../../state/containersJobsStore";
 import { listKey, useContainersStore } from "../../state/containersStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
@@ -126,6 +127,7 @@ export function KubeKindPage({ kind }: { kind: string }) {
   const reach = useContainersStore((s) => s.reach[context ?? ""]);
   const act = useContainersStore((s) => s.act);
   const select = useContainersStore((s) => s.select);
+  const setNav = useContainersStore((s) => s.setNav);
   const rows = (list?.rows ?? NO_ROWS) as KubeRow[];
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
@@ -161,7 +163,13 @@ export function KubeKindPage({ kind }: { kind: string }) {
         {reach?.ok !== false && <LiveMark />}
       </PageToolbar>
       {reach && !reach.ok ? (
-        <EmptyLine>{t("containers.clusterUnreachable", { reason: reach.text })}</EmptyLine>
+        <EmptyLine>
+          {t("containers.clusterUnreachable", { reason: reach.text })}{" "}
+          {/* The cluster's page tries it again and words what went wrong, with what fixes it. */}
+          <button onClick={() => setNav({ runtime: "kubernetes", section: "overview" })} className="text-[var(--cf-accent)] hover:underline">
+            {t("containers.m.kube.seeWhy")}
+          </button>
+        </EmptyLine>
       ) : list?.error ? (
         <EmptyLine>{list.error}</EmptyLine>
       ) : shown.length === 0 ? (
@@ -229,8 +237,12 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
   const setContext = useContainersStore((s) => s.setContext);
   const detect = useContainersStore((s) => s.detect);
   const act = useContainersStore((s) => s.act);
+  const checkReach = useContainersStore((s) => s.checkReach);
+  const startJob = useContainersJobsStore((s) => s.start);
+  const history = useContainersJobsStore((s) => s.history);
   const [origins, setOrigins] = useState<KubeContextOrigin[] | null>(null);
   const [tests, setTests] = useState<Record<string, KubeTest | "testing">>({});
+  const [switching, setSwitching] = useState<string | null>(null);
   const loadOrigins = () =>
     containersKubeOrigins()
       .then(setOrigins)
@@ -259,6 +271,38 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
     }
   };
   const originOf = (name: string) => origins?.find((o) => o.context === name);
+  /** Tried again, here and in the navigation's dot, once its sign-in is sorted. */
+  const retry = (name: string) => {
+    void test(name);
+    void checkReach(name);
+  };
+  // A device code shows in the jobs panel, where the person signs in; the token kubelogin then
+  // keeps is what every later kubectl uses. A sign-in that ended well tries the cluster again.
+  const signIn = (name: string) =>
+    void startJob(t("containers.m.kube.signingIn", { name }), { kind: "kubeLogin", runtime: "kubernetes", context: name, target: name }, { meta: { context: name } });
+  const lastSeen = useRef(Date.now());
+  useEffect(() => {
+    const fresh = history.filter((past) => past.kind === "kubeLogin" && past.at > lastSeen.current);
+    if (fresh.length === 0) return;
+    lastSeen.current = Math.max(...fresh.map((past) => past.at));
+    for (const past of fresh) if (past.code === 0 && past.meta.context) retry(past.meta.context);
+  }, [history]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** Microsoft's own fix for a device code nobody sees: kubelogin rewrites the user to sign in with
+   *  `az login`'s session — in the user's kubeconfig, so it asks first. */
+  const switchToAzureCli = async (name: string) => {
+    const file = originOf(name)?.file || "~/.kube/config";
+    if (!(await confirmAction(t("containers.m.kube.azureCliConfirm", { name, file }), false, t("containers.m.kube.azureCliConfirmButton")))) return;
+    setSwitching(name);
+    try {
+      await containersKubeUseAzureCli(name);
+      pushSuccessToast(t("containers.m.kube.azureCliDone", { name }));
+      retry(name);
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setSwitching(null);
+    }
+  };
   /** Makes it the context of every kubectl on this computer — only one of the user's own: a cluster
    *  added here lives in CodeFlow's kubeconfig, which a terminal's kubectl does not read. */
   const pointKubectl = (name: string) =>
@@ -354,6 +398,18 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
                   <tr>
                     <td colSpan={5} className="border-b border-[color-mix(in_srgb,var(--cf-border)_55%,transparent)] px-3 pb-2.5 pt-1.5">
                       <KubeTestLine test={failed} />
+                      {failed.hint === "azDeviceCode" && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <Button size="sm" variant="secondary" onClick={() => signIn(c.name)} title={t("containers.m.kube.signInHint")}>
+                            <LogIn size={12} />
+                            {t("containers.m.kube.signIn")}
+                          </Button>
+                          <Button size="sm" variant="secondary" disabled={switching === c.name} onClick={() => void switchToAzureCli(c.name)} title={t("containers.m.kube.azureCliHint")}>
+                            {switching === c.name ? <Loader2 size={12} className="animate-spin" /> : <KeyRound size={12} />}
+                            {t("containers.m.kube.azureCli")}
+                          </Button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )}

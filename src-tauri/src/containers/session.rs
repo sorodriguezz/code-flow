@@ -192,6 +192,10 @@ pub fn command_line(request: &SessionRequest) -> Result<(String, Vec<String>), S
                 }
             }
             "exec" => args.extend(["exec".into(), "-it".into(), request.target.clone()]),
+            // Anything that needs the server signs in: kubelogin's device code, or a browser, shows
+            // in the pane for the person in front of it — and the token it caches is what every
+            // later kubectl of the panel uses. `target` is the context's name.
+            "kubeLogin" => args.push("version".into()),
             other => return Err(format!("unknown session {other}")),
         }
         if let Some(c) = request.container.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
@@ -274,6 +278,7 @@ fn label(request: &SessionRequest) -> String {
     let what = match request.kind.as_str() {
         "logs" | "projectLogs" => "logs".to_string(),
         "pull" | "build" => request.kind.clone(),
+        "kubeLogin" => "sign-in".to_string(),
         kind => match compose_action(kind) {
             Some(action) => format!("compose {action}"),
             None => "exec".to_string(),
@@ -391,6 +396,10 @@ mod tests {
         let mut kube = request("pull", "kubernetes");
         kube.target = "nginx".into();
         assert!(command_line(&kube).unwrap_err().contains("unknown session"));
+        let mut login = request("kubeLogin", "kubernetes");
+        login.context = Some("aks-dev".into());
+        login.target = "aks-dev".into();
+        assert_eq!(command_line(&login).unwrap().1, vec!["--context", "aks-dev", "version"]);
     }
 
     #[test]

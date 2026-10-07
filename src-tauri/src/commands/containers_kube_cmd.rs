@@ -42,3 +42,10 @@ pub async fn containers_kube_remove(context: String) -> Result<(), String> {
 pub async fn containers_kube_test(context: String) -> kubeconfig::KubeTest {
     kubeconfig::test(&context).await
 }
+
+/// Makes a context sign in with the Azure CLI's session instead of a device code — a rewrite of the
+/// kubeconfig that holds it, which the panel confirms first.
+#[tauri::command]
+pub async fn containers_kube_use_azure_cli(context: String) -> Result<kubeconfig::AzureCliSwitch, String> {
+    kubeconfig::use_azure_cli(&context).await
+}

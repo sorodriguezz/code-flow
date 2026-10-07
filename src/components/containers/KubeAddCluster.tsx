@@ -174,6 +174,8 @@ export function kubeHintText(t: Translate, hint: string | null | undefined): str
       return t("containers.kube.add.hint.gcloudLogin");
     case "interactive":
       return t("containers.kube.add.hint.interactive");
+    case "azDeviceCode":
+      return t("containers.kube.add.hint.azDeviceCode");
     case "credentials":
       return t("containers.kube.add.hint.credentials");
     case "ca":

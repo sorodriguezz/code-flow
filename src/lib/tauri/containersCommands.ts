@@ -15,6 +15,7 @@ import type {
   KubeAddRequest,
   KubeContextOrigin,
   KubeTest,
+  AzureCliSwitch,
   KubeTools,
   RunSpec,
   RuntimeInfo,
@@ -86,7 +87,9 @@ export const containersApply = (context: string | null, namespace: string | null
 
 export interface SessionRequest {
   /** `pull`, `build` and the `compose*` ones run to their end in the pane, then the session exits. */
-  kind: "logs" | "exec" | "projectLogs" | "pull" | "build" | "composeUp" | "composeDown" | "composeRestart" | "composePull";
+  /** `kubeLogin`: `kubectl version` against the context named by `target`, so that a sign-in its
+   *  auth plugin asks for (a device code) shows in the pane. */
+  kind: "logs" | "exec" | "projectLogs" | "pull" | "build" | "composeUp" | "composeDown" | "composeRestart" | "composePull" | "kubeLogin";
   runtime: string;
   context: string | null;
   namespace?: string | null;
@@ -182,3 +185,5 @@ export const containersKubeOrigins = () => invoke<KubeContextOrigin[]>("containe
 export const containersKubeRemove = (context: string) => invoke<void>("containers_kube_remove", { context });
 
 export const containersKubeTest = (context: string) => invoke<KubeTest>("containers_kube_test", { context });
+
+export const containersKubeUseAzureCli = (context: string) => invoke<AzureCliSwitch>("containers_kube_use_azure_cli", { context });

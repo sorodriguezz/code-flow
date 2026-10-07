@@ -1525,7 +1525,11 @@ fn auth_of_user(user: &Value) -> Auth {
         let from_env = entries(user.pointer("/user/exec").unwrap_or(&Value::Null), "env").find(|e| name_of(e) == "AWS_PROFILE").map(|e| str_at(e, "/value"));
         let from_args = args.iter().position(|a| a == "--profile").and_then(|at| args.get(at + 1)).cloned();
         let profile = from_env.or(from_args).unwrap_or_default();
-        let interactive = args.iter().any(|a| matches!(a.as_str(), "devicecode" | "interactive"));
+        let interactive = if login == Login::Azure {
+            matches!(kubelogin_method(user, &args).as_str(), "devicecode" | "interactive")
+        } else {
+            args.iter().any(|a| matches!(a.as_str(), "devicecode" | "interactive"))
+        };
         return Auth { login, profile, interactive };
     }
     match str_at(user, "/user/auth-provider/name").as_str() {
@@ -1534,6 +1538,23 @@ fn auth_of_user(user: &Value) -> Auth {
         "gcp" => Auth { login: Login::Google, ..Auth::default() },
         _ => Auth { login: Login::Other, ..Auth::default() },
     }
+}
+
+/// The way a kubelogin user signs in: `AAD_LOGIN_METHOD` among the plugin's environment — kubelogin
+/// reads it *after* its flags, so it wins — else `--login`/`-l`, else kubelogin's own default, a
+/// device code. `az aks get-credentials` writes that default for every Entra ID cluster.
+fn kubelogin_method(user: &Value, args: &[String]) -> String {
+    let from_env = entries(user.pointer("/user/exec").unwrap_or(&Value::Null), "env").find(|e| name_of(e) == "AAD_LOGIN_METHOD").map(|e| str_at(e, "/value"));
+    let mut from_args = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--login" || arg == "-l" {
+            from_args = rest.next().cloned();
+        } else if let Some(value) = arg.strip_prefix("--login=").or_else(|| arg.strip_prefix("-l=")) {
+            from_args = Some(value.to_string());
+        }
+    }
+    from_env.filter(|v| !v.trim().is_empty()).or(from_args).unwrap_or_else(|| "devicecode".into()).trim().to_lowercase()
 }
 
 /// How `context` signs in, read as kubectl merges: the first file to define the context, then the
@@ -1562,6 +1583,10 @@ fn hint_for(error: &str, auth: &Auth) -> Option<String> {
         "gkePlugin".to_string()
     } else if has("executable aws") && missing {
         "awsCli".to_string()
+    } else if auth.login == Login::Azure && auth.interactive && (timed_out || has("devicelogin") || has("device code")) {
+        // Not "sign in with az login": kubelogin in device-code mode keeps a sign-in of its own,
+        // and an `az login` does nothing for it.
+        "azDeviceCode".to_string()
     } else if has("devicelogin") || has("device code") || (timed_out && auth.interactive) {
         "interactive".to_string()
     } else if has("aadsts") || has("az login") {
@@ -1635,6 +1660,76 @@ pub async fn test(context: &str) -> KubeTest {
     };
     let hint = hint_for(&error, &auth);
     failed(tidy(&error), hint)
+}
+
+// ------------------------------------------------------------------- Entra ID: the Azure CLI's sign-in
+
+/// What switching a context to the Azure CLI's sign-in did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureCliSwitch {
+    /// The kubeconfig kubelogin rewrote.
+    pub file: String,
+    /// The copy of it taken first, among CodeFlow's state.
+    pub backup: String,
+}
+
+/// The file `kubelogin convert-kubeconfig --context` has to rewrite for `context`: the first to
+/// define the context's user — which must define the context too, since kubelogin reads both from
+/// the one file it is given.
+fn entra_file(docs: &[(PathBuf, Value)], context: &str) -> Result<PathBuf, String> {
+    let user = docs.iter().find_map(|(_, doc)| find(doc, "contexts", context)).map(|c| str_at(c, "/context/user")).ok_or_else(|| format!("there is no context named {context}"))?;
+    if user.is_empty() {
+        return Err(format!("{context} names no user"));
+    }
+    let (path, doc) = docs.iter().find(|(_, doc)| find(doc, "users", &user).is_some()).ok_or_else(|| format!("there is no user named {user}"))?;
+    let entry = find(doc, "users", &user).unwrap_or(&Value::Null);
+    if exec_stem(entry) != "kubelogin" && str_at(entry, "/user/auth-provider/name") != "azure" {
+        return Err(format!("{context} does not sign in with Microsoft Entra ID"));
+    }
+    if find(doc, "contexts", context).is_none() {
+        return Err(format!(
+            "{context} is defined in one file and its user in {} — run `kubelogin convert-kubeconfig -l azurecli --kubeconfig \"{}\"` yourself",
+            path.display(),
+            path.display()
+        ));
+    }
+    Ok(path.clone())
+}
+
+/// A copy of a kubeconfig about to be rewritten by another tool — kept with CodeFlow's state, not
+/// beside the file, and as private as the credentials in it.
+fn backup_of(file: &Path) -> Result<PathBuf, String> {
+    let dir = crate::paths::state_dir().join("containers").join("backups");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "kubeconfig".into());
+    let to = dir.join(format!("{name}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+    std::fs::copy(file, &to).map_err(|e| format!("could not copy {}: {e}", file.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(to)
+}
+
+/// Makes `context` sign in with the Azure CLI's session instead of a device code — Microsoft's own
+/// `kubelogin convert-kubeconfig -l azurecli`, limited to that context's user, on the file that
+/// defines it (the user's own kubeconfig as much as CodeFlow's: the panel asks before calling this).
+/// A copy of the file is taken first.
+pub async fn use_azure_cli(context: &str) -> Result<AzureCliSwitch, String> {
+    let context = context.trim();
+    check_arg("context", context)?;
+    let kubelogin = cli::find("kubelogin").ok_or_else(|| format!("kubelogin is not installed — install it with `{}`", kubelogin_install()))?;
+    let files = Files::current().await;
+    let _writing = WRITING.lock().await;
+    let docs: Vec<(PathBuf, Value)> = files.read_order().into_iter().filter_map(|path| load(&path).ok().map(|doc| (path, doc))).collect();
+    let file = entra_file(&docs, context)?;
+    let backup = backup_of(&file)?;
+    let path = file.to_string_lossy().into_owned();
+    let args = strings(["convert-kubeconfig", "-l", "azurecli", "--context", context, "--kubeconfig", &path]);
+    cli::run_ok(&kubelogin.to_string_lossy(), &args, None, PLUGIN_TIMEOUT).await.map_err(|e| format!("kubelogin: {}", e.trim()))?;
+    Ok(AzureCliSwitch { file: path, backup: backup.to_string_lossy().into_owned() })
 }
 
 #[cfg(test)]
@@ -2032,6 +2127,14 @@ contexts:
         assert_eq!((aws.login, aws.profile.as_str()), (Login::Aws, "work"));
         let azure = auth_of_user(&json!({"name": "u", "user": {"exec": {"command": "kubelogin", "args": ["get-token", "--login", "devicecode"]}}}));
         assert!(azure.interactive && azure.login == Login::Azure);
+        // kubelogin's own default is a device code; the plugin's environment beats its flags.
+        let kubelogin = |args: Value, env: Value| auth_of_user(&json!({"name": "u", "user": {"exec": {"command": "/usr/local/bin/kubelogin", "args": args, "env": env}}}));
+        assert!(kubelogin(json!(["get-token", "--server-id", "6dae42f8"]), Value::Null).interactive);
+        assert!(kubelogin(json!(["get-token", "--login=interactive"]), Value::Null).interactive);
+        assert!(!kubelogin(json!(["get-token", "-l", "azurecli"]), Value::Null).interactive);
+        assert!(!kubelogin(json!(["get-token", "--login", "spn"]), Value::Null).interactive);
+        assert!(kubelogin(json!(["get-token", "--login", "azurecli"]), json!([{"name": "AAD_LOGIN_METHOD", "value": "devicecode"}])).interactive);
+        assert!(!kubelogin(json!(["get-token", "--login", "devicecode"]), json!([{"name": "AAD_LOGIN_METHOD", "value": "azurecli"}])).interactive);
         let plain = Auth::default();
 
         let hint = |error: &str, auth: &Auth| hint_for(error, auth);
@@ -2047,7 +2150,9 @@ contexts:
         assert_eq!(hint("Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout", &plain).as_deref(), Some("unreachable"));
         assert_eq!(hint("dial tcp: lookup x.privatelink.eastus.azmk8s.io: no such host", &plain).as_deref(), Some("unreachable"));
         assert_eq!(hint("The connection to the server localhost:8080 was refused - did you specify the right host or port?", &plain).as_deref(), Some("unreachable"));
-        assert_eq!(hint("kubectl did not answer within 25 s", &azure).as_deref(), Some("interactive"));
+        assert_eq!(hint("kubectl did not answer within 25 s", &azure).as_deref(), Some("azDeviceCode"));
+        assert_eq!(hint("To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABC123", &azure).as_deref(), Some("azDeviceCode"));
+        assert_eq!(hint("kubectl did not answer within 25 s", &Auth { login: Login::Other, interactive: true, ..Auth::default() }).as_deref(), Some("interactive"));
         assert_eq!(hint("kubectl did not answer within 25 s", &plain).as_deref(), Some("unreachable"));
         assert_eq!(hint("could not start kubectl: No such file or directory", &plain).as_deref(), Some("kubectl"));
         assert_eq!(hint("Error from server (Forbidden): something else", &plain), None);
@@ -2056,6 +2161,27 @@ contexts:
         let docs = vec![parse(USERS_CONFIG).unwrap()];
         assert_eq!(auth_of(&docs, "orbstack"), Auth::default());
         assert_eq!(auth_of(&docs, "missing"), Auth::default());
+    }
+
+    #[test]
+    fn the_entra_switch_rewrites_the_file_that_holds_the_user() {
+        let user_file = PathBuf::from("/home/me/.kube/config");
+        let app_file = PathBuf::from("/state/containers/kubeconfig");
+        let entra = json!({"name": "clusterUser_rg_aks", "user": {"exec": {"command": "kubelogin", "args": ["get-token", "--login", "devicecode", "--server-id", "6dae42f8"]}}});
+        let mine = json!({
+            "contexts": [{"name": "aks-dev", "context": {"cluster": "aks", "user": "clusterUser_rg_aks"}}, {"name": "kind", "context": {"cluster": "kind", "user": "kind-admin"}}],
+            "users": [entra.clone(), {"name": "kind-admin", "user": {"token": "x"}}],
+        });
+        let docs = vec![(user_file.clone(), mine), (app_file.clone(), json!({}))];
+        assert_eq!(entra_file(&docs, "aks-dev").unwrap(), user_file);
+        assert!(entra_file(&docs, "kind").unwrap_err().contains("Entra"));
+        assert!(entra_file(&docs, "nope").unwrap_err().contains("no context"));
+        // The context in one file and its user in another: kubelogin, given one file, reaches neither.
+        let split = vec![
+            (user_file.clone(), json!({"contexts": [{"name": "aks-dev", "context": {"user": "clusterUser_rg_aks"}}]})),
+            (app_file.clone(), json!({"users": [entra]})),
+        ];
+        assert!(entra_file(&split, "aks-dev").unwrap_err().contains("convert-kubeconfig"));
     }
 
     #[test]
