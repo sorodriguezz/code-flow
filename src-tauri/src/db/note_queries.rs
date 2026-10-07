@@ -13,8 +13,8 @@
 //! **Whatever writes `content` rewrites what is derived from it.** `excerpt`, `word_count` and
 //! nothing else — but those two are exactly what a list wants from a body it may not read, so a
 //! row whose derived columns disagree with its content shows the user a stale preview forever.
-//! [`save_note`], [`create_note`] and [`duplicate_note`] are the only writers of `content`, and
-//! all three go through [`derive`].
+//! [`save_note`], [`create_note`], [`duplicate_note`] and [`pull_file`] are the only writers of
+//! `content`, and all four go through [`derive`].
 //!
 //! What is *not* here: any notion of markdown. A note's body is text to this layer — it is stored,
 //! searched as a string, and measured. Rendering, outlines and formatting are the frontend's.
@@ -36,9 +36,11 @@ use super::queries::now;
 
 /// Every column *except* `content`. See the module comment.
 const NOTE_META_COLUMNS: &str = "id, workspace_id, book_id, title, excerpt, tags, pinned, \
-                                 word_count, sort_order, created_at, updated_at, scope";
+                                 word_count, sort_order, created_at, updated_at, scope, \
+                                 origin_project_id, origin_path";
 const NOTE_COLUMNS: &str = "id, workspace_id, book_id, title, content, excerpt, tags, pinned, \
-                            word_count, sort_order, created_at, updated_at, scope";
+                            word_count, sort_order, created_at, updated_at, scope, \
+                            origin_project_id, origin_path";
 const BOOK_COLUMNS: &str =
     "id, workspace_id, parent_id, name, color, sort_order, created_at, updated_at, scope";
 const TEMPLATE_COLUMNS: &str = "id, workspace_id, name, description, icon, content, tags, \
@@ -85,6 +87,8 @@ fn map_meta(row: &rusqlite::Row) -> rusqlite::Result<NoteMeta> {
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
         scope: row.get(11)?,
+        origin_project_id: row.get(12)?,
+        origin_path: row.get(13)?,
     })
 }
 
@@ -103,6 +107,8 @@ fn map_note(row: &rusqlite::Row) -> rusqlite::Result<NoteRow> {
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
         scope: row.get(12)?,
+        origin_project_id: row.get(13)?,
+        origin_path: row.get(14)?,
     })
 }
 
@@ -388,7 +394,7 @@ pub fn create_note(
         .unwrap_or_else(|| "workspace".to_string());
     conn.execute(
         &format!("INSERT INTO notes ({NOTE_COLUMNS}) \
-                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, '', '')"),
         params![
             id,
             workspace_id,
@@ -418,6 +424,8 @@ pub fn create_note(
         created_at: timestamp.clone(),
         updated_at: timestamp,
         scope,
+        origin_project_id: String::new(),
+        origin_path: String::new(),
     })
 }
 
@@ -737,6 +745,8 @@ pub fn duplicate_note(
         // second unreachable note rather than a copy the user can open.
         return Ok(None);
     };
+    // Not tied to the original's file, if it has one: two notes writing one file would undo each
+    // other on every save. `create_note` writes the copy with no origin.
     create_note(
         conn,
         &source.workspace_id,
@@ -746,6 +756,161 @@ pub fn duplicate_note(
         &source.tags,
     )
     .map(Some)
+}
+
+// ---------------------------------------------------------------------------
+// The repository bridge
+// ---------------------------------------------------------------------------
+
+/// The live note mirroring `rel_path` of `project_id` in this workspace, if there is one.
+///
+/// Scoped to the workspace for the reason `diagram_queries::diagram_for_file` is: a note in another
+/// workspace exists, but the view asking cannot open it.
+pub fn note_for_file(
+    conn: &Connection,
+    workspace_id: &str,
+    project_id: &str,
+    rel_path: &str,
+) -> rusqlite::Result<Option<NoteRow>> {
+    conn.query_row(
+        &format!(
+            "SELECT {NOTE_COLUMNS} FROM notes \
+             WHERE workspace_id = ?1 AND origin_project_id = ?2 AND origin_path = ?3 \
+               AND deleted_at = '' \
+             ORDER BY created_at LIMIT 1"
+        ),
+        params![workspace_id, project_id, rel_path],
+        map_note,
+    )
+    .optional()
+}
+
+/// The book this workspace collects `project_id`'s Markdown files in, made on first use and named
+/// after the repository.
+///
+/// Found by `origin_project_id`, never by name — see that column — so a book the user renamed still
+/// receives the next file, and one they deleted is simply made again.
+fn repo_book(
+    conn: &Connection,
+    workspace_id: &str,
+    project_id: &str,
+    project_name: &str,
+) -> rusqlite::Result<String> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM note_books WHERE workspace_id = ?1 AND origin_project_id = ?2 \
+             ORDER BY sort_order LIMIT 1",
+            params![workspace_id, project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let book = create_book(conn, workspace_id, None, project_name, "")?;
+    conn.execute(
+        "UPDATE note_books SET origin_project_id = ?2 WHERE id = ?1",
+        params![book.id, project_id],
+    )?;
+    Ok(book.id)
+}
+
+/// Files a Markdown file of a working tree as a note of this workspace — "Send to Notes" — and
+/// answers with it.
+///
+/// Idempotent on `(workspace, project, path)`: sending the same file twice reaches the same note,
+/// with its body refreshed from `content` (the file as the caller just read it), which is what
+/// makes this a bridge rather than an import. A new note lands in the repository's book.
+///
+/// `content` comes in rather than being read here because this layer does not touch the
+/// filesystem — the same split `diagram_queries::link_file` keeps.
+#[allow(clippy::too_many_arguments)]
+pub fn link_file(
+    conn: &Connection,
+    workspace_id: &str,
+    project_id: &str,
+    project_name: &str,
+    rel_path: &str,
+    title: &str,
+    content: &str,
+    tags: &str,
+) -> rusqlite::Result<NoteRow> {
+    if let Some(existing) = note_for_file(conn, workspace_id, project_id, rel_path)? {
+        return pull_file(conn, &existing.id, content)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows);
+    }
+    // A trashed note still tied to this file would start writing it again the day it is restored,
+    // beside the note made now. It comes back as an ordinary note instead.
+    conn.execute(
+        "UPDATE notes SET origin_project_id = '', origin_path = '' \
+         WHERE workspace_id = ?1 AND origin_project_id = ?2 AND origin_path = ?3 \
+           AND deleted_at <> ''",
+        params![workspace_id, project_id, rel_path],
+    )?;
+    let book_id = repo_book(conn, workspace_id, project_id, project_name)?;
+    let meta = create_note(conn, workspace_id, &book_id, title, content, tags)?;
+    set_origin(conn, &meta.id, project_id, rel_path)?;
+    get_note(conn, &meta.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+/// Ties a note to the file it was just saved as — "Save in a repository".
+///
+/// `updated_at` is left alone: the body did not change, and the gallery sorts by recency.
+pub fn set_origin(
+    conn: &Connection,
+    id: &str,
+    project_id: &str,
+    rel_path: &str,
+) -> rusqlite::Result<Option<NoteMeta>> {
+    conn.execute(
+        "UPDATE notes SET origin_project_id = ?2, origin_path = ?3 WHERE id = ?1",
+        params![id, project_id, rel_path],
+    )?;
+    meta_of(conn, id)
+}
+
+/// Writes what the working tree holds into a note that mirrors it, and answers with the row.
+///
+/// `Ok` with the row untouched when the body already matches, so re-reading an unchanged file costs
+/// one comparison. `None` when the note is gone. The title and the tags stay: they are the note's,
+/// and the file only holds the body.
+///
+/// **No version is recorded**, as in `diagram_queries::pull_file`: the change arrived from a
+/// working tree, which is where its history already is.
+pub fn pull_file(conn: &Connection, id: &str, content: &str) -> rusqlite::Result<Option<NoteRow>> {
+    let Some(existing) = get_note(conn, id)? else {
+        return Ok(None);
+    };
+    if existing.content == content {
+        return Ok(Some(existing));
+    }
+    let (excerpt, word_count) = derive(content);
+    conn.execute(
+        "UPDATE notes SET content = ?2, excerpt = ?3, word_count = ?4, updated_at = ?5 \
+         WHERE id = ?1 AND deleted_at = ''",
+        params![id, content, excerpt, word_count, now()],
+    )?;
+    get_note(conn, id)
+}
+
+/// Cuts a note loose from its file. The body stays as it is; the note stops writing the file and
+/// stops being rewritten by it. The file stays too — it is the repository's.
+pub fn unlink_file(conn: &Connection, id: &str) -> rusqlite::Result<Option<NoteMeta>> {
+    conn.execute(
+        "UPDATE notes SET origin_project_id = '', origin_path = '' WHERE id = ?1",
+        params![id],
+    )?;
+    meta_of(conn, id)
+}
+
+/// Whether any note — live or trashed, in any workspace — still names `rel_path` of `project_id`.
+/// See `repo_files::free_path`.
+pub fn origin_taken(conn: &Connection, project_id: &str, rel_path: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM notes WHERE origin_project_id = ?1 AND origin_path = ?2)",
+        params![project_id, rel_path],
+        |row| row.get(0),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2150,5 +2315,66 @@ mod tests {
         );
         assert!(first.books.iter().any(|b| b.name == "Aqui"));
         assert!(first.books.iter().all(|b| b.name != "Alla"));
+    }
+
+    /// "Send to Notes" twice is one note — refreshed from the file — in the repository's own book.
+    #[test]
+    fn a_file_sent_twice_is_one_note_in_its_repository_book() {
+        let conn = workspace();
+        let first =
+            link_file(&conn, "w1", "p1", "api", "docs/plan.md", "Plan", "# Plan\nuno", "[]").unwrap();
+        assert_eq!((first.origin_project_id.as_str(), first.origin_path.as_str()), ("p1", "docs/plan.md"));
+        let book = first.book_id.clone().unwrap();
+        assert_ne!(book, "b1", "it lands in the repository's book, not the user's");
+
+        let again =
+            link_file(&conn, "w1", "p1", "api", "docs/plan.md", "Otro", "# Plan\nuno dos tres", "[]").unwrap();
+        assert_eq!(again.id, first.id, "the same note");
+        assert_eq!(again.title, "Plan", "the title is the note's, not the file's");
+        assert_eq!(again.content, "# Plan\nuno dos tres");
+        assert_eq!(again.word_count, 5, "and what is derived from the body follows it");
+
+        // The book is found by repository, not by name: renamed, it still receives the next file.
+        rename_book(&conn, &book, "Documentación").unwrap();
+        let other = link_file(&conn, "w1", "p1", "api", "README.md", "README", "hola", "[]").unwrap();
+        assert_eq!(other.book_id.as_deref(), Some(book.as_str()));
+    }
+
+    #[test]
+    fn a_pull_rewrites_the_body_only_when_the_file_differs() {
+        let conn = workspace();
+        let note = create_note(&conn, "w1", "b1", "Runbook", "uno", "[\"ops\"]").unwrap();
+        set_origin(&conn, &note.id, "p1", ".codeflow/notes/runbook.md").unwrap();
+        let same = pull_file(&conn, &note.id, "uno").unwrap().unwrap();
+        assert_eq!(same.updated_at, note.updated_at, "an unchanged file writes nothing");
+
+        let pulled = pull_file(&conn, &note.id, "uno\n\ndos tres").unwrap().unwrap();
+        assert_eq!(pulled.content, "uno\n\ndos tres");
+        assert_eq!(pulled.word_count, 3);
+        assert_eq!(pulled.tags, "[\"ops\"]", "the tags are the note's");
+
+        let cut = unlink_file(&conn, &note.id).unwrap().unwrap();
+        assert!(cut.origin_path.is_empty() && cut.origin_project_id.is_empty());
+        assert_eq!(get_note(&conn, &note.id).unwrap().unwrap().content, "uno\n\ndos tres", "the body stays");
+    }
+
+    /// Two notes tied to one file would undo each other on every save.
+    #[test]
+    fn a_copy_and_a_restored_note_do_not_share_a_file_with_another_note() {
+        let conn = workspace();
+        let note = create_note(&conn, "w1", "b1", "Plan", "uno", "[]").unwrap();
+        set_origin(&conn, &note.id, "p1", "plan.md").unwrap();
+        assert!(origin_taken(&conn, "p1", "plan.md").unwrap());
+
+        let copy = duplicate_note(&conn, &note.id, "Copia de Plan").unwrap().unwrap();
+        assert!(copy.origin_path.is_empty(), "a copy is not tied to the original's file");
+
+        trash_note(&conn, &note.id).unwrap();
+        let sent = link_file(&conn, "w1", "p1", "api", "plan.md", "Plan", "uno", "[]").unwrap();
+        assert_ne!(sent.id, note.id, "a trashed note is not reached");
+        let trashed: String = conn
+            .query_row("SELECT origin_path FROM notes WHERE id = ?1", params![note.id], |row| row.get(0))
+            .unwrap();
+        assert!(trashed.is_empty(), "and it comes back from the trash untied");
     }
 }

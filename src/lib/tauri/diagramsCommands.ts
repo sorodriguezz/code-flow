@@ -132,6 +132,15 @@ export const diagramsPullFile = (id: string) => invoke<DiagramSync>("diagrams_pu
 export const diagramsUnlinkFile = (id: string) =>
   invoke<DiagramMetaRow | null>("diagrams_unlink_file", { id });
 
+/**
+ * "Save in a repository": writes a diagram made in the app as a file in `.codeflow/diagrams/` of one
+ * of the workspace's repositories — `.drawio`, `.excalidraw` or `.dbml`, by its dialect — and ties
+ * the two together, exactly as a file opened from the editor is. Answers the diagram's metadata and
+ * the version of the file written, which the next save is checked against.
+ */
+export const diagramsSaveToRepo = (id: string, projectId: string) =>
+  invoke<DiagramSaved>("diagrams_save_to_repo", { id, projectId });
+
 
 /**
  * One diagram's past versions, newest first and without their bodies.

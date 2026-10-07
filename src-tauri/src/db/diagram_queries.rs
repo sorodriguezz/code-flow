@@ -41,12 +41,12 @@ const TEMPLATE_COLUMNS: &str = "id, workspace_id, name, description, icon, doc, 
                                 sort_order, created_at, updated_at";
 
 /// The dialect an embedded draw.io reads and writes.
-const FORMAT_MXGRAPH: &str = "mxgraph";
+pub(crate) const FORMAT_MXGRAPH: &str = "mxgraph";
 /// The schema dialect. Mirrors `FORMAT_DBML` in `lib/diagrams/doc.ts`.
-const FORMAT_DBML: &str = "dbml";
+pub(crate) const FORMAT_DBML: &str = "dbml";
 /// The whiteboard dialect: an Excalidraw scene, stored as its `.excalidraw` file. Mirrors
 /// `FORMAT_EXCALIDRAW` in `lib/diagrams/doc.ts`.
-const FORMAT_EXCALIDRAW: &str = "excalidraw";
+pub(crate) const FORMAT_EXCALIDRAW: &str = "excalidraw";
 
 fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<DiagramFolderRow> {
     Ok(DiagramFolderRow {
@@ -619,6 +619,35 @@ pub fn unlink_file(conn: &Connection, id: &str) -> rusqlite::Result<Option<Diagr
     meta_of(conn, id)
 }
 
+/// Ties a diagram made in the app to the file it was just saved as — the step that turns
+/// "Save in a repository" into the same bridge [`link_file`] makes.
+///
+/// `updated_at` is left alone: the document did not change, and a diagram that jumps to the top of
+/// a list sorted by recency for having been saved somewhere is a diagram the user goes looking for.
+pub fn set_origin(
+    conn: &Connection,
+    id: &str,
+    project_id: &str,
+    rel_path: &str,
+) -> rusqlite::Result<Option<DiagramMeta>> {
+    conn.execute(
+        "UPDATE diagrams SET origin_project_id = ?2, origin_path = ?3 WHERE id = ?1",
+        params![id, project_id, rel_path],
+    )?;
+    meta_of(conn, id)
+}
+
+/// Whether any diagram — in any workspace — already mirrors `rel_path` of `project_id`. What a new
+/// file name has to avoid as much as an existing file: two diagrams writing one file would undo
+/// each other on every save.
+pub fn origin_taken(conn: &Connection, project_id: &str, rel_path: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM diagrams WHERE origin_project_id = ?1 AND origin_path = ?2)",
+        params![project_id, rel_path],
+        |row| row.get(0),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Folders
 // ---------------------------------------------------------------------------
@@ -1053,6 +1082,30 @@ mod tests {
         assert!(
             diagram_for_file(&conn, "w1", "p1", "db/schema.dbml").unwrap().is_none(),
             "so the file is free to be linked again",
+        );
+    }
+
+    /// "Save in a repository" ties a diagram made in the app to its new file, and it is from then on
+    /// the bridge a file opened from the editor is.
+    #[test]
+    fn a_saved_diagram_becomes_the_bridge_to_its_file() {
+        let conn = workspaces();
+        let made = create_diagram(&conn, "w1", None, "Arquitectura", "<mxGraphModel/>", FORMAT_MXGRAPH, "[]")
+            .unwrap();
+        assert!(!origin_taken(&conn, "p1", ".codeflow/diagrams/arquitectura.drawio").unwrap());
+
+        let tied = set_origin(&conn, &made.id, "p1", ".codeflow/diagrams/arquitectura.drawio")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tied.origin_path, ".codeflow/diagrams/arquitectura.drawio");
+        assert_eq!(tied.updated_at, made.updated_at, "the document did not change");
+        assert!(origin_taken(&conn, "p1", ".codeflow/diagrams/arquitectura.drawio").unwrap());
+        assert_eq!(
+            diagram_for_file(&conn, "w1", "p1", ".codeflow/diagrams/arquitectura.drawio")
+                .unwrap()
+                .map(|row| row.id),
+            Some(made.id),
+            "opening the file from the editor now reaches this diagram",
         );
     }
 

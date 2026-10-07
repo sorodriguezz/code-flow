@@ -25,6 +25,7 @@ import { TemplatePickerModal } from "./TemplatePickerModal";
 import { ICON_BUTTON, TagPill } from "./notesChrome";
 import { TREE_COLORS } from "../../lib/swatchColors";
 import { scopeMenuItems } from "../../lib/scopeMenu";
+import { noteRepoItems } from "./noteRepoItems";
 import { buildBookTree, descendantIds, flattenTree } from "../../lib/notes/tree";
 import { exportNotes, importMarkdownFiles, notebookForExport } from "../../lib/notes/exportActions";
 import type { NoteTreeRow as NoteTreeRowData } from "../../types/notes";
@@ -598,6 +599,7 @@ export function NoteExplorer() {
         icon: Copy,
         onClick: () => void duplicateNote(noteId),
       },
+      ...noteRepoItems(noteId),
       {
         // No confirmation: it lands in the trash, which is where it is undone.
         label: t("notes.moveToTrash"),

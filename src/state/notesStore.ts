@@ -15,6 +15,7 @@ import {
   notesLoadTree,
   notesMoveBook,
   notesMoveNote,
+  notesPullFile,
   notesPurgeNote,
   notesRenameBook,
   notesReorderBooks,
@@ -22,29 +23,36 @@ import {
   notesRestoreNote,
   notesRewriteLinks,
   notesSaveNote,
+  notesSaveToRepo,
   notesSearch,
   notesMoveBookToWorkspace,
   notesSetBookColor,
   notesSetBookScope,
   notesSetPinned,
+  notesUnlinkFile,
   notesUpdateTemplate,
 } from "../lib/tauri/notesCommands";
+import { onRepoFsChanged } from "../lib/tauri/events";
+import { describePath, isChangedOnDisk } from "../lib/editorFiles";
 import { serializeTags, parseTags } from "../lib/notes/tags";
 import { builtInTemplates, toTemplate } from "../lib/notes/templates";
 import { descendantIds } from "../lib/notes/tree";
 import type { ImportedMarkdown } from "../lib/notes/importMarkdown";
 import { notifyUnsavedChanged, registerUnsavedProvider } from "../lib/unsavedWork";
-import { confirmAction } from "./confirmStore";
+import { chooseAction, confirmAction } from "./confirmStore";
 import { translate } from "./languageStore";
-import { pushErrorToast, useToastStore } from "./toastStore";
+import { pushErrorToast, pushSuccessToast, useToastStore } from "./toastStore";
 import { useAiRunStore } from "./aiRunStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { isLinkedNote } from "../types/notes";
 import type {
   Note,
   NoteDraft,
   NoteBookRow,
+  NoteFileVersion,
   NoteGalleryView,
   NoteMetaRow,
+  NoteRow,
   NoteSearchHit,
   NoteSort,
   NoteTemplate,
@@ -278,6 +286,20 @@ interface NotesState {
   trash: NoteTrashRow[] | null;
 
   /**
+   * For each note that mirrors a file of a working tree, the version of that file it last read or
+   * wrote — what its next save is checked against (`notesSaveNote`). `null` for a file that could
+   * not be read when the note opened: the next save recreates it, unless something appeared there.
+   */
+  fileVersions: Record<string, NoteFileVersion | null>;
+  /**
+   * The open note, while its last save was refused because its file changed on disk (a pull, a
+   * checkout, another editor) and the person has not yet said whether to reload or overwrite.
+   */
+  fileConflict: string | null;
+  /** Why the open note's file could not be read when it opened, or `""`. */
+  fileError: string;
+
+  /**
    * Points the whole workspace at `workspaceId`, dropping everything the outgoing one had on
    * screen. `null` — the state a deleted workspace leaves behind — empties it and loads nothing.
    *
@@ -309,8 +331,31 @@ interface NotesState {
   noteChangedElsewhere: (noteId: string | null) => Promise<void>;
   /** Edits the open note. The only write path the editor uses. */
   editDraft: (patch: Partial<Pick<NoteDraft, "title" | "content" | "tags">>) => void;
-  /** Writes the draft now, if it is dirty. Called on close, on switch, and on the debounce. */
-  flush: () => Promise<void>;
+  /**
+   * Writes the draft now, if it is dirty. Called on close, on switch, and on the debounce.
+   *
+   * For a note that mirrors a file, a write refused because the file changed on disk is asked about
+   * (`interactive`, the default) — reload or overwrite; the quit guard passes `false` and leaves the
+   * draft unsaved instead. `force` is the "overwrite" answer.
+   */
+  flush: (options?: { interactive?: boolean; force?: boolean }) => Promise<void>;
+
+  /**
+   * Re-reads the open note's file when it mirrors one — on a change in the working tree. A clean
+   * draft only: unsaved edits are the person's, and the next save is what settles the two.
+   */
+  syncFromDisk: (id: string) => Promise<void>;
+  /** The answer to a refused save (`fileConflict`): take the file's copy, or write over it. */
+  resolveFileConflict: (answer: "reload" | "overwrite") => Promise<void>;
+  /** Asks again about the open note's refused save — the status bar's file chip, after a Cancel. */
+  reviewFileConflict: () => Promise<void>;
+  /**
+   * "Save in a repository": writes the note as a Markdown file in `.codeflow/notes/` of one of the
+   * workspace's repositories, and from then on every save writes it. See `notesSaveToRepo`.
+   */
+  saveToRepo: (id: string, projectId: string) => Promise<void>;
+  /** Cuts the note loose from its file; both keep what they have. */
+  unlinkFromRepo: (id: string) => Promise<void>;
 
   /**
    * Registers an AI write against `noteId`, and refuses a second one on the same note.
@@ -491,6 +536,9 @@ function clearedWorkspaceState(): Partial<NotesState> {
     sort: "manual",
     trashOpen: false,
     trash: null,
+    fileVersions: {},
+    fileConflict: null,
+    fileError: "",
   };
 }
 
@@ -536,6 +584,9 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   outlineOpen: false,
   trashOpen: false,
   trash: null,
+  fileVersions: {},
+  fileConflict: null,
+  fileError: "",
 
   setWorkspace: async (workspaceId) => {
     if (pendingLoad?.workspaceId === workspaceId) return pendingLoad.promise;
@@ -749,23 +800,41 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     if (get().trashOpen) set({ trashOpen: false });
     if (get().activeId === id) return;
     // The outgoing note first, and awaited: opening B before A's last sentence has been written
-    // would race the two saves.
-    await get().flush();
+    // would race the two saves. Quietly, because a refused file write is asked about just below,
+    // where the answer can still keep the note open.
+    await get().flush({ interactive: false });
+    if (!(await settledBeforeLeaving(get))) return;
 
-    const cached = get().bodies[id];
+    // A note that mirrors a file opens from the file, never from the cache: the working tree is
+    // where its latest text is, and a body cached before a pull would reopen as it was.
+    const linked = isLinkedNote(get().notes.find((n) => n.id === id));
+    const cached = linked ? undefined : get().bodies[id];
     if (cached !== undefined) {
       set((state) => ({
         activeId: id,
         draft: draftFor(state.notes, id, cached),
         savedAt: null,
+        fileError: "",
         bodyOrder: touch(state.bodyOrder, id),
       }));
       return;
     }
 
-    set({ activeId: id, draft: null, openingId: id, savedAt: null });
+    set({ activeId: id, draft: null, openingId: id, savedAt: null, fileError: "" });
     try {
-      const row = await notesGetNote(id);
+      let row: NoteRow | null;
+      if (linked) {
+        const sync = await notesPullFile(id);
+        row = sync.row;
+        if (get().activeId === id) {
+          set((state) => ({
+            fileVersions: { ...state.fileVersions, [id]: sync.version },
+            fileError: sync.file_error,
+          }));
+        }
+      } else {
+        row = await notesGetNote(id);
+      }
       // The user may have clicked on to a third note while this was in flight, or the note may
       // have been deleted from another window. Either way this answer is no longer the question.
       if (get().activeId !== id) return;
@@ -773,15 +842,130 @@ export const useNotesStore = create<NotesState>((set, get) => ({
         set({ activeId: null, draft: null, notes: get().notes.filter((n) => n.id !== id) });
         return;
       }
+      const opened = row;
       set((state) => ({
-        draft: { id, title: row.title, content: row.content, tags: parseTags(row.tags), dirty: false },
-        ...cacheBody(state, id, row.content),
+        draft: {
+          id,
+          title: opened.title,
+          content: opened.content,
+          tags: parseTags(opened.tags),
+          dirty: false,
+        },
+        // A pull that changed the body also changed what the list shows of it.
+        notes: linked ? withBodyMeta(state.notes, opened) : state.notes,
+        ...cacheBody(state, id, opened.content),
       }));
     } catch (error) {
       pushErrorToast(String(error));
       set({ activeId: null, draft: null });
     } finally {
       if (get().openingId === id) set({ openingId: null });
+    }
+  },
+
+  syncFromDisk: async (id) => {
+    const { draft, activeId } = get();
+    // Only the open note, and only while it is clean — see the action's comment.
+    if (activeId !== id || !draft || draft.id !== id || draft.dirty) return;
+    if (!isLinkedNote(get().notes.find((n) => n.id === id))) return;
+    try {
+      const sync = await notesPullFile(id);
+      // Re-checked after the round trip: typing can have started, or the note changed, meanwhile.
+      // Writing here then would be a reload over an edit.
+      const open = get().draft;
+      if (get().activeId !== id || !open || open.id !== id || open.dirty) return;
+      set((state) => ({
+        fileVersions: { ...state.fileVersions, [id]: sync.version },
+        fileError: sync.file_error,
+      }));
+      const row = sync.row;
+      if (!row || row.content === open.content) return;
+      set((state) => ({
+        draft: { ...open, content: row.content, dirty: false },
+        notes: withBodyMeta(state.notes, row),
+        ...cacheBody(state, id, row.content),
+      }));
+    } catch {
+      // Silent: this runs off a watcher that fires for every file in the repository.
+    }
+  },
+
+  resolveFileConflict: async (answer) => {
+    const id = get().fileConflict;
+    const draft = get().draft;
+    if (!id || !draft || draft.id !== id) return;
+    if (pendingFlush) await pendingFlush;
+    if (answer === "overwrite") {
+      set({ draft: { ...draft, dirty: true } });
+      await get().flush({ force: true });
+      return;
+    }
+    // "Reload from disk": the unsaved edit goes, on purpose — the file's copy wins. The row already
+    // holds it (the row is saved before the file), so it is in the note's history from here on.
+    try {
+      set({ draft: { ...draft, dirty: false } });
+      const sync = await notesPullFile(id);
+      const current = get().draft;
+      if (!sync.row || current?.id !== id) return;
+      const row = sync.row;
+      set((state) => ({
+        draft: { ...current, content: row.content, dirty: false },
+        notes: withBodyMeta(state.notes, row),
+        fileVersions: { ...state.fileVersions, [id]: sync.version },
+        fileError: sync.file_error,
+        fileConflict: null,
+        ...cacheBody(state, id, row.content),
+      }));
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  reviewFileConflict: async () => {
+    const id = get().fileConflict;
+    if (id && get().activeId === id) await askFileConflict(get, id);
+  },
+
+  saveToRepo: async (id, projectId) => {
+    // The file is written from the row, so the row has to hold what is on screen first.
+    if (get().activeId === id) await get().flush();
+    try {
+      const saved = await notesSaveToRepo(id, projectId);
+      const meta = saved.meta;
+      if (!meta) return;
+      set((state) => ({
+        notes: state.notes.map((note) =>
+          note.id === meta.id
+            ? { ...note, origin_project_id: meta.origin_project_id, origin_path: meta.origin_path }
+            : note,
+        ),
+        // What the next save of this note is checked against — the file was just written.
+        fileVersions: { ...state.fileVersions, [meta.id]: saved.version },
+      }));
+      pushSuccessToast(translate("repoSync.saved", { path: meta.origin_path }));
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  unlinkFromRepo: async (id) => {
+    try {
+      const meta = await notesUnlinkFile(id);
+      if (!meta) return;
+      set((state) => {
+        const fileVersions = { ...state.fileVersions };
+        delete fileVersions[id];
+        return {
+          notes: state.notes.map((note) =>
+            note.id === id ? { ...note, origin_project_id: "", origin_path: "" } : note,
+          ),
+          fileVersions,
+          fileConflict: state.fileConflict === id ? null : state.fileConflict,
+          fileError: state.activeId === id ? "" : state.fileError,
+        };
+      });
+    } catch (error) {
+      pushErrorToast(String(error));
     }
   },
 
@@ -798,7 +982,20 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       });
       return;
     }
-    const row = await notesGetNote(noteId).catch(() => null);
+    // Through the file for a note that mirrors one: the flow wrote the file as well, and the version
+    // this window holds for it is now the one before — the next save would be refused over a
+    // change that was never anybody else's.
+    let fetched: NoteRow | null;
+    if (isLinkedNote(get().notes.find((n) => n.id === noteId))) {
+      const sync = await notesPullFile(noteId).catch(() => null);
+      fetched = sync?.row ?? null;
+      if (sync && get().activeId === noteId) {
+        set((state) => ({ fileVersions: { ...state.fileVersions, [noteId]: sync.version } }));
+      }
+    } else {
+      fetched = await notesGetNote(noteId).catch(() => null);
+    }
+    const row = fetched;
     const draft = get().draft;
     if (!row || !draft || get().activeId !== noteId) return;
     if (!draft.dirty) {
@@ -817,8 +1014,9 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   },
 
   closeNote: async () => {
-    await get().flush();
-    set({ activeId: null, draft: null, savedAt: null });
+    await get().flush({ interactive: false });
+    if (!(await settledBeforeLeaving(get))) return;
+    set({ activeId: null, draft: null, savedAt: null, fileError: "" });
   },
 
   editDraft: (patch) => {
@@ -829,7 +1027,8 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     saveTimer = setTimeout(() => void get().flush(), AUTOSAVE_MS);
   },
 
-  flush: async () => {
+  flush: async (options = {}) => {
+    const { interactive = true, force = false } = options;
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = undefined;
@@ -840,6 +1039,8 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     // ends up written — so joining is both safer and less work.
     if (pendingFlush) return pendingFlush;
 
+    // Set when this run is the one that found the file moved — asked about once it is over.
+    let refused: string | null = null;
     const run = (async () => {
       // **A loop, not a single write, and this is the whole point of the function.**
       //
@@ -856,12 +1057,25 @@ export const useNotesStore = create<NotesState>((set, get) => ({
         // next pass picks that up. Clearing it afterwards would swallow exactly that edit.
         set({ draft: { ...draft, dirty: false }, saving: true });
         try {
-          const saved = await notesSaveNote(
+          const linked = isLinkedNote(get().notes.find((n) => n.id === draft.id));
+          const answer = await notesSaveNote(
             draft.id,
             draft.title,
             draft.content,
             serializeTags(draft.tags),
+            linked ? (get().fileVersions[draft.id] ?? null) : null,
+            // Only on the first pass: an edit typed while the overwrite was in flight is saved
+            // over the file it just wrote, checked like any other.
+            force && pass === 0,
           );
+          if (answer.version) {
+            const version = answer.version;
+            set((state) => ({
+              fileVersions: { ...state.fileVersions, [draft.id]: version },
+              fileConflict: state.fileConflict === draft.id ? null : state.fileConflict,
+            }));
+          }
+          const saved = answer.meta;
           if (!saved) {
             // Deleted from elsewhere while it was being edited. The editor closes rather than
             // re-creating a row the user removed.
@@ -902,6 +1116,14 @@ export const useNotesStore = create<NotesState>((set, get) => ({
           set((state) =>
             state.draft?.id === draft.id ? { draft: { ...state.draft, dirty: true } } : {},
           );
+          if (isChangedOnDisk(error)) {
+            // The note's file moved under it — a pull, another editor. The row is saved (it is
+            // written before the file); the file is not, and that is the person's call. Asked once:
+            // until it is answered, later saves stay quiet about the same conflict.
+            if (get().fileConflict !== draft.id) refused = draft.id;
+            set({ fileConflict: draft.id });
+            return;
+          }
           pushErrorToast(String(error));
           // Not retried in this loop: a failing backend would spin here, and the user has been
           // told. The next debounce or the next close is the retry.
@@ -918,6 +1140,10 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     } finally {
       if (pendingFlush === run) pendingFlush = null;
     }
+    // Outside the write, so the answer's own save ("overwrite") is not waiting on this one. Not
+    // awaited: the debounce that got here has nobody waiting on it. Leaving the note — the one
+    // caller that must wait for the answer — flushes quietly and asks through `settledBeforeLeaving`.
+    if (refused && interactive) void askFileConflict(get, refused);
   },
 
   // ---------- the AI writes ----------
@@ -1655,6 +1881,53 @@ function cacheBody(
   return { bodies, bodyOrder: order };
 }
 
+/**
+ * The list with one note's body-derived fields taken from `row` — what a pull from its file changed:
+ * the excerpt, the word count and `updated_at`. Nothing else, for the reason `flush` merges only the
+ * columns a save wrote.
+ */
+function withBodyMeta(notes: Note[], row: NoteRow): Note[] {
+  return notes.map((note) =>
+    note.id === row.id
+      ? { ...note, excerpt: row.excerpt, word_count: row.word_count, updated_at: row.updated_at }
+      : note,
+  );
+}
+
+/**
+ * "The file changed on disk since you opened it" — the editor's question in the editor's words:
+ * take the file's copy, or write over it. Cancel leaves both as they are, and the next save asks
+ * nothing new until the person answers (see `fileConflict`).
+ */
+async function askFileConflict(get: () => NotesState, id: string): Promise<void> {
+  const note = get().notes.find((n) => n.id === id);
+  const name = note?.origin_path ? describePath(note.origin_path).name : (note?.title ?? "");
+  const answer = await chooseAction({
+    message: translate("editor.diskConflict", { name }),
+    danger: true,
+    choices: [
+      { id: "reload", label: translate("editor.diskReload") },
+      { id: "overwrite", label: translate("editor.diskOverwrite"), variant: "danger" as const },
+    ],
+  });
+  // Answered after the person moved on: there is nothing on screen left to apply it to.
+  if (get().activeId !== id || get().fileConflict !== id) return;
+  if (answer === "reload" || answer === "overwrite") await get().resolveFileConflict(answer);
+}
+
+/**
+ * Whether the open note may be left. A refused save still waiting for its answer is asked about
+ * first, because leaving would lose the edit: the row holds it, but the next open reads the file and
+ * brings the row up to date with that. Cancelled, the note stays open; reloaded or overwritten, the
+ * edit's fate was the person's choice.
+ */
+async function settledBeforeLeaving(get: () => NotesState): Promise<boolean> {
+  const { draft, fileConflict } = get();
+  if (!draft || fileConflict !== draft.id) return true;
+  await askFileConflict(get, draft.id);
+  return get().fileConflict !== draft.id;
+}
+
 /** Loads the notes of whichever workspace is active. Mirrors `ensureRemoteStoreLoaded`; called
  *  from `App` on workspace change and from the view on mount. */
 export function ensureNotesStoreLoaded(): Promise<void> {
@@ -1711,7 +1984,9 @@ registerUnsavedProvider({
   },
   saveAll: async () => {
     for (let pass = 0; pass < MAX_FLUSH_PASSES; pass++) {
-      await useNotesStore.getState().flush();
+      // Quietly: a note whose file moved on disk is reported as unsaved — which keeps the app open
+      // with the draft intact — rather than asked about inside the quit's own question.
+      await useNotesStore.getState().flush({ interactive: false });
       if (!unsavedNote(useNotesStore.getState())) return [];
     }
     const left = unsavedNote(useNotesStore.getState());
@@ -1866,3 +2141,10 @@ void listen<{ workspaceId: string; noteId?: string }>("notes:changed", ({ payloa
   const state = useNotesStore.getState();
   if (payload.workspaceId === state.workspaceId) void state.noteChangedElsewhere(payload.noteId ?? null);
 });
+
+// The working tree changed: an open note that mirrors a file there re-reads it, when it is clean.
+// `catch` for the reason the diagrams store gives — outside Tauri `listen` rejects at import time.
+void onRepoFsChanged(() => {
+  const { activeId } = useNotesStore.getState();
+  if (activeId) void useNotesStore.getState().syncFromDisk(activeId);
+}).catch(() => {});

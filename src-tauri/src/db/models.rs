@@ -1179,6 +1179,14 @@ pub struct NoteMeta {
     /// deserialises; see `migrations::add_scope_to_scoped_tables`.
     #[serde(default = "scope_workspace")]
     pub scope: String,
+    /// The project whose working tree holds [`Self::origin_path`], or empty.
+    #[serde(default)]
+    pub origin_project_id: String,
+    /// The repo-relative Markdown file this note mirrors, or empty for a note that lives only here.
+    /// On the metadata because the tree marks a linked note, and the tree never reads bodies. See
+    /// `notes.origin_path`.
+    #[serde(default)]
+    pub origin_path: String,
 }
 
 /// One note, body included. Fetched one at a time by [`super::note_queries::get_note`].
@@ -1201,6 +1209,12 @@ pub struct NoteRow {
     /// deserialises; see `migrations::add_scope_to_scoped_tables`.
     #[serde(default = "scope_workspace")]
     pub scope: String,
+    /// See [`NoteMeta::origin_project_id`].
+    #[serde(default)]
+    pub origin_project_id: String,
+    /// See [`NoteMeta::origin_path`].
+    #[serde(default)]
+    pub origin_path: String,
 }
 
 /// A note skeleton the user saved to start from again.

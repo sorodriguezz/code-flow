@@ -2,9 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   DocVersion,
   NoteBookRow,
+  NoteFileVersion,
   NoteMetaRow,
   NoteRow,
+  NoteSaved,
   NoteSearchHit,
+  NoteSync,
   NoteTemplateRow,
   NoteTrashRow,
   NotesWorkspaceTree,
@@ -24,7 +27,7 @@ import type {
  * returns `content` in bulk would quietly undo it. See `db/note_queries.rs`.
  *
  * **Two calls answer with a value rather than an error where a failure would be ordinary.**
- * `notesSaveNote` and `notesMoveNote` return `null` when the note has been deleted underneath the
+ * `notesSaveNote` (its `meta`) and `notesMoveNote` return `null` when the note has been deleted underneath the
  * caller, and `notesMoveBook` returns `false` when a drop would have put a book inside its own
  * subtree. All three are things a second window or a stray drag makes happen; a rejected promise
  * would put a toast on screen for a user who did nothing wrong.
@@ -49,9 +52,55 @@ export const notesCreateNote = (
   tags: string,
 ) => invoke<NoteMetaRow>("notes_create_note", { workspaceId, bookId, title, content, tags });
 
-/** The autosave path. `null` means the note was deleted while it was being edited. */
-export const notesSaveNote = (id: string, title: string, content: string, tags: string) =>
-  invoke<NoteMetaRow | null>("notes_save_note", { id, title, content, tags });
+/**
+ * The autosave path. `meta` is `null` when the note was deleted while it was being edited.
+ *
+ * A note that mirrors a file writes the file too, over `expected` — the version it last read or
+ * wrote — and is refused with `changed-on-disk:` when the file moved since (`isChangedOnDisk`);
+ * `force` is the person's "overwrite" once asked. `version` in the answer is what the next save is
+ * checked against.
+ */
+export const notesSaveNote = (
+  id: string,
+  title: string,
+  content: string,
+  tags: string,
+  expected: NoteFileVersion | null = null,
+  force = false,
+) => invoke<NoteSaved>("notes_save_note", { id, title, content, tags, expected, force });
+
+// ---------- the repository bridge ----------
+
+/**
+ * Re-reads a note's file into it — the read half of the bridge, called on open and when the working
+ * tree changes. Safe on a note with no file, which comes back untouched. A file that could not be
+ * read is `file_error`, not a rejection: the note still opens on what it last had.
+ */
+export const notesPullFile = (id: string) => invoke<NoteSync>("notes_pull_file", { id });
+
+/**
+ * "Send to Notes": files a Markdown file of a working tree as a note that mirrors it — in the
+ * repository's own book, made on first use — and answers with it. Idempotent on the file. The title
+ * and tags are the caller's (read from front matter); the body is the file, exactly.
+ */
+export const notesLinkFile = (
+  workspaceId: string,
+  projectId: string,
+  relPath: string,
+  title: string,
+  tags: string,
+) => invoke<NoteSync>("notes_link_file", { workspaceId, projectId, relPath, title, tags });
+
+/**
+ * "Save in a repository": writes a note as `.codeflow/notes/<name>.md` in one of the workspace's
+ * repositories and ties the two, so every save from then on writes the file.
+ */
+export const notesSaveToRepo = (id: string, projectId: string) =>
+  invoke<NoteSaved>("notes_save_to_repo", { id, projectId });
+
+/** Cuts a note loose from its file, keeping both. */
+export const notesUnlinkFile = (id: string) =>
+  invoke<NoteMetaRow | null>("notes_unlink_file", { id });
 
 /** Refiles a note into another book. There is no "out of every book" — see `notesCreateNote`. */
 export const notesMoveNote = (id: string, bookId: string) =>

@@ -67,6 +67,7 @@ mod scaffold;
 /// Driving this install from a phone on the same network. Off unless the user turns it on.
 mod remotectl;
 mod remotes;
+mod repo_files;
 mod repo_identity;
 mod requirements;
 mod reset;
@@ -1431,6 +1432,10 @@ pub fn run() {
             commands::notes_cmd::notes_get_note,
             commands::notes_cmd::notes_create_note,
             commands::notes_cmd::notes_save_note,
+            commands::notes_cmd::notes_pull_file,
+            commands::notes_cmd::notes_link_file,
+            commands::notes_cmd::notes_save_to_repo,
+            commands::notes_cmd::notes_unlink_file,
             commands::notes_cmd::notes_move_note,
             commands::notes_cmd::notes_reorder_notes,
             commands::notes_cmd::notes_set_pinned,
@@ -1482,6 +1487,8 @@ pub fn run() {
             commands::flows_cmd::flows_rename_flow,
             commands::flows_cmd::flows_set_description,
             commands::flows_cmd::flows_move_flow,
+            commands::flows_cmd::flows_reorder_flows,
+            commands::flows_cmd::flows_reorder_folders,
             commands::flows_cmd::flows_set_scope,
             commands::flows_cmd::flows_move_to_workspace,
             commands::flows_cmd::flows_duplicate_flow,
@@ -1557,6 +1564,7 @@ pub fn run() {
             commands::diagrams_cmd::diagrams_link_file,
             commands::diagrams_cmd::diagrams_pull_file,
             commands::diagrams_cmd::diagrams_unlink_file,
+            commands::diagrams_cmd::diagrams_save_to_repo,
             commands::diagrams_cmd::diagrams_list_versions,
             commands::diagrams_cmd::diagrams_version_content,
             commands::diagrams_cmd::diagrams_delete_version,

@@ -1219,6 +1219,12 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- Tints the book's glyph, the same affordance `remote_hosts.color` gives a host:
             -- "which of these is work and which is the runbook" answered without reading.
             color        TEXT NOT NULL DEFAULT '',
+            -- The repository whose Markdown files "Send to Notes" files here, or empty for a book
+            -- made by hand. Found by this and never by name, so the book can be renamed, moved or
+            -- coloured like any other and the next file from that repository still lands in it —
+            -- the same rule `diagram_folders.origin_project_id` keeps. Also added by
+            -- `add_repo_origin_to_notes` for older databases.
+            origin_project_id TEXT NOT NULL DEFAULT '',
             sort_order   INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL,
             updated_at   TEXT NOT NULL
@@ -1282,7 +1288,13 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             updated_at   TEXT NOT NULL,
             -- '' on a live note, the moment it was trashed on one in the trash — see
             -- `note_queries::trash_note`. Also added by `add_trash_to_notes` for older databases.
-            deleted_at   TEXT NOT NULL DEFAULT ''
+            deleted_at   TEXT NOT NULL DEFAULT '',
+            -- The Markdown file of a working tree this note mirrors: the project, and the path in
+            -- it. Both empty for a note that lives only here, which is every note made before the
+            -- pair. Non-empty makes the note a mirror, like a diagram with an `origin_path`: every
+            -- save writes the file, every open re-reads it. Also added by `add_repo_origin_to_notes`.
+            origin_project_id TEXT NOT NULL DEFAULT '',
+            origin_path  TEXT NOT NULL DEFAULT ''
         );
         -- The gallery's default order, and the sidebar's: most recently touched first.
         CREATE INDEX IF NOT EXISTS idx_notes_recent ON notes (workspace_id, updated_at DESC);
@@ -1988,7 +2000,152 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_trust_to_flows(conn)?;
     add_flow_shares(conn)?;
     add_flow_repo_links(conn)?;
+    add_repo_origin_to_notes(conn)?;
+    seed_manual_flow_order(conn)?;
     Ok(())
+}
+
+/// Notes kept as Markdown files in a repository — "Save in a repository" and "Send to Notes". The
+/// note's file (project and path), and the repository a book collects those files for. See the
+/// columns in the `CREATE TABLE`s above, which a fresh database already has; this is the same
+/// belt-and-braces `add_repo_origin_to_diagrams` uses.
+pub(crate) fn add_repo_origin_to_notes(conn: &Connection) -> rusqlite::Result<()> {
+    for (table, column) in [
+        ("notes", "origin_project_id"),
+        ("notes", "origin_path"),
+        ("note_books", "origin_project_id"),
+    ] {
+        if table_exists(conn, table)? && !has_column(conn, table, column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT '';"
+            ))?;
+        }
+    }
+    // After the columns, for the reason given on `idx_diagrams_origin`.
+    if table_exists(conn, "notes")? {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_notes_origin \
+             ON notes (origin_project_id, origin_path) WHERE origin_path <> '';",
+        )?;
+    }
+    Ok(())
+}
+
+/// The index one list of the flows explorer is read and appended to by — a folder's flows, or the
+/// root's, in their dragged order. Made by [`seed_manual_flow_order`] and nowhere else, because its
+/// presence is also what says that this database's flows have been numbered for that order.
+const FLOW_ORDER_INDEX: &str = "idx_flows_manual_order";
+
+/// Flows and their folders were listed by name, whatever `sort_order` held — creation order, which
+/// nobody saw. Now that they can be dragged into an order of their own, that column is what the
+/// explorer draws, so it is renumbered once, by name: the first launch with dragging shows every list
+/// exactly as the last one without it did.
+///
+/// Once — run again, it would undo every order dragged since. The marker is [`FLOW_ORDER_INDEX`],
+/// made in the same transaction as the renumbering: a database that has it was numbered, and a
+/// fresh one gets it with nothing to number. Not a row in `app_settings`, which a new database
+/// starts without and nothing should have to know to ignore.
+pub(crate) fn seed_manual_flow_order(conn: &Connection) -> rusqlite::Result<()> {
+    for table in ["flows", "flow_folders"] {
+        if !table_exists(conn, table)? {
+            return Ok(());
+        }
+    }
+    let done: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+        params![FLOW_ORDER_INDEX],
+        |row| row.get(0),
+    )?;
+    if done {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    renumber_by_name(
+        &tx,
+        "SELECT id, name, workspace_id FROM flow_folders",
+        "UPDATE flow_folders SET sort_order = ?2 WHERE id = ?1",
+    )?;
+    renumber_by_name(
+        &tx,
+        "SELECT id, name, workspace_id || '/' || COALESCE(folder_id, '') FROM flows",
+        "UPDATE flows SET sort_order = ?2 WHERE id = ?1",
+    )?;
+    tx.execute_batch(&format!(
+        "CREATE INDEX IF NOT EXISTS {FLOW_ORDER_INDEX} ON flows (workspace_id, folder_id, sort_order);"
+    ))?;
+    tx.commit()
+}
+
+/// Renumbers the rows `select` lists — `(id, name, group)` — by name within each group, from zero.
+fn renumber_by_name(conn: &Connection, select: &str, update: &str) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare(select)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut groups: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for (id, name, group) in rows {
+        groups.entry(group).or_default().push((id, name));
+    }
+    let mut update = conn.prepare(update)?;
+    for (_, mut members) in groups {
+        members.sort_by(|a, b| natural_cmp(&a.1, &b.1).then_with(|| a.0.cmp(&b.0)));
+        for (index, (id, _)) in members.iter().enumerate() {
+            update.execute(params![id, index as i64])?;
+        }
+    }
+    Ok(())
+}
+
+/// The order a name sorts in for a person: case and accents folded, a run of digits compared as the
+/// number it is — "Flow 2" before "Flow 10". What the explorer's `localeCompare` with `numeric: true`
+/// and base sensitivity did, close enough that a list renumbered by it reads as it did.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn fold(text: &str) -> Vec<char> {
+        text.chars()
+            .flat_map(char::to_lowercase)
+            .map(|c| match c {
+                'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
+                'é' | 'è' | 'ë' | 'ê' => 'e',
+                'í' | 'ì' | 'ï' | 'î' => 'i',
+                'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+                'ú' | 'ù' | 'ü' | 'û' => 'u',
+                'ñ' => 'n',
+                'ç' => 'c',
+                other => other,
+            })
+            .collect()
+    }
+    let (a, b) = (fold(a), fold(b));
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+            let start = (i, j);
+            while i < a.len() && a[i].is_ascii_digit() {
+                i += 1;
+            }
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            let x: String = a[start.0..i].iter().collect();
+            let y: String = b[start.1..j].iter().collect();
+            let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
+            let order = x.len().cmp(&y.len()).then_with(|| x.cmp(y));
+            if order != Ordering::Equal {
+                return order;
+            }
+        } else {
+            if a[i] != b[j] {
+                return a[i].cmp(&b[j]);
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    (a.len() - i).cmp(&(b.len() - j))
 }
 
 /// Flows kept as files in a repository — see `flows::repo`. One row per linked flow: the project,
@@ -4361,5 +4518,56 @@ mod tests {
         assert_eq!(org("p1").as_deref(), Some("MyOrg"), "the connected spelling wins");
         assert_eq!(org("p2").as_deref(), Some("Unconnected"), "no connection, no rewrite");
         assert_eq!(org("p3"), None, "a project with no Azure link is untouched");
+    }
+
+    /// Flows were listed by name until they could be dragged. The first launch with dragging numbers
+    /// each list by name — once — so nothing moves; a later launch keeps the order dragged since.
+    #[test]
+    fn flows_are_numbered_by_name_once_and_a_dragged_order_survives_the_next_launch() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        // A database from before manual order: no index, which is the marker.
+        conn.execute_batch(
+            "DROP INDEX idx_flows_manual_order;
+             DELETE FROM workspaces;
+             INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                 VALUES ('w1', 'Flow', 'folder', '#111', 0, 't');
+             INSERT INTO flow_folders (id, workspace_id, name, sort_order, created_at, updated_at)
+                 VALUES ('fz', 'w1', 'Zeta', 0, 't', 't'), ('fa', 'w1', 'alfa', 1, 't', 't');
+             INSERT INTO flows (id, workspace_id, folder_id, name, spec, sort_order, created_at, updated_at)
+                 VALUES ('r10', 'w1', NULL, 'Flujo 10', '{}', 0, 't', 't'),
+                        ('r2', 'w1', NULL, 'flujo 2', '{}', 1, 't', 't'),
+                        ('re', 'w1', NULL, 'Éxito', '{}', 2, 't', 't'),
+                        ('in', 'w1', 'fz', 'Dentro', '{}', 7, 't', 't');",
+        )
+        .unwrap();
+
+        seed_manual_flow_order(&conn).unwrap();
+        let order = |table: &str, id: &str| -> i64 {
+            conn.query_row(&format!("SELECT sort_order FROM {table} WHERE id = ?1"), [id], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!((order("flow_folders", "fa"), order("flow_folders", "fz")), (0, 1));
+        assert_eq!(
+            (order("flows", "re"), order("flows", "r2"), order("flows", "r10")),
+            (0, 1, 2),
+            "accents folded, case ignored, numbers compared as numbers",
+        );
+        assert_eq!(order("flows", "in"), 0, "each folder is its own list");
+
+        // Dragged since: the next launch must leave it alone.
+        conn.execute_batch("UPDATE flows SET sort_order = 9 WHERE id = 're';").unwrap();
+        run(&conn).unwrap();
+        assert_eq!(order("flows", "re"), 9);
+    }
+
+    #[test]
+    fn natural_order_reads_like_a_person_sorts() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        assert_eq!(natural_cmp("Flujo 2", "flujo 10"), Less);
+        assert_eq!(natural_cmp("Árbol", "arbol"), Equal);
+        assert_eq!(natural_cmp("beta", "Alfa"), Greater);
+        assert_eq!(natural_cmp("v007", "v7"), Equal);
+        assert_eq!(natural_cmp("Paso", "Paso 1"), Less);
     }
 }

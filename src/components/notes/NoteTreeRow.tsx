@@ -5,6 +5,7 @@ import {
   FileText,
   Book,
   BookOpen,
+  GitBranch,
   Globe,
   Pin,
   type LucideIcon,
@@ -176,6 +177,15 @@ export const NoteTreeRow = memo(function NoteTreeRow({
           <span className="italic text-[var(--cf-text-muted)]">{untitledLabel}</span>
         )}
       </span>
+
+      {/* A note that mirrors a file of a working tree ("Save in a repository", "Send to Notes").
+          Marked because editing it writes that file — the one property of a row here with
+          consequences outside the app. Before the pin, as in the diagrams' tree. */}
+      {!isBook && row.note.origin_path && (
+        <span className="shrink-0 text-[var(--cf-text-muted)]" title={row.note.origin_path}>
+          <GitBranch size={10} />
+        </span>
+      )}
 
       {!isBook && row.note.pinned && (
         <Pin size={10} className="shrink-0 text-[var(--cf-accent)]" fill="currentColor" />

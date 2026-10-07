@@ -36,6 +36,7 @@ import { useFloatingEditorShortcuts, useRemoteActionShortcuts } from "./lib/useG
 import { parseFileIslandRef } from "./lib/editorIslands";
 import { onWindowMessage } from "./lib/windowBus";
 import { showDiagramHere } from "./lib/dbmlBridge";
+import { showNoteHere } from "./lib/notesBridge";
 import { showChatHere } from "./lib/chatBridge";
 import { pushErrorToast } from "./state/toastStore";
 import { SwitcherLock } from "./components/layout/SwitcherLock";
@@ -217,6 +218,18 @@ function AppWindow({ refId }: { refId: string }) {
     return onWindowMessage((message) => {
       if (message.kind !== "open-diagram" || message.to !== WINDOW.label) return;
       void showDiagramHere(message.workspaceId, message.diagramId).catch((e: unknown) =>
+        pushErrorToast(String(e)),
+      );
+    });
+  }, [refId]);
+
+  /** A note sent from a repository's Markdown file, when this is *the* Notes window — the same
+   *  arrangement as the diagram above. See `lib/notesBridge.ts`. */
+  useEffect(() => {
+    if (refId !== "notes") return;
+    return onWindowMessage((message) => {
+      if (message.kind !== "open-note" || message.to !== WINDOW.label) return;
+      void showNoteHere(message.workspaceId, message.noteId).catch((e: unknown) =>
         pushErrorToast(String(e)),
       );
     });

@@ -332,6 +332,10 @@ pub fn set_description(conn: &Connection, id: &str, description: &str) -> rusqli
 
 /// Files a flow in a folder (or the root), at the end of it. A folder of another workspace is
 /// refused by answering `None` — the tree that offered it was stale.
+///
+/// `updated_at` is left alone: where a flow is filed is not part of the flow. A move that touched
+/// it would mark a flow saved in a repository as edited since (`flows_repo_scan` compares the two)
+/// and send a shared flow's unchanged document to every teammate (`flows::share` syncs by it).
 pub fn move_flow(conn: &Connection, id: &str, folder_id: Option<&str>) -> rusqlite::Result<Option<FlowMeta>> {
     let Some(meta) = get_meta(conn, id)? else { return Ok(None) };
     if let Some(folder) = folder_id {
@@ -342,12 +346,46 @@ pub fn move_flow(conn: &Connection, id: &str, folder_id: Option<&str>) -> rusqli
             return Ok(None);
         }
     }
+    if meta.folder_id.as_deref() == folder_id {
+        return Ok(Some(meta));
+    }
     let order = next_flow_order(conn, &meta.workspace_id, folder_id)?;
     conn.execute(
-        "UPDATE flows SET folder_id = ?2, sort_order = ?3, updated_at = ?4 WHERE id = ?1",
-        params![id, folder_id, order, now()],
+        "UPDATE flows SET folder_id = ?2, sort_order = ?3 WHERE id = ?1",
+        params![id, folder_id, order],
     )?;
     get_meta(conn, id)
+}
+
+/// Puts one list of a workspace's flows — a folder's, or the root's — in the order given: the
+/// first id gets `sort_order` 0. What a drag in the explorer ends with, after the move that put the
+/// flow in that list.
+///
+/// Only the workspace's own flows are renumbered. A global flow of another workspace is drawn in the
+/// root list too, but its order belongs to its home's list; an id of one is skipped rather than
+/// written into a numbering it is not part of. `updated_at` is left alone, as in [`move_flow`].
+pub fn reorder_flows(conn: &Connection, workspace_id: &str, ids: &[String]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut update = tx.prepare("UPDATE flows SET sort_order = ?2 WHERE id = ?1 AND workspace_id = ?3")?;
+        for (index, id) in ids.iter().enumerate() {
+            update.execute(params![id, index as i64, workspace_id])?;
+        }
+    }
+    tx.commit()
+}
+
+/// The same for a workspace's folders, which are one flat list.
+pub fn reorder_folders(conn: &Connection, workspace_id: &str, ids: &[String]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut update =
+            tx.prepare("UPDATE flow_folders SET sort_order = ?2 WHERE id = ?1 AND workspace_id = ?3")?;
+        for (index, id) in ids.iter().enumerate() {
+            update.execute(params![id, index as i64, workspace_id])?;
+        }
+    }
+    tx.commit()
 }
 
 /// `true` puts the flow on every workspace's shelf; `false` back on its home's alone.
@@ -476,9 +514,30 @@ pub fn rename_folder(conn: &Connection, id: &str, name: &str) -> rusqlite::Resul
 
 /// Deletes a folder and puts its flows back at the root — explicitly, rather than trusting the
 /// foreign key's `ON DELETE SET NULL` to be enforced on this connection.
+///
+/// They go after the root's own flows, in the order they had in the folder: the root's order is
+/// one the user may have dragged into shape, and numbers that collided with it would shuffle both.
+/// `updated_at` is left alone, as in [`move_flow`].
 pub fn delete_folder(conn: &Connection, id: &str) -> rusqlite::Result<usize> {
     let tx = conn.unchecked_transaction()?;
-    tx.execute("UPDATE flows SET folder_id = NULL, updated_at = ?2 WHERE folder_id = ?1", params![id, now()])?;
+    let home: Option<String> = tx
+        .query_row("SELECT workspace_id FROM flow_folders WHERE id = ?1", params![id], |row| row.get(0))
+        .optional()?;
+    if let Some(workspace_id) = home {
+        let base = next_flow_order(&tx, &workspace_id, None)?;
+        let members: Vec<String> = {
+            let mut statement =
+                tx.prepare("SELECT id FROM flows WHERE folder_id = ?1 ORDER BY sort_order, name COLLATE NOCASE")?;
+            let rows = statement.query_map(params![id], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (index, flow) in members.iter().enumerate() {
+            tx.execute(
+                "UPDATE flows SET folder_id = NULL, sort_order = ?2 WHERE id = ?1",
+                params![flow, base + index as i64],
+            )?;
+        }
+    }
     let deleted = tx.execute("DELETE FROM flow_folders WHERE id = ?1", params![id])?;
     tx.commit()?;
     Ok(deleted)
@@ -579,6 +638,77 @@ mod tests {
 
         delete_folder(&conn, &folder.id).unwrap();
         assert_eq!(get_meta(&conn, &flow.id).unwrap().unwrap().folder_id, None);
+    }
+
+    /// The workspace's own flows as the tree lists them — the global ones of other workspaces left out.
+    fn order(conn: &Connection, workspace: &str) -> Vec<String> {
+        load_tree(conn, workspace)
+            .unwrap()
+            .flows
+            .into_iter()
+            .filter(|f| f.workspace_id == workspace)
+            .map(|f| f.name)
+            .collect()
+    }
+
+    /// A drag ends with a move and a renumbering, and neither is an edit of the flow.
+    #[test]
+    fn a_drag_orders_a_list_without_marking_its_flows_edited() {
+        let conn = workspaces();
+        let a = create(&conn, "w1", "A");
+        let b = create(&conn, "w1", "B");
+        let c = create(&conn, "w1", "C");
+        let foreign = create(&conn, "w2", "Ajeno");
+        set_scope(&conn, &foreign.id, true).unwrap();
+        let before = get_meta(&conn, &a.id).unwrap().unwrap().updated_at;
+
+        reorder_flows(&conn, "w1", &[c.id.clone(), a.id.clone(), b.id.clone(), foreign.id.clone()]).unwrap();
+        assert_eq!(order(&conn, "w1"), ["C", "A", "B"]);
+        assert_eq!(
+            get_meta(&conn, &foreign.id).unwrap().unwrap().sort_order,
+            foreign.sort_order,
+            "another workspace's flow keeps its own place in its own list",
+        );
+
+        let folder = create_folder(&conn, "w1", "Pagos").unwrap();
+        let moved = move_flow(&conn, &a.id, Some(&folder.id)).unwrap().unwrap();
+        assert_eq!(moved.folder_id.as_deref(), Some(folder.id.as_str()));
+        assert_eq!(moved.updated_at, before, "where a flow is filed is not part of the flow");
+    }
+
+    /// Deleting a folder hands its flows to the root after the root's own, in the folder's order.
+    #[test]
+    fn a_deleted_folder_hands_its_flows_to_the_end_of_the_root() {
+        let conn = workspaces();
+        let root = create(&conn, "w1", "Raíz");
+        let folder = create_folder(&conn, "w1", "Pagos").unwrap();
+        let second = create(&conn, "w1", "Segundo");
+        let first = create(&conn, "w1", "Primero");
+        move_flow(&conn, &second.id, Some(&folder.id)).unwrap();
+        move_flow(&conn, &first.id, Some(&folder.id)).unwrap();
+        reorder_flows(&conn, "w1", &[first.id.clone(), second.id.clone()]).unwrap();
+
+        delete_folder(&conn, &folder.id).unwrap();
+        let tree = load_tree(&conn, "w1").unwrap();
+        let names: Vec<_> = tree.flows.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Raíz", "Primero", "Segundo"]);
+        assert!(tree.flows.iter().all(|f| f.folder_id.is_none()));
+        assert_eq!(get_meta(&conn, &root.id).unwrap().unwrap().sort_order, 0);
+    }
+
+    #[test]
+    fn folders_take_the_order_they_are_dragged_into() {
+        let conn = workspaces();
+        let a = create_folder(&conn, "w1", "A").unwrap();
+        let b = create_folder(&conn, "w1", "B").unwrap();
+        let other = create_folder(&conn, "w2", "Otra").unwrap();
+        reorder_folders(&conn, "w1", &[b.id.clone(), a.id.clone(), other.id.clone()]).unwrap();
+        let names: Vec<_> = load_tree(&conn, "w1").unwrap().folders.into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["B", "A"]);
+        let untouched: i64 = conn
+            .query_row("SELECT sort_order FROM flow_folders WHERE id = ?1", params![other.id], |row| row.get(0))
+            .unwrap();
+        assert_eq!(untouched, other.sort_order, "another workspace's folder is not renumbered");
     }
 
     fn shell(script: &str, x: i64) -> (String, Derived) {

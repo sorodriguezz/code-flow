@@ -149,7 +149,7 @@ pub fn diagrams_save_diagram(
     };
 
     let version = match target {
-        Some((repo_path, rel_path)) => Some(write_linked(
+        Some((repo_path, rel_path)) => Some(crate::repo_files::write_linked(
             &repo_path,
             &rel_path,
             &doc,
@@ -159,45 +159,6 @@ pub fn diagrams_save_diagram(
         None => None,
     };
     Ok(DiagramSaved { meta, version })
-}
-
-/// Writes a linked diagram's file over the version it was read at — see [`diagrams_save_diagram`].
-///
-/// With no `expected` version the diagram never read the file (it was missing when the diagram
-/// opened): writing recreates it, unless something has put a file there since, which is a change on
-/// disk like any other. `force` is the user's "overwrite", given after they were asked.
-fn write_linked(
-    repo_path: &str,
-    rel_path: &str,
-    doc: &str,
-    expected: Option<&fsops::DiskVersion>,
-    force: bool,
-) -> Result<fsops::DiskVersion, String> {
-    if force {
-        return fsops::write_file_text_checked(repo_path, rel_path, doc, None);
-    }
-    match expected {
-        Some(version) => fsops::write_file_text_checked(repo_path, rel_path, doc, Some(version)),
-        None => {
-            if fsops::stat_editor_file(repo_path, rel_path, None)?.is_some() {
-                return Err(format!(
-                    "{}: {rel_path} appeared on disk since the diagram was opened",
-                    fsops::CHANGED_ON_DISK
-                ));
-            }
-            fsops::write_file_text_checked(repo_path, rel_path, doc, None)
-        }
-    }
-}
-
-/// A linked diagram's file, and the version of the bytes read — both from one read, so the version
-/// is the version of exactly this text. Anything but UTF-8 text is an error: the diagram would save
-/// it back as something else.
-fn read_linked(repo_path: &str, rel_path: &str) -> Result<(String, fsops::DiskVersion), String> {
-    match fsops::read_editor_file(repo_path, rel_path, false)? {
-        fsops::EditorFile::Text { text, version } => Ok((text, version)),
-        _ => Err(format!("{rel_path} is not a UTF-8 text file")),
-    }
 }
 
 // ---------- the repository bridge ----------
@@ -263,6 +224,12 @@ pub fn diagrams_link_file(
     // Read before the row is touched: a file that cannot be read is not a diagram, and half a link
     // — a row pointing at a path nothing could open — is worse than none.
     let doc = fsops::read_file_text(&project.local_path, &rel_path)?;
+    // A diagram here is one page: the editor hides draw.io's page tabs and the gallery, the search
+    // and the thumbnail all describe one drawing. A file with several would be saved back as the
+    // one on screen. Refused before anything is written, with a prefix the frontend words.
+    if format == diagram_queries::FORMAT_MXGRAPH && doc.matches("<diagram").count() > 1 {
+        return Err(format!("multi-page: {rel_path}"));
+    }
     diagram_queries::link_file(
         &conn,
         &workspace_id,
@@ -290,12 +257,58 @@ pub fn diagrams_pull_file(db: State<Db>, id: String) -> Result<DiagramSync, Stri
     let Some((repo_path, rel_path)) = origin_of_row(&conn, &row) else {
         return Ok(DiagramSync { row: Some(row), file_error: String::new(), version: None });
     };
-    match read_linked(&repo_path, &rel_path) {
+    match crate::repo_files::read_linked(&repo_path, &rel_path) {
         Ok((doc, version)) => {
             let row = diagram_queries::pull_file(&conn, &id, &doc).map_err(|e| e.to_string())?;
             Ok(DiagramSync { row, file_error: String::new(), version: Some(version) })
         }
         Err(message) => Ok(DiagramSync { row: Some(row), file_error: message, version: None }),
+    }
+}
+
+/// Saves a diagram made in the app into one of the workspace's repositories, and ties it to the file.
+///
+/// The file goes in `.codeflow/diagrams/`, named after the diagram, in its own dialect: `.drawio`,
+/// `.excalidraw` or `.dbml`. From then on the diagram is the same bridge a file opened from the
+/// editor is — every save writes the file, every open re-reads it — so the answer carries the
+/// version just written, which is what the next save is checked against.
+#[tauri::command]
+pub fn diagrams_save_to_repo(
+    db: State<Db>,
+    id: String,
+    project_id: String,
+) -> Result<DiagramSaved, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let row = diagram_queries::get_diagram(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "That diagram no longer exists".to_string())?;
+    if !row.origin_path.is_empty() {
+        return Err(format!("{} is already saved in a repository", row.title));
+    }
+    let project = crate::db::queries::get_project(&conn, &project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no such repository: {project_id}"))?;
+    let rel_path = crate::repo_files::free_path(
+        std::path::Path::new(&project.local_path),
+        crate::repo_files::DIAGRAMS_FOLDER,
+        &row.title,
+        file_extension(&row.format),
+        "diagrama",
+        |path| diagram_queries::origin_taken(&conn, &project_id, path).unwrap_or(true),
+    );
+    let version = crate::repo_files::create(&project.local_path, &rel_path, &row.doc)?;
+    let meta = diagram_queries::set_origin(&conn, &id, &project_id, &rel_path)
+        .map_err(|e| e.to_string())?;
+    Ok(DiagramSaved { meta, version: Some(version) })
+}
+
+/// The extension a diagram's dialect is saved under — the one draw.io, Excalidraw and every DBML
+/// tool open it by.
+fn file_extension(format: &str) -> &'static str {
+    match format {
+        diagram_queries::FORMAT_DBML => "dbml",
+        diagram_queries::FORMAT_EXCALIDRAW => "excalidraw",
+        _ => "drawio",
     }
 }
 
@@ -670,6 +683,7 @@ pub fn diagrams_read_import(path: String) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo_files::{read_linked, write_linked};
 
     fn repo() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("cf-diagrams-{}", uuid::Uuid::new_v4()));

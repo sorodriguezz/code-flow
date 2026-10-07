@@ -56,7 +56,14 @@ const ROOT: &str = ".codeflow";
 
 /// What is appended to `.git/info/exclude`. Matched verbatim before appending, so this is
 /// idempotent across every chain in a repository.
-const EXCLUDE_LINE: &str = "/.codeflow/";
+///
+/// The memory folder and nothing else: the rest of `.codeflow/` is the user's — flows, diagrams
+/// and notes saved there to be committed beside the code.
+const EXCLUDE_LINE: &str = "/.codeflow/memory/";
+
+/// What builds before that wrote, which hid every file under `.codeflow/` — a saved flow or note
+/// included — from `git status`. See [`narrow_legacy_exclude`].
+const LEGACY_EXCLUDE_LINE: &str = "/.codeflow/";
 
 /// The folder that actually holds one chain's notes.
 pub fn dir(chain_id: &str) -> PathBuf {
@@ -188,7 +195,17 @@ pub fn forget(chain_id: &str, repos: &[String]) {
 /// did nothing and the whole memory folder showed up in Changes. Idempotent there, which matters
 /// because this runs on every note a chain files.
 fn exclude_from_git(repo_path: &str) {
+    narrow_legacy_exclude(repo_path);
     let _ = crate::git_exclude::exclude(Path::new(repo_path), EXCLUDE_LINE);
+}
+
+/// Swaps the `/.codeflow/` line an earlier build wrote for the memory folder's own.
+///
+/// Called wherever the app saves a document into `.codeflow/` for the user to commit — a repository
+/// where a chain once ran would otherwise hide that file from Changes, and the "commit it with the
+/// code" the save promises would be a commit with nothing in it. The memory stays excluded.
+pub fn narrow_legacy_exclude(repo_path: &str) {
+    let _ = crate::git_exclude::replace(Path::new(repo_path), LEGACY_EXCLUDE_LINE, EXCLUDE_LINE);
 }
 
 #[cfg(test)]

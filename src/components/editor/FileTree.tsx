@@ -13,12 +13,16 @@ import {
   FolderPlus,
   FolderTree,
   ListTree,
+  NotebookPen,
   PenLine,
   RefreshCw,
   Scissors,
   TerminalSquare,
   Trash2,
+  Workflow,
 } from "lucide-react";
+import { isDiagramPath } from "../../lib/dbmlBridge";
+import { isMarkdownPath } from "../../lib/notesBridge";
 import {
   copyPath,
   createDir,
@@ -635,6 +639,8 @@ export function FileTree({
   fsNonce = 0,
   onRefresh,
   onOpenScratch,
+  onOpenInDiagrams,
+  onSendToNotes,
 }: {
   repoPath: string;
   /** The project the terminal dock indexes its shells by — what "Open in Integrated Terminal" files
@@ -692,6 +698,14 @@ export function FileTree({
    * the repository to show it would leave a file behind that nobody asked for.
    */
   onOpenScratch?: (name: string, content: string) => void;
+  /**
+   * "Open in Diagrams" on a diagram file — `.drawio`, `.excalidraw`, `.dbml` — filed as a diagram
+   * that mirrors it (`lib/dbmlBridge.ts`). Left out where there is no editor to save the file's tab
+   * first.
+   */
+  onOpenInDiagrams?: (path: string) => void;
+  /** "Send to Notes" on a Markdown file — a note that mirrors it (`lib/notesBridge.ts`). */
+  onSendToNotes?: (path: string) => void;
 }) {
   const t = useT();
   const chord = useShortcutChord();
@@ -1338,10 +1352,27 @@ export function FileTree({
 
   const menuItems = useCallback(
     (entry: FileEntry | null): MenuItem[] => {
-      const items: MenuItem[] = [
-        { label: t("editor.newFile"), icon: FilePlus, onClick: () => startDraftRef.current("file") },
+      const items: MenuItem[] = [];
+      // The file's own app, first — where VS Code puts a file's "open" rows — because it is the one
+      // thing in this menu that carries the file somewhere else. Only for a file that app opens.
+      if (entry && !entry.is_dir) {
+        const path = entry.path;
+        if (onOpenInDiagrams && isDiagramPath(path)) {
+          items.push({ label: t("editor.openInDiagrams"), icon: Workflow, onClick: () => onOpenInDiagrams(path) });
+        }
+        if (onSendToNotes && isMarkdownPath(path)) {
+          items.push({ label: t("editor.sendToNotes"), icon: NotebookPen, onClick: () => onSendToNotes(path) });
+        }
+      }
+      items.push(
+        {
+          label: t("editor.newFile"),
+          icon: FilePlus,
+          separated: items.length > 0,
+          onClick: () => startDraftRef.current("file"),
+        },
         { label: t("editor.newFolder"), icon: FolderPlus, onClick: () => startDraftRef.current("dir") },
-      ];
+      );
       // How many rows the menu is about. Rename stays singular whatever it says — there is no
       // sensible "rename these four" — so only the actions that can act on a list say so.
       const count = selectedPathsRef.current().length;
@@ -1506,6 +1537,8 @@ export function FileTree({
       toggleNest,
       focusTree,
       onOpenScratch,
+      onOpenInDiagrams,
+      onSendToNotes,
       // Paste is greyed while there is nothing on the clipboard for this repository.
       canPaste,
       // The menu's labels count the selection, so it has to be rebuilt when that count moves.

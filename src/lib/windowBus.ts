@@ -98,6 +98,12 @@ export type WindowMessage =
    */
   | { kind: "open-diagram"; to: string; workspaceId: string; diagramId: string }
   /**
+   * Put this note on screen, please — "Send to Notes" on a Markdown file of a repository, from a
+   * window whose Notes app is elsewhere. `open-diagram`'s twin in every respect, addressed for the
+   * same reason: see `lib/notesBridge.ts`.
+   */
+  | { kind: "open-note"; to: string; workspaceId: string; noteId: string }
+  /**
    * Put this conversation on screen, please.
    *
    * What "Open in CodeFlow" in the ask box actually does. Before it, that button broadcast

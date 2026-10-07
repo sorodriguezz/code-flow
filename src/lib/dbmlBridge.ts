@@ -1,21 +1,25 @@
-import { FORMAT_DBML } from "./diagrams/doc";
+import { FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MXGRAPH } from "./diagrams/doc";
 import { diagramsLinkFile } from "./tauri/diagramsCommands";
 import { focusSatellite } from "./tauri/windows";
 import { broadcast } from "./windowBus";
 import { isMainWindow, MAIN_LABEL, WINDOW } from "./windowIdentity";
+import { translate } from "../state/languageStore";
 import { useUiStore } from "../state/uiStore";
 import { useWindowStore } from "../state/windowStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { pushErrorToast } from "../state/toastStore";
+import type { DiagramFormat } from "../types/diagrams";
 
 /**
- * The bridge between a `.dbml` file in a repository and the Diagrams app.
+ * The bridge between a diagram file in a repository — `.dbml`, `.excalidraw` or `.drawio` — and the
+ * Diagrams app.
  *
  * # What "copy" means here, and what it does not
  *
- * Pressing *Open in Diagrams* on a schema in the editor does not export it. It files the **file
- * itself** as a diagram — a row whose `origin_path` names the working-tree file it mirrors — and
- * from then on the two are one document with two editors on it:
+ * Pressing *Open in Diagrams* on one — the schema button in the editor, or the file tree's menu —
+ * does not import it. It files the **file itself** as a diagram — a row whose `origin_path` names
+ * the working-tree file it mirrors — and from then on the two are one document with two editors on
+ * it:
  *
  * - opening the diagram re-reads the file, so the working tree wins whenever they differ;
  * - saving the diagram writes the file, so what is drawn in the app is what git offers to commit;
@@ -25,9 +29,9 @@ import { pushErrorToast } from "../state/toastStore";
  * gallery. The file is what makes it the repository's. Neither is a copy of the other, which is why
  * there is no "sync now" button anywhere and no direction for the user to choose.
  *
- * **Only schemas opened from a repository work this way.** A diagram created in the Diagrams app
- * has an empty `origin_path`, which is every diagram that existed before this module, and nothing
- * here touches one.
+ * **Only diagrams tied to a file work this way**: one opened from a repository, or one made in the
+ * app and then saved into one ("Save in a repository", `diagrams_save_to_repo`, which ends in the
+ * same row shape). Every other diagram has an empty `origin_path`, and nothing here touches it.
  *
  * # Where the diagram opens
  *
@@ -43,15 +47,38 @@ import { pushErrorToast } from "../state/toastStore";
  * explorer does.
  */
 
-/** The name a schema takes as a diagram: the file's, without its directories or its extension. */
+/** The extensions a diagram file is opened by, and the dialect each one is. */
+const DIAGRAM_EXTENSIONS: [RegExp, DiagramFormat][] = [
+  [/\.dbml$/i, FORMAT_DBML],
+  [/\.excalidraw$/i, FORMAT_EXCALIDRAW],
+  [/\.(drawio|dio)$/i, FORMAT_MXGRAPH],
+];
+
+/** The name a diagram file takes as a diagram: the file's, without its directories or its extension. */
 export function diagramTitleForPath(relPath: string): string {
   const base = relPath.split("/").pop() ?? relPath;
-  return base.replace(/\.dbml$/i, "") || base;
+  const extension = DIAGRAM_EXTENSIONS.find(([pattern]) => pattern.test(base))?.[0];
+  return (extension ? base.replace(extension, "") : base) || base;
 }
 
-/** Whether a path is one this bridge knows how to carry. The extension, and only the extension. */
+/** Whether a path is a schema — the file the editor's own "Open in Diagrams" button is for. */
 export function isDbmlPath(path: string | null | undefined): boolean {
   return Boolean(path && path.toLowerCase().endsWith(".dbml"));
+}
+
+/**
+ * Which editor of the Diagrams app a file opens in, from its extension — or `null` for a file that
+ * is not a diagram. The extension and only the extension, for the reason `exportFile.formatOf`
+ * gives. A bare `.xml` is not claimed: most XML in a repository is not a drawing.
+ */
+export function diagramFormatForPath(path: string | null | undefined): DiagramFormat | null {
+  if (!path) return null;
+  return DIAGRAM_EXTENSIONS.find(([pattern]) => pattern.test(path))?.[1] ?? null;
+}
+
+/** Whether this bridge can carry a path at all. */
+export function isDiagramPath(path: string | null | undefined): boolean {
+  return diagramFormatForPath(path) !== null;
 }
 
 /**
@@ -105,7 +132,8 @@ export async function showDiagramHere(workspaceId: string, diagramId: string): P
 }
 
 /**
- * Files a `.dbml` file as a diagram and puts it on screen, wherever the Diagrams app lives.
+ * Files a diagram file as a diagram and puts it on screen, wherever the Diagrams app lives. Answers
+ * `false` without a word for a path that is not a diagram — see `diagramFormatForPath`.
  *
  * Idempotent on the file: the second press reaches the same diagram with its document refreshed
  * from disk, rather than making a second one. Answers `true` when the diagram exists — a caller
@@ -116,24 +144,26 @@ export async function showDiagramHere(workspaceId: string, diagramId: string): P
  * is called, or the diagram opens on the file as it is on disk, which is not what is on screen.
  * `EditorView` does exactly that, and says so on the button.
  */
-export async function openDbmlInDiagrams(args: {
+export async function openFileInDiagrams(args: {
   workspaceId: string;
   projectId: string;
   relPath: string;
 }): Promise<boolean> {
+  const format = diagramFormatForPath(args.relPath);
+  if (!format) return false;
   const title = diagramTitleForPath(args.relPath);
   let diagramId: string;
   try {
-    const row = await diagramsLinkFile(
-      args.workspaceId,
-      args.projectId,
-      args.relPath,
-      title,
-      FORMAT_DBML,
-    );
+    const row = await diagramsLinkFile(args.workspaceId, args.projectId, args.relPath, title, format);
     diagramId = row.id;
   } catch (error) {
-    pushErrorToast(String(error));
+    // A drawing with several pages is refused before anything is written — see
+    // `diagrams_link_file`. Worded here, where there is a language.
+    pushErrorToast(
+      String(error).startsWith("multi-page:")
+        ? translate("diagrams.multiPage", { name: args.relPath.split("/").pop() ?? args.relPath })
+        : String(error),
+    );
     return false;
   }
 

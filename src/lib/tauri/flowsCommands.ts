@@ -319,6 +319,18 @@ export const flowsSetDescription = (id: string, description: string) =>
 export const flowsMoveFlow = (id: string, folderId: string | null) =>
   invoke<FlowMetaRow | null>("flows_move_flow", { id, folderId });
 
+/**
+ * One list of the explorer — a folder's flows, or the top level's — in the order a drag left it:
+ * `ids` is that whole list. A drag that crossed lists calls `flowsMoveFlow` first. Only the
+ * workspace's own flows are renumbered; see `flow_queries::reorder_flows`.
+ */
+export const flowsReorderFlows = (workspaceId: string, ids: string[]) =>
+  invoke<void>("flows_reorder_flows", { workspaceId, ids });
+
+/** The workspace's folders — one flat list — in the order a drag left them. */
+export const flowsReorderFolders = (workspaceId: string, ids: string[]) =>
+  invoke<void>("flows_reorder_folders", { workspaceId, ids });
+
 export const flowsSetScope = (id: string, global: boolean) =>
   invoke<FlowMetaRow | null>("flows_set_scope", { id, global });
 

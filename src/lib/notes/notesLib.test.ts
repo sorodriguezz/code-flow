@@ -38,6 +38,8 @@ const note = (id: string, bookId: string | null, title = id): Note => ({
   created_at: "",
   updated_at: "",
   scope: "workspace",
+  origin_project_id: "",
+  origin_path: "",
 });
 
 describe("outlineOf", () => {

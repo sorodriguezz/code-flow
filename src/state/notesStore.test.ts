@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Note, NoteMetaRow } from "../types/notes";
+import type { Note, NoteFileVersion, NoteMetaRow, NoteSaved } from "../types/notes";
 
 /**
  * The Notes store's write path, which had no tests: `flush` and the races it exists to win, the
@@ -40,10 +40,15 @@ const meta = (over: Partial<NoteMetaRow> = {}): NoteMetaRow => ({
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
   scope: "workspace",
+  origin_project_id: "",
+  origin_path: "",
   ...over,
 });
 
 const asNote = (row: NoteMetaRow): Note => ({ ...row, tags: [] });
+
+/** What `notes_save_note` answers — the row, and no file version for a note that mirrors none. */
+const saved = (row: NoteMetaRow | null): NoteSaved => ({ meta: row, version: null });
 
 /** Resolves when the promise is released by the test — a backend call left hanging on purpose. */
 function gate<T>() {
@@ -66,7 +71,7 @@ async function asked() {
 beforeEach(() => {
   calls = [];
   handlers = {
-    notes_save_note: (args) => meta({ title: String(args.title) }),
+    notes_save_note: (args) => saved(meta({ title: String(args.title) })),
   };
   useConfirmStore.setState({ request: null });
   useNotesStore.setState({
@@ -81,6 +86,9 @@ beforeEach(() => {
     saving: false,
     trash: null,
     trashOpen: false,
+    fileVersions: {},
+    fileConflict: null,
+    fileError: "",
   });
 });
 
@@ -95,15 +103,16 @@ describe("flush", () => {
   });
 
   it("writes again when a keystroke lands while the first write is in flight", async () => {
-    const first = gate<NoteMetaRow>();
+    const first = gate<NoteSaved>();
     let count = 0;
-    handlers.notes_save_note = (args) => (++count === 1 ? first.promise : meta({ title: String(args.title) }));
+    handlers.notes_save_note = (args) =>
+      ++count === 1 ? first.promise : saved(meta({ title: String(args.title) }));
 
     useNotesStore.getState().editDraft({ content: "uno" });
     const flushing = useNotesStore.getState().flush();
     // Typed during the round trip: the draft is dirty again behind the await.
     useNotesStore.getState().editDraft({ content: "uno dos" });
-    first.open(meta());
+    first.open(saved(meta()));
     await flushing;
 
     expect(saves()).toEqual(["uno", "uno dos"]);
@@ -111,12 +120,12 @@ describe("flush", () => {
   });
 
   it("joins a write already under way instead of racing it", async () => {
-    const first = gate<NoteMetaRow>();
+    const first = gate<NoteSaved>();
     handlers.notes_save_note = () => first.promise;
     useNotesStore.getState().editDraft({ content: "x" });
     const a = useNotesStore.getState().flush();
     const b = useNotesStore.getState().flush();
-    first.open(meta());
+    first.open(saved(meta()));
     await Promise.all([a, b]);
     expect(saves()).toEqual(["x"]);
   });
@@ -143,7 +152,7 @@ describe("flush", () => {
   });
 
   it("drops the draft when the note was deleted from elsewhere", async () => {
-    handlers.notes_save_note = () => null;
+    handlers.notes_save_note = () => saved(null);
     useNotesStore.getState().editDraft({ content: "tarde" });
     await useNotesStore.getState().flush();
     expect(useNotesStore.getState().draft).toBeNull();
@@ -151,14 +160,82 @@ describe("flush", () => {
   });
 
   it("folds back only the columns it wrote, so a pin made meanwhile survives", async () => {
-    const pending = gate<NoteMetaRow>();
+    const pending = gate<NoteSaved>();
     handlers.notes_save_note = () => pending.promise;
     useNotesStore.getState().editDraft({ title: "Nuevo" });
     const flushing = useNotesStore.getState().flush();
     useNotesStore.setState((state) => ({ notes: state.notes.map((n) => ({ ...n, pinned: true })) }));
-    pending.open(meta({ title: "Nuevo", pinned: false }));
+    pending.open(saved(meta({ title: "Nuevo", pinned: false })));
     await flushing;
     expect(useNotesStore.getState().notes[0]).toMatchObject({ title: "Nuevo", pinned: true });
+  });
+});
+
+describe("a note that mirrors a file", () => {
+  const read: NoteFileVersion = { mtime_ms: 1, size: 4, hash: "aa" };
+  const written: NoteFileVersion = { mtime_ms: 2, size: 9, hash: "bb" };
+  const linked = (over: Partial<NoteMetaRow> = {}) =>
+    meta({ origin_project_id: "p1", origin_path: "docs/plan.md", ...over });
+  const lastSave = () => calls.filter((call) => call.name === "notes_save_note").slice(-1)[0]?.args;
+
+  beforeEach(() => {
+    useNotesStore.setState({ notes: [asNote(linked())], fileVersions: { n1: read }, fileConflict: null });
+  });
+
+  it("saves over the version it last read, and keeps the one it wrote for the next save", async () => {
+    handlers.notes_save_note = () => ({ meta: linked(), version: written });
+    useNotesStore.getState().editDraft({ content: "hola mundo" });
+    await useNotesStore.getState().flush();
+    expect(lastSave()).toMatchObject({ expected: read, force: false });
+    expect(useNotesStore.getState().fileVersions.n1).toEqual(written);
+  });
+
+  it("asks before writing over a file that moved, and writes over it when told to", async () => {
+    let count = 0;
+    handlers.notes_save_note = () => {
+      if (++count === 1) throw new Error("changed-on-disk: docs/plan.md changed on disk since it was opened");
+      return { meta: linked(), version: written };
+    };
+    useNotesStore.getState().editDraft({ content: "mía" });
+    await useNotesStore.getState().flush();
+    expect(useNotesStore.getState().fileConflict).toBe("n1");
+    expect(useNotesStore.getState().draft?.dirty).toBe(true);
+
+    await asked();
+    useConfirmStore.getState().pick("overwrite");
+    for (let i = 0; i < 50 && useNotesStore.getState().fileConflict; i++) await Promise.resolve();
+    expect(lastSave()).toMatchObject({ content: "mía", force: true });
+    expect(useNotesStore.getState()).toMatchObject({ fileConflict: null, fileVersions: { n1: written } });
+    expect(useNotesStore.getState().draft?.dirty).toBe(false);
+  });
+
+  it("takes the file's copy when told to reload, dropping the edit", async () => {
+    handlers.notes_save_note = () => {
+      throw new Error("changed-on-disk: docs/plan.md changed on disk since it was opened");
+    };
+    handlers.notes_pull_file = () => ({
+      row: { ...linked({ word_count: 3 }), content: "lo del pull" },
+      file_error: "",
+      version: written,
+    });
+    useNotesStore.getState().editDraft({ content: "mía" });
+    await useNotesStore.getState().flush({ interactive: false });
+    await useNotesStore.getState().resolveFileConflict("reload");
+    expect(useNotesStore.getState().draft).toMatchObject({ content: "lo del pull", dirty: false });
+    expect(useNotesStore.getState()).toMatchObject({ fileConflict: null, fileVersions: { n1: written } });
+    expect(useNotesStore.getState().notes[0].word_count).toBe(3);
+  });
+
+  it("opens from its file rather than from the cache", async () => {
+    useNotesStore.setState({ activeId: null, draft: null, bodies: { n1: "lo de antes" } });
+    handlers.notes_pull_file = () => ({
+      row: { ...linked(), content: "lo del archivo" },
+      file_error: "",
+      version: read,
+    });
+    await useNotesStore.getState().openNote("n1");
+    expect(useNotesStore.getState().draft?.content).toBe("lo del archivo");
+    expect(calls.some((call) => call.name === "notes_get_note")).toBe(false);
   });
 });
 
@@ -168,13 +245,13 @@ describe("the quit guard's view of a note", () => {
     useNotesStore.getState().editDraft({ content: "sin guardar" });
     expect(collectUnsaved()).toContainEqual(expect.objectContaining({ label: "Nota" }));
 
-    const pending = gate<NoteMetaRow>();
+    const pending = gate<NoteSaved>();
     handlers.notes_save_note = () => pending.promise;
     const flushing = useNotesStore.getState().flush();
     // Marked clean before the write lands — and still unsaved as far as a quit is concerned.
     expect(useNotesStore.getState().draft?.dirty).toBe(false);
     expect(collectUnsaved()).toContainEqual(expect.objectContaining({ label: "Nota" }));
-    pending.open(meta());
+    pending.open(saved(meta()));
     await flushing;
     expect(collectUnsaved().filter((item) => item.label === "Nota")).toEqual([]);
   });

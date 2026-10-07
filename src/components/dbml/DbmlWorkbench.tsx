@@ -2063,23 +2063,14 @@ export function DbmlWorkbench({
                       The PNG and SVG pills are gone from the canvas entirely. They were a shortcut
                       to two entries of the export menu that is still two inches away in the
                       toolbar, and they were the only overlay in the top-right corner — which is
-                      where the boxes of a left-to-right layout end up. */}
+                      where the boxes of a left-to-right layout end up.
+
+                      Bottom-aligned, not centred: the zoom's column is taller than the two bars
+                      beside it whenever the map sits on top of it. */}
                   <div
-                    className={`absolute bottom-3 right-4 flex flex-col items-end gap-1.5 ${CHROME_FADE}`}
+                    className={`absolute bottom-3 right-4 flex items-end gap-1.5 ${CHROME_FADE}`}
                     style={{ opacity: chromeHot || viewAt || laserAt ? 1 : DIMMED }}
                   >
-                    {/* The whole diagram, small: where the frame is in it, and a press to go
-                        somewhere else. Over the zoom it belongs to, fading with it. */}
-                    {minimap && mapLayout && mapLayout.nodes.length > 0 && (
-                      <DbmlMinimap
-                        layout={mapLayout}
-                        selected={selected}
-                        subscribe={subscribeView}
-                        onCentre={(x, y) => canvas.current?.centreOn(x, y)}
-                        label={t("dbml.minimap")}
-                      />
-                    )}
-                    <div className="flex items-center gap-1.5">
                     {/* The laser, as a split: the pointer itself, and beside it the narrow half that
                         picks its ink. Here rather than in the toolbar because the toolbar is for the
                         document and is gone in full screen — which is exactly where a laser is
@@ -2136,6 +2127,20 @@ export function DbmlWorkbench({
                       </button>
                     </div>
 
+                    <div className="flex flex-col gap-1.5">
+                    {/* The whole diagram, small: where the frame is in it, nothing to press. As wide
+                        as the zoom under it — `w-0 min-w-full` adds nothing to the column's width
+                        and then fills it, so the zoom alone decides how wide that is. */}
+                    {minimap && mapLayout && mapLayout.nodes.length > 0 && (
+                      <div className="w-0 min-w-full">
+                        <DbmlMinimap
+                          layout={mapLayout}
+                          selected={selected}
+                          subscribe={subscribeView}
+                          label={t("dbml.minimap")}
+                        />
+                      </div>
+                    )}
                     <div className={FLOAT_BAR}>
                       <ZoomStep onClick={() => canvas.current?.zoomBy(1 / 1.2)} title={t("dbml.zoomOut")}>
                         <ZoomOut size={15} />

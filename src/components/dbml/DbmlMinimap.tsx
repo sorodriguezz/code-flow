@@ -1,10 +1,15 @@
-import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef } from "react";
 import type { DbmlLayout } from "../../lib/dbml/layout";
 
 /**
  * The whole diagram, small, above the zoom (the user's ask, 2026-10-06: "un mapa global del
- * diagrama"): every table as a block, the part the canvas shows as an outlined window, and a press
- * or a drag anywhere on it moves the canvas there.
+ * diagrama"): every table as a block and the part the canvas shows as an outlined window.
+ *
+ * **It only shows.** It was a control too — a press or a drag moved the canvas there — and the user
+ * took that back the same day ("que no se pueda interactuar con él, solo que indique dónde está la
+ * vista y los cuadros"). A press on it lands on nothing: not on the map, and not on the canvas under
+ * it either, which it hides. It is as wide as the zoom under it — its parent decides — and keeps the
+ * shape below.
  *
  * **It never re-renders to follow the canvas.** The canvas pans by writing its transform straight to
  * the `<svg>` (`DbmlCanvas.applyView`) — sixty times a second during a drag — and reports each one
@@ -22,22 +27,19 @@ export interface DbmlView {
   height: number;
 }
 
-const MAP_W = 216;
-const MAP_H = 136;
+/** Width over height. */
+const MAP_ASPECT = "8 / 5";
 
 export function DbmlMinimap({
   layout,
   selected,
   subscribe,
-  onCentre,
   label,
 }: {
   layout: DbmlLayout;
   selected: string | null;
   /** Hands the map the canvas's views as they happen — the current one first. Returns the unsubscribe. */
   subscribe: (draw: (view: DbmlView) => void) => () => void;
-  /** Puts this diagram point in the middle of the canvas. */
-  onCentre: (x: number, y: number) => void;
   label: string;
 }) {
   const svg = useRef<SVGSVGElement>(null);
@@ -72,41 +74,15 @@ export function DbmlMinimap({
     return stop;
   }, [subscribe, layout]);
 
-  /** Where a press on the map is, in diagram coordinates. */
-  const pointAt = (event: ReactPointerEvent<SVGSVGElement>) => {
-    const map = svg.current;
-    const matrix = map?.getScreenCTM();
-    if (!map || !matrix) return null;
-    const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse());
-    return { x: point.x, y: point.y };
-  };
-
-  const go = (event: ReactPointerEvent<SVGSVGElement>) => {
-    const point = pointAt(event);
-    if (point) onCentre(point.x, point.y);
-  };
-
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]">
       <svg
         ref={svg}
-        width={MAP_W}
-        height={MAP_H}
         preserveAspectRatio="xMidYMid meet"
         role="img"
         aria-label={label}
-        className="block cursor-pointer touch-none"
-        onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          event.currentTarget.setPointerCapture(event.pointerId);
-          go(event);
-        }}
-        onPointerMove={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) go(event);
-        }}
-        onPointerUp={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-        }}
+        className="block w-full"
+        style={{ aspectRatio: MAP_ASPECT }}
       >
         {layout.groups.flatMap((group) =>
           group.rects.map((rect, index) => (
@@ -143,7 +119,6 @@ export function DbmlMinimap({
           stroke="var(--cf-accent)"
           strokeWidth={1.5}
           vectorEffect="non-scaling-stroke"
-          pointerEvents="none"
         />
       </svg>
     </div>

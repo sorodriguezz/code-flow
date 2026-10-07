@@ -1,7 +1,7 @@
 //! Keeping what the app writes into a repository out of that repository's history.
 //!
 //! Two things drop files into a user's working copy on the app's behalf: a chain's shared memory
-//! (`.codeflow/`, see `chain_memory`) and the workspace's skills (`.claude/skills/<name>/`, see
+//! (`.codeflow/memory/`, see `chain_memory`) and the workspace's skills (`.claude/skills/<name>/`, see
 //! `skills_cmd::sync_skills_into_project`). Neither is the user's work, and both used to show up in
 //! the Changes panel as untracked files one "stage all" away from being committed — the skills
 //! always, and the memory in every *worktree*, where `.git` is not the directory the old code
@@ -95,10 +95,6 @@ pub fn literal(segment: &str) -> String {
 /// Returns whether the line was written. Failures are the caller's to ignore: a read-only checkout
 /// costs the user an untracked entry in Changes, never a failed turn.
 pub fn exclude(repo: &Path, pattern: &str) -> std::io::Result<bool> {
-    // A read, a check and a rewrite: two agent turns syncing skills into one repository at once —
-    // they run side by side now — would each read the file without the other's line and the second
-    // write would drop the first's. One process-wide lock; the file is tiny and the section short.
-    static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _serialised = WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let pattern = pattern.trim();
     let Some(common) = common_git_dir(repo) else { return Ok(false) };
@@ -120,6 +116,52 @@ pub fn exclude(repo: &Path, pattern: &str) -> std::io::Result<bool> {
     std::fs::write(&file, format!("{current}{separator}{pattern}\n"))?;
     Ok(true)
 }
+
+/// Swaps the line `old` for `new` in the working copy's `info/exclude`, when `old` is there.
+///
+/// For a line an earlier build wrote too wide — see `chain_memory::narrow_legacy_exclude`. Only an
+/// exact line is touched, so a pattern the user typed themselves is never rewritten, and `new` is
+/// written once however many times either line appears. Returns whether the file changed.
+pub fn replace(repo: &Path, old: &str, new: &str) -> std::io::Result<bool> {
+    let _serialised = WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (old, new) = (old.trim(), new.trim());
+    let Some(common) = common_git_dir(repo) else { return Ok(false) };
+    if old.is_empty() || new.is_empty() {
+        return Ok(false);
+    }
+    let file = common.join("info").join("exclude");
+    let current = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if !current.lines().any(|line| line.trim() == old) {
+        return Ok(false);
+    }
+    let mut written = false;
+    let mut lines = Vec::new();
+    for line in current.lines() {
+        let trimmed = line.trim();
+        if trimmed == old || trimmed == new {
+            if !written {
+                lines.push(new);
+                written = true;
+            }
+        } else {
+            lines.push(line);
+        }
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    std::fs::write(&file, text)?;
+    Ok(true)
+}
+
+/// Serialises every read-check-rewrite of an exclude file: two agent turns syncing skills into one
+/// repository at once — they run side by side now — would each read the file without the other's
+/// line, and the second write would drop the first's. One process-wide lock; the file is tiny and
+/// the section short.
+static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -175,6 +217,29 @@ mod tests {
         let file = std::fs::read_to_string(repo.join(".git").join("info").join("exclude")).unwrap();
         assert_eq!(file.matches("/.codeflow/").count(), 1);
         assert!(!untracked(&repo).contains(".codeflow"), "and git no longer lists it");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The line an older build wrote hid the documents saved beside the memory; narrowed, they show
+    /// up while the memory stays hidden.
+    #[test]
+    fn a_wide_line_is_narrowed_once_and_only_what_it_should_hide_stays_hidden() {
+        let repo = repo_with_a_commit();
+        std::fs::create_dir_all(repo.join(".codeflow").join("memory")).unwrap();
+        std::fs::write(repo.join(".codeflow").join("memory").join("01-bot.md"), "nota").unwrap();
+        std::fs::create_dir_all(repo.join(".codeflow").join("notes")).unwrap();
+        std::fs::write(repo.join(".codeflow").join("notes").join("plan.md"), "# Plan").unwrap();
+        exclude(&repo, "/.codeflow/").unwrap();
+        exclude(&repo, "/.codeflow/memory/").unwrap();
+        assert!(!untracked(&repo).contains(".codeflow"), "the wide line hides both");
+
+        assert!(replace(&repo, "/.codeflow/", "/.codeflow/memory/").unwrap());
+        assert!(!replace(&repo, "/.codeflow/", "/.codeflow/memory/").unwrap(), "nothing left to narrow");
+        let listed = untracked(&repo);
+        assert!(listed.contains(".codeflow/notes/plan.md"), "the saved note shows up: {listed}");
+        assert!(!listed.contains(".codeflow/memory"), "the memory stays hidden: {listed}");
+        let file = std::fs::read_to_string(repo.join(".git").join("info").join("exclude")).unwrap();
+        assert_eq!(file.matches("/.codeflow/memory/").count(), 1, "written once: {file}");
         std::fs::remove_dir_all(&repo).ok();
     }
 

@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   CalendarClock,
   ChevronDown,
@@ -30,11 +38,14 @@ import { iconButtonClass } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { explorerHeadClass, fieldClass, rowClass } from "../common/recipes";
 import { nodeIcon } from "../../lib/flows/nodeIcons";
+import { byName, byPlace, flowGroups } from "../../lib/flows/explorerOrder";
+import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { scopeMenuItems } from "../../lib/scopeMenu";
 import type { FlowFolderRow } from "../../lib/tauri/flowsCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowsStore, type FlowItem } from "../../state/flowsStore";
+import { halfAt, planDrop, useFlowsDragStore, type FlowsDropPlan } from "../../state/flowsDragStore";
 import { useT } from "../../state/languageStore";
 import { TemplatesDialog } from "./TemplatesDialog";
 import { FlowShareDialog } from "./FlowShareDialog";
@@ -43,15 +54,22 @@ import { promptAction } from "../../state/promptStore";
 import { useFlowRepoStore } from "../../state/flowRepoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 
-const byName = (a: { name: string }, b: { name: string }) =>
-  a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true });
+/** How near the list's top or bottom a drag starts scrolling it, and by how much per move. */
+const AUTOSCROLL_EDGE = 28;
+const AUTOSCROLL_STEP = 12;
 
 /**
- * The workspace's flows: folders first, then the flows at the top level, each by name.
+ * The workspace's flows: folders first, then the flows at the top level, each list in the order it
+ * was dragged into — see `lib/flows/explorerOrder`.
  *
  * A flow's row wears the glyph of the trigger it starts from — the one fact that says what kind of
  * automation it is before it is opened. A flow made global on another workspace's shelf sits at the
- * top level here, since the folder it is filed in belongs to that other workspace.
+ * end of the top level here, since the folder it is filed in belongs to that other workspace.
+ *
+ * **Dragging** a flow files it into a folder or back to the top level, and places it among its
+ * neighbours; dragging a folder places it among the folders. Pointer events throughout, for the
+ * reason `flowsDragStore` gives; off while a search is narrowing the tree, where the lists on screen
+ * are not the lists a drop would renumber.
  */
 export function FlowExplorer() {
   const flows = useFlowsStore((s) => s.flows);
@@ -83,23 +101,102 @@ export function FlowExplorer() {
   const unlinked = useMemo(() => repoEntries.filter((entry) => !entry.flowId && !entry.missing), [repoEntries]);
 
   const needle = query.trim().toLowerCase();
-  const groups = useMemo(() => {
-    const matches = (flow: FlowItem) => !needle || flow.name.toLowerCase().includes(needle);
-    const here = new Set(folders.map((folder) => folder.id));
-    const sortedFolders = [...folders].sort(byName).map((folder) => ({
-      folder,
-      flows: flows.filter((flow) => flow.folder_id === folder.id && matches(flow)).sort(byName),
-    }));
-    const root = flows
-      .filter((flow) => (!flow.folder_id || !here.has(flow.folder_id)) && matches(flow))
-      .sort(byName);
-    return {
-      folders: needle ? sortedFolders.filter((group) => group.flows.length > 0) : sortedFolders,
-      root,
-    };
-  }, [flows, folders, needle]);
+  const groups = useMemo(() => flowGroups(flows, folders, workspaceId, needle), [flows, folders, workspaceId, needle]);
 
   const store = () => useFlowsStore.getState();
+
+  // ---------- drag ----------
+
+  const drag = useFlowsDragStore((s) => s.drag);
+  const over = useFlowsDragStore((s) => s.over);
+  const treeRef = useRef<HTMLDivElement>(null);
+  /**
+   * Set when a drag has just ended, so the click the browser fires after the release is ignored —
+   * otherwise dropping onto a folder would also fold it. Cleared on a timeout rather than by that
+   * click, for the reason `DiagramExplorer`'s `swallowClick` gives.
+   */
+  const swallowClick = useRef(false);
+
+  const finishDrag = useCallback(() => {
+    setDragCursor(false);
+    if (useFlowsDragStore.getState().drag !== null) {
+      swallowClick.current = true;
+      setTimeout(() => {
+        swallowClick.current = false;
+      }, 0);
+    }
+    useFlowsDragStore.getState().end();
+  }, []);
+
+  /** On the container, on the capture phase — see `DiagramExplorer.onPointerMove` for both. */
+  const onPointerMove = useCallback(
+    (event: ReactPointerEvent) => {
+      const { origin, drag: live } = useFlowsDragStore.getState();
+      if (live) {
+        autoScroll(treeRef.current, event.clientY);
+        return;
+      }
+      if (!origin) return;
+      // No button held: a press whose release this never saw. Not a drag anybody began.
+      if (event.buttons === 0) {
+        finishDrag();
+        return;
+      }
+      if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < DRAG_THRESHOLD) return;
+      useFlowsDragStore.getState().begin();
+      setDragCursor(true);
+    },
+    [finishDrag],
+  );
+
+  /** A press that may become a drag. Left button only, and nothing while a search narrows the tree. */
+  const pressRow = (event: ReactPointerEvent, kind: "flow" | "folder", id: string, fromFolderId: string | null) => {
+    if (event.button !== 0 || needle) return;
+    useFlowsDragStore.getState().press({ kind, id, fromFolderId }, event.clientX, event.clientY);
+  };
+
+  type Target = Parameters<typeof planDrop>[1];
+  /** Where a release over this row would land — measured only while a drag is live. */
+  const planAt = (event: ReactPointerEvent, target: Target): FlowsDropPlan | null => {
+    const live = useFlowsDragStore.getState().drag;
+    if (!live) return null;
+    const rect = event.currentTarget.getBoundingClientRect();
+    return planDrop(live, target, halfAt(event.clientY - rect.top, rect.height));
+  };
+  const hoverRow = (event: ReactPointerEvent, target: Target) => {
+    if (!useFlowsDragStore.getState().drag) return;
+    useFlowsDragStore.getState().hover(planAt(event, target));
+  };
+  const commit = (plan: FlowsDropPlan | null) => {
+    const live = useFlowsDragStore.getState().drag;
+    if (!live || !plan) return;
+    const anchor = plan.mode === "order" ? { id: plan.anchorId, after: plan.after } : null;
+    if (live.kind === "folder") {
+      if (anchor) void store().dropFolder(live.id, anchor);
+    } else {
+      void store().dropFlow(live.id, plan.folderId, anchor);
+    }
+  };
+  /** Re-resolved from the release point, so the drop is where the pointer let go. */
+  const dropOnRow = (event: ReactPointerEvent, target: Target) => commit(planAt(event, target));
+
+  /** The top level as a target: how a flow is dragged out of its folder. Only for a flow in one. */
+  const rootPlan: FlowsDropPlan | null =
+    drag?.kind === "flow" && drag.fromFolderId !== null ? { mode: "into", folderId: null } : null;
+
+  /** The insertion line a row draws for an ordering plan anchored on it. */
+  const edgeOf = (id: string) =>
+    drag && over?.mode === "order" && over.anchorId === id ? (over.after ? "after" : "before") : null;
+  const dropLine = (edge: "before" | "after" | null, indent: number) =>
+    edge && (
+      <span
+        aria-hidden
+        className={`pointer-events-none absolute right-0 h-0.5 rounded-full bg-[var(--cf-accent-fill)] ${
+          edge === "before" ? "-top-px" : "-bottom-px"
+        }`}
+        style={{ left: indent }}
+      />
+    );
 
   const triggerGlyph = (flow: FlowItem) => {
     const descriptor = flow.triggers[0] ? catalogMap.get(flow.triggers[0]) : undefined;
@@ -157,7 +254,7 @@ export function FlowExplorer() {
         onClick: () => {},
         children: [
           { label: t("flows.root"), onClick: () => void store().moveFlow(flow.id, null), disabled: !flow.folder_id },
-          ...[...folders].sort(byName).map((folder) => ({
+          ...[...folders].sort(byPlace).map((folder) => ({
             label: folder.name,
             icon: Folder,
             onClick: () => void store().moveFlow(flow.id, folder.id),
@@ -222,6 +319,11 @@ export function FlowExplorer() {
 
   const flowRow = (flow: FlowItem, nested: boolean) => {
     const Glyph = triggerGlyph(flow);
+    // Only this workspace's own flows are dragged — another's global flow has its place in its home.
+    const own = flow.workspace_id === workspaceId;
+    // The list it is drawn in: its folder, or the top level.
+    const listId = nested ? flow.folder_id : null;
+    const target = { kind: "flow" as const, id: flow.id, folderId: listId, own };
     return (
       <button
         key={flow.id}
@@ -229,13 +331,19 @@ export function FlowExplorer() {
         role="treeitem"
         aria-selected={flow.id === activeId}
         onClick={() => {
+          if (swallowClick.current) return;
           void store().openFlow(flow.id);
           if (useFlowRunsStore.getState().pane === "schedule") useFlowRunsStore.getState().setPane("editor");
         }}
         onContextMenu={(event) => flowMenu(event, flow)}
+        onPointerDown={(event) => own && pressRow(event, "flow", flow.id, listId)}
+        // `pointermove`, not `pointerenter`: which half of the row the pointer is in is the answer.
+        onPointerMove={(event) => hoverRow(event, target)}
+        onPointerUp={(event) => dropOnRow(event, target)}
         title={`${flow.name} · ${t("flows.nodeCount", { n: flow.node_count })}`}
-        className={rowClass(flow.id === activeId, `h-7 ${nested ? "pl-7" : ""}`)}
+        className={rowClass(flow.id === activeId, `h-7 ${nested ? "pl-7" : ""} ${drag?.id === flow.id ? "opacity-40" : ""}`)}
       >
+        {dropLine(edgeOf(flow.id), nested ? 28 : 8)}
         <span className="relative shrink-0">
           <Glyph size={14} className="text-[var(--cf-text-muted)]" />
           {flow.active && (
@@ -286,7 +394,16 @@ export function FlowExplorer() {
   const empty = groups.root.length === 0 && groups.folders.length === 0;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      className="flex h-full min-h-0 flex-col"
+      onPointerMoveCapture={onPointerMove}
+      // On the container, so a release between rows ends the drag instead of leaving it armed; and a
+      // gesture taken over by the OS or the pointer leaving the panel ends it too, or the grabbing
+      // cursor would outlive it.
+      onPointerUp={finishDrag}
+      onPointerCancel={finishDrag}
+      onPointerLeave={finishDrag}
+    >
       {templatesFor && <TemplatesDialog folderId={templatesFor.folderId} onClose={() => setTemplatesFor(null)} />}
       {shareFor && <FlowShareDialog flowId={shareFor} onClose={() => setShareFor(null)} />}
       <div className={explorerHeadClass}>
@@ -389,6 +506,7 @@ export function FlowExplorer() {
       </div>
 
       <div
+        ref={treeRef}
         className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2"
         role="tree"
         aria-label={t("flows.title")}
@@ -397,16 +515,32 @@ export function FlowExplorer() {
         {groups.folders.map(({ folder, flows: inFolder }) => {
           // While searching, a folder with matches is shown open whatever its stored state.
           const open = needle ? true : !collapsed.includes(folder.id);
+          // A flow held over this folder files into it: the header takes the accent wash, as a
+          // selected row does — `rowClass`'s hover tint would otherwise win under the pointer.
+          const receiving = !!drag && over?.mode === "into" && over.folderId === folder.id;
+          const target = { kind: "folder" as const, id: folder.id };
           return (
             <div key={folder.id} role="group">
               <button
                 type="button"
                 role="treeitem"
                 aria-expanded={open}
-                onClick={() => store().toggleFolder(folder.id)}
+                onClick={() => {
+                  if (swallowClick.current) return;
+                  store().toggleFolder(folder.id);
+                }}
                 onContextMenu={(event) => folderMenu(event, folder)}
-                className={rowClass(false, "h-7 font-medium text-[var(--cf-text-muted)]")}
+                onPointerDown={(event) => pressRow(event, "folder", folder.id, null)}
+                onPointerMove={(event) => hoverRow(event, target)}
+                onPointerUp={(event) => dropOnRow(event, target)}
+                className={rowClass(
+                  receiving,
+                  `h-7 font-medium text-[var(--cf-text-muted)] ${
+                    receiving ? "ring-1 ring-[var(--cf-accent)]" : drag?.id === folder.id ? "opacity-40" : ""
+                  }`,
+                )}
               >
+                {dropLine(edgeOf(folder.id), 8)}
                 {open ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
                 {open ? <FolderOpen size={14} className="shrink-0" /> : <Folder size={14} className="shrink-0" />}
                 <span className="min-w-0 flex-1 truncate">{folder.name}</span>
@@ -417,6 +551,24 @@ export function FlowExplorer() {
           );
         })}
         {groups.root.map((flow) => flowRow(flow, false))}
+        {/* The top level as a drop target, while a flow is dragged out of a folder. It has no row
+            of its own — its flows sit below the folders with nothing above them — so without this
+            strip a flow could only go deeper into folders, never back out when the top level is
+            empty. Drawn only during that drag, so it costs no space the rest of the time. */}
+        {rootPlan && (
+          <div
+            aria-hidden
+            onPointerEnter={() => useFlowsDragStore.getState().hover(rootPlan)}
+            onPointerUp={() => commit(rootPlan)}
+            className={`mt-1 flex h-8 items-center justify-center rounded-md border border-dashed text-[11px] transition-colors ${
+              over?.mode === "into" && over.folderId === null
+                ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
+                : "border-[var(--cf-border)] text-[var(--cf-text-muted)]"
+            }`}
+          >
+            {t("flows.dropAtRoot")}
+          </div>
+        )}
         {empty && needle && <p className="px-2 py-4 text-center text-[12px] text-[var(--cf-text-muted)]">{t("flows.noMatches")}</p>}
         {/* Flow files in the repositories no flow here is linked to: one click brings one in. */}
         {unlinked.length > 0 && !needle && (
@@ -459,4 +611,13 @@ export function FlowExplorer() {
       )}
     </div>
   );
+}
+
+/** Scrolls the list when a drag nears either end of it — without this a drag reaches only the rows
+ *  on screen when it began. */
+function autoScroll(list: HTMLElement | null, clientY: number) {
+  if (!list) return;
+  const rect = list.getBoundingClientRect();
+  if (clientY < rect.top + AUTOSCROLL_EDGE) list.scrollTop -= AUTOSCROLL_STEP;
+  else if (clientY > rect.bottom - AUTOSCROLL_EDGE) list.scrollTop += AUTOSCROLL_STEP;
 }

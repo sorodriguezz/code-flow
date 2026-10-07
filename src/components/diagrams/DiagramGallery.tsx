@@ -14,6 +14,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { repoMenuItems } from "../../lib/repoMenu";
 import { folderInk, formatGlyph, ICON_BUTTON } from "./diagramsChrome";
 // Reused rather than reimplemented: "how long ago" is not a notes idea, and two implementations of
 // it is how one workspace starts saying "2 days ago" while the other says the date.
@@ -172,6 +173,15 @@ export function DiagramGallery() {
       icon: Copy,
       onClick: () => void duplicateDiagram(diagram.id),
     },
+    // The same rows as the explorer's menu — see `DiagramExplorer.diagramMenu`.
+    ...repoMenuItems({
+      workspaceId: useDiagramsStore.getState().workspaceId,
+      originPath: diagram.origin_path,
+      own: true,
+      onSave: (projectId) => void useDiagramsStore.getState().saveToRepo(diagram.id, projectId),
+      onUnlink: () => void useDiagramsStore.getState().unlinkFile(diagram.id),
+      separated: true,
+    }),
     {
       label: t("diagrams.delete"),
       icon: Trash2,

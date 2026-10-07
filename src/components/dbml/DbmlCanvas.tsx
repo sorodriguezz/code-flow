@@ -220,8 +220,6 @@ export interface DbmlCanvasHandle {
   layout: () => DbmlLayout;
   /** The middle of what the frame shows, in diagram coordinates — `null` while it has no size. */
   centre: () => { x: number; y: number } | null;
-  /** Moves the picture so this diagram point is in the middle of the frame, at the same zoom. */
-  centreOn: (x: number, y: number) => void;
 }
 
 export const DbmlCanvas = forwardRef<
@@ -857,15 +855,8 @@ export const DbmlCanvas = forwardRef<
         const { x, y, k } = viewRef.current;
         return { x: (frame.clientWidth / 2 - x) / k, y: (frame.clientHeight / 2 - y) / k };
       },
-      centreOn: (x, y) => {
-        const frame = frameRef.current;
-        if (!frame) return;
-        const { k } = viewRef.current;
-        applyView({ k, x: frame.clientWidth / 2 - x * k, y: frame.clientHeight / 2 - y * k });
-        scheduleCommit();
-      },
     }),
-    [fit, zoomBy, focusTable, nextMatch, framed, applyView, scheduleCommit],
+    [fit, zoomBy, focusTable, nextMatch, framed],
   );
 
   // The minimap's blocks: the layout each time it changes, and the view against it.

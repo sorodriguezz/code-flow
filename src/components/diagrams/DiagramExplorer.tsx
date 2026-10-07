@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { repoMenuItems } from "../../lib/repoMenu";
 import { DiagramTreeRow } from "./DiagramTreeRow";
 import { TemplatePickerModal } from "./TemplatePickerModal";
 import { ICON_BUTTON } from "./diagramsChrome";
@@ -499,7 +500,7 @@ export function DiagramExplorer() {
   );
 
   const diagramMenu = useCallback(
-    (id: string, title: string, pinned: boolean): MenuItem[] => [
+    (id: string, title: string, pinned: boolean, originPath: string): MenuItem[] => [
       {
         label: t("diagrams.rename"),
         icon: Pencil,
@@ -520,6 +521,15 @@ export function DiagramExplorer() {
         icon: Copy,
         onClick: () => void duplicateDiagram(id),
       },
+      // Diagrams have no global scope, so every diagram in this tree is this workspace's own.
+      ...repoMenuItems({
+        workspaceId: useDiagramsStore.getState().workspaceId,
+        originPath,
+        own: true,
+        onSave: (projectId) => void useDiagramsStore.getState().saveToRepo(id, projectId),
+        onUnlink: () => void useDiagramsStore.getState().unlinkFile(id),
+        separated: true,
+      }),
       {
         label: t("diagrams.delete"),
         icon: Trash2,
@@ -545,7 +555,7 @@ export function DiagramExplorer() {
         items:
           row.kind === "folder"
             ? folderMenu(event, row.id, row.folder.name)
-            : diagramMenu(row.id, row.diagram.title, row.diagram.pinned),
+            : diagramMenu(row.id, row.diagram.title, row.diagram.pinned, row.diagram.origin_path),
       });
     },
     [folderMenu, diagramMenu],

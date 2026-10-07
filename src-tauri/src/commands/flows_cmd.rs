@@ -339,6 +339,21 @@ pub fn flows_move_flow(
     flow_queries::move_flow(&conn, &id, folder_id.as_deref()).map_err(|e| e.to_string())
 }
 
+/// One list of the explorer — a folder's flows, or the root's — in the order a drag left it. See
+/// [`flow_queries::reorder_flows`].
+#[tauri::command]
+pub fn flows_reorder_flows(db: State<Db>, workspace_id: String, ids: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_queries::reorder_flows(&conn, &workspace_id, &ids).map_err(|e| e.to_string())
+}
+
+/// The workspace's folders in the order a drag left them.
+#[tauri::command]
+pub fn flows_reorder_folders(db: State<Db>, workspace_id: String, ids: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_queries::reorder_folders(&conn, &workspace_id, &ids).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn flows_set_scope(app: AppHandle, db: State<Db>, id: String, global: bool) -> Result<Option<FlowMeta>, String> {
     let meta = {

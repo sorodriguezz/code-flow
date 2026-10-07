@@ -19,6 +19,7 @@ import {
   diagramsReorderDiagrams,
   diagramsReorderFolders,
   diagramsSaveDiagram,
+  diagramsSaveToRepo,
   diagramsSetFolderColor,
   diagramsSetPinned,
   diagramsSetTags,
@@ -54,7 +55,7 @@ import { describePath, isChangedOnDisk } from "../lib/editorFiles";
 import { notifyUnsavedChanged, registerUnsavedProvider } from "../lib/unsavedWork";
 import { chooseAction } from "./confirmStore";
 import { translate } from "./languageStore";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { useAiRunStore } from "./aiRunStore";
 import { useWorkspaceStore } from "./workspaceStore";
 // Type only, so the layout module stays out of this store's runtime graph: `aiByDiagram` keeps
@@ -380,6 +381,12 @@ interface DiagramsState {
   syncFromDisk: (id: string) => Promise<void>;
   /** Cuts the diagram loose from its file. The document stays; only the syncing stops. */
   unlinkFile: (id: string) => Promise<void>;
+  /**
+   * "Save in a repository": writes a diagram made here into `.codeflow/diagrams/` of one of the
+   * workspace's repositories and ties the two, so from then on it is the same bridge a file opened
+   * from the editor is. An open diagram is flushed first — the file is written from the row.
+   */
+  saveToRepo: (id: string, projectId: string) => Promise<void>;
   /** Writes anything unsaved and goes back to the gallery, unmounting the editor. */
   closeDiagram: () => Promise<void>;
   /** One edit from the editor. Debounced into a write; see `SAVE_DEBOUNCE_MS`. */
@@ -937,6 +944,24 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
         diagrams: state.diagrams.map((d) => (d.id === row.id ? toDiagram(row) : d)),
         fileError: state.activeId === row.id ? "" : state.fileError,
       }));
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  saveToRepo: async (id, projectId) => {
+    // The file is written from the row, so the row has to hold what is on screen first.
+    if (get().activeId === id) await get().flush();
+    try {
+      const saved = await diagramsSaveToRepo(id, projectId);
+      const row = saved.meta;
+      if (!row) return;
+      set((state) => ({
+        diagrams: state.diagrams.map((d) => (d.id === row.id ? toDiagram(row) : d)),
+        // What the next autosave of this diagram is checked against — the file was just written.
+        fileVersions: { ...state.fileVersions, [row.id]: saved.version },
+      }));
+      pushSuccessToast(translate("repoSync.saved", { path: row.origin_path }));
     } catch (error) {
       pushErrorToast(String(error));
     }

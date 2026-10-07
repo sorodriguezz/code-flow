@@ -39,6 +39,7 @@ import { restoreSatellites } from "./lib/tauri/windows";
 import { onWindowMessage } from "./lib/windowBus";
 import { installIslandHost } from "./lib/editorIslands";
 import { showDiagramHere } from "./lib/dbmlBridge";
+import { showNoteHere } from "./lib/notesBridge";
 import { showChatHere } from "./lib/chatBridge";
 import { WINDOW } from "./lib/windowIdentity";
 import { useLayoutStore } from "./state/layoutStore";
@@ -777,6 +778,14 @@ export default function App() {
             // window has already handed away.
             if (message.to !== WINDOW.label) break;
             void showDiagramHere(message.workspaceId, message.diagramId).catch((e: unknown) =>
+              pushErrorToast(String(e)),
+            );
+            break;
+          case "open-note":
+            // "Send to Notes" from a window without the Notes app — the same rule as above, one app
+            // along. See `lib/notesBridge.ts`.
+            if (message.to !== WINDOW.label) break;
+            void showNoteHere(message.workspaceId, message.noteId).catch((e: unknown) =>
               pushErrorToast(String(e)),
             );
             break;

@@ -5,6 +5,10 @@
 //! note logic in Rust at all — a body is text to the backend (see that module's header), and
 //! everything that makes it a *note* (rendering, outline, formatting, templates) is the frontend's.
 //!
+//! The exception is a note that mirrors a Markdown file of a working tree ("Save in a repository",
+//! "Send to Notes"): its file is written beside the row on every save and read back on open, here,
+//! where the database lock and the path guard both are — see `crate::repo_files`.
+//!
 //! The one thing this layer owns is the shape of the failures the frontend must be able to tell
 //! apart: a note that no longer exists, and a book move that was refused. Both come back as
 //! values rather than as errors — `Option::None` and `false` respectively — because both are
@@ -21,6 +25,7 @@ use crate::db::models::{
 use crate::db::note_queries::NoteTrashRow;
 use crate::db::version_queries::{self, DocVersion};
 use crate::db::{note_queries, Db};
+use crate::fsops;
 
 /// Hits returned by one search. Well past what the panel can show, and the point of the cap is
 /// only that a one-character query on a large workspace can't turn into an unbounded transfer.
@@ -63,8 +68,24 @@ pub fn notes_create_note(
         .map_err(|e| e.to_string())
 }
 
-/// The autosave path. `None` means the note was deleted while it was being edited — the frontend
-/// drops the editor rather than resurrecting a row the user removed elsewhere.
+/// What a save answers: the note's metadata — `None` when it was deleted while it was being edited,
+/// and the frontend drops the editor rather than resurrecting a row the user removed elsewhere —
+/// and, for a note that mirrors a file, the version of the file just written, which is what the
+/// next save is checked against.
+#[derive(serde::Serialize)]
+pub struct NoteSaved {
+    pub meta: Option<NoteMeta>,
+    pub version: Option<fsops::DiskVersion>,
+}
+
+/// The autosave path.
+///
+/// **A note that mirrors a file is saved twice** — into the row and out into its working tree —
+/// both here, for the reason `diagrams_save_diagram` gives: one writer of the pair is what keeps
+/// the note and the file the same thing. The row first, so nothing typed is lost when the file
+/// write fails; the failure is returned, which leaves the draft dirty upstairs and the next edit
+/// tries again. The file is written only over the version last read (`expected`), and refused with
+/// `changed-on-disk:` otherwise, so the frontend can ask — reload, or overwrite (`force`).
 #[tauri::command]
 pub fn notes_save_note(
     db: State<Db>,
@@ -72,22 +93,171 @@ pub fn notes_save_note(
     title: String,
     content: String,
     tags: String,
-) -> Result<Option<NoteMeta>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    // Before the write, so the version holds what the note *was*: a snapshot taken afterwards is a
-    // copy of the change rather than of what it replaced, which is useless for going back. Its own
-    // guards keep this cheap on the autosave path — see `record_version`.
-    if let Ok(Some(previous)) = note_queries::get_note(&conn, &id) {
-        let _ = version_queries::record_version(
-            &conn,
-            "note",
-            &id,
-            &previous.title,
-            &previous.content,
-            &crate::db::queries::now(),
-        );
+    expected: Option<fsops::DiskVersion>,
+    force: Option<bool>,
+) -> Result<NoteSaved, String> {
+    let (meta, target) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        // Before the write, so the version holds what the note *was*: a snapshot taken afterwards is
+        // a copy of the change rather than of what it replaced, which is useless for going back.
+        // Its own guards keep this cheap on the autosave path — see `record_version`.
+        if let Ok(Some(previous)) = note_queries::get_note(&conn, &id) {
+            let _ = version_queries::record_version(
+                &conn,
+                "note",
+                &id,
+                &previous.title,
+                &previous.content,
+                &crate::db::queries::now(),
+            );
+        }
+        let meta = note_queries::save_note(&conn, &id, &title, &content, &tags)
+            .map_err(|e| e.to_string())?;
+        // Resolved under the lock and used after it is dropped: a filesystem write is not something
+        // to hold the whole database's connection for.
+        let target = meta.as_ref().and_then(|m| origin_of(&conn, &m.origin_project_id, &m.origin_path));
+        (meta, target)
+    };
+    let version = match target {
+        Some((repo_path, rel_path)) => Some(crate::repo_files::write_linked(
+            &repo_path,
+            &rel_path,
+            &content,
+            expected.as_ref(),
+            force.unwrap_or(false),
+        )?),
+        None => None,
+    };
+    Ok(NoteSaved { meta, version })
+}
+
+// ---------- the repository bridge ----------
+
+/// Where a note's file is — the checkout and the path in it — or `None` for a note that lives only
+/// here. `None` too when the project has since been removed: a note whose repository is gone stays
+/// readable and simply stops syncing, rather than being synced with a guessed checkout.
+fn origin_of(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    rel_path: &str,
+) -> Option<(String, String)> {
+    if rel_path.is_empty() {
+        return None;
     }
-    note_queries::save_note(&conn, &id, &title, &content, &tags).map_err(|e| e.to_string())
+    let project = crate::db::queries::get_project(conn, project_id).ok()??;
+    Some((project.local_path, rel_path.to_string()))
+}
+
+/// A note and how its file is doing — two fields rather than a `Result`, for the reason
+/// `diagrams_cmd::DiagramSync` gives: a file that could not be read (a branch without it) is not a
+/// failure to open the note, which opens on the last body it had.
+#[derive(serde::Serialize)]
+pub struct NoteSync {
+    /// `None` when the note itself is gone.
+    pub row: Option<NoteRow>,
+    /// Empty when the working tree was read. Otherwise the reason, already a sentence.
+    pub file_error: String,
+    /// The version of the file read — what the next save is checked against. `None` for a note
+    /// with no file, or when the file could not be read.
+    pub version: Option<fsops::DiskVersion>,
+}
+
+/// Re-reads a note's file into it, and answers with the note — the read half of the bridge, called
+/// when the note is opened and when its working tree changes. A note with no file comes back as it
+/// is, so "sync this if it mirrors a file" is one call rather than a branch upstairs.
+#[tauri::command]
+pub fn notes_pull_file(db: State<Db>, id: String) -> Result<NoteSync, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let Some(row) = note_queries::get_note(&conn, &id).map_err(|e| e.to_string())? else {
+        return Ok(NoteSync { row: None, file_error: String::new(), version: None });
+    };
+    let Some((repo_path, rel_path)) = origin_of(&conn, &row.origin_project_id, &row.origin_path)
+    else {
+        return Ok(NoteSync { row: Some(row), file_error: String::new(), version: None });
+    };
+    match crate::repo_files::read_linked(&repo_path, &rel_path) {
+        Ok((content, version)) => {
+            let row = note_queries::pull_file(&conn, &id, &content).map_err(|e| e.to_string())?;
+            Ok(NoteSync { row, file_error: String::new(), version: Some(version) })
+        }
+        Err(message) => Ok(NoteSync { row: Some(row), file_error: message, version: None }),
+    }
+}
+
+/// "Send to Notes": files a Markdown file of a working tree as a note that mirrors it, and answers
+/// with the note and the version read.
+///
+/// Idempotent on `(workspace, project, path)` — see [`note_queries::link_file`]. The title and tags
+/// are the caller's (it reads front matter); the body is read here, after the path guard, and is the
+/// file exactly — front matter included — since every save writes it back.
+#[tauri::command]
+pub fn notes_link_file(
+    db: State<Db>,
+    workspace_id: String,
+    project_id: String,
+    rel_path: String,
+    title: String,
+    tags: String,
+) -> Result<NoteSync, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let project = crate::db::queries::get_project(&conn, &project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no such repository: {project_id}"))?;
+    // Read before any row is touched: a file that cannot be read is not a note, and half a link — a
+    // note pointing at a path nothing could open — is worse than none.
+    let (content, version) = crate::repo_files::read_linked(&project.local_path, &rel_path)?;
+    let row = note_queries::link_file(
+        &conn,
+        &workspace_id,
+        &project_id,
+        &project.name,
+        &rel_path,
+        &title,
+        &content,
+        &tags,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(NoteSync { row: Some(row), file_error: String::new(), version: Some(version) })
+}
+
+/// "Save in a repository": writes a note as a Markdown file in `.codeflow/notes/` of one of the
+/// workspace's repositories, named after the note, and ties the note to it. From then on it is a
+/// mirror like a note sent from that repository — see [`notes_save_note`].
+#[tauri::command]
+pub fn notes_save_to_repo(
+    db: State<Db>,
+    id: String,
+    project_id: String,
+) -> Result<NoteSaved, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let note = note_queries::get_note(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "That note no longer exists".to_string())?;
+    if !note.origin_path.is_empty() {
+        return Err(format!("{} is already saved in a repository", note.title));
+    }
+    let project = crate::db::queries::get_project(&conn, &project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no such repository: {project_id}"))?;
+    let rel_path = crate::repo_files::free_path(
+        std::path::Path::new(&project.local_path),
+        crate::repo_files::NOTES_FOLDER,
+        &note.title,
+        "md",
+        "nota",
+        |path| note_queries::origin_taken(&conn, &project_id, path).unwrap_or(true),
+    );
+    let version = crate::repo_files::create(&project.local_path, &rel_path, &note.content)?;
+    let meta = note_queries::set_origin(&conn, &id, &project_id, &rel_path)
+        .map_err(|e| e.to_string())?;
+    Ok(NoteSaved { meta, version: Some(version) })
+}
+
+/// Cuts a note loose from its file, keeping both. See [`note_queries::unlink_file`].
+#[tauri::command]
+pub fn notes_unlink_file(db: State<Db>, id: String) -> Result<Option<NoteMeta>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::unlink_file(&conn, &id).map_err(|e| e.to_string())
 }
 
 // ---------- version history ----------

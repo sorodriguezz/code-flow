@@ -15,6 +15,8 @@ import {
   flowsNodeCatalog,
   flowsRenameFlow,
   flowsRenameFolder,
+  flowsReorderFlows,
+  flowsReorderFolders,
   flowsSaveFlow,
   flowsSetActive,
   flowsTrustFlow,
@@ -24,6 +26,7 @@ import {
   type FlowNodeDescriptor,
 } from "../lib/tauri/flowsCommands";
 import { parseSpec, serializeSpec, uniqueName, type Catalog, type FlowSpec } from "../lib/flows/spec";
+import { byPlace, ownList, placeIn } from "../lib/flows/explorerOrder";
 import { FLOW_TEMPLATES } from "../lib/flows/templates";
 import type { TranslationKey } from "../lib/i18n/translations";
 import { notifyUnsavedChanged, registerUnsavedProvider } from "../lib/unsavedWork";
@@ -143,6 +146,18 @@ interface FlowsState {
   importFlow: (folderId: string | null) => Promise<string | null>;
   deleteFlow: (id: string) => Promise<void>;
   moveFlow: (id: string, folderId: string | null) => Promise<void>;
+  /**
+   * What a drag in the explorer ends with: the flow filed in `folderId` (`null` is the top level),
+   * next to `anchor` — or at the end without one. Shown at once and written after; a refusal
+   * reloads the tree. See `lib/flows/explorerOrder`.
+   */
+  dropFlow: (
+    id: string,
+    folderId: string | null,
+    anchor: { id: string; after: boolean } | null,
+  ) => Promise<void>;
+  /** The same for a folder, which has no inside to be dropped into: only its place among folders. */
+  dropFolder: (id: string, anchor: { id: string; after: boolean }) => Promise<void>;
   setScope: (id: string, global: boolean) => Promise<void>;
   /** Switches a flow's automatic triggers on or off. The flow is saved first: what gets armed is
    *  what is on the canvas. */
@@ -687,6 +702,63 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
       }
     },
 
+    dropFlow: async (id, folderId, anchor) => {
+      const { workspaceId, flows, folders } = get();
+      const flow = flows.find((candidate) => candidate.id === id);
+      // Only this workspace's own flows move here — see `explorerOrder`.
+      if (!workspaceId || !flow || flow.workspace_id !== workspaceId) return;
+      const before = ownList(flows, folders, workspaceId, folderId);
+      const after = placeIn(before, flow, anchor);
+      const crossed = (flow.folder_id ?? null) !== folderId;
+      if (!crossed && after.map((f) => f.id).join() === before.map((f) => f.id).join()) return;
+
+      // On screen first, as one change: the row lands where it was dropped before either write.
+      const place = new Map(after.map((entry, index) => [entry.id, index]));
+      set((state) => ({
+        flows: state.flows.map((entry) =>
+          place.has(entry.id)
+            ? {
+                ...entry,
+                folder_id: entry.id === id ? folderId : entry.folder_id,
+                sort_order: place.get(entry.id) ?? entry.sort_order,
+              }
+            : entry,
+        ),
+      }));
+      // Dropped into a closed folder: opened, or the flow would vanish from under the pointer.
+      if (folderId && get().collapsed.includes(folderId)) get().toggleFolder(folderId);
+      try {
+        if (crossed && !(await flowsMoveFlow(id, folderId))) {
+          // Refused — a folder of another workspace, a flow deleted meanwhile: the tree was stale.
+          await get().refresh();
+          return;
+        }
+        await flowsReorderFlows(workspaceId, after.map((entry) => entry.id));
+      } catch (error) {
+        pushErrorToast(String(error));
+        await get().refresh();
+      }
+    },
+
+    dropFolder: async (id, anchor) => {
+      const { workspaceId, folders } = get();
+      const folder = folders.find((candidate) => candidate.id === id);
+      if (!workspaceId || !folder) return;
+      const before = [...folders].sort(byPlace);
+      const after = placeIn(before, folder, anchor);
+      if (after.map((f) => f.id).join() === before.map((f) => f.id).join()) return;
+      const place = new Map(after.map((entry, index) => [entry.id, index]));
+      set((state) => ({
+        folders: state.folders.map((entry) => ({ ...entry, sort_order: place.get(entry.id) ?? entry.sort_order })),
+      }));
+      try {
+        await flowsReorderFolders(workspaceId, after.map((entry) => entry.id));
+      } catch (error) {
+        pushErrorToast(String(error));
+        await get().refresh();
+      }
+    },
+
     trust: async (id) => {
       if (get().activeId === id) await get().flush();
       const meta = get().flows.find((flow) => flow.id === id);
@@ -763,10 +835,27 @@ export const useFlowsStore = create<FlowsState>((set, get) => {
     deleteFolder: async (id) => {
       try {
         await flowsDeleteFolder(id);
-        set((state) => ({
-          folders: state.folders.filter((f) => f.id !== id),
-          flows: state.flows.map((flow) => (flow.folder_id === id ? { ...flow, folder_id: null } : flow)),
-        }));
+        // Its flows go to the end of the top level, in the folder's order — what
+        // `flow_queries::delete_folder` wrote.
+        set((state) => {
+          const workspaceId = state.workspaceId;
+          const last = Math.max(
+            -1,
+            ...state.flows
+              .filter((flow) => flow.workspace_id === workspaceId && !flow.folder_id)
+              .map((flow) => flow.sort_order),
+          );
+          const members = state.flows.filter((flow) => flow.folder_id === id).sort(byPlace);
+          const place = new Map(members.map((flow, index) => [flow.id, last + 1 + index]));
+          return {
+            folders: state.folders.filter((f) => f.id !== id),
+            flows: state.flows.map((flow) =>
+              place.has(flow.id)
+                ? { ...flow, folder_id: null, sort_order: place.get(flow.id) ?? flow.sort_order }
+                : flow,
+            ),
+          };
+        });
       } catch (error) {
         pushErrorToast(String(error));
       }

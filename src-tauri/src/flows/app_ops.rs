@@ -203,14 +203,14 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
         }
         "note.append" => {
             let id = arg(&args, "noteId");
-            let note = {
-                let state = db(host);
-                let conn = state.0.lock().map_err(|e| e.to_string())?;
-                crate::db::note_queries::get_note(&conn, &id).map_err(|e| e.to_string())?.ok_or_else(|| "That note no longer exists".to_string())?
-            };
+            // Through the bridge: a note that mirrors a file is appended to as the file is now — a
+            // pull since its last save is not undone — and the file gets the addition too.
+            let sync = crate::commands::notes_cmd::notes_pull_file(db(host), id.clone())?;
+            let note = sync.row.ok_or_else(|| "That note no longer exists".to_string())?;
             let addition = arg(&args, "content");
             let content = if note.content.trim().is_empty() { addition } else { format!("{}\n\n{addition}", note.content.trim_end()) };
-            let meta = crate::commands::notes_cmd::notes_save_note(db(host), id.clone(), note.title, content, note.tags)?
+            let meta = crate::commands::notes_cmd::notes_save_note(db(host), id.clone(), note.title, content, note.tags, sync.version, None)?
+                .meta
                 .ok_or_else(|| "That note was deleted".to_string())?;
             let _ = host.app.emit("notes:changed", json!({ "workspaceId": note.workspace_id, "noteId": id }));
             to_json(meta)

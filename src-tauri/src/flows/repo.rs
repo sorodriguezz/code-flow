@@ -112,28 +112,7 @@ pub fn scan(root: &Path) -> Vec<FoundFile> {
 
 /// A file name for a flow: its name in lower case, letters and digits joined by `-`.
 pub fn slug(name: &str) -> String {
-    let folded: String = name
-        .chars()
-        .map(|c| match c {
-            'á' | 'à' | 'ä' | 'â' | 'Á' | 'À' | 'Ä' | 'Â' => 'a',
-            'é' | 'è' | 'ë' | 'ê' | 'É' | 'È' | 'Ë' | 'Ê' => 'e',
-            'í' | 'ì' | 'ï' | 'î' | 'Í' | 'Ì' | 'Ï' | 'Î' => 'i',
-            'ó' | 'ò' | 'ö' | 'ô' | 'Ó' | 'Ò' | 'Ö' | 'Ô' => 'o',
-            'ú' | 'ù' | 'ü' | 'û' | 'Ú' | 'Ù' | 'Ü' | 'Û' => 'u',
-            'ñ' | 'Ñ' => 'n',
-            other => other.to_ascii_lowercase(),
-        })
-        .collect();
-    let mut out = String::new();
-    for c in folded.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c);
-        } else if !out.ends_with('-') && !out.is_empty() {
-            out.push('-');
-        }
-    }
-    let out = out.trim_end_matches('-').chars().take(60).collect::<String>();
-    if out.is_empty() { "flujo".into() } else { out }
+    crate::repo_files::slug(name, "flujo")
 }
 
 /// A free path for a new flow file in `root`: `<slug>.json`, then `<slug>-2.json`…
@@ -157,6 +136,8 @@ pub fn write(root: &Path, path: &str, file: &ExportFile) -> Result<String, Strin
     let mut text = serde_json::to_string_pretty(&stable).map_err(|e| e.to_string())?;
     text.push('\n');
     std::fs::write(&full, text.as_bytes()).map_err(|e| format!("Could not write {}: {e}", full.display()))?;
+    // A repository where a chain once ran hides all of `.codeflow/` from git, this file included.
+    crate::chain_memory::narrow_legacy_exclude(&root.to_string_lossy());
     Ok(hash(text.as_bytes()))
 }
 

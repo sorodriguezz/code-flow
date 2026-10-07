@@ -113,7 +113,8 @@ import {
   type ParkedEditor as ParkedEditorOf,
 } from "../../lib/parkedEditors";
 import { onRepoFsChanged } from "../../lib/tauri/events";
-import { isDbmlPath, openDbmlInDiagrams } from "../../lib/dbmlBridge";
+import { isDiagramPath, openFileInDiagrams } from "../../lib/dbmlBridge";
+import { sendToNotes } from "../../lib/notesBridge";
 import { findTheme } from "../../lib/codeThemes";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useThemeStore } from "../../state/themeStore";
@@ -1484,7 +1485,29 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       // Not over a save that did not happen: the diagram would open on the older text on disk.
       const saved = await save(path);
       if (saved === "conflict" || saved === "failed") return;
-      await openDbmlInDiagrams({ workspaceId, projectId: current.id, relPath: path });
+      await openFileInDiagrams({ workspaceId, projectId: current.id, relPath: path });
+    },
+    [save],
+  );
+
+  /** "Send to Notes" on a Markdown file — the file tree's menu. The same order as the diagrams'
+   *  button above: the open tab is saved first, or the note would start from the file as it was. */
+  const sendFileToNotes = useCallback(
+    async (path: string) => {
+      const current = projectRef.current;
+      if (!current) return;
+      const workspaceId =
+        useWorkspaceStore.getState().workspaceOfProject(current.id) ??
+        useWorkspaceStore.getState().activeWorkspaceId;
+      if (!workspaceId) return;
+      const saved = await save(path);
+      if (saved === "conflict" || saved === "failed") return;
+      await sendToNotes({
+        workspaceId,
+        projectId: current.id,
+        repoPath: current.local_path,
+        relPath: path,
+      });
     },
     [save],
   );
@@ -2431,11 +2454,11 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       onSave={() => group.activePath && void save(group.activePath)}
       onReload={(path, opts) => void reloadTab(path, opts)}
       onDiskAction={diskAction}
-      // Only for a schema. Not a disabled button on every other file — there is nothing to explain
-      // about a bridge that does not apply, and a permanently greyed-out icon in a five-icon
+      // Only for a diagram file. Not a disabled button on every other file — there is nothing to
+      // explain about a bridge that does not apply, and a permanently greyed-out icon in a five-icon
       // toolbar is worse than an absent one.
       onOpenInDiagrams={
-        isDbmlPath(group.activePath)
+        isDiagramPath(group.activePath)
           ? () => group.activePath && void openInDiagrams(group.activePath)
           : null
       }
@@ -2658,6 +2681,8 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
               fsNonce={fsNonce}
               onRefresh={forceReload}
               onOpenScratch={openScratch}
+              onOpenInDiagrams={openInDiagrams}
+              onSendToNotes={sendFileToNotes}
             />
           )}
         </div>

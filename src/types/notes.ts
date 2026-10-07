@@ -40,11 +40,48 @@ export interface NoteMetaRow {
   updated_at: string;
   /** Denormalised from the note's book — see the `notes.scope` column comment. */
   scope: RowScope;
+  /** The project whose working tree holds `origin_path`, or `""`. */
+  origin_project_id: string;
+  /**
+   * The repo-relative Markdown file this note mirrors, or `""` for a note that lives only here. A
+   * note with one is the file: every save writes it and every open re-reads it — see `isLinkedNote`.
+   */
+  origin_path: string;
 }
 
 /** One note, body included. The only shape that carries `content`. */
 export interface NoteRow extends NoteMetaRow {
   content: string;
+}
+
+/** Whether a note mirrors a file of a working tree. */
+export const isLinkedNote = (note: { origin_path: string } | null | undefined): boolean =>
+  Boolean(note?.origin_path);
+
+/**
+ * What the file side of a note-that-mirrors-a-file version is — mirrors `fsops::DiskVersion`, and
+ * is the same shape the diagrams' bridge keeps. The next save is checked against it.
+ */
+export interface NoteFileVersion {
+  mtime_ms: number;
+  size: number;
+  hash: string;
+}
+
+/** What a save answers. Mirrors `notes_cmd::NoteSaved`. */
+export interface NoteSaved {
+  /** `null` when the note was deleted while it was being edited. */
+  meta: NoteMetaRow | null;
+  /** The version of the file just written, for a note that mirrors one; `null` otherwise. */
+  version: NoteFileVersion | null;
+}
+
+/** A note and how its file is doing. Mirrors `notes_cmd::NoteSync`. */
+export interface NoteSync {
+  row: NoteRow | null;
+  /** `""` when the file was read; otherwise why it could not be, already a sentence. */
+  file_error: string;
+  version: NoteFileVersion | null;
 }
 
 /** A note in the trash, as the trash lists it. Mirrors `note_queries::NoteTrashRow`. */

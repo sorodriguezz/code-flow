@@ -16,6 +16,7 @@ import {
   Eye,
   FileCode2,
   FileText,
+  GitBranch,
   LayoutTemplate,
   ListTree,
   MoreHorizontal,
@@ -43,14 +44,17 @@ import { NoteOutline } from "./NoteOutline";
 import { NoteTagBar } from "./NoteTagBar";
 import { SaveTemplateModal } from "./SaveTemplateModal";
 import { NoteAiPanel } from "./NoteAiPanel";
+import { noteRepoItems } from "./noteRepoItems";
 import { ICON_BUTTON, readingMinutes, relativeTime } from "./notesChrome";
 import type { NoteMonacoHandle } from "./NoteMonaco";
 import type { MarkdownTool } from "../../lib/notes/markdownTools";
 import { outlineOf } from "../../lib/notes/outline";
 import { bookPath } from "../../lib/notes/tree";
 import { exportNotes, type NoteExportFormat } from "../../lib/notes/exportActions";
-import type { NoteViewMode } from "../../types/notes";
+import { isLinkedNote, type Note, type NoteViewMode } from "../../types/notes";
+import { describePath } from "../../lib/editorFiles";
 import { useNotesStore } from "../../state/notesStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useToastStore } from "../../state/toastStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -377,6 +381,7 @@ export function NoteEditor() {
                     icon: LayoutTemplate,
                     onClick: () => setTemplating(true),
                   },
+                  ...noteRepoItems(note.id),
                   {
                     label: t("notes.exportMarkdown"),
                     icon: Download,
@@ -569,6 +574,7 @@ export function NoteEditor() {
         <span className="tabular-nums">{t("notes.wordCount", { n: words })}</span>
         <span className="tabular-nums">{t("notes.charCount", { n: settled.length })}</span>
         <span className="tabular-nums">{t("notes.readingTime", { n: readingMinutes(words) })}</span>
+        {note && isLinkedNote(note) && <LinkedFileChip note={note} />}
         <span className="ml-auto flex items-center gap-1.5">
           {saving ? (
             <>
@@ -617,5 +623,53 @@ export function NoteEditor() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * The status bar's word on a note that mirrors a file: which file, in which repository — and, when
+ * something is wrong with the file, what. In the warning colour while its last save was refused
+ * because the file moved on disk, or when the file could not be read when the note opened; the
+ * refused save is a button then, which asks the question again (reload or overwrite) for someone
+ * who cancelled it.
+ */
+function LinkedFileChip({ note }: { note: Note }) {
+  const t = useT();
+  const fileError = useNotesStore((s) => s.fileError);
+  const conflicted = useNotesStore((s) => s.fileConflict === note.id);
+  const reviewFileConflict = useNotesStore((s) => s.reviewFileConflict);
+  // Any workspace's list: a global note is on this shelf with its home's repository.
+  const repo = useWorkspaceStore(
+    (s) =>
+      Object.values(s.projectsByWorkspace)
+        .flat()
+        .find((project) => project.id === note.origin_project_id)?.name ?? "",
+  );
+  const path = note.origin_path;
+  const title = conflicted
+    ? t("editor.diskConflict", { name: describePath(path).name })
+    : fileError
+      ? t("repoSync.fileUnreadable", { path, error: fileError })
+      : t("repoSync.linkedTo", { path, repo });
+  const body = (
+    <>
+      <GitBranch size={11} className="shrink-0" aria-hidden />
+      <span className="truncate font-mono">{path}</span>
+    </>
+  );
+  const tone = conflicted || fileError ? "text-[var(--cf-warning)]" : "";
+  return conflicted ? (
+    <button
+      type="button"
+      onClick={() => void reviewFileConflict()}
+      title={title}
+      className={`flex min-w-0 items-center gap-1 hover:underline ${tone}`}
+    >
+      {body}
+    </button>
+  ) : (
+    <span title={title} className={`flex min-w-0 items-center gap-1 ${tone}`}>
+      {body}
+    </span>
   );
 }
