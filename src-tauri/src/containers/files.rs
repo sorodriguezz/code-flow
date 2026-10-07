@@ -3,6 +3,11 @@
 //!
 //! A path inside the container only ever travels as an argument: the scripts below are fixed text
 //! that reads it as `$1`, so a file named `$(reboot)` is a file with an odd name and nothing more.
+//!
+//! And a script only ever travels on standard input (`exec -i … sh -s -- PATH`), never as an
+//! argument. From Windows a script of several lines given to `sh -c` did not reach the container
+//! whole — only its first line ran, which exits 0 having printed nothing, so every folder read as
+//! empty — while the same script on stdin arrives as written on every system.
 
 use std::path::{Path, PathBuf};
 
@@ -24,19 +29,25 @@ pub struct FileEntry {
 
 /// Lists the folder `$1`: a `TYPE|SIZE|MTIME|./NAME` line per entry, dotfiles included (`stat -c`,
 /// which GNU and busybox both have, without following links), then `::targets` and the same for
-/// what each symbolic link points at. Without `stat` — or with too many entries for one command
-/// line (126: the shell could not start it) — `::ls` and the bare names of `ls -1Ap` (a folder's
-/// ending in `/`). `./` keeps a name starting with `-` from reading as an option; a glob that
-/// matches nothing stays as written and `stat` skips it.
+/// what each symbolic link points at. When `stat` gives nothing — there is none, it has no `-c`, or
+/// there are too many entries for one command line — `::ls` and the bare names of `ls -1Ap` (a
+/// folder's ending in `/`). It always gives something when it works: `./.*` matches `.` and `..`
+/// even in an empty folder. `./` keeps a name starting with `-` from reading as an option; a glob
+/// that matches nothing stays as written and `stat` skips it.
 const LIST_SCRIPT: &str = r#"[ -d "$1" ] || exit 3
 cd "$1" 2>/dev/null || exit 4
-if ! command -v stat >/dev/null 2>&1; then echo ::ls; exec ls -1Ap; fi
-stat -c '%F|%s|%Y|%n' ./.* ./* 2>/dev/null
-if [ $? -ge 126 ]; then echo ::ls; exec ls -1Ap; fi
-set --
-for f in ./.* ./*; do [ -L "$f" ] && set -- "$@" "$f"; done
-if [ $# -gt 0 ]; then echo ::targets; stat -L -c '%F|%s|%Y|%n' "$@" 2>/dev/null; fi
-exit 0"#;
+if command -v stat >/dev/null 2>&1; then
+  listing=$(stat -c '%F|%s|%Y|%n' ./.* ./* 2>/dev/null)
+  if [ -n "$listing" ]; then
+    printf '%s\n' "$listing"
+    set --
+    for f in ./.* ./*; do [ -L "$f" ] && set -- "$@" "$f"; done
+    if [ $# -gt 0 ]; then echo ::targets; stat -L -c '%F|%s|%Y|%n' "$@" 2>/dev/null; fi
+    exit 0
+  fi
+fi
+echo ::ls
+exec ls -1Ap"#;
 
 const DELETE_SCRIPT: &str = r#"rm -rf -- "$1""#;
 
@@ -167,13 +178,24 @@ fn exec_failure(output: &cli::Output, path: &str, without_shell: &str) -> String
 pub async fn browse(target: &Target, id: &str, path: &str) -> Result<Vec<FileEntry>, String> {
     let id = container(target, id)?;
     let path = container_path(path)?;
-    // `sh` is the script's `$0`; the path is `$1`.
-    let args: Vec<String> = vec!["exec".into(), id.into(), "sh".into(), "-c".into(), LIST_SCRIPT.into(), "sh".into(), path.clone()];
-    let output = target.run_owned(args, engine::LIST_TIMEOUT).await?;
+    let output = target.run_fed(script_args(id, &path), Some(LIST_SCRIPT), engine::LIST_TIMEOUT).await?;
     if !output.ok() {
         return Err(exec_failure(&output, &path, "this container has no shell — download a path instead"));
     }
-    Ok(parse_listing(&output.stdout))
+    let entries = parse_listing(&output.stdout);
+    // A container's `/` always holds something (`/proc`, `/etc`), so nothing at all there is a
+    // listing that went wrong — said as such, with whatever the container said, never shown as an
+    // empty folder.
+    if entries.is_empty() && path == "/" {
+        let said: Vec<&str> = output.stderr.lines().map(str::trim).filter(|l| !l.is_empty()).take(4).collect();
+        return Err(if said.is_empty() { "the container's shell listed nothing at /".to_string() } else { format!("the container's shell listed nothing at /: {}", said.join(" · ")) });
+    }
+    Ok(entries)
+}
+
+/// `exec -i ID sh -s -- PATH`: the script comes on stdin, the path is its `$1`.
+fn script_args(id: &str, path: &str) -> Vec<String> {
+    vec!["exec".into(), "-i".into(), id.into(), "sh".into(), "-s".into(), "--".into(), path.into()]
 }
 
 pub async fn delete(target: &Target, id: &str, path: &str) -> Result<(), String> {
@@ -182,8 +204,7 @@ pub async fn delete(target: &Target, id: &str, path: &str) -> Result<(), String>
     if path == "/" {
         return Err("the container's root folder cannot be deleted".into());
     }
-    let args: Vec<String> = vec!["exec".into(), id.into(), "sh".into(), "-c".into(), DELETE_SCRIPT.into(), "sh".into(), path.clone()];
-    let output = target.run_owned(args, engine::ACTION_TIMEOUT).await?;
+    let output = target.run_fed(script_args(id, &path), Some(DELETE_SCRIPT), engine::ACTION_TIMEOUT).await?;
     if output.ok() {
         Ok(())
     } else {
@@ -338,6 +359,10 @@ regular file|5120|1759322300|./notes\n";
         // The path is `$1` and only `$1`: nothing the user picks is ever part of the script's text.
         assert!(LIST_SCRIPT.contains(r#"cd "$1""#) && !LIST_SCRIPT.contains("{"));
         assert_eq!(DELETE_SCRIPT, r#"rm -rf -- "$1""#);
+        // And the scripts are not on the command line at all: stdin carries them.
+        let args = script_args("web", "/srv/my files");
+        assert_eq!(args, vec!["exec", "-i", "web", "sh", "-s", "--", "/srv/my files"]);
+        assert!(!args.iter().any(|a| a.contains('\n') || a.contains('"')));
     }
 
     fn scratch() -> PathBuf {

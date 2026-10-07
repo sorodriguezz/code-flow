@@ -87,10 +87,16 @@ impl Target {
     }
 
     pub async fn run_owned(&self, args: Vec<String>, timeout: Duration) -> Result<cli::Output, String> {
+        self.run_fed(args, None, timeout).await
+    }
+
+    /// [`Target::run_owned`] with `input` on the command's standard input — a script for an
+    /// `exec -i … sh -s`, which never has to survive a command line that way.
+    pub async fn run_fed(&self, args: Vec<String>, input: Option<&str>, timeout: Duration) -> Result<cli::Output, String> {
         let engine = self.engine()?;
         let mut full = self.global_args();
         full.extend(args);
-        cli::run(&engine.program(), &full, None, timeout).await
+        cli::run(&engine.program(), &full, input, timeout).await
     }
 
     /// Where this target's commands go: a socket on this computer (`unix://`, `npipe://`), or another

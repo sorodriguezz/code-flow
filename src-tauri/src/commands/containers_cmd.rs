@@ -104,7 +104,12 @@ pub async fn containers_apply(context: Option<String>, namespace: Option<String>
 }
 
 /// A container's logs or a shell inside it, as a terminal session id for the xterm pane.
-#[tauri::command]
+///
+/// `(async)`, like `write_terminal` and the rest (see `terminal_cmd`): opening one creates a
+/// pseudo-console and starts the engine's CLI, which on Windows — a ConPTY, and an antivirus that
+/// looks at every process start — can take a second or two. On the main thread that was the whole
+/// window frozen each time a container's Terminal or Registro tab was opened.
+#[tauri::command(async)]
 pub fn containers_open_session(app: AppHandle, registry: State<TerminalRegistry>, request: session::SessionRequest) -> Result<String, String> {
     session::open(app, &registry, &request)
 }
