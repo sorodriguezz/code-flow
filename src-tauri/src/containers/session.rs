@@ -52,6 +52,11 @@ pub struct SessionRequest {
     pub dockerfile: Option<String>,
     #[serde(default)]
     pub tag: Option<String>,
+    /// `aksStart`: the cluster's resource group and subscription (the target is its name).
+    #[serde(default)]
+    pub resource_group: Option<String>,
+    #[serde(default)]
+    pub subscription: Option<String>,
 }
 
 /// bash where the image has it, sh otherwise — the probe a person would type.
@@ -178,6 +183,23 @@ pub fn command_line(request: &SessionRequest) -> Result<(String, Vec<String>), S
         Some(shell) => args.push(shell.to_string()),
         None => args.extend(["sh".into(), "-c".into(), FIND_SHELL.into()]),
     };
+    if request.kind == "aksStart" {
+        // An AKS cluster that was stopped (its API server's name then resolves to nothing): Azure's
+        // own `az aks start`, which takes minutes and says so as it goes.
+        let az = super::cli::find("az").ok_or("the Azure CLI (`az`) is not installed")?;
+        let field = |value: &Option<String>, what: &str| -> Result<String, String> {
+            let value = value.as_deref().map(str::trim).unwrap_or_default();
+            if value.is_empty() || value.starts_with('-') || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                Err(format!("\"{value}\" is not a {what}"))
+            } else {
+                Ok(value.to_string())
+            }
+        };
+        let group = field(&request.resource_group, "resource group")?;
+        let subscription = field(&request.subscription, "subscription")?;
+        let args = ["aks", "start", "--name", &request.target, "--resource-group", &group, "--subscription", &subscription];
+        return Ok((az.to_string_lossy().into_owned(), args.iter().map(|a| a.to_string()).collect()));
+    }
     if request.runtime == "kubernetes" {
         let target = kube::KubeTarget { context: request.context.clone(), namespace: request.namespace.clone() };
         let mut args = target.context_args();
@@ -194,8 +216,10 @@ pub fn command_line(request: &SessionRequest) -> Result<(String, Vec<String>), S
             "exec" => args.extend(["exec".into(), "-it".into(), request.target.clone()]),
             // Anything that needs the server signs in: kubelogin's device code, or a browser, shows
             // in the pane for the person in front of it — and the token it caches is what every
-            // later kubectl of the panel uses. `target` is the context's name.
-            "kubeLogin" => args.push("version".into()),
+            // later kubectl of the panel uses. `target` is the context's name. The request may take
+            // as long as the person does: kubectl's own limit (32 s, the plugin's wait included)
+            // cut sign-ins that were still being typed.
+            "kubeLogin" => args.extend(["version".into(), "--request-timeout=10m".into()]),
             other => return Err(format!("unknown session {other}")),
         }
         if let Some(c) = request.container.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
@@ -279,6 +303,7 @@ fn label(request: &SessionRequest) -> String {
         "logs" | "projectLogs" => "logs".to_string(),
         "pull" | "build" => request.kind.clone(),
         "kubeLogin" => "sign-in".to_string(),
+        "aksStart" => return "az aks start".to_string(),
         kind => match compose_action(kind) {
             Some(action) => format!("compose {action}"),
             None => "exec".to_string(),
@@ -328,6 +353,8 @@ mod tests {
             build_context: None,
             dockerfile: None,
             tag: None,
+            resource_group: None,
+            subscription: None,
         }
     }
 
@@ -399,7 +426,7 @@ mod tests {
         let mut login = request("kubeLogin", "kubernetes");
         login.context = Some("aks-dev".into());
         login.target = "aks-dev".into();
-        assert_eq!(command_line(&login).unwrap().1, vec!["--context", "aks-dev", "version"]);
+        assert_eq!(command_line(&login).unwrap().1, vec!["--context", "aks-dev", "version", "--request-timeout=10m"]);
     }
 
     #[test]

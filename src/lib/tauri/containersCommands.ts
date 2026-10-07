@@ -16,6 +16,7 @@ import type {
   KubeContextOrigin,
   KubeTest,
   AzureCliSwitch,
+  AksStatus,
   KubeTools,
   RunSpec,
   RuntimeInfo,
@@ -89,7 +90,8 @@ export interface SessionRequest {
   /** `pull`, `build` and the `compose*` ones run to their end in the pane, then the session exits. */
   /** `kubeLogin`: `kubectl version` against the context named by `target`, so that a sign-in its
    *  auth plugin asks for (a device code) shows in the pane. */
-  kind: "logs" | "exec" | "projectLogs" | "pull" | "build" | "composeUp" | "composeDown" | "composeRestart" | "composePull" | "kubeLogin";
+  /** `aksStart`: `az aks start` for the cluster named by `target`, in `resourceGroup` and `subscription`. */
+  kind: "logs" | "exec" | "projectLogs" | "pull" | "build" | "composeUp" | "composeDown" | "composeRestart" | "composePull" | "kubeLogin" | "aksStart";
   runtime: string;
   context: string | null;
   namespace?: string | null;
@@ -106,6 +108,8 @@ export interface SessionRequest {
   buildContext?: string | null;
   dockerfile?: string | null;
   tag?: string | null;
+  resourceGroup?: string | null;
+  subscription?: string | null;
 }
 
 export const containersOpenSession = (request: SessionRequest) => invoke<string>("containers_open_session", { request });
@@ -187,3 +191,5 @@ export const containersKubeRemove = (context: string) => invoke<void>("container
 export const containersKubeTest = (context: string) => invoke<KubeTest>("containers_kube_test", { context });
 
 export const containersKubeUseAzureCli = (context: string) => invoke<AzureCliSwitch>("containers_kube_use_azure_cli", { context });
+
+export const containersKubeAksStatus = (context: string) => invoke<AksStatus>("containers_kube_aks_status", { context });

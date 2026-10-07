@@ -1568,10 +1568,12 @@ fn auth_of(docs: &[Value], context: &str) -> Auth {
 }
 
 /// What to do about a failed `kubectl version` — a key the panel words (`containers.kube.add.hint.*`),
-/// `awsLogin` carrying the profile after a colon.
-fn hint_for(error: &str, auth: &Auth) -> Option<String> {
+/// `awsLogin` carrying the profile after a colon. `server` is the context's cluster's: an AKS one
+/// gets the words for what Azure does (a stopped cluster's name stops resolving).
+fn hint_for(error: &str, auth: &Auth, server: &str) -> Option<String> {
     let e = error.to_lowercase();
     let has = |needle: &str| e.contains(needle);
+    let aks = host_of(server).ends_with(".azmk8s.io") || has(".azmk8s.io");
     let missing = has("not found") || has("no such file");
     let timed_out = has("did not answer within");
     let aws_login = || if auth.profile.is_empty() { "awsLogin".to_string() } else { format!("awsLogin:{}", auth.profile) };
@@ -1604,6 +1606,10 @@ fn hint_for(error: &str, auth: &Auth) -> Option<String> {
         }
     } else if has("x509") || has("certificate signed by unknown authority") || has("failed to verify certificate") || has("certificate is not trusted") {
         "ca".to_string()
+    } else if has("no such host") || has("name or service not known") || has("nodename nor servname") || has("could not resolve host") {
+        // The server's name resolves to nothing. For AKS that is most often a stopped cluster — its
+        // API server's record goes with it — or one made again under a new name.
+        if aks { "aksDns" } else { "dns" }.to_string()
     } else if timed_out && auth.login != Login::Static {
         // A plugin that never returned is more often waiting for a sign-in than a cluster that is down.
         "interactive".to_string()
@@ -1619,7 +1625,7 @@ fn hint_for(error: &str, auth: &Auth) -> Option<String> {
         || has("tls handshake timeout")
         || has("unable to connect to the server")
     {
-        "unreachable".to_string()
+        if aks { "aksUnreachable" } else { "unreachable" }.to_string()
     } else {
         return None;
     };
@@ -1658,8 +1664,173 @@ pub async fn test(context: &str) -> KubeTest {
         }
         Err(error) => error,
     };
-    let hint = hint_for(&error, &auth);
+    let (_, server) = cluster_of(&docs, context);
+    let hint = hint_for(&error, &auth, &server);
     failed(tidy(&error), hint)
+}
+
+// ------------------------------------------------------------------------- AKS: what Azure says
+
+/// What Azure says about the AKS cluster behind a context — asked when it does not answer, to tell
+/// a stopped cluster from a private one, one that moved to a new address, or one that is gone.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AksStatus {
+    /// Found among the subscriptions `az` is signed into.
+    pub found: bool,
+    /// Its name in Azure — the kubeconfig's when it was not found.
+    pub name: String,
+    pub resource_group: String,
+    pub subscription: String,
+    pub subscription_name: String,
+    /// Azure's power state: `Running`, `Stopped`.
+    pub power: String,
+    /// Azure's provisioning state: `Succeeded`, `Starting`, `Stopping`, `Failed`…
+    pub provisioning: String,
+    /// Its API server has a private endpoint only: it answers from the organisation's network.
+    pub private: bool,
+    /// The addresses its API server lets in; empty when any may.
+    pub authorized_ranges: Vec<String>,
+    /// The kubeconfig still names one of its current addresses.
+    pub address_current: bool,
+}
+
+/// One cluster of `az aks list -o json`, as a diagnosis reads it.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct AksListed {
+    name: String,
+    resource_group: String,
+    subscription: String,
+    power: String,
+    provisioning: String,
+    private: bool,
+    authorized_ranges: Vec<String>,
+    /// `fqdn`, `privateFqdn` and `azurePortalFqdn`, lowercased; the empty ones left out.
+    addresses: Vec<String>,
+}
+
+fn parse_aks_listed(text: &str) -> Vec<AksListed> {
+    cli::json_values(text)
+        .iter()
+        .filter_map(|c| {
+            let name = str_at(c, "/name");
+            if name.is_empty() {
+                return None;
+            }
+            let subscription = str_at(c, "/id").split('/').skip_while(|part| !part.eq_ignore_ascii_case("subscriptions")).nth(1).unwrap_or_default().to_string();
+            let addresses = ["/fqdn", "/privateFqdn", "/azurePortalFqdn"].iter().map(|at| str_at(c, at).to_lowercase()).filter(|a| !a.is_empty()).collect();
+            let authorized_ranges = c
+                .pointer("/apiServerAccessProfile/authorizedIpRanges")
+                .and_then(Value::as_array)
+                .map(|list| list.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            Some(AksListed {
+                name,
+                resource_group: str_at(c, "/resourceGroup"),
+                subscription,
+                power: str_at(c, "/powerState/code"),
+                provisioning: str_at(c, "/provisioningState"),
+                private: c.pointer("/apiServerAccessProfile/enablePrivateCluster").and_then(Value::as_bool).unwrap_or(false),
+                authorized_ranges,
+                addresses,
+            })
+        })
+        .collect()
+}
+
+/// The host a kubeconfig's `server` names: `https://x.hcp.eastus.azmk8s.io:443` → `x.hcp.eastus.azmk8s.io`.
+fn host_of(server: &str) -> String {
+    let server = server.trim();
+    let rest = server.split_once("://").map(|(_, rest)| rest).unwrap_or(server);
+    rest.split(['/', ':']).next().unwrap_or_default().to_lowercase()
+}
+
+/// A context's cluster: its name in the kubeconfig, and its server — read as kubectl merges.
+fn cluster_of(docs: &[Value], context: &str) -> (String, String) {
+    let cluster = docs.iter().find_map(|doc| find(doc, "contexts", context)).map(|c| str_at(c, "/context/cluster")).unwrap_or_default();
+    if cluster.is_empty() {
+        return (String::new(), String::new());
+    }
+    let server = docs.iter().find_map(|doc| find(doc, "clusters", &cluster)).map(|c| str_at(c, "/cluster/server")).unwrap_or_default();
+    (cluster, server)
+}
+
+/// The listed cluster a context points at: the one serving its address — else one by its name,
+/// which is all that is left of a cluster made again under a new address.
+fn match_aks<'a>(listed: &'a [AksListed], names: &[&str], host: &str) -> Option<&'a AksListed> {
+    listed
+        .iter()
+        .find(|c| !host.is_empty() && c.addresses.iter().any(|a| a == host))
+        .or_else(|| listed.iter().find(|c| names.iter().any(|n| !n.is_empty() && c.name.eq_ignore_ascii_case(n))))
+}
+
+fn aks_status_of(listed: &AksListed, host: &str, subscription_name: &str) -> AksStatus {
+    AksStatus {
+        found: true,
+        name: listed.name.clone(),
+        resource_group: listed.resource_group.clone(),
+        subscription: listed.subscription.clone(),
+        subscription_name: subscription_name.to_string(),
+        power: listed.power.clone(),
+        provisioning: listed.provisioning.clone(),
+        private: listed.private,
+        authorized_ranges: listed.authorized_ranges.clone(),
+        address_current: listed.addresses.iter().any(|a| a == host),
+    }
+}
+
+/// Looks the context's AKS cluster up in every subscription `az` is signed into — the default one
+/// first, where a cluster in use most likely is.
+pub async fn aks_status(context: &str) -> Result<AksStatus, String> {
+    let context = context.trim();
+    check_arg("context", context)?;
+    let files = Files::current().await;
+    let docs: Vec<Value> = files.read_order().iter().filter_map(|p| load(p).ok()).collect();
+    let (cluster, server) = cluster_of(&docs, context);
+    let host = host_of(&server);
+    if !host.ends_with(".azmk8s.io") {
+        return Err(format!("{context} is not an AKS cluster"));
+    }
+    let az = need("az")?;
+    let subscriptions = accounts("aks").await?;
+    let names = [cluster.as_str(), context];
+    let name_of_subscription = |id: &str| subscriptions.iter().find(|s| s.id.eq_ignore_ascii_case(id)).map(|s| s.name.clone()).unwrap_or_default();
+    // Owned ids, so the listings below borrow nothing across their awaits.
+    let (first, rest): (Vec<String>, Vec<String>) = {
+        let (first, rest): (Vec<&CloudAccount>, Vec<&CloudAccount>) = subscriptions.iter().partition(|s| s.is_default);
+        (first.into_iter().map(|s| s.id.clone()).collect(), rest.into_iter().map(|s| s.id.clone()).collect())
+    };
+    let mut listed: Vec<AksListed> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for batch in [first, rest] {
+        let results: Vec<Result<String, String>> = futures_util::stream::iter(batch.into_iter().map(|id| {
+            let az = az.clone();
+            let args = vec!["aks".to_string(), "list".into(), "-o".into(), "json".into(), "--subscription".into(), id];
+            async move { run_cloud("aks", &az, &args, &[], LIST_TIMEOUT, "").await }
+        }))
+        .buffer_unordered(DESCRIBE_AT_ONCE)
+        .collect()
+        .await;
+        for result in results {
+            match result {
+                Ok(text) => listed.extend(parse_aks_listed(&text)),
+                Err(error) => failures.push(error),
+            }
+        }
+        // Found where it lives now: the other subscriptions need not be asked.
+        if listed.iter().any(|c| c.addresses.iter().any(|a| *a == host)) {
+            break;
+        }
+    }
+    if let Some(hit) = match_aks(&listed, &names, &host) {
+        return Ok(aks_status_of(hit, &host, &name_of_subscription(&hit.subscription)));
+    }
+    if listed.is_empty() {
+        if let Some(failure) = failures.into_iter().next() {
+            return Err(failure);
+        }
+    }
+    Ok(AksStatus { name: if cluster.is_empty() { context.to_string() } else { cluster }, ..AksStatus::default() })
 }
 
 // ------------------------------------------------------------------- Entra ID: the Azure CLI's sign-in
@@ -2137,7 +2308,7 @@ contexts:
         assert!(!kubelogin(json!(["get-token", "--login", "devicecode"]), json!([{"name": "AAD_LOGIN_METHOD", "value": "azurecli"}])).interactive);
         let plain = Auth::default();
 
-        let hint = |error: &str, auth: &Auth| hint_for(error, auth);
+        let hint = |error: &str, auth: &Auth| hint_for(error, auth, "https://10.0.0.1:6443");
         assert_eq!(hint("Unable to connect to the server: getting credentials: exec: executable kubelogin not found", &plain).as_deref(), Some("kubelogin"));
         assert_eq!(hint("exec: executable gke-gcloud-auth-plugin not found", &plain).as_deref(), Some("gkePlugin"));
         assert_eq!(hint("getting credentials: exec: executable aws not found", &plain).as_deref(), Some("awsCli"));
@@ -2148,7 +2319,13 @@ contexts:
         assert_eq!(hint("AADSTS70043: The refresh token has expired", &plain).as_deref(), Some("azLogin"));
         assert_eq!(hint("Unable to connect to the server: tls: failed to verify certificate: x509: certificate signed by unknown authority", &plain).as_deref(), Some("ca"));
         assert_eq!(hint("Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout", &plain).as_deref(), Some("unreachable"));
-        assert_eq!(hint("dial tcp: lookup x.privatelink.eastus.azmk8s.io: no such host", &plain).as_deref(), Some("unreachable"));
+        assert_eq!(hint("dial tcp: lookup x.privatelink.eastus.azmk8s.io: no such host", &plain).as_deref(), Some("aksDns"));
+        assert_eq!(hint("dial tcp: lookup api.example.test: no such host", &plain).as_deref(), Some("dns"));
+        // An AKS server is known by the kubeconfig's address even when the error does not name it.
+        let aks = "https://dns-aks-dev-e2smvalx.hcp.eastus.azmk8s.io:443";
+        assert_eq!(hint_for("Unable to connect to the server: context deadline exceeded (Client.Timeout exceeded while awaiting headers)", &plain, aks).as_deref(), Some("aksUnreachable"));
+        assert_eq!(hint_for("Unable to connect to the server: dial tcp: lookup dns-aks-dev-e2smvalx.hcp.eastus.azmk8s.io: no such host", &plain, aks).as_deref(), Some("aksDns"));
+        assert_eq!(hint_for("kubectl did not answer within 25 s", &azure, aks).as_deref(), Some("azDeviceCode"), "a device code still comes first");
         assert_eq!(hint("The connection to the server localhost:8080 was refused - did you specify the right host or port?", &plain).as_deref(), Some("unreachable"));
         assert_eq!(hint("kubectl did not answer within 25 s", &azure).as_deref(), Some("azDeviceCode"));
         assert_eq!(hint("To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABC123", &azure).as_deref(), Some("azDeviceCode"));
@@ -2161,6 +2338,51 @@ contexts:
         let docs = vec![parse(USERS_CONFIG).unwrap()];
         assert_eq!(auth_of(&docs, "orbstack"), Auth::default());
         assert_eq!(auth_of(&docs, "missing"), Auth::default());
+    }
+
+    #[test]
+    fn aks_is_found_by_its_address_then_by_its_name() {
+        assert_eq!(host_of("https://dns-aks-dev-e2smvalx.hcp.eastus.azmk8s.io:443"), "dns-aks-dev-e2smvalx.hcp.eastus.azmk8s.io");
+        assert_eq!(host_of("https://API.Example.test/k8s"), "api.example.test");
+        assert_eq!(host_of("10.0.0.1"), "10.0.0.1");
+        // What `az aks list -o json` gives, cut to the fields read.
+        let listed = parse_aks_listed(
+            r#"[
+              {"name": "AKS-DESA", "resourceGroup": "rg-desa", "id": "/subscriptions/8ea818f5/resourcegroups/rg-desa/providers/Microsoft.ContainerService/managedClusters/AKS-DESA",
+               "powerState": {"code": "Stopped"}, "provisioningState": "Succeeded",
+               "fqdn": "dns-aks-desa-e2smvalx.hcp.eastus.azmk8s.io", "privateFqdn": null, "azurePortalFqdn": "dns-aks-desa-e2smvalx.portal.hcp.eastus.azmk8s.io",
+               "apiServerAccessProfile": null},
+              {"name": "AKS-QA", "resourceGroup": "rg-qa", "id": "/subscriptions/3783af45/resourceGroups/rg-qa/providers/Microsoft.ContainerService/managedClusters/AKS-QA",
+               "powerState": {"code": "Running"}, "provisioningState": "Succeeded",
+               "fqdn": "dns-aks-qa-new.hcp.eastus.azmk8s.io",
+               "apiServerAccessProfile": {"enablePrivateCluster": false, "authorizedIpRanges": ["200.1.2.3/32", "190.4.5.0/24"]}},
+              {"name": "AKS-PRIV", "resourceGroup": "rg-p", "id": "/subscriptions/9eeeac53/resourceGroups/rg-p/providers/x/AKS-PRIV",
+               "powerState": {"code": "Running"}, "fqdn": null, "privateFqdn": "aks-priv-1a2b.privatelink.eastus.azmk8s.io",
+               "apiServerAccessProfile": {"enablePrivateCluster": true, "authorizedIpRanges": null}}
+            ]"#,
+        );
+        assert_eq!(listed.len(), 3);
+        assert_eq!((listed[0].subscription.as_str(), listed[0].power.as_str()), ("8ea818f5", "Stopped"));
+        assert_eq!(listed[1].authorized_ranges, vec!["200.1.2.3/32", "190.4.5.0/24"]);
+        assert!(listed[2].private && listed[2].addresses == vec!["aks-priv-1a2b.privatelink.eastus.azmk8s.io"]);
+
+        let stopped = match_aks(&listed, &["AKS-DESA"], "dns-aks-desa-e2smvalx.hcp.eastus.azmk8s.io").unwrap();
+        let status = aks_status_of(stopped, "dns-aks-desa-e2smvalx.hcp.eastus.azmk8s.io", "ACHS Azure Desarrollo");
+        assert!(status.found && status.address_current && status.power == "Stopped" && status.resource_group == "rg-desa");
+        // Made again under a new address: found by its name, and the address is the old one.
+        let moved = match_aks(&listed, &["aks-qa", "AKS-QA"], "dns-aks-qa-old.hcp.eastus.azmk8s.io").unwrap();
+        assert!(!aks_status_of(moved, "dns-aks-qa-old.hcp.eastus.azmk8s.io", "").address_current);
+        assert!(match_aks(&listed, &["AKS-GONE"], "dns-aks-gone.hcp.eastus.azmk8s.io").is_none());
+        // The address wins over a name another cluster happens to share.
+        let by_address = match_aks(&listed, &["AKS-DESA"], "aks-priv-1a2b.privatelink.eastus.azmk8s.io").unwrap();
+        assert_eq!(by_address.name, "AKS-PRIV");
+
+        let docs = vec![json!({
+            "contexts": [{"name": "AKS-DESA", "context": {"cluster": "AKS-DESA", "user": "u"}}],
+            "clusters": [{"name": "AKS-DESA", "cluster": {"server": "https://dns-aks-desa-e2smvalx.hcp.eastus.azmk8s.io:443"}}],
+        })];
+        assert_eq!(cluster_of(&docs, "AKS-DESA"), ("AKS-DESA".to_string(), "https://dns-aks-desa-e2smvalx.hcp.eastus.azmk8s.io:443".to_string()));
+        assert_eq!(cluster_of(&docs, "other"), (String::new(), String::new()));
     }
 
     #[test]

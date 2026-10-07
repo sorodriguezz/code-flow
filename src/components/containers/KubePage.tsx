@@ -1,19 +1,19 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { CheckCircle2, Crosshair, KeyRound, LogIn, Loader2, MoreHorizontal, Plus, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, Cloud, Crosshair, KeyRound, LogIn, Loader2, MoreHorizontal, Play, Plus, Trash2, XCircle } from "lucide-react";
 import { Button } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { RowAction, StateDot, ago } from "./containerBits";
 import { kubeMenu } from "./containerActions";
 import { KubeTestLine, kubeHintText } from "./KubeAddCluster";
 import { DataTable, EmptyLine, LiveMark, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
-import { containersKubeOrigins, containersKubeRemove, containersKubeTest, containersKubeUseAzureCli } from "../../lib/tauri/containersCommands";
+import { containersKubeAksStatus, containersKubeOrigins, containersKubeRemove, containersKubeTest, containersKubeUseAzureCli } from "../../lib/tauri/containersCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useContainersJobsStore } from "../../state/containersJobsStore";
 import { listKey, useContainersStore } from "../../state/containersStore";
-import { useLanguageStore, useT } from "../../state/languageStore";
+import { useLanguageStore, useT, type Translate } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import type { KubeContextOrigin, KubeRow, KubeTest, RuntimeInfo } from "../../types/containers";
+import type { AksStatus, KubeContextOrigin, KubeRow, KubeTest, RuntimeInfo } from "../../types/containers";
 
 /**
  * Kubernetes as tables — one per kind, with the columns `kubectl get` would print for it (a pod's
@@ -277,16 +277,28 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
     void checkReach(name);
   };
   // A device code shows in the jobs panel, where the person signs in; the token kubelogin then
-  // keeps is what every later kubectl uses. A sign-in that ended well tries the cluster again.
+  // keeps is what every later kubectl uses. A sign-in — or a cluster started in Azure — tries the
+  // cluster again when it ends, however it ended: the row then says what stands in the way now.
   const signIn = (name: string) =>
     void startJob(t("containers.m.kube.signingIn", { name }), { kind: "kubeLogin", runtime: "kubernetes", context: name, target: name }, { meta: { context: name } });
   const lastSeen = useRef(Date.now());
   useEffect(() => {
-    const fresh = history.filter((past) => past.kind === "kubeLogin" && past.at > lastSeen.current);
+    const fresh = history.filter((past) => (past.kind === "kubeLogin" || past.kind === "aksStart") && past.at > lastSeen.current);
     if (fresh.length === 0) return;
     lastSeen.current = Math.max(...fresh.map((past) => past.at));
-    for (const past of fresh) if (past.code === 0 && past.meta.context) retry(past.meta.context);
+    for (const past of fresh) if (past.meta.context) retry(past.meta.context);
   }, [history]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** `az aks start` for a cluster Azure says is stopped — minutes of work, and costs again once it
+   *  runs, so it asks first. */
+  const startAks = async (context: string, status: AksStatus) => {
+    const where = aksWhere(status);
+    if (!(await confirmAction(t("containers.m.kube.aks.startConfirm", { name: status.name, where }), false, t("containers.m.kube.aks.startConfirmButton")))) return;
+    void startJob(
+      t("containers.m.kube.aks.starting", { name: status.name }),
+      { kind: "aksStart", runtime: "kubernetes", context, target: status.name, resourceGroup: status.resourceGroup, subscription: status.subscription },
+      { meta: { context } },
+    );
+  };
   /** Microsoft's own fix for a device code nobody sees: kubelogin rewrites the user to sign in with
    *  `az login`'s session — in the user's kubeconfig, so it asks first. */
   const switchToAzureCli = async (name: string) => {
@@ -410,6 +422,7 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
                           </Button>
                         </div>
                       )}
+                      {(failed.hint === "aksDns" || failed.hint === "aksUnreachable") && <AksCheck context={c.name} onStart={(status) => void startAks(c.name, status)} />}
                     </td>
                   </tr>
                 )}
@@ -419,6 +432,60 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
           </tbody>
         </DataTable>
       )}
+    </div>
+  );
+}
+
+/** Where an AKS cluster lives: its resource group and subscription. */
+function aksWhere(status: AksStatus): string {
+  return [status.resourceGroup, status.subscriptionName || status.subscription].filter(Boolean).join(" · ");
+}
+
+/** What Azure's answer means for a cluster that does not answer — the first that applies. */
+function aksVerdict(t: Translate, status: AksStatus): string {
+  if (!status.found) return t("containers.m.kube.aks.notFound", { name: status.name });
+  const where = aksWhere(status);
+  if (status.power === "Stopped") return t("containers.m.kube.aks.stopped", { where });
+  if (/^(starting|stopping|updating|upgrading|creating|deleting|scaling)$/i.test(status.provisioning)) return t("containers.m.kube.aks.busy", { state: status.provisioning, where });
+  if (!status.addressCurrent) return t("containers.m.kube.aks.moved", { where });
+  if (status.private) return t("containers.m.kube.aks.private", { where });
+  if (status.authorizedRanges.length > 0) return t("containers.m.kube.aks.ranges", { ranges: status.authorizedRanges.join(", "), where });
+  return t("containers.m.kube.aks.running", { where });
+}
+
+/**
+ * «Revisar en Azure» under an AKS cluster that does not answer: `az` is asked what became of it —
+ * stopped, private, behind a list of addresses, moved to a new one, or gone — and a stopped one can
+ * be started from here.
+ */
+function AksCheck({ context, onStart }: { context: string; onStart: (status: AksStatus) => void }) {
+  const t = useT();
+  const [state, setState] = useState<AksStatus | "checking" | { error: string } | null>(null);
+  const check = async () => {
+    setState("checking");
+    try {
+      setState(await containersKubeAksStatus(context));
+    } catch (e) {
+      setState({ error: String(e) });
+    }
+  };
+  const status = state && state !== "checking" && !("error" in state) ? state : null;
+  return (
+    <div className="mt-2 flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Button size="sm" variant="secondary" disabled={state === "checking"} onClick={() => void check()} title={t("containers.m.kube.aks.checkHint")}>
+          {state === "checking" ? <Loader2 size={12} className="animate-spin" /> : <Cloud size={12} />}
+          {t("containers.m.kube.aks.check")}
+        </Button>
+        {status?.found && status.power === "Stopped" && (
+          <Button size="sm" variant="secondary" onClick={() => onStart(status)}>
+            <Play size={12} />
+            {t("containers.m.kube.aks.start")}
+          </Button>
+        )}
+      </div>
+      {status && <p className="text-[12px] leading-snug text-[var(--cf-text)]">{aksVerdict(t, status)}</p>}
+      {state && state !== "checking" && "error" in state && <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-[var(--cf-danger)]">{state.error}</p>}
     </div>
   );
 }

@@ -176,6 +176,12 @@ export function kubeHintText(t: Translate, hint: string | null | undefined): str
       return t("containers.kube.add.hint.interactive");
     case "azDeviceCode":
       return t("containers.kube.add.hint.azDeviceCode");
+    case "dns":
+      return t("containers.kube.add.hint.dns");
+    case "aksDns":
+      return t("containers.kube.add.hint.aksDns");
+    case "aksUnreachable":
+      return t("containers.kube.add.hint.aksUnreachable");
     case "credentials":
       return t("containers.kube.add.hint.credentials");
     case "ca":

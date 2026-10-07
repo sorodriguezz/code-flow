@@ -324,6 +324,25 @@ export interface KubeTest {
   hint: string | null;
 }
 
+/** What Azure says about the AKS cluster behind a context that does not answer. */
+export interface AksStatus {
+  /** Found among the subscriptions `az` is signed into. */
+  found: boolean;
+  name: string;
+  resourceGroup: string;
+  subscription: string;
+  subscriptionName: string;
+  /** Azure's power state: `Running`, `Stopped`. */
+  power: string;
+  /** Azure's provisioning state: `Succeeded`, `Starting`, `Stopping`… */
+  provisioning: string;
+  private: boolean;
+  /** The addresses its API server lets in; empty when any may. */
+  authorizedRanges: string[];
+  /** The kubeconfig still names one of its current addresses. */
+  addressCurrent: boolean;
+}
+
 /** A context switched to the Azure CLI's sign-in: the kubeconfig kubelogin rewrote, and the copy
  *  taken first. */
 export interface AzureCliSwitch {

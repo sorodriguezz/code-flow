@@ -43,6 +43,13 @@ pub async fn containers_kube_test(context: String) -> kubeconfig::KubeTest {
     kubeconfig::test(&context).await
 }
 
+/// What Azure says about a context's AKS cluster: stopped, private, behind authorized addresses,
+/// moved to a new address, or not in any subscription `az` can see.
+#[tauri::command]
+pub async fn containers_kube_aks_status(context: String) -> Result<kubeconfig::AksStatus, String> {
+    kubeconfig::aks_status(&context).await
+}
+
 /// Makes a context sign in with the Azure CLI's session instead of a device code — a rewrite of the
 /// kubeconfig that holds it, which the panel confirms first.
 #[tauri::command]

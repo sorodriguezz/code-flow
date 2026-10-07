@@ -895,6 +895,7 @@ pub fn run() {
             commands::containers_kube_cmd::containers_kube_remove,
             commands::containers_kube_cmd::containers_kube_test,
             commands::containers_kube_cmd::containers_kube_use_azure_cli,
+            commands::containers_kube_cmd::containers_kube_aks_status,
             commands::services_cmd::list_services,
             commands::services_cmd::list_service_groups,
             commands::services_cmd::create_service,
