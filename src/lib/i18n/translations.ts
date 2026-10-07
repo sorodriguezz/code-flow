@@ -2761,6 +2761,11 @@ const en = {
   "notifications.goOtherWorkspace": "Go there — switches to {name}",
   "notifications.workspaceGone": "That workspace no longer exists",
   "notifications.remove": "Remove this notification",
+  // What a toast's pill says when its message is too long to be the pill — the message then opens
+  // below it. One word: the colour and the glyph already said which kind it is.
+  "toast.error": "Error",
+  "toast.success": "Done",
+  "toast.info": "Notice",
   "notifications.gitFetched": "Fetch finished",
   "notifications.gitFetchFailed": "Fetch failed",
   "notifications.gitPulled": "Pull finished",

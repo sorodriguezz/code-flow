@@ -168,6 +168,20 @@
   --cf-ai-a: #8b5cf6;
   --cf-ai-b: #6366f1;
   --cf-ai-c: #06b6d4;
+  /* Toasts and "something finished" cards (`common/MorphToast`): the app's own raised surface, so
+     they sit in the theme instead of on top of it — dark on the dark themes, light on the light
+     ones (the user's call: an inverted card "realza demasiado"). Its edge is a threshold, so the
+     filter draws the hairline (`-edge`) and the soft lift (`-shadow`, which is the only pair here
+     that needs a value per mode). */
+  --cf-toast-fill: var(--cf-surface-raised);
+  --cf-toast-edge: var(--cf-border);
+  --cf-toast-shadow: rgb(18 20 40 / 0.14);
+  --cf-toast-ink: var(--cf-text-muted);
+  --cf-toast-faint: var(--cf-text-faint);
+  --cf-toast-success: var(--cf-success);
+  --cf-toast-danger: var(--cf-danger);
+  --cf-toast-warning: var(--cf-warning);
+  --cf-toast-info: var(--cf-accent);
   --cf-sheet-radius: 10px;
 }
 
@@ -215,6 +229,7 @@
   --cf-laser-blue: #5b9bff;
   --cf-laser-yellow: #ffd426;
   --cf-laser-core: rgb(255 255 255 / 0.6);
+  --cf-toast-shadow: rgb(0 0 0 / 0.5);
   --cf-titlebar-gradient: linear-gradient(
     120deg,
     color-mix(in oklab, #163a3a 50%, var(--cf-surface)) 0%,
@@ -272,6 +287,7 @@
     --cf-laser-blue: #5b9bff;
     --cf-laser-yellow: #ffd426;
     --cf-laser-core: rgb(255 255 255 / 0.6);
+    --cf-toast-shadow: rgb(0 0 0 / 0.5);
     --cf-titlebar-gradient: linear-gradient(
       120deg,
       color-mix(in oklab, #163a3a 50%, var(--cf-surface)) 0%,

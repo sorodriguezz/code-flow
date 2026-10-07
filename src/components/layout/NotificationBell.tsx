@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "framer-motion";
-import { ArrowRight, Bell, CircleAlert, CircleCheck, Info, Trash2, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowRight, Bell, Trash2, Volume2, VolumeX, X } from "lucide-react";
 import { iconButtonClass } from "../common/Button";
+import { ToneBadge } from "../common/MorphToast";
 import { chipClass } from "../common/recipes";
 import {
   followNotification,
@@ -19,18 +20,6 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { riseDelay } from "../../lib/rise";
 
 const PANEL_WIDTH = 340;
-
-const STATUS_ICON = {
-  success: CircleCheck,
-  error: CircleAlert,
-  info: Info,
-} as const;
-
-const STATUS_COLOR = {
-  success: "var(--cf-success)",
-  error: "var(--cf-danger)",
-  info: "var(--cf-text-muted)",
-} as const;
 
 /** How long the arrival burst runs before the dot settles into its resting pulse. Long enough to
  * catch an eye that was elsewhere, short enough that it is over by the time you look. */
@@ -410,7 +399,6 @@ function Row({
   onFollowed: () => void;
 }) {
   const t = useT();
-  const Icon = STATUS_ICON[item.status];
   const finished = new Date(item.finishedAt);
   /* A deleted workspace is nowhere to go, so the button goes rather than fails on click. The
      entry stays: it is still a true record of something that finished. */
@@ -432,7 +420,9 @@ function Row({
       {!item.seen && (
         <span className="absolute inset-y-1.5 left-0 w-[2.5px] rounded-r-full bg-[var(--cf-accent-fill)]" />
       )}
-      <Icon size={15} className="mt-px shrink-0" style={{ color: STATUS_COLOR[item.status] }} />
+      {/* The disc the card that announced it led with, so the row reads as the same thing — in the
+          sheet's tones rather than the card's ink. */}
+      <ToneBadge tone={item.status} onSheet className="-mt-px" />
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">

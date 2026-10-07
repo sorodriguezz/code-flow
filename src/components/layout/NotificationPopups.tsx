@@ -1,6 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { CircleAlert, CircleCheck, Info } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   followNotification,
   NOTIFICATION_SOURCE_LABEL,
@@ -10,9 +8,10 @@ import {
 import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { MorphToast, useMorphStack } from "../common/MorphToast";
 
 /**
- * The small card that slides in when something finishes, and takes itself away again.
+ * The small card that rises when something finishes, and takes itself away again.
  *
  * # Why this watches the store instead of being pushed to
  *
@@ -29,32 +28,22 @@ import { pushErrorToast } from "../../state/toastStore";
  * # Why it is not the existing toast
  *
  * A toast is for something that just failed in front of you and needs acknowledging. This is for
- * work that finished while you were looking elsewhere — a different tone, a different lifetime, and
+ * work that finished while you were looking elsewhere — a different lifetime, its own corner, and
  * it carries the source and the target so it can be followed. Merging them would mean one of the
- * two behaving wrongly.
+ * two behaving wrongly. They share a *look* (`MorphToast`) and nothing else: the pill says what
+ * finished, and where it happened melts out below it.
  */
-
-const STATUS_ICON = {
-  success: CircleCheck,
-  error: CircleAlert,
-  info: Info,
-} as const;
-
-const STATUS_COLOR = {
-  success: "var(--cf-success)",
-  error: "var(--cf-danger)",
-  info: "var(--cf-accent)",
-} as const;
 
 /**
  * How long a card stays.
  *
- * Long enough to read a title and a detail without hurrying — measured on the longest strings this
- * can show, which are the `remote.action.*` ones. An error stays roughly twice as long: it is the
- * one kind you may want to act on, and re-opening the bell to re-read something that vanished is
- * the failure this whole component exists to avoid.
+ * The title is in the pill for the whole of it; the body — the detail, the source and the
+ * workspace — melts out 150 ms in and folds back two seconds before the end, so these are the old
+ * dwell times (measured on the longest strings, the `remote.action.*` ones) plus those two seconds.
+ * An error stays longer: it is the one kind you may want to act on, and re-opening the bell to
+ * re-read something that vanished is the failure this whole component exists to avoid.
  */
-const DWELL_MS = 4200;
+const DWELL_MS = 6000;
 const DWELL_ERROR_MS = 8000;
 
 /**
@@ -62,14 +51,20 @@ const DWELL_ERROR_MS = 8000;
  *
  * A burst — a chain finishing five steps, or a phone doing several things in a row — must not
  * become a column that covers the window it is reporting on. Beyond this the oldest is retired
- * early; it is still in the bell.
+ * early; it is still in the bell. Only the newest holds its body open, so even a full stack is
+ * mostly pills.
  */
 const MAX_VISIBLE = 3;
+
+const dwellOf = (item: AppNotification) => (item.status === "error" ? DWELL_ERROR_MS : DWELL_MS);
 
 function Popup({
   item,
   workspace,
   foreign,
+  leaving,
+  open,
+  onHoverChange,
   onDismiss,
 }: {
   item: AppNotification;
@@ -83,33 +78,14 @@ function Popup({
    *  carries the attribution at all: without it, work that landed in another workspace is drawn
    *  identically to work that landed here, and the click moves the window with no warning. */
   foreign: boolean;
+  leaving: boolean;
+  /** This card's turn to hold its body open — the stack's newest, or the one under the pointer. */
+  open: boolean;
+  onHoverChange: (hovering: boolean) => void;
   onDismiss: () => void;
 }) {
   const t = useT();
-  const reduced = useReducedMotion();
-  const Icon = STATUS_ICON[item.status];
-  // Held so hovering keeps the card while a pointer is over it — reading something and having it
-  // leave mid-sentence is worse than it never appearing.
-  const [held, setHeld] = useState(false);
-
-  /**
-   * The dismiss, reached through a ref so the dwell timer does not depend on a closure's identity.
-   *
-   * The parent rebuilds `onDismiss` on every one of its own renders, and it renders whenever any
-   * notification arrives — or whenever *another card dismisses itself* and rewrites the visible
-   * list. With `onDismiss` in the dependency array below, each of those cleared and re-armed the
-   * timeout of every card on screen, so a burst kept pushing the whole stack's deadline forward: a
-   * chain finishing ten steps left three cards covering the window far longer than `DWELL_MS`,
-   * which is the opposite of what `MAX_VISIBLE` is there to guarantee.
-   */
-  const dismiss = useRef(onDismiss);
-  dismiss.current = onDismiss;
-
-  useEffect(() => {
-    if (held) return;
-    const id = setTimeout(() => dismiss.current(), item.status === "error" ? DWELL_ERROR_MS : DWELL_MS);
-    return () => clearTimeout(id);
-  }, [held, item.status]);
+  const title = t(item.titleKey, item.params);
 
   /**
    * Whether the card is still offering to take you there — the bell's guard, applied here too.
@@ -137,46 +113,31 @@ function Popup({
       : undefined;
 
   return (
-    <motion.div
-      layout
-      initial={reduced ? { opacity: 0 } : { opacity: 0, x: 24, scale: 0.96 }}
-      animate={reduced ? { opacity: 1 } : { opacity: 1, x: 0, scale: 1 }}
-      exit={reduced ? { opacity: 0 } : { opacity: 0, x: 24, scale: 0.96 }}
-      transition={{ type: "spring", stiffness: 420, damping: 34 }}
-      onPointerEnter={() => setHeld(true)}
-      onPointerLeave={() => setHeld(false)}
-      className="pointer-events-auto w-[320px] overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
-    >
-      <button
-        type="button"
-        title={goLabel}
-        onClick={() => {
-          // Following closes the card: the thing it was pointing at is now on screen, so leaving a
-          // duplicate of the pointer floating over it is noise.
-          //
-          // Awaited through `void … .catch(...)` rather than fired and forgotten: the jump crosses
-          // workspaces and loads the destination's stores, so it can fail long after this handler
-          // has returned, and the only place left to say so is a toast.
-          if (followable) void followNotification(item).catch((e: unknown) => pushErrorToast(String(e)));
-          onDismiss();
-        }}
-        // A card with nowhere to go is still worth being able to get rid of, so the click stays and
-        // only the jump is dropped — but the accent hover goes with it, since a hover state is a
-        // promise to take you somewhere and this one could not keep it.
-        className={`flex w-full items-start gap-2 px-3 py-2.5 text-left ${
-          followable ? "hover:bg-[var(--cf-accent)]/6" : ""
-        }`}
-      >
-        <Icon size={14} className="mt-0.5 shrink-0" style={{ color: STATUS_COLOR[item.status] }} />
-        <span className="min-w-0 flex-1">
-          <span className="block text-[13px] font-medium leading-snug text-[var(--cf-text)]">
-            {t(item.titleKey, item.params)}
-          </span>
-          {item.detail && (
-            <span className="mt-0.5 block truncate text-[12px] text-[var(--cf-text-muted)]">
-              {item.detail}
-            </span>
-          )}
+    <MorphToast
+      tone={item.status}
+      title={title}
+      titleKey={title}
+      align="right"
+      duration={dwellOf(item)}
+      canExpand={open}
+      leaving={leaving}
+      urgent={item.status === "error"}
+      onHoverChange={onHoverChange}
+      activateLabel={goLabel}
+      onActivate={() => {
+        // Following closes the card: the thing it was pointing at is now on screen, so leaving a
+        // duplicate of the pointer floating over it is noise. A card with nowhere to go is still
+        // worth being able to get rid of, so the click stays and only the jump is dropped.
+        //
+        // Awaited through `void … .catch(...)` rather than fired and forgotten: the jump crosses
+        // workspaces and loads the destination's stores, so it can fail long after this handler
+        // has returned, and the only place left to say so is a toast.
+        if (followable) void followNotification(item).catch((e: unknown) => pushErrorToast(String(e)));
+        onDismiss();
+      }}
+      body={
+        <>
+          {item.detail && <span className="block truncate">{item.detail}</span>}
           {/* Where it came from, and — since a run outlives the screen it was started from — where
               it happened. The workspace closes the line rather than opening it because the source
               is the field the eye scans; the dot is the workspace's own identity colour, the same
@@ -184,18 +145,22 @@ function Popup({
               halves of "a wiki page finished, in Cliente B" are recognised without being read.
 
               Nothing is drawn for a notification stamped with no workspace, matching the bell's
-              row: unlike a *live* row in the status bar, a card that is gone in four seconds has
-              nothing to disambiguate itself against, and an italic "No workspace" on a phone-driven
-              run would be the longest thing on the line. */}
-          <span className="mt-0.5 flex items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)]">
-            <span className="shrink-0 uppercase tracking-wide">
+              row: unlike a *live* row in the status bar, a card that is gone in seconds has nothing
+              to disambiguate itself against, and an italic "No workspace" on a phone-driven run
+              would be the longest thing on the line. */}
+          <span
+            className={`flex items-center gap-1 text-[10.5px] leading-4 text-[var(--cf-toast-faint)] ${
+              item.detail ? "mt-1" : ""
+            }`}
+          >
+            <span className="shrink-0 font-semibold uppercase tracking-wide">
               {t(NOTIFICATION_SOURCE_LABEL[item.source])}
             </span>
             {workspace && (
               <>
                 <span
                   aria-hidden
-                  className="h-1.5 w-1.5 shrink-0 rounded-full"
+                  className="ml-1 h-1.5 w-1.5 shrink-0 rounded-full"
                   style={{ background: workspace.color }}
                 />
                 <span className="min-w-0 truncate" title={workspace.name}>
@@ -203,16 +168,16 @@ function Popup({
                 </span>
                 {foreign && (
                   // The one thing the name alone cannot say: this is not where you are standing.
-                  <span className="shrink-0 rounded-full bg-[color-mix(in_oklab,var(--cf-text)_10%,transparent)] px-1 text-[10.5px] font-semibold uppercase tracking-wide">
+                  <span className="shrink-0 rounded-full bg-[color-mix(in_oklab,var(--cf-toast-ink)_16%,transparent)] px-1.5 font-semibold uppercase tracking-wide text-[var(--cf-toast-ink)]">
                     {t("agents.liveElsewhere")}
                   </span>
                 )}
               </>
             )}
           </span>
-        </span>
-      </button>
-    </motion.div>
+        </>
+      }
+    />
   );
 }
 
@@ -293,28 +258,39 @@ export function NotificationPopups() {
     setVisible((current) => [...current, ...fresh.slice().reverse()].slice(-MAX_VISIBLE));
   }, [items]);
 
-  if (visible.length === 0) return null;
+  const retire = useCallback(
+    (id: string) => setVisible((current) => current.filter((entry) => entry.id !== id)),
+    [],
+  );
+  const stack = useMorphStack(visible, {
+    keyOf: (item) => item.id,
+    // `visible` is oldest-first, so the newest card is the one at the end.
+    orderOf: (item) => visible.indexOf(item),
+    durationOf: dwellOf,
+    onExpire: (item) => retire(item.id),
+  });
+
+  if (stack.entries.length === 0) return null;
 
   return (
-    // Below the toast container's `z-50` and offset under it: when both fire at once they stack
-    // rather than overlap, and the toast — which is the more urgent of the two — stays on top.
-    <div className="pointer-events-none fixed bottom-10 right-3 z-40 flex flex-col items-end gap-2">
-      <AnimatePresence initial={false}>
-        {visible.map((item) => {
-          const { workspace, foreign } = homeOf(item);
-          return (
-            <Popup
-              key={item.id}
-              item={item}
-              workspace={workspace}
-              foreign={foreign}
-              onDismiss={() =>
-                setVisible((current) => current.filter((entry) => entry.id !== item.id))
-              }
-            />
-          );
-        })}
-      </AnimatePresence>
+    // Below the toast container's `z-50`: when both fire at once the toast — which is the more
+    // urgent of the two — stays on top.
+    <div className="pointer-events-none fixed bottom-10 right-3 z-40 flex flex-col items-end gap-3">
+      {stack.entries.map(({ key, item, leaving }) => {
+        const { workspace, foreign } = homeOf(item);
+        return (
+          <Popup
+            key={key}
+            item={item}
+            workspace={workspace}
+            foreign={foreign}
+            leaving={leaving}
+            open={stack.openKey === key}
+            onHoverChange={stack.hoverChange(key)}
+            onDismiss={() => retire(item.id)}
+          />
+        );
+      })}
     </div>
   );
 }

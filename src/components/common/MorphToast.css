@@ -1,0 +1,340 @@
+/* The morph toast's motion and geometry — the half of `MorphToast.tsx` that CSS moves.
+
+   Every duration here is a fraction of the SVG springs' 600 ms, and `--cf-morph-spring` *is* that
+   spring: framer-motion's `bounce: 0.25` over 600 ms, sampled into `linear()`. So the box, the pill's
+   text and the fades land on the same frame as the shape the SVG draws under them. */
+
+:root {
+  --cf-morph-spring: linear(
+    0,
+    0.003 0.8%,
+    0.011 1.7%,
+    0.024 2.5%,
+    0.063 4.2%,
+    0.113 5.8%,
+    0.204 8.3%,
+    0.508 15.8%,
+    0.63 19.2%,
+    0.71 21.7%,
+    0.78 24.2%,
+    0.84 26.7%,
+    0.889 29.2%,
+    0.94 32.5%,
+    0.976 35.8%,
+    1.006 40%,
+    1.023 45%,
+    1.028 51.7%,
+    1.003 80.8%,
+    1
+  );
+  --cf-morph-ms: 600ms;
+  --cf-morph-pill-h: 40px;
+  --cf-morph-gap: 12px;
+}
+
+/* The box: as wide as the body can open, as tall as the shape is right now. Only the pill and an
+   open body are *there* — the rest is air the pointer has to fall through to the app beneath. */
+.cf-morph {
+  position: relative;
+  flex-shrink: 0;
+  width: var(--cf-morph-w);
+  height: var(--cf-morph-h);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px) scale(0.95);
+  /* No room taken until it is ready, so the cards above slide up to make it rather than jump. */
+  margin-top: calc(-1 * (var(--cf-morph-pill-h) + var(--cf-morph-gap)));
+  contain: layout style;
+}
+
+.cf-morph[data-ready="true"] {
+  opacity: 1;
+  transform: none;
+  margin-top: 0;
+  transition:
+    transform calc(var(--cf-morph-ms) * 0.66) var(--cf-morph-spring),
+    opacity calc(var(--cf-morph-ms) * 0.66) var(--cf-morph-spring),
+    margin-top calc(var(--cf-morph-ms) * 0.66) var(--cf-morph-spring),
+    height var(--cf-morph-ms) var(--cf-morph-spring);
+}
+
+/* Leaving: sinks back toward the edge it rose from, and hands its room back to the stack. */
+.cf-morph[data-ready="true"][data-leaving="true"] {
+  opacity: 0;
+  transform: translateY(6px) scale(0.95);
+  margin-top: calc(-1 * var(--cf-morph-gap));
+}
+
+/* The whole card as one control, for the cards that go somewhere. Covers the box, but takes the
+   pointer only where its children do. */
+.cf-morph-hit {
+  position: absolute;
+  inset: 0;
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  pointer-events: none;
+}
+
+.cf-morph-hit :is(.cf-morph-pill, .cf-morph-body[data-visible="true"]) {
+  cursor: pointer;
+}
+
+/* The ring goes on the pill — around the whole box it would outline mostly air. */
+.cf-morph-hit:focus-visible {
+  outline: none;
+}
+
+.cf-morph-hit:focus-visible .cf-morph-pill {
+  outline: 2px solid var(--cf-focus);
+  outline-offset: 2px;
+  border-radius: 9999px;
+}
+
+/* ---------------------------------- Shape --------------------------------- */
+
+/* Drawn pill-on-top, then flipped: the pill sits on the edge the stack hangs from and the body
+   melts out of it upward, away from that edge. */
+.cf-morph-canvas {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  overflow: visible;
+  pointer-events: none;
+  transform: scaleY(-1);
+}
+
+.cf-morph-fill {
+  fill: var(--cf-toast-fill);
+}
+
+/* The two colours the filter paints with (see `MorphToast`'s filter): the hairline it draws around
+   the merged shape, and the shadow under it. */
+.cf-morph-edge {
+  flood-color: var(--cf-toast-edge);
+}
+
+.cf-morph-shadow {
+  flood-color: var(--cf-toast-shadow);
+}
+
+/* ---------------------------------- Pill ---------------------------------- */
+
+.cf-morph-pill {
+  position: absolute;
+  bottom: 0;
+  left: var(--cf-morph-px);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  height: var(--cf-morph-pill-h);
+  max-width: var(--cf-morph-pw);
+  padding: 8px;
+  overflow: hidden;
+  pointer-events: auto;
+  /* Open, the pill's text steps back a little toward the body — it has become the tab, not the card. */
+  transform: var(--cf-morph-pt);
+}
+
+.cf-morph[data-ready="true"] .cf-morph-pill {
+  transition:
+    transform var(--cf-morph-ms) var(--cf-morph-spring),
+    left var(--cf-morph-ms) var(--cf-morph-spring),
+    max-width var(--cf-morph-ms) var(--cf-morph-spring);
+}
+
+/* Never shrinks: the pill clips it while the shape catches up, so the measured width is always the
+   text's own, never the width of the frame it is being animated into. */
+.cf-morph-stack {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 100%;
+}
+
+.cf-morph-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(var(--cf-morph-w) - 26px);
+  white-space: nowrap;
+}
+
+.cf-morph-line[data-layer="current"] {
+  position: relative;
+  z-index: 1;
+  animation: cf-morph-line-in var(--cf-morph-ms) var(--cf-morph-spring) both;
+}
+
+/* What the pill said a moment ago, blurring out under what it says now. */
+.cf-morph-line[data-layer="prev"] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  pointer-events: none;
+  animation: cf-morph-line-out calc(var(--cf-morph-ms) * 0.7) ease forwards;
+}
+
+@keyframes cf-morph-line-in {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@keyframes cf-morph-line-out {
+  from {
+    opacity: 1;
+    filter: blur(0);
+  }
+  to {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+
+/* `--cf-morph-tone` is set per line (see `MorphToast`), so a line blurring out keeps its own colour. */
+.cf-morph-badge {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 9999px;
+  color: var(--cf-morph-tone);
+  background: color-mix(in oklab, var(--cf-morph-tone) 14%, transparent);
+}
+
+/* The same badge on a sheet — the bell's rows — in the sheet's tones, a size down to sit in a row.
+   Info stays as quiet there as it always was in that list. */
+.cf-tone-badge {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 9999px;
+  color: var(--cf-tone-badge);
+  background: color-mix(in oklab, var(--cf-tone-badge) 14%, transparent);
+}
+
+.cf-tone-badge svg {
+  width: 12px;
+  height: 12px;
+}
+
+.cf-tone-badge[data-tone="success"] {
+  --cf-tone-badge: var(--cf-success);
+}
+
+.cf-tone-badge[data-tone="error"] {
+  --cf-tone-badge: var(--cf-danger);
+}
+
+.cf-tone-badge[data-tone="warning"] {
+  --cf-tone-badge: var(--cf-warning);
+}
+
+.cf-tone-badge[data-tone="info"] {
+  --cf-tone-badge: var(--cf-text-muted);
+}
+
+.cf-morph-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--cf-morph-tone);
+}
+
+/* The ×: folded away until the pointer (or focus) is on the card, so a pill at rest is just its
+   message. It takes no room while folded — the pill springs wider to make room when it unfolds. */
+.cf-morph-close {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 0;
+  height: 18px;
+  margin-left: -8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 9999px;
+  padding: 0;
+  background: none;
+  color: var(--cf-toast-ink);
+  opacity: 0;
+  cursor: pointer;
+  transition:
+    opacity 150ms ease,
+    background-color 150ms ease;
+}
+
+.cf-morph:is(:hover, :focus-within) .cf-morph-close {
+  width: 18px;
+  margin-left: 0;
+  opacity: 0.75;
+}
+
+.cf-morph .cf-morph-close:hover {
+  opacity: 1;
+  background: color-mix(in oklab, var(--cf-toast-ink) 18%, transparent);
+}
+
+/* ---------------------------------- Body ---------------------------------- */
+
+.cf-morph-body {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  opacity: var(--cf-morph-co);
+  pointer-events: none;
+}
+
+.cf-morph-body[data-visible="true"] {
+  pointer-events: auto;
+}
+
+/* Out fast, in late: the text is gone before the body folds, and only arrives once there is room. */
+.cf-morph[data-ready="true"] .cf-morph-body {
+  transition: opacity calc(var(--cf-morph-ms) * 0.08) ease calc(var(--cf-morph-ms) * 0.04);
+}
+
+.cf-morph[data-ready="true"] .cf-morph-body[data-visible="true"] {
+  transition: opacity calc(var(--cf-morph-ms) * 0.6) ease calc(var(--cf-morph-ms) * 0.3);
+}
+
+.cf-morph-content {
+  display: block;
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 18px;
+  text-align: left;
+  color: var(--cf-toast-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cf-morph,
+  .cf-morph * {
+    animation-duration: 0s !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+  }
+}
