@@ -190,6 +190,12 @@ export const containersKubeRemove = (context: string) => invoke<void>("container
 
 export const containersKubeTest = (context: string) => invoke<KubeTest>("containers_kube_test", { context });
 
+/** «Analizar con IA» on a log: `about` says what produced it (one `Clave: valor` per line), `log` is
+ *  the text the pane shows. Routed as the `logs` AI task; `workspaceId` picks the account the way
+ *  the picker beside the button names it. */
+export const containersAnalyzeLogs = (args: { log: string; about: string; language: string; runId: string; workspaceId: string | null }) =>
+  invoke<string>("containers_analyze_logs", args);
+
 export const containersKubeUseAzureCli = (context: string) => invoke<AzureCliSwitch>("containers_kube_use_azure_cli", { context });
 
 export const containersKubeAksStatus = (context: string) => invoke<AksStatus>("containers_kube_aks_status", { context });

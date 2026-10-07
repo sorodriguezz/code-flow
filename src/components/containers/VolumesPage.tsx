@@ -6,9 +6,9 @@ import { ContextMenu } from "../common/ContextMenu";
 import { fieldClass } from "../common/recipes";
 import { Facts, RowAction, SectionTitle } from "./containerBits";
 import { engineMenu, runtimeLabel } from "./containerActions";
-import { DataTable, Dialog, EmptyLine, Field, LiveMark, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
+import { DataTable, Dialog, EmptyLine, Field, LiveMark, LoadingLine, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
 import { BulkBar, CopyText, Drawer, DrawerBody, InspectPane, MutedLine, StopClick, menuAt, useEngineList, useInspect, usePicked, type DrawerView, type MenuState } from "./pageBits";
-import { validObjectName } from "./pageModel";
+import { firstRead, validObjectName } from "./pageModel";
 import { containersCreateVolume } from "../../lib/tauri/containersCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useContainersStore } from "../../state/containersStore";
@@ -116,8 +116,10 @@ export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
             <EmptyLine>{runtime.problem ?? t("containers.notRunningHint")}</EmptyLine>
           ) : list?.error ? (
             <EmptyLine>{list.error}</EmptyLine>
+          ) : firstRead(list) ? (
+            <LoadingLine />
           ) : shown.length === 0 ? (
-            <EmptyLine>{!list ? t("containers.m.loading") : rows.length ? t("containers.m.volumes.noMatch") : t("containers.m.volumes.none")}</EmptyLine>
+            <EmptyLine>{rows.length ? t("containers.m.volumes.noMatch") : t("containers.m.volumes.none")}</EmptyLine>
           ) : (
             <DataTable minWidth={openRow ? 520 : 680}>
               <thead>
@@ -138,7 +140,7 @@ export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
                 {shown.map((row) => (
                   <tr
                     key={row.name}
-                    className={`${trClass(picked.has(row.name) || openName === row.name)} cursor-default`}
+                    className={trClass(picked.has(row.name) || openName === row.name, true)}
                     onClick={() => setOpenName(row.name)}
                     onContextMenu={(e) => setMenu(menuAt(e, rowMenu(row)))}
                   >

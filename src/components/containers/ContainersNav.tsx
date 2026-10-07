@@ -11,12 +11,15 @@ import {
   Network,
   Plus,
   RefreshCw,
+  Unplug,
   type LucideIcon,
 } from "lucide-react";
 import { Select } from "../common/Select";
 import { rowClass, sectionLabelClass } from "../common/recipes";
 import { RowAction, RuntimeGlyph, StateDot } from "./containerBits";
 import { runtimeLabel } from "./containerActions";
+import { firstRead } from "./pageModel";
+import { disconnectCluster } from "./KubePage";
 import { listKey, useContainersStore, type EngineSection } from "../../state/containersStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -55,6 +58,17 @@ export function ContainersNav({ onAddCluster, onAddEngine }: { onAddCluster: () 
   const detect = useContainersStore((s) => s.detect);
   const pulse = useContainersStore((s) => s.pulse);
   const hasKube = runtimes.some((r) => r.id === "kubernetes");
+  /** Everything read again — the cluster too, whose answer is otherwise kept for a while. */
+  const refresh = async () => {
+    await detect();
+    const store = useContainersStore.getState();
+    const cluster = store.runtimes.some((r) => r.id === "kubernetes") ? store.contextOf("kubernetes") : null;
+    if (cluster) {
+      void store.checkReach(cluster, { force: true });
+      void store.loadNamespaces(cluster, { force: true });
+    }
+    await pulse();
+  };
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex h-8 shrink-0 items-center gap-1 px-2">
@@ -62,7 +76,7 @@ export function ContainersNav({ onAddCluster, onAddEngine }: { onAddCluster: () 
         <RowAction label={t("containers.m.addEngine")} onClick={onAddEngine}>
           <Plus size={12} />
         </RowAction>
-        <RowAction label={t("containers.refresh")} onClick={() => void detect().then(() => pulse())}>
+        <RowAction label={t("containers.refresh")} onClick={() => void refresh()}>
           {detecting ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
         </RowAction>
       </div>
@@ -212,11 +226,15 @@ function KubeNav({ runtime, onAddCluster }: { runtime: RuntimeInfo; onAddCluster
   const reach = useContainersStore((s) => s.reach[context ?? ""]);
   const checkReach = useContainersStore((s) => s.checkReach);
   const activeList = useContainersStore((s) => (nav.runtime === "kubernetes" ? s.lists[listKey("kubernetes", context, s.namespaceOf(context), nav.section)] : undefined));
-  const kindCount = activeList ? activeList.rows.length : null;
+  // Read for the first time: a spinner where the count goes, not a 0 the cluster never said.
+  const kindCount: ReactNode = !activeList ? null : firstRead(activeList) ? (activeList.loading ? <Loader2 size={10} className="animate-spin" /> : null) : activeList.rows.length;
+  // Both keep their answer, so a dock opened again or a visit back asks the cluster nothing new.
+  // A cluster known not to answer is not asked for its namespaces: they come once it does.
   useEffect(() => {
     if (!context) return;
+    const known = useContainersStore.getState().reach[context];
     void checkReach(context);
-    void loadNamespaces(context);
+    if (known?.ok !== false) void loadNamespaces(context);
   }, [context, checkReach, loadNamespaces]);
   const here = nav.runtime === "kubernetes";
   return (
@@ -235,12 +253,18 @@ function KubeNav({ runtime, onAddCluster }: { runtime: RuntimeInfo; onAddCluster
               value={context ?? ""}
               onChange={(next) => setContext("kubernetes", next)}
               options={runtime.contexts.map((c) => ({ value: c.name, label: c.name }))}
+              placeholder={t("containers.m.kube.notConnected")}
               ariaLabel={t("containers.m.cluster")}
             />
           ) : (
             <span className="text-[11.5px] text-[var(--cf-text-muted)]">{t("containers.m.noClusters")}</span>
           )}
         </div>
+        {context && (
+          <RowAction label={t("containers.m.kube.disconnectHint")} onClick={() => void disconnectCluster(t)}>
+            <Unplug size={12} />
+          </RowAction>
+        )}
         <RowAction label={t("containers.m.addCluster")} onClick={onAddCluster}>
           <Plus size={12} />
         </RowAction>

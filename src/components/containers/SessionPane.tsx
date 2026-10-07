@@ -22,11 +22,14 @@ export function SessionPane({
   request,
   visible,
   liveToken,
+  textRef,
 }: {
   request: SessionRequest;
   visible: boolean;
   /** Changes when the thing behind the session restarts — a reconnect follows. */
   liveToken?: string;
+  /** A reader of what the pane shows, as text — for the log's copy, save and «Analizar con IA». */
+  textRef?: { current: (() => string) | null };
 }) {
   const t = useT();
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -98,7 +101,7 @@ export function SessionPane({
         </div>
       ) : sessionId ? (
         <>
-          <TerminalPane key={sessionId} sessionId={sessionId} visible={visible} />
+          <TerminalPane key={sessionId} sessionId={sessionId} visible={visible} textRef={textRef} />
           {exited && (
             <button
               onClick={() => setGeneration((g) => g + 1)}

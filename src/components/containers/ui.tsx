@@ -1,5 +1,5 @@
 import { useRef, type ReactNode } from "react";
-import { ExternalLink, Search, X } from "lucide-react";
+import { ExternalLink, Loader2, Search, X } from "lucide-react";
 import { useDialog } from "../../lib/useFocusTrap";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
@@ -106,9 +106,10 @@ export function Td({ children, className = "", align = "left", title }: { childr
   );
 }
 
-/** A row's hover and selection tint — the explorers' colours on a table row. */
-export function trClass(selected: boolean): string {
-  return `group transition-colors duration-100 ${selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"}`;
+/** A row's hover and selection tint — the explorers' colours on a table row. A row that does
+ *  something on a single click says so with the pointer, like a button would. */
+export function trClass(selected: boolean, clickable = false): string {
+  return `group transition-colors duration-100 ${selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"}${clickable ? " cursor-pointer" : ""}`;
 }
 
 /** The words for an engine state. */
@@ -276,4 +277,16 @@ export function FormSection({ title, children, trailing }: { title: ReactNode; c
 /** The one line an empty list shows — no box, no heading (the app's empty states are terse). */
 export function EmptyLine({ children }: { children: ReactNode }) {
   return <p className="px-3 py-3 text-[12px] text-[var(--cf-text-muted)]">{children}</p>;
+}
+
+/** The same line while a list is read for the first time — with the spinner, so a cluster that takes
+ *  seconds to answer reads as working, never as empty. */
+export function LoadingLine({ children }: { children?: ReactNode }) {
+  const t = useT();
+  return (
+    <p className="flex items-center gap-1.5 px-3 py-3 text-[12px] text-[var(--cf-text-muted)]">
+      <Loader2 size={12} className="shrink-0 animate-spin" />
+      {children ?? t("containers.m.loading")}
+    </p>
+  );
 }

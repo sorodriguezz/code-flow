@@ -144,6 +144,13 @@ pub(crate) enum AiTask {
     /// its own row rather than [`AiTask::Flows`]': picking a strong model to *build* a flow must not
     /// move every automatic AI node of every flow onto it.
     FlowBuilder,
+    /// Explaining a container's or a pod's log — the Contenedores panel's «Analizar con IA». Text-only:
+    /// the log goes on stdin as the pane shows it, and the engine never reaches the cluster or the
+    /// engine, so it routes anywhere, a local model included. Its own row rather than
+    /// [`AiTask::Pipeline`]'s, its closest relative: that one reads a repository with tools to explain
+    /// a red build, this one reads a log and nothing else — a different length of run, and routinely
+    /// the cheaper engine.
+    Logs,
 }
 
 impl AiTask {
@@ -153,7 +160,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 21] = [
+    pub(crate) const ALL: [AiTask; 22] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -175,6 +182,7 @@ impl AiTask {
         AiTask::ChatTitle,
         AiTask::Flows,
         AiTask::FlowBuilder,
+        AiTask::Logs,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -203,6 +211,7 @@ impl AiTask {
             AiTask::ChatTitle => "chat_title",
             AiTask::Flows => "flows",
             AiTask::FlowBuilder => "flow_builder",
+            AiTask::Logs => "logs",
         }
     }
 }

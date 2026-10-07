@@ -254,3 +254,33 @@ export function rowOfStats(rows: ContainerRow[], sample: ContainerStats): Contai
 export function topByUsage(stats: ContainerStats[], by: "cpu" | "memory", limit = 5): ContainerStats[] {
   return [...stats].sort((a, b) => (by === "cpu" ? b.cpuPercent - a.cpuPercent : b.memUsage - a.memUsage)).slice(0, limit);
 }
+
+// ---------------------------------------------------------------------------------------- lists
+
+/**
+ * A list not answered yet under the context and namespace on screen. A read starts by writing an
+ * entry with no rows, so its rows are a placeholder until the first answer — reading "nothing here"
+ * off them is what showed an AKS cluster's 209 pods as none while kubectl was still on its way.
+ */
+export function firstRead(list: { at: number } | undefined): boolean {
+  return !list || list.at === 0;
+}
+
+// ----------------------------------------------------------------------------------------- logs
+
+/**
+ * The name a saved log is offered under: what it is the log of, made safe for every file system,
+ * and when it was taken — `api-7f9c_2026-10-07_14-03-22.log`.
+ */
+export function logFileName(subject: string, extension: "log" | "txt", now: Date = new Date()): string {
+  const safe = subject.trim().replace(/[\\/:*?"<>|\s]+/g, "_").replace(/^[._]+|[._]+$/g, "").slice(0, 80) || "logs";
+  const two = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}_${two(now.getHours())}-${two(now.getMinutes())}-${two(now.getSeconds())}`;
+  return `${safe}_${stamp}.${extension}`;
+}
+
+/** How many lines a log holds — what the copy and save toasts count. */
+export function lineCount(text: string): number {
+  if (!text) return 0;
+  return text.split("\n").length;
+}

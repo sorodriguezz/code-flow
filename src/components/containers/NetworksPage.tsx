@@ -7,9 +7,9 @@ import { Select } from "../common/Select";
 import { chipClass, fieldClass } from "../common/recipes";
 import { Facts, RowAction, SectionTitle } from "./containerBits";
 import { engineMenu, runtimeLabel } from "./containerActions";
-import { DataTable, Dialog, EmptyLine, Field, LiveMark, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
+import { DataTable, Dialog, EmptyLine, Field, LiveMark, LoadingLine, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
 import { BulkBar, CopyText, Drawer, DrawerBody, InspectPane, MutedLine, StopClick, menuAt, useEngineList, useInspect, usePicked, type DrawerView, type MenuState } from "./pageBits";
-import { networkFacts, validObjectName } from "./pageModel";
+import { firstRead, networkFacts, validObjectName } from "./pageModel";
 import { containersCreateNetwork } from "../../lib/tauri/containersCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useContainersStore } from "../../state/containersStore";
@@ -112,8 +112,10 @@ export function NetworksPage({ runtime }: { runtime: RuntimeInfo }) {
             <EmptyLine>{runtime.problem ?? t("containers.notRunningHint")}</EmptyLine>
           ) : list?.error ? (
             <EmptyLine>{list.error}</EmptyLine>
+          ) : firstRead(list) ? (
+            <LoadingLine />
           ) : shown.length === 0 ? (
-            <EmptyLine>{!list ? t("containers.m.loading") : rows.length ? t("containers.m.networks.noMatch") : t("containers.m.networks.none")}</EmptyLine>
+            <EmptyLine>{rows.length ? t("containers.m.networks.noMatch") : t("containers.m.networks.none")}</EmptyLine>
           ) : (
             <DataTable minWidth={openRow ? 480 : 620}>
               <thead>
@@ -134,7 +136,7 @@ export function NetworksPage({ runtime }: { runtime: RuntimeInfo }) {
                 {shown.map((row) => (
                   <tr
                     key={row.id || row.name}
-                    className={`${trClass(picked.has(row.name) || openName === row.name)} cursor-default`}
+                    className={trClass(picked.has(row.name) || openName === row.name, true)}
                     onClick={() => setOpenName(row.name)}
                     onContextMenu={(e) => setMenu(menuAt(e, rowMenu(row)))}
                   >

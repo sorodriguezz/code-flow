@@ -468,6 +468,7 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   "chat-title": "usage.task.chatTitle",
   flows: "usage.task.flows",
   "flow-build": "usage.task.flowBuild",
+  "logs-analyze": "usage.task.logsAnalyze",
   other: "usage.task.other",
 };
 

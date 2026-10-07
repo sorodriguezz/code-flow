@@ -393,6 +393,8 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
     let launcher = app.autolaunch();
     if enabled {
         launcher.enable().map_err(|e| e.to_string())?;
+        // What the plugin wrote, put right — the Windows entry unquoted, above all. See `autostart`.
+        crate::autostart::after_enable(&app);
     } else {
         launcher.disable().map_err(|e| e.to_string())?;
     }

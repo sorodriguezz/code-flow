@@ -102,6 +102,10 @@ export const AI_TASKS: AiTaskDef[] = [
   // rather than `flows`': picking a strong model to build with must not move every automatic AI
   // node onto it.
   { key: "flow_builder", labelKey: "task.flowBuilder", hintKey: "task.flowBuilderHint", area: "other", modelForKey: "task.flowBuilderModelFor" },
+  // «Analizar con IA» on a container's or a pod's log (`AiTask::Logs`). Text-only: the log goes on
+  // stdin as the pane shows it and nothing else is opened, so it routes anywhere. Its own row rather
+  // than `pipeline`'s, which reads a repository with tools — this one reads a log and nothing else.
+  { key: "logs", labelKey: "task.logs", hintKey: "task.logsHint", area: "other", modelForKey: "task.logsModelFor" },
 ];
 
 export const AI_TASK_KEYS = AI_TASKS.map((t) => t.key);

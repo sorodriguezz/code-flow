@@ -59,6 +59,9 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // The quit paths that never touch the close handler: the tray's Quit, ⌘Q, the
         // in-app quit. All three end in `AppHandle::exit`, which is here.
         crate::window_state::save(app);
+        // The power hold «Evitar que el equipo se suspenda» took, if any — it dies with the process
+        // anyway; let go here so the log says so on a normal quit.
+        crate::keep_awake::release_on_exit();
         // The last four seconds of every bench terminal's output, which the flusher's timer
         // has not come round for. The shells themselves die with the process — that is what
         // a pty is — so this is the whole of what "don't lose my work" can mean here, and

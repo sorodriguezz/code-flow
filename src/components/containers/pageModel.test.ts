@@ -7,12 +7,15 @@ import {
   COMPOSE_PROJECT,
   dirOf,
   dockerHubUrl,
+  firstRead,
   imageName,
   onDockerHub,
   validObjectName,
   imageUseCount,
   imageUsers,
   layerCommand,
+  lineCount,
+  logFileName,
   networkFacts,
   pullableReference,
   relativeTo,
@@ -269,5 +272,34 @@ describe("stats", () => {
     expect(rowOfStats(rows, stats[0])?.name).toBe("web");
     expect(topByUsage(stats, "cpu").map((s) => s.name)).toEqual(["db", "web"]);
     expect(topByUsage(stats, "memory", 1).map((s) => s.name)).toEqual(["web"]);
+  });
+});
+
+describe("a list being read for the first time", () => {
+  it("is not empty — its rows are a placeholder until the first answer", () => {
+    expect(firstRead(undefined)).toBe(true);
+    // What `refreshList` writes the moment it starts: no rows, never answered.
+    expect(firstRead({ at: 0 })).toBe(true);
+    expect(firstRead({ at: 1_700_000_000_000 })).toBe(false);
+  });
+});
+
+describe("a saved log", () => {
+  const when = new Date(2026, 9, 7, 14, 3, 22);
+
+  it("is named after what it is the log of, and when it was taken", () => {
+    expect(logFileName("achs-virtual-login-api-6f59dc4568-7rxv2", "log", when)).toBe("achs-virtual-login-api-6f59dc4568-7rxv2_2026-10-07_14-03-22.log");
+    expect(logFileName("web", "txt", when)).toBe("web_2026-10-07_14-03-22.txt");
+  });
+
+  it("never carries a character a file system refuses", () => {
+    expect(logFileName("deployment/api: main", "log", when)).toBe("deployment_api_main_2026-10-07_14-03-22.log");
+    expect(logFileName("  ", "log", when)).toBe("logs_2026-10-07_14-03-22.log");
+  });
+
+  it("counts its lines", () => {
+    expect(lineCount("")).toBe(0);
+    expect(lineCount("one")).toBe(1);
+    expect(lineCount("one\ntwo")).toBe(2);
   });
 });

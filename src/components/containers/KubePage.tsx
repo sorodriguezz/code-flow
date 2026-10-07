@@ -1,19 +1,20 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { CheckCircle2, Cloud, Crosshair, KeyRound, LogIn, Loader2, MoreHorizontal, Play, Plus, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, Cloud, Crosshair, KeyRound, LogIn, Loader2, MoreHorizontal, Play, Plus, Trash2, Unplug, XCircle } from "lucide-react";
 import { Button } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { RowAction, StateDot, ago } from "./containerBits";
 import { kubeMenu } from "./containerActions";
 import { KubeTestLine, kubeHintText } from "./KubeAddCluster";
-import { DataTable, EmptyLine, LiveMark, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
-import { containersKubeAksStatus, containersKubeOrigins, containersKubeRemove, containersKubeTest, containersKubeUseAzureCli } from "../../lib/tauri/containersCommands";
+import { DataTable, EmptyLine, LiveMark, LoadingLine, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
+import { firstRead } from "./pageModel";
+import { containersKubeAksStatus, containersKubeRemove, containersKubeUseAzureCli } from "../../lib/tauri/containersCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useContainersJobsStore } from "../../state/containersJobsStore";
-import { listKey, useContainersStore } from "../../state/containersStore";
+import { KUBE_CHECK_FRESH_MS, listKey, useContainersStore } from "../../state/containersStore";
 import { useLanguageStore, useT, type Translate } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import type { AksStatus, KubeContextOrigin, KubeRow, KubeTest, RuntimeInfo } from "../../types/containers";
+import type { AksStatus, KubeRow, KubeTest, RuntimeInfo } from "../../types/containers";
 
 /**
  * Kubernetes as tables — one per kind, with the columns `kubectl get` would print for it (a pod's
@@ -172,8 +173,10 @@ export function KubeKindPage({ kind }: { kind: string }) {
         </EmptyLine>
       ) : list?.error ? (
         <EmptyLine>{list.error}</EmptyLine>
+      ) : firstRead(list) ? (
+        <LoadingLine />
       ) : shown.length === 0 ? (
-        <EmptyLine>{!list ? t("containers.m.loading") : rows.length ? t("containers.m.kube.noMatch") : t("containers.m.kube.none")}</EmptyLine>
+        <EmptyLine>{rows.length ? t("containers.m.kube.noMatch") : t("containers.m.kube.none")}</EmptyLine>
       ) : (
         <DataTable minWidth={720}>
           <thead>
@@ -192,7 +195,7 @@ export function KubeKindPage({ kind }: { kind: string }) {
           </thead>
           <tbody>
             {shown.map((row) => (
-              <tr key={`${row.namespace}/${row.name}`} className={trClass(false)} onClick={() => open(row)} onContextMenu={(e) => openMenu(e, row)}>
+              <tr key={`${row.namespace}/${row.name}`} className={trClass(false, true)} onClick={() => open(row)} onContextMenu={(e) => openMenu(e, row)}>
                 <Td className="max-w-[280px]">
                   <span className="block truncate font-medium text-[var(--cf-text)]" title={row.name}>
                     {row.name}
@@ -230,35 +233,57 @@ export function KubeKindPage({ kind }: { kind: string }) {
   );
 }
 
+/**
+ * «Desconectar»: the panel stops reading the cluster it is connected to — see `disconnectKube`. Asks
+ * first only when it closes port-forwards, which something on this computer may be using.
+ */
+export async function disconnectCluster(t: Translate) {
+  const store = useContainersStore.getState();
+  const context = store.contextOf("kubernetes");
+  if (!context) return;
+  const forwards = store.forwards.filter((f) => f.context === context).length;
+  if (forwards > 0 && !(await confirmAction(t("containers.m.kube.disconnectConfirm", { name: context, count: forwards }), false, t("containers.m.kube.disconnect")))) return;
+  await store.disconnectKube();
+  pushSuccessToast(t("containers.m.kube.disconnectedFrom", { name: context }));
+}
+
 /** The cluster's page: does it answer, what it runs, where its context lives, and removal. */
 export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeInfo; onAddCluster: () => void }) {
   const t = useT();
+  const language = useLanguageStore((s) => s.language);
   const context = useContainersStore((s) => s.contextOf("kubernetes"));
   const setContext = useContainersStore((s) => s.setContext);
   const detect = useContainersStore((s) => s.detect);
   const act = useContainersStore((s) => s.act);
+  const tests = useContainersStore((s) => s.kubeTests);
+  const reach = useContainersStore((s) => s.reach);
+  const testKube = useContainersStore((s) => s.testKube);
   const checkReach = useContainersStore((s) => s.checkReach);
+  const origins = useContainersStore((s) => s.kubeOrigins);
+  const loadOrigins = useContainersStore((s) => s.loadKubeOrigins);
   const startJob = useContainersJobsStore((s) => s.start);
   const history = useContainersJobsStore((s) => s.history);
-  const [origins, setOrigins] = useState<KubeContextOrigin[] | null>(null);
-  const [tests, setTests] = useState<Record<string, KubeTest | "testing">>({});
   const [switching, setSwitching] = useState<string | null>(null);
-  const loadOrigins = () =>
-    containersKubeOrigins()
-      .then(setOrigins)
-      .catch(() => setOrigins([]));
+  // Kept in the store, so coming back draws them at once; read again behind it — a file read.
   useEffect(() => {
     void loadOrigins();
-  }, [runtime.contexts.length]);
-  const test = async (name: string) => {
-    setTests((all) => ({ ...all, [name]: "testing" }));
-    const result = await containersKubeTest(name).catch((e: unknown) => ({ ok: false, version: null, error: String(e), hint: null }) as KubeTest);
-    setTests((all) => ({ ...all, [name]: result }));
-  };
-  // The cluster on screen is tried once by itself; the rest when asked.
+  }, [runtime.contexts.length, loadOrigins]);
+  // The cluster on screen is tried by itself, the rest when asked — and "tried" is the navigation's
+  // check, joined while it is on its way or reused while it is fresh: a cluster that answers is not
+  // asked twice. Only one that does not is tested here, for the hint that says why.
   useEffect(() => {
-    if (context && tests[context] === undefined) void test(context);
-  }, [context]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!context) return;
+    let alive = true;
+    void (async () => {
+      const tested = useContainersStore.getState().kubeTests[context];
+      if (tested && (tested.testing || Date.now() - tested.at < KUBE_CHECK_FRESH_MS)) return;
+      await checkReach(context);
+      if (alive && useContainersStore.getState().reach[context]?.ok === false) void testKube(context);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [context, checkReach, testKube]);
   const remove = async (name: string) => {
     if (!(await confirmAction(t("containers.m.kube.confirmRemove", { name }), true, t("containers.remove")))) return;
     try {
@@ -271,11 +296,18 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
     }
   };
   const originOf = (name: string) => origins?.find((o) => o.context === name);
-  /** Tried again, here and in the navigation's dot, once its sign-in is sorted. */
-  const retry = (name: string) => {
-    void test(name);
-    void checkReach(name);
+  /** Tried again — here and in the navigation's dot, which the same answer updates. */
+  const retry = (name: string) => void testKube(name, { force: true });
+  /** What is known of a context, the newest answer first: its own test (which carries the hint), or
+   *  what the navigation's check found since. */
+  const resultOf = (name: string): KubeTest | null => {
+    const tested = tests[name];
+    const known = reach[name];
+    if (tested?.result && (!known || tested.at >= known.at)) return tested.result;
+    if (!known) return tested?.result ?? null;
+    return known.ok ? { ok: true, version: known.text || null, error: null, hint: null } : { ok: false, version: null, error: known.text, hint: null };
   };
+  const checkedAt = (name: string) => Math.max(tests[name]?.at ?? 0, reach[name]?.at ?? 0);
   // A device code shows in the jobs panel, where the person signs in; the token kubelogin then
   // keeps is what every later kubectl uses. A sign-in — or a cluster started in Azure — tries the
   // cluster again when it ends, however it ended: the row then says what stands in the way now.
@@ -321,7 +353,7 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
     void act({ runtime: "kubernetes", context: name, object: "contexts", action: "useContext", ids: [name], label: t("containers.done.useContext", { name }), refresh: [] }).then(() => void detect());
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <PageHead title={t("containers.m.kube.clusters")} sub={runtime.version ? `kubectl ${runtime.version}` : undefined}>
+      <PageHead title={t("containers.m.kube.clusters")} sub={[runtime.version && `kubectl ${runtime.version}`, !context && runtime.contexts.length > 0 && t("containers.m.kube.notConnected")].filter(Boolean).join(" · ") || undefined}>
         <Button size="sm" variant="primary" onClick={onAddCluster}>
           <Plus size={13} />
           {t("containers.m.addCluster")}
@@ -342,29 +374,51 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
           </thead>
           <tbody>
             {runtime.contexts.map((c) => {
-              const result = tests[c.name];
+              const result = resultOf(c.name);
+              const testing = tests[c.name]?.testing === true;
+              const at = checkedAt(c.name);
               const origin = originOf(c.name);
-              const failed = result && result !== "testing" && !result.ok ? result : null;
+              const failed = result && !result.ok ? result : null;
+              const pick = () => {
+                if (c.name !== context) setContext("kubernetes", c.name);
+              };
               return (
                 <Fragment key={c.name}>
-                <tr className={trClass(c.name === context)}>
+                <tr
+                  className={trClass(c.name === context, true)}
+                  onClick={pick}
+                  onKeyDown={(e) => {
+                    if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                      e.preventDefault();
+                      pick();
+                    }
+                  }}
+                  tabIndex={0}
+                  aria-selected={c.name === context}
+                  title={c.name === context ? undefined : t("containers.m.kube.connectTo", { name: c.name })}
+                >
                   <Td>
-                    <button onClick={() => setContext("kubernetes", c.name)} className="flex min-w-0 items-center gap-1.5 text-left">
+                    <span className="flex min-w-0 items-center gap-1.5">
                       <span className="truncate font-medium text-[var(--cf-text)]">{c.name}</span>
+                      {c.name === context && (
+                        <span className="shrink-0 rounded bg-[var(--cf-accent-soft)] px-1 text-[10px] font-medium text-[var(--cf-accent)]" title={t("containers.m.kube.connectedHint")}>
+                          {t("containers.m.kube.connected")}
+                        </span>
+                      )}
                       {c.name === runtime.currentContext && (
                         <span className="shrink-0 rounded bg-[var(--cf-hover)] px-1 text-[10px] text-[var(--cf-text-muted)]" title={t("containers.m.kube.currentHint")}>
                           {t("containers.m.kube.current")}
                         </span>
                       )}
-                    </button>
+                    </span>
                   </Td>
                   <Td className="max-w-[260px]">
                     <span className="block truncate font-mono text-[11.5px] text-[var(--cf-text-muted)]" title={c.detail}>
                       {c.detail || "—"}
                     </span>
                   </Td>
-                  <Td>
-                    {result === "testing" ? (
+                  <Td title={at > 0 && !testing ? t("containers.m.kube.checkedAgo", { ago: ago(new Date(at).toISOString(), language) }) : undefined}>
+                    {testing && !result ? (
                       <span className="flex items-center gap-1.5 text-[var(--cf-text-muted)]">
                         <Loader2 size={11} className="animate-spin" />
                         {t("containers.connecting")}
@@ -373,11 +427,13 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
                       <span className="flex min-w-0 items-center gap-1.5">
                         <CheckCircle2 size={12} className="shrink-0 text-[var(--cf-success)]" />
                         <span className="truncate text-[var(--cf-text)]">{result.version ? `Kubernetes ${result.version}` : t("containers.m.kube.reachable")}</span>
+                        {testing && <Loader2 size={10} className="shrink-0 animate-spin text-[var(--cf-text-muted)]" />}
                       </span>
                     ) : failed ? (
                       <span className="flex min-w-0 items-center gap-1.5" title={[kubeHintText(t, failed.hint), failed.error].filter(Boolean).join("\n")}>
                         <XCircle size={12} className="shrink-0 text-[var(--cf-danger)]" />
                         <span className="truncate text-[var(--cf-danger)]">{t("containers.m.kube.unreachable")}</span>
+                        {testing && <Loader2 size={10} className="shrink-0 animate-spin text-[var(--cf-text-muted)]" />}
                       </span>
                     ) : (
                       <span className="text-[var(--cf-text-faint)]">—</span>
@@ -390,9 +446,22 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
                   </Td>
                   <Td align="right">
                     <span className="flex items-center justify-end gap-1">
-                      <Button size="sm" variant="ghost" onClick={() => void test(c.name)} disabled={result === "testing"}>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          retry(c.name);
+                        }}
+                        disabled={testing}
+                      >
                         {t("containers.m.kube.test")}
                       </Button>
+                      {c.name === context && (
+                        <RowAction label={t("containers.m.kube.disconnectHint")} onClick={() => void disconnectCluster(t)}>
+                          <Unplug size={12} />
+                        </RowAction>
+                      )}
                       {origin && !origin.managed && c.name !== runtime.currentContext && (
                         <RowAction label={t("containers.kube.useContext")} onClick={() => pointKubectl(c.name)}>
                           <Crosshair size={12} />

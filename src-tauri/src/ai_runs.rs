@@ -476,6 +476,12 @@ fn live() -> &'static Mutex<HashMap<u32, Option<String>>> {
     LIVE.get_or_init(Mutex::default)
 }
 
+/// How many AI CLI processes are alive — tracked runs and the untracked ones (a commit message, a
+/// chat title) alike. «Evitar que el equipo se suspenda» counts them as work in progress.
+pub fn live_processes() -> usize {
+    live().lock().map(|live| live.len()).unwrap_or(0)
+}
+
 /// Set once the app has begun to quit, and never cleared: nothing starts after that point.
 static STOPPING: AtomicBool = AtomicBool::new(false);
 

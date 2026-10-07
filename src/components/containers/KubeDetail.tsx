@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowRightLeft, Check, Eye, EyeOff, ExternalLink, Loader2, Play, RefreshCw, RotateCw, Scaling, Trash2 } from "lucide-react";
 import { Select } from "../common/Select";
 import { Checkbox } from "../common/Checkbox";
 import { SessionPane } from "./SessionPane";
+import { LogAnalysisPanel, LogTools } from "./LogTools";
 import { BackButton, DetailHeader, NO_ROWS } from "./ContainersDetail";
 import { DetailTabs, Facts, HeaderAction, RowAction, SectionTitle, StateDot, TextView, ago } from "./containerBits";
 import { kubeMenu, kubePorts } from "./containerActions";
@@ -10,6 +11,7 @@ import { containersApply, containersText } from "../../lib/tauri/containersComma
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { confirmAction } from "../../state/confirmStore";
 import { listKey, useContainersStore } from "../../state/containersStore";
+import { logAnalysisKey } from "../../state/containersLogAiStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -54,6 +56,8 @@ export function KubeDetail({ selection }: { selection: ContainerSelection }) {
   const containers = (row?.extra.containers as { name: string; image: string; ready: boolean; restarts: number; state: string; lastState: string }[] | undefined) ?? [];
   const [container, setContainer] = useState<string>("");
   const [previous, setPrevious] = useState(false);
+  /** What the log pane shows, as text — for its copy, save and «Analizar con IA». */
+  const logText = useRef<(() => string) | null>(null);
   useEffect(() => setVisited((v) => (v.has(tab) ? v : new Set([...v, tab]))), [tab]);
   if (!row) return <p className="p-4 text-[12px] text-[var(--cf-text-muted)]">{t("containers.gone")}</p>;
 
@@ -63,6 +67,22 @@ export function KubeDetail({ selection }: { selection: ContainerSelection }) {
   const ns = row.namespace || null;
   const logTarget = kind === "pods" ? row.name : `${singular(kind)}/${row.name}`;
   const ports = kubePorts(kind, row);
+  // What the engine is told the log is — data for the model, in the prompt's language.
+  const logAbout = [
+    "Origen: Kubernetes",
+    `Contexto: ${selection.context ?? "(el actual de kubeconfig)"}`,
+    row.namespace && `Namespace: ${row.namespace}`,
+    `Recurso: ${singular(kind)}/${row.name}`,
+    container && `Contenedor: ${container}`,
+    containers.length > 0 && `Contenedores: ${containers.map((c) => `${c.name} (${c.image})`).join(", ")}`,
+    previous && "Registro: el de la ejecución anterior (--previous)",
+    row.status && `Estado: ${row.status}`,
+    row.ready && `Listos: ${row.ready}`,
+    row.restarts ? `Reinicios: ${row.restarts}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const analysisKey = logAnalysisKey(["kubernetes", selection.context, ns, logTarget, container, previous && "previous"]);
 
   const headerActions: ReactNode[] = [];
   const scale = byLabel("containers.kube.scale");
@@ -98,15 +118,15 @@ export function KubeDetail({ selection }: { selection: ContainerSelection }) {
         value={tab}
         onChange={setTab}
         trailing={
-          kind === "pods" && (tab === "logs" || tab === "terminal") ? (
+          tab === "logs" || (kind === "pods" && tab === "terminal") ? (
             <span className="flex items-center gap-2 text-[11px] text-[var(--cf-text-muted)]">
-              {tab === "logs" && (
+              {kind === "pods" && tab === "logs" && (
                 <label className="flex items-center gap-1">
                   <Checkbox checked={previous} onChange={setPrevious} />
                   {t("containers.previous")}
                 </label>
               )}
-              {containers.length > 1 && (
+              {kind === "pods" && containers.length > 1 && (
                 <div className="w-[140px]">
                   <Select
                     size="sm"
@@ -117,6 +137,7 @@ export function KubeDetail({ selection }: { selection: ContainerSelection }) {
                   />
                 </div>
               )}
+              {tab === "logs" && <LogTools read={() => logText.current?.() ?? ""} subject={row.name} about={logAbout} analysisKey={analysisKey} />}
             </span>
           ) : null
         }
@@ -127,8 +148,10 @@ export function KubeDetail({ selection }: { selection: ContainerSelection }) {
             visible={tab === "logs"}
             liveToken={`${row.restarts ?? 0}|${row.status}`}
             request={{ kind: "logs", runtime: "kubernetes", context: selection.context, namespace: ns, target: logTarget, container: container || null, tail: 500, previous }}
+            textRef={logText}
           />
         )}
+        {tab === "logs" && <LogAnalysisPanel analysisKey={analysisKey} />}
         {visited.has("terminal") && tabs.includes("terminal") && (
           <SessionPane
             visible={tab === "terminal"}

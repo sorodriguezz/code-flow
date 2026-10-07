@@ -5,9 +5,9 @@ import { Button } from "../common/Button";
 import { ContextMenu } from "../common/ContextMenu";
 import { RowAction, StateDot } from "./containerBits";
 import { engineMenu, runtimeLabel } from "./containerActions";
-import { DataTable, EmptyLine, LiveMark, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
+import { DataTable, EmptyLine, LiveMark, LoadingLine, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
 import { menuAt, useEngineList, type MenuState } from "./pageBits";
-import { COMPOSE_PROJECT, composeOptions, composeProjectName, composeProjects, dirOf, baseName, type ComposeProject } from "./pageModel";
+import { COMPOSE_PROJECT, composeOptions, composeProjectName, composeProjects, dirOf, baseName, firstRead, type ComposeProject } from "./pageModel";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useContainersJobsStore } from "../../state/containersJobsStore";
@@ -110,8 +110,10 @@ export function ComposePage({ runtime }: { runtime: RuntimeInfo }) {
           <EmptyLine>{runtime.problem ?? t("containers.notRunningHint")}</EmptyLine>
         ) : list?.error ? (
           <EmptyLine>{list.error}</EmptyLine>
+        ) : firstRead(list) ? (
+          <LoadingLine />
         ) : shown.length === 0 ? (
-          <EmptyLine>{!list ? t("containers.m.loading") : projects.length ? t("containers.m.compose.noMatch") : t("containers.m.compose.none")}</EmptyLine>
+          <EmptyLine>{projects.length ? t("containers.m.compose.noMatch") : t("containers.m.compose.none")}</EmptyLine>
         ) : (
           <DataTable minWidth={720}>
             <thead>

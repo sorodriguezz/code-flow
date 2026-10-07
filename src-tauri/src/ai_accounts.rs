@@ -610,16 +610,8 @@ pub async fn probe(binary: &str, env: &AccountEnv) -> AccountStatus {
         checked_at: chrono::Utc::now().to_rfc3339(),
         ..AccountStatus::default()
     };
-    // agy has no status command, and it keeps one login for the whole machine — whose address it
-    // writes beside the credential. Reading that answers "who" without starting the CLI (which, asked
-    // anything it does not know as a command, sends it to the model and spends a turn).
     if env.provider == "gemini" {
-        let active = dirs::home_dir()
-            .and_then(|home| std::fs::read_to_string(home.join(".gemini").join("google_accounts.json")).ok())
-            .and_then(|text| gemini_active_account(&text));
-        status.signed_in = Some(active.is_some());
-        status.email = active.unwrap_or_default();
-        return status;
+        return probe_gemini(binary, env, status).await;
     }
     let Some(args) = status_args(&env.provider) else {
         status.error = "unsupported".into();
@@ -662,6 +654,96 @@ pub async fn probe(binary: &str, env: &AccountEnv) -> AccountStatus {
     }
     identity_from_files(env, &mut status);
     status
+}
+
+/// Whether agy is signed in, and as whom.
+///
+/// agy has no status command, and anything it does not know as a command goes to the model and
+/// spends a turn — so it is asked with `agy models`, a real subcommand that spends nothing and that
+/// agy refuses without a login ("Please sign in to view available models"). Listing a model is the
+/// answer, from the CLI itself.
+///
+/// This used to read `active` in `~/.gemini/google_accounts.json` and nothing else. That file is
+/// the Gemini CLI's, not agy's: an install that only ever signed in through agy never writes it, so
+/// a working login read as "Sin sesión" (seen 2026-10-07). It is now only where the address comes
+/// from when agy's own record of the login does not name one.
+///
+/// Who: agy logs the login it applies — "OAuth: authenticated successfully as …" — and
+/// `--log-file` sends this run's log to a file of our own, so another agy running at the same time
+/// cannot answer for this one. The file is removed afterwards.
+async fn probe_gemini(binary: &str, env: &AccountEnv, mut status: AccountStatus) -> AccountStatus {
+    if crate::ai::find_on_path(binary).is_none() {
+        status.error = "not_installed".into();
+        return status;
+    }
+    let log = std::env::temp_dir().join(format!("codeflow-agy-status-{}.log", Uuid::new_v4()));
+    let (mut cmd, program) = crate::ai::aux_command_resolved(binary);
+    cmd.arg("--log-file").arg(&log).arg("models");
+    env.apply(&mut cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let launch = crate::ai::output_patiently(&mut cmd, binary, &program);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(25), launch).await;
+    let logged = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    let output = match result {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            status.error = e;
+            return status;
+        }
+        Err(_) => {
+            status.error = "timeout".into();
+            return status;
+        }
+    };
+    let stdout = crate::ai::strip_ansi(&String::from_utf8_lossy(&output.stdout));
+    let stderr = crate::ai::strip_ansi(&String::from_utf8_lossy(&output.stderr));
+    status.signed_in = gemini_signed_in(output.status.success(), &stdout, &stderr);
+    match status.signed_in {
+        Some(true) => {
+            status.email = gemini_logged_account(&logged)
+                .or_else(|| {
+                    dirs::home_dir()
+                        .and_then(|home| std::fs::read_to_string(home.join(".gemini").join("google_accounts.json")).ok())
+                        .and_then(|text| gemini_active_account(&text))
+                })
+                .unwrap_or_default();
+        }
+        Some(false) => {}
+        // Neither a list nor a refusal: say what agy said rather than guess either way.
+        None => status.error = first_line(&stderr).or_else(|| first_line(&stdout)).unwrap_or_else(|| "unreadable".into()),
+    }
+    status
+}
+
+/// `agy models`' answer: models listed = signed in; refused for want of a login = signed out;
+/// anything else (a network error, a crash) = not known — never "signed out", which would send the
+/// user to sign in again to something that works.
+fn gemini_signed_in(success: bool, stdout: &str, stderr: &str) -> Option<bool> {
+    if success && stdout.lines().any(|line| !line.trim().is_empty()) {
+        return Some(true);
+    }
+    let said = format!("{stdout}\n{stderr}").to_lowercase();
+    if said.contains("sign in") || said.contains("not logged in") {
+        return Some(false);
+    }
+    None
+}
+
+/// The address agy logged when it applied its login: "OAuth: authenticated successfully as
+/// ana@example.com", or "applyAuthResult: email=ana@example.com, authMethod=consumer". The last one
+/// logged wins — a login applied again after a refresh is the one in force.
+fn gemini_logged_account(log: &str) -> Option<String> {
+    log.lines().rev().find_map(|line| {
+        let after = line
+            .split_once("authenticated successfully as ")
+            .or_else(|| line.split_once("applyAuthResult: email="))
+            .map(|(_, rest)| rest)?;
+        let email = after.split(|c: char| c == ',' || c.is_whitespace()).next()?.trim();
+        email.contains('@').then(|| email.to_string())
+    })
 }
 
 /// Reads each CLI's status output. Pure, so the shapes are pinned by tests.
@@ -871,8 +953,8 @@ fn opencode_with_emails(list: &str, auth_json: &str) -> String {
         .join(", ")
 }
 
-/// The account agy is signed in as: `active` in `~/.gemini/google_accounts.json`, the file the Gemini
-/// CLIs write when a Google login completes.
+/// `active` in `~/.gemini/google_accounts.json` — the Gemini CLI's record of its Google login, which
+/// agy alone never writes. Only the fallback for the address: see [`probe_gemini`].
 fn gemini_active_account(json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     let active = value.get("active")?.as_str()?.trim();
@@ -966,6 +1048,44 @@ mod tests {
             "OpenCode Zen, Google (ana@example.com), OpenCode Go"
         );
         assert_eq!(opencode_with_emails("OpenCode Zen", "not json"), "OpenCode Zen");
+    }
+
+    #[test]
+    fn gemini_is_signed_in_when_agy_lists_its_models() {
+        let listed = "gemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-pro\tGemini 3.8 Pro\n";
+        assert_eq!(gemini_signed_in(true, listed, "Fetching available models...\n"), Some(true));
+        // What agy prints without a login (checked against agy with an empty HOME).
+        let refused = "Fetching available models...\nError: Please sign in to view available models. Launch the CLI without arguments to sign in.\n";
+        assert_eq!(gemini_signed_in(false, "", refused), Some(false));
+        // A network error is not a signed-out account.
+        assert_eq!(gemini_signed_in(false, "", "Error: dial tcp: lookup cloudcode-pa.googleapis.com: no such host\n"), None);
+        assert_eq!(gemini_signed_in(true, "", ""), None);
+    }
+
+    /// agy on this machine, asked the way Settings asks: `agy models`, which spends nothing.
+    #[tokio::test]
+    #[ignore = "runs the installed agy"]
+    async fn gemini_status_from_the_installed_agy() {
+        let status = probe("agy", &AccountEnv::system("gemini")).await;
+        eprintln!("signed_in={:?} email_set={} error={:?}", status.signed_in, !status.email.is_empty(), status.error);
+        assert_eq!(status.signed_in, Some(true));
+        assert!(status.email.contains('@'));
+    }
+
+    #[test]
+    fn gemini_names_the_login_agy_applied() {
+        let log = "I1007 14:57:37.396431 1 server_oauth.go:204] applyAuthResult: email=ana@example.com, authMethod=consumer, quotaProject=\n\
+                   I1007 14:57:37.396442 1 server_oauth.go:209] OAuth: authenticated successfully as ana@example.com\n";
+        assert_eq!(gemini_logged_account(log), Some("ana@example.com".to_string()));
+        assert_eq!(
+            gemini_logged_account("I1007 1 server_oauth.go:204] applyAuthResult: email=luis@example.com, authMethod=consumer\n"),
+            Some("luis@example.com".to_string())
+        );
+        // A refresh later in the same log names the login in force.
+        let refreshed = "x] OAuth: authenticated successfully as old@example.com\ny] OAuth: authenticated successfully as new@example.com\n";
+        assert_eq!(gemini_logged_account(refreshed), Some("new@example.com".to_string()));
+        assert_eq!(gemini_logged_account("E1003 errorreport.go:224] You are not logged into Antigravity.\n"), None);
+        assert_eq!(gemini_logged_account("applyAuthResult: email=, authMethod=unspecified\n"), None);
     }
 
     #[test]

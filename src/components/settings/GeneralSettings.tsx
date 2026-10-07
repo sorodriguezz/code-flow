@@ -1,7 +1,17 @@
 import { useEffect, useState } from "react";
 import { Checkbox } from "../common/Checkbox";
 import { AboutPane } from "./AboutSettings";
-import { autostartEnabled, setAutostart } from "../../lib/tauri/windows";
+import {
+  autostartEnabled,
+  autostartOpenSystemSettings,
+  autostartStatus,
+  keepAwakeStatus,
+  setAutostart,
+  setKeepAwake,
+  type AutostartStatus,
+  type KeepAwakeMode,
+  type KeepAwakeStatus,
+} from "../../lib/tauri/windows";
 import { FolderOpen, GraduationCap, Loader2, LogOut, Trash2 } from "lucide-react";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { Segmented } from "../common/Segmented";
@@ -61,6 +71,8 @@ function CloseAndLaunch() {
   // `null` until the system answers, or when it cannot: the box is disabled rather than guessed.
   const [launch, setLaunch] = useState<boolean | null>(null);
   const [hidden, setHidden] = useState(false);
+  /** Bumped after every toggle, so the line under the box reads the system again. */
+  const [asked, setAsked] = useState(0);
 
   useEffect(() => {
     void getSetting(CLOSE_BEHAVIOR_KEY)
@@ -101,7 +113,8 @@ function CloseAndLaunch() {
           onChange={(on) => {
             void setAutostart(on)
               .then(setLaunch)
-              .catch((e: unknown) => pushToast(t("settings.launchAtLoginFailed", { reason: String(e) })));
+              .catch((e: unknown) => pushToast(t("settings.launchAtLoginFailed", { reason: String(e) })))
+              .finally(() => setAsked((n) => n + 1));
           }}
         />
         {t("settings.launchAtLogin")}
@@ -121,7 +134,119 @@ function CloseAndLaunch() {
           {t("settings.launchHidden")}
         </label>
       )}
+      <AutostartHealth asked={asked} />
+      <KeepAwake />
     </div>
+  );
+}
+
+/**
+ * The line under «Iniciar CodeFlow al iniciar sesión»: whether the login item will work, and the
+ * proof that it has — when it last started the app. The box alone answered from the registration,
+ * which both systems keep after it has stopped working (see `autostart.rs`).
+ */
+function AutostartHealth({ asked }: { asked: number }) {
+  const t = useT();
+  const language = useLanguageStore((s) => s.language);
+  const [status, setStatus] = useState<AutostartStatus | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void autostartStatus()
+      .then((next) => alive && setStatus(next))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [asked]);
+  if (!status) return null;
+  const openSettings = (
+    <button type="button" onClick={() => void autostartOpenSystemSettings().catch(() => {})} className="text-[var(--cf-accent)] hover:underline">
+      {t("settings.autostartOpenSettings")}
+    </button>
+  );
+  const line = "-mt-1.5 ml-6 text-[12px] leading-snug";
+  switch (status.problem) {
+    case "blocked":
+      return (
+        <p className={`${line} text-[var(--cf-warning)]`}>
+          {t("settings.autostartBlocked")} {openSettings}
+        </p>
+      );
+    case "taskManager":
+      return (
+        <p className={`${line} text-[var(--cf-warning)]`}>
+          {t("settings.autostartTaskManager")} {openSettings}
+        </p>
+      );
+    case "translocated":
+      return <p className={`${line} text-[var(--cf-warning)]`}>{t("settings.autostartTranslocated")}</p>;
+    case "missing":
+      return <p className={`${line} text-[var(--cf-warning)]`}>{t("settings.autostartMissing", { path: status.target ?? "" })}</p>;
+    default:
+      if (!status.enabled) return null;
+      return (
+        <p className={`${line} text-[var(--cf-text-muted)]`} title={status.target ?? undefined}>
+          {status.lastAutostart
+            ? t("settings.autostartLast", {
+                when: new Date(status.lastAutostart).toLocaleString(language === "es" ? "es" : "en", { dateStyle: "medium", timeStyle: "short" }),
+              })
+            : t("settings.autostartNever")}
+        </p>
+      );
+  }
+}
+
+/**
+ * «Evitar que el equipo se suspenda» — and, while it is on, what it is doing about it right now. The
+ * backend holds the system awake (`keep_awake.rs`); this asks it every few seconds while on screen,
+ * which is a lock and four counts.
+ */
+function KeepAwake() {
+  const t = useT();
+  const pushToast = useToastStore((s) => s.pushToast);
+  const [status, setStatus] = useState<KeepAwakeStatus | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const read = () =>
+      void keepAwakeStatus()
+        .then((next) => alive && setStatus(next))
+        .catch(() => {});
+    read();
+    const timer = setInterval(read, 5000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+  const change = (mode: KeepAwakeMode) =>
+    void setKeepAwake(mode)
+      .then(setStatus)
+      .catch((e: unknown) => pushToast(String(e)));
+  const mode = status?.mode ?? "off";
+  const what = (status?.reasons ?? []).map((reason) => t(`settings.keepAwake.${reason.kind}`, { count: reason.count })).join(" · ");
+  const now = !status?.supported
+    ? t("settings.keepAwakeUnsupported")
+    : status.holding
+      ? what
+        ? t("settings.keepAwakeHolding", { what })
+        : t("settings.keepAwakeHoldingAlways")
+      : t("settings.keepAwakeIdle");
+  return (
+    <>
+      <label className="flex w-fit cursor-pointer items-center gap-2 text-[13px] text-[var(--cf-text)]" title={t("settings.keepAwakeHint")}>
+        <Checkbox checked={mode !== "off"} disabled={!status?.supported} onChange={(on) => change(on ? "busy" : "off")} />
+        {t("settings.keepAwake")}
+      </label>
+      {mode !== "off" && (
+        <>
+          <label className="-mt-1.5 ml-6 flex w-fit cursor-pointer items-center gap-2 text-[13px] text-[var(--cf-text)]" title={t("settings.keepAwakeBusyHint")}>
+            <Checkbox checked={mode === "busy"} onChange={(on) => change(on ? "busy" : "always")} />
+            {t("settings.keepAwakeBusy")}
+          </label>
+          <p className={`-mt-1.5 ml-6 text-[12px] leading-snug ${status?.holding ? "text-[var(--cf-success)]" : "text-[var(--cf-text-muted)]"}`}>{now}</p>
+        </>
+      )}
+    </>
   );
 }
 

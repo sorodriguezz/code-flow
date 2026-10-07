@@ -6,7 +6,8 @@ import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { Segmented } from "../common/Segmented";
 import { RowAction, useInterval } from "./containerBits";
 import { engineMenu, runtimeLabel } from "./containerActions";
-import { DataTable, EmptyLine, LiveMark, NO_ROWS, PageHead, PageToolbar, PortChips, SearchField, StatePill, Td, Th, fmtBytes, fmtPercent, statusSince, trClass } from "./ui";
+import { DataTable, EmptyLine, LiveMark, LoadingLine, NO_ROWS, PageHead, PageToolbar, PortChips, SearchField, StatePill, Td, Th, fmtBytes, fmtPercent, statusSince, trClass } from "./ui";
+import { firstRead } from "./pageModel";
 import { RunContainerDialog } from "./RunContainerDialog";
 import { confirmAction } from "../../state/confirmStore";
 import { listKey, useContainersStore } from "../../state/containersStore";
@@ -303,8 +304,10 @@ export function ContainersPage({ runtime }: { runtime: RuntimeInfo }) {
         <EmptyLine>{runtime.problem ?? t("containers.notRunningHint")}</EmptyLine>
       ) : list?.error ? (
         <EmptyLine>{list.error}</EmptyLine>
+      ) : firstRead(list) ? (
+        <LoadingLine />
       ) : shown.length === 0 ? (
-        <EmptyLine>{!list ? t("containers.m.loading") : rows.length ? t("containers.m.noMatch") : t("containers.m.noContainers")}</EmptyLine>
+        <EmptyLine>{rows.length ? t("containers.m.noMatch") : t("containers.m.noContainers")}</EmptyLine>
       ) : (
         <DataTable minWidth={760}>
           <thead>

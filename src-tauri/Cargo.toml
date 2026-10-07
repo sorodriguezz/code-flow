@@ -490,10 +490,14 @@ windows = { version = "0.61", features = ["Win32_Graphics_Dxgi"] }
 # `WM_NCACTIVATE` that `glass::system_frame` sends (bindings only; nothing new to build). The
 # DataExchange, SystemInformation and KeyboardAndMouse modules are for Flujos' triggers: the
 # clipboard's change counter and the time since the last keystroke or click (bindings only too).
+# Power is «Evitar que el equipo se suspenda» (`keep_awake`: a power request), and Registry the
+# launch-at-login entry written with its path quoted (`autostart`) — bindings only as well.
 windows-sys = { version = "0.60", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
   "Win32_System_DataExchange",
+  "Win32_System_Power",
+  "Win32_System_Registry",
   "Win32_System_SystemInformation",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_System_ProcessStatus",
@@ -511,6 +515,12 @@ window-vibrancy = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+# `NSProcessInfo`'s activity API, for «Evitar que el equipo se suspenda» (`keep_awake`): the one call
+# that keeps macOS from idle sleep *and* from App Napping the app while its window is hidden. Both
+# crates are already in the tree at these versions (tao and wry are built on them), so naming them
+# compiles nothing new.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSProcessInfo", "NSString"] }
 # The universal-apple-darwin release build cross-compiles the x86_64 slice on an
 # aarch64 GitHub runner; git2's default OpenSSL backend then fails to find a
 # matching OpenSSL via pkg-config for the non-host target ("could not find

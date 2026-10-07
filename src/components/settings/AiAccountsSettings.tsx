@@ -76,12 +76,12 @@ export function AiAccountsSettings() {
       ))}
 
       <GeminiRow
-        onSwitch={() =>
+        onSwitch={(signedOut) =>
           void openLogin({
             provider: "gemini",
             accountId: null,
-            title: t("accounts.geminiSwitch"),
-            hint: t("accounts.geminiSwitchHint"),
+            title: signedOut ? t("accounts.geminiLoginTitle") : t("accounts.geminiSwitch"),
+            hint: signedOut ? t("accounts.geminiLoginHint") : t("accounts.geminiSwitchHint"),
           })
         }
       />
@@ -298,8 +298,8 @@ function AccountRow({
         <span className="w-[120px] shrink-0 truncate text-[13px] text-[var(--cf-text)]">{label}</span>
       </Tooltip>
       {/* The whole line on hover: an address and a plan, or opencode's list of logins with theirs,
-          outgrow the row's width. */}
-      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]" title={statusLine(status, checking, t)}>
+          outgrow the row's width — and, when the CLI could not be asked, what it said. */}
+      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]" title={statusTitle(status, checking, t)}>
         {statusLine(status, checking, t)}
       </span>
       <Tooltip label={t("accounts.check")}>
@@ -379,18 +379,26 @@ function statusLine(status: AccountStatus | undefined, checking: boolean, t: Ret
   if (!status) return checking ? t("accounts.checking") : "";
   if (status.signedIn) {
     const who = [status.email, status.plan].filter(Boolean).join(" · ");
-    return who || t("accounts.signedIn");
+    return who ? t("accounts.signedInAs", { who }) : t("accounts.signedIn");
   }
   if (status.signedIn === false) return t("accounts.signedOut");
   if (status.error === "not_installed") return t("accounts.notInstalled");
   return t("accounts.unknown");
 }
 
-/** Gemini keeps one login in a keychain item with a fixed name — no second account can exist
- * beside it, so the most this can do is say who it is signed in as and make switching it quick. The
- * address comes from the file agy writes beside that login (see `ai_accounts::probe`); agy publishes
- * no plan anywhere this can read, so none is shown. */
-function GeminiRow({ onSwitch }: { onSwitch: () => void }) {
+/** The line, plus what the CLI said when it could not be asked — "could not be checked" alone
+ *  leaves the user guessing whether they are signed in. */
+function statusTitle(status: AccountStatus | undefined, checking: boolean, t: ReturnType<typeof useT>): string {
+  const line = statusLine(status, checking, t);
+  const said = status && status.signedIn === null && status.error && status.error !== "not_installed" ? status.error : "";
+  return said ? `${line} — ${said}` : line;
+}
+
+/** Gemini keeps one login for the whole machine — no second account can exist beside it, so the
+ * most this can do is say whether agy is signed in and as whom, and make signing in or switching
+ * quick. Asked of agy itself (`agy models`, which it refuses without a login — see
+ * `ai_accounts::probe_gemini`); agy publishes no plan anywhere this can read, so none is shown. */
+function GeminiRow({ onSwitch }: { onSwitch: (signedOut: boolean) => void }) {
   const t = useT();
   const check = useAiAccountsStore((s) => s.check);
   const status = useAiAccountsStore((s) => s.statuses[accountKey("gemini", null)]);
@@ -398,21 +406,27 @@ function GeminiRow({ onSwitch }: { onSwitch: () => void }) {
   useEffect(() => {
     void check("gemini", null);
   }, [check]);
-  const who = statusLine(status, checking, t);
+  const signedOut = status?.signedIn === false;
   return (
     <div className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] px-3 py-2">
       <ProviderGlyph providerId="gemini" size={14} />
       <span className="text-[13px] font-medium text-[var(--cf-text)]">{providerDisplayLabel("gemini", t)}</span>
       <StatusDot status={status} checking={checking} />
-      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]" title={who}>
-        {who}
+      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]" title={statusTitle(status, checking, t)}>
+        {statusLine(status, checking, t)}
       </span>
+      <Tooltip label={t("accounts.check")}>
+        <button type="button" aria-label={t("accounts.check")} disabled={checking} onClick={() => void check("gemini", null)} className={ICON_BUTTON}>
+          {checking ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+        </button>
+      </Tooltip>
       <Tooltip label={t("accounts.geminiSingle")} description={t("accounts.geminiSingleHint")}>
         <span className={chipClass("neutral")}>{t("accounts.geminiSingle")}</span>
       </Tooltip>
-      <button type="button" onClick={onSwitch} className={buttonClass({ variant: "secondary", size: "sm" })}>
+      {/* Signed out, there is nothing to switch from: the button says what it does then. */}
+      <button type="button" onClick={() => onSwitch(signedOut)} className={buttonClass({ variant: signedOut ? "primary" : "secondary", size: "sm" })}>
         <KeyRound size={13} />
-        {t("accounts.geminiSwitch")}
+        {signedOut ? t("accounts.login") : t("accounts.geminiSwitch")}
       </button>
     </div>
   );

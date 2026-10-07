@@ -1220,6 +1220,8 @@ dependencies = [
  "mongodb",
  "mysql_async",
  "notify",
+ "objc2",
+ "objc2-foundation",
  "open",
  "pdf-extract",
  "percent-encoding",

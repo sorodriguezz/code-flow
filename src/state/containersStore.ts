@@ -5,6 +5,8 @@ import {
   containersForwardClose,
   containersForwardOpen,
   containersForwards,
+  containersKubeOrigins,
+  containersKubeTest,
   containersList,
   containersNamespaces,
   containersReach,
@@ -13,7 +15,7 @@ import {
 } from "../lib/tauri/containersCommands";
 import { getSetting, setSetting } from "../lib/tauri/commands";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
-import type { ContainerSelection, ContainerStats, ForwardView, RuntimeId, RuntimeInfo } from "../types/containers";
+import type { ContainerSelection, ContainerStats, ForwardView, KubeContextOrigin, KubeTest, RuntimeId, RuntimeInfo } from "../types/containers";
 
 /**
  * The Contenedores panel: which runtimes this computer has, what each holds, and what is picked.
@@ -33,6 +35,19 @@ import type { ContainerSelection, ContainerStats, ForwardView, RuntimeId, Runtim
  * given the context its rows were read from and never resolves one itself, and a selection made under a
  * context that is no longer in force is let go: its pane would show staging's rows while Delete went to
  * prod.
+ *
+ * **A cluster is asked whether it answers once, not on every visit.** `kubectl version` against a
+ * remote cluster costs seconds — an auth plugin starting, a DNS lookup that fails slowly — so its
+ * answer (`reach`, `kubeTests`) is kept with the time it was given and reused while it is fresh:
+ * leaving the cluster's page and coming back, or closing the dock and opening it again, shows what
+ * was found a minute ago instead of asking again. «Probar» and the navigation's refresh ask anew.
+ *
+ * **Disconnecting is the panel's, not kubeconfig's.** «Desconectar» leaves Kubernetes with no cluster
+ * (`kubeDisconnected`): nothing is read from it, its port-forwards are closed, its pages and their log
+ * and shell sessions let go. The user's kubeconfig, its current context and the credentials an auth
+ * plugin keeps are untouched — a terminal's kubectl goes on working. Kept across launches, so a
+ * disconnected panel does not fall back to kubeconfig's current context on the next start; picking a
+ * cluster connects again.
  */
 
 const PREFS_KEY = "containers_prefs";
@@ -63,6 +78,8 @@ interface Prefs {
   context: Record<string, string>;
   /** Kubernetes: the namespace per context; `""` = all. */
   namespace: Record<string, string>;
+  /** Kubernetes: disconnected on purpose — no cluster, rather than kubeconfig's current one. */
+  kubeDisconnected?: boolean;
 }
 
 const DEFAULT_PREFS: Prefs = {
@@ -70,10 +87,22 @@ const DEFAULT_PREFS: Prefs = {
   nav: { runtime: null, section: "containers" },
   context: {},
   namespace: {},
+  kubeDisconnected: false,
 };
 
 export const listKey = (runtime: string, context: string | null, namespace: string | null, what: string) =>
   `${runtime}|${context ?? ""}|${namespace ?? ""}|${what}`;
+
+/** How long a cluster's answer — it answers, it does not and why — stands before a visit asks again. */
+export const KUBE_CHECK_FRESH_MS = 10 * 60_000;
+
+/** A context's connection test on the cluster page: the last answer, and whether one is on its way. */
+export interface KubeTestState {
+  result: KubeTest | null;
+  testing: boolean;
+  /** When `result` came back, ms since the epoch; 0 = never. */
+  at: number;
+}
 
 interface ContainersState {
   runtimes: RuntimeInfo[];
@@ -87,8 +116,13 @@ interface ContainersState {
   prefsLoaded: boolean;
   /** Kubernetes namespaces, per context. */
   namespaces: Record<string, string[]>;
-  /** Whether a Kubernetes context's cluster answers: its version, or the reason it does not. */
-  reach: Record<string, { ok: boolean; text: string }>;
+  /** Whether a Kubernetes context's cluster answers: its version, or the reason it does not, and
+   *  when that was found out. */
+  reach: Record<string, { ok: boolean; text: string; at: number }>;
+  /** The cluster page's connection test per context — with the hint that says what fixes it. */
+  kubeTests: Record<string, KubeTestState>;
+  /** Which kubeconfig each context comes from; `null` until first read. */
+  kubeOrigins: KubeContextOrigin[] | null;
   selection: ContainerSelection | null;
   forwards: ForwardView[];
   /** Actions in flight, by `object|id`, so a row shows it is busy and refuses a second click. */
@@ -111,10 +145,17 @@ interface ContainersState {
   toggleOpen: (key: string, open?: boolean) => void;
   contextOf: (runtime: RuntimeId) => string | null;
   setContext: (runtime: RuntimeId, context: string) => void;
+  /** Leaves Kubernetes with no cluster: see the note above. Port-forwards it holds are closed. */
+  disconnectKube: () => Promise<void>;
   namespaceOf: (context: string | null) => string;
   setNamespace: (context: string | null, namespace: string) => void;
-  loadNamespaces: (context: string | null) => Promise<void>;
-  checkReach: (context: string | null) => Promise<void>;
+  /** Read once per context; `force` reads them again (the navigation's refresh). */
+  loadNamespaces: (context: string | null, opts?: { force?: boolean }) => Promise<void>;
+  /** Asks the cluster unless a fresh answer is kept; `force` asks regardless. */
+  checkReach: (context: string | null, opts?: { force?: boolean }) => Promise<void>;
+  /** The cluster page's test of one context — kept like `reach`, which it also answers. */
+  testKube: (context: string, opts?: { force?: boolean }) => Promise<void>;
+  loadKubeOrigins: () => Promise<void>;
   refreshList: (runtime: RuntimeId, what: string) => Promise<void>;
   /** Re-reads every list that is unfolded — the panel's timer. */
   pulse: () => Promise<void>;
@@ -163,6 +204,26 @@ function listOf(object: string): string {
 }
 
 const inflight = new Map<string, Promise<void>>();
+/** Reach checks and connection tests on their way, per context — a second caller joins the first. */
+const reachInflight = new Map<string, Promise<void>>();
+const testInflight = new Map<string, Promise<void>>();
+
+const fresh = (at: number | undefined) => at !== undefined && at > 0 && Date.now() - at < KUBE_CHECK_FRESH_MS;
+
+/**
+ * Records whether a context's cluster answers. A cluster that did not and now does gets its lists
+ * read at once (the pulse skips a cluster known not to answer) and its namespaces, which the
+ * navigation did not ask for while it was down.
+ */
+function noteReach(context: string, ok: boolean, text: string, at = Date.now()) {
+  const store = useContainersStore;
+  const before = store.getState().reach[context];
+  store.setState((s) => ({ reach: { ...s.reach, [context]: { ok, text, at } } }));
+  if (ok && before && !before.ok) {
+    void store.getState().loadNamespaces(context);
+    void store.getState().pulse();
+  }
+}
 
 export const useContainersStore = create<ContainersState>((set, get) => ({
   runtimes: [],
@@ -174,6 +235,8 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
   prefsLoaded: false,
   namespaces: {},
   reach: {},
+  kubeTests: {},
+  kubeOrigins: null,
   selection: null,
   forwards: [],
   busy: {},
@@ -224,6 +287,7 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
                 : DEFAULT_PREFS.nav,
             context: parsed.context && typeof parsed.context === "object" ? parsed.context : {},
             namespace: parsed.namespace && typeof parsed.namespace === "object" ? parsed.namespace : {},
+            kubeDisconnected: parsed.kubeDisconnected === true,
           },
         });
       }
@@ -282,6 +346,7 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
   },
 
   contextOf: (runtime) => {
+    if (runtime === "kubernetes" && get().prefs.kubeDisconnected) return null;
     const info = get().runtimes.find((r) => r.id === runtime);
     const chosen = get().prefs.context[runtime];
     if (chosen && info?.contexts.some((c) => c.name === chosen)) return chosen;
@@ -290,10 +355,29 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
   },
   setContext: (runtime, context) => {
     const prefs = get().prefs;
-    const next = { ...prefs, context: { ...prefs.context, [runtime]: context } };
+    const next = { ...prefs, context: { ...prefs.context, [runtime]: context }, kubeDisconnected: runtime === "kubernetes" ? false : prefs.kubeDisconnected };
     set({ prefs: next, selection: get().selection?.runtime === runtime ? null : get().selection });
     savePrefs(next);
     void get().pulse();
+  },
+  disconnectKube: async () => {
+    const context = get().contextOf("kubernetes");
+    if (!context) return;
+    const prefs = get().prefs;
+    // Back to the clusters' page: a kind's page has no cluster to read now.
+    const next: Prefs = { ...prefs, kubeDisconnected: true, nav: prefs.nav.runtime === "kubernetes" ? { runtime: "kubernetes", section: "overview" } : prefs.nav };
+    // Its rows go too: a page that came back to them would show a cluster nobody is reading.
+    const prefix = `kubernetes|${context}|`;
+    set((s) => ({
+      prefs: next,
+      selection: s.selection?.runtime === "kubernetes" ? null : s.selection,
+      lists: Object.fromEntries(Object.entries(s.lists).filter(([key]) => !key.startsWith(prefix))),
+    }));
+    savePrefs(next);
+    const forwards = get().forwards.filter((f) => f.context === context);
+    if (forwards.length === 0) return;
+    await Promise.all(forwards.map((f) => containersForwardClose(f.id).catch(() => {})));
+    await get().loadForwards();
   },
 
   namespaceOf: (context) => {
@@ -310,7 +394,8 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
     savePrefs(next);
     void get().pulse();
   },
-  loadNamespaces: async (context) => {
+  loadNamespaces: async (context, opts) => {
+    if (!opts?.force && get().namespaces[context ?? ""]) return;
     try {
       const names = await containersNamespaces("kubernetes", context);
       set((s) => ({ namespaces: { ...s.namespaces, [context ?? ""]: names } }));
@@ -318,12 +403,48 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
       // The reach check says why; the picker keeps "all namespaces".
     }
   },
-  checkReach: async (context) => {
+  checkReach: (context, opts) => {
+    const key = context ?? "";
+    if (!opts?.force && fresh(get().reach[key]?.at)) return Promise.resolve();
+    const running = reachInflight.get(key);
+    if (running) return running;
+    const task = (async () => {
+      try {
+        noteReach(key, true, await containersReach(context));
+      } catch (error) {
+        noteReach(key, false, String(error));
+      } finally {
+        reachInflight.delete(key);
+      }
+    })();
+    reachInflight.set(key, task);
+    return task;
+  },
+  testKube: (context, opts) => {
+    if (!opts?.force && fresh(get().kubeTests[context]?.at)) return Promise.resolve();
+    const running = testInflight.get(context);
+    if (running) return running;
+    const task = (async () => {
+      set((s) => ({ kubeTests: { ...s.kubeTests, [context]: { result: s.kubeTests[context]?.result ?? null, at: s.kubeTests[context]?.at ?? 0, testing: true } } }));
+      try {
+        const result = await containersKubeTest(context).catch((e: unknown): KubeTest => ({ ok: false, version: null, error: String(e), hint: null }));
+        const at = Date.now();
+        set((s) => ({ kubeTests: { ...s.kubeTests, [context]: { result, at, testing: false } } }));
+        // The same question the navigation's dot asks: one answer serves both — stamped alike, so the
+        // cluster page knows this test is not older than the dot's answer.
+        noteReach(context, result.ok, result.ok ? (result.version ?? "") : (result.error ?? ""), at);
+      } finally {
+        testInflight.delete(context);
+      }
+    })();
+    testInflight.set(context, task);
+    return task;
+  },
+  loadKubeOrigins: async () => {
     try {
-      const version = await containersReach(context);
-      set((s) => ({ reach: { ...s.reach, [context ?? ""]: { ok: true, text: version } } }));
-    } catch (error) {
-      set((s) => ({ reach: { ...s.reach, [context ?? ""]: { ok: false, text: String(error) } } }));
+      set({ kubeOrigins: await containersKubeOrigins() });
+    } catch {
+      set((s) => ({ kubeOrigins: s.kubeOrigins ?? [] }));
     }
   },
 
@@ -335,11 +456,13 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
     if (running) return running;
     const task = (async () => {
       set((s) => ({ lists: { ...s.lists, [key]: { ...(s.lists[key] ?? { rows: [], error: null, at: 0 }), loading: true } } }));
+      // A cluster disconnected while its read was on its way: the answer has nowhere to go.
+      const dropped = () => runtime === "kubernetes" && get().contextOf("kubernetes") === null;
       try {
         const rows = await containersList<unknown>(runtime, context, namespace, what);
-        set((s) => ({ lists: { ...s.lists, [key]: { rows, error: null, at: Date.now(), loading: false } } }));
+        if (!dropped()) set((s) => ({ lists: { ...s.lists, [key]: { rows, error: null, at: Date.now(), loading: false } } }));
       } catch (error) {
-        set((s) => ({ lists: { ...s.lists, [key]: { rows: s.lists[key]?.rows ?? [], error: String(error), at: Date.now(), loading: false } } }));
+        if (!dropped()) set((s) => ({ lists: { ...s.lists, [key]: { rows: s.lists[key]?.rows ?? [], error: String(error), at: Date.now(), loading: false } } }));
       } finally {
         inflight.delete(key);
       }

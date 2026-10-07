@@ -19,6 +19,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ContextMenu } from "../common/ContextMenu";
 import { TerminalSearch } from "./TerminalSearch";
+import { bufferText } from "./bufferText";
 
 /**
  * How far back you can scroll in one terminal. Stated rather than inherited: it used to be
@@ -129,6 +130,7 @@ export function TerminalPane({
   onClose,
   closeLabel,
   autoFocus = false,
+  textRef,
 }: {
   sessionId: string;
   visible: boolean;
@@ -188,6 +190,12 @@ export function TerminalPane({
   /** Takes the keyboard as soon as the terminal exists — for a dialog whose only job is this
    *  shell, like signing an AI account in. Read once, at mount. */
   autoFocus?: boolean;
+  /**
+   * Given a reader of everything the pane holds — scrollback and screen, as plain text (see
+   * `bufferText`) — while the terminal exists, and `null` once it is gone. For an owner that offers to
+   * copy, save or analyse the whole of it: a container's log, where what is on screen is the answer.
+   */
+  textRef?: { current: (() => string) | null };
 }) {
   const t = useT();
   // The scheme on screen, so a shell wears the same colours as the editor — and, in a see-through
@@ -204,6 +212,8 @@ export function TerminalPane({
   const readOnlyRef = useRef(readOnly);
   const quietExitRef = useRef(quietExit);
   const autoFocusRef = useRef(autoFocus);
+  const textRefRef = useRef(textRef);
+  textRefRef.current = textRef;
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   /** The size the pty was last told about, so an unchanged fit costs nothing. See `fitAndReport`. */
@@ -373,6 +383,9 @@ export function TerminalPane({
     term.open(containerRef.current);
     termRef.current = term;
     fitRef.current = fitAddon;
+    const textSink = textRefRef.current;
+    const readText = () => bufferText(term.buffer.active);
+    if (textSink) textSink.current = readText;
     if (autoFocusRef.current) term.focus();
     clipboardKeys(term, { copy: copySelection, paste: pasteClipboard, find: openFind });
 
@@ -500,6 +513,8 @@ export function TerminalPane({
       if (badgeTimer.current) clearTimeout(badgeTimer.current);
       dataDisposable.dispose();
       unregister();
+      // Identity-checked, like the sink: a pane that replaced this one has already put its own reader.
+      if (textSink && textSink.current === readText) textSink.current = null;
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

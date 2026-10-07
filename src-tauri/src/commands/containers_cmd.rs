@@ -4,8 +4,11 @@
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
+use crate::commands::claude_cmd::{load_ai_config_in, AiTask};
 use crate::containers::{self, engine, forward, kube, session};
+use crate::db::Db;
 use crate::terminal::TerminalRegistry;
+use crate::{ai, ai_runs};
 
 #[tauri::command]
 pub async fn containers_detect() -> Result<Vec<containers::RuntimeInfo>, String> {
@@ -101,6 +104,31 @@ pub async fn containers_reach(context: Option<String>) -> Result<String, String>
 #[tauri::command]
 pub async fn containers_apply(context: Option<String>, namespace: Option<String>, manifest: String) -> Result<String, String> {
     kube::apply(&kube::KubeTarget { context, namespace }, &manifest).await
+}
+
+/// «Analizar con IA» on a log pane: the log as the pane shows it, explained by the engine the `logs`
+/// task is routed to — the picker beside the button writes that route. `workspace_id` is the
+/// window's, so the account it runs as is the one the picker names; the containers themselves belong
+/// to no workspace. Cancellable through `run_id`, like every other run.
+#[tauri::command]
+pub async fn containers_analyze_logs(
+    app: AppHandle,
+    db: State<'_, Db>,
+    log: String,
+    about: String,
+    language: Option<String>,
+    run_id: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<String, String> {
+    let config = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        load_ai_config_in(&conn, AiTask::Logs, workspace_id.as_deref())?
+    };
+    let language = language.unwrap_or_else(|| "es".to_string());
+    ai_runs::scoped(app, run_id, async {
+        ai::analyze_logs(&*config.engine, &config.binary, &config.model, &about, &log, &language).await
+    })
+    .await
 }
 
 /// A container's logs or a shell inside it, as a terminal session id for the xterm pane.

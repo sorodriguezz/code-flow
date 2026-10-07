@@ -7,6 +7,7 @@
 mod ado;
 mod ai;
 mod applog;
+mod autostart;
 mod api;
 mod appmenu;
 mod ai_locks;
@@ -88,6 +89,7 @@ mod sigv4;
 mod skill_meta;
 mod supabase;
 mod sysload;
+mod keep_awake;
 mod keyvault;
 mod known_hosts;
 mod terminal;
@@ -495,6 +497,11 @@ pub fn run() {
             // takeover check, so a launch that is only answering a recovery question arms nothing.
             flows::triggers::start(app.handle());
             flows::waits::arm(app.handle());
+            // Launch at login: the time of a launch the login item made — Settings shows it, the
+            // proof the option works — and the registration pointed back at this copy of the app.
+            autostart::on_launch(app.handle(), std::env::args().any(|arg| arg == AUTOSTARTED_FLAG));
+            // «Evitar que el equipo se suspenda», from the stored choice. See `keep_awake`.
+            keep_awake::start(app.handle());
             // The main window, built here from its own entry in `tauri.conf.json` (which says
             // `"create": false`) rather than by Tauri before `setup` runs — the one difference being
             // `enable_clipboard_access`, which that config has no field for. Without it WebView2 (and
@@ -782,6 +789,10 @@ pub fn run() {
             tray::hide_main_to_tray,
             tray::autostart_enabled,
             tray::set_autostart,
+            autostart::autostart_status,
+            autostart::autostart_open_system_settings,
+            keep_awake::keep_awake_status,
+            keep_awake::set_keep_awake,
             windows::get_quick_ask_shortcut,
             windows::set_window_unsaved,
             glass::set_window_glass,
@@ -864,6 +875,7 @@ pub fn run() {
             commands::containers_cmd::containers_list,
             commands::containers_cmd::containers_act,
             commands::containers_cmd::containers_text,
+            commands::containers_cmd::containers_analyze_logs,
             commands::containers_cmd::containers_container_detail,
             commands::containers_cmd::containers_namespaces,
             commands::containers_cmd::containers_reach,

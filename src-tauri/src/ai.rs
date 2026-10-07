@@ -1070,6 +1070,10 @@ pub mod task {
     /// A flow written or changed from a description — see [`super::build_flow`]. Its own label
     /// rather than [`FLOWS`]': that one is what a running flow spends, this one is the editor's.
     pub const FLOW_BUILD: &str = "flow-build";
+    /// A container's or a pod's log explained — see [`super::analyze_logs`]. Its own label rather
+    /// than [`PIPELINE_ANALYZE`]'s: that one reads a repository with tools, this one a log alone, and
+    /// counting them together would hide which of the two is spending.
+    pub const LOGS_ANALYZE: &str = "logs-analyze";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -5952,6 +5956,77 @@ pub async fn analyze_pipeline_failure(
         engine.label(),
         run.model.as_deref().unwrap_or(model),
     ))
+}
+
+/// How much of a log «Analizar con IA» hands over — the same budget as a CI job's, trimmed the same
+/// way: a fifth from the head (what started), the rest from the tail (what went wrong last).
+pub const MAX_LOGS_CHARS: usize = crate::ci::MAX_AI_LOG_CHARS;
+
+/// The ask behind a container's or a pod's «Analizar con IA».
+///
+/// Shaped like [`DEFAULT_PIPELINE_TEMPLATE`], and for the same reasons: three fixed sections make an
+/// answer someone can act on, and a long answer is what keeps a log that is *about* a rate limit
+/// from being read as the engine running out of quota (see [`refusal_reply`]). Unlike the pipeline's
+/// it has nothing to open — no repository, no cluster — so it must say what the log alone supports
+/// and what would need a look elsewhere.
+pub const DEFAULT_LOGS_PROMPT: &str =
+    "Eres un ingeniero de plataforma senior. Se te entrega por stdin qué produjo un registro (un \
+     contenedor de Docker o Podman, un pod o un recurso de Kubernetes: su runtime, contexto, \
+     namespace, imagen y estado cuando se conocen) y el registro tal como se ve en pantalla.\n\n\
+     No tienes acceso al clúster, al motor ni al código: trabaja SOLO con lo que el registro \
+     muestra. Cuando algo sea una hipótesis, dilo; si para confirmarlo hace falta mirar otra cosa \
+     (eventos del pod, `describe`, variables de entorno, el código), di exactamente qué y con qué \
+     comando.\n\n\
+     Responde en Markdown, con EXACTAMENTE estas tres secciones y en este orden:\n\n\
+     ## Resumen\n\
+     Qué está haciendo el proceso y en qué estado queda, en dos o tres frases. Si el registro no \
+     muestra ningún problema, dilo claramente aquí y no inventes ninguno.\n\n\
+     ## Problemas\n\
+     Errores, excepciones, advertencias que importan, reinicios, tiempos de espera o \
+     configuraciones inseguras, del más grave al menos grave. Para cada uno: cita las líneas \
+     concretas del registro en un bloque de código, y explica la causa más probable. Ignora el \
+     ruido habitual de arranque.\n\n\
+     ## Qué hacer\n\
+     Pasos concretos para confirmarlo y corregirlo, en orden: comandos `kubectl` o `docker` cuando \
+     apliquen, y qué cambiar (configuración, variables, recursos, imagen). Si no hay nada que \
+     corregir, dilo.\n\n\
+     No inventes líneas que el registro no tiene: si no está en el registro, no lo cites.";
+
+/// Explains a container's or a pod's log — the Contenedores panel's «Analizar con IA».
+///
+/// Text-only and read-only: `about` (what produced the log, one `Clave: valor` per line) and the log
+/// itself go on stdin, and nothing is opened — no working directory, no tools. `language` is the
+/// interface's, so the answer reads in the language the panel around it does.
+pub async fn analyze_logs(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    about: &str,
+    log_text: &str,
+    language: &str,
+) -> Result<String, String> {
+    if log_text.trim().is_empty() {
+        return Err("El registro está vacío: no hay nada que analizar".to_string());
+    }
+    let (log, trimmed) = crate::ci::head_and_tail(log_text, MAX_LOGS_CHARS);
+    let mut stdin_payload = String::new();
+    stdin_payload.push_str("=== QUÉ ES ===\n");
+    stdin_payload.push_str(about.trim());
+    stdin_payload.push_str(if trimmed { "\n\n=== REGISTRO (recortado: principio y final) ===\n" } else { "\n\n=== REGISTRO ===\n" });
+    stdin_payload.push_str(&log);
+
+    let ask = if language == "en" {
+        "Analyze the log as instructed. Answer in English, keeping the three sections (translate their headings)."
+    } else {
+        "Analiza el registro según las instrucciones. Responde en español."
+    };
+    let mut inv = AiInvocation::new(ask, &stdin_payload);
+    inv.system_prompt = Some(DEFAULT_LOGS_PROMPT);
+    inv.model = model;
+    inv.read_only = true;
+    inv.task = task::LOGS_ANALYZE;
+    let run = run(engine, binary, inv).await?;
+    Ok(stamp_footer(&run.text, "registros", engine.label(), run.model.as_deref().unwrap_or(model)))
 }
 
 /// Above this many characters a turn's message stops riding `-p` and is delivered as **data**,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowDownToLine,
@@ -22,6 +22,7 @@ import { Checkbox } from "../common/Checkbox";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
 import { SessionPane } from "./SessionPane";
+import { LogAnalysisPanel, LogTools } from "./LogTools";
 import { ContainerFiles } from "./ContainerFiles";
 import { ContainerStats } from "./ContainerStats";
 import { NO_ROWS } from "./ui";
@@ -33,6 +34,7 @@ import { projectOptions } from "./ContainersPanel";
 import { containersContainerDetail, containersText } from "../../lib/tauri/containersCommands";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { listKey, useContainersStore } from "../../state/containersStore";
+import { logAnalysisKey } from "../../state/containersLogAiStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { ContainerRow, ContainerSelection, ContainerSummary, ImageRow, NetworkRow, PortMap, VolumeRow } from "../../types/containers";
@@ -154,6 +156,8 @@ function ContainerDetail({ selection }: { selection: ContainerSelection }) {
   const [tail, setTail] = useState("500");
   const [timestamps, setTimestamps] = useState(false);
   const [raw, setRaw] = useState(false);
+  /** What the log pane shows, as text — for its copy, save and «Analizar con IA». */
+  const logText = useRef<(() => string) | null>(null);
   const ctr = selection.runtime === "ctr";
   useEffect(() => setVisited((v) => (v.has(tab) ? v : new Set([...v, tab]))), [tab]);
   if (!row) return <Gone />;
@@ -171,6 +175,19 @@ function ContainerDetail({ selection }: { selection: ContainerSelection }) {
       ];
   const current = ctr ? "config" : tab;
   const menu = engineMenu({ runtime: selection.runtime, context: selection.context, object: "container", row, t, act, select: () => select(selection) });
+  // What the engine is told the log is — data for the model, in the prompt's language.
+  const logAbout = [
+    `Origen: ${runtimeLabel(selection.runtime, t)}`,
+    selection.context && `Contexto: ${selection.context}`,
+    `Contenedor: ${row.name}`,
+    `Imagen: ${row.image}`,
+    row.status && `Estado: ${row.status}`,
+    row.health && `Salud: ${row.health}`,
+    row.project && `Compose: ${row.project}${row.service ? ` / ${row.service}` : ""}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const analysisKey = logAnalysisKey([selection.runtime, selection.context, "container", row.id]);
   return (
     <>
       <DetailHeader
@@ -237,6 +254,7 @@ function ContainerDetail({ selection }: { selection: ContainerSelection }) {
                   ariaLabel={t("containers.tailLabel")}
                 />
               </div>
+              <LogTools read={() => logText.current?.() ?? ""} subject={row.name} about={logAbout} analysisKey={analysisKey} />
             </span>
           ) : current === "config" ? (
             <Segmented
@@ -258,8 +276,10 @@ function ContainerDetail({ selection }: { selection: ContainerSelection }) {
             visible={current === "logs"}
             liveToken={running ? "up" : "down"}
             request={{ kind: "logs", runtime: selection.runtime, context: selection.context, target: row.id, tail: Number(tail), timestamps }}
+            textRef={logText}
           />
         )}
+        {!ctr && current === "logs" && <LogAnalysisPanel analysisKey={analysisKey} />}
         {!ctr && visited.has("terminal") && (running ? (
           <SessionPane visible={current === "terminal"} request={{ kind: "exec", runtime: selection.runtime, context: selection.context, target: row.id }} />
         ) : (
@@ -467,10 +487,21 @@ function ProjectDetail({ selection }: { selection: ContainerSelection }) {
   const select = useContainersStore((s) => s.select);
   const [tab, setTab] = useState<ProjectTab>("logs");
   const [visited, setVisited] = useState<Set<ProjectTab>>(new Set(["logs"]));
+  /** What the log pane shows, as text — for its copy, save and «Analizar con IA». */
+  const logText = useRef<(() => string) | null>(null);
   useEffect(() => setVisited((v) => (v.has(tab) ? v : new Set([...v, tab]))), [tab]);
   const options = useMemo(() => projectOptions(rows), [rows]);
   if (rows.length === 0) return <Gone />;
   const name = selection.id;
+  const logAbout = [
+    `Origen: ${runtimeLabel(selection.runtime, t)} Compose`,
+    selection.context && `Contexto: ${selection.context}`,
+    `Proyecto: ${name}`,
+    `Servicios: ${rows.map((r) => `${r.service || r.name} (${r.image}, ${r.status})`).join("; ")}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const analysisKey = logAnalysisKey([selection.runtime, selection.context, "project", name]);
   const up = rows.filter((r) => r.state === "running").length;
   const run = (action: string, label: TranslationKey) => void act({ runtime: selection.runtime, context: selection.context, object: "project", action, ids: [name], options, label: t(label, { name }) });
   const menu = engineMenu({ runtime: selection.runtime, context: selection.context, object: "project", project: { name, rows }, t, act, select: () => select(selection) });
@@ -500,6 +531,7 @@ function ProjectDetail({ selection }: { selection: ContainerSelection }) {
         ]}
         value={tab}
         onChange={setTab}
+        trailing={tab === "logs" ? <LogTools read={() => logText.current?.() ?? ""} subject={name} about={logAbout} analysisKey={analysisKey} /> : null}
       />
       <div className="relative flex min-h-0 flex-1">
         {visited.has("logs") && (
@@ -507,8 +539,10 @@ function ProjectDetail({ selection }: { selection: ContainerSelection }) {
             visible={tab === "logs"}
             liveToken={up > 0 ? "up" : "down"}
             request={{ kind: "projectLogs", runtime: selection.runtime, context: selection.context, target: name, tail: 300, projectDir: options.projectDir, configFiles: options.configFiles }}
+            textRef={logText}
           />
         )}
+        {tab === "logs" && <LogAnalysisPanel analysisKey={analysisKey} />}
         {tab === "containers" && (
           <div className="min-h-0 flex-1 overflow-y-auto p-3">
             <table className="w-full text-[12px]">
@@ -520,7 +554,7 @@ function ProjectDetail({ selection }: { selection: ContainerSelection }) {
                     <tr
                       key={row.id}
                       onClick={() => select({ runtime: selection.runtime, context: selection.context, namespace: null, object: "container", id: row.id, name: row.name })}
-                      className="cursor-default hover:bg-[var(--cf-hover)]"
+                      className="cursor-pointer hover:bg-[var(--cf-hover)]"
                     >
                       <td className="w-4 py-1 pl-1">
                         <StateDot tone={stateTone(row.state, row.health)} />

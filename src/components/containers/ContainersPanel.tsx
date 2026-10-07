@@ -106,6 +106,7 @@ export function ContainersPane() {
   const detect = useContainersStore((s) => s.detect);
   const setContext = useContainersStore((s) => s.setContext);
   const setNav = useContainersStore((s) => s.setNav);
+  const kubeContext = useContainersStore((s) => s.contextOf("kubernetes"));
   const nav = useNav();
   const runtime = runtimes.find((r) => r.id === nav.runtime);
   let page: ReactNode;
@@ -121,7 +122,9 @@ export function ContainersPane() {
   } else if (selection && selection.runtime === runtime.id) {
     page = <ContainersDetail selection={selection} />;
   } else if (runtime.id === "kubernetes") {
-    page = nav.section === "overview" ? <KubeOverviewPage runtime={runtime} onAddCluster={() => setDialog("cluster")} /> : <KubeKindPage kind={nav.section} />;
+    // Disconnected, a kind's page has no cluster to read: the clusters' page is where one is picked.
+    page =
+      nav.section === "overview" || !kubeContext ? <KubeOverviewPage runtime={runtime} onAddCluster={() => setDialog("cluster")} /> : <KubeKindPage kind={nav.section} />;
   } else {
     page = <EnginePage section={nav.section} runtimeId={runtime.id} />;
   }

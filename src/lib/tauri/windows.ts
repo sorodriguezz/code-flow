@@ -105,5 +105,32 @@ export const hideMainToTray = () => invoke<void>("hide_main_to_tray");
 export const autostartEnabled = () => invoke<boolean>("autostart_enabled");
 export const setAutostart = (enabled: boolean) => invoke<boolean>("set_autostart", { enabled });
 
+/** Whether the login item will actually start CodeFlow — see `autostart.rs`. `problem`:
+ *  `blocked` (macOS: off in Login Items), `translocated` (macOS: running from a temporary copy),
+ *  `missing` (the registered program is gone), `taskManager` (Windows: off in Startup apps). */
+export interface AutostartStatus {
+  enabled: boolean;
+  target: string | null;
+  problem: "blocked" | "translocated" | "missing" | "taskManager" | null;
+  /** When the login item last started CodeFlow, RFC 3339. */
+  lastAutostart: string | null;
+}
+export const autostartStatus = () => invoke<AutostartStatus>("autostart_status");
+/** The system's own list of what starts at login. */
+export const autostartOpenSystemSettings = () => invoke<void>("autostart_open_system_settings");
+
+/** «Evitar que el equipo se suspenda» — see `keep_awake.rs`. */
+export type KeepAwakeMode = "off" | "busy" | "always";
+export interface KeepAwakeStatus {
+  mode: KeepAwakeMode;
+  /** The system is being kept awake right now. */
+  holding: boolean;
+  supported: boolean;
+  /** What is at work: AI runs, flow runs, armed flows, services. */
+  reasons: { kind: "ai" | "flowRuns" | "flowsArmed" | "services"; count: number }[];
+}
+export const keepAwakeStatus = () => invoke<KeepAwakeStatus>("keep_awake_status");
+export const setKeepAwake = (mode: KeepAwakeMode) => invoke<KeepAwakeStatus>("set_keep_awake", { mode });
+
 /** The operating system's locale (`es-CL`, `en-US`…), or `null` when it cannot be read. */
 export const systemLocale = () => invoke<string | null>("system_locale");

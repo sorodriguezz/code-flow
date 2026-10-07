@@ -7,7 +7,7 @@ import { Segmented } from "../common/Segmented";
 import { chipClass } from "../common/recipes";
 import { Facts, RowAction, SectionTitle, StateDot, ago, stateTone } from "./containerBits";
 import { engineMenu, runtimeLabel } from "./containerActions";
-import { DataTable, Dialog, EmptyLine, Field, LiveMark, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, fmtBytes, trClass } from "./ui";
+import { DataTable, Dialog, EmptyLine, Field, LiveMark, LoadingLine, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, fmtBytes, trClass } from "./ui";
 import { RunContainerDialog } from "./RunContainerDialog";
 import {
   BulkBar,
@@ -25,7 +25,7 @@ import {
   type DrawerView,
   type MenuState,
 } from "./pageBits";
-import { imageUseCount, imageUsers, layerCommand, pullableReference } from "./pageModel";
+import { firstRead, imageUseCount, imageUsers, layerCommand, pullableReference } from "./pageModel";
 import { containersImageHistory } from "../../lib/tauri/containersCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useContainersJobsStore } from "../../state/containersJobsStore";
@@ -206,8 +206,10 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
             <EmptyLine>{runtime.problem ?? t("containers.notRunningHint")}</EmptyLine>
           ) : list?.error ? (
             <EmptyLine>{list.error}</EmptyLine>
+          ) : firstRead(list) ? (
+            <LoadingLine />
           ) : shown.length === 0 ? (
-            <EmptyLine>{!list ? t("containers.m.loading") : rows.length ? t("containers.m.images.noMatch") : t("containers.m.images.none")}</EmptyLine>
+            <EmptyLine>{rows.length ? t("containers.m.images.noMatch") : t("containers.m.images.none")}</EmptyLine>
           ) : (
             <DataTable minWidth={openRow ? 560 : 720}>
               <thead>
@@ -235,7 +237,7 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
                   const { users, count } = usageOf(row);
                   const working = busy[`image|${refOf(row)}`];
                   return (
-                    <tr key={key} className={`${trClass(picked.has(key) || openKey === key)} cursor-default`} onClick={() => setOpenKey(key)} onContextMenu={(e) => setMenu(menuAt(e, rowMenu(row)))}>
+                    <tr key={key} className={trClass(picked.has(key) || openKey === key, true)} onClick={() => setOpenKey(key)} onContextMenu={(e) => setMenu(menuAt(e, rowMenu(row)))}>
                       <Td align="center" className="w-8">
                         <StopClick>
                           <Checkbox checked={picked.has(key)} onChange={() => toggle(key)} />
