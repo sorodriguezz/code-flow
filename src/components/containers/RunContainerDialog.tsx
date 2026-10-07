@@ -1,17 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, ClipboardPaste, Copy, ExternalLink, Eye, EyeOff, FolderOpen, Loader2, Play, Plus, Star, X } from "lucide-react";
+import { ChevronDown, ClipboardPaste, Copy, Eye, EyeOff, FolderOpen, Loader2, Play, Plus, X } from "lucide-react";
 import { Button } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
-import { chipClass, fieldClass, popoverClass } from "../common/recipes";
+import { fieldClass } from "../common/recipes";
 import { Dialog, Field, FormSection, NO_ROWS } from "./ui";
-import { containersHubSearch, containersHubTags, containersRun, containersText } from "../../lib/tauri/containersCommands";
-import { openExternalUrl } from "../../lib/tauri/commands";
+import { ImageCombo } from "./pageBits";
+import { containersRun, containersText } from "../../lib/tauri/containersCommands";
 import { listKey, useContainersStore } from "../../state/containersStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
-import type { ContainerRow, HubRepo, HubTag, ImageRow, NetworkRow, RestartPolicy, RunSpec, RuntimeInfo, VolumeRow } from "../../types/containers";
+import type { ContainerRow, NetworkRow, RestartPolicy, RunSpec, RuntimeInfo, VolumeRow } from "../../types/containers";
 
 /**
  * «Ejecutar contenedor» — a `docker run -d` from a form, lite-dock's dialog: an image from this
@@ -36,19 +36,10 @@ function quote(value: string): string {
   return /^[\w@%+=:,./-]+$/.test(value) ? value : `"${value.replace(/(["\\$`])/g, "\\$1")}"`;
 }
 
-const imageName = (reference: string) => (reference.includes(":") && !reference.endsWith("]") ? reference.slice(0, reference.lastIndexOf(":")) : reference);
-/** A plain Docker Hub reference: no registry host in front (`ghcr.io/…`, `localhost:5000/…`). */
-const onHub = (name: string) => {
-  const first = name.split("/")[0];
-  return !first.includes(".") && !first.includes(":") && first !== "localhost";
-};
-const hubUrl = (name: string) => (name.includes("/") ? `https://hub.docker.com/r/${name}` : `https://hub.docker.com/_/${name}`);
-
 export function RunContainerDialog({ runtime, context, initialImage = "", onClose }: { runtime: RuntimeInfo; context: string | null; initialImage?: string; onClose: () => void }) {
   const t = useT();
   const refreshList = useContainersStore((s) => s.refreshList);
   const select = useContainersStore((s) => s.select);
-  const images = (useContainersStore((s) => s.lists[listKey(runtime.id, context, null, "images")])?.rows ?? NO_ROWS) as ImageRow[];
   const volumes = (useContainersStore((s) => s.lists[listKey(runtime.id, context, null, "volumes")])?.rows ?? NO_ROWS) as VolumeRow[];
   const networks = (useContainersStore((s) => s.lists[listKey(runtime.id, context, null, "networks")])?.rows ?? NO_ROWS) as NetworkRow[];
   const containers = (useContainersStore((s) => s.lists[listKey(runtime.id, context, null, "containers")])?.rows ?? NO_ROWS) as ContainerRow[];
@@ -74,48 +65,6 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
     for (const what of ["images", "volumes", "networks", "containers"]) void refreshList(runtime.id, what);
   }, [runtime.id, refreshList]);
 
-  // ---- the image: this engine's, or Docker Hub's
-  const [comboOpen, setComboOpen] = useState(false);
-  const [hub, setHub] = useState<HubRepo[]>([]);
-  const [hubLoading, setHubLoading] = useState(false);
-  const [hubError, setHubError] = useState<string | null>(null);
-  const [tags, setTags] = useState<HubTag[] | null>(null);
-  const combo = useRef<HTMLDivElement>(null);
-  const local = useMemo(() => images.filter((i) => !i.dangling && i.reference && !i.reference.includes("<none>")).map((i) => i.reference), [images]);
-  const localMatches = useMemo(() => {
-    const needle = image.trim().toLowerCase();
-    if (!needle || local.some((r) => r.toLowerCase() === needle)) return local;
-    return local.filter((r) => r.toLowerCase().includes(needle));
-  }, [image, local]);
-  const term = imageName(image.trim());
-  useEffect(() => {
-    if (!comboOpen || term.length < 2 || !onHub(term)) {
-      setHub([]);
-      setHubLoading(false);
-      return;
-    }
-    let alive = true;
-    setHubLoading(true);
-    const timer = setTimeout(() => {
-      containersHubSearch(term, 8)
-        .then((found) => alive && (setHub(found), setHubError(null)))
-        .catch((e: unknown) => alive && (setHub([]), setHubError(String(e))))
-        .finally(() => alive && setHubLoading(false));
-    }, 350);
-    return () => {
-      alive = false;
-      clearTimeout(timer);
-    };
-  }, [term, comboOpen]);
-  useEffect(() => {
-    if (!comboOpen) return;
-    const outside = (event: PointerEvent) => {
-      if (combo.current && !combo.current.contains(event.target as Node)) setComboOpen(false);
-    };
-    document.addEventListener("pointerdown", outside, true);
-    return () => document.removeEventListener("pointerdown", outside, true);
-  }, [comboOpen]);
-
   /** A local image's EXPOSE, as port rows — host port the same unless taken. */
   const prefillPorts = async (reference: string) => {
     try {
@@ -140,21 +89,6 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
       // No EXPOSE to read: the rows stay as they are.
     }
   };
-  const pickLocal = (reference: string) => {
-    setImage(reference);
-    setTags(null);
-    setComboOpen(false);
-    void prefillPorts(reference);
-  };
-  const pickHub = (repo: HubRepo) => {
-    setImage(`${repo.name}:latest`);
-    setComboOpen(false);
-    setTags(null);
-    containersHubTags(repo.name, 40)
-      .then(setTags)
-      .catch(() => setTags([]));
-  };
-
   // ---- ports another container already holds
   const usedPorts = useMemo(() => {
     const used = new Map<string, string>();
@@ -224,9 +158,12 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
   };
 
   const program = runtime.id === "podman" ? "podman" : runtime.id === "nerdctl" ? "nerdctl" : "docker";
+  // The flag the run itself passes for a context that is not the engine's own (`Target::global_args`):
+  // a Docker context, a Podman connection, a containerd namespace.
+  const contextFlag = runtime.id === "podman" ? "--connection" : runtime.id === "nerdctl" ? "--namespace" : "--context";
   const preview = useMemo(() => {
     const parts = [program];
-    if (context && runtime.id === "docker" && context !== runtime.currentContext) parts.push(`--context ${quote(context)}`);
+    if (context && context !== runtime.currentContext) parts.push(`${contextFlag} ${quote(context)}`);
     parts.push("run -d");
     if (spec.name) parts.push(`--name ${quote(spec.name)}`);
     if (spec.autoRemove) parts.push("--rm");
@@ -243,7 +180,7 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
     parts.push(spec.image || "<imagen>");
     if (spec.command) parts.push(spec.command);
     return parts.join(" ");
-  }, [program, context, runtime.id, runtime.currentContext, spec.name, spec.autoRemove, spec.restart, spec.pull, spec.publishAll, spec.ports, spec.volumes, spec.env, spec.network, spec.workdir, spec.memoryMb, spec.cpus, spec.image, spec.command]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [program, contextFlag, context, runtime.currentContext, spec.name, spec.autoRemove, spec.restart, spec.pull, spec.publishAll, spec.ports, spec.volumes, spec.env, spec.network, spec.workdir, spec.memoryMb, spec.cpus, spec.image, spec.command]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async () => {
     if (!spec.image || running) return;
@@ -292,77 +229,7 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
       >
         <div className="grid grid-cols-[1fr_200px] gap-3">
           <Field label={t("containers.m.run.image")}>
-            <div ref={combo} className="relative">
-              <div className="flex gap-1">
-                <input
-                  autoFocus
-                  value={image}
-                  onChange={(e) => {
-                    setImage(e.target.value);
-                    setTags(null);
-                    setComboOpen(true);
-                  }}
-                  onFocus={() => setComboOpen(true)}
-                  onKeyDown={(e) => e.key === "Escape" && comboOpen && (e.stopPropagation(), setComboOpen(false))}
-                  placeholder={t("containers.m.run.imagePlaceholder")}
-                  spellCheck={false}
-                  className={mono}
-                />
-                {tags && tags.length > 0 && (
-                  <div className="w-[130px] shrink-0">
-                    <Select
-                      size="sm"
-                      value={image.includes(":") ? image.slice(image.lastIndexOf(":") + 1) : "latest"}
-                      onChange={(tag) => setImage(`${imageName(image)}:${tag}`)}
-                      options={tags.map((tag) => ({ value: tag.name, label: tag.name }))}
-                      ariaLabel={t("containers.m.run.tag")}
-                    />
-                  </div>
-                )}
-              </div>
-              {comboOpen && (
-                <div className={`${popoverClass} absolute left-0 right-0 top-full z-10 mt-1 max-h-[320px] overflow-y-auto`}>
-                  <div className="px-2 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">{t("containers.m.run.localImages")}</div>
-                  {localMatches.length ? (
-                    localMatches.map((reference) => (
-                      <button key={reference} onClick={() => pickLocal(reference)} className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[12.5px] hover:bg-[var(--cf-hover)]">
-                        <span className="min-w-0 flex-1 truncate font-mono">{reference}</span>
-                        <span className={chipClass("ok")}>{t("containers.m.run.downloaded")}</span>
-                      </button>
-                    ))
-                  ) : (
-                    <p className="px-2 py-1 text-[11.5px] text-[var(--cf-text-muted)]">{t("containers.m.run.noLocalMatch")}</p>
-                  )}
-                  <div className="flex items-center gap-1.5 px-2 pb-1 pt-2 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
-                    Docker Hub
-                    {hubLoading && <Loader2 size={10} className="animate-spin" />}
-                  </div>
-                  {hub.map((repo) => (
-                    <div key={repo.name} className="flex items-start gap-1 rounded-md px-2 py-1 hover:bg-[var(--cf-hover)]">
-                      <button onClick={() => pickHub(repo)} className="flex min-w-0 flex-1 flex-col text-left">
-                        <span className="flex items-center gap-1.5 text-[12.5px]">
-                          <span className="truncate font-mono font-medium">{repo.name}</span>
-                          {repo.official && <span className={chipClass("accent")}>{t("containers.m.run.official")}</span>}
-                          <span className="ml-auto flex shrink-0 items-center gap-0.5 text-[11px] text-[var(--cf-text-muted)]">
-                            <Star size={10} />
-                            {repo.stars.toLocaleString()}
-                          </span>
-                        </span>
-                        {repo.description && <span className="line-clamp-1 text-[11px] text-[var(--cf-text-muted)]">{repo.description}</span>}
-                      </button>
-                      <button onClick={() => void openExternalUrl(hubUrl(repo.name))} title={t("containers.m.run.viewOnHub")} className="mt-0.5 shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]">
-                        <ExternalLink size={11} />
-                      </button>
-                    </div>
-                  ))}
-                  {!hubLoading && hub.length === 0 && (
-                    <p className="px-2 py-1 text-[11.5px] text-[var(--cf-text-muted)]">
-                      {hubError ?? (term.length < 2 ? t("containers.m.run.typeToSearch") : onHub(term) ? t("containers.m.run.noHubMatch") : t("containers.m.run.notOnHub"))}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
+            <ImageCombo runtime={runtime} context={context} value={image} onChange={setImage} onPickLocal={(reference) => void prefillPorts(reference)} autoFocus />
           </Field>
           <Field label={t("containers.m.run.name")}>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("containers.m.run.optional")} spellCheck={false} className={mono} />

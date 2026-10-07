@@ -789,7 +789,7 @@ const COPIED_MARKS = [
   {
     source: "[Devicon](https://github.com/devicons/devicon)",
     licence: "MIT",
-    marks: "Azure DevOps; SQL Server, Azure SQL Database, SQLite, Cassandra, Spark, ClickHouse, Ignite, Firebird",
+    marks: "Azure DevOps; SQL Server, Azure SQL Database, SQLite, Cassandra, Spark, ClickHouse, Ignite, Firebird; Podman",
   },
   { source: "[theSVG](https://github.com/glincker/thesvg)", licence: "MIT", marks: "CockroachDB, TiDB, H2, Trino, Teradata" },
   { source: "[Simple Icons](https://github.com/simple-icons/simple-icons)", licence: "CC0-1.0", marks: "Oracle" },
@@ -1302,7 +1302,8 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, m
     w(
       "",
       "Single marks copied into the source from sets and artwork the app does not install, for the",
-      "AI engines and platforms it integrates with and the databases it connects to:",
+      "AI engines and platforms it integrates with, the databases it connects to and the container",
+      "runtimes it drives:",
       "",
       "| Source | Licence | Marks |",
       "|---|---|---|",
@@ -1318,6 +1319,20 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, m
     }
     w("");
   }
+
+  w(
+    "## Notification sounds",
+    "",
+    "Nine notification cues follow [TypeUI's notification catalogue](https://www.typeui.sh/ui-sounds/notifications)",
+    "by TypeUI / Bergside LLC. Six recordings ship in `public/sounds/typeui/`; three cues are",
+    "generated with Web Audio. Their provenance is recorded in `public/sounds/typeui/SOURCE.md`.",
+    "These resources are governed by the [TypeUI EULA](https://www.typeui.sh/license), including",
+    "its account and subscription access conditions, rather than CodeFlow's own licence or the",
+    "MIT licence of TypeUI's public CLI. TypeUI and its licensors retain ownership of the resources.",
+    "Prisma, the tenth cue, is an original CodeFlow melody generated with Web Audio and covered by",
+    "CodeFlow's own licence.",
+    "",
+  );
 
   // -- npm -----------------------------------------------------------------
 

@@ -60,8 +60,15 @@ export interface ToggleOption extends OptionBase {
   kind: "toggle";
   default: boolean;
   /** Drawn with the rest of its group under this heading, instead of in the shared "Include" row —
-   *  NestJS's dependencies, a list of their own rather than extras of the template. */
+   *  NestJS's dependencies, Quarkus's extensions: a list of their own rather than extras of the
+   *  template, picked the way Spring's starters are (chips and «+ Add», see `DependencyPicker`). */
   group?: TranslationKey;
+  /** In a group: the heading it is listed under in the picker's menu. */
+  section?: TranslationKey;
+  /** In a group: one line on what it adds, under its name in the menu. */
+  descriptionKey?: TranslationKey;
+  /** In a group: offered one click away under the chips while not picked. */
+  popular?: boolean;
 }
 
 export interface TextOption extends OptionBase {
@@ -353,16 +360,20 @@ const NEST_PLATFORM: ChoiceOption = {
 };
 
 /**
- * The integrations NestJS's own documentation walks through (Techniques and Security), as checkboxes
- * under "Dependencies". Only ones that work as installed — no database, whose driver is a decision of
- * its own. Where Express and Fastify need different packages (Helmet, compression, Swagger's static
- * files), the platform picked decides. `core` marks the ones released with `@nestjs/core` itself,
- * which are pinned to the generated project's major so npm does not refuse the peer range.
+ * The integrations NestJS's own documentation walks through (Techniques and Security), picked under
+ * "Dependencies" the way Spring's starters are. Only ones that work as installed — no database, whose
+ * driver is a decision of its own. Where Express and Fastify need different packages (Helmet,
+ * compression, Swagger's static files), the platform picked decides. `core` marks the ones released
+ * with `@nestjs/core` itself, which are pinned to the generated project's major so npm does not
+ * refuse the peer range.
  */
 interface NestDependency {
   id: string;
   label?: string;
   labelKey?: TranslationKey;
+  section: TranslationKey;
+  descriptionKey: TranslationKey;
+  popular?: boolean;
   packages: (fastify: boolean) => string[];
   /** TypeScript only. */
   types?: (fastify: boolean) => string[];
@@ -370,35 +381,102 @@ interface NestDependency {
 }
 
 const NEST_DEPENDENCIES: NestDependency[] = [
-  { id: "nestConfig", labelKey: "scaffold.nest.config", packages: () => ["@nestjs/config"] },
-  { id: "nestValidation", labelKey: "scaffold.nest.validation", packages: () => ["class-validator", "class-transformer"] },
+  {
+    id: "nestConfig",
+    labelKey: "scaffold.nest.config",
+    section: "scaffold.depGroup.core",
+    descriptionKey: "scaffold.nest.d.config",
+    popular: true,
+    packages: () => ["@nestjs/config"],
+  },
+  {
+    id: "nestValidation",
+    labelKey: "scaffold.nest.validation",
+    section: "scaffold.depGroup.core",
+    descriptionKey: "scaffold.nest.d.validation",
+    popular: true,
+    packages: () => ["class-validator", "class-transformer"],
+  },
   {
     id: "nestSwagger",
     label: "Swagger (OpenAPI)",
+    section: "scaffold.depGroup.web",
+    descriptionKey: "scaffold.nest.d.swagger",
+    popular: true,
     packages: (fastify) => (fastify ? ["@nestjs/swagger", "@fastify/static"] : ["@nestjs/swagger"]),
   },
   {
     id: "nestJwt",
     label: "JWT + Passport",
+    section: "scaffold.depGroup.security",
+    descriptionKey: "scaffold.nest.d.jwt",
+    popular: true,
     packages: () => ["@nestjs/jwt", "@nestjs/passport", "passport", "passport-jwt"],
     types: () => ["@types/passport-jwt"],
   },
-  { id: "nestThrottler", labelKey: "scaffold.nest.throttler", packages: () => ["@nestjs/throttler"] },
-  { id: "nestSchedule", labelKey: "scaffold.nest.schedule", packages: () => ["@nestjs/schedule"] },
-  { id: "nestCache", labelKey: "scaffold.nest.cache", packages: () => ["@nestjs/cache-manager", "cache-manager"] },
-  { id: "nestEvents", labelKey: "scaffold.nest.events", packages: () => ["@nestjs/event-emitter"] },
-  { id: "nestHttp", labelKey: "scaffold.nest.http", packages: () => ["@nestjs/axios", "axios"] },
-  { id: "nestHealth", label: "Health checks (Terminus)", packages: () => ["@nestjs/terminus"] },
-  { id: "nestHelmet", label: "Helmet", packages: (fastify) => [fastify ? "@fastify/helmet" : "helmet"] },
+  {
+    id: "nestThrottler",
+    labelKey: "scaffold.nest.throttler",
+    section: "scaffold.depGroup.security",
+    descriptionKey: "scaffold.nest.d.throttler",
+    packages: () => ["@nestjs/throttler"],
+  },
+  {
+    id: "nestSchedule",
+    labelKey: "scaffold.nest.schedule",
+    section: "scaffold.depGroup.ops",
+    descriptionKey: "scaffold.nest.d.schedule",
+    packages: () => ["@nestjs/schedule"],
+  },
+  {
+    id: "nestCache",
+    labelKey: "scaffold.nest.cache",
+    section: "scaffold.depGroup.ops",
+    descriptionKey: "scaffold.nest.d.cache",
+    packages: () => ["@nestjs/cache-manager", "cache-manager"],
+  },
+  {
+    id: "nestEvents",
+    labelKey: "scaffold.nest.events",
+    section: "scaffold.depGroup.core",
+    descriptionKey: "scaffold.nest.d.events",
+    packages: () => ["@nestjs/event-emitter"],
+  },
+  {
+    id: "nestHttp",
+    labelKey: "scaffold.nest.http",
+    section: "scaffold.depGroup.web",
+    descriptionKey: "scaffold.nest.d.http",
+    packages: () => ["@nestjs/axios", "axios"],
+  },
+  {
+    id: "nestHealth",
+    label: "Health checks (Terminus)",
+    section: "scaffold.depGroup.ops",
+    descriptionKey: "scaffold.nest.d.health",
+    packages: () => ["@nestjs/terminus"],
+  },
+  {
+    id: "nestHelmet",
+    label: "Helmet",
+    section: "scaffold.depGroup.security",
+    descriptionKey: "scaffold.nest.d.helmet",
+    popular: true,
+    packages: (fastify) => [fastify ? "@fastify/helmet" : "helmet"],
+  },
   {
     id: "nestCompression",
     labelKey: "scaffold.nest.compression",
+    section: "scaffold.depGroup.web",
+    descriptionKey: "scaffold.nest.d.compression",
     packages: (fastify) => [fastify ? "@fastify/compress" : "compression"],
     types: (fastify) => (fastify ? [] : ["@types/compression"]),
   },
   {
     id: "nestWebsockets",
     label: "WebSockets (Socket.IO)",
+    section: "scaffold.depGroup.web",
+    descriptionKey: "scaffold.nest.d.websockets",
     packages: () => ["@nestjs/websockets", "@nestjs/platform-socket.io"],
     core: true,
   },
@@ -411,6 +489,9 @@ const NEST_DEPENDENCY_OPTIONS: ToggleOption[] = NEST_DEPENDENCIES.map((dependenc
   labelKey: dependency.labelKey,
   default: false,
   group: "scaffold.opt.dependencies",
+  section: dependency.section,
+  descriptionKey: dependency.descriptionKey,
+  popular: dependency.popular,
 }));
 
 /**
@@ -559,24 +640,31 @@ const RUBY_GEM_HOME =
 const RAILS_BIN = "load Gem.activate_bin_path('railties', 'rails', ARGV.shift)";
 
 /**
- * The extensions most projects start from, as checkboxes under "Extensions" — ids as code.quarkus.io
+ * The extensions most projects start from, picked under "Extensions" — ids as code.quarkus.io
  * takes them, present in every current stream (checked against 3.27, 3.33 and 3.40, 2026-10-01). With
  * none ticked the service adds REST and a `/hello` resource on its own, so REST is ticked by default
  * and the starter code is the same either way. There is no SQLite driver in the platform.
  */
-const QUARKUS_EXTENSIONS: { id: string; label: string; extension: string; default?: boolean }[] = [
-  { id: "qRest", label: "REST", extension: "io.quarkus:quarkus-rest", default: true },
-  { id: "qRestJackson", label: "REST Jackson", extension: "io.quarkus:quarkus-rest-jackson" },
-  { id: "qRestClient", label: "REST Client", extension: "io.quarkus:quarkus-rest-client-jackson" },
-  { id: "qPanache", label: "Hibernate ORM with Panache", extension: "io.quarkus:quarkus-hibernate-orm-panache" },
-  { id: "qPostgres", label: "JDBC PostgreSQL", extension: "io.quarkus:quarkus-jdbc-postgresql" },
-  { id: "qMysql", label: "JDBC MySQL", extension: "io.quarkus:quarkus-jdbc-mysql" },
-  { id: "qFlyway", label: "Flyway", extension: "io.quarkus:quarkus-flyway" },
-  { id: "qValidator", label: "Hibernate Validator", extension: "io.quarkus:quarkus-hibernate-validator" },
-  { id: "qOpenapi", label: "SmallRye OpenAPI", extension: "io.quarkus:quarkus-smallrye-openapi" },
-  { id: "qHealth", label: "SmallRye Health", extension: "io.quarkus:quarkus-smallrye-health" },
-  { id: "qScheduler", label: "Scheduler", extension: "io.quarkus:quarkus-scheduler" },
-  { id: "qOidc", label: "OIDC", extension: "io.quarkus:quarkus-oidc" },
+const QUARKUS_EXTENSIONS: {
+  id: string;
+  label: string;
+  extension: string;
+  section: TranslationKey;
+  default?: boolean;
+  popular?: boolean;
+}[] = [
+  { id: "qRest", label: "REST", extension: "io.quarkus:quarkus-rest", section: "scaffold.depGroup.web", default: true },
+  { id: "qRestJackson", label: "REST Jackson", extension: "io.quarkus:quarkus-rest-jackson", section: "scaffold.depGroup.web", popular: true },
+  { id: "qRestClient", label: "REST Client", extension: "io.quarkus:quarkus-rest-client-jackson", section: "scaffold.depGroup.web" },
+  { id: "qPanache", label: "Hibernate ORM with Panache", extension: "io.quarkus:quarkus-hibernate-orm-panache", section: "scaffold.depGroup.data", popular: true },
+  { id: "qPostgres", label: "JDBC PostgreSQL", extension: "io.quarkus:quarkus-jdbc-postgresql", section: "scaffold.depGroup.data", popular: true },
+  { id: "qMysql", label: "JDBC MySQL", extension: "io.quarkus:quarkus-jdbc-mysql", section: "scaffold.depGroup.data" },
+  { id: "qFlyway", label: "Flyway", extension: "io.quarkus:quarkus-flyway", section: "scaffold.depGroup.data" },
+  { id: "qValidator", label: "Hibernate Validator", extension: "io.quarkus:quarkus-hibernate-validator", section: "scaffold.depGroup.core", popular: true },
+  { id: "qOpenapi", label: "SmallRye OpenAPI", extension: "io.quarkus:quarkus-smallrye-openapi", section: "scaffold.depGroup.web", popular: true },
+  { id: "qHealth", label: "SmallRye Health", extension: "io.quarkus:quarkus-smallrye-health", section: "scaffold.depGroup.ops", popular: true },
+  { id: "qScheduler", label: "Scheduler", extension: "io.quarkus:quarkus-scheduler", section: "scaffold.depGroup.core" },
+  { id: "qOidc", label: "OIDC", extension: "io.quarkus:quarkus-oidc", section: "scaffold.depGroup.security" },
 ];
 
 /** Hono's starters `create-hono` can make without a question, and what each one runs with. Vercel's
@@ -1624,6 +1712,8 @@ export const TEMPLATES: Template[] = [
           label: extension.label,
           default: extension.default === true,
           group: "scaffold.opt.extensions",
+          section: extension.section,
+          popular: extension.popular,
         }),
       ),
     ],

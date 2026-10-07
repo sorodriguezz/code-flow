@@ -1569,8 +1569,9 @@ pub fn context_window_for(model: &str) -> Option<i64> {
     const WINDOWS: &[(&str, i64)] = &[
         // Anthropic held 200k through the 4.5 generation (Opus 4.5 and 4.1, Sonnet 4.5, Haiku 4.5
         // all stay there), and moved to 1M with Opus 4.6 and Sonnet 4.6: every family below is 1M
-        // in Anthropic's own model table, the 5.x lines and Fable included. Each is a prefix, so
-        // `claude-opus-5` also answers for `claude-opus-5-5` and its dated ids.
+        // in Anthropic's own model table, the 5.x lines and Fable included — Haiku joined with 5.5
+        // (2026-10-07), so its row starts at 5 and Haiku 4.5 keeps the 200k default. Each is a
+        // prefix, so `claude-opus-5` also answers for `claude-opus-5-5` and its dated ids.
         ("claude-", 200_000),
         ("claude-opus-4-6", 1_000_000),
         ("claude-opus-4-7", 1_000_000),
@@ -1578,6 +1579,7 @@ pub fn context_window_for(model: &str) -> Option<i64> {
         ("claude-opus-5", 1_000_000),
         ("claude-sonnet-4-6", 1_000_000),
         ("claude-sonnet-5", 1_000_000),
+        ("claude-haiku-5", 1_000_000),
         ("claude-fable-5", 1_000_000),
         ("claude-mythos-5", 1_000_000),
         // Gemini's 1M is the headline of the 1.5 line onwards; the flash tiers share it.
@@ -7396,6 +7398,7 @@ mod tests {
             "claude-sonnet-4-6",
             "claude-sonnet-5",
             "claude-sonnet-5-5",
+            "claude-haiku-5-5",
             "claude-fable-5",
             "claude-fable-5-1",
             "anthropic/claude-sonnet-4-6",

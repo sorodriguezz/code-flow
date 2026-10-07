@@ -6,13 +6,14 @@ import { Checkbox } from "../common/Checkbox";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
 import { fieldClass } from "../common/recipes";
+import { DependencyPicker } from "./DependencyPicker";
 import { Field } from "./Field";
 
 /**
  * A template's own choices, drawn by kind: two to four choices are a segmented control, more are a
- * select, the toggles share one row of checkboxes (they are extras, not decisions) — or a field of
- * their own when they name a group, like NestJS's dependencies — free text is a field, and a runtime
- * version is a select of that runtime's living lines.
+ * select, the toggles share one row of checkboxes (they are extras, not decisions) — or, when they
+ * name a group like NestJS's dependencies, a field of their own picked the way Spring's starters are
+ * — free text is a field, and a runtime version is a select of that runtime's living lines.
  */
 export function TemplateOptions({
   template,
@@ -120,11 +121,29 @@ export function TemplateOptions({
           <Checkboxes options={toggles} opts={opts} onChange={onChange} label={label} />
         </Field>
       )}
-      {[...groups].map(([group, options]) => (
-        <Field key={group} label={t(group)} align="start">
-          <Checkboxes options={options} opts={opts} onChange={onChange} label={label} />
-        </Field>
-      ))}
+      {[...groups].map(([group, options]) => {
+        const picked = (option: ToggleOption) => Boolean(opts[option.id] ?? option.default);
+        return (
+          <Field key={group} label={t(group)} align="start">
+            <DependencyPicker
+              items={options.map((option) => ({
+                id: option.id,
+                name: label(option),
+                description: option.descriptionKey ? t(option.descriptionKey) : undefined,
+                group: option.section ? t(option.section) : undefined,
+              }))}
+              selected={options.filter(picked).map((option) => option.id)}
+              onToggle={(id) => {
+                const option = options.find((candidate) => candidate.id === id);
+                if (option) onChange(id, !picked(option));
+              }}
+              popular={options.filter((option) => option.popular).map((option) => option.id)}
+              label={t(group)}
+              searchPlaceholder={t("scaffold.deps.search", { what: t(group).toLowerCase() })}
+            />
+          </Field>
+        );
+      })}
     </>
   );
 }

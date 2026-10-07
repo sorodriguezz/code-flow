@@ -191,11 +191,12 @@ loaded on demand. Each set's licence is the one its own `info.json` declares.
 | VSCode Icons | `@iconify-json/vscode-icons` | 1.2.69 (upstream 12.19.0) | MIT | [Roberto Huertas](https://github.com/vscode-icons/vscode-icons) | 1566 |
 
 Single marks copied into the source from sets and artwork the app does not install, for the
-AI engines and platforms it integrates with and the databases it connects to:
+AI engines and platforms it integrates with, the databases it connects to and the container
+runtimes it drives:
 
 | Source | Licence | Marks |
 |---|---|---|
-| [Devicon](https://github.com/devicons/devicon) | MIT | Azure DevOps; SQL Server, Azure SQL Database, SQLite, Cassandra, Spark, ClickHouse, Ignite, Firebird |
+| [Devicon](https://github.com/devicons/devicon) | MIT | Azure DevOps; SQL Server, Azure SQL Database, SQLite, Cassandra, Spark, ClickHouse, Ignite, Firebird; Podman |
 | [theSVG](https://github.com/glincker/thesvg) | MIT | CockroachDB, TiDB, H2, Trino, Teradata |
 | [Simple Icons](https://github.com/simple-icons/simple-icons) | CC0-1.0 | Oracle |
 | [Carbon](https://github.com/carbon-design-system/carbon/tree/main/packages/icons) (IBM) | Apache-2.0 | Db2 |
@@ -212,6 +213,17 @@ AI engines and platforms it integrates with and the databases it connects to:
 A licence on a logo set covers the drawings, not the brands: the marks remain their owners'
 trademarks, and CodeFlow uses them only to identify the tools and services they stand for.
 The interface's own icons are Lucide (`lucide-react`), listed with the npm packages below.
+
+## Notification sounds
+
+Nine notification cues follow [TypeUI's notification catalogue](https://www.typeui.sh/ui-sounds/notifications)
+by TypeUI / Bergside LLC. Six recordings ship in `public/sounds/typeui/`; three cues are
+generated with Web Audio. Their provenance is recorded in `public/sounds/typeui/SOURCE.md`.
+These resources are governed by the [TypeUI EULA](https://www.typeui.sh/license), including
+its account and subscription access conditions, rather than CodeFlow's own licence or the
+MIT licence of TypeUI's public CLI. TypeUI and its licensors retain ownership of the resources.
+Prisma, the tenth cue, is an original CodeFlow melody generated with Web Audio and covered by
+CodeFlow's own licence.
 
 ## npm packages
 

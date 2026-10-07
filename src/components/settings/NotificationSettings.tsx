@@ -7,8 +7,8 @@
  * in the app that was not behind the Settings window.
  *
  * Three questions, in the order somebody actually asks them: what does it sound like, does it reach
- * me when I am not looking at the app, and which of these do I care about at all. The first had one
- * answer until 2026-09-24; it has ten now, and a pane of its own.
+ * me when I am not looking at the app, and which of these do I care about at all. The sound
+ * catalogue has its own pane, with a preview for each cue.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -75,31 +75,19 @@ function Toggle({
   );
 }
 
-/** Seconds of score the glyph spans. Longer sounds (the bowl, the doorbell's tail) run off its right
- *  edge, which is the truth about them: they go on after the others have stopped. */
-const SCORE_SPAN_S = 1.6;
 const SCORE_W = 56;
 const SCORE_H = 22;
 const SCORE_PAD = 4;
 
-/**
- * A sound's score as a small piano roll: time across, pitch up, one mark per note — drawn from the
- * same array that plays it (`NOTIFICATION_SOUNDS`), so what is drawn is what is heard.
- *
- * Pitch is scaled to each sound's own range rather than to one shared axis: the point is the shape —
- * two notes falling, five rising, one long drone — and on a shared axis the glass and the bowl
- * would both be flat lines at opposite edges. While the sound plays, a playhead crosses it.
- */
+/** Scores for generated tones, actual waveforms for recordings. Both span the full cue. */
 function ScoreGlyph({ sound, playing }: { sound: NotificationSoundDef; playing: number | null }) {
-  const pitches = sound.score.flatMap((note) => (note.to ? [note.hz, note.to] : [note.hz])).map(Math.log2);
-  const high = Math.max(...pitches);
-  const low = Math.min(...pitches);
-  // Centred, and never more than an octave to the full height — so a sound with one pitch sits in
-  // the middle rather than on an edge, and two notes a third apart do not fill the whole glyph.
+  const pitches = sound.score.map((note) => Math.log2(note.hz));
+  const high = pitches.length ? Math.max(...pitches) : 0;
+  const low = pitches.length ? Math.min(...pitches) : 0;
   const middle = (high + low) / 2;
   const span = Math.max(high - low, 1);
   const y = (hz: number) => SCORE_H / 2 - ((Math.log2(hz) - middle) / span) * (SCORE_H - SCORE_PAD * 2);
-  const x = (seconds: number) => SCORE_PAD + Math.min(seconds / SCORE_SPAN_S, 1) * (SCORE_W - SCORE_PAD * 2);
+  const x = (seconds: number) => SCORE_PAD + (seconds / sound.length) * (SCORE_W - SCORE_PAD * 2);
 
   return (
     <span
@@ -108,46 +96,26 @@ function ScoreGlyph({ sound, playing }: { sound: NotificationSoundDef; playing: 
       style={{ width: SCORE_W, height: SCORE_H }}
     >
       <svg viewBox={`0 0 ${SCORE_W} ${SCORE_H}`} width={SCORE_W} height={SCORE_H} className="absolute inset-0">
-        {sound.score.map((note, index) =>
-          note.to ? (
-            // A glide: a stroke from where the pitch starts to where it ends.
-            <line
-              key={index}
-              x1={x(note.at)}
-              y1={y(note.hz)}
-              x2={x(note.at + note.dur)}
-              y2={y(note.to)}
-              stroke="currentColor"
-              strokeWidth={2}
-              strokeLinecap="round"
-            />
-          ) : (
-            // A note, drawn for the part of it that is heard — the first two thirds of its tail.
-            <rect
-              key={index}
-              x={x(note.at)}
-              y={y(note.hz) - 1}
-              width={Math.max(3, x(note.at + note.dur * 0.65) - x(note.at))}
-              height={2}
-              rx={1}
-              fill="currentColor"
-            />
-          ),
-        )}
+        {sound.waveform ? sound.waveform.map((amplitude, index) => {
+          const height = Math.max(2, amplitude * (SCORE_H - SCORE_PAD * 2));
+          return (
+            <rect key={index} x={SCORE_PAD + index * 2} y={(SCORE_H - height) / 2}
+              width={1.2} height={height} rx={0.6} fill="currentColor" />
+          );
+        }) : sound.score.map((note, index) => (
+          <rect key={index} x={x(note.at)} y={y(note.hz) - 1}
+            width={Math.max(3, x(note.at + note.dur * 0.65) - x(note.at))}
+            height={2} rx={1} fill="currentColor" />
+        ))}
       </svg>
       {playing !== null && (
-        // Keyed by the play count, so pressing the same sound again restarts the sweep.
-        <span
-          key={playing}
-          className="cf-score-playhead"
-          style={{ animationDuration: `${Math.min(sound.length, SCORE_SPAN_S)}s` }}
-        />
+        <span key={playing} className="cf-score-playhead" style={{ animationDuration: `${sound.length}s` }} />
       )}
     </span>
   );
 }
 
-/** What it sounds like: whether it sounds at all, how loud, and which of the twelve. */
+/** What it sounds like: whether it sounds at all, how loud, and which cue. */
 function SoundPane() {
   const t = useT();
   const enabled = usePreferencesStore((s) => s.notificationSoundEnabled);
@@ -171,7 +139,7 @@ function SoundPane() {
     previewNotificationSound(id, level);
     setPlaying((previous) => ({ id, run: (previous?.run ?? 0) + 1 }));
     window.clearTimeout(stopTimer.current);
-    stopTimer.current = window.setTimeout(() => setPlaying(null), Math.min(soundById(id).length, SCORE_SPAN_S) * 1000 + 120);
+    stopTimer.current = window.setTimeout(() => setPlaying(null), soundById(id).length * 1000 + 120);
   };
 
   const commitVolume = () => {
@@ -219,8 +187,7 @@ function SoundPane() {
       </div>
 
       <PaneBlock title={t("notifications.toneHeading")}>
-        {/* Two columns once the pane is wide enough for a name and its line side by side — twelve sounds
-            make six full rows. */}
+        {/* Two columns once the pane is wide enough for each name and its preview. */}
         <div className="@container">
           <div
             role="radiogroup"

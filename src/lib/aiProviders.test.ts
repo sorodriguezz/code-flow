@@ -18,6 +18,11 @@ describe("modelDisplayLabel", () => {
     expect(modelDisplayLabel("claude", "claude-sonnet-5", t)).toBe("Sonnet 5");
   });
 
+  it("tells Haiku 5.5 from Haiku 4.5", () => {
+    expect(modelDisplayLabel("claude", "claude-haiku-5-5", t)).toBe("Haiku 5.5");
+    expect(modelDisplayLabel("claude", "claude-haiku-4-5-20251001", t)).toBe("Haiku 4.5");
+  });
+
   it("tells Fable 5.1 from Fable 5, dated ids included", () => {
     expect(modelDisplayLabel("claude", "claude-fable-5-1", t)).toBe("Fable 5.1");
     expect(modelDisplayLabel("claude", "claude-fable-5-1-20260901", t)).toBe("Fable 5.1");

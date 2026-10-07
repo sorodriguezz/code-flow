@@ -549,7 +549,7 @@ function appMeta(refId: string): {
     case "chat":
       return { labelKey: "tabbar.chat", icon: MessagesSquare };
     case "flows":
-      return { labelKey: "tabbar.flows", icon: Waypoints, stage: "beta", stageHintKey: "flows.betaHint" };
+      return { labelKey: "tabbar.flows", icon: Waypoints };
     default:
       return { labelKey: "windows.unknownApp", icon: Layers };
   }

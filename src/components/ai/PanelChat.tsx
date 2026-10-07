@@ -69,6 +69,11 @@ const MAX_COMPOSER_HEIGHT = 180;
  *   `chatQueueStore`). Not the repository wait above: that one is a sent turn waiting for a lease,
  *   this is a message not sent yet.
  */
+/** The bubble the answer in flight is drawn into — module-level, because `ChatMessageBubble` is
+ *  memoised on its props and a fresh object per render would defeat it on the one component that
+ *  re-renders with every chunk. */
+const PENDING_SHELL = { role: "assistant" as const, content: "" };
+
 export function PanelChat({
   tabKey,
   projectId,
@@ -338,7 +343,6 @@ export function PanelChat({
 
   const repoName = project?.name ?? "";
   const lastUser = session.messages.map((m) => m.role).lastIndexOf("user");
-  const [logExpanded, setLogExpanded] = useState(false);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -451,14 +455,12 @@ export function PanelChat({
                 runId={session.runId}
                 running
                 startedAt={session.runStartedAt}
+                answering={!!session.streamText}
                 showStop={false}
                 onRetry={() => useChatStore.getState().retryTurn(conversationId)}
-                expanded={logExpanded}
-                onToggle={() => setLogExpanded((v) => !v)}
-              />
-              {session.streamText && (
-                <ChatMessageBubble message={{ role: "assistant", content: "" }} streamText={session.streamText} />
-              )}
+              >
+                {session.streamText && <ChatMessageBubble message={PENDING_SHELL} streamText={session.streamText} />}
+              </AiRunLog>
             </>
           )}
         </div>

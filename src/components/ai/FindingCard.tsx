@@ -290,7 +290,6 @@ export function ResolveWithAiButton({
   noteKey?: string;
 }) {
   const t = useT();
-  const [logExpanded, setLogExpanded] = useState(false);
   /** Extra instructions for the fix, kept whether the field is open or shut — collapsing it is
    * "I'm done typing", not "throw that away", and a re-run usually wants the same note. Kept in the
    * assistant's drafts when the card has a key, so switching tab does not throw it away either. */
@@ -364,8 +363,6 @@ export function ResolveWithAiButton({
           runId={runId}
           running
           startedAt={runStartedAt}
-          expanded={logExpanded}
-          onToggle={() => setLogExpanded((v) => !v)}
         />
       )}
       {resolution && (

@@ -3,7 +3,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowUpRight, MessagesSquare, X } from "lucide-react";
 import { ChatComposer } from "./ChatComposer";
 import { ChatMessageBubble } from "./ChatMessageBubble";
-import { ThinkingBlock } from "./ThinkingBlock";
 import { AiRunLog } from "../ai/AiRunLog";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { providerCapabilities } from "../../lib/aiProviders";
@@ -97,7 +96,6 @@ export function QuickAskWindow() {
   );
 
   const [draft, setDraft] = useState("");
-  const [logExpanded, setLogExpanded] = useState(false);
 
   const fileGeneration = usePreferencesStore((s) => s.chatFileGenerationEnabled);
   const routedProvider = useTaskProvider("chat");
@@ -302,26 +300,25 @@ export function QuickAskWindow() {
 
         {session.sending && (
           <div className="space-y-2">
-            {pendingThinking && <ThinkingBlock text={pendingThinking} live />}
-            {pendingText && (
-              <ChatMessageBubble message={PENDING_SHELL} variant="reading" streamText={pendingText} />
-            )}
-            {/* The same honest strip the full transcript shows, and here for the sharper version of
+            {/* The same run card the full transcript shows, and here for the sharper version of
                 the same reason: five of the six engines produce no text at all until the turn is
                 over, and in a window this small an empty rectangle for forty seconds reads as a
-                window that failed to open. */}
+                window that failed to open. The answer streams inside it, beside the mark. */}
             <AiRunLog
+              density="reading"
               runId={session.runId ?? undefined}
               running
               startedAt={session.runStartedAt}
+              thinking={pendingThinking}
+              answering={!!pendingText}
               // The composer under it turns into Stop, and in a window this narrow a second one on
               // the card is not a redundancy the eye can ignore — it is half the row.
               showStop={false}
-              expanded={logExpanded}
-              onToggle={() => setLogExpanded((v) => !v)}
-            />
+            >
+              {pendingText && <ChatMessageBubble message={PENDING_SHELL} variant="reading" streamText={pendingText} />}
+            </AiRunLog>
             {!streamsTokens && !pendingText && (
-              <p className="text-[10.5px] text-[var(--cf-text-muted)]">{t("chat.noStreamingNotice")}</p>
+              <p className="pl-11 text-[10.5px] text-[var(--cf-text-muted)]">{t("chat.noStreamingNotice")}</p>
             )}
           </div>
         )}

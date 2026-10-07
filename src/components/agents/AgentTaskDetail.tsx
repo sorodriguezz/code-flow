@@ -55,7 +55,6 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
   const [continuing, setContinuing] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [logExpanded, setLogExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const messages = live?.messages ?? [];
@@ -255,8 +254,6 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
               runId={live.runId}
               running
               startedAt={live.runStartedAt}
-              expanded={logExpanded}
-              onToggle={() => setLogExpanded((v) => !v)}
             />
           )}
         </div>

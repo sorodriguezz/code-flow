@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_NOTIFICATION_SOUND,
   DEFAULT_NOTIFICATION_VOLUME,
@@ -11,75 +11,45 @@ import {
 import { translations } from "./i18n/translations";
 import { es } from "./i18n/translations.es";
 
-/**
- * The notification sounds, checked without a speaker: every one is a graph of oscillators scheduled
- * on a context, so what can go wrong is visible in the graph — a source started and never stopped
- * (it stays on the context for the life of the app, and this runs every time work finishes), a
- * note scheduled in the past (its first milliseconds are clipped), an exponential ramp to zero (the
- * real API throws), and the default quietly becoming a different sound.
- *
- * How they *sound*, and that they are level with each other, was measured by rendering each through
- * an `OfflineAudioContext` — which needs a browser, so it is not repeated here.
- */
-
 class FakeParam {
   value = 0;
-  setValueAtTime(value: number) {
-    this.value = value;
-    return this;
-  }
-  linearRampToValueAtTime(value: number) {
-    this.value = value;
-    return this;
-  }
+  setValueAtTime(value: number) { this.value = value; return this; }
+  linearRampToValueAtTime(value: number) { this.value = value; return this; }
   exponentialRampToValueAtTime(value: number) {
-    // What the real AudioParam does, and the reason every envelope here stops at 0.0001.
-    if (value <= 0) throw new RangeError("exponentialRampToValueAtTime needs a positive target");
+    if (value <= 0) throw new RangeError("Exponential ramps need positive targets");
     this.value = value;
     return this;
   }
-  cancelScheduledValues() {
-    return this;
-  }
+  cancelScheduledValues() { return this; }
 }
 
 class FakeNode {
   readonly outputs: unknown[] = [];
-  connect(target: unknown) {
-    this.outputs.push(target);
-    return target;
-  }
-  disconnect() {}
+  disconnected = false;
+  connect<T>(target: T): T { this.outputs.push(target); return target; }
+  disconnect() { this.disconnected = true; }
 }
 
 class FakeSource extends FakeNode {
   started: number | null = null;
   stopped: number | null = null;
-  start(at = 0) {
-    this.started = at;
-  }
-  stop(at = 0) {
-    this.stopped = at;
-  }
-}
-
-class FakeOscillator extends FakeSource {
-  type = "sine";
-  frequency = new FakeParam();
-  detune = new FakeParam();
+  start(at = 0) { this.started = at; }
+  stop(at = 0) { this.stopped = at; }
 }
 
 function fakeContext() {
   const sources: FakeSource[] = [];
-  const gains: { gain: FakeParam }[] = [];
+  const gains: (FakeNode & { gain: FakeParam })[] = [];
   const ctx = {
     currentTime: 3,
-    sampleRate: 48000,
+    state: "running",
     destination: new FakeNode(),
+    resume: vi.fn(async () => {}),
+    decodeAudioData: vi.fn(async () => ({ duration: 1 }) as AudioBuffer),
     createOscillator: () => {
-      const osc = new FakeOscillator();
-      sources.push(osc);
-      return osc;
+      const source = Object.assign(new FakeSource(), { type: "sine", frequency: new FakeParam() });
+      sources.push(source);
+      return source;
     },
     createBufferSource: () => {
       const source = Object.assign(new FakeSource(), { buffer: null as unknown });
@@ -91,24 +61,31 @@ function fakeContext() {
       gains.push(node);
       return node;
     },
-    createBiquadFilter: () => Object.assign(new FakeNode(), { type: "lowpass", frequency: new FakeParam(), Q: new FakeParam() }),
-    createBuffer: (_channels: number, length: number) => {
-      const data = new Float32Array(length);
-      return { getChannelData: () => data };
-    },
+    createDynamicsCompressor: () => Object.assign(new FakeNode(), {
+      threshold: new FakeParam(), knee: new FakeParam(), ratio: new FakeParam(),
+      attack: new FakeParam(), release: new FakeParam(),
+    }),
   };
-  return { ctx: ctx as unknown as BaseAudioContext, sources, gains };
+  return { ctx: ctx as unknown as AudioContext, sources, gains, decode: ctx.decodeAudioData, resume: ctx.resume };
 }
 
-describe("the notification sounds", () => {
-  it("are twelve, each with its own id", () => {
-    const ids = NOTIFICATION_SOUNDS.map((sound) => sound.id);
-    expect(ids).toHaveLength(12);
-    expect(new Set(ids).size).toBe(ids.length);
-    expect(ids[0]).toBe(DEFAULT_NOTIFICATION_SOUND);
+const audioResponse = () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) });
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+beforeEach(() => { vi.stubGlobal("fetch", vi.fn(async () => audioResponse())); });
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+describe("the notification catalogue", () => {
+  it("offers all nine TypeUI cues and the original Prisma melody", () => {
+    expect(NOTIFICATION_SOUNDS.map((sound) => sound.id)).toEqual([
+      "double-ping", "ping", "mellow-chime", "soft-bell", "activity-beacon",
+      "signal-arrival", "short-beep", "high-chime", "popup", "prism",
+    ]);
+    expect(DEFAULT_NOTIFICATION_SOUND).toBe("double-ping");
+    expect(NOTIFICATION_SOUNDS.filter((sound) => sound.file)).toHaveLength(6);
   });
 
-  it("have a name and a line in both languages", () => {
+  it("has a name and description in both languages", () => {
     for (const sound of NOTIFICATION_SOUNDS) {
       for (const key of [sound.labelKey, sound.hintKey]) {
         expect(translations.en[key], `${sound.id}: ${key} (en)`).toBeTruthy();
@@ -117,73 +94,127 @@ describe("the notification sounds", () => {
     }
   });
 
-  it("keep the default the sound the app always made", () => {
-    // Cadencia is not a new sound with an old name: someone who never opens the new pane must hear
-    // exactly what they heard before it existed.
-    const cadence = soundById("cadence");
-    expect(cadence.level).toBe(0.9);
-    const at = (seconds: number) =>
-      cadence.score.filter((note) => Math.abs(note.at - seconds) < 1e-9).map((note) => note.hz);
-    expect(at(0)).toEqual([220, 293.66, 329.63]);
-    expect(at(0.42)).toEqual([146.83, 220, 293.66, 369.99, 73.42]);
-    expect(cadence.score.filter((note) => note.peak === 0.055).map((note) => note.hz)).toEqual([1174.66, 1567.98, 2349.32]);
-    expect(volumeGain(DEFAULT_NOTIFICATION_VOLUME)).toBe(1);
-  });
-
-  it("are short — the longest is the bowl, and it is under four seconds", () => {
+  it("packages recordings locally and keeps previews tied to their duration", () => {
     for (const sound of NOTIFICATION_SOUNDS) {
-      expect(sound.length, sound.id).toBeGreaterThan(0.1);
-      expect(sound.length, sound.id).toBeLessThan(4);
-    }
-  });
-
-  it("stop every source they start, after starting it, and never schedule into the past", () => {
-    for (const sound of NOTIFICATION_SOUNDS) {
-      const { ctx, sources } = fakeContext();
-      renderNotificationSound(ctx, sound.id, DEFAULT_NOTIFICATION_VOLUME);
-      expect(sources.length, sound.id).toBeGreaterThan(0);
-      for (const source of sources) {
-        expect(source.started, sound.id).not.toBeNull();
-        expect(source.stopped, sound.id).not.toBeNull();
-        expect(source.started!, sound.id).toBeGreaterThanOrEqual(ctx.currentTime);
-        expect(source.stopped!, sound.id).toBeGreaterThan(source.started!);
-        // Nothing outlives the sound by more than the 20ms each stop is padded with, plus the lead-in.
-        expect(source.stopped!, sound.id).toBeLessThanOrEqual(ctx.currentTime + sound.length + 0.05);
+      expect(sound.length).toBeGreaterThan(0.1);
+      expect(sound.length).toBeLessThan(4);
+      if (sound.file) {
+        expect(sound.file).toMatch(/^\/sounds\/typeui\/.*\.mp3$/);
+        expect(sound.waveform).toHaveLength(24);
+        expect(sound.waveform!.every((value) => value >= 0 && value <= 1)).toBe(true);
+      } else {
+        expect(sound.score.length).toBeGreaterThan(0);
+        for (const note of sound.score) expect(note.at + note.dur + 0.03).toBeLessThanOrEqual(sound.length + 1e-9);
       }
     }
   });
 
-  it("scale the whole sound by its level and the volume, on one gain", () => {
-    for (const volume of [0, 35, 70, 100]) {
-      const { ctx, gains } = fakeContext();
-      const master = renderNotificationSound(ctx, "marimba", volume);
-      expect(gains[0]).toBe(master);
-      expect(master.gain.value).toBeCloseTo(soundById("marimba").level * volumeGain(volume), 10);
+  it("stops every source it starts, after starting, without scheduling into the past", async () => {
+    for (const sound of NOTIFICATION_SOUNDS) {
+      const { ctx, sources } = fakeContext();
+      await renderNotificationSound(ctx, sound.id, DEFAULT_NOTIFICATION_VOLUME);
+      expect(sources.length, sound.id).toBeGreaterThan(0);
+      for (const source of sources) {
+        expect(source.started).not.toBeNull();
+        expect(source.stopped).not.toBeNull();
+        expect(source.started!).toBeGreaterThanOrEqual(ctx.currentTime);
+        expect(source.stopped!).toBeGreaterThan(source.started!);
+      }
     }
   });
 
-  it("fall back to the default for an id this release does not know", () => {
-    expect(soundById("theremin").id).toBe(DEFAULT_NOTIFICATION_SOUND);
-    expect(soundById(null).id).toBe(DEFAULT_NOTIFICATION_SOUND);
-    expect(isNotificationSoundId("bowl")).toBe(true);
-    expect(isNotificationSoundId("theremin")).toBe(false);
+  it("scales the final output with the existing volume curve", async () => {
+    for (const id of ["ping", "mellow-chime"]) {
+      for (const volume of [0, 35, 70, 100]) {
+        const { ctx } = fakeContext();
+        const master = await renderNotificationSound(ctx, id, volume);
+        expect(master.gain.value).toBeCloseTo(volumeGain(volume), 10);
+      }
+    }
+  });
+
+  it("falls back for retired, absent or unknown saved selections", () => {
+    for (const id of ["cadence", "chime", "marimba", "harp", "glass", "bowl", "doorbell", "drop", "digital", "air", "levelup", "victory", "theremin", null]) {
+      expect(soundById(id).id).toBe(DEFAULT_NOTIFICATION_SOUND);
+      expect(isNotificationSoundId(id)).toBe(false);
+    }
+    expect(isNotificationSoundId("soft-bell")).toBe(true);
+  });
+});
+
+describe("recorded playback", () => {
+  it("shares fetching and decoding for simultaneous plays on one context", async () => {
+    const { ctx, decode, sources } = fakeContext();
+    await Promise.all([renderNotificationSound(ctx, "mellow-chime", 70), renderNotificationSound(ctx, "mellow-chime", 70)]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(sources).toHaveLength(2);
+  });
+
+  it("schedules against the current time after decoding finishes", async () => {
+    const { ctx, decode, sources } = fakeContext();
+    decode.mockImplementationOnce(async () => {
+      Object.assign(ctx, { currentTime: 6 });
+      return { duration: 1 } as AudioBuffer;
+    });
+    await renderNotificationSound(ctx, "mellow-chime", 70);
+    expect(sources[0].started).toBeCloseTo(6.02);
+    expect(sources[0].stopped).toBeCloseTo(7.02);
+  });
+
+  it("retries a failed load without poisoning the cache", async () => {
+    const { ctx, decode } = fakeContext();
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: false, status: 404 } as Response);
+    await expect(renderNotificationSound(ctx, "mellow-chime", 70)).rejects.toThrow("404");
+    await renderNotificationSound(ctx, "mellow-chime", 70);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(decode).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards a slow preview when a newer sound is selected", async () => {
+    vi.resetModules();
+    const { previewNotificationSound } = await import("./notificationSound");
+    const { ctx, gains } = fakeContext();
+    vi.stubGlobal("window", { AudioContext: class { constructor() { return ctx; } } });
+    let finish!: (response: Response) => void;
+    vi.mocked(fetch).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    previewNotificationSound("mellow-chime", 70);
+    await flush();
+    previewNotificationSound("ping", 70);
+    await flush();
+    finish(audioResponse() as Response);
+    await flush();
+    const outputs = gains.filter((gain) => gain.outputs.some((node) =>
+      node instanceof FakeNode && node.outputs.includes(ctx.destination)));
+    expect(outputs).toHaveLength(2);
+    expect(outputs[0].disconnected).toBe(false);
+    expect(outputs[1].disconnected).toBe(true);
+  });
+
+  it("resumes suspended contexts and throttles bursts of notifications", async () => {
+    vi.resetModules();
+    const { playNotificationSound } = await import("./notificationSound");
+    const { ctx, sources, resume } = fakeContext();
+    Object.assign(ctx, { state: "suspended" });
+    vi.stubGlobal("window", { AudioContext: class { constructor() { return ctx; } } });
+    playNotificationSound("ping", 70);
+    playNotificationSound("ping", 70);
+    await flush();
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(sources).toHaveLength(2);
   });
 });
 
 describe("volumeGain", () => {
-  it("is silence at 0, the tuned level at the default, and about 6 dB over it at 100", () => {
+  it("is silent at 0, tuned at 70, and about 6 dB louder at 100", () => {
     expect(volumeGain(0)).toBe(0);
     expect(volumeGain(DEFAULT_NOTIFICATION_VOLUME)).toBe(1);
     expect(20 * Math.log10(volumeGain(100))).toBeCloseTo(6.2, 1);
   });
-
-  it("only ever gets louder as the slider goes up", () => {
-    for (let volume = 1; volume <= 100; volume++) {
-      expect(volumeGain(volume)).toBeGreaterThan(volumeGain(volume - 1));
-    }
+  it("increases monotonically", () => {
+    for (let volume = 1; volume <= 100; volume++) expect(volumeGain(volume)).toBeGreaterThan(volumeGain(volume - 1));
   });
-
-  it("clamps what it cannot trust", () => {
+  it("clamps untrusted values", () => {
     expect(volumeGain(250)).toBe(volumeGain(100));
     expect(volumeGain(-5)).toBe(0);
     expect(volumeGain(Number.NaN)).toBe(1);

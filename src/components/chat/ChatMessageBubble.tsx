@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, FileText, GitBranch, ImageIcon, Pencil, Puzzle, RefreshCw, Square, type LucideIcon } from "lucide-react";
 import { splitAttachmentNote } from "../../lib/attachmentNote";
@@ -8,7 +8,11 @@ import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import { useT } from "../../state/languageStore";
 import type { AiRunLine } from "../../state/aiRunStore";
 import { AiErrorBanner } from "../ai/AiErrorBanner";
-import { AiRunLog } from "../ai/AiRunLog";
+import { AiRunLog, RunFileChips } from "../ai/AiRunLog";
+import { AiSparkles } from "../common/AiGlyph";
+import { ThinkingOrb } from "../common/ThinkingOrb";
+import { thinkingFinishMs } from "../../lib/thinkingDesigns";
+import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
 import { LazyTrace } from "./LazyTrace";
 import { CostChip, formatResponseTime, parseStamp, useCopy, useLocale } from "./chatChrome";
 import { fenceLabelOf, highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
@@ -45,6 +49,9 @@ export interface ChatBubbleMessage {
   engineVersion?: string;
   /** What the engine printed while producing this answer. */
   trace?: AiRunLine[];
+  /** The model's reasoning behind this answer, when the engine streamed it. Folded with the trace
+   *  into the turn's "Thought for …" line, never shown as part of the answer. */
+  thinking?: string;
   /** A reopened turn whose trace was not read with the transcript: its disclosure fetches it by this
    *  id when opened. Ignored when `trace` is already here. */
   traceId?: string;
@@ -148,30 +155,26 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
 }) {
   const t = useT();
   const [copied, copy] = useCopy();
-  const [traceOpen, setTraceOpen] = useState(false);
   const reading = variant === "reading";
 
-  // The recorded process behind this answer. Rendered under every kind of assistant turn —
-  // including the failed and the stopped ones, where "what was it doing when it died?" is the
-  // whole question.
+  // The recorded process behind this answer — "Thought for 15 s · 5 steps", over the answer and
+  // beside the avatar, the way the run card it was a moment ago sat there. Drawn for every kind of
+  // assistant turn, the failed and the stopped ones included, where "what was it doing when it
+  // died?" is the whole question.
   const trace = message.trace;
-  const traceWrap = reading ? "pt-1.5" : "mr-auto max-w-[95%] pt-1";
+  const thinking = message.role === "assistant" ? message.thinking : undefined;
   const traceLog =
-    trace && trace.length > 0 ? (
-      <div className={traceWrap}>
-        <AiRunLog
-          lines={trace}
-          running={false}
-          label={t("ai.traceSteps", { n: trace.length })}
-          expanded={traceOpen}
-          onToggle={() => setTraceOpen((v) => !v)}
-        />
-      </div>
+    (trace && trace.length > 0) || thinking?.trim() ? (
+      <AiRunLog
+        lines={trace ?? []}
+        running={false}
+        durationMs={message.responseTimeMs}
+        thinking={thinking}
+        density={variant}
+      />
     ) : message.traceId ? (
       // Reopened: the trace stayed on disk, and is read the first time somebody opens it.
-      <div className={traceWrap}>
-        <LazyTrace traceId={message.traceId} />
-      </div>
+      <LazyTrace traceId={message.traceId} durationMs={message.responseTimeMs} density={variant} />
     ) : null;
 
   const streaming = streamText !== undefined;
@@ -236,10 +239,45 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   });
 
   const stampRow = <ChatStamp message={message} detail={stamp} />;
+  const isUser = message.role === "user";
+
+  // An answer still being written: the bare words and a caret. It is drawn inside the run card's
+  // column (`AiRunLog`'s children), beside the mark that is writing it, so it carries no avatar of
+  // its own; it re-renders as markdown once, when it is whole.
+  if (streaming) {
+    return (
+      <div
+        className={`min-w-0 select-text wrap-anywhere text-[var(--cf-text)] ${
+          reading ? "text-[15px] leading-[1.75]" : "text-[12px] leading-relaxed"
+        }`}
+      >
+        <span className="whitespace-pre-wrap">
+          {body}
+          <span aria-hidden="true" className="cf-caret" />
+        </span>
+      </div>
+    );
+  }
+
+  /**
+   * An assistant turn: the avatar in the gutter and everything the turn said in the column beside
+   * it — the two columns the run card used while it ran, so the answer lands where it was written.
+   * The column is nudged down when it opens on the answer itself, to sit the first line level with
+   * the avatar's middle; the "Thought for…" line is nudged the same way.
+   */
+  const assistantTurn = (content: ReactNode) => (
+    <div className={`group grid grid-cols-[auto_minmax(0,1fr)] ${reading ? "gap-x-3" : "gap-x-2.5"}`}>
+      <AssistantAvatar reading={reading} landedAt={message.createdAt} />
+      <div className={`min-w-0 space-y-1.5 ${reading ? "pt-[5px]" : "pt-[2px]"}`}>
+        {traceLog}
+        {content}
+      </div>
+    </div>
+  );
 
   if (parsedError) {
-    return (
-      <div className={reading ? "space-y-1" : "mr-auto max-w-[95%] space-y-1"}>
+    return assistantTurn(
+      <>
         {/* The provider is taken from the turn, not from the current routing: a conversation
             reopened after the route changed must still be told which engine actually failed, or
             the remedy names the wrong CLI's install command. */}
@@ -249,76 +287,143 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
           provider={message.provider ?? undefined}
           onPickModel={actions?.onPickModel}
         />
-        {traceLog}
         {stampRow}
-      </div>
+      </>,
     );
   }
 
   if (message.isCancelled) {
-    return (
-      <div className={reading ? "space-y-1" : "mr-auto max-w-[85%] space-y-1"}>
-        {/* `w-fit` only in the reading column, where the wrapper is the full 740px and a dashed box
-            stretched across all of it would read as an error banner rather than a footnote. The
-            panel keeps the box it has always drawn. */}
-        <div
-          className={`flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-1 text-[11px] text-[var(--cf-text-muted)] ${
-            reading ? "w-fit" : ""
-          }`}
-        >
+    return assistantTurn(
+      <>
+        {/* `w-fit`: a dashed box stretched across the column would read as an error banner rather
+            than a footnote. */}
+        <div className="flex w-fit items-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-1 text-[11px] text-[var(--cf-text-muted)]">
           <Square size={9} className="fill-current" />
           {t("ai.runStopped")}
         </div>
-        {traceLog}
         {stampRow}
+      </>,
+    );
+  }
+
+  // The user's own turn is the one bubble left: neutral rather than accent-washed, sized to its
+  // words, its tight corner on its own side. The reply has no bubble at all — a reply that fills
+  // the column is a document, and a tinted rectangle round a document is what makes a chat feel
+  // like a support widget instead of a page.
+  const userShell = reading
+    ? "ml-auto w-fit max-w-[85%] whitespace-pre-wrap rounded-[18px] rounded-br-md px-4 py-2.5 text-[14px] leading-[1.7]"
+    : "ml-auto w-fit max-w-[88%] whitespace-pre-wrap rounded-[14px] rounded-br-[5px] px-3 py-1.5 text-[12px] leading-relaxed";
+
+  /*
+    One row under the turn: what it cost, and what you can do about it.
+
+    The row takes the side its turn is on, and the stamp takes the *outer* edge of it: left of the
+    controls under an assistant's answer, right of them under a user's bubble. A transcript is read
+    as two columns, and metadata that always starts at the left margin detaches from the short
+    right-aligned bubble it belongs to and reads as if it were the reply's.
+
+    The stamp is the only part drawn at rest; the controls appear when the turn is hovered (or
+    focused, so the keyboard can reach what the mouse uncovers), on whichever side faces the middle
+    of the column, so they grow into empty space instead of pushing the stamp.
+  */
+  const controls = (
+    <div className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 hover:opacity-100">
+      <BubbleAction icon={copied ? Check : Copy} label={t("chat.copyMessage")} onClick={() => copy(copyText)} done={copied} />
+      {actions?.onRegenerate && (
+        <BubbleAction
+          icon={RefreshCw}
+          label={t("chat.regenerate")}
+          onClick={actions.onRegenerate}
+          cost={actions.replayTurns}
+          costTitle={t("chat.replayCost", { n: actions.replayTurns ?? 0 })}
+        />
+      )}
+      {actions?.onEdit && (
+        <BubbleAction
+          icon={Pencil}
+          label={t("chat.editMessage")}
+          onClick={actions.onEdit}
+          cost={actions.replayTurns}
+          costTitle={t("chat.replayCost", { n: actions.replayTurns ?? 0 })}
+        />
+      )}
+      {actions?.onBranch && (
+        <BubbleAction
+          icon={GitBranch}
+          label={t("chat.branchHere")}
+          onClick={actions.onBranch}
+          cost={actions.replayTurns}
+          costTitle={t("chat.replayCost", { n: actions.replayTurns ?? 0 })}
+        />
+      )}
+    </div>
+  );
+
+  // The panel's turns have no controls row; a copy button rides the corner on hover instead.
+  const panelCopy = !reading && (
+    <button
+      type="button"
+      onClick={() => copy(copyText)}
+      title={t("chat.copyMessage")}
+      className={`absolute -top-2 flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] opacity-0 shadow-sm group-hover:opacity-100 ${
+        isUser ? "-left-2" : "-right-2"
+      }`}
+    >
+      {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} className="text-[var(--cf-text-muted)]" />}
+    </button>
+  );
+
+  if (isUser) {
+    return (
+      <div className="group space-y-1">
+        <div
+          // Selectable as a bubble: a user's own turn renders as a bare string, and would otherwise
+          // be the one kind of message you couldn't quote back. `wrap-anywhere`: a pasted log or
+          // stack trace is mostly paths with no space to break at.
+          className={`relative min-w-0 select-text wrap-anywhere bg-[color-mix(in_oklab,var(--cf-text)_6%,var(--cf-surface))] text-[var(--cf-text)] shadow-[inset_0_0_0_1px_var(--cf-border)] ${userShell}`}
+        >
+          {message.skill && (
+            <span className="mb-1 flex items-center gap-1 font-mono text-[11px] text-[var(--cf-text-muted)]">
+              <Puzzle size={11} className="shrink-0" />
+              {message.skill}
+            </span>
+          )}
+          {sentFiles.length > 0 && (
+            <span className="mb-1 flex flex-wrap gap-1 whitespace-normal">
+              {sentFiles.map((file) => (
+                <span
+                  key={file.path}
+                  title={file.path}
+                  className="flex min-w-0 max-w-full items-center gap-1 rounded border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)]"
+                >
+                  {file.isImage ? <ImageIcon size={11} className="shrink-0" /> : <FileText size={11} className="shrink-0" />}
+                  <span className="truncate">{file.name}</span>
+                </span>
+              ))}
+            </span>
+          )}
+          {body}
+          {panelCopy}
+        </div>
+        {reading ? (
+          <div className="flex items-center justify-end gap-1.5 pt-0.5">
+            {controls}
+            {stampRow}
+          </div>
+        ) : (
+          stampRow
+        )}
       </div>
     );
   }
 
-  const isUser = message.role === "user";
-
-  // The two variants differ only in this class string, kept side by side so the difference is one thing
-  // to read rather than a branch to trace through the component.
-  const shell = reading
-    ? isUser
-      ? "ml-auto max-w-[85%] whitespace-pre-wrap rounded-2xl border border-[color-mix(in_oklab,var(--cf-accent)_26%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_11%,var(--cf-surface))] px-4 py-2.5 text-[14px] leading-[1.7] text-[var(--cf-text)]"
-      : "w-full text-[15px] leading-[1.75] text-[var(--cf-text)]"
-    : isUser
-      ? "ml-auto max-w-[85%] whitespace-pre-wrap rounded-lg border border-[color-mix(in_oklab,var(--cf-accent)_30%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_14%,var(--cf-surface))] px-2.5 py-1.5 text-[12px] leading-relaxed text-[var(--cf-text)]"
-      : "mr-auto max-w-[85%] rounded-lg bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] px-2.5 py-1.5 text-[12px] leading-relaxed text-[var(--cf-text)]";
-
-  return (
-    <div className="space-y-1">
+  return assistantTurn(
+    <>
       <div
-        // Selectable as a bubble rather than only through the markdown class inside it: a plain
-        // (non-markdown) message — a user's own turn, a cancelled run's text — renders as a bare
-        // string here and would otherwise be the one kind of message you couldn't quote back.
-        //
-        // `wrap-anywhere`: a pasted log or stack trace is mostly paths with no space to break at, and
-        // without it each one ran straight through the bubble's edge (and off the panel). Code blocks
-        // keep their own sideways scroll — `white-space: pre` never wraps.
-        className={`group relative min-w-0 select-text wrap-anywhere ${shell}`}
+        className={`relative min-w-0 select-text wrap-anywhere text-[var(--cf-text)] ${
+          reading ? "text-[15px] leading-[1.75]" : "text-[12px] leading-relaxed"
+        }`}
       >
-        {isUser && message.skill && (
-          <span className="mb-1 flex items-center gap-1 font-mono text-[11px] text-[var(--cf-text-muted)]">
-            <Puzzle size={11} className="shrink-0" />
-            {message.skill}
-          </span>
-        )}
-        {isUser && sentFiles.length > 0 && (
-          <span className="mb-1 flex flex-wrap gap-1 whitespace-normal">
-            {sentFiles.map((file) => (
-              <span
-                key={file.path}
-                title={file.path}
-                className="flex min-w-0 max-w-full items-center gap-1 rounded border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)]"
-              >
-                {file.isImage ? <ImageIcon size={11} className="shrink-0" /> : <FileText size={11} className="shrink-0" />}
-                <span className="truncate">{file.name}</span>
-              </span>
-            ))}
-          </span>
-        )}
         {markup !== null ? (
           <div
             ref={bodyRef}
@@ -329,112 +434,73 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
             // The memoised object, never an inline `{{ __html }}` — see `markup`.
             dangerouslySetInnerHTML={markup}
           />
-        ) : streaming ? (
-          // A caret while the tokens land, dropped the instant the turn is whole. It is the one
-          // honest "it is still going" mark for a transcript that is already showing text — a
-          // spinner beside a half-written paragraph says less than the paragraph does.
-          <span className="whitespace-pre-wrap">
-            {body}
-            <span
-              aria-hidden="true"
-              className="ml-[1px] inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-[var(--cf-accent-fill)] align-baseline"
-            />
-          </span>
         ) : (
           body
         )}
-        {!reading && (
-          <button
-            type="button"
-            onClick={() => copy(copyText)}
-            title={t("chat.copyMessage")}
-            className={`absolute -top-2 flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] opacity-0 shadow-sm group-hover:opacity-100 ${
-              isUser ? "-left-2" : "-right-2"
-            }`}
-          >
-            {copied ? (
-              <Check size={11} className="text-[var(--cf-success)]" />
-            ) : (
-              <Copy size={11} className="text-[var(--cf-text-muted)]" />
-            )}
-          </button>
-        )}
+        {panelCopy}
       </div>
-      {traceLog}
-      {/* Under the answer that made them, and above the hover controls: the files are part of what
-          this turn said, and the row below is what you *do* about the turn. */}
+      {/* The files the turn read or changed — its sources — then the files it wrote. Both are part
+          of what this turn said; the row after them is what you *do* about it. */}
+      {trace && trace.length > 0 && <RunFileChips lines={trace} density={variant} />}
       {outputs && outputs.files.length > 0 && (
-        <div className="pt-1.5">
+        <div className="pt-0.5">
           <OutputBar conversationId={outputs.conversationId} files={outputs.files} label={false} />
         </div>
       )}
-      {/*
-        One row under the turn: what it cost, and what you can do about it.
-       
-        They were two rows — controls, then a stamp beneath them — which is two lines of chrome
-        under every paragraph of a reading surface, and the pair drifted apart on screen because
-        only one of them was ever visible at rest.
-       
-        The row takes the side its turn is on, and the stamp takes the *outer* edge of it: left of
-        the controls under an assistant's answer, right of them under a user's bubble. A transcript
-        is read as two columns, and metadata that always starts at the left margin detaches from
-        the short right-aligned bubble it belongs to and reads as if it were the reply's.
-       
-        Ordering it this way is also what keeps the row still. The stamp is the only part drawn at
-        rest; the controls appear on hover on whichever side faces the middle of the column, so
-        they grow into empty space instead of pushing the one thing that was already there.
-       
-        The controls keep the hover reveal — `focus-within` as well, so the keyboard can reach what
-        the mouse uncovers — and the stamp does not: it is information, not an action.
-      */}
-      {reading && !streaming ? (
-        <div className={`flex items-center gap-1.5 pt-0.5 ${isUser ? "justify-end" : ""}`}>
-          {!isUser && stampRow}
-          <div className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 hover:opacity-100">
-          <BubbleAction
-            icon={copied ? Check : Copy}
-            label={t("chat.copyMessage")}
-            onClick={() => copy(copyText)}
-            done={copied}
-          />
-          {actions?.onRegenerate && (
-            <BubbleAction
-              icon={RefreshCw}
-              label={t("chat.regenerate")}
-              onClick={actions.onRegenerate}
-              cost={actions.replayTurns}
-              costTitle={t("chat.replayCost", { n: actions.replayTurns ?? 0 })}
-            />
-          )}
-          {actions?.onEdit && (
-            <BubbleAction
-              icon={Pencil}
-              label={t("chat.editMessage")}
-              onClick={actions.onEdit}
-              cost={actions.replayTurns}
-              costTitle={t("chat.replayCost", { n: actions.replayTurns ?? 0 })}
-            />
-          )}
-          {actions?.onBranch && (
-            <BubbleAction
-              icon={GitBranch}
-              label={t("chat.branchHere")}
-              onClick={actions.onBranch}
-              cost={actions.replayTurns}
-              costTitle={t("chat.replayCost", { n: actions.replayTurns ?? 0 })}
-            />
-          )}
-          </div>
-          {isUser && stampRow}
+      {reading ? (
+        <div className="flex items-center gap-1.5">
+          {stampRow}
+          {controls}
         </div>
       ) : (
-        // The panel variant and a turn still being written have no controls to sit beside, so the
-        // stamp keeps the plain line it always had.
         stampRow
       )}
-    </div>
+    </>,
   );
 });
+
+/** How recently a turn must have landed for its avatar to arrive by way of the thinking mark. */
+const SETTLE_WINDOW_MS = 4000;
+
+/**
+ * The assistant's mark beside its turn.
+ *
+ * A turn that has only just landed first shows the thinking mark resolving — the run card that sat
+ * in this gutter a moment ago, finishing — and then the avatar springs in in its place. How long
+ * that takes is the design's own finish (`thinkingFinishMs`: a brief resolve for most, a little
+ * show for the ones built around it). A turn read back from history is simply the avatar:
+ * replaying that for every old message would be a flourish pretending something had just happened.
+ */
+function AssistantAvatar({ reading, landedAt }: { reading: boolean; landedAt?: string }) {
+  const [settling, setSettling] = useState(() => {
+    const when = parseStamp(landedAt);
+    const age = when ? Date.now() - when.getTime() : -1;
+    return age >= 0 && age < SETTLE_WINDOW_MS;
+  });
+  const [arrived] = useState(settling);
+  const design = useThinkingDesignStore((s) => s.design);
+  useEffect(() => {
+    if (!settling) return;
+    const timer = setTimeout(() => setSettling(false), thinkingFinishMs(design));
+    return () => clearTimeout(timer);
+  }, [settling, design]);
+  const box = reading ? "h-8 w-8" : "h-[22px] w-[22px]";
+  return (
+    <span className={`flex ${box} shrink-0 items-center justify-center`}>
+      {settling ? (
+        <ThinkingOrb size={reading ? "card" : "md"} activity={{ done: true }} />
+      ) : (
+        <span
+          className={`flex ${box} items-center justify-center rounded-full bg-[var(--cf-surface-raised)] shadow-[inset_0_0_0_1px_var(--cf-border)] ${
+            arrived ? "cf-avatar-in" : ""
+          }`}
+        >
+          <AiSparkles size={reading ? 15 : 11} />
+        </span>
+      )}
+    </span>
+  );
+}
 
 /** One control on the hover row under a reading-variant turn. */
 function BubbleAction({
@@ -784,7 +850,9 @@ function ChatStamp({ message, detail }: { message: ChatBubbleMessage; detail: Ch
 
   const parts: string[] = [];
   if (message.role === "assistant") {
-    if (detail === "full" && message.responseTimeMs !== undefined) {
+    // A turn with a trace or reasoning already says how long it took, in its "Thought for…" line.
+    const saysDuration = (message.trace?.length ?? 0) > 0 || !!message.thinking?.trim() || !!message.traceId;
+    if (detail === "full" && message.responseTimeMs !== undefined && !saysDuration) {
       parts.push(`⏱ ${formatResponseTime(message.responseTimeMs)}`);
     }
     if (message.provider) parts.push(providerDisplayLabel(message.provider, t));

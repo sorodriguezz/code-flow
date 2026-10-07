@@ -364,7 +364,6 @@ function AnalysisDrawer({
   onClose: () => void;
 }) {
   const t = useT();
-  const [traceOpen, setTraceOpen] = useState(true);
 
   return (
     <div className="flex max-h-[280px] shrink-0 flex-col border-t border-[var(--cf-border)] bg-[var(--cf-surface)]">
@@ -384,8 +383,6 @@ function AnalysisDrawer({
               runId={runId}
               running
               startedAt={startedAt}
-              expanded={traceOpen}
-              onToggle={() => setTraceOpen((open) => !open)}
             />
           </div>
         )}

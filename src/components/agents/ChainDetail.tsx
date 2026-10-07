@@ -638,7 +638,6 @@ function StepRow({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const [logOpen, setLogOpen] = useState(false);
   /** The re-run note being typed, or `null` when the box is closed. `""` is a real value — a
    * re-run with nothing to add is a legitimate thing to ask for. */
   const [rerun, setRerun] = useState<string | null>(null);
@@ -764,7 +763,7 @@ function StepRow({
       {/* The run card, and with it the one orb this step's run wears in the pane. */}
       {running && step.run_id && live && (
         <div className="mt-2.5">
-          <AiRunLog runId={step.run_id} running expanded={logOpen} onToggle={() => setLogOpen((v) => !v)} />
+          <AiRunLog runId={step.run_id} running />
         </div>
       )}
 

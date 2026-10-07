@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowDownToLine, ArrowUpFromLine, FileUp, MoreHorizontal, Play, RotateCw, ScrollText, Square } from "lucide-react";
+import { ArrowDownToLine, ArrowUpFromLine, FilePlus2, FileUp, MoreHorizontal, Play, RotateCw, ScrollText, Square } from "lucide-react";
 import { Button } from "../common/Button";
 import { ContextMenu } from "../common/ContextMenu";
+import { ComposeBuilderDialog } from "./ComposeBuilderDialog";
 import { RowAction, StateDot } from "./containerBits";
 import { engineMenu, runtimeLabel } from "./containerActions";
 import { DataTable, EmptyLine, LiveMark, LoadingLine, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
@@ -18,9 +19,10 @@ import type { ContainerRow, RuntimeInfo } from "../../types/containers";
 
 /**
  * An engine's Compose projects, read from its containers' labels: how many of each run, its services,
- * the folder it came from. Brought up (from its files, or from any compose file picked here), stopped,
- * started, restarted, taken down; `up`, `pull` and the project's log run as the manager's jobs (see
- * `JobsPanel`), where what Compose prints can be followed — and keep running if the page is left.
+ * the folder it came from. Brought up (from its files, or from any compose file picked here — or one
+ * written here, «New compose»), stopped, started, restarted, taken down; `up`, `pull` and the
+ * project's log run as the manager's jobs (see `JobsPanel`), where what Compose prints can be
+ * followed — and keep running if the page is left.
  */
 
 export function ComposePage({ runtime }: { runtime: RuntimeInfo }) {
@@ -33,6 +35,7 @@ export function ComposePage({ runtime }: { runtime: RuntimeInfo }) {
   const refreshList = useContainersStore((s) => s.refreshList);
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState<MenuState>(null);
+  const [building, setBuilding] = useState(false);
   const startJob = useContainersJobsStore((s) => s.start);
   const ctr = runtime.id === "ctr";
   const place = context || runtimeLabel(runtime.id, t);
@@ -93,6 +96,11 @@ export function ComposePage({ runtime }: { runtime: RuntimeInfo }) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <PageHead title={t("containers.m.section.compose")} sub={projects.length ? String(projects.length) : undefined}>
+        {/* Writing a file needs no engine; bringing it up does, and the dialog says so itself. */}
+        <Button size="sm" variant="secondary" onClick={() => setBuilding(true)} disabled={ctr}>
+          <FilePlus2 size={13} />
+          {t("containers.m.compose.new")}
+        </Button>
         <Button size="sm" variant="primary" onClick={() => void upFromFile()} disabled={!runtime.running || ctr}>
           <FileUp size={13} />
           {t("containers.m.compose.upFromFile")}
@@ -198,6 +206,7 @@ export function ComposePage({ runtime }: { runtime: RuntimeInfo }) {
         )}
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      {building && <ComposeBuilderDialog runtime={runtime} context={context} onClose={() => setBuilding(false)} onUp={up} />}
     </div>
   );
 }

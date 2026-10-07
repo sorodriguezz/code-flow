@@ -109,7 +109,6 @@ export function LogAnalysisPanel({ analysisKey }: { analysisKey: string }) {
   const t = useT();
   const analysis = useContainersLogAiStore((s) => s.byKey[analysisKey]);
   const clear = useContainersLogAiStore((s) => s.clear);
-  const [traceOpen, setTraceOpen] = useState(true);
   if (!analysis) return null;
   const running = analysisRunning(analysis);
   return (
@@ -138,7 +137,7 @@ export function LogAnalysisPanel({ analysisKey }: { analysisKey: string }) {
       <div className="min-h-0 flex-1 overflow-auto">
         {running && (
           <div className="p-2">
-            <AiRunLog runId={analysis.runId} running startedAt={analysis.startedAt} expanded={traceOpen} onToggle={() => setTraceOpen((open) => !open)} />
+            <AiRunLog runId={analysis.runId} running startedAt={analysis.startedAt} />
           </div>
         )}
         {analysis.error && <p className="whitespace-pre-wrap break-words px-3 py-3 text-[12.5px] text-[var(--cf-danger)]">{analysis.error}</p>}

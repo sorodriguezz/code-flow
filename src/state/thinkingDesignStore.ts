@@ -26,7 +26,8 @@ export const useThinkingDesignStore = create<ThinkingDesignState>((set, get) => 
   init: async () => {
     const stored = await getSetting(KEY).catch(() => undefined);
     if (stored === undefined) return;
-    // Unset, or an id this release does not know (written by a newer one): the reactor.
+    // Unset, or an id this release does not know — written by a newer one, or one of the twelve
+    // retired marks an older one offered (reactor, sparkle…): the default.
     const design = isThinkingDesign(stored) ? stored : DEFAULT_THINKING_DESIGN;
     if (design !== get().design) set({ design });
   },

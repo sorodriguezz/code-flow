@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Loader2, RefreshCw, ShieldCheck, Square } from "lucide-react";
 import { buttonClass } from "../common/Button";
 import { parseAnalysis, type AnalysisFinding } from "../../lib/parseAnalysis";
@@ -110,7 +110,6 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabKey]);
-  const [logExpanded, setLogExpanded] = useState(false);
   const expanded = view.expanded ?? EMPTY_FLAGS;
   const split = width >= SPLIT_MIN_WIDTH && findings.length > 0 && !hydrating;
   const picked = findings.find((f) => f.id === view.picked) ?? findings[0] ?? null;
@@ -176,8 +175,6 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
                 runId={runningJob.id}
                 running
                 startedAt={runningJob.createdAt}
-                expanded={logExpanded}
-                onToggle={() => setLogExpanded((v) => !v)}
               />
               {displayJob && <p className="px-0.5 text-[11px] text-[var(--cf-text-faint)]">{t("doc.whileRunningAnalysis")}</p>}
             </div>

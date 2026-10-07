@@ -1,12 +1,11 @@
-import { useMemo, useState } from "react";
-import { Plus, Search, X } from "lucide-react";
+import { useMemo } from "react";
 import { useT } from "../../state/languageStore";
 import type { SpringMeta } from "../../lib/scaffold/api";
 import { springRangeIncludes } from "../../lib/scaffold/spring";
-import { Checkbox } from "../common/Checkbox";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
-import { chipClass, fieldClass, sectionLabelClass } from "../common/recipes";
+import { fieldClass } from "../common/recipes";
+import { DependencyPicker, type PickerItem } from "./DependencyPicker";
 import { Field } from "./Field";
 
 /** The Spring form's own state — everything start.spring.io asks except the name, which is the
@@ -57,15 +56,20 @@ export function SpringFields({
   packageProblem: string | null;
 }) {
   const t = useT();
-  const [picking, setPicking] = useState(false);
-  const [query, setQuery] = useState("");
-
-  const byId = useMemo(() => {
-    const map = new Map<string, { name: string; description: string; versionRange: string; group: string }>();
-    for (const group of meta.dependencies)
-      for (const dep of group.values) map.set(dep.id, { ...dep, group: group.name });
-    return map;
-  }, [meta]);
+  // Every starter under Initializr's own headings; one the chosen Boot line does not take says so.
+  const starters = useMemo<PickerItem[]>(
+    () =>
+      meta.dependencies.flatMap((group) =>
+        group.values.map((dep) => ({
+          id: dep.id,
+          name: dep.name,
+          description: dep.description,
+          group: group.name,
+          unavailable: springRangeIncludes(dep.versionRange, value.bootVersion) ? null : t("scaffold.spring.incompatible", { range: dep.versionRange }),
+        })),
+      ),
+    [meta, value.bootVersion, t],
+  );
 
   const toggle = (id: string) =>
     onChange({
@@ -73,17 +77,6 @@ export function SpringFields({
         ? value.dependencies.filter((dep) => dep !== id)
         : [...value.dependencies, id],
     });
-
-  const needle = query.trim().toLowerCase();
-  const groups = meta.dependencies
-    .map((group) => ({
-      name: group.name,
-      values: group.values.filter(
-        (dep) => !needle || dep.name.toLowerCase().includes(needle) || dep.description.toLowerCase().includes(needle) || dep.id.includes(needle),
-      ),
-    }))
-    .filter((group) => group.values.length > 0);
-  const popular = POPULAR.filter((id) => byId.has(id) && !value.dependencies.includes(id));
 
   return (
     <>
@@ -151,95 +144,14 @@ export function SpringFields({
         />
       </Field>
       <Field label={t("scaffold.spring.dependencies")} align="start">
-        <div className="min-w-0 space-y-2">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {value.dependencies.map((id) => {
-              const dep = byId.get(id);
-              const fits = dep ? springRangeIncludes(dep.versionRange, value.bootVersion) : true;
-              return (
-                <span
-                  key={id}
-                  title={fits ? dep?.description : t("scaffold.spring.incompatible", { range: dep?.versionRange ?? "" })}
-                  className={chipClass(fits ? "accent" : "warn", "pr-1")}
-                >
-                  {dep?.name ?? id}
-                  <button
-                    type="button"
-                    onClick={() => toggle(id)}
-                    aria-label={t("scaffold.remove")}
-                    className="rounded-[3px] p-px opacity-70 hover:opacity-100"
-                  >
-                    <X size={10} />
-                  </button>
-                </span>
-              );
-            })}
-            <button
-              type="button"
-              onClick={() => setPicking((open) => !open)}
-              aria-expanded={picking}
-              className={chipClass("neutral", "cursor-pointer hover:text-[var(--cf-text)]")}
-            >
-              <Plus size={11} />
-              {t("scaffold.spring.add")}
-            </button>
-          </div>
-          {!picking && popular.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1">
-              {popular.slice(0, 8).map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => toggle(id)}
-                  title={byId.get(id)?.description}
-                  className="rounded-[5px] px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-                >
-                  + {byId.get(id)?.name}
-                </button>
-              ))}
-            </div>
-          )}
-          {picking && (
-            <div className="rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)]">
-              <div className="relative border-b border-[var(--cf-border)] p-1.5">
-                <Search size={12} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]" />
-                <input
-                  autoFocus
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder={t("scaffold.spring.search")}
-                  className={fieldClass({ size: "sm", className: "w-full pl-7" })}
-                />
-              </div>
-              <div className="max-h-[220px] overflow-y-auto p-1">
-                {groups.map((group) => (
-                  <div key={group.name}>
-                    <div className={`${sectionLabelClass} pt-2`}>{group.name}</div>
-                    {group.values.map((dep) => {
-                      const fits = springRangeIncludes(dep.versionRange, value.bootVersion);
-                      const checked = value.dependencies.includes(dep.id);
-                      return (
-                        <label
-                          key={dep.id}
-                          title={fits ? dep.description : t("scaffold.spring.incompatible", { range: dep.versionRange })}
-                          className={`flex items-start gap-2 rounded-md px-2 py-1 ${
-                            fits || checked ? "cursor-pointer hover:bg-[var(--cf-hover)]" : "opacity-45"
-                          }`}
-                        >
-                          <Checkbox checked={checked} disabled={!fits && !checked} onChange={() => toggle(dep.id)} className="mt-0.5" />
-                          <span className="min-w-0">
-                            <span className="block truncate text-[12.5px] text-[var(--cf-text)]">{dep.name}</span>
-                            <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{dep.description}</span>
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+        <DependencyPicker
+          items={starters}
+          selected={value.dependencies}
+          onToggle={toggle}
+          popular={POPULAR}
+          label={t("scaffold.spring.dependencies")}
+          searchPlaceholder={t("scaffold.spring.search")}
+        />
       </Field>
     </>
   );

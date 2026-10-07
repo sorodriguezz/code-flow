@@ -580,7 +580,6 @@ export function PrDocument({
   const split = segment === "findings" && width >= SPLIT_MIN_WIDTH && findings.length > 0 && !hydrating;
   const expanded = view.expanded ?? EMPTY_FLAGS;
   const picked = findings.find((f) => f.id === view.picked) ?? findings[0] ?? null;
-  const [logExpanded, setLogExpanded] = useState(false);
   const [fixpackCopied, copyFixpack] = useCopy();
 
   const cardProps = (finding: AnalysisFinding, at: number) => {
@@ -814,8 +813,6 @@ export function PrDocument({
                 runId={runningJob.id}
                 running
                 startedAt={runningJob.createdAt}
-                expanded={logExpanded}
-                onToggle={() => setLogExpanded((v) => !v)}
               />
               {displayJob && segment === "findings" && (
                 <p className="px-0.5 text-[11px] text-[var(--cf-text-faint)]">{t("doc.whileRunning", { n: displayNumber })}</p>

@@ -8,7 +8,6 @@ import {
   type ChatBubbleActions,
   type ChatBubbleMessage,
 } from "./ChatMessageBubble";
-import { ThinkingBlock } from "./ThinkingBlock";
 import { SelectionActions } from "./SelectionActions";
 import { useTextMenu } from "../common/TextMenu";
 import { CompactionMark } from "./CompactionMark";
@@ -102,7 +101,6 @@ export function ChatTranscript({
   /** The pill's visibility, which *is* rendered — so it is state, and it only flips when the
    *  reader crosses the threshold rather than on every scroll event. */
   const [detached, setDetached] = useState(false);
-  const [logExpanded, setLogExpanded] = useState(false);
   /**
    * Where this conversation was compacted, if it was.
    *
@@ -308,25 +306,14 @@ export function ChatTranscript({
 
           {session.sending && (
             <div className="space-y-2">
-              {pendingThinking && <ThinkingBlock text={pendingThinking} live />}
-              {pendingText && (
-                <ChatMessageBubble
-                  message={PENDING_SHELL}
-                  variant="reading"
-                  streamText={pendingText}
-                />
-              )}
               {/*
-                The honest progress mark, and the reason it is here for *every* provider rather than
-                only the four that cannot type.
+                The turn in flight, as one card for *every* provider: the thinking mark in the
+                gutter, the phase it is in, the reasoning and the steps — and, as it streams, the
+                answer itself in the same column, beside the mark that is writing it.
 
-                For Claude the text above is already the evidence, and this strip is merely the tool
-                calls behind it. For the other five there is nothing above at all until the turn
-                lands — their headless modes emit structured steps and no intra-message text — so
-                this strip is the entire answer to "is it alive", and a `ThinkingOrb` sitting where
-                the reply will be would be a decoration standing in for information the app actually
-                has. `AiRunLog` already renders the steps and the elapsed time; there is nothing
-                to add and a lot to get wrong by re-drawing it.
+                For Claude the reasoning and the answer stream token by token. For the other five
+                nothing arrives until the turn lands — their headless modes emit structured steps
+                and no intra-message text — so the steps are the entire answer to "is it alive".
 
                 Its Stop is the one thing this view does not want. The composer's send button has
                 already become Stop while a turn runs, and it sits where the hand already is — two
@@ -334,21 +321,24 @@ export function ChatTranscript({
                 different actions.
               */}
               <AiRunLog
+                density="reading"
                 runId={session.runId ?? undefined}
                 running
                 startedAt={session.runStartedAt}
+                thinking={pendingThinking}
+                answering={!!pendingText}
                 showStop={false}
                 onRetry={activeId ? () => useConversationStore.getState().retryTurn(activeId) : undefined}
-                expanded={logExpanded}
-                onToggle={() => setLogExpanded((v) => !v)}
-              />
+              >
+                {pendingText && <ChatMessageBubble message={PENDING_SHELL} variant="reading" streamText={pendingText} />}
+              </AiRunLog>
               {/* What the log is actually saying, while it is still saying it.
                   A CLI pointed at an endpoint that is not listening retries rather than fails, so
                   without this the run spins until the user gives up and presses Stop — with the
                   explanation on screen the whole time, in a wall of identical orange lines nobody
                   should have to read. See `lib/runDiagnosis`. */}
               {diagnosis && (
-                <p className="px-0.5 text-[11px] leading-relaxed text-[var(--cf-warning)]">
+                <p className="pl-11 text-[11px] leading-relaxed text-[var(--cf-warning)]">
                   {serviceOnPort(diagnosis.url)
                     ? t("chat.endpointUnreachableKnown", {
                         url: diagnosis.url,
@@ -358,7 +348,7 @@ export function ChatTranscript({
                 </p>
               )}
               {!streamsTokens && !pendingText && !diagnosis && (
-                <p className="px-0.5 text-[10.5px] text-[var(--cf-text-muted)]">
+                <p className="pl-11 text-[10.5px] text-[var(--cf-text-muted)]">
                   {t("chat.noStreamingNotice")}
                 </p>
               )}
@@ -457,6 +447,8 @@ const TranscriptTurn = memo(function TranscriptTurn({
       engineVersion: message.engineVersion ?? undefined,
       responseTimeMs: message.responseTimeMs ?? undefined,
       trace: message.trace ?? undefined,
+      // Folded with the trace into the turn's "Thought for…" line, above the answer.
+      thinking: message.thinking ?? undefined,
       isError: message.isError,
       isCancelled: message.isCancelled,
     }),
@@ -493,10 +485,6 @@ const TranscriptTurn = memo(function TranscriptTurn({
           <div className="h-px flex-1 bg-[var(--cf-border)]" />
         </div>
       )}
-      {/* A finished turn keeps whatever reasoning it arrived with, folded shut. It is *above* the
-          answer because that is the order it happened in, and shut because after the fact it is a
-          monologue sitting over the thing the reader came for. */}
-      {message.thinking && <ThinkingBlock text={message.thinking} live={false} />}
       {/* `group` here and not on the bubble: the hover row lives inside the bubble component but
           must reveal on hover of the whole turn, divider excluded. */}
       <div className="group">

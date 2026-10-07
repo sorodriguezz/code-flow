@@ -23,7 +23,7 @@ const PIPELINE_POLL_KEY = "pipeline_poll_seconds";
 const KEY = "auto_fetch_interval_seconds";
 const SECRET_SCAN_KEY = "secret_scan_enabled";
 const NOTIFICATION_SOUND_KEY = "notification_sound_enabled";
-/** Which of the sounds in `lib/notificationSound` plays. Unset means the one the app always made. */
+/** Which of the sounds in `lib/notificationSound` plays. Retired or unset selections use the current default. */
 const NOTIFICATION_SOUND_ID_KEY = "notification_sound_id";
 /** 0–100; unset means `DEFAULT_NOTIFICATION_VOLUME`, the level the sounds were tuned at. */
 const NOTIFICATION_SOUND_VOLUME_KEY = "notification_sound_volume";

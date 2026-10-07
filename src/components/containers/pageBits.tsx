@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { Copy, ExternalLink, Loader2, Star, X } from "lucide-react";
 import { Button } from "../common/Button";
 import type { MenuItem } from "../common/ContextMenu";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
-import { chipClass, fieldClass } from "../common/recipes";
+import { chipClass, fieldClass, popoverClass } from "../common/recipes";
 import { RowAction, TextView } from "./containerBits";
 import { NO_ROWS } from "./ui";
 import { dockerHubUrl, imageName, onDockerHub } from "./pageModel";
@@ -356,6 +356,181 @@ export function ImageSearchField({
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The image field of a form — «Ejecutar contenedor», a service of «Nuevo compose»: what is typed, a
+ * menu under it with this engine's images and Docker Hub's matches, and a Hub repository's tags
+ * beside it once one is picked. `ImageSearchField` above is the same search laid open, for the pull
+ * dialog, where the list is the whole form.
+ */
+export function ImageCombo({
+  runtime,
+  context,
+  value,
+  onChange,
+  onPickLocal,
+  autoFocus = false,
+}: {
+  runtime: RuntimeInfo;
+  context: string | null;
+  value: string;
+  onChange: (next: string) => void;
+  /** One of this engine's images picked from the menu — the run dialog reads its EXPOSE. */
+  onPickLocal?: (reference: string) => void;
+  autoFocus?: boolean;
+}) {
+  const t = useT();
+  const { rows: images } = useEngineList<ImageRow>(runtime.id, context, "images");
+  const [open, setOpen] = useState(false);
+  const [hub, setHub] = useState<HubRepo[]>([]);
+  const [hubLoading, setHubLoading] = useState(false);
+  const [hubError, setHubError] = useState<string | null>(null);
+  const [tags, setTags] = useState<HubTag[] | null>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const local = useMemo(() => [...new Set(images.filter((i) => !i.dangling && i.reference && !i.reference.includes("<none>")).map((i) => i.reference))], [images]);
+  const localMatches = useMemo(() => {
+    const needle = value.trim().toLowerCase();
+    if (!needle || local.some((reference) => reference.toLowerCase() === needle)) return local;
+    return local.filter((reference) => reference.toLowerCase().includes(needle));
+  }, [value, local]);
+  const term = imageName(value.trim());
+  useEffect(() => {
+    if (!open || term.length < 2 || !onDockerHub(term)) {
+      setHub([]);
+      setHubLoading(false);
+      return;
+    }
+    let alive = true;
+    setHubLoading(true);
+    const timer = setTimeout(() => {
+      containersHubSearch(term, 8)
+        .then((found) => {
+          if (!alive) return;
+          setHub(found);
+          setHubError(null);
+        })
+        .catch((e: unknown) => {
+          if (!alive) return;
+          setHub([]);
+          setHubError(String(e));
+        })
+        .finally(() => {
+          if (alive) setHubLoading(false);
+        });
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [term, open]);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      if (box.current && !box.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", outside, true);
+    return () => document.removeEventListener("pointerdown", outside, true);
+  }, [open]);
+
+  const pickLocal = (reference: string) => {
+    onChange(reference);
+    setTags(null);
+    setOpen(false);
+    onPickLocal?.(reference);
+  };
+  const pickHub = (repo: HubRepo) => {
+    onChange(`${repo.name}:latest`);
+    setOpen(false);
+    setTags(null);
+    containersHubTags(repo.name, 40)
+      .then(setTags)
+      .catch(() => setTags([]));
+  };
+  const groupClass = "px-2 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
+  return (
+    <div ref={box} className="relative">
+      <div className="flex gap-1">
+        <input
+          autoFocus={autoFocus}
+          value={value}
+          onChange={(e) => {
+            onChange(e.target.value);
+            setTags(null);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          // A click on the field already focused brings back a menu Escape put away.
+          onClick={() => setOpen(true)}
+          onKeyDown={(e) => {
+            // The menu's Escape, not the dialog's: marked handled, so the dialog stays open.
+            if (e.key === "Escape" && open) {
+              e.preventDefault();
+              e.stopPropagation();
+              setOpen(false);
+            }
+          }}
+          placeholder={t("containers.m.run.imagePlaceholder")}
+          spellCheck={false}
+          aria-label={t("containers.m.run.image")}
+          className={fieldClass({ size: "sm", className: "w-full font-mono" })}
+        />
+        {tags && tags.length > 0 && (
+          <div className="w-[130px] shrink-0">
+            <Select
+              size="sm"
+              value={value.includes(":") ? value.slice(value.lastIndexOf(":") + 1) : "latest"}
+              onChange={(tag) => onChange(`${imageName(value)}:${tag}`)}
+              options={tags.map((tag) => ({ value: tag.name, label: tag.name }))}
+              ariaLabel={t("containers.m.run.tag")}
+            />
+          </div>
+        )}
+      </div>
+      {open && (
+        <div className={`${popoverClass} absolute left-0 right-0 top-full z-10 mt-1 max-h-[320px] overflow-y-auto`}>
+          <div className={groupClass}>{t("containers.m.run.localImages")}</div>
+          {localMatches.length ? (
+            localMatches.map((reference) => (
+              <button key={reference} onClick={() => pickLocal(reference)} className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[12.5px] hover:bg-[var(--cf-hover)]">
+                <span className="min-w-0 flex-1 truncate font-mono">{reference}</span>
+                <span className={chipClass("ok")}>{t("containers.m.run.downloaded")}</span>
+              </button>
+            ))
+          ) : (
+            <p className="px-2 py-1 text-[11.5px] text-[var(--cf-text-muted)]">{t("containers.m.run.noLocalMatch")}</p>
+          )}
+          <div className={`${groupClass} flex items-center gap-1.5 pt-2`}>
+            Docker Hub
+            {hubLoading && <Loader2 size={10} className="animate-spin" />}
+          </div>
+          {hub.map((repo) => (
+            <div key={repo.name} className="flex items-start gap-1 rounded-md px-2 py-1 hover:bg-[var(--cf-hover)]">
+              <button onClick={() => pickHub(repo)} className="flex min-w-0 flex-1 flex-col text-left">
+                <span className="flex items-center gap-1.5 text-[12.5px]">
+                  <span className="truncate font-mono font-medium">{repo.name}</span>
+                  {repo.official && <span className={chipClass("accent")}>{t("containers.m.run.official")}</span>}
+                  <span className="ml-auto flex shrink-0 items-center gap-0.5 text-[11px] text-[var(--cf-text-muted)]">
+                    <Star size={10} />
+                    {repo.stars.toLocaleString()}
+                  </span>
+                </span>
+                {repo.description && <span className="line-clamp-1 text-[11px] text-[var(--cf-text-muted)]">{repo.description}</span>}
+              </button>
+              <button onClick={() => void openExternalUrl(dockerHubUrl(repo.name))} title={t("containers.m.run.viewOnHub")} className="mt-0.5 shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]">
+                <ExternalLink size={11} />
+              </button>
+            </div>
+          ))}
+          {!hubLoading && hub.length === 0 && (
+            <p className="px-2 py-1 text-[11.5px] text-[var(--cf-text-muted)]">
+              {hubError ?? (term.length < 2 ? t("containers.m.run.typeToSearch") : onDockerHub(term) ? t("containers.m.run.noHubMatch") : t("containers.m.run.notOnHub"))}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

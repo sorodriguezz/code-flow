@@ -60,8 +60,6 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
   const publishing = useStoriesStore((s) => s.publishingByBatch[batchId] !== undefined);
   const [showSource, setShowSource] = useState(false);
   const [answering, setAnswering] = useState(false);
-  const [runLogOpen, setRunLogOpen] = useState(false);
-  const [verifyLogOpen, setVerifyLogOpen] = useState(false);
 
   const openQuestions = useMemo(
     () => (batch ? parseOpenQuestions(batch.open_questions) : []),
@@ -258,8 +256,6 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
               running
               startedAt={runId ? (runStartedAt[runId] ?? null) : null}
               label={t(list.length === 0 ? "stories.generatingTitle" : "stories.regeneratingTitle")}
-              expanded={runLogOpen}
-              onToggle={() => setRunLogOpen((open) => !open)}
             />
           )}
           {/* Verification is its own run, so it gets its own card rather than sharing one — the two
@@ -270,8 +266,6 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
               running
               startedAt={verifyRunId ? (runStartedAt[verifyRunId] ?? null) : null}
               label={t("stories.verifyingTitle")}
-              expanded={verifyLogOpen}
-              onToggle={() => setVerifyLogOpen((open) => !open)}
             />
           )}
         </div>

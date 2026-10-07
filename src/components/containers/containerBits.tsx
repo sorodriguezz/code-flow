@@ -1,22 +1,21 @@
 import { useEffect, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import Editor from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
-import { Box, Boxes, type LucideIcon } from "lucide-react";
+import { Boxes } from "lucide-react";
 import { BrandGlyph } from "../ai/ProviderGlyph";
 import { Tooltip } from "../common/Tooltip";
 import { RUNTIME_LOGOS } from "../../lib/containers/logos";
+import type { BrandLogo } from "../../lib/icons/brandLogos";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { useThemeStore } from "../../state/themeStore";
 import type { RuntimeId } from "../../types/containers";
 
-/** A runtime's mark: Docker's whale and Kubernetes' wheel from the logo set, a box for the rest. */
+/** A runtime's mark: Docker's whale, Podman's seals and Kubernetes' wheel; containerd (`nerdctl`,
+ *  `ctr`), which has none in the sets, a box in its slate blue. */
 export function RuntimeGlyph({ id, size = 14 }: { id: RuntimeId; size?: number }) {
-  const logo = RUNTIME_LOGOS[id === "kubernetes" ? "kubernetes" : id === "docker" ? "docker" : ""];
+  const logo: BrandLogo | undefined = RUNTIME_LOGOS[id];
   if (logo) return <BrandGlyph id={id} logo={logo} size={size} />;
-  const Icon: LucideIcon = id === "podman" ? Box : Boxes;
-  // Podman's purple and containerd's slate blue, so the three engines read apart at a glance.
-  const colour = id === "podman" ? "#892ca0" : "#5b7fa6";
-  return <Icon size={size} strokeWidth={2} style={{ color: colour }} className="shrink-0" />;
+  return <Boxes size={size} strokeWidth={2} style={{ color: "#5b7fa6" }} className="shrink-0" />;
 }
 
 /** The colour a state wears — the services' tones, so "running" means the same green everywhere. */
