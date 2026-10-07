@@ -239,10 +239,135 @@ fn conforming(text: &str, schema: &Value) -> Result<Value, Vec<String>> {
     }
 }
 
+/// The request body for a turn of a conversation: [`chat_body`] with the messages so far, and the
+/// tools on offer (`no_more_tools`: declared, but the model must answer in words).
+#[allow(clippy::too_many_arguments)]
+pub fn conversation_body(
+    provider: &str,
+    model: &str,
+    system: &str,
+    messages: &[Value],
+    tools: &[super::tools::FlowTool],
+    no_more_tools: bool,
+    schema: Option<&Value>,
+    temperature: Option<f64>,
+    max_tokens: u32,
+) -> Value {
+    let mut body = chat_body(provider, model, system, "", schema, temperature, max_tokens);
+    let declared = (!tools.is_empty()).then(|| super::tools::declarations(provider, tools));
+    match provider {
+        "anthropic" => {
+            body["messages"] = json!(messages);
+            if let Some(declared) = declared {
+                body["tools"] = declared;
+                if no_more_tools {
+                    body["tool_choice"] = json!({"type": "none"});
+                }
+            }
+        }
+        "gemini" => {
+            body["contents"] = json!(messages);
+            if let Some(declared) = declared {
+                body["tools"] = declared;
+                // Gemini refuses a JSON answer and function calling together: the schema is then
+                // only the prompt's instruction, checked after.
+                if let Some(config) = body.get_mut("generationConfig").and_then(Value::as_object_mut) {
+                    config.remove("responseMimeType");
+                }
+                if no_more_tools {
+                    body["toolConfig"] = json!({"functionCallingConfig": {"mode": "NONE"}});
+                }
+            }
+        }
+        _ => {
+            let mut all = Vec::with_capacity(messages.len() + 1);
+            if !system.trim().is_empty() {
+                all.push(json!({"role": "system", "content": system}));
+            }
+            all.extend(messages.iter().cloned());
+            body["messages"] = Value::Array(all);
+            if let Some(declared) = declared {
+                body["tools"] = declared;
+                if no_more_tools {
+                    body["tool_choice"] = json!("none");
+                }
+            }
+        }
+    }
+    body
+}
+
+/// A question asked as a conversation: the remembered turns before it, other flows as tools, the
+/// calls run until the model answers in words (or its budget is spent). Returns the answer with
+/// every turn's tokens added up, and what was called.
+#[allow(clippy::too_many_arguments)]
+async fn converse(
+    ctx: &NodeCtx,
+    provider: &str,
+    base: &str,
+    key: Option<&str>,
+    model: &str,
+    system: &str,
+    mut messages: Vec<Value>,
+    tools: &[super::tools::FlowTool],
+    max_calls: usize,
+    schema: Option<&Value>,
+    temperature: f64,
+    max_tokens: u32,
+) -> Result<(Answer, Vec<Value>), NodeError> {
+    let http = client()?;
+    let url = chat_url(provider, base, model);
+    let mut calls_made = 0;
+    let mut log = Vec::new();
+    let mut total = Answer::default();
+    let mut temperature = Some(temperature);
+    loop {
+        let no_more = calls_made >= max_calls;
+        let body = conversation_body(provider, model, system, &messages, tools, no_more, schema, temperature, max_tokens);
+        let answer = match send(ctx, provider, signed(http.post(&url).json(&body), provider, key)).await {
+            // Reasoning models take only their default temperature: asked again without one.
+            Err(NodeError::Failed(error)) if error.contains("temperature") && temperature.is_some() => {
+                temperature = None;
+                continue;
+            }
+            other => other?,
+        };
+        let read = read_answer(provider, &answer);
+        total.input_tokens += read.input_tokens;
+        total.output_tokens += read.output_tokens;
+        total.model = read.model.clone();
+        total.cut = read.cut;
+        let (calls, said) = super::tools::calls_in(provider, &answer);
+        if calls.is_empty() || no_more {
+            if no_more && !calls.is_empty() && read.text.trim().is_empty() {
+                return Err(NodeError::failed(format!("The model kept calling tools after {max_calls} calls — raise «Max tool calls»")));
+            }
+            total.text = read.text;
+            return Ok((total, log));
+        }
+        messages.push(said);
+        let mut results = Vec::with_capacity(calls.len());
+        for call in calls {
+            if ctx.cancel.is_cancelled() {
+                return Err(NodeError::Cancelled);
+            }
+            calls_made += 1;
+            if calls_made > max_calls {
+                results.push(super::tools::over_budget(call));
+                continue;
+            }
+            results.push(super::tools::run_call(ctx, tools, call, &mut log).await);
+        }
+        messages.extend(super::tools::result_messages(provider, &results));
+    }
+}
+
 async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let provider = provider_id(&ctx.param_str("apiProvider"));
     let key = api_key(ctx, &provider).await?;
     let schema = output_schema(&ctx.params)?;
+    let tools = super::tools::flow_tools(ctx, &ctx.params).await?;
+    let max_calls = super::tools::max_calls(&ctx.params);
     let resolved = if ctx.param_str("runFor") == "once" { vec![ctx.resolve_once().await?] } else { ctx.resolve_each().await? };
     let mut out = Vec::with_capacity(resolved.len());
     for (index, params) in resolved.iter().enumerate() {
@@ -263,7 +388,18 @@ async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let temperature = number(params, "temperature").unwrap_or(0.2).clamp(0.0, 2.0);
         let max_tokens = number(params, "maxTokens").unwrap_or(1_024.0).clamp(16.0, 200_000.0) as u32;
         let started = Instant::now();
-        let mut answer = complete(ctx, &provider, &base, key.as_deref(), &model, &system, &full, schema.as_ref(), temperature, max_tokens).await?;
+        let memory = super::tools::memory_key(ctx, params);
+        let history = memory.as_deref().map(|key| super::tools::recall(ctx, key)).unwrap_or_default();
+        let mut called = Vec::new();
+        let mut answer = if tools.is_empty() && history.is_empty() {
+            complete(ctx, &provider, &base, key.as_deref(), &model, &system, &full, schema.as_ref(), temperature, max_tokens).await?
+        } else {
+            let messages = super::tools::opening(&provider, &history, &full);
+            let (answer, log) =
+                converse(ctx, &provider, &base, key.as_deref(), &model, &system, messages, &tools, max_calls, schema.as_ref(), temperature, max_tokens).await?;
+            called = log;
+            answer
+        };
         let mut data = None;
         if let Some(schema) = &schema {
             match conforming(&answer.text, schema) {
@@ -285,10 +421,16 @@ async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         if answer.cut {
             ctx.log(LogStream::Info, "The answer reached the token limit and is cut — raise «Max tokens»");
         }
+        if let Some(key) = &memory {
+            super::tools::remember(ctx, key, history, prompt.trim(), answer.text.trim(), params);
+        }
         let mut json = Map::new();
         json.insert("text".into(), json!(answer.text.trim()));
         if let Some(data) = data {
             json.insert("data".into(), data);
+        }
+        if !called.is_empty() {
+            json.insert("toolCalls".into(), json!(called));
         }
         json.insert("provider".into(), json!(provider));
         json.insert("model".into(), json!(if answer.model.is_empty() { model } else { answer.model }));

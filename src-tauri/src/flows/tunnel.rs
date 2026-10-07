@@ -50,6 +50,11 @@ pub fn status() -> TunnelStatus {
 }
 
 /// The public URL of a webhook path, when a tunnel is up.
+/// Any path of the flows' server through the tunnel — a form, an approval page.
+pub fn public_url(path: &str) -> Option<String> {
+    status().url.map(|base| format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/')))
+}
+
 pub fn public_hook(path: &str) -> Option<String> {
     status().url.map(|base| format!("{}/hooks/{}", base.trim_end_matches('/'), path.trim_start_matches('/')))
 }

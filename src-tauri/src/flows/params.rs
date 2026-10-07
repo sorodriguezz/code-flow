@@ -94,6 +94,16 @@ pub enum Kind {
     /// A provider's model, typed or picked from the list its API gives (`flows_ai_models`):
     /// chat models, or embedding ones.
     ApiModel { purpose: &'static str },
+    /// A table of Flujos' own (`flows::tables`), by name — picked or typed, made on first write.
+    FlowTable,
+    /// A collection or folder of the API client: `collection:<id>` or `folder:<id>`.
+    ApiCollection,
+    /// `[{ name, kind }]` — the columns fake data is made of (`nodes::textkit::fake`).
+    FakeFields,
+    /// `[{ field, check, arg }]` — what each item must satisfy (`nodes::textkit::validate`).
+    ValidationRules,
+    /// `{ name: value }` — the inputs the called flow declares, filled per item (a custom node).
+    SubflowInputs,
 }
 
 /// Shown only while another parameter holds one of `values`.
@@ -284,6 +294,8 @@ const STATE: &[ParamSpec] = &[
     // `collect` and `takeAll` are the digest: collect across runs, hand everything over at once.
     p("operation", select(&["get", "set", "increment", "delete", "collect", "takeAll"]), "\"get\"").literal(),
     p("key", text("lastId"), "\"\""),
+    // A value that forgets itself — a cache, a token, a window: read back as missing once it expires.
+    p("ttlSec", COUNT, "0").when("operation", &["set", "increment", "collect"]),
     p("value", text(""), "\"\"").when("operation", &["set", "collect"]),
     p("amount", NUMBER, "1").when("operation", &["increment"]),
     p("fallback", text(""), "\"\"").when("operation", &["get"]),
@@ -331,17 +343,24 @@ const MERGE: &[ParamSpec] = &[
 ];
 
 const WAIT: &[ParamSpec] = &[
-    p("mode", select(&["duration", "until", "webhook"]), "\"duration\"").literal(),
+    p("mode", select(&["duration", "until", "webhook", "waitForm"]), "\"duration\"").literal(),
     p("amount", COUNT, "5").when("mode", &["duration"]),
     p("unit", select(&["seconds", "minutes", "hours", "days"]), "\"seconds\"").when("mode", &["duration"]),
     p("until", text("2026-12-31T09:00"), "\"\"").when("mode", &["until"]),
-    p("timeoutHours", COUNT, "0").literal().when("mode", &["webhook"]),
+    p("timeoutHours", COUNT, "0").literal().when("mode", &["webhook", "waitForm"]),
+    p("formTitle", text("Datos para continuar"), "\"\"").when("mode", &["waitForm"]),
+    p("fields", Kind::FormFields, "[]").literal().when("mode", &["waitForm"]),
 ];
 
 const APPROVAL: &[ParamSpec] = &[
     p("message", long_text("¿Publicar el reporte de {{ $json.fecha }}?"), "\"\""),
     p("timeoutHours", COUNT, "0").literal(),
     p("onTimeout", select(&["reject", "fail"]), "\"reject\"").literal(),
+    // Where else the question goes, with links that decide it (through the tunnel when one is up).
+    p("approvalVia", Kind::MultiSelect { options: &["viaTelegram", "viaSlack", "viaEmail"] }, "[]").literal(),
+    p("approvalCredential", Kind::Credential { kinds: &["bearer", "smtp"] }, "\"\"").literal(),
+    p("approvalChat", text("123456789"), "\"\""),
+    p("approvalTo", text("jefa@example.com"), "\"\""),
 ];
 
 const STOP: &[ParamSpec] = &[p("message", text(""), "\"\"")];
@@ -349,9 +368,10 @@ const STOP: &[ParamSpec] = &[p("message", text(""), "\"\"")];
 // ------------------------------------------------------------------ transform
 
 const SET: &[ParamSpec] = &[
-    p("mode", select(&["manual", "json"]), "\"manual\"").literal(),
+    p("mode", select(&["manual", "json", "rename"]), "\"manual\"").literal(),
     p("assignments", Kind::Assignments, "[]").literal().when("mode", &["manual"]),
     p("json", Kind::Code { lang: "json" }, "\"{}\"").when("mode", &["json"]),
+    p("renames", Kind::KeyValue, "[]").literal().when("mode", &["rename"]),
     p("include", select(&["all", "none", "selected", "except"]), "\"all\"").literal(),
     p("fields", Kind::Strings, "[]").literal().when("include", &["selected", "except"]),
     p("dotNotation", Kind::Boolean, "true").literal(),
@@ -377,11 +397,12 @@ const SPLIT: &[ParamSpec] = &[
 ];
 
 const AGGREGATE: &[ParamSpec] = &[
-    p("mode", select(&["summarize", "all", "fields"]), "\"summarize\"").literal(),
+    p("mode", select(&["summarize", "all", "fields", "chunks"]), "\"summarize\"").literal(),
     p("groupBy", Kind::Strings, "[]").literal().when("mode", &["summarize"]),
     p("aggregations", Kind::Aggregations, r#"[{"op":"count","field":"","as":"count"}]"#).literal().when("mode", &["summarize"]),
     p("fields", Kind::Strings, "[]").literal().when("mode", &["fields"]),
-    p("destination", text("data"), "\"data\"").literal().when("mode", &["all"]),
+    p("destination", text("data"), "\"data\"").literal().when("mode", &["all", "chunks"]),
+    p("groupSize", Kind::Number { min: Some(1.0), max: None }, "10").literal().when("mode", &["chunks"]),
 ];
 
 const DEDUPE: &[ParamSpec] = &[
@@ -391,16 +412,32 @@ const DEDUPE: &[ParamSpec] = &[
     p("historySize", COUNT, "10000").literal().when("scope", &["history"]),
 ];
 
-const DATE_OPS: &[&str] = &["format", "add", "subtract", "startOf", "endOf", "diff", "setZone", "extract", "now"];
+const DATE_OPS: &[&str] = &[
+    "format",
+    "add",
+    "subtract",
+    "startOf",
+    "endOf",
+    "diff",
+    "setZone",
+    "extract",
+    "now",
+    "addBusinessDays",
+    "isBusinessDay",
+    "businessDaysBetween",
+    "nextBusinessDay",
+];
 const DATE: &[ParamSpec] = &[
     p("operation", select(DATE_OPS), "\"format\"").literal(),
     p("value", text("{{ $json.date }}"), "\"\""),
     p("fromFormat", text("dd/MM/yyyy"), "\"\""),
     p("zone", text("America/Santiago"), "\"\""),
-    p("amount", NUMBER, "1").when("operation", &["add", "subtract"]),
+    p("amount", NUMBER, "1").when("operation", &["add", "subtract", "addBusinessDays"]),
     p("unit", select(&["years", "quarters", "months", "weeks", "days", "hours", "minutes", "seconds", "milliseconds"]), "\"days\"")
         .when("operation", &["add", "subtract", "startOf", "endOf", "diff"]),
-    p("other", text("{{ $json.otherDate }}"), "\"\"").when("operation", &["diff"]),
+    p("other", text("{{ $json.otherDate }}"), "\"\"").when("operation", &["diff", "businessDaysBetween"]),
+    p("holidayCountry", text("CL"), "\"CL\"").literal().when("operation", &["addBusinessDays", "isBusinessDay", "businessDaysBetween", "nextBusinessDay"]),
+    p("extraHolidays", Kind::Strings, "[]").when("operation", &["addBusinessDays", "isBusinessDay", "businessDaysBetween", "nextBusinessDay"]),
     p("toZone", text("UTC"), "\"UTC\"").when("operation", &["setZone"]),
     p(
         "part",
@@ -409,12 +446,12 @@ const DATE: &[ParamSpec] = &[
     )
     .when("operation", &["extract"]),
     p("format", select(&["iso", "date", "unixMillis", "unixSeconds", "sql", "http", "relative", "custom"]), "\"iso\"")
-        .when("operation", &["format", "add", "subtract", "startOf", "endOf", "setZone", "now"]),
+        .when("operation", &["format", "add", "subtract", "startOf", "endOf", "setZone", "now", "addBusinessDays", "nextBusinessDay"]),
     p("customFormat", text("yyyy-MM-dd HH:mm"), "\"yyyy-MM-dd HH:mm\"").when("format", &["custom"]),
     p("target", text("date"), "\"date\""),
 ];
 
-const TEXT_OPS: &[&str] = &["replace", "extract", "split", "join", "case", "trim", "truncate", "length"];
+const TEXT_OPS: &[&str] = &["replace", "extract", "split", "join", "case", "trim", "truncate", "length", "textDiff"];
 const TEXT: &[ParamSpec] = &[
     p("operation", select(TEXT_OPS), "\"replace\"").literal(),
     p("value", text("{{ $json.title }}"), "\"\""),
@@ -431,6 +468,8 @@ const TEXT: &[ParamSpec] = &[
     p("length", COUNT, "100").when("operation", &["truncate"]),
     p("ellipsis", text("…"), "\"…\"").when("operation", &["truncate"]),
     p("ignoreCase", Kind::Boolean, "false").when("operation", &["replace", "extract", "split"]),
+    p("diffWith", long_text("{{ $json.before }}"), "\"\"").when("operation", &["textDiff"]),
+    p("diffFormat", select(&["unifiedDiff", "lineChanges"]), "\"unifiedDiff\"").literal().when("operation", &["textDiff"]),
     p("target", text("text"), "\"text\""),
 ];
 
@@ -445,7 +484,7 @@ const NOTIFY: &[ParamSpec] = &[
 // ------------------------------------------------------------------ triggers (milestone 2)
 
 const SCHEDULE: &[ParamSpec] = &[
-    p("mode", select(&["interval", "times", "cron"]), "\"interval\"").literal(),
+    p("mode", select(&["interval", "times", "cron", "once"]), "\"interval\"").literal(),
     p("every", Kind::Number { min: Some(1.0), max: None }, "15").literal().when("mode", &["interval"]),
     p("unit", select(&["minutes", "hours", "days"]), "\"minutes\"").literal().when("mode", &["interval"]),
     p("at", Kind::Strings, "[\"09:00\"]").literal().when("mode", &["times"]),
@@ -453,8 +492,11 @@ const SCHEDULE: &[ParamSpec] = &[
         .literal()
         .when("mode", &["times"]),
     p("cron", text("*/15 8-19 * * 1-5"), "\"\"").literal().when("mode", &["cron"]),
+    p("onceAt", text("2026-12-24 09:00"), "\"\"").literal().when("mode", &["once"]),
     p("timezone", text("America/Santiago"), "\"\"").literal(),
     p("catchUp", Kind::Boolean, "true").literal(),
+    p("skipHolidays", Kind::Boolean, "false").literal().when("mode", &["interval", "times", "cron"]),
+    p("holidayCountry", text("CL"), "\"CL\"").literal().when("skipHolidays", &["true"]),
 ];
 
 const WEBHOOK: &[ParamSpec] = &[
@@ -472,6 +514,10 @@ const WEBHOOK: &[ParamSpec] = &[
     p("toleranceSec", COUNT, "300").literal().when("auth", &["stripeSig", "slackSig"]),
     // A header naming each delivery: a sender's retry of one already run is answered, not run again.
     p("dedupeHeader", text("X-GitHub-Delivery"), "\"\"").literal(),
+    // The handshake a service makes before it sends anything: Meta's `hub.challenge`, Slack's
+    // `url_verification`, Microsoft Graph's `validationToken` — answered here, never run.
+    p("verify", select(&["noVerify", "metaVerify", "slackChallenge", "graphValidation"]), "\"noVerify\"").literal(),
+    p("verifyToken", text("mi-token-de-verificacion"), "\"\"").literal().when("verify", &["metaVerify"]),
     p("respond", select(&["immediately", "lastNode", "respondNode"]), "\"immediately\"").literal(),
 ];
 
@@ -542,6 +588,8 @@ const APP_EVENTS: &[&str] = &[
     "reviewerFailed",
     "prReviewFinished",
     "aiQuotaHigh",
+    "aiQuotaReset",
+    "noteSaved",
 ];
 const APP_EVENT: &[ParamSpec] = &[
     p("event", select(APP_EVENTS), "\"appStart\"").literal(),
@@ -554,6 +602,7 @@ const APP_EVENT: &[ParamSpec] = &[
     // A terminal that ran at least this long: the build you left running, not every `ls`.
     p("minSeconds", COUNT, "60").literal().when("event", &["terminalExited"]),
     p("threshold", Kind::Number { min: Some(1.0), max: Some(100.0) }, "80").literal().when("event", &["aiQuotaHigh"]),
+    p("noteTag", text("publicar"), "\"\"").literal().when("event", &["noteSaved"]),
 ];
 
 const HOTKEY: &[ParamSpec] = &[p("accelerator", text("CmdOrCtrl+Alt+F"), "\"\"").literal()];
@@ -566,6 +615,20 @@ const ERROR_TRIGGER: &[ParamSpec] = &[
 const SUBFLOW: &[ParamSpec] = &[
     p("flow", Kind::Flows { multiple: false }, "\"\"").literal(),
     p("mode", select(&["wait", "fire"]), "\"wait\"").literal(),
+    // What the called flow gets: the items as they come, or the inputs it declares, filled per item.
+    p("subflowInput", select(&["sendItems", "sendInputs"]), "\"sendItems\"").literal(),
+    p("inputs", Kind::SubflowInputs, "{}").when("subflowInput", &["sendInputs"]),
+];
+
+/// "Llamado por otro flujo", which may declare the inputs it takes — and, published, become a node
+/// of its own in the palette (a custom node: a `logic.subflow` preset on this flow).
+const SUBFLOW_TRIGGER: &[ParamSpec] = &[
+    p("fields", Kind::FormFields, "[]").literal(),
+    p("publishAsNode", Kind::Boolean, "false").literal(),
+    p("nodeIcon", raw_select(&["box", "package", "wrench", "rocket", "send", "database", "globe", "file-text", "git-branch", "bot", "bell", "sparkles"]), "\"box\"")
+        .literal()
+        .when("publishAsNode", &["true"]),
+    p("nodeDescription", long_text("Crea el ticket y avisa al equipo"), "\"\"").literal().when("publishAsNode", &["true"]),
 ];
 
 const RESPOND: &[ParamSpec] = &[
@@ -620,6 +683,7 @@ const AGENT: &[ParamSpec] = &[
     ANSWER_FIELDS.when("output", &["json"]),
     ANSWER_SCHEMA.when("output", &["schema"]),
     p("session", select(&["new", "continue"]), "\"new\"").literal(),
+    MEMORY_KEY.when("session", &["continue"]),
     p("effort", select(&["default", "low", "medium", "high", "max"]), "\"default\"").literal(),
     FALLBACK_ENGINES,
     AI_RUN_FOR,
@@ -638,6 +702,10 @@ const LOCAL: &[ParamSpec] = &[
     p("temperature", Kind::Number { min: Some(0.0), max: Some(2.0) }, "0.2"),
     p("maxTokens", Kind::Number { min: Some(16.0), max: None }, "1024"),
     p("contextSize", COUNT, "0"),
+    TOOL_FLOWS,
+    MAX_TOOL_CALLS,
+    MEMORY_KEY,
+    MEMORY_TURNS,
     AI_RUN_FOR,
 ];
 
@@ -771,17 +839,24 @@ const WEB_PAGE: &[ParamSpec] = &[
 ];
 
 const SITE_CHECK: &[ParamSpec] = &[
-    p("check", select(&["httpCheck", "tlsCheck", "dnsCheck", "portCheck"]), "\"httpCheck\"").literal(),
-    p("siteTarget", text("https://example.com"), "\"\""),
+    p("check", select(&["httpCheck", "tlsCheck", "dnsCheck", "portCheck", "pingCheck", "domainExpiry", "publicIp"]), "\"httpCheck\"").literal(),
+    p("siteTarget", text("https://example.com"), "\"\"").when("check", &["httpCheck", "tlsCheck", "dnsCheck", "portCheck", "pingCheck", "domainExpiry"]),
+    p("pingCount", Kind::Number { min: Some(1.0), max: Some(10.0) }, "3").literal().when("check", &["pingCheck"]),
     p("expectStatus", text("200-399"), "\"\"").when("check", &["httpCheck"]),
     p("port", COUNT, "443").when("check", &["tlsCheck", "portCheck"]),
-    p("warnDays", COUNT, "14").literal().when("check", &["tlsCheck"]),
+    p("warnDays", COUNT, "14").literal().when("check", &["tlsCheck", "domainExpiry"]),
     p("recordType", raw_select(&["A", "AAAA", "CNAME", "MX", "TXT", "NS"]), "\"A\"").literal().when("check", &["dnsCheck"]),
     p("timeoutMs", COUNT, "10000").literal(),
 ];
 
 const UNTIL: &[ParamSpec] = &[
-    p("check", select(&["httpUntil", "commandUntil"]), "\"httpUntil\"").literal(),
+    p("check", select(&["httpUntil", "commandUntil", "fileUntil", "portUntil", "sqlUntil"]), "\"httpUntil\"").literal(),
+    p("untilPath", text("~/Descargas/reporte.csv"), "\"\"").when("check", &["fileUntil"]),
+    p("untilGone", Kind::Boolean, "false").when("check", &["fileUntil"]),
+    p("host", text("localhost"), "\"localhost\"").when("check", &["portUntil"]),
+    p("port", COUNT, "5432").when("check", &["portUntil"]),
+    p("connection", Kind::DbConnection { kinds: SQL_ENGINES }, "\"\"").literal().when("check", &["sqlUntil"]),
+    p("untilQuery", Kind::Code { lang: "sql" }, "\"SELECT 1 FROM pedidos WHERE estado = 'listo'\"").when("check", &["sqlUntil"]),
     p("url", text("https://example.com/health"), "\"\"").when("check", &["httpUntil"]),
     p("expectStatus", text("200"), "\"200\"").when("check", &["httpUntil"]),
     p("bodyContains", text("\"status\":\"ok\""), "\"\"").when("check", &["httpUntil"]),
@@ -828,8 +903,22 @@ const PDF: &[ParamSpec] = &[
 ];
 
 const IMAGE: &[ParamSpec] = &[
-    p("operation", select(&["imageInfo", "resize", "convertImage", "crop", "rotate", "qrCreate", "qrRead"]), "\"resize\"").literal(),
-    p("path", file("{{ $json.path }}"), "\"\"").when("operation", &["imageInfo", "resize", "convertImage", "crop", "rotate", "qrRead"]),
+    p(
+        "operation",
+        select(&["imageInfo", "resize", "convertImage", "crop", "rotate", "qrCreate", "qrRead", "stripMetadata", "watermark", "imageCompare"]),
+        "\"resize\"",
+    )
+    .literal(),
+    p("path", file("{{ $json.path }}"), "\"\"")
+        .when("operation", &["imageInfo", "resize", "convertImage", "crop", "rotate", "qrRead", "stripMetadata", "watermark", "imageCompare"]),
+    p("watermarkImage", file("~/Imágenes/logo.png"), "\"\"").when("operation", &["watermark"]),
+    p("watermarkText", text("© Mi empresa"), "\"\"").when("operation", &["watermark"]),
+    p("watermarkPosition", select(&["posBottomRight", "posBottomLeft", "posTopRight", "posTopLeft", "posCenter"]), "\"posBottomRight\"")
+        .literal()
+        .when("operation", &["watermark"]),
+    p("watermarkOpacity", Kind::Number { min: Some(0.0), max: Some(100.0) }, "50").when("operation", &["watermark"]),
+    p("comparePath", file("{{ $json.baseline }}"), "\"\"").when("operation", &["imageCompare"]),
+    p("diffThreshold", Kind::Number { min: Some(0.0), max: Some(255.0) }, "16").when("operation", &["imageCompare"]),
     p("qrText", text("https://example.com"), "\"\"").when("operation", &["qrCreate"]),
     p("qrSize", COUNT, "512").literal().when("operation", &["qrCreate"]),
     p("width", COUNT, "800").when("operation", &["resize", "crop"]),
@@ -837,8 +926,9 @@ const IMAGE: &[ParamSpec] = &[
     p("x", COUNT, "0").when("operation", &["crop"]),
     p("y", COUNT, "0").when("operation", &["crop"]),
     p("degrees", raw_select(&["90", "180", "270"]), "\"90\"").literal().when("operation", &["rotate"]),
-    p("savePath", file_to_write("~/Imágenes/salida.png", &["*"]), "\"\"").when("operation", &["resize", "convertImage", "crop", "rotate", "qrCreate"]),
-    p("quality", COUNT, "85").literal().when("operation", &["resize", "convertImage", "crop", "rotate"]),
+    p("savePath", file_to_write("~/Imágenes/salida.png", &["*"]), "\"\"")
+        .when("operation", &["resize", "convertImage", "crop", "rotate", "qrCreate", "stripMetadata", "watermark", "imageCompare"]),
+    p("quality", COUNT, "85").literal().when("operation", &["resize", "convertImage", "crop", "rotate", "watermark"]),
 ];
 
 const COMMIT: &[ParamSpec] = &[
@@ -1087,6 +1177,8 @@ const LIST: &[ParamSpec] = &[
     p("newerThanMinutes", COUNT, "0"),
     p("sortBy", select(&["name", "modified", "size"]), "\"name\"").literal(),
     p("limit", COUNT, "0"),
+    p("olderThanDays", COUNT, "0"),
+    p("listOutput", select(&["listEntries", "listSummary"]), "\"listEntries\"").literal(),
 ];
 
 const MOVE: &[ParamSpec] = &[
@@ -1097,20 +1189,50 @@ const MOVE: &[ParamSpec] = &[
     p("overwrite", Kind::Boolean, "false").when("operation", &["move", "copy", "rename"]),
 ];
 
-const GIT_OPS: &[&str] = &["status", "makeCommit", "pull", "push", "fetch", "checkout", "createTag", "diff", "log"];
+const GIT_OPS: &[&str] = &[
+    "status",
+    "makeCommit",
+    "pull",
+    "push",
+    "fetch",
+    "checkout",
+    "createTag",
+    "diff",
+    "log",
+    "clone",
+    "mergeBranch",
+    "rebaseOnto",
+    "stashPush",
+    "stashPop",
+    "cherryPick",
+    "revertCommit",
+    "branches",
+    "deleteBranch",
+    "tags",
+];
 const GIT: &[ParamSpec] = &[
     p("project", Kind::Project, "\"\"").literal(),
     p("repoPath", Kind::Folder, "\"\"").literal(),
     p("operation", select(GIT_OPS), "\"status\"").literal(),
-    p("message", text(""), "\"\"").when("operation", &["makeCommit", "createTag"]),
+    p("message", text(""), "\"\"").when("operation", &["makeCommit", "createTag", "stashPush"]),
     p("stageAll", Kind::Boolean, "true").when("operation", &["makeCommit"]),
     p("remote", text("origin"), "\"origin\"").when("operation", &["pull", "push", "fetch"]),
-    p("branch", text(""), "\"\"").when("operation", &["push", "checkout"]),
+    p("branch", text(""), "\"\"").when("operation", &["push", "checkout", "clone", "mergeBranch", "rebaseOnto", "deleteBranch"]),
     p("create", Kind::Boolean, "false").when("operation", &["checkout"]),
     p("pushTags", Kind::Boolean, "false").when("operation", &["push"]),
     p("tag", text("v1.0.0"), "\"\"").when("operation", &["createTag"]),
     p("base", text("main"), "\"\"").when("operation", &["diff"]),
-    p("maxCount", COUNT, "20").when("operation", &["log"]),
+    p("maxCount", COUNT, "20").when("operation", &["log", "tags"]),
+    p("logRange", text("v1.2.0..HEAD"), "\"\"").when("operation", &["log"]),
+    p("cloneUrl", text("https://github.com/org/repo.git"), "\"\"").when("operation", &["clone"]),
+    p("cloneInto", Kind::Folder, "\"\"").when("operation", &["clone"]),
+    p("depth", COUNT, "0").when("operation", &["clone"]),
+    p("ffOnly", Kind::Boolean, "false").when("operation", &["mergeBranch"]),
+    p("shas", text("{{ $json.sha }}"), "\"\"").when("operation", &["cherryPick", "revertCommit"]),
+    p("deleteRemote", Kind::Boolean, "false").when("operation", &["deleteBranch"]),
+    p("forceDelete", Kind::Boolean, "false").when("operation", &["deleteBranch"]),
+    p("mergedInto", text("main"), "\"\"").when("operation", &["branches"]),
+    p("staleDays", COUNT, "0").when("operation", &["branches"]),
 ];
 
 const PULL_REQUEST: &[ParamSpec] = &[
@@ -1148,11 +1270,14 @@ const PIPELINE_RUN: &[ParamSpec] = &[
 ];
 
 const NOTE: &[ParamSpec] = &[
-    p("operation", select(&["create", "addToEnd"]), "\"create\"").literal(),
+    p("operation", select(&["create", "addToEnd", "noteRead", "noteSearch", "noteReplace"]), "\"create\"").literal(),
     p("title", text(""), "\"\"").when("operation", &["create"]),
     p("tags", text(""), "\"\"").when("operation", &["create"]),
-    p("note", Kind::Note, "\"\"").literal().when("operation", &["addToEnd"]),
-    p("content", long_text(""), "\"\""),
+    p("note", Kind::Note, "\"\"").literal().when("operation", &["addToEnd", "noteRead", "noteReplace"]),
+    p("noteQuery", text("despliegue"), "\"\"").when("operation", &["noteSearch"]),
+    p("noteTagFilter", text("publicar"), "\"\"").when("operation", &["noteSearch"]),
+    p("maxResults", COUNT, "20").when("operation", &["noteSearch"]),
+    p("content", long_text(""), "\"\"").when("operation", &["create", "addToEnd", "noteReplace"]),
 ];
 
 const REVIEWER: &[ParamSpec] = &[
@@ -1179,7 +1304,9 @@ const CLIPBOARD: &[ParamSpec] = &[p("text", long_text("{{ $json.text }}"), "\"={
 
 const VAULT: &[ParamSpec] = &[
     p("item", Kind::VaultItem, "\"\"").literal(),
-    p("itemField", text("password"), "\"password\"").literal(),
+    // A field as stored, or the item's current 2FA code (never its secret).
+    p("vaultValue", select(&["vaultField", "vaultTotp"]), "\"vaultField\"").literal(),
+    p("itemField", text("password"), "\"password\"").literal().when("vaultValue", &["vaultField"]),
     p("target", text("secret"), "\"secret\"").literal(),
 ];
 
@@ -1268,8 +1395,20 @@ const API_CHAT: &[ParamSpec] = &[
     ANSWER_SCHEMA.when("output", &["schema"]),
     p("temperature", Kind::Number { min: Some(0.0), max: Some(2.0) }, "0.2"),
     p("maxTokens", Kind::Number { min: Some(16.0), max: None }, "1024"),
+    TOOL_FLOWS,
+    MAX_TOOL_CALLS,
+    MEMORY_KEY,
+    MEMORY_TURNS,
     AI_RUN_FOR,
 ];
+
+/// Other flows the model may call — their "llamado por otro flujo" or "herramienta para IA" trigger
+/// says what each takes (`flows::nodes::llm::tools`).
+const TOOL_FLOWS: ParamSpec = p("toolFlows", Kind::Flows { multiple: true }, "[]").literal();
+const MAX_TOOL_CALLS: ParamSpec = p("maxToolCalls", Kind::Number { min: Some(1.0), max: Some(50.0) }, "6").literal();
+/// One conversation per key — a Telegram chat, a customer — remembered across runs.
+const MEMORY_KEY: ParamSpec = p("memoryKey", text("{{ $json.chatId }}"), "\"\"");
+const MEMORY_TURNS: ParamSpec = p("memoryTurns", Kind::Number { min: Some(1.0), max: Some(100.0) }, "10").literal();
 
 const EMBED_PROVIDER: ParamSpec = p("embedProvider", select(&["openaiApi", "gemini", "compatible", "ollama"]), "\"openaiApi\"").literal();
 const EMBED_URL: ParamSpec = p("embedUrl", text("http://127.0.0.1:11434"), "\"\"").literal().when("embedProvider", &["compatible", "ollama"]);
@@ -1357,8 +1496,12 @@ const PR_MEMORY: &[ParamSpec] = &[
 /// RabbitMQ, Kafka or SQS (`nodes::queue`): publish, or take messages. A field of one broker and one
 /// operation carries both conditions.
 const QUEUE: &[ParamSpec] = &[
-    p("broker", select(&["rabbitmq", "kafka", "sqs"]), "\"rabbitmq\"").literal(),
+    p("broker", select(&["rabbitmq", "kafka", "sqs", "nats", "azureServiceBus"]), "\"rabbitmq\"").literal(),
     p("queueOp", select(&["queuePublish", "queueReceive"]), "\"queuePublish\"").literal(),
+    p("natsUrl", text("nats://localhost:4222"), "\"\"").literal().when("broker", &["nats"]),
+    p("natsSubject", text("pedidos.nuevos"), "\"\"").when("broker", &["nats"]),
+    p("sbNamespace", text("mi-namespace"), "\"\"").literal().when("broker", &["azureServiceBus"]),
+    p("sbEntity", text("pedidos"), "\"\"").when("broker", &["azureServiceBus"]),
     p("credential", Kind::Credential { kinds: &["basic", "aws"] }, "\"\"").literal(),
     p("amqpUrl", text("amqp://rabbit.example.com:5672/%2f"), "\"\"").literal().when("broker", &["rabbitmq"]),
     p("exchange", text(""), "\"\"").when("broker", &["rabbitmq"]).and_when("queueOp", &["queuePublish"]),
@@ -1378,7 +1521,7 @@ const QUEUE: &[ParamSpec] = &[
     p("message", long_text("{{ JSON.stringify($json) }}"), "\"={{ JSON.stringify($json) }}\"").when("queueOp", &["queuePublish"]),
     p("messageHeaders", Kind::KeyValue, "[]").when("queueOp", &["queuePublish"]),
     p("messageLimit", Kind::Number { min: Some(1.0), max: None }, "10").when("queueOp", &["queueReceive"]),
-    p("leaveInQueue", Kind::Boolean, "false").when("broker", &["rabbitmq", "sqs"]).and_when("queueOp", &["queueReceive"]),
+    p("leaveInQueue", Kind::Boolean, "false").when("broker", &["rabbitmq", "sqs", "azureServiceBus"]).and_when("queueOp", &["queueReceive"]),
     EACH,
 ];
 
@@ -1623,7 +1766,10 @@ const ALL_FILE_HOSTS: &[&str] = &["ssh", "sftp", "ftp", "ftps", "smb", "s3", "az
 /// «Evento de Google» (`triggers::watchers::google`).
 const GOOGLE_TRIGGER: &[ParamSpec] = &[
     p("credential", Kind::Credential { kinds: &["oauth2"] }, "\"\"").literal(),
-    p("googleEvent", select(&["calendarSoon", "sheetsNewRow"]), "\"calendarSoon\"").literal(),
+    p("googleEvent", select(&["calendarSoon", "sheetsNewRow", "gmailNew", "driveNew"]), "\"calendarSoon\"").literal(),
+    p("gmailQuery", text("from:facturas@example.com"), "\"\"").literal().when("googleEvent", &["gmailNew"]),
+    p("driveFolder", text(""), "\"\"").literal().when("googleEvent", &["driveNew"]),
+    p("driveQuery", text("name contains 'informe'"), "\"\"").literal().when("googleEvent", &["driveNew"]),
     p("calendarId", text("primary"), "\"primary\"").literal().when("googleEvent", &["calendarSoon"]),
     p("leadMinutes", COUNT, "10").literal().when("googleEvent", &["calendarSoon"]),
     p("spreadsheetId", text("1AbC…"), "\"\"").literal().when("googleEvent", &["sheetsNewRow"]),
@@ -1633,8 +1779,29 @@ const GOOGLE_TRIGGER: &[ParamSpec] = &[
 
 /// «Evento del sistema» (`triggers::watchers::system`).
 const SYSTEM_TRIGGER: &[ParamSpec] = &[
-    p("systemEvent", select(&["wake", "networkChange", "powerPlugged", "powerUnplugged", "batteryLow"]), "\"wake\"").literal(),
+    p(
+        "systemEvent",
+        select(&[
+            "wake",
+            "networkChange",
+            "powerPlugged",
+            "powerUnplugged",
+            "batteryLow",
+            "diskLow",
+            "screenLocked",
+            "screenUnlocked",
+            "wifiChanged",
+            "userIdle",
+            "userBack",
+        ]),
+        "\"wake\"",
+    )
+    .literal(),
     p("batteryBelow", Kind::Number { min: Some(1.0), max: Some(99.0) }, "20").literal().when("systemEvent", &["batteryLow"]),
+    p("diskBelowGb", Kind::Number { min: Some(1.0), max: None }, "10").literal().when("systemEvent", &["diskLow"]),
+    p("diskPath", text("/"), "\"/\"").literal().when("systemEvent", &["diskLow"]),
+    p("wifiName", text("Oficina"), "\"\"").literal().when("systemEvent", &["wifiChanged"]),
+    p("idleMinutes", Kind::Number { min: Some(1.0), max: None }, "10").literal().when("systemEvent", &["userIdle", "userBack"]),
 ];
 
 /// «Enlace o terminal» (`triggers::watchers::open_link`): the name `codeflow --flow <name>` uses, and
@@ -1680,6 +1847,610 @@ const LISTEN: &[ParamSpec] = &[
     p("event", text(""), "\"\"").literal().when("transport", &["socketio", "sse"]),
     p("reconnect", Kind::Boolean, "true").literal(),
 ];
+
+// ------------------------------------------------------------------ milestone 12
+
+const ENGINE_KINDS: &[&str] = &["docker", "podman", "nerdctl"];
+const ENGINE_KIND: ParamSpec = p("engineKind", select(ENGINE_KINDS), "\"docker\"").literal();
+const CONTAINER_CONTEXT: ParamSpec = p("containerContext", text("orbstack"), "\"\"").literal();
+const KUBE_CONTEXT: ParamSpec = p("kubeContext", text("orbstack"), "\"\"").literal();
+const KUBE_KINDS: &[&str] = &[
+    "pods",
+    "deployments",
+    "statefulsets",
+    "daemonsets",
+    "jobs",
+    "cronjobs",
+    "services",
+    "ingresses",
+    "configmaps",
+    "secrets",
+    "persistentvolumeclaims",
+    "events",
+    "nodes",
+    "namespaces",
+];
+
+/// «Contenedor»: Docker, Podman or containerd (`nerdctl`), through their own CLIs.
+const CONTAINER: &[ParamSpec] = &[
+    ENGINE_KIND,
+    CONTAINER_CONTEXT,
+    p(
+        "containerOp",
+        select(&[
+            "ctrList",
+            "ctrStart",
+            "ctrStop",
+            "ctrRestart",
+            "ctrRemove",
+            "ctrLogs",
+            "ctrExec",
+            "ctrInspect",
+            "ctrStats",
+            "ctrPull",
+            "ctrRun",
+            "composeUp",
+            "composeDown",
+            "composeRestart",
+            "composePs",
+        ]),
+        "\"ctrList\"",
+    )
+    .literal(),
+    p("ctrState", select(&["allStates", "runningOnly", "stoppedOnly"]), "\"allStates\"").when("containerOp", &["ctrList"]),
+    p("nameFilter", text("api-*"), "\"\"").when("containerOp", &["ctrList"]),
+    p("container", text("{{ $json.name }}"), "\"\"")
+        .when("containerOp", &["ctrStart", "ctrStop", "ctrRestart", "ctrRemove", "ctrLogs", "ctrExec", "ctrInspect", "ctrStats"]),
+    p("lines", COUNT, "200").when("containerOp", &["ctrLogs"]),
+    p("logsSince", text("10m"), "\"\"").when("containerOp", &["ctrLogs"]),
+    p("command", Kind::Code { lang: "shell" }, "\"\"").when("containerOp", &["ctrExec"]),
+    p("removeVolumes", Kind::Boolean, "false").when("containerOp", &["ctrRemove"]),
+    p("image", text("nginx:alpine"), "\"\"").when("containerOp", &["ctrPull", "ctrRun"]),
+    p("ctrName", text("web"), "\"\"").when("containerOp", &["ctrRun"]),
+    p("publishPorts", Kind::Strings, "[]").when("containerOp", &["ctrRun"]),
+    p("env", Kind::KeyValue, "[]").when("containerOp", &["ctrRun"]),
+    p("volumes", Kind::KeyValue, "[]").when("containerOp", &["ctrRun"]),
+    p("args", Kind::Strings, "[]").when("containerOp", &["ctrRun"]),
+    p("detach", Kind::Boolean, "true").when("containerOp", &["ctrRun"]),
+    p("remove", Kind::Boolean, "false").when("containerOp", &["ctrRun"]),
+    p("composeFile", file("~/proyectos/api/compose.yaml"), "\"\"").when("containerOp", &["composeUp", "composeDown", "composeRestart", "composePs"]),
+    p("composeProject", text("api"), "\"\"").when("containerOp", &["composeUp", "composeDown", "composeRestart", "composePs"]),
+    FAIL_ON_EXIT.when("containerOp", &["ctrExec"]),
+    p("runFor", select(&["each", "once"]), "\"each\"").literal(),
+];
+
+/// «Kubernetes», through `kubectl` — the user's kubeconfig, a context named or the current one.
+const K8S: &[ParamSpec] = &[
+    KUBE_CONTEXT,
+    p("namespace", text("default"), "\"\""),
+    p(
+        "k8sOp",
+        select(&["k8sGet", "k8sDescribe", "k8sLogs", "k8sExec", "k8sScale", "k8sRestart", "k8sRolloutStatus", "k8sDelete", "k8sApply"]),
+        "\"k8sGet\"",
+    )
+    .literal(),
+    p("k8sKind", raw_select(KUBE_KINDS), "\"pods\"").when("k8sOp", &["k8sGet", "k8sDescribe", "k8sScale", "k8sRestart", "k8sRolloutStatus", "k8sDelete"]),
+    p("k8sName", text("api"), "\"\"").when("k8sOp", &["k8sGet", "k8sDescribe", "k8sLogs", "k8sExec", "k8sScale", "k8sRestart", "k8sRolloutStatus", "k8sDelete"]),
+    p("labelSelector", text("app=api"), "\"\"").when("k8sOp", &["k8sGet"]),
+    p("container", text("api"), "\"\"").when("k8sOp", &["k8sLogs", "k8sExec"]),
+    p("lines", COUNT, "200").when("k8sOp", &["k8sLogs"]),
+    p("previous", Kind::Boolean, "false").when("k8sOp", &["k8sLogs"]),
+    p("command", Kind::Code { lang: "shell" }, "\"\"").when("k8sOp", &["k8sExec"]),
+    p("replicas", COUNT, "2").when("k8sOp", &["k8sScale"]),
+    p("timeoutSec", COUNT, "300").literal().when("k8sOp", &["k8sRolloutStatus"]),
+    p("manifest", Kind::Code { lang: "yaml" }, "\"\"").when("k8sOp", &["k8sApply"]),
+    FAIL_ON_EXIT.when("k8sOp", &["k8sExec"]),
+    p("runFor", select(&["each", "once"]), "\"once\"").literal(),
+];
+
+/// «Evento de contenedor»: the engine's own event stream (`docker events`).
+const CONTAINER_TRIGGER: &[ParamSpec] = &[
+    ENGINE_KIND,
+    CONTAINER_CONTEXT,
+    p(
+        "ctrEvents",
+        Kind::MultiSelect { options: &["evDie", "evStart", "evStop", "evRestart", "evUnhealthy", "evHealthy", "evOom", "evCreate", "evDestroy"] },
+        r#"["evDie","evUnhealthy","evOom"]"#,
+    )
+    .literal(),
+    p("nameFilter", text("api-*"), "\"\"").literal(),
+    p("imageFilter", text("postgres*"), "\"\"").literal(),
+    p("composeProject", text("api"), "\"\"").literal(),
+    p("ignoreExitZero", Kind::Boolean, "true").literal(),
+];
+
+/// «Evento de Kubernetes»: pods that crash, restart or fail, rollouts that degrade, nodes going away.
+const K8S_TRIGGER: &[ParamSpec] = &[
+    KUBE_CONTEXT,
+    p("namespace", text("default"), "\"\"").literal(),
+    p(
+        "k8sEvents",
+        Kind::MultiSelect { options: &["podCrashLoop", "podFailed", "podRestarted", "podNotReady", "podPending", "deployDegraded", "nodeNotReady", "warningEvent"] },
+        r#"["podCrashLoop","podFailed","podRestarted"]"#,
+    )
+    .literal(),
+    p("labelSelector", text("app=api"), "\"\"").literal(),
+    p("intervalSec", Kind::Number { min: Some(10.0), max: None }, "30").literal(),
+];
+
+/// «Línea en un log»: a file followed as it grows, or a container's or pod's output.
+const LOG_LINE: &[ParamSpec] = &[
+    p("logSource", select(&["logFile", "logContainer", "logPod"]), "\"logFile\"").literal(),
+    p("logPath", file("/var/log/app/app.log"), "\"\"").literal().when("logSource", &["logFile"]),
+    ENGINE_KIND.when("logSource", &["logContainer"]),
+    CONTAINER_CONTEXT.when("logSource", &["logContainer"]),
+    p("container", text("api"), "\"\"").literal().when("logSource", &["logContainer", "logPod"]),
+    KUBE_CONTEXT.when("logSource", &["logPod"]),
+    p("namespace", text("default"), "\"\"").literal().when("logSource", &["logPod"]),
+    p("k8sName", text("api-7d9f8"), "\"\"").literal().when("logSource", &["logPod"]),
+    p("pattern", text("ERROR|Exception"), "\"\"").literal(),
+    p("regex", Kind::Boolean, "true").literal(),
+    p("contextLines", COUNT, "0").literal(),
+    p("maxPerMinute", COUNT, "30").literal(),
+];
+
+/// «Nuevo en un servicio»: any connector's list, looked at again and again.
+const CONNECTOR_TRIGGER: &[ParamSpec] = &[
+    p("call", Kind::Connector, r#"{"connector":"github","operation":"listIssues","fields":{}}"#).literal(),
+    p("credential", Kind::Credential { kinds: &["bearer", "basic", "webhook", "oauth2"] }, "\"\"").literal(),
+    p("idField", text("id"), "\"id\"").literal(),
+    p("changeMode", select(&["newItems", "newOrChanged"]), "\"newItems\"").literal(),
+    p("watchFields", Kind::Strings, "[]").literal().when("changeMode", &["newOrChanged"]),
+    p("intervalSec", Kind::Number { min: Some(30.0), max: None }, "120").literal(),
+];
+
+/// «Formulario web»: a page on the flows' server that runs the flow with what is sent.
+const FORM_TRIGGER: &[ParamSpec] = &[
+    p("formPath", text("contacto"), "\"\"").literal(),
+    p("formTitle", text("Solicitud de acceso"), "\"\"").literal(),
+    p("formDescription", long_text("Completa los datos y te avisamos."), "\"\"").literal(),
+    p("fields", Kind::FormFields, r#"[{"name":"nombre","label":"Nombre","type":"text","required":true}]"#).literal(),
+    p("submitLabel", text("Enviar"), "\"\"").literal(),
+    p("respond", select(&["immediately", "lastNode", "respondNode"]), "\"immediately\"").literal(),
+    p("thanksMessage", long_text("¡Gracias! Recibimos tus datos."), "\"\"").literal().when("respond", &["immediately"]),
+    p("formAccess", select(&["formOpen", "formPassword"]), "\"formOpen\"").literal(),
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal().when("formAccess", &["formPassword"]),
+];
+
+/// «Asistente en el Chat»: the flow is offered as an assistant in CodeFlow's Chat.
+const CHAT_TRIGGER: &[ParamSpec] = &[
+    p("assistantName", text("Asistente de despliegues"), "\"\"").literal(),
+    p("assistantDescription", long_text("Responde sobre el estado de los despliegues"), "\"\"").literal(),
+    p("historyTurns", Kind::Number { min: Some(0.0), max: Some(100.0) }, "10").literal(),
+];
+
+/// «Desde el menú contextual»: an entry in CodeFlow's right-click menus.
+const CONTEXT_TRIGGER: &[ParamSpec] = &[
+    p(
+        "contextPlaces",
+        Kind::MultiSelect { options: &["placeFile", "placeFolder", "placeSelection", "placeCommit", "placePr"] },
+        r#"["placeFile"]"#,
+    )
+    .literal(),
+    p("menuLabel", text("Subir a S3"), "\"\"").literal(),
+    p("fileGlob", text("*.csv"), "\"\"").literal(),
+    p("askFirst", Kind::Boolean, "false").literal(),
+];
+
+/// «Portapapeles»: something copied that looks like what the flow wants.
+const CLIPBOARD_TRIGGER: &[ParamSpec] = &[
+    p("clipKind", select(&["clipAny", "clipUrl", "clipJson", "clipPath"]), "\"clipAny\"").literal(),
+    p("pattern", text("[A-Z]+-\\d+"), "\"\"").literal(),
+    p("regex", Kind::Boolean, "true").literal(),
+    p("minLength", COUNT, "1").literal(),
+];
+
+/// «Evento de Microsoft»: Outlook, OneDrive, Excel and the calendar, by Graph.
+const MICROSOFT_TRIGGER: &[ParamSpec] = &[
+    p("credential", Kind::Credential { kinds: &["oauth2"] }, "\"\"").literal(),
+    p("msEvent", select(&["outlookNew", "onedriveNew", "excelNewRow", "msCalendarSoon"]), "\"outlookNew\"").literal(),
+    p("outlookFolder", text("inbox"), "\"inbox\"").literal().when("msEvent", &["outlookNew"]),
+    p("outlookQuery", text("factura"), "\"\"").literal().when("msEvent", &["outlookNew"]),
+    p("unreadOnly", Kind::Boolean, "true").literal().when("msEvent", &["outlookNew"]),
+    p("onedriveFolder", text("Documentos/Entrada"), "\"\"").literal().when("msEvent", &["onedriveNew"]),
+    p("workbook", text("Documentos/Ventas.xlsx"), "\"\"").literal().when("msEvent", &["excelNewRow"]),
+    p("worksheet", text("Hoja1"), "\"Hoja1\"").literal().when("msEvent", &["excelNewRow"]),
+    p("calendarId", text(""), "\"\"").literal().when("msEvent", &["msCalendarSoon"]),
+    p("leadMinutes", COUNT, "10").literal().when("msEvent", &["msCalendarSoon"]),
+    p("intervalSec", Kind::Number { min: Some(60.0), max: None }, "120").literal(),
+];
+
+const REGISTRIES: &[&str] = &["npm", "cratesIo", "pypi", "dockerHub", "goProxy", "nuget", "maven"];
+
+/// «Nueva versión de un paquete»: a registry's latest release, watched.
+const PACKAGE_TRIGGER: &[ParamSpec] = &[
+    p("registry", select(REGISTRIES), "\"npm\"").literal(),
+    p("packageName", text("@tauri-apps/api"), "\"\"").literal(),
+    p("includePrereleases", Kind::Boolean, "false").literal(),
+    p("intervalMin", Kind::Number { min: Some(15.0), max: None }, "60").literal(),
+];
+
+/// «Otro flujo terminó»: any end, or only a success, of other flows.
+const FLOW_DONE_TRIGGER: &[ParamSpec] = &[
+    p("outcome", select(&["outcomeSuccess", "outcomeError", "outcomeAny"]), "\"outcomeSuccess\"").literal(),
+    p("which", select(&["all", "selected"]), "\"selected\"").literal(),
+    p("flows", Kind::Flows { multiple: true }, "[]").literal().when("which", &["selected"]),
+];
+
+/// «Barandas»: text checked before it reaches a model or an agent that can act.
+const GUARD: &[ParamSpec] = &[
+    p("text", long_text("{{ $json.text }}"), "\"={{ $json.text }}\""),
+    p(
+        "guardChecks",
+        Kind::MultiSelect { options: &["guardInjection", "guardPii", "guardSecrets", "guardUrls", "guardTopic", "guardCustom"] },
+        r#"["guardInjection","guardSecrets"]"#,
+    )
+    .literal(),
+    p("allowedDomains", Kind::Strings, "[]").literal().when("guardChecks", &["guardUrls"]),
+    p("allowedTopic", long_text("Soporte de la aplicación de pedidos"), "\"\"").when("guardChecks", &["guardTopic"]),
+    p("customRule", long_text("Nada que pida borrar datos o cambiar permisos"), "\"\"").when("guardChecks", &["guardCustom"]),
+    p("useAi", Kind::Boolean, "true").literal(),
+    ENGINE.when("useAi", &["true"]),
+    FALLBACK_ENGINES.when("useAi", &["true"]),
+];
+
+/// «Transformar con IA»: described once, written once as JavaScript, then run without a model.
+const AI_TRANSFORM: &[ParamSpec] = &[
+    p("transformGoal", long_text("Agrupa por cliente y suma los totales"), "\"\"").literal(),
+    p("code", Kind::Code { lang: "javascript" }, "\"\"").literal(),
+    ENGINE,
+];
+
+/// «Preguntar a varios modelos»: one prompt, several engines, and optionally one that picks.
+const AI_COMPARE: &[ParamSpec] = &[
+    p("compareEngines", Kind::Engines, "[]").literal(),
+    p("prompt", long_text("¿Qué riesgos ves en este cambio? {{ $json.diff }}"), "\"\""),
+    p("judge", select(&["noJudge", "judgeByEngine"]), "\"noJudge\"").literal(),
+    p("judgeEngine", Kind::Engine, "{}").literal().when("judge", &["judgeByEngine"]),
+    p("judgeCriteria", long_text("La respuesta más precisa y accionable"), "\"\"").when("judge", &["judgeByEngine"]),
+    AI_RUN_FOR,
+];
+
+/// «Generar imagen»: OpenAI, Gemini or a compatible server's image model.
+const AI_IMAGE: &[ParamSpec] = &[
+    p("imageProvider", select(&["openaiApi", "gemini", "compatible"]), "\"openaiApi\"").literal(),
+    p("baseUrl", text("https://api.example.com/v1"), "\"\"").literal().when("imageProvider", &["compatible"]),
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal(),
+    p("imageModel", text("gpt-image-1"), "\"\"").literal(),
+    p("imagePrompt", long_text("Un faro al atardecer, estilo acuarela"), "\"\""),
+    p("imageSize", raw_select(&["1024x1024", "1536x1024", "1024x1536", "auto"]), "\"1024x1024\"").literal(),
+    p("imageCount", Kind::Number { min: Some(1.0), max: Some(4.0) }, "1").literal(),
+    p("savePath", file_to_write("~/Imágenes/generada.png", &["*"]), "\"\""),
+    AI_RUN_FOR,
+];
+
+/// «Texto a voz»: OpenAI, ElevenLabs or this computer's own voice.
+const AI_SPEECH: &[ParamSpec] = &[
+    p("speechEngine", select(&["openaiApi", "elevenlabs", "systemVoice"]), "\"systemVoice\"").literal(),
+    p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal().when("speechEngine", &["openaiApi", "elevenlabs"]),
+    p("speechText", long_text("{{ $json.text }}"), "\"={{ $json.text }}\""),
+    p("voice", text("alloy"), "\"\""),
+    p("speechModel", text("gpt-4o-mini-tts"), "\"\"").literal().when("speechEngine", &["openaiApi", "elevenlabs"]),
+    p("savePath", file_to_write("~/Música/aviso.mp3", &["*"]), "\"\""),
+    p("speakNow", Kind::Boolean, "false").literal(),
+    AI_RUN_FOR,
+];
+
+/// «Buscar en internet».
+const WEB_SEARCH: &[ParamSpec] = &[
+    p("searchProvider", select(&["brave", "tavily", "searxng", "serper", "duckduckgo"]), "\"duckduckgo\"").literal(),
+    p("credential", Kind::Credential { kinds: &["bearer", "header"] }, "\"\"").literal().when("searchProvider", &["brave", "tavily", "serper"]),
+    p("searxUrl", text("http://localhost:8888"), "\"\"").literal().when("searchProvider", &["searxng"]),
+    p("searchQuery", text("{{ $json.question }}"), "\"\""),
+    p("maxResults", COUNT, "5"),
+    p("searchFreshness", select(&["anyTime", "pastDay", "pastWeek", "pastMonth"]), "\"anyTime\"").literal(),
+    p("searchLanguage", text("es"), "\"\"").literal(),
+    p("fetchPages", COUNT, "0").literal(),
+    EACH,
+];
+
+/// «Navegador»: a page rendered by a real (headless) browser.
+const BROWSER: &[ParamSpec] = &[
+    p("browserOp", select(&["browserShot", "browserPdf", "browserHtml", "browserText", "browserRun"]), "\"browserShot\"").literal(),
+    p("url", text("https://example.com"), "\"\""),
+    p("browserSteps", Kind::Code { lang: "json" }, r##""[\n  { \"action\": \"click\", \"selector\": \"#aceptar\" }\n]""##).when("browserOp", &["browserRun"]),
+    p("waitFor", text("main"), "\"\""),
+    p("waitMs", COUNT, "0").literal(),
+    p("fullPage", Kind::Boolean, "true").literal().when("browserOp", &["browserShot"]),
+    p("viewportWidth", COUNT, "1280").literal(),
+    p("viewportHeight", COUNT, "800").literal(),
+    p("savePath", file_to_write("~/Imágenes/pagina.png", &["*"]), "\"\"").when("browserOp", &["browserShot", "browserPdf"]),
+    p("browserPath", file(""), "\"\"").literal(),
+    p("timeoutMs", COUNT, "30000").literal(),
+    EACH,
+];
+
+/// «SOAP».
+const SOAP: &[ParamSpec] = &[
+    p("wsdlUrl", text("https://servicio.example.com/ws?wsdl"), "\"\""),
+    p("soapOperation", text("ObtenerCliente"), "\"\""),
+    p("soapBodyMode", select(&["soapJson", "soapXml"]), "\"soapJson\"").literal(),
+    p("soapBody", Kind::Code { lang: "json" }, "\"{}\"").when("soapBodyMode", &["soapJson"]),
+    p("soapRaw", Kind::Code { lang: "xml" }, "\"\"").when("soapBodyMode", &["soapXml"]),
+    p("soapVersion", raw_select(&["1.1", "1.2"]), "\"1.1\"").literal(),
+    p("endpoint", text(""), "\"\""),
+    HTTP_CREDENTIAL,
+    HEADERS,
+    TIMEOUT_MS,
+    VERIFY_SSL,
+    EACH,
+];
+
+/// «AWS»: any AWS API, signed with Signature Version 4.
+const AWS: &[ParamSpec] = &[
+    p("credential", Kind::Credential { kinds: &["aws"] }, "\"\"").literal(),
+    p("awsService", text("lambda"), "\"\""),
+    p("awsRegion", text("us-east-1"), "\"us-east-1\""),
+    p("method", raw_select(&["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]), "\"POST\""),
+    p("awsPath", text("/2015-03-31/functions/mi-funcion/invocations"), "\"/\""),
+    p("query", Kind::KeyValue, "[]"),
+    HEADERS,
+    p("awsTarget", text("DynamoDB_20120810.Scan"), "\"\""),
+    p("body", long_text("{{ JSON.stringify($json) }}"), "\"\""),
+    p("awsHost", text(""), "\"\"").literal(),
+    TIMEOUT_MS,
+    EACH,
+];
+
+/// «Encender un equipo» (Wake-on-LAN).
+const WOL: &[ParamSpec] = &[
+    p("macAddress", text("AA:BB:CC:DD:EE:FF"), "\"\""),
+    p("broadcast", text("255.255.255.255"), "\"255.255.255.255\"").literal(),
+    p("wolPort", Kind::Number { min: Some(1.0), max: Some(65535.0) }, "9").literal(),
+];
+
+/// «Versión del proyecto»: semver read, bumped or set across the project's manifests.
+const VERSION: &[ParamSpec] = &[
+    p("versionOp", select(&["versionRead", "versionBump", "versionSet", "versionCompare", "versionLatest"]), "\"versionRead\"").literal(),
+    p("project", Kind::Project, "\"\"").literal().when("versionOp", &["versionRead", "versionBump", "versionSet"]),
+    p("repoPath", Kind::Folder, "\"\"").literal().when("versionOp", &["versionRead", "versionBump", "versionSet"]),
+    p("versionFiles", Kind::Strings, "[]").literal().when("versionOp", &["versionRead", "versionBump", "versionSet"]),
+    p("bumpPart", select(&["patch", "minor", "major", "prepatch", "preminor", "premajor", "prerelease"]), "\"patch\"").when("versionOp", &["versionBump"]),
+    p("preid", text("beta"), "\"beta\"").when("versionOp", &["versionBump"]),
+    p("newVersion", text("2.1.0"), "\"\"").when("versionOp", &["versionSet"]),
+    p("versionA", text("{{ $json.version }}"), "\"\"").when("versionOp", &["versionCompare"]),
+    p("versionB", text("2.0.0"), "\"\"").when("versionOp", &["versionCompare"]),
+    p("versionRange", text("^2.0.0"), "\"\"").when("versionOp", &["versionCompare"]),
+    p("registry", select(REGISTRIES), "\"npm\"").literal().when("versionOp", &["versionLatest"]),
+    p("packageName", text("@tauri-apps/api"), "\"\"").when("versionOp", &["versionLatest"]),
+    p("includePrereleases", Kind::Boolean, "false").when("versionOp", &["versionLatest"]),
+];
+
+/// «Buscar en el código»: the editor's search in files, over a repository.
+const CODE_SEARCH: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("searchText", text("TODO|FIXME"), "\"\""),
+    p("regex", Kind::Boolean, "true").literal(),
+    p("caseSensitive", Kind::Boolean, "false").literal(),
+    p("wholeWord", Kind::Boolean, "false").literal(),
+    p("includeGlobs", text("src/**, *.ts"), "\"\"").literal(),
+    p("excludeGlobs", text("*.test.ts"), "\"\"").literal(),
+    p("maxResults", COUNT, "500").literal(),
+    p("searchOutput", select(&["perMatch", "perFile"]), "\"perMatch\"").literal(),
+];
+
+/// «Vulnerabilidades de dependencias»: the project's lockfiles against OSV.dev.
+const AUDIT: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("repoPath", Kind::Folder, "\"\"").literal(),
+    p("lockfiles", Kind::Strings, "[]").literal(),
+    p("auditSeverity", select(&["sevAll", "sevModerate", "sevHigh", "sevCritical"]), "\"sevAll\"").literal(),
+    p("auditOutput", select(&["perVulnerability", "summaryOnly"]), "\"perVulnerability\"").literal(),
+];
+
+/// «Tabla de Flujos»: rows of the flows' own tables.
+const TABLE: &[ParamSpec] = &[
+    p("tableName", Kind::FlowTable, "\"\"").literal(),
+    p(
+        "tableOp",
+        select(&["tableInsert", "tableUpsert", "tableGet", "tableFind", "tableUpdate", "tableDelete", "tableList", "tableClear"]),
+        "\"tableUpsert\"",
+    )
+    .literal(),
+    p("rowKey", text("{{ $json.id }}"), "\"={{ $json.id }}\"").when("tableOp", &["tableUpsert", "tableGet", "tableUpdate", "tableDelete"]),
+    p("rowData", text("{{ $json }}"), "\"={{ $json }}\"").when("tableOp", &["tableInsert", "tableUpsert", "tableUpdate"]),
+    p(
+        "conditions",
+        Kind::Conditions,
+        r#"{"combinator":"and","ignoreCase":false,"conditions":[{"left":"","op":"equals","right":""}]}"#,
+    )
+    .literal()
+    .when("tableOp", &["tableFind"]),
+    p("maxRows", COUNT, "1000").literal().when("tableOp", &["tableFind", "tableList"]),
+    p("runFor", select(&["each", "once"]), "\"each\"").literal(),
+];
+
+/// «Datos de prueba».
+const FAKE: &[ParamSpec] = &[
+    p("fakeCount", Kind::Number { min: Some(1.0), max: Some(10000.0) }, "10").literal(),
+    p("fakeLocale", select(&["localeCl", "localeEs", "localeEn"]), "\"localeCl\"").literal(),
+    p(
+        "fakeFields",
+        Kind::FakeFields,
+        r#"[{"name":"nombre","kind":"fullName"},{"name":"email","kind":"email"},{"name":"rut","kind":"rut"},{"name":"ciudad","kind":"city"}]"#,
+    )
+    .literal(),
+    p("fakeSeed", text("42"), "\"\"").literal(),
+];
+
+/// «Comparar esquemas»: two databases, their differences and the DDL that closes them.
+const SCHEMA_DIFF: &[ParamSpec] = &[
+    p("connection", Kind::DbConnection { kinds: SQL_ENGINES }, "\"\"").literal(),
+    p("database", text(""), "\"\"").literal(),
+    p("schema", text("public"), "\"\"").literal(),
+    p("connectionB", Kind::DbConnection { kinds: SQL_ENGINES }, "\"\"").literal(),
+    p("databaseB", text(""), "\"\"").literal(),
+    p("schemaB", text("public"), "\"\"").literal(),
+    p("diffOutput", select(&["diffChanges", "diffDdl", "diffSummary"]), "\"diffChanges\"").literal(),
+    p("sqlDialect", select(&["dialectPostgres", "dialectMysql", "dialectSqlserver", "dialectSqlite"]), "\"dialectPostgres\"").literal(),
+];
+
+/// «Audio y video»: ffmpeg's common jobs.
+const MEDIA: &[ParamSpec] = &[
+    p(
+        "mediaOp",
+        select(&["mediaInfo", "extractAudio", "mediaConvert", "mediaTrim", "mediaSplit", "mediaThumbnail", "mediaCompress"]),
+        "\"extractAudio\"",
+    )
+    .literal(),
+    p("mediaPath", file("{{ $json.path }}"), "\"\""),
+    p("audioFormat", raw_select(&["mp3", "m4a", "wav", "ogg", "flac"]), "\"mp3\"").when("mediaOp", &["extractAudio"]),
+    p("trimStart", text("00:00:10"), "\"\"").when("mediaOp", &["mediaTrim"]),
+    p("trimDuration", text("00:01:00"), "\"\"").when("mediaOp", &["mediaTrim"]),
+    p("splitMinutes", Kind::Number { min: Some(0.0), max: None }, "10").when("mediaOp", &["mediaSplit"]),
+    p("splitMaxMb", Kind::Number { min: Some(0.0), max: None }, "24").when("mediaOp", &["mediaSplit"]),
+    p("thumbAt", text("00:00:05"), "\"00:00:01\"").when("mediaOp", &["mediaThumbnail"]),
+    p("crf", Kind::Number { min: Some(18.0), max: Some(40.0) }, "28").when("mediaOp", &["mediaCompress"]),
+    p("savePath", file_to_write("~/Música/salida.mp3", &["*"]), "\"\"").when("mediaOp", &["extractAudio", "mediaConvert", "mediaTrim", "mediaSplit", "mediaThumbnail", "mediaCompress"]),
+    EACH,
+];
+
+/// «Documento Word».
+const DOCX: &[ParamSpec] = &[
+    p("docxOp", select(&["docxRead", "docxFill", "docxCreate"]), "\"docxRead\"").literal(),
+    p("path", file("~/Documentos/plantilla.docx"), "\"\"").when("docxOp", &["docxRead", "docxFill"]),
+    p("docxReadAs", select(&["asMarkdown", "asText"]), "\"asMarkdown\"").literal().when("docxOp", &["docxRead"]),
+    p("fillFrom", select(&["fillItem", "fillPairs"]), "\"fillItem\"").literal().when("docxOp", &["docxFill"]),
+    p("docxValues", Kind::KeyValue, "[]").when("fillFrom", &["fillPairs"]).and_when("docxOp", &["docxFill"]),
+    p("markdown", long_text("# Informe\n\n{{ $json.resumen }}"), "\"\"").when("docxOp", &["docxCreate"]),
+    p("savePath", file_to_write("~/Documentos/salida.docx", &["*"]), "\"\"").when("docxOp", &["docxFill", "docxCreate"]),
+    EACH,
+];
+
+/// «Calendario .ics».
+const ICS: &[ParamSpec] = &[
+    p("icsOp", select(&["icsRead", "icsCreate"]), "\"icsRead\"").literal(),
+    p("icsSource", text("https://calendar.example.com/feriados.ics"), "\"\"").when("icsOp", &["icsRead"]),
+    p("rangeStart", text("{{ $now.toISODate() }}"), "\"\"").when("icsOp", &["icsRead"]),
+    p("rangeEnd", text(""), "\"\"").when("icsOp", &["icsRead"]),
+    p("eventTitle", text("Revisión del despliegue"), "\"\"").when("icsOp", &["icsCreate"]),
+    p("startTime", text("2026-10-05 09:30"), "\"\"").when("icsOp", &["icsCreate"]),
+    p("endTime", text(""), "\"\"").when("icsOp", &["icsCreate"]),
+    p("allDay", Kind::Boolean, "false").when("icsOp", &["icsCreate"]),
+    p("description", long_text(""), "\"\"").when("icsOp", &["icsCreate"]),
+    p("eventLocation", text(""), "\"\"").when("icsOp", &["icsCreate"]),
+    p("organizer", text("yo@example.com"), "\"\"").when("icsOp", &["icsCreate"]),
+    p("attendees", Kind::Strings, "[]").when("icsOp", &["icsCreate"]),
+    p("savePath", file_to_write("~/Documentos/evento.ics", &["*"]), "\"\"").when("icsOp", &["icsCreate"]),
+    EACH,
+];
+
+/// «¿Horario hábil?».
+const BUSINESS_HOURS: &[ParamSpec] = &[
+    p("days", Kind::MultiSelect { options: &["mon", "tue", "wed", "thu", "fri", "sat", "sun"] }, r#"["mon","tue","wed","thu","fri"]"#).literal(),
+    p("workFrom", text("09:00"), "\"09:00\"").literal(),
+    p("workTo", text("18:00"), "\"18:00\"").literal(),
+    p("timezone", text("America/Santiago"), "\"\"").literal(),
+    p("skipHolidays", Kind::Boolean, "true").literal(),
+    p("holidayCountry", text("CL"), "\"CL\"").literal().when("skipHolidays", &["true"]),
+    p("atTime", text("{{ $json.createdAt }}"), "\"\""),
+];
+
+/// «Comprobar»: conditions every item must meet, or the run fails with the message.
+const ASSERT: &[ParamSpec] = &[
+    p(
+        "conditions",
+        Kind::Conditions,
+        r#"{"combinator":"and","ignoreCase":false,"conditions":[{"left":"","op":"equals","right":""}]}"#,
+    )
+    .literal(),
+    p("assertMessage", text("El total no cuadra"), "\"\""),
+];
+
+/// «Validar datos».
+const VALIDATE: &[ParamSpec] = &[
+    p("validationRules", Kind::ValidationRules, r#"[{"field":"email","check":"isEmail","arg":""}]"#).literal(),
+    p("normalize", Kind::MultiSelect { options: &["normTrim", "normLowerEmail", "normRut", "normPhone"] }, r#"["normTrim"]"#).literal(),
+    p("phoneCountry", text("56"), "\"56\"").literal(),
+    p("errorsField", text("_errors"), "\"_errors\"").literal(),
+];
+
+/// «Limitar».
+const LIMIT: &[ParamSpec] = &[
+    p("limitMode", select(&["firstN", "lastN", "skipN", "pageN"]), "\"firstN\"").literal(),
+    p("keepCount", COUNT, "10"),
+    p("skipCount", COUNT, "0").when("limitMode", &["pageN"]),
+];
+
+/// «Números».
+const NUMBER_TOOL: &[ParamSpec] = &[
+    p("numberOp", select(&["numFormat", "numParse", "numRound", "numBytes", "numConvert", "numRandom", "numPercent"]), "\"numFormat\"").literal(),
+    p("value", text("{{ $json.total }}"), "\"\"").when("numberOp", &["numFormat", "numParse", "numRound", "numBytes", "numConvert", "numPercent"]),
+    p("numLocale", text("es-CL"), "\"es-CL\"").when("numberOp", &["numFormat", "numParse"]),
+    p("numStyle", select(&["styleDecimal", "styleCurrency", "stylePercent"]), "\"styleDecimal\"").when("numberOp", &["numFormat"]),
+    p("currency", text("CLP"), "\"CLP\"").when("numStyle", &["styleCurrency"]),
+    p("decimals", Kind::Number { min: Some(0.0), max: Some(10.0) }, "0").when("numberOp", &["numFormat", "numRound", "numBytes", "numConvert", "numPercent"]),
+    p("roundMode", select(&["roundHalf", "roundUp", "roundDown"]), "\"roundHalf\"").when("numberOp", &["numRound"]),
+    p("fromUnit", text("km"), "\"\"").when("numberOp", &["numConvert"]),
+    p("toUnit", text("mi"), "\"\"").when("numberOp", &["numConvert"]),
+    p("minValue", NUMBER, "1").when("numberOp", &["numRandom"]),
+    p("maxValue", NUMBER, "100").when("numberOp", &["numRandom"]),
+    p("integerOnly", Kind::Boolean, "true").when("numberOp", &["numRandom"]),
+    p("baseValue", text("{{ $json.previous }}"), "\"\"").when("numberOp", &["numPercent"]),
+    p("target", text("number"), "\"number\""),
+];
+
+/// «Formato para chat».
+const CHAT_FORMAT: &[ParamSpec] = &[
+    p("text", long_text("{{ $json.text }}"), "\"={{ $json.text }}\""),
+    p("chatTarget", select(&["fmtSlack", "fmtTelegram", "fmtTelegramHtml", "fmtWhatsapp", "fmtDiscord", "fmtTeams", "fmtHtml", "fmtPlain"]), "\"fmtSlack\"").literal(),
+    p("target", text("text"), "\"text\""),
+];
+
+/// «Colección del cliente API».
+const API_COLLECTION: &[ParamSpec] = &[
+    p("apiCollection", Kind::ApiCollection, "\"\"").literal(),
+    p("environment", Kind::ApiEnvironment, "\"\"").literal(),
+    p("variables", Kind::KeyValue, "[]"),
+    p("stopOnFailure", Kind::Boolean, "false").literal(),
+    p("delayMs", COUNT, "0").literal(),
+    p("collectionOutput", select(&["perRequest", "collectionSummary"]), "\"perRequest\"").literal(),
+];
+
+/// «Diagrama».
+const DIAGRAM: &[ParamSpec] = &[
+    p("diagramOp", select(&["diagramSave", "diagramRead"]), "\"diagramSave\"").literal(),
+    p("title", text("Arquitectura"), "\"\""),
+    p("diagramFormat", select(&["fmtDbml", "fmtDrawio", "fmtExcalidraw"]), "\"fmtDbml\"").literal().when("diagramOp", &["diagramSave"]),
+    p("content", long_text("Table usuarios {\n  id int [pk]\n}"), "\"\"").when("diagramOp", &["diagramSave"]),
+];
+
+/// «Historia o Wiki».
+const STORY: &[ParamSpec] = &[
+    p("storyOp", select(&["storyReview", "docGenerate", "docPublish"]), "\"storyReview\"").literal(),
+    p("reviewStage", select(&["stageAnalyze", "stageDescription", "stageCriteria", "stageTasks", "stageTasksQa"]), "\"stageAnalyze\"")
+        .literal()
+        .when("storyOp", &["storyReview"]),
+    p("workItemKind", select(&["kindStory", "kindBug"]), "\"kindStory\"").literal().when("storyOp", &["storyReview"]),
+    p("storyText", long_text("Como cliente quiero pagar con transferencia…"), "\"\"").when("storyOp", &["storyReview"]),
+    p("docTitle", text("Arquitectura del API"), "\"\"").when("storyOp", &["docGenerate", "docPublish"]),
+    p("docScope", select(&["scopeRepo", "scopeWorkspace"]), "\"scopeRepo\"").literal().when("storyOp", &["docGenerate"]),
+    p("project", Kind::Project, "\"\"").literal().when("storyOp", &["storyReview", "docGenerate"]),
+    p("instructions", long_text(""), "\"\"").when("storyOp", &["docGenerate"]),
+    p("useContext", Kind::Boolean, "false").literal().when("storyOp", &["storyReview", "docGenerate"]),
+    p("overwrite", Kind::Boolean, "false").literal().when("storyOp", &["docPublish"]),
+    ENGINE.when("storyOp", &["storyReview", "docGenerate"]),
+];
+
+/// «Uso de IA».
+const AI_USAGE: &[ParamSpec] = &[
+    p("usagePeriod", select(&["today", "last7", "last30", "thisMonth"]), "\"last7\"").literal(),
+    p("usageGroup", select(&["byProvider", "byModel", "byTask"]), "\"byProvider\"").literal(),
+    p("includeQuota", Kind::Boolean, "true").literal(),
+];
+
+/// «Procesos y puertos».
+const PROCESS: &[ParamSpec] = &[
+    p("processOp", select(&["listPorts", "whoUsesPort", "freePort", "listProcesses", "killProcess", "systemInfo"]), "\"whoUsesPort\"").literal(),
+    p("port", COUNT, "3000").when("processOp", &["whoUsesPort", "freePort"]),
+    p("processName", text("node"), "\"\"").when("processOp", &["listProcesses", "killProcess"]),
+    p("pid", COUNT, "0").when("processOp", &["killProcess"]),
+    p("sortProcesses", select(&["byCpu", "byMemory", "byName"]), "\"byCpu\"").literal().when("processOp", &["listProcesses"]),
+    p("maxResults", COUNT, "20").when("processOp", &["listProcesses", "listPorts"]),
+];
+
+/// «Datos de la ejecución»: key/values filed on the run, to find it by them in Ejecuciones.
+const RUN_DATA: &[ParamSpec] = &[p("runFields", Kind::KeyValue, r#"[{"name":"pedido","value":"={{ $json.id }}"}]"#)];
 
 /// The parameters of a node type; empty for a type that has none (or none yet).
 pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
@@ -1782,6 +2553,51 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "trigger.phone" => PHONE,
         "trigger.bot" => BOT,
         "trigger.tool" => TOOL,
+        "trigger.subflow" => SUBFLOW_TRIGGER,
+        "trigger.container" => CONTAINER_TRIGGER,
+        "trigger.k8s" => K8S_TRIGGER,
+        "trigger.logLine" => LOG_LINE,
+        "trigger.connector" => CONNECTOR_TRIGGER,
+        "trigger.form" => FORM_TRIGGER,
+        "trigger.chat" => CHAT_TRIGGER,
+        "trigger.context" => CONTEXT_TRIGGER,
+        "trigger.clipboard" => CLIPBOARD_TRIGGER,
+        "trigger.microsoft" => MICROSOFT_TRIGGER,
+        "trigger.package" => PACKAGE_TRIGGER,
+        "trigger.flowDone" => FLOW_DONE_TRIGGER,
+        "code.container" => CONTAINER,
+        "code.k8s" => K8S,
+        "ai.guard" => GUARD,
+        "ai.transform" => AI_TRANSFORM,
+        "ai.compare" => AI_COMPARE,
+        "ai.image" => AI_IMAGE,
+        "ai.speech" => AI_SPEECH,
+        "net.search" => WEB_SEARCH,
+        "net.browser" => BROWSER,
+        "net.soap" => SOAP,
+        "net.aws" => AWS,
+        "net.wol" => WOL,
+        "files.version" => VERSION,
+        "app.search" => CODE_SEARCH,
+        "app.audit" => AUDIT,
+        "data.table" => TABLE,
+        "data.fake" => FAKE,
+        "data.schemaDiff" => SCHEMA_DIFF,
+        "files.media" => MEDIA,
+        "files.docx" => DOCX,
+        "files.ics" => ICS,
+        "logic.businessHours" => BUSINESS_HOURS,
+        "logic.assert" => ASSERT,
+        "transform.validate" => VALIDATE,
+        "transform.limit" => LIMIT,
+        "transform.number" => NUMBER_TOOL,
+        "transform.chatFormat" => CHAT_FORMAT,
+        "app.apiCollection" => API_COLLECTION,
+        "app.diagram" => DIAGRAM,
+        "app.story" => STORY,
+        "app.aiUsage" => AI_USAGE,
+        "app.process" => PROCESS,
+        "app.runData" => RUN_DATA,
         "trigger.feed" => FEED_TRIGGER,
         "net.feed" => FEED_READ,
         "trigger.queue" => QUEUE_TRIGGER,

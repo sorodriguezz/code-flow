@@ -272,6 +272,8 @@ const OUTCOME_KEY: Record<string, TranslationKey> = {
   skipped: "flows.schedule.outcomeSkipped",
   queued: "flows.schedule.outcomeQueued",
   missed: "flows.schedule.outcomeMissed",
+  holiday: "flows.schedule.outcomeHoliday",
+  settling: "flows.schedule.outcomeSettling",
 };
 
 /** The name the flows' MCP server is registered under, in CodeFlow and in the commands shown. */

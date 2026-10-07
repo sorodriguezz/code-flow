@@ -2004,7 +2004,128 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     seed_manual_flow_order(conn)?;
     add_flow_run_days(conn)?;
     add_flow_templates(conn)?;
+    rehash_flow_trust(conn)?;
+    add_flow_tables_store(conn)?;
+    add_custom_data_to_flow_runs(conn)?;
+    add_flow_tests(conn)?;
     Ok(())
+}
+
+/// The executable hash covers more node types since milestone 12 (`spec::EXECUTABLE_TYPES`): a flow
+/// with a notebook, a shortcut or a container command now hashes differently from what was stored.
+/// Recomputed once, and the trust each flow had — its stored hash was the trusted one, or it ran
+/// nothing — is carried to the new hash, so nobody's working flow turns "unreviewed" over a
+/// definition change. A template that carried trust (a non-empty `trusted_hash`) keeps it the same way.
+pub(crate) fn rehash_flow_trust(conn: &Connection) -> rusqlite::Result<()> {
+    const MARKER: &str = "migration:flow-exec-hash-m12";
+    if !table_exists(conn, "flows")? || !has_column(conn, "flows", "exec_hash")? {
+        return Ok(());
+    }
+    let done: Option<String> = rusqlite::OptionalExtension::optional(conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [MARKER], |row| row.get(0)))?;
+    if done.is_some() {
+        return Ok(());
+    }
+    let rows: Vec<(String, String, String, String)> = {
+        let mut statement = conn.prepare("SELECT id, spec, exec_hash, trusted_hash FROM flows")?;
+        let collected = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        collected
+    };
+    // A database with no flows yet has nothing hashed the old way — and every flow it gets will be
+    // hashed the new way — so there is nothing to mark either (a fresh install keeps no setting).
+    let templates_trusted: i64 = if table_exists(conn, "flow_templates")? {
+        conn.query_row("SELECT COUNT(*) FROM flow_templates WHERE trusted_hash <> ''", [], |row| row.get(0))?
+    } else {
+        0
+    };
+    if rows.is_empty() && templates_trusted == 0 {
+        return Ok(());
+    }
+    for (id, text, old_hash, trusted_hash) in rows {
+        let Ok(parsed) = crate::flows::spec::parse(&text) else { continue };
+        let new_hash = crate::flows::spec::executable_hash(&parsed);
+        if new_hash == old_hash {
+            continue;
+        }
+        let was_trusted = old_hash.is_empty() || (!trusted_hash.is_empty() && trusted_hash == old_hash);
+        conn.execute(
+            "UPDATE flows SET exec_hash = ?2, trusted_hash = CASE WHEN ?3 THEN ?2 ELSE trusted_hash END WHERE id = ?1",
+            rusqlite::params![id, new_hash, was_trusted],
+        )?;
+    }
+    if table_exists(conn, "flow_templates")? {
+        let templates: Vec<(String, String)> = {
+            let mut statement = conn.prepare("SELECT id, spec FROM flow_templates WHERE trusted_hash <> ''")?;
+            let collected = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        for (id, text) in templates {
+            let Ok(parsed) = crate::flows::spec::parse(&text) else { continue };
+            conn.execute("UPDATE flow_templates SET trusted_hash = ?2 WHERE id = ?1", rusqlite::params![id, crate::flows::spec::executable_hash(&parsed)])?;
+        }
+    }
+    conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')", [MARKER])?;
+    Ok(())
+}
+
+/// Flujos' own tables (`flows::tables`, the «Tabla de Flujos» node): a table is a name in a workspace
+/// (or global), its rows JSON documents keyed by a text key. Core data — it is what the user's flows
+/// remember — so it travels with backups like the flows themselves.
+pub(crate) fn add_flow_tables_store(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS flow_data_tables (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            columns      TEXT NOT NULL DEFAULT '[]',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            UNIQUE (workspace_id, name)
+        );
+        CREATE TABLE IF NOT EXISTS flow_data_rows (
+            table_id   TEXT NOT NULL REFERENCES flow_data_tables(id) ON DELETE CASCADE,
+            row_key    TEXT NOT NULL,
+            data       TEXT NOT NULL,
+            seq        INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (table_id, row_key)
+        );
+        CREATE INDEX IF NOT EXISTS flow_data_rows_seq ON flow_data_rows (table_id, seq);
+        "#,
+    )
+}
+
+/// What a run filed about itself with «Datos de la ejecución» — searchable in Ejecuciones.
+pub(crate) fn add_custom_data_to_flow_runs(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "flow_runs")? || has_column(conn, "flow_runs", "custom_data")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE flow_runs ADD COLUMN custom_data TEXT NOT NULL DEFAULT '{}';")
+}
+
+/// A flow's tests: an input to start it with and what its output must hold (`flows::tests`).
+pub(crate) fn add_flow_tests(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS flow_tests (
+            id          TEXT PRIMARY KEY,
+            flow_id     TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
+            name        TEXT NOT NULL,
+            input       TEXT NOT NULL DEFAULT '{}',
+            node_id     TEXT NOT NULL DEFAULT '',
+            expected    TEXT NOT NULL DEFAULT '{}',
+            match_mode  TEXT NOT NULL DEFAULT 'contains',
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            last_status TEXT NOT NULL DEFAULT '',
+            last_detail TEXT NOT NULL DEFAULT '',
+            last_run_at TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS flow_tests_flow ON flow_tests (flow_id, sort_order);
+        "#,
+    )
 }
 
 /// The user's own flow templates, beside the ones the app ships (`lib/flows/templates.ts`): a flow

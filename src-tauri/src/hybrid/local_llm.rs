@@ -800,6 +800,212 @@ where
     Ok(outcome)
 }
 
+// ------------------------------------------------------------------ a conversation with tools
+
+/// One turn of a conversation that may call tools, or that carries remembered turns — the flows'
+/// «Modelo local» with other flows as tools. **Not streamed**: a tool call is only usable whole,
+/// and the node waits for the whole answer anyway.
+///
+/// The messages are OpenAI-shaped whatever the server: `system`, `user`, `assistant` with
+/// `tool_calls` whose arguments are JSON text, `tool` with `tool_call_id`. Ollama's differences —
+/// arguments as an object, a result named by `tool_name` — are made here, both ways
+/// ([`ollama_messages`], [`read_converse`]).
+pub struct ConverseRequest<'a> {
+    pub model: &'a str,
+    pub messages: &'a [Value],
+    /// OpenAI-shaped function tools.
+    pub tools: &'a [Value],
+    /// Tools stay on offer (the conversation names them) but the model must answer in words — the
+    /// last turn, once the node's budget of calls is spent. Ollama has no such switch: its tools are
+    /// left out instead, which it accepts.
+    pub no_more_tools: bool,
+    /// Ollama only, as in [`ChatRequest`].
+    pub num_ctx: Option<u32>,
+    pub max_tokens: u32,
+    pub temperature: f32,
+    pub keep_alive: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConverseOutcome {
+    pub text: String,
+    /// The assistant's message, OpenAI-shaped, to put back in the conversation.
+    pub message: Value,
+    /// `{ id, name, arguments }`, `arguments` an object; every call has an id.
+    pub tool_calls: Vec<Value>,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub finish: Finish,
+}
+
+/// The conversation as Ollama reads it.
+pub fn ollama_messages(messages: &[Value]) -> Vec<Value> {
+    let mut names = std::collections::HashMap::new();
+    messages
+        .iter()
+        .map(|message| {
+            let mut message = message.clone();
+            if let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                for call in calls.iter_mut() {
+                    let id = call.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or_default().to_string();
+                    if !id.is_empty() {
+                        names.insert(id, name);
+                    }
+                    if let Some(arguments) = call.pointer_mut("/function/arguments") {
+                        if let Some(text) = arguments.as_str() {
+                            *arguments = serde_json::from_str(text).unwrap_or_else(|_| json!({}));
+                        }
+                    }
+                }
+            }
+            if message.get("role").and_then(Value::as_str) == Some("tool") {
+                let name = message.get("tool_call_id").and_then(Value::as_str).and_then(|id| names.get(id)).cloned();
+                if let Some(name) = name {
+                    message["tool_name"] = json!(name);
+                }
+            }
+            message
+        })
+        .collect()
+}
+
+/// A tool call from either server's shape.
+fn call_of(call: &Value, index: usize) -> Value {
+    let arguments = match call.pointer("/function/arguments") {
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text).ok().filter(Value::is_object).unwrap_or_else(|| json!({})),
+        Some(Value::Object(map)) => Value::Object(map.clone()),
+        _ => json!({}),
+    };
+    let id = call
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("call_{index}"));
+    json!({ "id": id, "name": call.pointer("/function/name").and_then(Value::as_str).unwrap_or_default(), "arguments": arguments })
+}
+
+/// Answer text without a reasoning block a server left inline.
+fn without_thinking(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("<think>") {
+        if let Some(end) = rest.find("</think>") {
+            return rest[end + "</think>".len()..].trim().to_string();
+        }
+    }
+    text.trim().to_string()
+}
+
+/// What one answer says, from either server's shape — apart from [`converse`] so it is tested
+/// without a server.
+pub fn read_converse(kind: BackendKind, body: &Value) -> ConverseOutcome {
+    let finish_of = |reason: Option<&str>| match reason {
+        Some("stop") | Some("tool_calls") => Finish::Stop,
+        Some("length") => Finish::Length,
+        _ => Finish::Unknown,
+    };
+    let (message, prompt_tokens, completion_tokens, finish) = match kind {
+        BackendKind::Ollama => (
+            body.get("message").cloned().unwrap_or_else(|| json!({})),
+            body.get("prompt_eval_count").and_then(Value::as_u64),
+            body.get("eval_count").and_then(Value::as_u64),
+            finish_of(body.get("done_reason").and_then(Value::as_str)),
+        ),
+        BackendKind::Openai | BackendKind::Bundled => {
+            let choice = &body["choices"][0];
+            (
+                choice.get("message").cloned().unwrap_or_else(|| json!({})),
+                body.pointer("/usage/prompt_tokens").and_then(Value::as_u64),
+                body.pointer("/usage/completion_tokens").and_then(Value::as_u64),
+                finish_of(choice.get("finish_reason").and_then(Value::as_str)),
+            )
+        }
+    };
+    let tool_calls: Vec<Value> =
+        message.get("tool_calls").and_then(Value::as_array).into_iter().flatten().enumerate().map(|(index, call)| call_of(call, index)).collect();
+    let text = without_thinking(message.get("content").and_then(Value::as_str).unwrap_or_default());
+    let mut stored = json!({ "role": "assistant", "content": text });
+    if !tool_calls.is_empty() {
+        stored["tool_calls"] = Value::Array(
+            tool_calls
+                .iter()
+                .map(|call| {
+                    json!({
+                        "id": call["id"],
+                        "type": "function",
+                        "function": { "name": call["name"], "arguments": call["arguments"].to_string() },
+                    })
+                })
+                .collect(),
+        );
+    }
+    ConverseOutcome { text, message: stored, tool_calls, prompt_tokens, completion_tokens, finish }
+}
+
+/// One turn of [`ConverseRequest`]; `cancel` resolving drops the request.
+pub async fn converse<C>(endpoint: &Endpoint, request: &ConverseRequest<'_>, cancel: C) -> Result<ConverseOutcome, LocalError>
+where
+    C: Future<Output = ()>,
+{
+    let client = client_for(&endpoint.base_url);
+    let builder = match endpoint.kind {
+        BackendKind::Ollama => {
+            let mut options = json!({ "num_predict": request.max_tokens, "temperature": request.temperature });
+            if let Some(num_ctx) = request.num_ctx {
+                options["num_ctx"] = json!(num_ctx);
+            }
+            let mut body = json!({ "model": request.model, "messages": ollama_messages(request.messages), "stream": false, "options": options });
+            if !request.tools.is_empty() && !request.no_more_tools {
+                body["tools"] = json!(request.tools);
+            }
+            if let Some(keep_alive) = request.keep_alive {
+                body["keep_alive"] = json!(keep_alive);
+            }
+            client.post(format!("{}/api/chat", endpoint.base_url)).json(&body)
+        }
+        BackendKind::Openai | BackendKind::Bundled => {
+            let mut body = json!({
+                "model": request.model,
+                "messages": request.messages,
+                "stream": false,
+                "max_tokens": request.max_tokens,
+                "temperature": request.temperature,
+            });
+            if !request.tools.is_empty() {
+                body["tools"] = json!(request.tools);
+                if request.no_more_tools {
+                    body["tool_choice"] = json!("none");
+                }
+            }
+            with_auth(client.post(format!("{}/v1/chat/completions", endpoint.base_url)), endpoint).json(&body)
+        }
+    };
+    tokio::pin!(cancel);
+    let response = tokio::select! {
+        biased;
+        _ = &mut cancel => return Err(LocalError::Cancelled),
+        sent = tokio::time::timeout(FIRST_TOKEN_LIMIT, builder.send()) => match sent {
+            Err(_) => return Err(LocalError::Stalled(format!("no answer in {} min", FIRST_TOKEN_LIMIT.as_secs() / 60))),
+            Ok(sent) => sent.map_err(transport_error)?,
+        },
+    };
+    if !response.status().is_success() {
+        return Err(error_body(response).await);
+    }
+    let text = tokio::select! {
+        biased;
+        _ = &mut cancel => return Err(LocalError::Cancelled),
+        text = response.text() => text.map_err(transport_error)?,
+    };
+    let body: Value = serde_json::from_str(&text).map_err(|e| LocalError::Malformed(format!("{e}: {text:.120}")))?;
+    if let Some(error) = body.get("error") {
+        let message = error.get("message").and_then(Value::as_str).or_else(|| error.as_str()).unwrap_or("error");
+        return Err(LocalError::Server { status: 200, message: message.to_string() });
+    }
+    Ok(read_converse(endpoint.kind, &body))
+}
+
 /// Turns the response body, as it arrives, into answer text and final counts. Separate from
 /// [`chat`] so both wire formats can be tested without a server.
 pub struct StreamReader {
@@ -1213,5 +1419,37 @@ mod tests {
         assert!(pull_line("", &mut layers).unwrap().is_none());
         let failed = pull_line(r#"{"error":"pull model manifest: file does not exist"}"#, &mut layers).unwrap_err();
         assert!(failed.sentence().contains("file does not exist"));
+    }
+
+    #[test]
+    fn a_conversation_reads_tool_calls_from_both_servers() {
+        let openai = json!({"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": null,
+            "tool_calls": [{"id": "call_9", "type": "function", "function": {"name": "crear_ticket", "arguments": "{\"titulo\":\"Caída\"}"}}]}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 9}});
+        let read = read_converse(BackendKind::Openai, &openai);
+        assert_eq!(read.tool_calls, vec![json!({"id": "call_9", "name": "crear_ticket", "arguments": {"titulo": "Caída"}})]);
+        assert_eq!(read.message["tool_calls"][0]["function"]["arguments"], "{\"titulo\":\"Caída\"}");
+        assert_eq!(read.prompt_tokens, Some(40));
+
+        let ollama = json!({"message": {"role": "assistant", "content": "<think>hmm</think>Listo",
+            "tool_calls": [{"function": {"name": "crear_ticket", "arguments": {"titulo": "Caída"}}}]}, "done_reason": "stop", "eval_count": 3});
+        let read = read_converse(BackendKind::Ollama, &ollama);
+        assert_eq!(read.text, "Listo");
+        assert_eq!(read.tool_calls[0]["id"], "call_0", "a call without an id gets one");
+        assert_eq!(read.finish, Finish::Stop);
+    }
+
+    #[test]
+    fn ollama_gets_arguments_as_objects_and_named_results() {
+        let messages = vec![
+            json!({"role": "user", "content": "abre un ticket"}),
+            json!({"role": "assistant", "content": "", "tool_calls": [{"id": "call_0", "type": "function",
+                "function": {"name": "crear_ticket", "arguments": "{\"titulo\":\"x\"}"}}]}),
+            json!({"role": "tool", "tool_call_id": "call_0", "content": "{\"id\":7}"}),
+        ];
+        let converted = ollama_messages(&messages);
+        assert_eq!(converted[1]["tool_calls"][0]["function"]["arguments"], json!({"titulo": "x"}));
+        assert_eq!(converted[2]["tool_name"], "crear_ticket");
+        assert_eq!(messages[2].get("tool_name"), None, "the conversation itself stays OpenAI-shaped");
     }
 }

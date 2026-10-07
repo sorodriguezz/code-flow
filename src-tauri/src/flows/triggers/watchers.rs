@@ -17,21 +17,21 @@ use super::TriggerView;
 use crate::db::{flow_run_queries, Db};
 use crate::flows::run::Item;
 
-fn text(params: &Value, name: &str) -> String {
+pub(super) fn text(params: &Value, name: &str) -> String {
     params.get(name).and_then(Value::as_str).unwrap_or_default().trim().to_string()
 }
 
-fn seconds(params: &Value, name: &str, floor: u64, fallback: u64) -> Duration {
+pub(super) fn seconds(params: &Value, name: &str, floor: u64, fallback: u64) -> Duration {
     Duration::from_secs(params.get(name).and_then(Value::as_f64).map(|n| n.max(0.0) as u64).unwrap_or(fallback).max(floor))
 }
 
-fn state_get(app: &AppHandle, flow_id: &str, key: &str) -> Option<Value> {
+pub(super) fn state_get(app: &AppHandle, flow_id: &str, key: &str) -> Option<Value> {
     let db = app.state::<Db>();
     let conn = db.0.lock().ok()?;
     flow_run_queries::state_get(&conn, flow_id, key).ok().flatten()
 }
 
-fn state_set(app: &AppHandle, flow_id: &str, key: &str, value: &Value) {
+pub(super) fn state_set(app: &AppHandle, flow_id: &str, key: &str, value: &Value) {
     let db = app.state::<Db>();
     let conn = db.0.lock();
     if let Ok(conn) = conn {
@@ -39,14 +39,50 @@ fn state_set(app: &AppHandle, flow_id: &str, key: &str, value: &Value) {
     }
 }
 
-fn fire(app: &AppHandle, flow_id: &str, node_id: &str, view: &Arc<Mutex<TriggerView>>, item: Value) {
+/// A poller's memory, tied to what it watches: the stored value carries a print of the watched
+/// parameters, and once the query, the folder or the sheet is edited the old memory no longer
+/// applies — the next look is a first look again, seeded and never fired. Kept under the node's id
+/// alone, it was read against the new query and fired everything that query listed.
+pub(super) fn memory_get(app: &AppHandle, flow_id: &str, key: &str, watched: &Value) -> Option<Value> {
+    let stored = state_get(app, flow_id, key)?;
+    if stored.get("watch").and_then(Value::as_str) != Some(watch_print(watched).as_str()) {
+        return None;
+    }
+    stored.get("value").cloned()
+}
+
+pub(super) fn memory_set(app: &AppHandle, flow_id: &str, key: &str, watched: &Value, value: &Value) {
+    state_set(app, flow_id, key, &json!({"watch": watch_print(watched), "value": value}));
+}
+
+fn watch_print(watched: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(watched.to_string().as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The meetings an «about to start» trigger already announced, kept on disk (a save re-arms the
+/// trigger, and a memory that lived in the task announced the same meeting again): `id|start` →
+/// start, pruned once a meeting is a day past.
+pub(super) fn announced_once(app: &AppHandle, flow_id: &str, key: &str, watched: &Value, id: &str, start: chrono::DateTime<chrono::Utc>) -> bool {
+    let mut announced = memory_get(app, flow_id, key, watched).and_then(|v| v.as_object().cloned()).unwrap_or_default();
+    if announced.contains_key(id) {
+        return false;
+    }
+    let horizon = chrono::Utc::now() - chrono::Duration::days(1);
+    announced.retain(|_, at| at.as_str().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).is_some_and(|t| t > horizon));
+    announced.insert(id.to_string(), json!(start.to_rfc3339()));
+    memory_set(app, flow_id, key, watched, &Value::Object(announced));
+    true
+}
+
+pub(super) fn fire(app: &AppHandle, flow_id: &str, node_id: &str, view: &Arc<Mutex<TriggerView>>, item: Value) {
     if let Err(error) = super::fire(app, flow_id, node_id, vec![Item::new(item)]) {
         super::note_problem(view, Some(error));
     }
 }
 
 /// A loop that looks every `interval` until cancelled, `look` saying what went wrong (if anything).
-fn every<F, Fut>(interval: Duration, view: Arc<Mutex<TriggerView>>, cancel: CancellationToken, mut look: F)
+pub(super) fn every<F, Fut>(interval: Duration, view: Arc<Mutex<TriggerView>>, cancel: CancellationToken, mut look: F)
 where
     F: FnMut() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<(), String>> + Send,
@@ -319,10 +355,9 @@ pub fn google(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vie
     let interval = seconds(params, "intervalSec", 60, 120);
     let (app, flow_id, node_id, params) = (app.clone(), flow_id.to_string(), node_id.to_string(), params.clone());
     let fire_view = view.clone();
-    let fired: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     every(interval, view, cancel, move || {
-        let (app, flow_id, node_id, params, credential, event, view, fired) =
-            (app.clone(), flow_id.clone(), node_id.clone(), params.clone(), credential.clone(), event.clone(), fire_view.clone(), fired.clone());
+        let (app, flow_id, node_id, params, credential, event, view) =
+            (app.clone(), flow_id.clone(), node_id.clone(), params.clone(), credential.clone(), event.clone(), fire_view.clone());
         async move {
             let meta = {
                 let db = app.state::<Db>();
@@ -352,9 +387,10 @@ pub fn google(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vie
                 let body = get(format!("https://sheets.googleapis.com/v4/spreadsheets/{id}/values/{encoded}")).await?;
                 let rows: Vec<Vec<Value>> = body.get("values").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().map(|r| r.as_array().cloned().unwrap_or_default()).collect();
                 let key = format!("google:{node_id}:rows");
+                let watched = json!({"spreadsheet": id, "range": range});
                 let count = rows.len() as i64;
-                let before = state_get(&app, &flow_id, &key).and_then(|v| v.as_i64());
-                state_set(&app, &flow_id, &key, &json!(count));
+                let before = memory_get(&app, &flow_id, &key, &watched).and_then(|v| v.as_i64());
+                memory_set(&app, &flow_id, &key, &watched, &json!(count));
                 let Some(before) = before else { return Ok(()) };
                 let header: Vec<String> = rows.first().map(|h| h.iter().map(|c| c.as_str().unwrap_or_default().to_string()).collect()).unwrap_or_default();
                 for (index, row) in rows.iter().enumerate().skip(before.max(1) as usize) {
@@ -367,6 +403,100 @@ pub fn google(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vie
                     fire(&app, &flow_id, &node_id, &view, Value::Object(item));
                 }
                 return Ok(());
+            }
+            if event == "gmailNew" || event == "driveNew" {
+                let encode = |text: &str| url::form_urlencoded::byte_serialize(text.as_bytes()).collect::<String>();
+                let entries: Vec<Value> = if event == "gmailNew" {
+                    let query = text(&params, "gmailQuery");
+                    let mut url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25".to_string();
+                    if !query.is_empty() {
+                        url.push_str(&format!("&q={}", encode(&query)));
+                    }
+                    get(url).await?.get("messages").and_then(Value::as_array).cloned().unwrap_or_default()
+                } else {
+                    // A folder by its id or its link (…/folders/<id>).
+                    let given = text(&params, "driveFolder");
+                    let folder = given.split("/folders/").nth(1).map(|rest| rest.split(['/', '?']).next().unwrap_or_default().to_string()).unwrap_or(given);
+                    let mut q = "trashed = false and mimeType != 'application/vnd.google-apps.folder'".to_string();
+                    if !folder.is_empty() {
+                        q.push_str(&format!(" and '{}' in parents", folder.replace('\'', "")));
+                    }
+                    let query = text(&params, "driveQuery");
+                    if !query.is_empty() {
+                        q.push_str(&format!(" and ({query})"));
+                    }
+                    let url = format!(
+                        "https://www.googleapis.com/drive/v3/files?q={}&orderBy=createdTime%20desc&pageSize=50&fields=files(id,name,mimeType,createdTime,modifiedTime,webViewLink,size,owners(displayName,emailAddress))",
+                        encode(&q)
+                    );
+                    get(url).await?.get("files").and_then(Value::as_array).cloned().unwrap_or_default()
+                };
+                let key = format!("google:{node_id}:seen");
+                let watched = json!({
+                    "event": event,
+                    "gmailQuery": text(&params, "gmailQuery"),
+                    "driveFolder": text(&params, "driveFolder"),
+                    "driveQuery": text(&params, "driveQuery"),
+                });
+                let stored = memory_get(&app, &flow_id, &key, &watched);
+                let first = stored.is_none();
+                let mut seen: Vec<String> = stored.and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+                let known: HashSet<String> = seen.iter().cloned().collect();
+                // A message that could not be read is left for the next look — and what was fired
+                // before it is still saved, rather than fired again because one read failed.
+                let mut problem = None;
+                for entry in entries.iter().rev() {
+                    let id = entry.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    if id.is_empty() || known.contains(&id) {
+                        continue;
+                    }
+                    seen.push(id.clone());
+                    if first {
+                        continue;
+                    }
+                    let item = if event == "gmailNew" {
+                        let message = match get(format!(
+                            "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date"
+                        ))
+                        .await
+                        {
+                            Ok(message) => message,
+                            Err(error) => {
+                                seen.pop();
+                                problem = Some(error);
+                                continue;
+                            }
+                        };
+                        let header = |name: &str| {
+                            message
+                                .pointer("/payload/headers")
+                                .and_then(Value::as_array)
+                                .and_then(|list| list.iter().find(|h| h.get("name").and_then(Value::as_str).is_some_and(|n| n.eq_ignore_ascii_case(name))))
+                                .and_then(|h| h.get("value").cloned())
+                                .unwrap_or(Value::Null)
+                        };
+                        json!({
+                            "id": id,
+                            "threadId": message.get("threadId"),
+                            "from": header("From"),
+                            "to": header("To"),
+                            "subject": header("Subject"),
+                            "date": header("Date"),
+                            "snippet": message.get("snippet"),
+                            "labels": message.get("labelIds"),
+                            "link": format!("https://mail.google.com/mail/u/0/#all/{id}"),
+                        })
+                    } else {
+                        entry.clone()
+                    };
+                    fire(&app, &flow_id, &node_id, &view, item);
+                }
+                if seen.len() > 2000 {
+                    let cut = seen.len() - 2000;
+                    seen.drain(..cut);
+                }
+                memory_set(&app, &flow_id, &key, &watched, &json!(seen));
+                return problem.map_or(Ok(()), Err);
             }
             let calendar = { let c = text(&params, "calendarId"); if c.is_empty() { "primary".to_string() } else { c } };
             let lead = params.get("leadMinutes").and_then(Value::as_f64).unwrap_or(10.0).clamp(1.0, 24.0 * 60.0);
@@ -387,7 +517,7 @@ pub fn google(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vie
                 if start.is_empty() || begins.is_some_and(|b| b < now) {
                     continue;
                 }
-                if fired.lock().map(|mut set| set.insert(id)).unwrap_or(false) {
+                if begins.is_some_and(|b| announced_once(&app, &flow_id, &format!("google:{node_id}:announced"), &json!({"calendar": calendar}), &id, b)) {
                     fire(&app, &flow_id, &node_id, &view, json!({
                         "id": event.get("id"),
                         "summary": event.get("summary"),
@@ -421,22 +551,111 @@ fn local_address() -> Option<String> {
 pub fn system(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view: Arc<Mutex<TriggerView>>, cancel: CancellationToken) -> Result<(), String> {
     let event = text(params, "systemEvent");
     let below = params.get("batteryBelow").and_then(Value::as_f64).unwrap_or(20.0);
+    let disk_path = { let p = text(params, "diskPath"); if p.is_empty() { "/".to_string() } else { p } };
+    let disk_below = params.get("diskBelowGb").and_then(Value::as_f64).unwrap_or(10.0).max(0.1);
+    let idle_after = params.get("idleMinutes").and_then(Value::as_f64).unwrap_or(10.0).max(1.0) * 60.0;
+    let wifi_wanted = text(params, "wifiName");
+    if event == "diskLow" && !super::desk::disk_path_ok(&disk_path) {
+        return Err(format!("{disk_path} does not exist"));
+    }
     let (app, flow_id, node_id) = (app.clone(), flow_id.to_string(), node_id.to_string());
+    // The desk is read by starting small programs (ioreg, loginctl, networksetup, nmcli…): off the
+    // async threads, which a five-second tick of blocking spawns would otherwise keep busy.
+    async fn desk<T: Send + 'static>(read: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        tokio::task::spawn_blocking(read).await.ok()
+    }
     tauri::async_runtime::spawn(async move {
         let mut last_tick = (Instant::now(), SystemTime::now());
         let mut network = local_address();
         let mut power = crate::power::status();
-        let mut warned = false;
+        // The desk's state when the flow was switched on: a change from it is what fires — a disk
+        // or a battery already low then is the state seeded, not news.
+        let mut warned = match event.as_str() {
+            "diskLow" => {
+                let path = disk_path.clone();
+                desk(move || super::desk::disk_free_gb(&path)).await.flatten().is_some_and(|free| free < disk_below)
+            }
+            "batteryLow" => power.as_ref().is_some_and(|now| !now.plugged_in && now.percent <= below),
+            _ => false,
+        };
+        let mut locked = if matches!(event.as_str(), "screenLocked" | "screenUnlocked") { desk(super::desk::screen_locked).await.flatten() } else { None };
+        let mut wifi = if event == "wifiChanged" { desk(super::desk::wifi_name).await.and_then(Result::ok).flatten() } else { None };
+        // When the person went away, by the wall clock — which keeps counting while the machine sleeps.
+        let mut away_from: Option<SystemTime> = None;
+        let tick = if matches!(event.as_str(), "screenLocked" | "screenUnlocked" | "userBack") { Duration::from_secs(5) } else { Duration::from_secs(15) };
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(15)) => {}
+                _ = tokio::time::sleep(tick) => {}
                 _ = cancel.cancelled() => return,
             }
             let now = (Instant::now(), SystemTime::now());
             let wall = now.1.duration_since(last_tick.1).unwrap_or_default();
             let mono = now.0.duration_since(last_tick.0);
             last_tick = now;
+            let stamp = chrono::Utc::now().to_rfc3339();
             match event.as_str() {
+                "diskLow" => match desk({ let path = disk_path.clone(); move || super::desk::disk_free_gb(&path) }).await.flatten() {
+                    Some(free) => {
+                        super::note_problem(&view, None);
+                        if free < disk_below && !warned {
+                            warned = true;
+                            fire(&app, &flow_id, &node_id, &view, json!({"event": "diskLow", "path": disk_path, "freeGb": (free * 10.0).round() / 10.0, "belowGb": disk_below, "at": stamp}));
+                        } else if free > disk_below + 1.0 {
+                            warned = false;
+                        }
+                    }
+                    None => super::note_problem(&view, Some(format!("the disk of {disk_path} could not be read"))),
+                },
+                "screenLocked" | "screenUnlocked" => match desk(super::desk::screen_locked).await.flatten() {
+                    Some(current) => {
+                        super::note_problem(&view, None);
+                        if let Some(before) = locked {
+                            if current != before && current == (event == "screenLocked") {
+                                fire(&app, &flow_id, &node_id, &view, json!({"event": event, "locked": current, "at": stamp}));
+                            }
+                        }
+                        locked = Some(current);
+                    }
+                    None => super::note_problem(&view, Some("this system does not say whether the screen is locked".into())),
+                },
+                "wifiChanged" => match desk(super::desk::wifi_name).await.unwrap_or_else(|| Err("the Wi-Fi network could not be read".into())) {
+                    Ok(current) => {
+                        super::note_problem(&view, None);
+                        if current != wifi {
+                            let involved = wifi_wanted.is_empty()
+                                || current.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&wifi_wanted))
+                                || wifi.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&wifi_wanted));
+                            if involved {
+                                fire(&app, &flow_id, &node_id, &view, json!({"event": "wifiChanged", "network": current, "previous": wifi, "connected": current.is_some(), "at": stamp}));
+                            }
+                            wifi = current;
+                        }
+                    }
+                    Err(problem) => super::note_problem(&view, Some(problem)),
+                },
+                "userIdle" | "userBack" => match desk(super::desk::idle_seconds).await.flatten() {
+                    Some(idle) => {
+                        super::note_problem(&view, None);
+                        if idle >= idle_after {
+                            if away_from.is_none() {
+                                away_from = Some(SystemTime::now() - Duration::from_secs_f64(idle));
+                                if event == "userIdle" {
+                                    fire(&app, &flow_id, &node_id, &view, json!({"event": "userIdle", "idleSeconds": idle.round(), "at": stamp}));
+                                }
+                            }
+                        } else if idle < 60.0 {
+                            if let Some(from) = away_from.take() {
+                                if event == "userBack" {
+                                    // From the last input before going away to now — not the idle
+                                    // threshold, which is all the earlier reading measured.
+                                    let seconds = SystemTime::now().duration_since(from).unwrap_or(wall).as_secs_f64() - idle;
+                                    fire(&app, &flow_id, &node_id, &view, json!({"event": "userBack", "awaySeconds": seconds.max(0.0).round(), "at": stamp}));
+                                }
+                            }
+                        }
+                    }
+                    None => super::note_problem(&view, Some("this system does not say how long it has been idle".into())),
+                },
                 "wake" => {
                     // A sleep stops the monotonic clock and not the wall clock.
                     if wall > mono + Duration::from_secs(60) {

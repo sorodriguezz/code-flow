@@ -117,7 +117,8 @@ fn settle(app: &AppHandle, wait_id: &str, decision: &str, by: &str, payload: &Va
 pub(super) fn wait_for(host: &AppHost, request: WaitRequest, cancel: CancellationToken) -> HostFuture<'_, Result<WaitAnswer, String>> {
     Box::pin(async move {
         let app = host.app.clone();
-        if request.kind == "webhook" {
+        // A call, a form and an approval sent as links all arrive at the flows' server.
+        if request.kind == "webhook" || request.kind == "form" || request.links {
             super::triggers::webhook::ensure_server(&app)?;
         }
         // What a pick-up after a restart needs: the flow as it ran and what reached this node.
@@ -230,6 +231,25 @@ pub fn resume_by_call(app: &AppHandle, path: &str, call: Value) -> Result<String
     }
 }
 
+/// The open wait a page link points at — `<run>/<node name>`, or `<run>` alone when one node of
+/// that run waits — of `kind` (`approval`, `form`).
+pub fn open_wait_at(app: &AppHandle, path: &str, kind: &str) -> Result<FlowWaitRow, String> {
+    let (run_id, node_name) = match path.split_once('/') {
+        Some((run, node)) => (run, Some(percent_encoding::percent_decode_str(node).decode_utf8_lossy().into_owned())),
+        None => (path, None),
+    };
+    let open: Vec<FlowWaitRow> = with_db(app, |conn| queries::waits_of_run(conn, run_id))?
+        .into_iter()
+        .filter(|wait| wait.kind == kind && wait.decided_at.is_none())
+        .filter(|wait| node_name.as_ref().is_none_or(|name| &wait.node_name == name))
+        .collect();
+    match open.as_slice() {
+        [wait] => Ok(wait.clone()),
+        [] => Err("not-waiting".into()),
+        _ => Err("Several nodes of this run wait: add the node's name to the link".into()),
+    }
+}
+
 /// The open waits of a workspace (or all of them), oldest first.
 pub fn open_waits(app: &AppHandle, workspace_id: Option<&str>) -> Result<Vec<FlowWaitRow>, String> {
     with_db(app, |conn| queries::open_waits(conn, workspace_id))
@@ -300,10 +320,14 @@ fn pick_up(app: &AppHandle, wait: &FlowWaitRow, answer: WaitAnswer) -> Result<()
     // What a running node would have done with this ending.
     let fail_on_timeout = match node.type_id.as_str() {
         "logic.approval" => node.params.get("onTimeout").and_then(Value::as_str) == Some("fail"),
-        _ => wait.kind == "webhook",
+        _ => wait.kind == "webhook" || wait.kind == "form",
     };
     if answer.decision == "expired" && fail_on_timeout {
-        let message = if wait.kind == "webhook" { "No call arrived before the time limit" } else { "Nobody decided before the time limit" };
+        let message = match wait.kind.as_str() {
+            "webhook" => "No call arrived before the time limit",
+            "form" => "Nobody filled in the form before the time limit",
+            _ => "Nobody decided before the time limit",
+        };
         finish_parked(app, &run.id, "error", message)?;
         return Ok(());
     }

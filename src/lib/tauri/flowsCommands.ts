@@ -67,7 +67,12 @@ export type FlowParamKind =
   | { type: "remoteHost"; kinds: string[] }
   | { type: "note" }
   | { type: "vaultItem" }
-  | { type: "connector" };
+  | { type: "connector" }
+  | { type: "flowTable" }
+  | { type: "apiCollection" }
+  | { type: "fakeFields" }
+  | { type: "validationRules" }
+  | { type: "subflowInputs" };
 
 /** `engine::EngineChoice` — an AI node's engine. `provider: ""` is the Flows routing row's engine,
  *  `"local"` the local model of Settings; `account: ""` is automatic. */
@@ -452,6 +457,8 @@ export interface FlowRunRow {
   finishedAt: string | null;
   durationMs: number | null;
   dataBytes: number;
+  /** What the run filed about itself with «Datos de la ejecución». */
+  customData?: Record<string, unknown>;
   /** For runs nobody started by hand: when their end becomes a notification. */
   notify?: "never" | "failure" | "always";
 }
@@ -664,8 +671,8 @@ export const flowsCancelRun = (runId: string) => invoke<boolean>("flows_cancel_r
 
 export const flowsActiveRuns = (workspaceId: string) => invoke<FlowRunRow[]>("flows_active_runs", { workspaceId });
 
-export const flowsListRuns = (flowId: string, limit?: number, before?: string | null) =>
-  invoke<FlowRunRow[]>("flows_list_runs", { flowId, limit: limit ?? null, before: before ?? null });
+export const flowsListRuns = (flowId: string, limit?: number, before?: string | null, search?: string | null) =>
+  invoke<FlowRunRow[]>("flows_list_runs", { flowId, limit: limit ?? null, before: before ?? null, search: search?.trim() ? search.trim() : null });
 
 export const flowsGetRun = (runId: string) => invoke<FlowRunDetail | null>("flows_get_run", { runId });
 
@@ -937,3 +944,137 @@ export const flowsShareRotate = (flowId: string) => invoke<string>("flows_share_
 
 export const flowsShareLeave = (flowId: string) => invoke<void>("flows_share_leave", { flowId });
 
+// ---------- «Transformar con IA» ----------
+
+/** What «Generar código» answers: the code, tried once against the node's input in the newest run. */
+export interface FlowTransformCode {
+  code: string;
+  summary: string;
+  tested: boolean;
+  inputCount: number;
+  outputCount?: number;
+  preview?: unknown[];
+  error?: string;
+}
+
+export const flowsAiTransformCode = (flowId: string, nodeId: string, spec: string | null, runId: string | null) =>
+  invoke<FlowTransformCode>("flows_ai_transform_code", { flowId, nodeId, spec, runId });
+
+// ---------- tables («Tablas») ----------
+
+/** `flows::tables::TableInfo`. */
+export interface FlowTable {
+  id: string;
+  workspaceId: string;
+  name: string;
+  columns: string[];
+  rows: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** `flows::tables::RowView`. */
+export interface FlowTableRow {
+  key: string;
+  data: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const flowsTablesList = (workspaceId: string) => invoke<FlowTable[]>("flows_tables_list", { workspaceId });
+export const flowsTableCreate = (workspaceId: string, name: string) => invoke<FlowTable>("flows_table_create", { workspaceId, name });
+export const flowsTableRename = (tableId: string, name: string) => invoke<FlowTable>("flows_table_rename", { tableId, name });
+export const flowsTableDelete = (tableId: string) => invoke<void>("flows_table_delete", { tableId });
+export const flowsTableRows = (tableId: string, offset: number, limit: number, search: string | null) =>
+  invoke<{ table: FlowTable; rows: FlowTableRow[]; total: number }>("flows_table_rows", { tableId, offset, limit, search });
+export const flowsTablePutRow = (tableId: string, key: string, data: Record<string, unknown>, previousKey: string | null) =>
+  invoke<FlowTableRow | null>("flows_table_put_row", { tableId, key, data, previousKey });
+export const flowsTableDeleteRows = (tableId: string, keys: string[]) => invoke<number>("flows_table_delete_rows", { tableId, keys });
+export const flowsTableClear = (tableId: string) => invoke<number>("flows_table_clear", { tableId });
+export const flowsTableDropColumn = (tableId: string, column: string) => invoke<void>("flows_table_drop_column", { tableId, column });
+export const flowsTableSetColumns = (tableId: string, columns: string[]) => invoke<void>("flows_table_set_columns", { tableId, columns });
+export const flowsTableImport = (tableId: string, rows: Record<string, unknown>[], keyField: string | null) =>
+  invoke<number>("flows_table_import", { tableId, rows, keyField });
+
+// ---------- tests («Pruebas») ----------
+
+/** `flows::testing::FlowTest`. */
+export interface FlowTest {
+  id: string;
+  flowId: string;
+  name: string;
+  input: unknown;
+  nodeId: string;
+  expected: unknown;
+  matchMode: "contains" | "equals" | "runs";
+  sortOrder: number;
+  lastStatus: string;
+  lastDetail: string;
+  lastRunAt: string;
+}
+
+/** `flows::testing::TestOutcome`. */
+export interface FlowTestOutcome {
+  id: string;
+  name: string;
+  status: "passed" | "failed";
+  detail: string;
+  runId: string | null;
+}
+
+export const flowsTestsList = (flowId: string) => invoke<FlowTest[]>("flows_tests_list", { flowId });
+export const flowsTestSave = (test: FlowTest) => invoke<FlowTest>("flows_test_save", { test });
+export const flowsTestDelete = (id: string) => invoke<void>("flows_test_delete", { id });
+export const flowsTestsRun = (flowId: string, ids: string[] | null) => invoke<FlowTestOutcome[]>("flows_tests_run", { flowId, ids });
+
+// ---------- «Mis nodos», right-click entries, chat flows ----------
+
+/** A flow published as a node by its «Llamado por otro flujo» trigger. */
+export interface FlowPublishedNode {
+  flowId: string;
+  name: string;
+  icon: string;
+  description: string;
+  fields: { name: string; label: string; type: string; required: boolean; options: string[]; default: unknown }[];
+  scope: string;
+}
+
+export const flowsPublishedNodes = (workspaceId: string) => invoke<FlowPublishedNode[]>("flows_published_nodes", { workspaceId });
+
+/** `triggers::ContextEntry` — «Menú contextual». */
+export interface FlowContextEntry {
+  flowId: string;
+  nodeId: string;
+  flowName: string;
+  workspaceId: string;
+  scope: string;
+  label: string;
+  places: string[];
+  glob: string;
+  askFirst: boolean;
+}
+
+export type FlowContextPlace = "file" | "folder" | "selection" | "commit" | "pr";
+
+export const flowsContextEntries = (workspaceId: string, place: FlowContextPlace, path?: string | null) =>
+  invoke<FlowContextEntry[]>("flows_context_entries", { workspaceId, place, path: path ?? null });
+
+export const flowsContextRun = (flowId: string, nodeId: string, payload: Record<string, unknown>) =>
+  invoke<{ held: boolean; runId: string | null }>("flows_context_run", { flowId, nodeId, payload });
+
+/** `triggers::ChatAssistant` — a flow the Chat app can talk to. */
+export interface FlowChatAssistant {
+  flowId: string;
+  nodeId: string;
+  flowName: string;
+  workspaceId: string;
+  scope: string;
+  name: string;
+  description: string;
+  historyTurns: number;
+}
+
+export const flowsChatAssistants = (workspaceId: string) => invoke<FlowChatAssistant[]>("flows_chat_assistants", { workspaceId });
+
+export const flowsChatTurn = (flowId: string, message: string, history: { role: string; text: string }[], conversationId: string | null) =>
+  invoke<{ text: string; runId: string | null; name: string }>("flows_chat_turn", { flowId, message, history, conversationId });

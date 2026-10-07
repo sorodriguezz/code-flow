@@ -78,3 +78,47 @@ describe("a saved request sent from a flow", () => {
     await expect(runSavedRequest({ workspaceId: "w1", requestId: "r1", environmentId: "gone", variables: {} })).rejects.toThrow(/environment/);
   });
 });
+
+describe("a collection run from a flow", () => {
+  const request = (id: string, sortOrder: number) => ({
+    id,
+    collection_id: "c1",
+    folder_id: null,
+    name: `Pedido ${id}`,
+    protocol: "http",
+    sort_order: sortOrder,
+    spec: JSON.stringify({ protocol: "http", method: "GET", url: `{{base}}/${id}`, auth: { type: "inherit" } }),
+  });
+  const failure = {
+    status: 500,
+    status_text: "Internal Server Error",
+    http_version: "HTTP/1.1",
+    headers: [],
+    body_text: "",
+    body_base64: null,
+    size_bytes: 0,
+    duration_ms: 3,
+    timings: {},
+    redirects: [],
+    set_cookies: [],
+    sent: {},
+  };
+
+  it("counts what a stop on failure never sent apart: passed, failed and skipped add up to the total", async () => {
+    const api = await import("../tauri/apiCommands");
+    const { runSavedCollection } = await import("./savedRequest");
+    const tree = await api.apiLoadTree("w1");
+    const ask = { workspaceId: "w1", collectionId: "c1", environmentId: "", variables: {}, delayMs: 0 };
+
+    vi.mocked(api.apiLoadTree).mockResolvedValueOnce({ ...tree, requests: [request("a", 0), request("b", 1), request("c", 2)] } as never);
+    vi.mocked(api.apiSendHttpTracked).mockResolvedValueOnce(failure as never);
+    const stopped = await runSavedCollection({ ...ask, stopOnFailure: true });
+    expect(stopped).toMatchObject({ total: 3, passed: 0, failed: 1, skipped: 2 });
+    expect(stopped.results.map((result) => result.name)).toEqual(["Pedido a"]);
+
+    vi.mocked(api.apiLoadTree).mockResolvedValueOnce({ ...tree, requests: [request("a", 0), request("b", 1), request("c", 2)] } as never);
+    vi.mocked(api.apiSendHttpTracked).mockResolvedValueOnce(failure as never);
+    const whole = await runSavedCollection({ ...ask, stopOnFailure: false });
+    expect(whole).toMatchObject({ total: 3, passed: 2, failed: 1, skipped: 0 });
+  });
+});

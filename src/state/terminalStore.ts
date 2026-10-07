@@ -57,7 +57,7 @@ const DOCK_VIEW_KEY = "terminal_dock_view";
  * unmounts the shells (see `ServicesDock`). A satellite has no services, so it only ever shows
  * `"terminal"` and never reads or writes the remembered value.
  */
-export type DockView = "terminal" | "services";
+export type DockView = "terminal" | "containers" | "services";
 
 interface TerminalState {
   /** Hidden by default — only opens when the user asks for it (or a new terminal is created). */
@@ -77,6 +77,10 @@ interface TerminalState {
   showDock: (view: DockView) => void;
   /** Hides the dock, whichever panel it shows — its own chevron. */
   hidePanel: () => void;
+  /** The dock taking the work column's height, the view above it down to its floor — for a manager
+   *  page (Contenedores' tables) that wants the room. Not remembered: it is a moment's need. */
+  dockMaximized: boolean;
+  toggleDockMaximized: () => void;
   /** With `split: true`, adds the new terminal to whichever group is currently active instead
    * of starting a new one — otherwise every new terminal gets its own group. `profileId` picks
    * the shell; omitted, the backend resolves the configured default. */
@@ -253,6 +257,8 @@ function forgetTerminal(id: string): void {
 export const useTerminalStore = create<TerminalState>((set, get) => ({
   panelOpen: false,
   dockView: "terminal",
+  dockMaximized: false,
+  toggleDockMaximized: () => set((s) => ({ dockMaximized: !s.dockMaximized })),
   byProject: {},
 
   init: async () => {
@@ -264,7 +270,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       // there would turn its ⌘J into "switch to terminals" instead of "close".
       isMainWindow() ? getSetting(DOCK_VIEW_KEY).catch(() => null) : Promise.resolve(null),
     ]);
-    set({ panelOpen: raw === "1", dockView: view === "services" ? "services" : "terminal" });
+    set({ panelOpen: raw === "1", dockView: view === "services" || view === "containers" ? view : "terminal" });
   },
 
   togglePanel: () => get().toggleDock("terminal"),
@@ -282,7 +288,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   hidePanel: () => {
-    set({ panelOpen: false });
+    set({ panelOpen: false, dockMaximized: false });
     void setSetting(PANEL_OPEN_KEY, "0");
   },
 

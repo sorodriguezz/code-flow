@@ -1,0 +1,265 @@
+{
+  "id": "airtable",
+  "name": "Airtable",
+  "group": "appsData",
+  "baseUrl": "https://api.airtable.com/v0",
+  "auth": "bearer",
+  "authHint": {
+    "es": "Un token de acceso personal de Airtable (con data.records y schema.bases) como credencial Token",
+    "en": "An Airtable personal access token (with data.records and schema.bases) as a Token credential"
+  },
+  "tokenUrl": "https://airtable.com/create/tokens",
+  "test": {
+    "path": "/meta/whoami",
+    "label": "{{email}} · {{id}}"
+  },
+  "errorField": "error.message",
+  "operations": [
+    {
+      "id": "listRecords",
+      "name": {
+        "es": "Leer registros",
+        "en": "Read records"
+      },
+      "method": "GET",
+      "path": "/{{baseId}}/{{table}}",
+      "query": {
+        "maxRecords": "{{maxRecords}}",
+        "view": "{{view}}",
+        "filterByFormula": "{{formula}}"
+      },
+      "fields": [
+        {
+          "name": "baseId",
+          "label": {
+            "es": "Base",
+            "en": "Base"
+          },
+          "required": true,
+          "lookup": {
+            "path": "/meta/bases",
+            "result": "bases",
+            "value": "id",
+            "label": "{{name}}"
+          }
+        },
+        {
+          "name": "table",
+          "label": {
+            "es": "Tabla",
+            "en": "Table"
+          },
+          "required": true,
+          "encode": true,
+          "lookup": {
+            "path": "/meta/bases/{{baseId}}/tables",
+            "result": "tables",
+            "value": "name",
+            "label": "{{name}}",
+            "needs": [
+              "baseId"
+            ]
+          }
+        },
+        {
+          "name": "view",
+          "label": {
+            "es": "Vista",
+            "en": "View"
+          }
+        },
+        {
+          "name": "formula",
+          "label": {
+            "es": "Fórmula de filtro",
+            "en": "Filter formula"
+          },
+          "placeholder": "{Estado} = 'Pendiente'"
+        },
+        {
+          "name": "maxRecords",
+          "label": {
+            "es": "Máximo",
+            "en": "At most"
+          },
+          "placeholder": "100"
+        }
+      ],
+      "result": "records"
+    },
+    {
+      "id": "createRecord",
+      "name": {
+        "es": "Crear un registro",
+        "en": "Create a record"
+      },
+      "method": "POST",
+      "path": "/{{baseId}}/{{table}}",
+      "fields": [
+        {
+          "name": "baseId",
+          "label": {
+            "es": "Base",
+            "en": "Base"
+          },
+          "required": true,
+          "lookup": {
+            "path": "/meta/bases",
+            "result": "bases",
+            "value": "id",
+            "label": "{{name}}"
+          }
+        },
+        {
+          "name": "table",
+          "label": {
+            "es": "Tabla",
+            "en": "Table"
+          },
+          "required": true,
+          "encode": true,
+          "lookup": {
+            "path": "/meta/bases/{{baseId}}/tables",
+            "result": "tables",
+            "value": "name",
+            "label": "{{name}}",
+            "needs": [
+              "baseId"
+            ]
+          }
+        },
+        {
+          "name": "fields",
+          "label": {
+            "es": "Campos (JSON)",
+            "en": "Fields (JSON)"
+          },
+          "placeholder": "{\"Nombre\": \"ACME\", \"Estado\": \"Nuevo\"}",
+          "json": true,
+          "required": true,
+          "multiline": true
+        }
+      ],
+      "body": {
+        "fields": "{{fields}}",
+        "typecast": true
+      }
+    },
+    {
+      "id": "updateRecord",
+      "name": {
+        "es": "Actualizar un registro",
+        "en": "Update a record"
+      },
+      "method": "PATCH",
+      "path": "/{{baseId}}/{{table}}/{{recordId}}",
+      "fields": [
+        {
+          "name": "baseId",
+          "label": {
+            "es": "Base",
+            "en": "Base"
+          },
+          "required": true,
+          "lookup": {
+            "path": "/meta/bases",
+            "result": "bases",
+            "value": "id",
+            "label": "{{name}}"
+          }
+        },
+        {
+          "name": "table",
+          "label": {
+            "es": "Tabla",
+            "en": "Table"
+          },
+          "required": true,
+          "encode": true,
+          "lookup": {
+            "path": "/meta/bases/{{baseId}}/tables",
+            "result": "tables",
+            "value": "name",
+            "label": "{{name}}",
+            "needs": [
+              "baseId"
+            ]
+          }
+        },
+        {
+          "name": "recordId",
+          "label": {
+            "es": "Registro (rec…)",
+            "en": "Record (rec…)"
+          },
+          "required": true
+        },
+        {
+          "name": "fields",
+          "label": {
+            "es": "Campos a cambiar (JSON)",
+            "en": "Fields to change (JSON)"
+          },
+          "json": true,
+          "required": true,
+          "multiline": true
+        }
+      ],
+      "body": {
+        "fields": "{{fields}}",
+        "typecast": true
+      }
+    },
+    {
+      "id": "deleteRecord",
+      "name": {
+        "es": "Borrar un registro",
+        "en": "Delete a record"
+      },
+      "method": "DELETE",
+      "path": "/{{baseId}}/{{table}}/{{recordId}}",
+      "fields": [
+        {
+          "name": "baseId",
+          "label": {
+            "es": "Base",
+            "en": "Base"
+          },
+          "required": true,
+          "lookup": {
+            "path": "/meta/bases",
+            "result": "bases",
+            "value": "id",
+            "label": "{{name}}"
+          }
+        },
+        {
+          "name": "table",
+          "label": {
+            "es": "Tabla",
+            "en": "Table"
+          },
+          "required": true,
+          "encode": true,
+          "lookup": {
+            "path": "/meta/bases/{{baseId}}/tables",
+            "result": "tables",
+            "value": "name",
+            "label": "{{name}}",
+            "needs": [
+              "baseId"
+            ]
+          }
+        },
+        {
+          "name": "recordId",
+          "label": {
+            "es": "Registro (rec…)",
+            "en": "Record (rec…)"
+          },
+          "required": true
+        }
+      ]
+    }
+  ]
+}

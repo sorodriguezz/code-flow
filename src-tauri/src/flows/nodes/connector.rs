@@ -2,6 +2,11 @@
 //!
 //! Building the request ([`request_for`]) and reading the answer ([`answer_items`]) are plain
 //! functions of the definition, so every shipped connector is tested without its service.
+//!
+//! **No error shows the credential.** A transport error names the URL it went to and a refusal quotes
+//! what the service said; Telegram's token is part of its URL, a webhook *is* one. Everything a call
+//! fails with or logs goes through [`redact`] first — in a run, and outside one (a trigger's card, a
+//! field's lookup), where nothing else would.
 
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
@@ -42,6 +47,73 @@ fn is_blank(value: &Value) -> bool {
     }
 }
 
+/// A value sent even when it comes out empty: `{"$keep": "{{path}}"}` in a body or a query. An
+/// optional field left empty takes its key out of the request (`connectors::render`), which is what
+/// nearly every service wants — but Dropbox names its root folder `"path": ""`, and a body without
+/// the key is a 400.
+const KEEP: &str = "$keep";
+
+/// `rendered` with each `{"$keep": …}` of `template` unwrapped: to its value, or to `""` when the
+/// value was empty and `render` left it out.
+fn unwrap_kept(template: &Value, rendered: &mut Value, values: &Map<String, Value>) {
+    let (Value::Object(template), Value::Object(out)) = (template, rendered) else { return };
+    for (key, entry) in template {
+        // A key can be a placeholder too (Notion's title property): found under the name it took.
+        let Some(slot) = out.get_mut(&connectors::splice(key, values)) else { continue };
+        match entry {
+            Value::Object(inner) if inner.len() == 1 && inner.contains_key(KEEP) => {
+                *slot = slot.get(KEEP).cloned().unwrap_or_else(|| Value::String(String::new()));
+            }
+            Value::Object(_) => unwrap_kept(entry, slot, values),
+            _ => {}
+        }
+    }
+}
+
+/// What a credential reads as where it was taken out — the run's own redaction writes the same.
+const HIDDEN: &str = "••••••";
+
+/// Every way a credential can appear in the text of an error or a log line: as stored and trimmed, as
+/// a URL writes it in a path or a query, the encoded pair `basic` sends, and — a webhook — the URL as
+/// `url` prints it back. Shorter than four characters a "secret" would take ordinary words out of
+/// every message, as the run's own rule says too.
+fn secret_forms(credential: Option<&Credential>) -> Vec<String> {
+    let Some(credential) = credential else { return Vec::new() };
+    let mut forms = Vec::new();
+    for secret in [credential.secret.as_str(), credential.secret.trim()] {
+        forms.push(secret.to_string());
+        forms.push(url::form_urlencoded::byte_serialize(secret.as_bytes()).collect::<String>());
+        forms.push(crate::oauth::urlencode(secret));
+        if let Ok(path) = url::Url::parse(&format!("http://x/{secret}")) {
+            forms.push(path.path().trim_start_matches('/').to_string());
+        }
+        if let Ok(address) = url::Url::parse(secret) {
+            forms.push(address.to_string());
+            forms.push(address.to_string().trim_end_matches('/').to_string());
+        }
+    }
+    if let Some(user) = credential.meta.get("user").and_then(Value::as_str) {
+        forms.push(base64::engine::general_purpose::STANDARD.encode(format!("{user}:{}", credential.secret)));
+    }
+    forms.retain(|form| form.chars().count() >= 4);
+    // Longest first, so a form that holds another is replaced whole.
+    forms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    forms.dedup();
+    forms
+}
+
+/// `text` with every form of the credential replaced.
+fn redact(text: &str, forms: &[String]) -> String {
+    forms.iter().fold(text.to_string(), |out, form| if out.contains(form.as_str()) { out.replace(form.as_str(), HIDDEN) } else { out })
+}
+
+fn hidden(error: NodeError, forms: &[String]) -> NodeError {
+    match error {
+        NodeError::Failed(text) => NodeError::Failed(redact(&text, forms)),
+        other => other,
+    }
+}
+
 async fn call(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError> {
     let call = params.get("call").cloned().unwrap_or(Value::Null);
     let (connector, operation) = chosen(&call)?;
@@ -56,7 +128,8 @@ async fn call(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError> {
         Some(ctx.credential(id.trim()).await?)
     };
     let timeout_ms = number(params, "timeoutMs").map(|n| n.max(0.0) as u64).filter(|n| *n > 0).unwrap_or(30_000);
-    let (request, url) = request_for(connector, operation, values, credential.as_ref(), timeout_ms)?;
+    let forms = secret_forms(credential.as_ref());
+    let (request, url) = request_for(connector, operation, values, credential.as_ref(), timeout_ms).map_err(|e| hidden(e, &forms))?;
     if let Some(Credential { kind, .. }) = &credential {
         if kind == "basic" || connector.auth == "basic" {
             // The encoded pair is as much the password as the password.
@@ -66,14 +139,28 @@ async fn call(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError> {
         }
     }
     let response = tokio::select! {
-        response = crate::api::http::send(request, None, None) => response.map_err(NodeError::failed)?,
+        response = crate::api::http::send(request, None, None) => response.map_err(|e| NodeError::failed(redact(&e, &forms)))?,
         _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
     };
     ctx.log(
         LogStream::Info,
-        &format!("{} {} {} → {} ({} ms)", connector.name, operation.method, loggable(&url), response.status, response.duration_ms),
+        &redact(&format!("{} {} {} → {} ({} ms)", connector.name, operation.method, loggable(&url), response.status, response.duration_ms), &forms),
     );
-    answer_items(connector, operation, response.status, &response.body_text)
+    answer_items(connector, operation, response.status, &response.body_text).map_err(|e| hidden(e, &forms))
+}
+
+/// One call outside a run — what the «Cambios en un servicio» trigger looks with. The credential is
+/// already resolved (an OAuth sign-in as its access token).
+pub(crate) async fn call_outside(call: &Value, credential: Option<Credential>) -> Result<Vec<Value>, String> {
+    let (connector, operation) = chosen(call).map_err(|e| e.to_string())?;
+    let values: Map<String, Value> = call.get("fields").and_then(Value::as_object).cloned().unwrap_or_default();
+    let credential = if connector.auth == "none" { None } else { credential };
+    // No run here to redact anything: the trigger's card shows this error as it is returned.
+    let forms = secret_forms(credential.as_ref());
+    let hide = |error: String| redact(&error, &forms);
+    let (request, _) = request_for(connector, operation, values, credential.as_ref(), 30_000).map_err(|e| hide(e.to_string()))?;
+    let response = crate::api::http::send(request, None, None).await.map_err(hide)?;
+    answer_items(connector, operation, response.status, &response.body_text).map_err(|e| hide(e.to_string()))
 }
 
 /// The HTTP request a call makes. Required fields are checked here; the credential signs it the way
@@ -169,7 +256,12 @@ pub(super) fn request_for(
     if connector.auth == "query" {
         query_template.extend(connector.auth_query.clone());
     }
-    if let Some(Value::Object(query)) = connectors::render(&Value::Object(query_template), &values, &json_fields).map_err(NodeError::Failed)? {
+    let query_template = Value::Object(query_template);
+    let mut query = connectors::render(&query_template, &values, &json_fields).map_err(NodeError::Failed)?;
+    if let Some(query) = query.as_mut() {
+        unwrap_kept(&query_template, query, &values);
+    }
+    if let Some(Value::Object(query)) = query {
         if !query.is_empty() {
             let mut pairs = url.query_pairs_mut();
             for (name, value) in query {
@@ -186,7 +278,13 @@ pub(super) fn request_for(
         }
     }
     let rendered = match &operation.body {
-        Some(template) => connectors::render(template, &values, &json_fields).map_err(NodeError::Failed)?,
+        Some(template) => {
+            let mut rendered = connectors::render(template, &values, &json_fields).map_err(NodeError::Failed)?;
+            if let Some(body) = rendered.as_mut() {
+                unwrap_kept(template, body, &values);
+            }
+            rendered
+        }
         None => None,
     };
     // A form body: the rendered object's fields as pairs, strings as they are, the rest as JSON text.
@@ -228,10 +326,12 @@ pub(super) fn request_for(
 /// `needs` (a team's states need the team). A failure is the service's own message, as a call's is.
 pub(crate) async fn lookup(connector: &Connector, lookup: &Lookup, values: Map<String, Value>, credential: Option<&Credential>) -> Result<Vec<Choice>, String> {
     let operation = lookup_operation(connector, lookup);
-    let (request, _) = request_for(connector, &operation, values, credential, 20_000).map_err(|e| e.to_string())?;
-    let response = crate::api::http::send(request, None, None).await?;
+    let forms = secret_forms(credential);
+    let hide = |error: String| redact(&error, &forms);
+    let (request, _) = request_for(connector, &operation, values, credential, 20_000).map_err(|e| hide(e.to_string()))?;
+    let response = crate::api::http::send(request, None, None).await.map_err(hide)?;
     // The call's own checks — a 4xx, Slack's `ok: false`, a GraphQL `errors` — and then the list.
-    answer_items(connector, &operation, response.status, &response.body_text).map_err(|e| e.to_string())?;
+    answer_items(connector, &operation, response.status, &response.body_text).map_err(|e| hide(e.to_string()))?;
     Ok(lookup.choices(&parse_answer(&response.body_text)))
 }
 
@@ -670,11 +770,60 @@ mod tests {
     }
 
     #[test]
+    fn dropbox_lists_its_root_as_an_empty_path() {
+        let (connector, operation) = op("dropbox", "listFolder");
+        let sl = token("sl.u.token", json!({}));
+        let (request, _) = request_for(connector, operation, values(json!({"path": "", "recursive": ""})), Some(&sl), 30_000).unwrap();
+        assert_eq!(body(&request), json!({"path": "", "limit": 200}), "the root is `\"path\": \"\"`, not a missing key");
+        let (request, _) = request_for(connector, operation, Map::new(), Some(&sl), 30_000).unwrap();
+        assert_eq!(body(&request), json!({"path": "", "limit": 200}));
+        let (request, _) = request_for(connector, operation, values(json!({"path": "/Facturas", "recursive": "true"})), Some(&sl), 30_000).unwrap();
+        assert_eq!(body(&request), json!({"path": "/Facturas", "recursive": true, "limit": 200}));
+        // Everywhere else an empty optional still leaves its key out.
+        let (connector, operation) = op("slack", "postMessage");
+        let (request, _) = request_for(connector, operation, values(json!({"channel": "#v", "text": "x", "thread_ts": ""})), Some(&token("xoxb-1", json!({}))), 30_000).unwrap();
+        assert_eq!(body(&request), json!({"channel": "#v", "text": "x"}));
+    }
+
+    #[test]
+    fn a_credential_never_reads_in_an_error_or_a_log_line() {
+        // Telegram: the token is a segment of every URL it calls.
+        let forms = secret_forms(Some(&token("123456:AAH-secret_tok", json!({}))));
+        let error = "POST https://api.telegram.org/bot123456:AAH-secret_tok/sendMessage timed out after 30000 ms with no response";
+        assert_eq!(redact(error, &forms), "POST https://api.telegram.org/bot••••••/sendMessage timed out after 30000 ms with no response");
+        assert_eq!(hidden(NodeError::failed(error), &forms), NodeError::Failed(redact(error, &forms)));
+        assert_eq!(hidden(NodeError::Cancelled, &forms), NodeError::Cancelled);
+        // Trello: key and token in the query, escaped the way the URL writes them; the key is no secret.
+        let (connector, operation) = op("trello", "createCard");
+        let credential = basic("key-1", "t0k en/+=");
+        let (request, _) = request_for(connector, operation, values(json!({"listId": "L1", "name": "x"})), Some(&credential), 30_000).unwrap();
+        let shown = redact(&format!("POST {} could not connect", request.url), &secret_forms(Some(&credential)));
+        assert!(!shown.contains("t0k"), "{shown}");
+        assert!(shown.contains("key=key-1"), "{shown}");
+        // Basic auth: the encoded pair is as much the password as the password.
+        let pair = base64::engine::general_purpose::STANDARD.encode("ana@example.com:pw-1234");
+        let shown = redact(&format!("echoed Authorization: Basic {pair}"), &secret_forms(Some(&basic("ana@example.com", "pw-1234"))));
+        assert_eq!(shown, "echoed Authorization: Basic ••••••");
+        // Three letters would take ordinary words out of every message.
+        assert_eq!(redact("a bad request", &secret_forms(Some(&token("bad", json!({}))))), "a bad request");
+    }
+
+    /// Outside a run — a trigger looking, a field's lookup — nothing else redacts the error.
+    #[tokio::test]
+    async fn a_failed_call_outside_a_run_does_not_show_its_webhook() {
+        // A port nothing listens on: the send fails, and the transport error names the URL.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let hook = webhook(&format!("http://127.0.0.1:{port}/api/webhooks/1/s3cr3t-hook-token"));
+        let error = call_outside(&json!({"connector": "discord", "operation": "webhookMessage", "fields": {"content": "x"}}), Some(hook)).await.unwrap_err();
+        assert!(!error.contains("s3cr3t-hook-token") && error.contains(HIDDEN), "{error}");
+    }
+
+    #[test]
     fn every_shipped_connector_reads_and_fits_a_credential_kind() {
         for connector in connectors::CONNECTORS.iter() {
             assert!(!connector.operations.is_empty(), "{} has no operations", connector.id);
             assert!(!connector.credential_kinds().is_empty() || connector.auth == "none", "{} signs in with nothing it knows", connector.id);
         }
-        assert_eq!(connectors::CONNECTORS.len(), 25);
+        assert_eq!(connectors::CONNECTORS.len(), 34);
     }
 }

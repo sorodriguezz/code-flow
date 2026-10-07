@@ -1,0 +1,105 @@
+{
+  "id": "mindicador",
+  "name": "mindicador.cl",
+  "group": "appsData",
+  "baseUrl": "https://mindicador.cl/api",
+  "auth": "none",
+  "authHint": {
+    "es": "Sin credencial: indicadores económicos de Chile del Banco Central y el SII",
+    "en": "No credential: Chile's economic indicators, from the Central Bank and the SII"
+  },
+  "errorField": "message",
+  "operations": [
+    {
+      "id": "today",
+      "name": {
+        "es": "Indicadores de hoy (UF, dólar, UTM…)",
+        "en": "Today's indicators (UF, dollar, UTM…)"
+      },
+      "method": "GET",
+      "path": "",
+      "fields": []
+    },
+    {
+      "id": "indicator",
+      "name": {
+        "es": "Últimos valores de un indicador",
+        "en": "An indicator's latest values"
+      },
+      "method": "GET",
+      "path": "/{{indicator}}",
+      "fields": [
+        {
+          "name": "indicator",
+          "label": {
+            "es": "Indicador (uf, dolar, euro, utm, ipc, imacec, tpm, libra_cobre, tasa_desempleo, bitcoin)",
+            "en": "Indicator (uf, dolar, euro, utm, ipc, imacec, tpm, libra_cobre, tasa_desempleo, bitcoin)"
+          },
+          "required": true,
+          "placeholder": "uf"
+        }
+      ],
+      "result": "serie"
+    },
+    {
+      "id": "onDate",
+      "name": {
+        "es": "Un indicador en una fecha",
+        "en": "An indicator on a date"
+      },
+      "method": "GET",
+      "path": "/{{indicator}}/{{date}}",
+      "fields": [
+        {
+          "name": "indicator",
+          "label": {
+            "es": "Indicador",
+            "en": "Indicator"
+          },
+          "required": true,
+          "placeholder": "dolar"
+        },
+        {
+          "name": "date",
+          "label": {
+            "es": "Fecha (dd-mm-aaaa)",
+            "en": "Date (dd-mm-yyyy)"
+          },
+          "required": true,
+          "placeholder": "15-03-2026"
+        }
+      ],
+      "result": "serie"
+    },
+    {
+      "id": "year",
+      "name": {
+        "es": "Un indicador en un año",
+        "en": "An indicator over a year"
+      },
+      "method": "GET",
+      "path": "/{{indicator}}/{{year}}",
+      "fields": [
+        {
+          "name": "indicator",
+          "label": {
+            "es": "Indicador",
+            "en": "Indicator"
+          },
+          "required": true,
+          "placeholder": "uf"
+        },
+        {
+          "name": "year",
+          "label": {
+            "es": "Año",
+            "en": "Year"
+          },
+          "required": true,
+          "placeholder": "2026"
+        }
+      ],
+      "result": "serie"
+    }
+  ]
+}

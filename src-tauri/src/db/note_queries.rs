@@ -1517,7 +1517,7 @@ fn replace_wiki_links(content: &str, wanted: &str, new_title: &str) -> Option<St
 
 /// Case- and accent-insensitive folding, plus whitespace collapsed — the same comparison
 /// `foldTitle` makes in the frontend, so a link resolves and back-links identically.
-fn fold_for_match(text: &str) -> String {
+pub(crate) fn fold_for_match(text: &str) -> String {
     let lowered: String = text.trim().to_lowercase();
     let mut out = String::with_capacity(lowered.len());
     let mut last_was_space = false;

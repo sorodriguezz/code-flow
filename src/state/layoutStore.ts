@@ -47,7 +47,8 @@ export type LayoutKey =
   | "dbmlConsoleHeight"
   | "pipelinesListWidth"
   | "pipelinesGraphHeight"
-  | "servicesListWidth";
+  | "servicesListWidth"
+  | "containersListWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -96,6 +97,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   pipelinesListWidth: "layout_pipelines_list_width",
   pipelinesGraphHeight: "layout_pipelines_graph_height",
   servicesListWidth: "layout_services_list_width",
+  containersListWidth: "layout_containers_list_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -196,6 +198,9 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // this column sits under the editor, so every pixel it takes is one the console loses — but wide
   // enough for a name, a status dot and a port chip before the hover actions arrive on top.
   servicesListWidth: 210,
+  // The Contenedores tree: a runtime, its sections and rows that carry a name, a status and a port —
+  // three levels of indent deep, so wider than the services' list.
+  containersListWidth: 280,
 };
 
 /**

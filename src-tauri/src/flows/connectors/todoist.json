@@ -1,0 +1,160 @@
+{
+  "id": "todoist",
+  "name": "Todoist",
+  "group": "appsProjects",
+  "baseUrl": "https://api.todoist.com/api/v1",
+  "auth": "bearer",
+  "authHint": {
+    "es": "Tu token de API de Todoist (Ajustes › Integraciones › Desarrollador) como credencial Token",
+    "en": "Your Todoist API token (Settings › Integrations › Developer) as a Token credential"
+  },
+  "tokenUrl": "https://app.todoist.com/app/settings/integrations/developer",
+  "test": {
+    "path": "/user",
+    "label": "{{full_name}} · {{email}}"
+  },
+  "errorField": "error",
+  "operations": [
+    {
+      "id": "createTask",
+      "name": {
+        "es": "Crear una tarea",
+        "en": "Create a task"
+      },
+      "method": "POST",
+      "path": "/tasks",
+      "fields": [
+        {
+          "name": "content",
+          "label": {
+            "es": "Tarea",
+            "en": "Task"
+          },
+          "required": true
+        },
+        {
+          "name": "description",
+          "label": {
+            "es": "Descripción",
+            "en": "Description"
+          },
+          "multiline": true
+        },
+        {
+          "name": "project_id",
+          "label": {
+            "es": "Proyecto",
+            "en": "Project"
+          },
+          "lookup": {
+            "path": "/projects",
+            "result": "results",
+            "value": "id",
+            "label": "{{name}}"
+          }
+        },
+        {
+          "name": "due_string",
+          "label": {
+            "es": "Vence (texto natural)",
+            "en": "Due (natural language)"
+          },
+          "placeholder": "mañana a las 9"
+        },
+        {
+          "name": "priority",
+          "label": {
+            "es": "Prioridad (1 a 4)",
+            "en": "Priority (1 to 4)"
+          },
+          "json": true,
+          "placeholder": "4"
+        },
+        {
+          "name": "labels",
+          "label": {
+            "es": "Etiquetas (JSON)",
+            "en": "Labels (JSON)"
+          },
+          "json": true,
+          "placeholder": "[\"trabajo\"]"
+        }
+      ],
+      "body": {
+        "content": "{{content}}",
+        "description": "{{description}}",
+        "project_id": "{{project_id}}",
+        "due_string": "{{due_string}}",
+        "priority": "{{priority}}",
+        "labels": "{{labels}}"
+      }
+    },
+    {
+      "id": "listTasks",
+      "name": {
+        "es": "Tareas",
+        "en": "Tasks"
+      },
+      "method": "GET",
+      "path": "/tasks",
+      "query": {
+        "project_id": "{{project_id}}",
+        "limit": "{{limit}}"
+      },
+      "fields": [
+        {
+          "name": "project_id",
+          "label": {
+            "es": "Proyecto",
+            "en": "Project"
+          },
+          "lookup": {
+            "path": "/projects",
+            "result": "results",
+            "value": "id",
+            "label": "{{name}}"
+          }
+        },
+        {
+          "name": "limit",
+          "label": {
+            "es": "Cuántas (hasta 200)",
+            "en": "How many (up to 200)"
+          },
+          "placeholder": "50"
+        }
+      ],
+      "result": "results"
+    },
+    {
+      "id": "closeTask",
+      "name": {
+        "es": "Completar una tarea",
+        "en": "Complete a task"
+      },
+      "method": "POST",
+      "path": "/tasks/{{taskId}}/close",
+      "fields": [
+        {
+          "name": "taskId",
+          "label": {
+            "es": "Tarea (id)",
+            "en": "Task (id)"
+          },
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "listProjects",
+      "name": {
+        "es": "Proyectos",
+        "en": "Projects"
+      },
+      "method": "GET",
+      "path": "/projects",
+      "fields": [],
+      "result": "results"
+    }
+  ]
+}

@@ -1067,6 +1067,13 @@ pub async fn chat_send(
     // The user's own words, kept for the conversation's title: the note below names files, not the
     // topic.
     let asked = message.clone();
+    // A flow that answers in the chat («Asistente del Chat»): no engine and no session — the flow
+    // runs with the message and the conversation so far, and its last node's text is the answer.
+    let chosen = provider.clone().unwrap_or_else(|| conversation.provider.clone());
+    if chosen == "flow" {
+        let flow_id = model.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| conversation.model.clone());
+        return flow_turn(&app, &db, &conversation, &flow_id, &asked, run_id).await;
+    }
     let message = if attachments.is_empty() {
         message
     } else {
@@ -1643,6 +1650,143 @@ pub async fn chat_send(
         // Re-derived from the JSON that was stored, so the reply and the row can never disagree
         // about what this turn made.
         outputs: produced_paths,
+    })
+}
+
+/// One turn answered by a flow — see the branch at the top of [`chat_send`]. The question and the
+/// answer are filed like any engine's, so the transcript, the unread mark and the title behave the
+/// same; a failed run is an error bubble with the flow's own reason.
+async fn flow_turn(
+    app: &AppHandle,
+    db: &State<'_, Db>,
+    conversation: &crate::db::models::ChatConversation,
+    flow_id: &str,
+    message: &str,
+    run_id: Option<String>,
+) -> Result<ChatReply, String> {
+    let conversation_id = conversation.id.clone();
+    let _lease = ai_locks::acquire_key(&conversation_id).ok_or_else(|| {
+        let name = if conversation.title.trim().is_empty() { &conversation_id } else { &conversation.title };
+        format!("{}{name}", ai_locks::BUSY_MARKER)
+    })?;
+    let (turn, history) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let history: Vec<serde_json::Value> = chat_queries::list_messages(&conn, &conversation_id, false)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|row| !row.is_error && !row.is_cancelled && !row.content.trim().is_empty())
+            .map(|row| serde_json::json!({ "role": row.role, "text": row.content }))
+            .collect();
+        let turn = chat_queries::next_turn(&conn, &conversation_id).map_err(|e| e.to_string())?;
+        chat_queries::append_message(
+            &conn,
+            &ChatMessageRow {
+                id: uuid::Uuid::new_v4().to_string(),
+                conversation_id: conversation_id.clone(),
+                turn,
+                role: "user".to_string(),
+                content: message.to_string(),
+                provider: Some("flow".to_string()),
+                model: None,
+                engine_version: None,
+                response_time_ms: None,
+                is_error: false,
+                is_cancelled: false,
+                trace: None,
+                outputs: None,
+                created_at: String::new(),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let _ = chat_queries::autotitle_from_first_message(&conn, &conversation_id);
+        (turn, history)
+    };
+    let started = std::time::Instant::now();
+    // Under the run id the composer's Stop cancels, like an engine's turn: stopping cancels the
+    // flow's run too, rather than leaving the thread locked until the flow finishes on its own.
+    let answer = ai_runs::scoped(app.clone(), run_id.clone(), async {
+        let mut stop = run_id.as_deref().and_then(ai_runs::subscribe);
+        crate::flows::triggers::chat_turn(app, flow_id, message, history, &conversation_id, &conversation.workspace_id, async move {
+            ai_runs::cancelled(&mut stop).await
+        })
+        .await
+    })
+    .await;
+    let response_time_ms = started.elapsed().as_millis() as i64;
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let (text, name) = match answer {
+        Ok(value) => (
+            value.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            value.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+        ),
+        Err(error) => {
+            // Filed as an engine turn's failure or Stop is (see `chat_send`): a stopped turn has no
+            // content and no unread mark — the person was there and did it.
+            let cancelled = error.starts_with(ai_runs::CANCELLED_MARKER);
+            if !cancelled {
+                let _ = chat_queries::set_unread(&conn, &conversation_id, true);
+            }
+            let _ = chat_queries::append_message(
+                &conn,
+                &ChatMessageRow {
+                    id: assistant_message_id,
+                    conversation_id: conversation_id.clone(),
+                    turn,
+                    role: "assistant".to_string(),
+                    content: if cancelled { String::new() } else { error.clone() },
+                    provider: Some("flow".to_string()),
+                    model: None,
+                    engine_version: None,
+                    response_time_ms: Some(response_time_ms),
+                    is_error: !cancelled,
+                    is_cancelled: cancelled,
+                    trace: None,
+                    outputs: None,
+                    created_at: String::new(),
+                },
+            );
+            return Err(error);
+        }
+    };
+    chat_queries::append_message(
+        &conn,
+        &ChatMessageRow {
+            id: assistant_message_id.clone(),
+            conversation_id: conversation_id.clone(),
+            turn,
+            role: "assistant".to_string(),
+            content: text.clone(),
+            provider: Some("flow".to_string()),
+            model: Some(name.clone()),
+            engine_version: None,
+            response_time_ms: Some(response_time_ms),
+            is_error: false,
+            is_cancelled: false,
+            trace: None,
+            outputs: None,
+            created_at: String::new(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = chat_queries::set_unread(&conn, &conversation_id, true);
+    let _ = chat_queries::update_session(&conn, &conversation_id, None, "flow", None, flow_id, None);
+    let created_at = chat_queries::list_messages(&conn, &conversation_id, false)
+        .ok()
+        .and_then(|rows| rows.into_iter().find(|m| m.id == assistant_message_id).map(|m| m.created_at))
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    Ok(ChatReply {
+        account_id: None,
+        text,
+        session_id: None,
+        model: Some(name),
+        provider: "flow".to_string(),
+        engine_version: None,
+        created_at,
+        response_time_ms,
+        message_id: assistant_message_id,
+        compacted: false,
+        outputs: Vec::new(),
     })
 }
 

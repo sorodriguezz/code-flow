@@ -198,6 +198,13 @@ pub struct LocalCall {
     /// The window to load the model with; `0` for Settings' (or the model's suggested one).
     pub context: u32,
     pub node_name: String,
+    /// A conversation instead of one question: OpenAI-shaped messages after the system prompt,
+    /// ending with the question (`prompt` is then unused). Remembered turns, tool calls and results.
+    pub messages: Vec<Value>,
+    /// Other flows the model may call, as OpenAI-shaped function tools.
+    pub tools: Vec<Value>,
+    /// Tools on offer but no more calls — the turn after the node's budget is spent.
+    pub no_more_tools: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -209,6 +216,10 @@ pub struct LocalAnswer {
     pub completion_tokens: Option<u64>,
     /// The answer ran into `max_tokens` and is cut.
     pub cut: bool,
+    /// In a conversation: the assistant's message to put back in it, and the tools it called
+    /// (`{ id, name, arguments }`).
+    pub message: Option<Value>,
+    pub tool_calls: Vec<Value>,
 }
 
 /// A task for the Agents console: one agent with an instruction, or a saved chain template, in one
@@ -239,6 +250,9 @@ pub struct WaitRequest {
     pub timeout: Option<Duration>,
     /// The node's input, kept so a run picked up after a restart can hand it on.
     pub inputs: Ports,
+    /// The decision may arrive through a link (an approval sent by Telegram, Slack or email): the
+    /// flows' server must be up to receive it.
+    pub links: bool,
 }
 
 /// How a wait ended.

@@ -1,0 +1,149 @@
+{
+  "id": "dropbox",
+  "name": "Dropbox",
+  "group": "appsData",
+  "baseUrl": "https://api.dropboxapi.com/2",
+  "auth": "bearer",
+  "authHint": {
+    "es": "Un token de acceso de una app de Dropbox (con files.metadata y sharing) como credencial Token",
+    "en": "An access token of a Dropbox app (with files.metadata and sharing) as a Token credential"
+  },
+  "tokenUrl": "https://www.dropbox.com/developers/apps",
+  "test": {
+    "method": "POST",
+    "path": "/users/get_current_account",
+    "label": "{{name.display_name}} · {{email}}"
+  },
+  "errorField": "error_summary",
+  "operations": [
+    {
+      "id": "listFolder",
+      "name": {
+        "es": "Archivos de una carpeta",
+        "en": "A folder's files"
+      },
+      "method": "POST",
+      "path": "/files/list_folder",
+      "fields": [
+        {
+          "name": "path",
+          "label": {
+            "es": "Carpeta (vacía: la raíz)",
+            "en": "Folder (empty: the root)"
+          },
+          "placeholder": "/Facturas"
+        },
+        {
+          "name": "recursive",
+          "label": {
+            "es": "Con subcarpetas (true/false)",
+            "en": "With subfolders (true/false)"
+          },
+          "json": true,
+          "placeholder": "false"
+        }
+      ],
+      "body": {
+        "path": {
+          "$keep": "{{path}}"
+        },
+        "recursive": "{{recursive}}",
+        "limit": 200
+      },
+      "result": "entries"
+    },
+    {
+      "id": "search",
+      "name": {
+        "es": "Buscar archivos",
+        "en": "Search files"
+      },
+      "method": "POST",
+      "path": "/files/search_v2",
+      "fields": [
+        {
+          "name": "query",
+          "label": {
+            "es": "Texto",
+            "en": "Text"
+          },
+          "required": true
+        }
+      ],
+      "body": {
+        "query": "{{query}}"
+      },
+      "result": "matches"
+    },
+    {
+      "id": "temporaryLink",
+      "name": {
+        "es": "Enlace temporal de descarga",
+        "en": "Temporary download link"
+      },
+      "method": "POST",
+      "path": "/files/get_temporary_link",
+      "fields": [
+        {
+          "name": "path",
+          "label": {
+            "es": "Archivo",
+            "en": "File"
+          },
+          "required": true,
+          "placeholder": "/Facturas/marzo.pdf"
+        }
+      ],
+      "body": {
+        "path": "{{path}}"
+      }
+    },
+    {
+      "id": "shareLink",
+      "name": {
+        "es": "Compartir con un enlace",
+        "en": "Share with a link"
+      },
+      "method": "POST",
+      "path": "/sharing/create_shared_link_with_settings",
+      "fields": [
+        {
+          "name": "path",
+          "label": {
+            "es": "Archivo o carpeta",
+            "en": "File or folder"
+          },
+          "required": true
+        }
+      ],
+      "body": {
+        "path": "{{path}}"
+      }
+    },
+    {
+      "id": "createFolder",
+      "name": {
+        "es": "Crear una carpeta",
+        "en": "Create a folder"
+      },
+      "method": "POST",
+      "path": "/files/create_folder_v2",
+      "fields": [
+        {
+          "name": "path",
+          "label": {
+            "es": "Carpeta",
+            "en": "Folder"
+          },
+          "required": true,
+          "placeholder": "/Informes/2026"
+        }
+      ],
+      "body": {
+        "path": "{{path}}",
+        "autorename": false
+      },
+      "result": "metadata"
+    }
+  ]
+}

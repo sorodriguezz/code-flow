@@ -586,6 +586,16 @@
       }
       case "length":
         return stringify(value).length;
+      case "textDiff": {
+        // From what it was (`diffWith`) to what it is now (the value): `+` is what the value added.
+        const ops = lineDiff(stringify(params.diffWith), stringify(value));
+        const added = ops.filter((op) => op.type === "add").length;
+        const removed = ops.filter((op) => op.type === "remove").length;
+        if (params.diffFormat === "lineChanges") {
+          return { changed: added + removed > 0, added, removed, changes: ops.filter((op) => op.type !== "same") };
+        }
+        return { changed: added + removed > 0, added, removed, diff: unifiedDiff(ops) };
+      }
       case "template":
         return stringify(params.template);
       default:
@@ -667,9 +677,148 @@
       }
       case "now":
         return writeDate(DateTime.now().setZone(zone || "system"), output);
+      case "addBusinessDays": {
+        const amount = Math.trunc(Number(params.amount) || 0);
+        const step = amount >= 0 ? 1 : -1;
+        let moved = source;
+        for (let counted = 0; counted < Math.abs(amount); ) {
+          moved = moved.plus({ days: step });
+          if (isBusinessDay(moved, params)) counted += 1;
+        }
+        return writeDate(moved, output);
+      }
+      case "isBusinessDay":
+        if (!source.isValid) throw new Error("Not a date");
+        return isBusinessDay(source, params);
+      case "businessDaysBetween": {
+        const other = readDate(params.other, params.fromFormat, zone);
+        if (!other.isValid) throw new Error("The second date is not a date");
+        // Business days after the first date up to and including the second; negative when it is earlier.
+        const forward = other >= source;
+        let cursor = (forward ? source : other).startOf("day");
+        const end = (forward ? other : source).startOf("day");
+        let count = 0;
+        while (cursor < end) {
+          cursor = cursor.plus({ days: 1 });
+          if (isBusinessDay(cursor, params)) count += 1;
+        }
+        return forward ? count : -count;
+      }
+      case "nextBusinessDay": {
+        if (!source.isValid) throw new Error("Not a date");
+        let day = source;
+        for (let guard = 0; !isBusinessDay(day, params) && guard < 366; guard += 1) day = day.plus({ days: 1 });
+        return writeDate(day, output);
+      }
       default:
         throw new Error(`Unknown date operation "${params.operation}"`);
     }
+  }
+
+  /** Monday to Friday, not a holiday of the country (handed in by the engine) nor one listed. */
+  function isBusinessDay(dt, params) {
+    if (dt.weekday > 5) return false;
+    const key = dt.toISODate();
+    const holidays = Array.isArray(params.__holidays) ? params.__holidays : [];
+    const extra = Array.isArray(params.extraHolidays) ? params.extraHolidays.map((d) => String(d).trim()) : [];
+    return !holidays.includes(key) && !extra.includes(key);
+  }
+
+  /**
+   * A line diff (Myers' algorithm): the shortest list of kept, removed and added lines that turns
+   * `before` into `after`.
+   */
+  function lineDiff(before, after) {
+    const a = before.split(/\r?\n/);
+    const b = after.split(/\r?\n/);
+    const n = a.length;
+    const m = b.length;
+    const max = n + m;
+    const v = new Array(2 * max + 2).fill(0);
+    const trace = [];
+    let done = false;
+    for (let d = 0; d <= max && !done; d += 1) {
+      trace.push(v.slice());
+      for (let k = -d; k <= d; k += 2) {
+        let x = k === -d || (k !== d && v[k - 1 + max] < v[k + 1 + max]) ? v[k + 1 + max] : v[k - 1 + max] + 1;
+        let y = x - k;
+        while (x < n && y < m && a[x] === b[y]) {
+          x += 1;
+          y += 1;
+        }
+        v[k + max] = x;
+        if (x >= n && y >= m) {
+          done = true;
+          break;
+        }
+      }
+    }
+    const ops = [];
+    let x = n;
+    let y = m;
+    for (let d = trace.length - 1; d >= 0 && (x > 0 || y > 0); d -= 1) {
+      const vv = trace[d];
+      const k = x - y;
+      const prevK = k === -d || (k !== d && vv[k - 1 + max] < vv[k + 1 + max]) ? k + 1 : k - 1;
+      const prevX = vv[prevK + max];
+      const prevY = prevX - prevK;
+      while (x > prevX && y > prevY) {
+        ops.push({ type: "same", line: a[x - 1] });
+        x -= 1;
+        y -= 1;
+      }
+      if (d === 0) break;
+      if (x === prevX) {
+        ops.push({ type: "add", line: b[y - 1] });
+      } else {
+        ops.push({ type: "remove", line: a[x - 1] });
+      }
+      x = prevX;
+      y = prevY;
+    }
+    while (x > 0 && y > 0) {
+      ops.push({ type: "same", line: a[x - 1] });
+      x -= 1;
+      y -= 1;
+    }
+    return ops.reverse();
+  }
+
+  /** The diff as a unified patch, three lines of context around each change. */
+  function unifiedDiff(ops) {
+    const positions = [];
+    let aLine = 1;
+    let bLine = 1;
+    for (const op of ops) {
+      positions.push({ a: aLine, b: bLine });
+      if (op.type !== "add") aLine += 1;
+      if (op.type !== "remove") bLine += 1;
+    }
+    const changes = ops.map((op, i) => (op.type === "same" ? -1 : i)).filter((i) => i >= 0);
+    if (changes.length === 0) return "";
+    // Changes closer than twice the context share a hunk, the way `diff -u` groups them.
+    const groups = [];
+    let first = changes[0];
+    let last = changes[0];
+    for (const i of changes.slice(1)) {
+      if (i - last > 6) {
+        groups.push([first, last]);
+        first = i;
+      }
+      last = i;
+    }
+    groups.push([first, last]);
+    const out = [];
+    for (const [from, to] of groups) {
+      const start = Math.max(0, from - 3);
+      const end = Math.min(ops.length, to + 4);
+      const hunk = ops.slice(start, end);
+      const aCount = hunk.filter((op) => op.type !== "add").length;
+      const bCount = hunk.filter((op) => op.type !== "remove").length;
+      out.push(`@@ -${positions[start].a},${aCount} +${positions[start].b},${bCount} @@`);
+      for (const op of hunk) out.push((op.type === "add" ? "+" : op.type === "remove" ? "-" : " ") + op.line);
+    }
+    return out.join("\n");
   }
 
   // ---------------------------------------------------------------- the Code node

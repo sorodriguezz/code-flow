@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { CircleAlert, FileDiff, RotateCcw, Square, StepForward, Trash2, Undo2, Waypoints } from "lucide-react";
+import { CircleAlert, FileDiff, FlaskConical, RotateCcw, Square, StepForward, Trash2, Undo2, Waypoints } from "lucide-react";
 import { Button, iconButtonClass } from "../common/Button";
-import { rowClass, underlineStripClass, underlineTabClass } from "../common/recipes";
+import { fieldClass, rowClass, underlineStripClass, underlineTabClass } from "../common/recipes";
 import { DataModeSwitch, ItemsView, type DataMode } from "./DataView";
 import { LogLines } from "./RunLog";
 import { MODE_KEY, NODE_STATUS_KEY, RUN_STATUS_KEY, formatDuration, formatWhen, itemsLabel, statusColor } from "./runFormat";
 import { WaitCard } from "./WaitCard";
+import { testFromRun } from "./FlowTestsView";
+import { promptAction } from "../../state/promptStore";
 import { familyColor, nodeIcon } from "../../lib/flows/nodeIcons";
 import {
   flowsMetrics,
@@ -13,6 +15,7 @@ import {
   flowsRunLog,
   flowsRunNodeData,
   flowsCancelRun,
+  flowsListRuns,
   flowsRetryRun,
   flowsUndoEdits,
   type FlowLogLine,
@@ -54,7 +57,27 @@ export function ExecutionsView() {
     if (flowId) void useFlowRunsStore.getState().loadHistory(flowId);
   }, [flowId]);
 
-  const rows = history?.rows ?? [];
+  // «Buscar»: the runs whose filed data («Datos de la ejecución»), id or error hold the text.
+  const [search, setSearch] = useState("");
+  const [found, setFound] = useState<FlowRunRow[] | null>(null);
+  useEffect(() => {
+    const text = search.trim();
+    if (!text || !flowId) {
+      setFound(null);
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(() => {
+      void flowsListRuns(flowId, 200, null, text)
+        .then((list) => alive && setFound(list))
+        .catch(() => alive && setFound([]));
+    }, 250);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [search, flowId]);
+  const rows = found ?? history?.rows ?? [];
   useEffect(() => {
     if (!selected && rows.length > 0) useFlowRunsStore.getState().selectRun(rows[0].id);
   }, [selected, rows]);
@@ -86,6 +109,16 @@ export function ExecutionsView() {
           </button>
         </div>
         <MetricsStrip flowId={flowId} version={`${rows.length}:${rows[0]?.id ?? ""}:${rows[0]?.status ?? ""}`} />
+        <div className="shrink-0 px-2 pt-1.5">
+          <input
+            className={fieldClass({ size: "sm", className: "w-full" })}
+            value={search}
+            placeholder={t("flows.executions.search")}
+            aria-label={t("flows.executions.search")}
+            title={t("flows.executions.searchHint")}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
           {rows.length === 0 && !history?.loading && <p className="px-2 py-3 text-[12px] text-[var(--cf-text-muted)]">{t("flows.executions.none")}</p>}
           {rows.map((row) => (
@@ -105,6 +138,14 @@ export function ExecutionsView() {
                 <span>·</span>
                 <span>{t(MODE_KEY[row.mode] ?? "flows.mode.manual")}</span>
               </span>
+              {row.customData && Object.keys(row.customData).length > 0 && (
+                <span className="truncate pl-4 text-left font-mono text-[10.5px] text-[var(--cf-text-muted)]">
+                  {Object.entries(row.customData)
+                    .slice(0, 3)
+                    .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+                    .join(" · ")}
+                </span>
+              )}
             </button>
           ))}
           {history?.more && rows.length > 0 && (
@@ -281,6 +322,25 @@ function RunDetail({ runId, flowId }: { runId: string; flowId: string }) {
                 <RotateCcw size={12} />
                 {t("flows.executions.retry")}
               </Button>
+            )}
+            {run.triggerNode && run.status === "success" && (
+              <button
+                type="button"
+                className={iconButtonClass({ size: "sm" })}
+                title={t("flows.executions.saveAsTest")}
+                aria-label={t("flows.executions.saveAsTest")}
+                onClick={() =>
+                  void promptAction(t("flows.tests.namePrompt"), { initial: t("flows.tests.defaultName", { when: new Date(run.startedAt).toLocaleString(language) }), confirmLabel: t("flows.tables.save") }).then(
+                    (name) =>
+                      name &&
+                      void testFromRun(flowId, run, nodes, name, flowsRunNodeData)
+                        .then(() => pushSuccessToast(t("flows.tests.saved", { name })))
+                        .catch((error) => pushErrorToast(String(error))),
+                  )
+                }
+              >
+                <FlaskConical size={14} />
+              </button>
             )}
             {run.triggerNode && run.status === "error" && (
               <Button size="sm" title={t("flows.executions.retryFailedHint")} onClick={() => void retry(true)}>

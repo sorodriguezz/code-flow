@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { ContextMenu } from "../common/ContextMenu";
+import { ensureFlowContextEntries, flowMenuItems } from "../../state/flowContextStore";
 import { matchesCommit } from "../../lib/gitActions";
 import { commitMenuItems } from "./commitMenu";
 import { useGitToolsStore } from "../../state/gitToolsStore";
@@ -1012,6 +1013,7 @@ const CommitTable = memo(function CommitTable() {
                 style={{ position: "absolute", left: 0, right: 0, top: rowTop(r.row), height: ROW_HEIGHT }}
                 onContextMenu={(event) => {
                   event.preventDefault();
+                  ensureFlowContextEntries();
                   setMenu({ commit: r.commit, x: event.clientX, y: event.clientY });
                 }}
                 // The open commit wears the selection every list in the app wears — the accent wash,
@@ -1165,7 +1167,8 @@ const CommitTable = memo(function CommitTable() {
         <ContextMenu
           x={menu.x}
           y={menu.y}
-          items={commitMenuItems({
+          items={[
+            ...commitMenuItems({
             commit: menu.commit,
             headCommitId,
             dirty,
@@ -1182,7 +1185,18 @@ const CommitTable = memo(function CommitTable() {
               if (bisect?.active) void bisectMark(verdict, commit.id);
               else if (verdict !== "skip") void bisectStart(verdict, commit.id);
             },
-          })}
+            }),
+            // What active flows offer on a commit («Menú contextual» triggers).
+            ...flowMenuItems("commit", null, () => ({
+              sha: menu.commit.id,
+              shortSha: menu.commit.short_id,
+              summary: menu.commit.summary,
+              author: menu.commit.author_name,
+              authorEmail: menu.commit.author_email,
+              date: new Date(menu.commit.timestamp * 1000).toISOString(),
+              repoPath: useRepoStore.getState().repoPath,
+            })),
+          ]}
           onClose={() => setMenu(null)}
         />
       )}

@@ -284,7 +284,7 @@ pub(super) struct AppHost {
     pub(super) flow_id: String,
     pub(super) flow_name: String,
     pub(super) workspace_id: String,
-    depth: u32,
+    pub(super) depth: u32,
     lines: Mutex<Vec<LogLine>>,
     log_bytes: AtomicU64,
     /// Secret values this run has read — its credentials, a Llavero item — kept out of everything it
@@ -345,6 +345,28 @@ fn redact_text(text: &str, secrets: &[String]) -> String {
 }
 
 impl AppHost {
+    /// `value` with every secret this run has read replaced — for what a node stores on the run
+    /// itself (`run.data`), which the run's own files and log never carry in clear either.
+    pub(super) fn redacted(&self, mut value: Value) -> Value {
+        let secrets = self.secrets.lock().map(|list| list.clone()).unwrap_or_default();
+        if !secrets.is_empty() {
+            redact_value(&mut value, &secrets);
+        }
+        value
+    }
+
+    /// An error's text with this run's secrets taken out — the error is stored on the node's row
+    /// and the run's, and a library error may quote the URL a token was part of (Telegram's
+    /// `bot<token>`), whatever the node itself was careful to say.
+    pub(super) fn redacted_text(&self, text: &str) -> String {
+        let secrets = self.secrets.lock().map(|list| list.clone()).unwrap_or_default();
+        if secrets.is_empty() {
+            text.to_string()
+        } else {
+            redact_text(text, &secrets)
+        }
+    }
+
     fn with_db<T>(&self, work: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>) -> Result<T, String> {
         let db = self.app.state::<Db>();
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -505,7 +527,7 @@ impl RunHost for AppHost {
         row.items_in = items_in;
         row.items_out = items_out;
         row.attempts = report.attempts as i64;
-        row.error = report.error.unwrap_or_default();
+        row.error = self.redacted_text(&report.error.unwrap_or_default());
         self.publish(row);
     }
 
@@ -631,12 +653,23 @@ impl RunHost for AppHost {
                 return Err(format!("\"{}\" belongs to another workspace", target.meta.name));
             }
             let parsed = spec::parse(&target.spec)?;
-            let entry = parsed
+            let entry_node = parsed
                 .nodes
                 .iter()
                 .find(|n| n.type_id == "trigger.subflow" && !n.disabled)
-                .map(|n| n.id.clone())
                 .ok_or_else(|| format!("\"{}\" has no \"called by another flow\" trigger", target.meta.name))?;
+            let entry = entry_node.id.clone();
+            // A trigger that declares its inputs gets them typed and checked, as a form's answers are.
+            let fields = crate::flows::form::fields_of(&entry_node.params);
+            let items = if fields.is_empty() {
+                items
+            } else {
+                items
+                    .into_iter()
+                    .map(|item| crate::flows::form::coerce(&fields, &item.json).map(Item::new))
+                    .collect::<Result<Vec<_>, String>>()
+                    .map_err(|e| format!("The inputs for \"{}\": {e}", target.meta.name))?
+            };
             let mut request = StartRequest::fired(&entry, items, RunOrigin::Subflow);
             request.depth = self.depth + 1;
             request.wait = wait;
@@ -759,6 +792,8 @@ pub enum RunOrigin {
     /// from where it failed, the nodes that had succeeded reused. Pins are ignored: what is being
     /// retried was a real run.
     Retry,
+    /// One of the flow's tests («Pruebas»): a real run from its trigger, started by a person.
+    Test,
 }
 
 /// What a run ended with, for whoever is waiting on it.
@@ -867,7 +902,7 @@ pub const DEFAULT_AI_PER_HOUR: u32 = 60;
 /// When a flow's runs end in a notification: never, when they fail, or always. Read from the flow's
 /// settings for the runs nobody is watching; a run started by hand answers to the window instead.
 pub(super) fn notify_setting(spec: &FlowSpec, origin: RunOrigin) -> Option<String> {
-    if origin == RunOrigin::Manual || origin == RunOrigin::Retry {
+    if matches!(origin, RunOrigin::Manual | RunOrigin::Retry | RunOrigin::Test) {
         return None;
     }
     let chosen = spec.settings.get("notifyOn").and_then(Value::as_str).unwrap_or("failure");
@@ -877,8 +912,9 @@ pub(super) fn notify_setting(spec: &FlowSpec, origin: RunOrigin) -> Option<Strin
     })
 }
 
-/// The form a run of `flow_id` in `mode` asks for: the fields of the manual trigger its plan starts
-/// from — `None` when that trigger has none, is pinned, or is not a manual trigger.
+/// The form a run of `flow_id` in `mode` asks for: the fields of the trigger its plan starts from — a
+/// manual trigger's, a web form's, a subflow's inputs or a tool's arguments (`form::asks`) — `None`
+/// when that trigger has none, is pinned, or asks nothing.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunForm {
@@ -904,7 +940,7 @@ pub fn run_form(app: &AppHandle, flow_id: &str, mode: &RunMode, trigger: Option<
         Err(_) => return Ok(None),
     };
     let Some(start) = plan.trigger.as_deref().and_then(|id| parsed.nodes.iter().find(|n| n.id == id)) else { return Ok(None) };
-    if start.type_id != "trigger.manual" || pins.contains_key(&start.id) {
+    if !crate::flows::form::asks(&start.type_id) || pins.contains_key(&start.id) {
         return Ok(None);
     }
     let fields = crate::flows::form::fields_of(&start.params);
@@ -935,7 +971,7 @@ pub fn start_with(
         }
         let parsed = spec::parse(&flow.spec)?;
         // «No correr con batería»: a heavy flow waits for the cable — unless a person asked for it.
-        if !matches!(origin, RunOrigin::Manual | RunOrigin::Retry)
+        if !matches!(origin, RunOrigin::Manual | RunOrigin::Retry | RunOrigin::Test)
             && parsed.settings.get("skipOnBattery").and_then(Value::as_bool) == Some(true)
             && crate::power::status().is_some_and(|power| !power.plugged_in)
         {
@@ -979,10 +1015,16 @@ pub fn start_with(
     if let Some(items) = trigger_items {
         plan.trigger_output = Some(vec![items]);
     } else if let Some(input) = form_input {
-        // The form's answers are the manual trigger's item — typed against its fields here.
+        // The form's answers are the trigger's item — typed against its fields here. The triggers
+        // that are not the manual one say the item came by hand, as their samples do.
         if let Some(start) = plan.trigger.as_deref().and_then(|id| parsed.nodes.iter().find(|n| n.id == id)) {
-            if start.type_id == "trigger.manual" && !pins.contains_key(&start.id) {
-                let item = crate::flows::form::coerce(&crate::flows::form::fields_of(&start.params), &input)?;
+            if crate::flows::form::asks(&start.type_id) && !pins.contains_key(&start.id) {
+                let mut item = crate::flows::form::coerce(&crate::flows::form::fields_of(&start.params), &input)?;
+                if start.type_id != "trigger.manual" {
+                    if let Some(map) = item.as_object_mut() {
+                        map.insert("manual".into(), Value::Bool(true));
+                    }
+                }
                 plan.trigger_output = Some(vec![vec![Item::new(item)]]);
             }
         }
@@ -993,6 +1035,7 @@ pub fn start_with(
         RunOrigin::Subflow => "subflow",
         RunOrigin::Error => "error",
         RunOrigin::Retry => "retry",
+        RunOrigin::Test => "test",
     };
 
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -1014,6 +1057,7 @@ pub fn start_with(
         duration_ms: None,
         data_bytes: 0,
         notify: notify_setting(&parsed, origin),
+        custom_data: Value::Object(Default::default()),
     };
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -1125,7 +1169,7 @@ pub(super) fn launch(app: &AppHandle, launch: Launch) -> Option<tokio::sync::one
         let _ = std::fs::remove_dir_all(run_dir(&started.id).join("work"));
         let mut row = started.clone();
         row.status = outcome.status.as_str().to_string();
-        row.error = outcome.error.clone().unwrap_or_default();
+        row.error = host.redacted_text(&outcome.error.clone().unwrap_or_default());
         row.error_node = outcome.error_node.clone().unwrap_or_default();
         row.finished_at = Some(finished_at.clone());
         row.duration_ms = Some(duration);
@@ -1140,7 +1184,7 @@ pub(super) fn launch(app: &AppHandle, launch: Launch) -> Option<tokio::sync::one
         if let Some(tx) = done_tx {
             let _ = tx.send(Finished { status: row.status.clone(), error: row.error.clone(), last_output: outcome.last_output.clone() });
         }
-        super::triggers::run_finished(&app, &row, origin);
+        super::triggers::run_finished(&app, &row, origin, depth, &outcome.last_output);
         let pruner = app.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || {
             if let Ok(conn) = pruner.state::<Db>().0.lock() {

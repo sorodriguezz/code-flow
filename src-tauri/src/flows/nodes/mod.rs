@@ -12,8 +12,12 @@
 mod ai;
 mod app;
 pub(crate) mod binary;
+mod browser;
 pub(crate) mod connector;
+mod containers;
 pub(crate) mod data;
+pub(crate) mod devtools;
+mod docs;
 pub(crate) mod feed;
 mod files;
 pub(crate) mod formats;
@@ -30,12 +34,16 @@ mod notebook;
 mod process;
 mod prs;
 pub(crate) mod queue;
-mod redact;
+pub(crate) mod redact;
 mod remote;
+mod table;
+mod textkit;
+mod tools;
 mod transcribe;
 mod transform;
 mod utils;
 mod vision;
+mod web;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,7 +171,13 @@ impl NodeCtx {
         json!({
             "node": self.node.name,
             "flow": {"id": self.run.flow_id, "name": self.run.flow_name, "active": false, "workspaceId": self.run.workspace_id},
-            "execution": {"id": self.run.run_id, "mode": self.run.mode, "resumeUrl": self.run.host.resume_url()},
+            "execution": {
+                "id": self.run.run_id,
+                "mode": self.run.mode,
+                "resumeUrl": self.run.host.resume_url(),
+                // A waiting form's page (`Esperar → un formulario`), through the tunnel when one is up.
+                "resumeFormUrl": self.run.host.resume_url().map(|url| crate::flows::triggers::webhook::public_or_local(&url.replacen("/resume/", "/form/", 1))),
+            },
             "vars": self.run.vars,
             "timezone": self.run.timezone,
             "runIndex": 0,
@@ -297,7 +311,8 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "code.shell" | "code.python" | "code.node" | "code.command" | "code.script" | "code.osascript" => process::execute(ctx).await,
         "code.js" => code(ctx).await,
         "net.http" => http::execute(ctx).await,
-        "logic.if" | "logic.switch" | "logic.merge" | "logic.wait" | "logic.stop" | "logic.noop" | "logic.approval" => {
+        "logic.if" | "logic.switch" | "logic.merge" | "logic.wait" | "logic.stop" | "logic.noop" | "logic.approval" | "logic.businessHours"
+        | "logic.assert" => {
             logic::execute(ctx).await
         }
         "transform.set" | "transform.filter" | "transform.sort" | "transform.split" | "transform.aggregate"
@@ -305,7 +320,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "app.notify" | "data.state" | "data.vars" | "net.respond" | "code.service" => app::execute(ctx).await,
         "logic.subflow" => logic::subflow(ctx).await,
         "ai.agent" | "ai.local" | "ai.classify" | "ai.extract" | "ai.summarize" | "ai.review" | "ai.prReview" | "ai.prFix" | "ai.prReply"
-        | "ai.chat" | "ai.commit" | "app.agent" | "ai.vision" => {
+        | "ai.chat" | "ai.commit" | "app.agent" | "ai.vision" | "ai.guard" | "ai.transform" | "ai.compare" | "ai.image" | "ai.speech" => {
             ai::execute(ctx).await
         }
         "files.file" | "files.list" | "files.move" | "files.git" | "code.docker" => files::execute(ctx).await,
@@ -315,6 +330,12 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             net::execute(ctx).await
         }
         "net.connector" => connector::execute(ctx).await,
+        "code.container" | "code.k8s" => containers::execute(ctx).await,
+        "files.version" | "app.search" | "app.audit" | "app.process" => devtools::execute(ctx).await,
+        "files.media" | "files.docx" | "files.ics" => docs::execute(ctx).await,
+        "net.search" | "net.soap" | "net.aws" | "net.wol" => web::execute(ctx).await,
+        "net.browser" => browser::execute(ctx).await,
+        "transform.chatFormat" | "transform.number" | "transform.validate" | "transform.limit" | "data.fake" => textkit::execute(ctx).await,
         "net.google" => google::execute(ctx).await,
         "net.microsoft" => microsoft::execute(ctx).await,
         "ai.transcribe" => transcribe::execute(ctx).await,
@@ -329,10 +350,11 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         }
         "files.pdf" | "files.image" => media::execute(ctx).await,
         "code.notebook" => notebook::execute(ctx).await,
-        "data.sql" | "data.mongo" | "data.redis" | "data.sheet" | "data.dbml" => data::execute(ctx).await,
+        "data.sql" | "data.mongo" | "data.redis" | "data.sheet" | "data.dbml" | "data.schemaDiff" => data::execute(ctx).await,
+        "data.table" => table::execute(ctx).await,
         "code.ssh" | "net.transfer" | "net.storage" => remote::execute(ctx).await,
         "files.pr" | "files.pipeline" | "app.note" | "app.reviewer" | "app.open" | "app.terminal" | "app.clipboard" | "app.vault"
-        | "app.apiRequest" => {
+        | "app.apiRequest" | "app.apiCollection" | "app.diagram" | "app.story" | "app.aiUsage" | "app.runData" => {
             integrations::execute(ctx).await
         }
         other => Err(NodeError::failed(format!("No executor for {other}"))),
@@ -352,6 +374,29 @@ fn trigger_output(type_id: &str, params: &Value) -> Result<Vec<Item>, String> {
             "manual": true,
         }),
         "trigger.manual" => crate::flows::form::defaults(&crate::flows::form::fields_of(params))?,
+        // The rest: an item of the shape the trigger really emits, so what follows can be built
+        // against it — a form's or a declared input's defaults, an event like the ones it waits for.
+        // A sample, not the defaults: a required field with none would stop every step tried after
+        // the trigger. A run started by hand asks the form instead (`runs::run_form`).
+        "trigger.form" | "trigger.subflow" | "trigger.tool" => {
+            let mut item = crate::flows::form::sample(&crate::flows::form::fields_of(params));
+            if let Some(map) = item.as_object_mut() {
+                map.insert("manual".into(), json!(true));
+            }
+            item
+        }
+        "trigger.chat" => json!({"message": "Hola", "history": [], "conversationId": "", "at": now.to_rfc3339(), "manual": true}),
+        "trigger.clipboard" => json!({"text": "https://example.com", "kind": "url", "length": 19, "groups": [], "at": now.to_rfc3339(), "manual": true}),
+        "trigger.context" => {
+            let place = params.get("contextPlaces").and_then(Value::as_array).and_then(|p| p.first()).and_then(Value::as_str).unwrap_or("placeFile");
+            json!({"place": place.trim_start_matches("place").to_lowercase(), "path": "", "relativePath": "", "repoPath": "", "at": now.to_rfc3339(), "manual": true})
+        }
+        "trigger.container" => json!({"event": "die", "container": "api", "id": "", "image": "", "exitCode": 1, "composeProject": "", "composeService": "", "engine": text(params, "engineKind"), "at": now.to_rfc3339(), "manual": true}),
+        "trigger.k8s" => json!({"event": "podCrashLoop", "kind": "pod", "namespace": text(params, "namespace"), "name": "api-0", "reason": "CrashLoopBackOff", "restarts": 3, "context": text(params, "kubeContext"), "at": now.to_rfc3339(), "manual": true}),
+        "trigger.logLine" => json!({"line": "ERROR example", "groups": [], "context": [], "source": text(params, "logPath"), "suppressedBefore": 0, "at": now.to_rfc3339(), "manual": true}),
+        "trigger.package" => json!({"registry": text(params, "registry"), "package": text(params, "packageName"), "version": "", "previous": "", "url": "", "manual": true}),
+        "trigger.flowDone" => json!({"flow": {"id": "", "name": ""}, "execution": {"id": "", "status": "success", "error": "", "customData": {}}, "output": [], "manual": true}),
+        "trigger.connector" => json!({"_change": "new", "manual": true}),
         _ => json!({"manual": true}),
     };
     Ok(vec![Item::new(json)])
@@ -361,10 +406,14 @@ fn trigger_output(type_id: &str, params: &Value) -> Result<Vec<Item>, String> {
 async fn code(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let mode = ctx.param_str("mode");
     let source = ctx.param_str("code");
+    run_code(ctx, if mode == "each" { "each" } else { "all" }, &source).await
+}
+
+/// JavaScript run the Code node's way — `all` once over every item, `each` once per item — with its
+/// console lines in the log.
+pub(crate) async fn run_code(ctx: &NodeCtx, mode: &str, source: &str) -> Result<Ports, NodeError> {
     let limit = ctx.timeout.unwrap_or(CODE_TIMEOUT);
-    let answer = ctx
-        .js_job(json!({"kind": "code", "mode": if mode == "each" { "each" } else { "all" }, "code": source}), limit)
-        .await?;
+    let answer = ctx.js_job(json!({"kind": "code", "mode": mode, "code": source}), limit).await?;
     for line in answer.get("logs").and_then(Value::as_array).into_iter().flatten() {
         let level = line.get("level").and_then(Value::as_str).unwrap_or("log");
         let stream = if matches!(level, "error" | "warn") { LogStream::Stderr } else { LogStream::Console };

@@ -267,6 +267,14 @@ pub fn cached_tightest(key: &str) -> Option<(f64, String)> {
     quota.limits.first().map(|limit| (limit.used_percent, limit.resets_at.clone()))
 }
 
+/// Every reading held, without asking anyone — what a flow's «Uso de IA» reports next to the spend.
+pub fn cached_readings() -> Vec<ProviderQuota> {
+    let Ok(guard) = CACHE.lock() else { return Vec::new() };
+    let mut out: Vec<ProviderQuota> = guard.as_ref().map(|all| all.values().map(|(_, quota)| quota.clone()).collect()).unwrap_or_default();
+    out.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.account_id.cmp(&b.account_id)));
+    out
+}
+
 /// Drops one provider's cached answer, so the next read has to go and ask.
 fn forget(provider: &str) {
     if let Ok(mut guard) = CACHE.lock() {

@@ -39,7 +39,19 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "transform.dedupe" => dedupe(ctx),
         "transform.date" | "transform.text" => {
             let kind = if ctx.node.type_id == "transform.date" { "date" } else { "text" };
-            let answer = ctx.js_job(json!({"kind": kind, "params": ctx.params}), JS_TIMEOUT).await?;
+            let mut params = ctx.params.clone();
+            // Business days need the country's holidays, which the JavaScript cannot fetch: the years
+            // around today are handed in with the job (`isBusinessDay` in the prelude).
+            if kind == "date" && matches!(text(&params, "operation").as_str(), "addBusinessDays" | "isBusinessDay" | "businessDaysBetween" | "nextBusinessDay") {
+                use chrono::Datelike;
+                let year = chrono::Local::now().year();
+                let country = crate::flows::holidays::country_code(&text(&params, "holidayCountry")).map_err(NodeError::failed)?;
+                let holidays = crate::flows::holidays::for_years(&country, (year - 2)..=(year + 3)).await;
+                let mut list: Vec<String> = holidays.iter().map(|d| d.format("%Y-%m-%d").to_string()).collect();
+                list.sort();
+                params["__holidays"] = json!(list);
+            }
+            let answer = ctx.js_job(json!({"kind": kind, "params": params}), JS_TIMEOUT).await?;
             let produced = answer.as_array().cloned().unwrap_or_default();
             Ok(vec![produced.into_iter().enumerate().map(|(index, json)| Item::paired(json, index)).collect()])
         }
@@ -89,6 +101,7 @@ async fn set(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let fields = strings(&ctx.params, "fields");
     let dotted = ctx.params.get("dotNotation").is_none() || flag(&ctx.params, "dotNotation");
     let json_mode = text(&ctx.params, "mode") == "json";
+    let rename_mode = text(&ctx.params, "mode") == "rename";
     let items = ctx.items();
     let mut out = Vec::with_capacity(items.len());
     for index in 0..items.len().max(1) {
@@ -114,7 +127,23 @@ async fn set(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             }
             _ => Value::Object(as_object(&source)),
         };
-        if json_mode {
+        if rename_mode {
+            // Each `old → new`: the value moves (dotted paths both sides); a missing field is left alone.
+            for (from, to) in super::pairs(params, "renames") {
+                let to = to.trim();
+                if to.is_empty() || to == from {
+                    continue;
+                }
+                if let Some(value) = get_path(&result, &from).cloned() {
+                    remove_path(&mut result, &from);
+                    if dotted {
+                        set_path(&mut result, to, value);
+                    } else if let Value::Object(target) = &mut result {
+                        target.insert(to.to_string(), value);
+                    }
+                }
+            }
+        } else if json_mode {
             let value = match params.get("json") {
                 Some(Value::String(raw)) if !raw.trim().is_empty() => {
                     serde_json::from_str::<Value>(raw).map_err(|e| NodeError::failed(format!("The JSON is not valid: {e}")))?
@@ -259,6 +288,22 @@ fn aggregate(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             let mut out = json!({});
             set_path(&mut out, &destination, Value::Array(items.iter().map(|item| item.json.clone()).collect()));
             Ok(vec![vec![Item::new(out)]])
+        }
+        "chunks" => {
+            // Lists of `groupSize` items each — a batch API's page, without a loop.
+            let size = number(&ctx.params, "groupSize").unwrap_or(10.0).max(1.0) as usize;
+            let destination = text(&ctx.params, "destination").trim().to_string();
+            let destination = if destination.is_empty() { "data".to_string() } else { destination };
+            let groups: Vec<Item> = items
+                .chunks(size)
+                .enumerate()
+                .map(|(index, chunk)| {
+                    let mut out = json!({"group": index + 1, "count": chunk.len()});
+                    set_path(&mut out, &destination, Value::Array(chunk.iter().map(|item| item.json.clone()).collect()));
+                    Item::new(out)
+                })
+                .collect();
+            Ok(vec![groups])
         }
         "fields" => {
             let fields = strings(&ctx.params, "fields");

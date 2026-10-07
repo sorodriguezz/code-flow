@@ -24,7 +24,12 @@ export type AiGlyphName =
   | "database-zap"
   | "reply"
   | "scan-search"
-  | "audio-lines";
+  | "audio-lines"
+  | "columns-3"
+  | "image-plus"
+  | "volume-2"
+  | "shield-alert"
+  | "wand-sparkles";
 
 /**
  * An AI icon: the glyph cut out of the logo's stroke, with the stroke flowing through it — see

@@ -31,6 +31,12 @@ const say = (label: { es: string; en: string }) => label.es;
 const node = (type: string, params: Record<string, unknown>, disabled = false): FlowNodeSpec => ({ id: "n", type, name: "n", pos: [0, 0], params, settings: {}, disabled });
 
 describe("nodeIssues", () => {
+  it("reads a node that never set its call by the catalogue's default", () => {
+    const fallback = { connector: "linear", operation: "createIssue", fields: {} };
+    expect(nodeIssues(node("trigger.connector", {}), [linear], new Set(), say, t, fallback)).not.toContain("flows.issue.service");
+    expect(nodeIssues(node("trigger.connector", {}), [linear], new Set(), say, t)).toEqual(["flows.issue.service"]);
+  });
+
   it("names what a Conector lacks: the credential and the required fields, not an expression", () => {
     const call = { connector: "linear", operation: "createIssue", fields: { teamId: "", title: "={{ $json.title }}" } };
     expect(nodeIssues(node("net.connector", { call }), [linear], new Set(), say, t)).toEqual([

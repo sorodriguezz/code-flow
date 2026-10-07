@@ -11,6 +11,8 @@
 //! [`RunHost::remote_host`]: super::engine::RunHost::remote_host
 //! [`RunHost::app_call`]: super::engine::RunHost::app_call
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -203,13 +205,17 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
         }
         "note.append" => {
             let id = arg(&args, "noteId");
+            check_note(host, &id)?;
             // Through the bridge: a note that mirrors a file is appended to as the file is now — a
             // pull since its last save is not undone — and the file gets the addition too.
             let sync = crate::commands::notes_cmd::notes_pull_file(db(host), id.clone())?;
             let note = sync.row.ok_or_else(|| "That note no longer exists".to_string())?;
             let addition = arg(&args, "content");
             let content = if note.content.trim().is_empty() { addition } else { format!("{}\n\n{addition}", note.content.trim_end()) };
-            let meta = crate::commands::notes_cmd::notes_save_note(db(host), id.clone(), note.title, content, note.tags, sync.version, None)?
+            // Saved as this flow's doing, so its own «Nota guardada» trigger is not set off by it.
+            let meta = crate::flows::triggers::saving_note_as(&host.flow_id, || {
+                crate::commands::notes_cmd::notes_save_note(db(host), id.clone(), note.title, content, note.tags, sync.version, None)
+            })?
                 .meta
                 .ok_or_else(|| "That note was deleted".to_string())?;
             let _ = host.app.emit("notes:changed", json!({ "workspaceId": note.workspace_id, "noteId": id }));
@@ -224,7 +230,32 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
         }
         "service.waitFor" => service_wait(host, &args, cancel).await,
         "chat.send" => chat_turn(host, &args, cancel).await,
+        "table.get" | "table.list" | "table.write" | "table.delete" | "table.clear" => table_op(host, op, &args),
+        "note.read" | "note.search" | "note.replace" => note_op(host, op, &args),
+        "vault.totp" => vault_totp(host, &args),
+        "diagram.save" | "diagram.read" => diagram_op(host, op, &args),
+        "story.review" | "doc.generate" | "doc.publish" => story_op(host, op, &args, cancel).await,
+        "ai.usage" => ai_usage(host, &args),
+        "run.data" => {
+            // Redacted like the run's files: these fields are searchable in Ejecuciones, travel to
+            // «Otro flujo terminó» flows and go into backups.
+            let fields = match host.redacted(Value::Object(args.get("fields").and_then(Value::as_object).cloned().unwrap_or_default())) {
+                Value::Object(fields) => fields,
+                _ => Default::default(),
+            };
+            let state = db(host);
+            let conn = state.0.lock().map_err(|e| e.to_string())?;
+            crate::db::flow_run_queries::add_custom_data(&conn, &host.run_id, &fields).map_err(|e| e.to_string())
+        }
+        "api.collection" => {
+            let mut payload = args.clone();
+            payload["workspaceId"] = json!(host.workspace_id);
+            super::bridge::ask(&host.app, "api.collection", payload, Duration::from_secs(60 * 60), cancel).await
+        }
+        "flows.tools" => flow_tools(host, &args),
+        "flows.callTool" => call_flow_tool(host, &args, cancel).await,
         "db.dbml" => schema_dbml(host, &args, cancel).await,
+        "db.schema" => schema_read(host, &args, cancel).await,
         "api.request" => {
             // The API client builds and sends it — its one `resolveRequest` — in the window.
             let mut payload = args.clone();
@@ -307,6 +338,29 @@ async fn pr_comment(host: &AppHost, args: &Value) -> Result<Value, String> {
 /// the window's emitter (`flows::bridge` — one emitter, see `lib/dbml/fromSchema.ts`) and kept where
 /// asked: a DBML diagram of the workspace, found by title (made the first time, replaced after), or
 /// a file.
+/// A connection's schema as the diagram reads it — tables, columns and references (`data.schemaDiff`).
+async fn schema_read(host: &AppHost, args: &Value, cancel: CancellationToken) -> Result<Value, String> {
+    let some = |name: &str| Some(arg(args, name)).filter(|value| !value.trim().is_empty());
+    let node: crate::datasource::DbNodeRef = serde_json::from_value(json!({
+        "kind": if some("schema").is_some() { "schema" } else { "database" },
+        "database": some("database"),
+        "schema": some("schema"),
+        "name": null,
+    }))
+    .map_err(|e| e.to_string())?;
+    let read = crate::commands::db_cmd::db_schema_diagram(
+        db(host),
+        host.app.state::<crate::datasource::DbRegistry>(),
+        arg(args, "connectionId"),
+        node,
+        format!("flow-{}", uuid::Uuid::new_v4()),
+    );
+    tokio::select! {
+        diagram = read => to_json(diagram?),
+        _ = cancel.cancelled() => Err(crate::ai_runs::CANCELLED_MARKER.to_string()),
+    }
+}
+
 async fn schema_dbml(host: &AppHost, args: &Value, cancel: CancellationToken) -> Result<Value, String> {
     let some = |name: &str| Some(arg(args, name)).filter(|value| !value.trim().is_empty());
     let node: crate::datasource::DbNodeRef = serde_json::from_value(json!({
@@ -788,4 +842,594 @@ mod tests {
         assert_eq!(range(finding(None, Some("3"))), None);
         assert!(severity_rank("critical") > severity_rank("warning") && severity_rank("warning") > severity_rank("info"));
     }
+
+    #[test]
+    fn a_tool_call_back_up_its_own_chain_is_refused() {
+        let (root, called) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+        // A run no tool call started has only its own flow on its chain.
+        let top = tool_chain(&root, "A");
+        assert_eq!(top, ["A"]);
+        assert_eq!(calling_back(&top, "A", "A").as_deref(), Some("A flow cannot be its own tool"));
+        assert!(calling_back(&top, "B", "B").is_none());
+        {
+            // A called B: B's run is filed with A above it while the call lasts…
+            let _filed = FiledChain::file(&called, top.clone());
+            let chain = tool_chain(&called, "B");
+            assert_eq!(chain, ["A", "B"]);
+            assert!(calling_back(&chain, "A", "Agente").is_some_and(|why| why.contains("“Agente” is already running further up")));
+            assert!(calling_back(&chain, "C", "C").is_none());
+        }
+        // …and taken out once the call ended, however it ended.
+        assert_eq!(tool_chain(&called, "B"), ["B"]);
+    }
+
+    #[test]
+    fn a_note_of_another_workspace_is_out_of_reach() {
+        use crate::db::note_queries;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at) VALUES
+               ('w1', 'Uno', 'folder', '#111111', 0, '2026-01-01T00:00:00Z'),
+               ('w2', 'Dos', 'folder', '#222222', 1, '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        let book = note_queries::create_book(&conn, "w2", None, "Libro", "").unwrap();
+        let theirs = note_queries::create_note(&conn, "w2", &book.id, "Ajena", "texto", "[]").unwrap();
+        assert_eq!(note_in_reach(&conn, &theirs.id, "w1").unwrap_err(), "That note belongs to another workspace");
+        assert!(note_in_reach(&conn, &theirs.id, "w2").is_ok());
+        // A global book's notes are on every shelf, as `note.search` lists them.
+        let shared = note_queries::create_book(&conn, "w2", None, "Compartido", "").unwrap();
+        note_queries::set_book_scope(&conn, &shared.id, true).unwrap();
+        let everyone = note_queries::create_note(&conn, "w2", &shared.id, "Común", "texto", "[]").unwrap();
+        assert!(note_in_reach(&conn, &everyone.id, "w1").is_ok());
+        assert_eq!(note_in_reach(&conn, "no-such-note", "w1").unwrap_err(), "That note no longer exists");
+    }
+}
+
+// ------------------------------------------------------------------------------- flows as tools
+
+/// A tool name every provider takes: lowercase letters, digits and `_`, starting with a letter,
+/// at most 64 — Gemini's rule is the strictest.
+pub(super) fn tool_name(raw: &str) -> String {
+    let mut name: String = raw
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if !name.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        name = format!("flow_{name}");
+    }
+    name.chars().take(64).collect::<String>().trim_end_matches('_').to_string()
+}
+
+/// The flows above each tool run still going, root first. A run knows how deep it is, not who called
+/// it (`runs::StartRequest` carries no parent), so `flows.callTool` files here the chain of the run
+/// it starts, for as long as that call lasts, and refuses a call to a flow already on its own chain:
+/// depth alone let two agent flows that list each other go five levels down, «Máx. llamadas» calls
+/// at each. A chain that passes through an Execute flow node is not seen here (`runs` would have to
+/// carry it).
+static TOOL_CHAINS: LazyLock<Mutex<HashMap<String, Vec<String>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The flows on `run_id`'s chain of tool calls: those that called it, root first, then its own.
+fn tool_chain(run_id: &str, flow_id: &str) -> Vec<String> {
+    let mut chain = TOOL_CHAINS.lock().ok().and_then(|chains| chains.get(run_id).cloned()).unwrap_or_default();
+    chain.push(flow_id.to_string());
+    chain
+}
+
+/// Why the flow `target` («`name`») may not be called as a tool from a run whose chain is `chain` —
+/// `None` when it may.
+fn calling_back(chain: &[String], target: &str, name: &str) -> Option<String> {
+    match chain.iter().position(|flow| flow == target) {
+        None => None,
+        Some(at) if at + 1 == chain.len() => Some("A flow cannot be its own tool".into()),
+        Some(_) => Some(format!("“{name}” is already running further up this chain of tool calls — a flow cannot call one that called it")),
+    }
+}
+
+/// A tool run's entry in [`TOOL_CHAINS`], taken out when the call that started it ends — answered,
+/// failed or stopped.
+struct FiledChain(String);
+
+impl FiledChain {
+    fn file(run_id: &str, above: Vec<String>) -> Self {
+        if let Ok(mut chains) = TOOL_CHAINS.lock() {
+            chains.insert(run_id.to_string(), above);
+        }
+        FiledChain(run_id.to_string())
+    }
+}
+
+impl Drop for FiledChain {
+    fn drop(&mut self) {
+        if let Ok(mut chains) = TOOL_CHAINS.lock() {
+            chains.remove(&self.0);
+        }
+    }
+}
+
+/// The trigger a flow is called as a tool through: its «Herramienta de IA», or its «Llamado por
+/// otro flujo».
+fn tool_entry(parsed: &super::spec::FlowSpec) -> Option<&super::spec::FlowNode> {
+    parsed
+        .nodes
+        .iter()
+        .find(|n| n.type_id == "trigger.tool" && !n.disabled)
+        .or_else(|| parsed.nodes.iter().find(|n| n.type_id == "trigger.subflow" && !n.disabled))
+}
+
+/// The flows a model may call, described: name, description, input schema.
+fn flow_tools(host: &AppHost, args: &Value) -> Result<Value, String> {
+    let ids: Vec<String> = args
+        .get("flowIds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let state = db(host);
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut taken = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for id in ids {
+        if id == host.flow_id {
+            return Err("A flow cannot be its own tool".into());
+        }
+        let row = crate::db::flow_queries::get_flow(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "One of the tool flows no longer exists".to_string())?;
+        if row.meta.workspace_id != host.workspace_id && row.meta.scope != "global" {
+            return Err(format!("“{}” belongs to another workspace", row.meta.name));
+        }
+        let parsed = super::spec::parse(&row.spec)?;
+        let entry = tool_entry(&parsed)
+            .ok_or_else(|| format!("“{}” has no “AI tool” or “called by another flow” trigger to be called through", row.meta.name))?;
+        let given = |key: &str| entry.params.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        let (raw, description) = if entry.type_id == "trigger.tool" {
+            (Some(given("toolName")).filter(|n| !n.is_empty()).unwrap_or_else(|| row.meta.name.clone()), given("toolDescription"))
+        } else {
+            (row.meta.name.clone(), Some(given("nodeDescription")).filter(|d| !d.is_empty()).unwrap_or_else(|| row.meta.description.clone()))
+        };
+        let mut name = tool_name(&raw);
+        let mut n = 2;
+        while !taken.insert(name.clone()) {
+            name = format!("{}_{n}", tool_name(&raw));
+            n += 1;
+        }
+        let description = if description.trim().is_empty() { format!("Runs the flow “{}”", row.meta.name) } else { description };
+        let fields = super::form::fields_of(&entry.params);
+        out.push(json!({
+            "name": name,
+            "description": description,
+            "schema": super::mcp::input_schema(&fields),
+            "flowId": row.meta.id,
+            "nodeId": entry.id,
+            "flowName": row.meta.name,
+        }));
+    }
+    Ok(Value::Array(out))
+}
+
+/// Runs a tool flow as a sub-run with the model's arguments as its trigger's item, and waits.
+async fn call_flow_tool(host: &AppHost, args: &Value, cancel: CancellationToken) -> Result<Value, String> {
+    let flow_id = arg(args, "flowId");
+    let node_id = arg(args, "nodeId");
+    let arguments = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let (name, fields) = {
+        let state = db(host);
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let row = crate::db::flow_queries::get_flow(&conn, &flow_id).map_err(|e| e.to_string())?.ok_or("The tool's flow no longer exists")?;
+        if row.meta.workspace_id != host.workspace_id && row.meta.scope != "global" {
+            return Err(format!("“{}” belongs to another workspace", row.meta.name));
+        }
+        let parsed = super::spec::parse(&row.spec)?;
+        let entry = parsed
+            .nodes
+            .iter()
+            .find(|n| n.id == node_id && !n.disabled)
+            .ok_or_else(|| format!("“{}” no longer has the trigger it was called through", row.meta.name))?;
+        (row.meta.name.clone(), super::form::fields_of(&entry.params))
+    };
+    let chain = tool_chain(&host.run_id, &host.flow_id);
+    if let Some(refusal) = calling_back(&chain, &flow_id, &name) {
+        return Err(refusal);
+    }
+    let item = if fields.is_empty() {
+        if arguments.is_object() { arguments } else { json!({ "input": arguments }) }
+    } else {
+        super::form::coerce(&fields, &arguments)?
+    };
+    let mut request = super::runs::StartRequest::fired(&node_id, vec![super::run::Item::new(item)], super::runs::RunOrigin::Subflow);
+    request.depth = host.depth + 1;
+    request.wait = true;
+    if request.depth > 5 {
+        return Err("Flows calling flows stop five levels deep".into());
+    }
+    let (started, done) = super::runs::start_with(&host.app, &flow_id, request).map_err(|error| match error.as_str() {
+        "untrusted" => format!("“{name}” is not trusted yet — open it once and trust it"),
+        _ => error,
+    })?;
+    // Filed before anything is awaited: the tool's run reads its chain back on its own first call,
+    // which comes after a model's answer at the earliest.
+    let _filed = FiledChain::file(&started.id, chain);
+    let done = done.ok_or("The tool's run did not start")?;
+    let finished = tokio::select! {
+        finished = done => finished.map_err(|_| "The tool's run ended without saying how".to_string())?,
+        _ = cancel.cancelled() => {
+            // Nobody is left to read its answer: the tool's run stops with the node that called it,
+            // rather than going on doing real things unwatched.
+            super::runs::cancel(&started.id);
+            return Err(crate::ai_runs::CANCELLED_MARKER.to_string());
+        }
+    };
+    if finished.status == "success" {
+        Ok(json!({ "items": finished.last_output.iter().map(|item| item.json.clone()).collect::<Vec<_>>() }))
+    } else {
+        let why = if finished.error.is_empty() { finished.status } else { finished.error };
+        Err(format!("“{name}” failed: {why}"))
+    }
+}
+
+// ------------------------------------------------------------------------------------------ tables
+
+fn table_op(host: &AppHost, op: &str, args: &Value) -> Result<Value, String> {
+    use super::tables;
+    let name = arg(args, "name");
+    let state = db(host);
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let writes = matches!(op, "table.write");
+    let table = if writes {
+        Some(tables::ensure(&conn, &host.workspace_id, &name)?)
+    } else {
+        tables::by_name(&conn, &host.workspace_id, &name).map_err(|e| e.to_string())?
+    };
+    let Some(table) = table else {
+        // Nothing written yet: reads find nothing rather than fail.
+        return Ok(match op {
+            "table.list" => json!([]),
+            "table.clear" => json!(0),
+            "table.delete" => json!(false),
+            _ => Value::Null,
+        });
+    };
+    let changed = |conn: &rusqlite::Connection| {
+        let _ = host.app.emit("flows:tables-changed", json!({ "workspaceId": host.workspace_id, "tableId": table.id }));
+        let _ = conn;
+    };
+    match op {
+        "table.get" => Ok(tables::row(&conn, &table.id, &arg(args, "key")).map_err(|e| e.to_string())?.map(|row| row.item()).unwrap_or(Value::Null)),
+        "table.list" => {
+            let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(1_000).clamp(1, tables::MAX_ROWS);
+            let mut out = Vec::new();
+            let mut offset = 0;
+            while (out.len() as i64) < limit {
+                let (page, _) = tables::rows(&conn, &table.id, offset, 10_000.min(limit - out.len() as i64), None).map_err(|e| e.to_string())?;
+                if page.is_empty() {
+                    break;
+                }
+                offset += page.len() as i64;
+                out.extend(page.iter().map(tables::RowView::item));
+            }
+            Ok(Value::Array(out))
+        }
+        "table.write" => {
+            let how = match arg(args, "how").as_str() {
+                "insert" => tables::Write::Insert,
+                "update" => tables::Write::Update,
+                _ => tables::Write::Upsert,
+            };
+            let key = args.get("key").and_then(Value::as_str).map(str::to_string);
+            let written = tables::put(&conn, &table.id, key.as_deref(), args.get("data").unwrap_or(&Value::Null), how)?;
+            changed(&conn);
+            Ok(written.map(|row| row.item()).unwrap_or(Value::Null))
+        }
+        "table.delete" => {
+            let deleted = tables::delete_row(&conn, &table.id, &arg(args, "key")).map_err(|e| e.to_string())?;
+            changed(&conn);
+            Ok(json!(deleted))
+        }
+        _ => {
+            let cleared = tables::clear(&conn, &table.id).map_err(|e| e.to_string())?;
+            changed(&conn);
+            Ok(json!(cleared))
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------- notes
+
+fn note_json(row: &crate::db::models::NoteRow) -> Value {
+    json!({
+        "id": row.id,
+        "title": row.title,
+        "content": row.content,
+        "tags": serde_json::from_str::<Value>(&row.tags).unwrap_or_else(|_| json!([])),
+        "updatedAt": row.updated_at,
+        "bookId": row.book_id,
+    })
+}
+
+/// Whether a flow of `workspace_id` may read or write the note `note_id`: one of its own workspace,
+/// or one on every shelf (`scope = 'global'`) — the notes `note.search` lists.
+fn note_in_reach(conn: &rusqlite::Connection, note_id: &str, workspace_id: &str) -> Result<(), String> {
+    let row = crate::db::note_queries::get_note(conn, note_id).map_err(|e| e.to_string())?.ok_or_else(|| "That note no longer exists".to_string())?;
+    if row.workspace_id == workspace_id || row.scope == "global" {
+        Ok(())
+    } else {
+        Err("That note belongs to another workspace".into())
+    }
+}
+
+/// [`note_in_reach`] for this run — asked before the file bridge, which may write the note it pulls.
+fn check_note(host: &AppHost, note_id: &str) -> Result<(), String> {
+    let state = db(host);
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note_in_reach(&conn, note_id, &host.workspace_id)
+}
+
+fn note_op(host: &AppHost, op: &str, args: &Value) -> Result<Value, String> {
+    match op {
+        "note.read" => {
+            let id = arg(args, "noteId");
+            check_note(host, &id)?;
+            // As the file is now, for a note that mirrors one.
+            let sync = crate::commands::notes_cmd::notes_pull_file(db(host), id)?;
+            let row = sync.row.ok_or_else(|| "That note no longer exists".to_string())?;
+            Ok(note_json(&row))
+        }
+        "note.replace" => {
+            let id = arg(args, "noteId");
+            check_note(host, &id)?;
+            let sync = crate::commands::notes_cmd::notes_pull_file(db(host), id.clone())?;
+            let note = sync.row.ok_or_else(|| "That note no longer exists".to_string())?;
+            let meta = crate::flows::triggers::saving_note_as(&host.flow_id, || {
+                crate::commands::notes_cmd::notes_save_note(db(host), id.clone(), note.title, arg(args, "content"), note.tags, sync.version, None)
+            })?
+                .meta
+                .ok_or_else(|| "That note was deleted".to_string())?;
+            let _ = host.app.emit("notes:changed", json!({ "workspaceId": note.workspace_id, "noteId": id }));
+            to_json(meta)
+        }
+        _ => {
+            let query = arg(args, "query").trim().to_string();
+            let tag = arg(args, "tag").trim().trim_start_matches('#').to_lowercase();
+            let max = args.get("max").and_then(Value::as_i64).unwrap_or(20).clamp(1, 500) as usize;
+            let state = db(host);
+            let conn = state.0.lock().map_err(|e| e.to_string())?;
+            let tree = crate::db::note_queries::load_tree(&conn, &host.workspace_id).map_err(|e| e.to_string())?;
+            let hits = if query.is_empty() {
+                Vec::new()
+            } else {
+                crate::db::note_queries::search_notes(&conn, &host.workspace_id, &query, 2_000).map_err(|e| e.to_string())?
+            };
+            let folded = |text: &str| crate::db::note_queries::fold_for_match(text);
+            let wanted = folded(&query);
+            let mut out = Vec::new();
+            for meta in &tree.notes {
+                let tags: Vec<String> = serde_json::from_str(&meta.tags).unwrap_or_default();
+                if !tag.is_empty() && !tags.iter().any(|t| t.to_lowercase() == tag) {
+                    continue;
+                }
+                let hit = hits.iter().find(|hit| hit.id == meta.id);
+                if !query.is_empty() && hit.is_none() && !folded(&meta.title).contains(&wanted) {
+                    continue;
+                }
+                let Some(row) = crate::db::note_queries::get_note(&conn, &meta.id).map_err(|e| e.to_string())? else { continue };
+                let mut item = note_json(&row);
+                if let Some(hit) = hit {
+                    item["snippet"] = json!(hit.snippet);
+                }
+                out.push(item);
+                if out.len() >= max {
+                    break;
+                }
+            }
+            Ok(Value::Array(out))
+        }
+    }
+}
+
+/// The current 2FA code of a Llavero item — never its secret.
+fn vault_totp(host: &AppHost, args: &Value) -> Result<Value, String> {
+    let session = host.app.state::<crate::keyvault::session::VaultSession>();
+    if !session.is_unlocked() {
+        return Err("The Llavero is locked — unlock it in CodeFlow and run again".to_string());
+    }
+    let item = crate::commands::keyvault_cmd::keyvault_get_item(db(host), session, arg(args, "itemId"))?
+        .ok_or_else(|| "That Llavero item no longer exists".to_string())?;
+    let secret = to_json(&item.secret)?;
+    let seed = secret.get("totp").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).ok_or_else(|| format!("“{}” has no 2FA code set up", item.meta.title))?;
+    let config = crate::keyvault::totp::parse(seed)?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let code = crate::keyvault::totp::code_at(&config, now);
+    Ok(json!({ "title": item.meta.title, "code": code.code, "secondsRemaining": code.seconds_remaining, "period": code.period }))
+}
+
+// ---------------------------------------------------------------------------------------- diagrams
+
+fn diagram_op(host: &AppHost, op: &str, args: &Value) -> Result<Value, String> {
+    let title = arg(args, "title").trim().to_string();
+    if title.is_empty() {
+        return Err("Write the diagram's title".into());
+    }
+    let existing = {
+        let state = db(host);
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::db::diagram_queries::load_tree(&conn, &host.workspace_id).map_err(|e| e.to_string())?.diagrams.into_iter().find(|meta| meta.title == title)
+    };
+    if op == "diagram.read" {
+        let meta = existing.ok_or_else(|| format!("There is no diagram called “{title}”"))?;
+        let sync = crate::commands::diagrams_cmd::diagrams_pull_file(db(host), meta.id.clone())?;
+        let row = sync.row.ok_or_else(|| "That diagram no longer exists".to_string())?;
+        return Ok(json!({ "id": row.id, "title": row.title, "format": row.format, "content": row.doc, "updatedAt": row.updated_at }));
+    }
+    let format = arg(args, "format");
+    let content = arg(args, "content");
+    if content.trim().is_empty() {
+        return Err("The diagram's content is empty".into());
+    }
+    let id = match existing {
+        Some(meta) => {
+            if meta.format != format {
+                return Err(format!("“{title}” is a {} diagram — save this one under another title", meta.format));
+            }
+            // The picture in the gallery is drawn by the editor; the old one stays until it opens.
+            let thumbnail = {
+                let state = db(host);
+                let conn = state.0.lock().map_err(|e| e.to_string())?;
+                crate::db::diagram_queries::load_thumbnails(&conn, std::slice::from_ref(&meta.id))
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .next()
+                    .map(|t| t.thumbnail)
+                    .unwrap_or_default()
+            };
+            crate::commands::diagrams_cmd::diagrams_save_diagram(db(host), meta.id.clone(), content, format.clone(), thumbnail, None, Some(true))?;
+            meta.id
+        }
+        None => crate::commands::diagrams_cmd::diagrams_create_diagram(db(host), host.workspace_id.clone(), None, title.clone(), content, format.clone(), "[]".into())?.id,
+    };
+    let _ = host.app.emit("diagrams:changed", json!({ "workspaceId": host.workspace_id, "diagramId": id }));
+    Ok(json!({ "id": id, "title": title, "format": format }))
+}
+
+// ------------------------------------------------------------------------------ stories and wiki
+
+async fn story_op(host: &AppHost, op: &str, args: &Value, cancel: CancellationToken) -> Result<Value, String> {
+    let provider = Some(arg(args, "provider")).filter(|p| !p.trim().is_empty());
+    let model = Some(arg(args, "model")).filter(|m| !m.trim().is_empty());
+    let run_id = Some(format!("flow-story-{}", uuid::Uuid::new_v4()));
+    match op {
+        "story.review" => {
+            let stage: crate::ai::WorkItemReviewStage = serde_json::from_value(json!(arg(args, "stage"))).map_err(|_| "Unknown review stage".to_string())?;
+            let kind: crate::ai::WorkItemKind = serde_json::from_value(json!(arg(args, "kind"))).map_err(|_| "Unknown work item kind".to_string())?;
+            let projects: Vec<String> = Some(arg(args, "projectId")).filter(|p| !p.trim().is_empty()).into_iter().collect();
+            let work = crate::commands::stories_cmd::review_work_item(
+                host.app.clone(),
+                db(host),
+                host.workspace_id.clone(),
+                projects,
+                stage,
+                kind,
+                arg(args, "story"),
+                args.get("useContext").and_then(Value::as_bool).unwrap_or(false),
+                run_id.clone(),
+                provider,
+                model,
+            );
+            let result = tokio::select! {
+                result = work => result?,
+                _ = cancel.cancelled() => {
+                    if let Some(id) = &run_id { crate::ai_runs::cancel(id); }
+                    return Err(crate::ai_runs::CANCELLED_MARKER.to_string());
+                }
+            };
+            to_json(result)
+        }
+        "doc.generate" => {
+            let title = arg(args, "title").trim().to_string();
+            if title.is_empty() {
+                return Err("Write the document's title".into());
+            }
+            let scope: crate::ai::DocScope = serde_json::from_value(json!(arg(args, "scope"))).map_err(|_| "Unknown document scope".to_string())?;
+            let (doc_id, projects) = {
+                let state = db(host);
+                let conn = state.0.lock().map_err(|e| e.to_string())?;
+                let projects: Vec<String> = match scope {
+                    crate::ai::DocScope::Repo => Some(arg(args, "projectId")).filter(|p| !p.trim().is_empty()).into_iter().collect(),
+                    crate::ai::DocScope::Workspace => crate::db::queries::list_projects(&conn, &host.workspace_id).map_err(|e| e.to_string())?.into_iter().map(|p| p.id).collect(),
+                };
+                let scope_text = if matches!(scope, crate::ai::DocScope::Repo) { "repo" } else { "workspace" };
+                let existing = crate::db::queries::list_doc_pages(&conn, &host.workspace_id).map_err(|e| e.to_string())?.into_iter().find(|page| page.title == title && page.scope == scope_text);
+                let id = match existing {
+                    Some(page) => page.id,
+                    None => crate::db::queries::create_doc_page(&conn, &host.workspace_id, projects.first().map(String::as_str).filter(|_| scope_text == "repo"), scope_text, &title)
+                        .map_err(|e| e.to_string())?
+                        .id,
+                };
+                (id, projects)
+            };
+            if projects.is_empty() {
+                return Err("Choose the repository to document".into());
+            }
+            let work = crate::commands::stories_cmd::generate_doc_page(
+                host.app.clone(),
+                db(host),
+                host.workspace_id.clone(),
+                doc_id.clone(),
+                scope,
+                projects,
+                arg(args, "instructions"),
+                args.get("useContext").and_then(Value::as_bool).unwrap_or(false),
+                run_id.clone(),
+                provider,
+                model,
+            );
+            let result = tokio::select! {
+                result = work => result?,
+                _ = cancel.cancelled() => {
+                    if let Some(id) = &run_id { crate::ai_runs::cancel(id); }
+                    return Err(crate::ai_runs::CANCELLED_MARKER.to_string());
+                }
+            };
+            let mut out = to_json(result)?;
+            out["docId"] = json!(doc_id);
+            out["title"] = json!(title);
+            Ok(out)
+        }
+        _ => {
+            let title = arg(args, "title").trim().to_string();
+            let page = {
+                let state = db(host);
+                let conn = state.0.lock().map_err(|e| e.to_string())?;
+                crate::db::queries::list_doc_pages(&conn, &host.workspace_id).map_err(|e| e.to_string())?.into_iter().find(|page| page.title == title)
+            }
+            .ok_or_else(|| format!("There is no document called “{title}” in Historias › Wiki"))?;
+            let published = crate::commands::stories_cmd::publish_doc_page(db(host), page.id.clone(), Some(args.get("overwrite").and_then(Value::as_bool).unwrap_or(false))).await?;
+            let mut out = to_json(published)?;
+            out["docId"] = json!(page.id);
+            Ok(out)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------- AI usage
+
+fn ai_usage(host: &AppHost, args: &Value) -> Result<Value, String> {
+    let now = chrono::Local::now();
+    let midnight = |date: chrono::NaiveDate| date.and_hms_opt(0, 0, 0).and_then(|t| t.and_local_timezone(chrono::Local).earliest()).unwrap_or(now);
+    let hours = match arg(args, "period").as_str() {
+        "today" => (now - midnight(now.date_naive())).num_hours() + 1,
+        "last30" => 24 * 30,
+        "thisMonth" => {
+            use chrono::Datelike;
+            let first = now.date_naive().with_day(1).unwrap_or(now.date_naive());
+            (now - midnight(first)).num_hours() + 1
+        }
+        _ => 24 * 7,
+    };
+    let stats = {
+        let state = db(host);
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::db::queries::ai_usage_stats(&conn, hours.max(1), None).map_err(|e| e.to_string())?
+    };
+    let groups = match arg(args, "group").as_str() {
+        "byModel" => to_json(&stats.models)?,
+        "byTask" => to_json(&stats.tasks)?,
+        _ => to_json(&stats.providers)?,
+    };
+    let runs: i64 = stats.providers.iter().map(|p| p.runs).sum();
+    let tokens: i64 = stats.providers.iter().map(|p| p.input_tokens + p.output_tokens).sum();
+    let cost: f64 = stats.providers.iter().map(|p| p.cost_usd).sum();
+    let mut out = json!({ "periodHours": hours, "runs": runs, "tokens": tokens, "costUsd": (cost * 10_000.0).round() / 10_000.0, "groups": groups, "since": stats.since });
+    if args.get("quota").and_then(Value::as_bool).unwrap_or(true) {
+        out["quota"] = to_json(crate::ai_quota::cached_readings())?;
+    }
+    Ok(out)
 }

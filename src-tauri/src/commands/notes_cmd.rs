@@ -113,6 +113,9 @@ pub fn notes_save_note(
         }
         let meta = note_queries::save_note(&conn, &id, &title, &content, &tags)
             .map_err(|e| e.to_string())?;
+        if meta.is_some() {
+            crate::flows::triggers::note_saved(&id);
+        }
         // Resolved under the lock and used after it is dropped: a filesystem write is not something
         // to hold the whole database's connection for.
         let target = meta.as_ref().and_then(|m| origin_of(&conn, &m.origin_project_id, &m.origin_path));

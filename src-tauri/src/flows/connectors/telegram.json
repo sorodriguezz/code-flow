@@ -4,32 +4,257 @@
   "group": "appsChat",
   "baseUrl": "https://api.telegram.org/bot{{secret}}",
   "auth": "path",
-  "authHint": { "es": "Token del bot (de @BotFather) como credencial de tipo Bearer", "en": "Bot token (from @BotFather) as a Bearer credential" },
+  "authHint": {
+    "es": "Token del bot (de @BotFather) como credencial de tipo Bearer",
+    "en": "Bot token (from @BotFather) as a Bearer credential"
+  },
   "tokenUrl": "https://t.me/BotFather",
-  "test": {"path": "/getMe", "result": "result", "label": "@{{username}}"},
+  "test": {
+    "path": "/getMe",
+    "result": "result",
+    "label": "@{{username}}"
+  },
   "okField": "ok",
   "errorField": "description",
   "operations": [
     {
       "id": "sendMessage",
-      "name": { "es": "Enviar un mensaje", "en": "Send a message" },
+      "name": {
+        "es": "Enviar un mensaje",
+        "en": "Send a message"
+      },
       "method": "POST",
       "path": "/sendMessage",
       "fields": [
-        { "name": "chat_id", "label": { "es": "Chat", "en": "Chat" }, "placeholder": "123456789", "required": true },
-        { "name": "text", "label": { "es": "Mensaje", "en": "Message" }, "multiline": true, "required": true },
-        { "name": "parse_mode", "label": { "es": "Formato (Markdown, HTML)", "en": "Format (Markdown, HTML)" } }
+        {
+          "name": "chat_id",
+          "label": {
+            "es": "Chat",
+            "en": "Chat"
+          },
+          "placeholder": "123456789",
+          "required": true
+        },
+        {
+          "name": "text",
+          "label": {
+            "es": "Mensaje",
+            "en": "Message"
+          },
+          "multiline": true,
+          "required": true
+        },
+        {
+          "name": "parse_mode",
+          "label": {
+            "es": "Formato (Markdown, HTML)",
+            "en": "Format (Markdown, HTML)"
+          }
+        }
       ],
-      "body": { "chat_id": "{{chat_id}}", "text": "{{text}}", "parse_mode": "{{parse_mode}}" },
+      "body": {
+        "chat_id": "{{chat_id}}",
+        "text": "{{text}}",
+        "parse_mode": "{{parse_mode}}"
+      },
       "result": "result"
     },
     {
       "id": "getUpdates",
-      "name": { "es": "Leer mensajes recibidos", "en": "Read received messages" },
+      "name": {
+        "es": "Leer mensajes recibidos",
+        "en": "Read received messages"
+      },
       "method": "GET",
       "path": "/getUpdates",
-      "query": { "offset": "{{offset}}" },
-      "fields": [{ "name": "offset", "label": { "es": "Desde el update", "en": "From update" } }],
+      "query": {
+        "offset": "{{offset}}"
+      },
+      "fields": [
+        {
+          "name": "offset",
+          "label": {
+            "es": "Desde el update",
+            "en": "From update"
+          }
+        }
+      ],
+      "result": "result"
+    },
+    {
+      "id": "sendPhoto",
+      "name": {
+        "es": "Enviar una imagen (URL)",
+        "en": "Send a picture (URL)"
+      },
+      "method": "POST",
+      "path": "/sendPhoto",
+      "fields": [
+        {
+          "name": "chat_id",
+          "label": {
+            "es": "Chat",
+            "en": "Chat"
+          },
+          "required": true,
+          "placeholder": "123456789"
+        },
+        {
+          "name": "photo",
+          "label": {
+            "es": "Imagen (URL pública)",
+            "en": "Picture (public URL)"
+          },
+          "required": true
+        },
+        {
+          "name": "caption",
+          "label": {
+            "es": "Texto",
+            "en": "Caption"
+          },
+          "multiline": true
+        },
+        {
+          "name": "parse_mode",
+          "label": {
+            "es": "Formato (Markdown, HTML)",
+            "en": "Format (Markdown, HTML)"
+          }
+        }
+      ],
+      "body": {
+        "chat_id": "{{chat_id}}",
+        "photo": "{{photo}}",
+        "caption": "{{caption}}",
+        "parse_mode": "{{parse_mode}}"
+      },
+      "result": "result"
+    },
+    {
+      "id": "sendDocument",
+      "name": {
+        "es": "Enviar un archivo (URL)",
+        "en": "Send a file (URL)"
+      },
+      "method": "POST",
+      "path": "/sendDocument",
+      "fields": [
+        {
+          "name": "chat_id",
+          "label": {
+            "es": "Chat",
+            "en": "Chat"
+          },
+          "required": true
+        },
+        {
+          "name": "document",
+          "label": {
+            "es": "Archivo (URL pública)",
+            "en": "File (public URL)"
+          },
+          "required": true
+        },
+        {
+          "name": "caption",
+          "label": {
+            "es": "Texto",
+            "en": "Caption"
+          },
+          "multiline": true
+        }
+      ],
+      "body": {
+        "chat_id": "{{chat_id}}",
+        "document": "{{document}}",
+        "caption": "{{caption}}"
+      },
+      "result": "result"
+    },
+    {
+      "id": "editMessage",
+      "name": {
+        "es": "Editar un mensaje",
+        "en": "Edit a message"
+      },
+      "method": "POST",
+      "path": "/editMessageText",
+      "fields": [
+        {
+          "name": "chat_id",
+          "label": {
+            "es": "Chat",
+            "en": "Chat"
+          },
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "label": {
+            "es": "Mensaje (id)",
+            "en": "Message (id)"
+          },
+          "required": true,
+          "json": true
+        },
+        {
+          "name": "text",
+          "label": {
+            "es": "Texto nuevo",
+            "en": "New text"
+          },
+          "multiline": true,
+          "required": true
+        },
+        {
+          "name": "parse_mode",
+          "label": {
+            "es": "Formato (Markdown, HTML)",
+            "en": "Format (Markdown, HTML)"
+          }
+        }
+      ],
+      "body": {
+        "chat_id": "{{chat_id}}",
+        "message_id": "{{message_id}}",
+        "text": "{{text}}",
+        "parse_mode": "{{parse_mode}}"
+      },
+      "result": "result"
+    },
+    {
+      "id": "pinMessage",
+      "name": {
+        "es": "Fijar un mensaje",
+        "en": "Pin a message"
+      },
+      "method": "POST",
+      "path": "/pinChatMessage",
+      "fields": [
+        {
+          "name": "chat_id",
+          "label": {
+            "es": "Chat",
+            "en": "Chat"
+          },
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "label": {
+            "es": "Mensaje (id)",
+            "en": "Message (id)"
+          },
+          "required": true,
+          "json": true
+        }
+      ],
+      "body": {
+        "chat_id": "{{chat_id}}",
+        "message_id": "{{message_id}}",
+        "disable_notification": true
+      },
       "result": "result"
     }
   ]

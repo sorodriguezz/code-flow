@@ -41,6 +41,7 @@ import { FlowShareDialog, ShareConflictDialog } from "./FlowShareDialog";
 import { useFlowShareStore } from "../../state/flowShareStore";
 import { FlowSettingsDialog } from "./FlowSettingsDialog";
 import { ExecutionsView } from "./ExecutionsView";
+import { FlowTestsView } from "./FlowTestsView";
 import { RunLog } from "./RunLog";
 import { NODE_STATUS_KEY, formatDuration, itemsLabel, nodeTime } from "./runFormat";
 import {
@@ -76,11 +77,12 @@ import {
   flowsListVersions,
   flowsVersionContent,
   type FlowNodeDescriptor,
+  flowsPublishedNodes,
 } from "../../lib/tauri/flowsCommands";
 import { diffSpecs } from "../../lib/flows/diff";
 import { useConnectors } from "../../lib/flows/connectorList";
 import { nodeIssues } from "../../lib/flows/nodeIssues";
-import { paletteEntries, serviceOf, type PaletteEntry } from "../../lib/flows/paletteEntries";
+import { paletteEntries, publishedEntries, serviceOf, type PaletteEntry, type PublishedNode } from "../../lib/flows/paletteEntries";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowVaultStore } from "../../state/flowVaultStore";
@@ -192,19 +194,35 @@ function Editor() {
   // What an unfinished node is missing — its credential checked against the workspace's.
   const credentials = useFlowVaultStore((s) => s.credentials);
   const credentialIds = useMemo(() => new Set(credentials.map((c) => c.id)), [credentials]);
+  // Flows published as nodes («Mis nodos»), read again whenever the workspace's flows change.
+  const workspaceForPalette = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const flowsVersion = useFlowsStore((s) => s.flows.map((flow) => `${flow.id}:${flow.version}`).join(","));
+  const [published, setPublished] = useState<PublishedNode[]>([]);
+  useEffect(() => {
+    if (!workspaceForPalette) return;
+    let alive = true;
+    void flowsPublishedNodes(workspaceForPalette)
+      .then((rows) => alive && setPublished(rows))
+      .catch(() => alive && setPublished([]));
+    return () => {
+      alive = false;
+    };
+  }, [workspaceForPalette, flowsVersion]);
   // What the palette lists — node types, and one entry per service in Apps.
-  const entries = useMemo(
-    () =>
-      paletteEntries(
-        catalog,
-        connectors,
-        (d) => t(`flows.node.${d.typeId}` as TranslationKey),
-        (d) => t(`flows.nodeDesc.${d.typeId}` as TranslationKey),
-        (typeId, service) => t(`flows.appDesc.${typeId}.${service}` as TranslationKey),
-        (label) => (language === "es" ? label.es : label.en),
-      ),
-    [catalog, connectors, t, language],
-  );
+  const entries = useMemo(() => {
+    const all = paletteEntries(
+      catalog,
+      connectors,
+      (d) => t(`flows.node.${d.typeId}` as TranslationKey),
+      (d) => t(`flows.nodeDesc.${d.typeId}` as TranslationKey),
+      (typeId, service) => t(`flows.appDesc.${typeId}.${service}` as TranslationKey),
+      (label) => (language === "es" ? label.es : label.en),
+    );
+    const mine = publishedEntries(published, catalogMap.get("logic.subflow"), draftId);
+    if (mine.length === 0) return all;
+    const at = all.findIndex((entry) => entry.descriptor.family === "logic");
+    return at < 0 ? [...all, ...mine] : [...all.slice(0, at), ...mine, ...all.slice(at)];
+  }, [catalog, connectors, t, language, published, catalogMap, draftId]);
   const meta = useFlowsStore((s) => s.flows.find((flow) => flow.id === s.draft?.id) ?? null);
   const canUndo = useFlowsStore((s) => s.past.length > 0);
   const canRedo = useFlowsStore((s) => s.future.length > 0);
@@ -299,7 +317,9 @@ function Editor() {
       const mark = diff?.nodes.get(item.id);
       // Only a running node's clock moves; every other node keeps its cached object.
       const time = record ? nodeTime(record, now) : "";
-      const issue = descriptor ? nodeIssues(item, connectors, credentialIds, (label) => (language === "es" ? label.es : label.en), t).join("\n") : "";
+      const issue = descriptor
+        ? nodeIssues(item, connectors, credentialIds, (label) => (language === "es" ? label.es : label.en), t, descriptor.params.find((p) => p.name === "call")?.default).join("\n")
+        : "";
       const key = [item, selected, size, descriptor, language, record, pinned, waiting, mark, time, issue];
       const cached = nodeCache.current.get(item.id);
       if (cached && same(cached.key, key)) {
@@ -1068,6 +1088,7 @@ function Editor() {
             options={[
               { value: "editor", label: t("flows.pane.editor") },
               { value: "executions", label: t("flows.pane.executions") },
+              { value: "tests", label: t("flows.pane.tests") },
             ]}
             value={pane}
             onChange={(next) => useFlowRunsStore.getState().setPane(next)}
@@ -1254,7 +1275,9 @@ function Editor() {
           )}
         </header>
 
-        {pane === "executions" ? (
+        {pane === "tests" ? (
+          <FlowTestsView />
+        ) : pane === "executions" ? (
           <ExecutionsView />
         ) : (
           <div className="flex min-h-0 flex-1">

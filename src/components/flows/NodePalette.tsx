@@ -311,6 +311,8 @@ export function NodePalette({
                             {t(`flows.group.${d.group}` as TranslationKey)}
                           </div>
                         )}
+                        {/* Back to the family's own nodes after a headed group («Mis nodos» before Logic's). */}
+                        {!d.group && nodes[index - 1]?.group && <div className="mx-2 my-1.5 h-px bg-[var(--cf-border)]" />}
                         {row(d, null)}
                       </div>
                     ))}
@@ -341,7 +343,7 @@ export function NodePalette({
 
 /** An entry's mark: the service's own logo when it has one, the node type's glyph otherwise. */
 function EntryGlyph({ entry, size }: { entry: PaletteEntry; size: number }) {
-  const Icon = nodeIcon(entry.descriptor.icon);
+  const Icon = nodeIcon(entry.icon ?? entry.descriptor.icon);
   const logo = entry.logo ? appLogo(entry.logo) : undefined;
   return logo ? <BrandGlyph id={entry.logo ?? ""} logo={logo} size={size} /> : <Icon size={size} strokeWidth={size > 16 ? 1.75 : 2} />;
 }

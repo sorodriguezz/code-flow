@@ -27,6 +27,7 @@ import {
   McpServersField,
 } from "./AiFields";
 import { DbConnectionPicker, NotePicker, RemoteHostPicker, VaultItemPicker, ApiEnvironmentPicker, ApiRequestPicker } from "./AppFields";
+import { ApiCollectionPicker, FakeFieldsEditor, FlowTablePicker, SubflowInputsEditor, TransformCodeButton, ValidationRulesEditor } from "./MoreFields";
 import { visible } from "../../lib/flows/paramVisibility";
 import { serializeSpec } from "../../lib/flows/spec";
 import {
@@ -845,6 +846,13 @@ function asCall(value: unknown): FlowConnectorCall {
   return { connector: str(record.connector), operation: str(record.operation), fields };
 }
 
+/** An operation «Cambios en un servicio» may call again and again: one that only reads. The same test
+ *  as `reads` in triggers/more.rs, which refuses the rest — the first operation of a service (Slack's
+ *  postMessage) used to be picked with it, hidden from this list and run every 30 seconds. */
+function readsOnly(operation: { id: string; method: string }): boolean {
+  return operation.method.toUpperCase() === "GET" || /^(list|search|query|get|history)/i.test(operation.id);
+}
+
 /** The "Conector" node's call: the service, what to do with it, and that action's own fields —
  *  each one fixed or an expression, like any field. Nothing secret is ever one of them: the token
  *  is the credential below. */
@@ -853,12 +861,15 @@ function ConnectorField({
   onChange,
   credential,
   credentialRow,
+  listOnly = false,
 }: {
   value: unknown;
   onChange: (next: unknown) => void;
   credential: string;
   /** The node's credential, drawn right under the service — a list of teams or channels needs it first. */
   credentialRow?: (connector: FlowConnector) => ReactNode;
+  /** «Cambios en un servicio» looks at a list again and again: only the operations that read one. */
+  listOnly?: boolean;
 }) {
   const t = useT();
   const language = useLanguageStore((s) => s.language);
@@ -885,7 +896,7 @@ function ConnectorField({
         <div className="w-[188px] shrink-0">
           <Select
             value={call.connector}
-            onChange={(id) => onChange({ connector: id, operation: connectors.find((c) => c.id === id)?.operations[0]?.id ?? "", fields: {} })}
+            onChange={(id) => onChange({ connector: id, operation: (connectors.find((c) => c.id === id)?.operations ?? []).find((o) => !listOnly || readsOnly(o))?.id ?? "", fields: {} })}
             options={connectors.map((c) => ({ value: c.id, label: c.name }))}
             size="sm"
             ariaLabel={t("flows.connector.service")}
@@ -895,7 +906,9 @@ function ConnectorField({
           <Select
             value={operation ? call.operation : ""}
             onChange={pickOperation}
-            options={(connector?.operations ?? []).map((o) => ({ value: o.id, label: say(o.name) }))}
+            options={(connector?.operations ?? [])
+              .filter((o) => !listOnly || readsOnly(o))
+              .map((o) => ({ value: o.id, label: say(o.name) }))}
             size="sm"
             ariaLabel={t("flows.connector.action")}
           />
@@ -1203,11 +1216,27 @@ function ParamField({
       case "apiEnvironment":
         editor = <ApiEnvironmentPicker value={value} onChange={onChange} />;
         break;
+      case "flowTable":
+        editor = <FlowTablePicker value={value} onChange={onChange} />;
+        break;
+      case "apiCollection":
+        editor = <ApiCollectionPicker value={value} onChange={onChange} />;
+        break;
+      case "fakeFields":
+        editor = <FakeFieldsEditor value={value} onChange={onChange} />;
+        break;
+      case "validationRules":
+        editor = <ValidationRulesEditor value={value} onChange={onChange} />;
+        break;
+      case "subflowInputs":
+        editor = <SubflowInputsEditor value={value} onChange={onChange} flowId={str(params.flow)} />;
+        break;
       case "connector":
         editor = (
           <ConnectorField
             value={value}
             onChange={onChange}
+            listOnly={typeId === "trigger.connector"}
             credential={str(params.credential)}
             credentialRow={(chosen) => (
               <div className="flex flex-col gap-1">
@@ -1234,6 +1263,7 @@ function ParamField({
       {editor}
       {expression && kind.type === "code" && <ExpressionPreview flowId={flowId} nodeId={nodeId} expression={value} />}
       {typeId === "ai.agent" && spec.name === "access" && <AccessHint params={params} />}
+      {typeId === "ai.transform" && spec.name === "transformGoal" && <TransformCodeButton flowId={flowId} nodeId={nodeId} params={params} setParam={setParam} />}
     </div>
   );
 }
@@ -1256,8 +1286,9 @@ export function ParamFields({
 }) {
   const t = useT();
   // A connector call decides which credentials fit, and whether one is asked for at all.
-  const connectors = useConnectors(typeId === "net.connector");
-  const callSpec = typeId === "net.connector" ? specs.find((spec) => spec.name === "call") : undefined;
+  const callsConnector = typeId === "net.connector" || typeId === "trigger.connector";
+  const connectors = useConnectors(callsConnector);
+  const callSpec = callsConnector ? specs.find((spec) => spec.name === "call") : undefined;
   const connector = callSpec ? connectors.find((c) => c.id === asCall(params.call ?? callSpec.default).connector) : undefined;
   if (specs.length === 0) {
     return <p className="text-[12px] text-[var(--cf-text-muted)]">{t("flows.param.none")}</p>;
@@ -1268,7 +1299,7 @@ export function ParamFields({
       {specs
         .filter((spec) => visible(spec, params, specs))
         // The Conector draws its credential under the service it signs into (`ConnectorField`).
-        .filter((spec) => !(typeId === "net.connector" && spec.name === "credential"))
+        .filter((spec) => !(callsConnector && spec.name === "credential"))
         .map((spec) => (
           <ParamField
             key={spec.name}

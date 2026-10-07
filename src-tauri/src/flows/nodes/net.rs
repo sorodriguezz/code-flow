@@ -559,7 +559,7 @@ pub(super) fn mailboxes(raw: &str) -> Result<Vec<lettre::message::Mailbox>, Node
         .collect()
 }
 
-fn email<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Value>, NodeError>> + Send + 'a>> {
+pub(super) fn email<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Value>, NodeError>> + Send + 'a>> {
     Box::pin(async move {
         use lettre::message::{header::ContentType, Attachment, MultiPart, SinglePart};
         use lettre::transport::smtp::authentication::Credentials;

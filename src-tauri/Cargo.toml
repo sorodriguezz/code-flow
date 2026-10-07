@@ -441,6 +441,12 @@ serde_json_path = "0.7.2"
 qrcode = "0.14.1"
 rqrr = "0.11.0"
 jsonschema = { version = "0.58.5", default-features = false }
+# Flujos — «Versión del proyecto»: semver bumps and comparisons. Already in the tree (cargo and tauri
+# use it), so naming it compiles nothing new.
+semver = "1"
+# Flujos — the image node's text watermark: glyphs from a system font, rasterized. Small, pure Rust,
+# on the ttf-parser already in the tree.
+ab_glyph = "0.2"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 lopdf = { version = "0.42", default-features = false }
 # Flujos — incoming mail (IMAP trigger and node): the client and the message parser.
@@ -481,10 +487,15 @@ windows = { version = "0.61", features = ["Win32_Graphics_Dxgi"] }
 # already in the tree (tauri, sysinfo and keyring all reach for it), so this names three modules and
 # compiles nothing that was not being compiled. The DWM, Controls and WindowsAndMessaging modules are
 # for the see-through window's system backdrop — the frame extension, caption colour and
-# `WM_NCACTIVATE` that `glass::system_frame` sends (bindings only; nothing new to build).
+# `WM_NCACTIVATE` that `glass::system_frame` sends (bindings only; nothing new to build). The
+# DataExchange, SystemInformation and KeyboardAndMouse modules are for Flujos' triggers: the
+# clipboard's change counter and the time since the last keystroke or click (bindings only too).
 windows-sys = { version = "0.60", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
+  "Win32_System_DataExchange",
+  "Win32_System_SystemInformation",
+  "Win32_UI_Input_KeyboardAndMouse",
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
   "Win32_UI_Controls",

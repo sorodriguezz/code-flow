@@ -162,7 +162,16 @@ fn kind_text(spec: &ParamSpec) -> String {
         Kind::FormFields => "[{name, label, type: text|longText|number|boolean|select|date, required, default, options: \"a, b\"}] \
                              — what a manual run asks for"
             .into(),
+        Kind::FlowTable => "the name of a Flujos table (made on first write), e.g. \"clientes\"".into(),
+        Kind::FakeFields => "[{name, kind: fullName|firstName|lastName|email|phone|rut|address|city|region|country|company|jobTitle|\
+                             uuid|integer|decimal|boolean|date|datetime|sentence|paragraph|url|ip|color|price|product|word|username}]"
+            .into(),
+        Kind::ValidationRules => "[{field, check: required|isEmail|isUrl|isUuid|isNumber|isInteger|isDate|isRut|isCard|isIban|isPhone|\
+                                  matches|minLength|maxLength|minValue|maxValue|oneOf, arg}]"
+            .into(),
+        Kind::SubflowInputs => "{inputName: value} — the inputs the called flow declares".into(),
         Kind::Project
+        | Kind::ApiCollection
         | Kind::Flows { .. }
         | Kind::Service
         | Kind::McpServers

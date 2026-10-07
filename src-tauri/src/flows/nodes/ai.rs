@@ -49,8 +49,15 @@ const MAX_DIFF_CHARS: usize = crate::ai::MAX_REVIEW_DIFF_CHARS;
 /// A commit message is written from at most this much diff, as in the Changes panel.
 const MAX_COMMIT_DIFF_CHARS: usize = crate::ai::MAX_DIFF_CHARS;
 
+mod extra;
+
 pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     match ctx.node.type_id.as_str() {
+        "ai.guard" => extra::guard(ctx).await,
+        "ai.transform" => extra::transform(ctx).await,
+        "ai.compare" => extra::compare(ctx).await,
+        "ai.image" => extra::image(ctx).await,
+        "ai.speech" => extra::speech(ctx).await,
         "ai.agent" => agent(ctx).await,
         "ai.local" => local(ctx).await,
         "ai.classify" => classify(ctx).await,
@@ -556,8 +563,6 @@ async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         }
     }
     let keep_session = ctx.param_str("session") == "continue";
-    let session_key = format!("ai-session:{}", ctx.node.id);
-    let mut session = if keep_session { stored_session(ctx, &session_key, &engines[0]) } else { None };
     let mcp = if can_edit { strings(&ctx.params, "mcp") } else { Vec::new() };
     let resolved = if ctx.param_str("runFor") == "once" { vec![ctx.resolve_once().await?] } else { ctx.resolve_each().await? };
 
@@ -571,6 +576,12 @@ async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         if let Some(schema) = &schema {
             full.push_str(&schema_instruction(schema));
         }
+        // One conversation per «Clave de memoria» — a chat, a customer — or one for the node.
+        let session_key = match text(params, "memoryKey").trim() {
+            "" => format!("ai-session:{}", ctx.node.id),
+            key => format!("ai-session:{}:{key}", ctx.node.id),
+        };
+        let session = if keep_session { stored_session(ctx, &session_key, &engines[0]) } else { None };
         let question = Ask {
             prompt: full,
             data: text(params, "data"),
@@ -593,7 +604,6 @@ async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         };
         if keep_session && used == 0 {
             if let Some(id) = &reply.session {
-                session = Some(id.clone());
                 let stored = json!({ "provider": engines[0].provider, "account": engines[0].account, "session": id });
                 let _ = ctx.run.host.state_set(&session_key, Some(&stored));
             }
@@ -622,6 +632,60 @@ async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 // -------------------------------------------------------------------------------- the local model
 
+/// A local model's conversation: the remembered turns, other flows as tools, calls run until it
+/// answers in words or its budget is spent. The answer's tokens are every turn's.
+async fn local_converse(
+    ctx: &NodeCtx,
+    base: &LocalCall,
+    mut messages: Vec<Value>,
+    tools: &[super::tools::FlowTool],
+    max_calls: usize,
+) -> Result<(crate::flows::engine::LocalAnswer, Vec<Value>), NodeError> {
+    let declared = if tools.is_empty() { Vec::new() } else { super::tools::declarations("openai", tools).as_array().cloned().unwrap_or_default() };
+    let mut calls_made = 0;
+    let mut log = Vec::new();
+    let (mut input, mut output) = (0u64, 0u64);
+    loop {
+        let no_more = calls_made >= max_calls;
+        take_slot(ctx)?;
+        let call = LocalCall { messages: messages.clone(), tools: declared.clone(), no_more_tools: no_more, ..base.clone() };
+        let mut answer = ctx.run.host.local_ai(call, ctx.cancel.clone()).await.map_err(failure_of)?;
+        input += answer.prompt_tokens.unwrap_or(0);
+        output += answer.completion_tokens.unwrap_or(0);
+        let calls: Vec<super::tools::ToolCall> = answer
+            .tool_calls
+            .iter()
+            .map(|call| super::tools::ToolCall {
+                id: text(call, "id"),
+                name: text(call, "name"),
+                arguments: call.get("arguments").cloned().unwrap_or_else(|| json!({})),
+            })
+            .collect();
+        if calls.is_empty() || no_more {
+            if no_more && !calls.is_empty() && answer.text.trim().is_empty() {
+                return Err(NodeError::failed(format!("The model kept calling tools after {max_calls} calls — raise «Max tool calls»")));
+            }
+            answer.prompt_tokens = Some(input);
+            answer.completion_tokens = Some(output);
+            return Ok((answer, log));
+        }
+        messages.push(answer.message.clone().unwrap_or_else(|| json!({ "role": "assistant", "content": answer.text })));
+        let mut results = Vec::with_capacity(calls.len());
+        for call in calls {
+            if ctx.cancel.is_cancelled() {
+                return Err(NodeError::Cancelled);
+            }
+            calls_made += 1;
+            if calls_made > max_calls {
+                results.push(super::tools::over_budget(call));
+                continue;
+            }
+            results.push(super::tools::run_call(ctx, tools, call, &mut log).await);
+        }
+        messages.extend(super::tools::result_messages("openai", &results));
+    }
+}
+
 async fn local(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let schema = output_schema(&ctx.params)?;
     let credential = ctx.param_str("credential");
@@ -630,6 +694,8 @@ async fn local(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     } else {
         Some(ctx.run.host.credential(&credential).map_err(NodeError::Failed)?.secret)
     };
+    let tools = super::tools::flow_tools(ctx, &ctx.params).await?;
+    let max_calls = super::tools::max_calls(&ctx.params);
     let resolved = if ctx.param_str("runFor") == "once" { vec![ctx.resolve_once().await?] } else { ctx.resolve_each().await? };
     let mut out = Vec::with_capacity(resolved.len());
     for (index, params) in resolved.iter().enumerate() {
@@ -653,10 +719,21 @@ async fn local(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             max_tokens: number(params, "maxTokens").unwrap_or(1_024.0).clamp(16.0, 131_072.0) as u32,
             context: number(params, "contextSize").unwrap_or(0.0).clamp(0.0, 1_048_576.0) as u32,
             node_name: ctx.node.name.clone(),
+            ..Default::default()
         };
         let started = Instant::now();
-        take_slot(ctx)?;
-        let mut answer = ctx.run.host.local_ai(call.clone(), ctx.cancel.clone()).await.map_err(failure_of)?;
+        let memory = super::tools::memory_key(ctx, params);
+        let history = memory.as_deref().map(|key| super::tools::recall(ctx, key)).unwrap_or_default();
+        let mut called = Vec::new();
+        let mut answer = if tools.is_empty() && history.is_empty() {
+            take_slot(ctx)?;
+            ctx.run.host.local_ai(call.clone(), ctx.cancel.clone()).await.map_err(failure_of)?
+        } else {
+            let messages = super::tools::opening("openai", &history, &full);
+            let (answer, log) = local_converse(ctx, &call, messages, &tools, max_calls).await?;
+            called = log;
+            answer
+        };
         let mut data = None;
         if let Some(schema) = &schema {
             let (object, problems) = problems_of(&answer.text, schema);
@@ -694,10 +771,16 @@ async fn local(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         if answer.cut {
             ctx.log(LogStream::Info, "The answer reached the token limit and is cut — raise «Max tokens»");
         }
+        if let Some(key) = &memory {
+            super::tools::remember(ctx, key, history, prompt.trim(), answer.text.trim(), params);
+        }
         let mut json = Map::new();
         json.insert("text".into(), json!(answer.text.trim()));
         if let Some(data) = data {
             json.insert("data".into(), data);
+        }
+        if !called.is_empty() {
+            json.insert("toolCalls".into(), json!(called));
         }
         json.insert("engine".into(), json!("local"));
         json.insert("server".into(), json!(answer.server));

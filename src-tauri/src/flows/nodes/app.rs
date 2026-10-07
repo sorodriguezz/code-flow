@@ -122,6 +122,41 @@ fn with_field(json: &Value, target: &str, value: Value) -> Value {
     out
 }
 
+/// A value kept with a lifetime: `{ "$ttl": <expiry, ms since the epoch>, "$value": … }`. Only values
+/// written with one are wrapped, so every key written before TTLs existed reads as it always did.
+const TTL_KEY: &str = "$ttl";
+
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// The value under `key`, unwrapped — `None` when there is none or its time is up (and then it is
+/// removed, so an expired cache does not linger in the flow's memory).
+fn read_state(host: &std::sync::Arc<dyn crate::flows::engine::RunHost>, key: &str) -> Result<Option<Value>, NodeError> {
+    let stored = host.state_get(key).map_err(NodeError::failed)?;
+    match stored {
+        Some(Value::Object(map)) if map.contains_key(TTL_KEY) && map.contains_key("$value") => {
+            let expires = map.get(TTL_KEY).and_then(Value::as_i64).unwrap_or(0);
+            if expires > 0 && expires <= now_millis() {
+                host.state_set(key, None).map_err(NodeError::failed)?;
+                Ok(None)
+            } else {
+                Ok(map.get("$value").cloned())
+            }
+        }
+        other => Ok(other),
+    }
+}
+
+fn write_state(host: &std::sync::Arc<dyn crate::flows::engine::RunHost>, key: &str, value: &Value, ttl_sec: f64) -> Result<(), NodeError> {
+    if ttl_sec > 0.0 {
+        let wrapped = json!({ TTL_KEY: now_millis() + (ttl_sec * 1000.0) as i64, "$value": value });
+        host.state_set(key, Some(&wrapped)).map_err(NodeError::failed)
+    } else {
+        host.state_set(key, Some(value)).map_err(NodeError::failed)
+    }
+}
+
 async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
     let operation = text(&ctx.params, "operation");
@@ -135,7 +170,7 @@ async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             return Err(NodeError::failed("Name the key the entries were collected under"));
         }
         let host = &ctx.run.host;
-        let list = host.state_get(&key).map_err(NodeError::failed)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let list = read_state(host, &key)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
         host.state_set(&key, None).map_err(NodeError::failed)?;
         if list.is_empty() {
             return Ok(vec![Vec::new()]);
@@ -158,16 +193,17 @@ async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         }
         let json = items.get(index).map(|item| item.json.clone()).unwrap_or(json!({}));
         let host = &ctx.run.host;
+        let ttl = number(params, "ttlSec").unwrap_or(0.0).max(0.0);
         let produced = match operation.as_str() {
             "set" => {
                 let value = params.get("value").cloned().unwrap_or(Value::Null);
-                host.state_set(&key, Some(&value)).map_err(NodeError::failed)?;
+                write_state(host, &key, &value, ttl)?;
                 json
             }
             "increment" => {
-                let current = host.state_get(&key).map_err(NodeError::failed)?.as_ref().and_then(to_number).unwrap_or(0.0);
+                let current = read_state(host, &key)?.as_ref().and_then(to_number).unwrap_or(0.0);
                 let next = crate::flows::value::number(current + number(params, "amount").unwrap_or(1.0));
-                host.state_set(&key, Some(&next)).map_err(NodeError::failed)?;
+                write_state(host, &key, &next, ttl)?;
                 with_field(&json, &text(params, "target"), next)
             }
             "delete" => {
@@ -177,18 +213,18 @@ async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             "collect" => {
                 // The item itself unless a value was written — what a digest usually collects.
                 let value = params.get("value").cloned().filter(|v| v != "" && !v.is_null()).unwrap_or_else(|| json.clone());
-                let mut list = host.state_get(&key).map_err(NodeError::failed)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+                let mut list = read_state(host, &key)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
                 list.push(value);
                 let keep = number(params, "keepAtMost").filter(|n| *n >= 1.0).map(|n| n as usize).unwrap_or(1000);
                 if list.len() > keep {
                     let cut = list.len() - keep;
                     list.drain(..cut);
                 }
-                host.state_set(&key, Some(&Value::Array(list))).map_err(NodeError::failed)?;
+                write_state(host, &key, &Value::Array(list), ttl)?;
                 json
             }
             _ => {
-                let value = host.state_get(&key).map_err(NodeError::failed)?.unwrap_or_else(|| {
+                let value = read_state(host, &key)?.unwrap_or_else(|| {
                     params.get("fallback").cloned().filter(|v| v != "").unwrap_or(Value::Null)
                 });
                 with_field(&json, &text(params, "target"), value)

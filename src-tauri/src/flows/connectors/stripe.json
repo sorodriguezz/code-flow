@@ -1,0 +1,245 @@
+{
+  "id": "stripe",
+  "name": "Stripe",
+  "group": "appsData",
+  "baseUrl": "https://api.stripe.com/v1",
+  "auth": "bearer",
+  "authHint": {
+    "es": "Una clave secreta o restringida de Stripe (sk_… o rk_…) como credencial Token",
+    "en": "A Stripe secret or restricted key (sk_… or rk_…) as a Token credential"
+  },
+  "tokenUrl": "https://dashboard.stripe.com/apikeys",
+  "test": {
+    "path": "/account",
+    "label": "{{settings.dashboard.display_name}} · {{email}}"
+  },
+  "errorField": "error.message",
+  "operations": [
+    {
+      "id": "balance",
+      "name": {
+        "es": "Saldo disponible",
+        "en": "Available balance"
+      },
+      "method": "GET",
+      "path": "/balance",
+      "fields": []
+    },
+    {
+      "id": "listPayments",
+      "name": {
+        "es": "Pagos recientes",
+        "en": "Recent payments"
+      },
+      "method": "GET",
+      "path": "/payment_intents",
+      "query": {
+        "limit": "{{limit}}",
+        "customer": "{{customer}}"
+      },
+      "fields": [
+        {
+          "name": "limit",
+          "label": {
+            "es": "Cuántos (hasta 100)",
+            "en": "How many (up to 100)"
+          },
+          "placeholder": "20"
+        },
+        {
+          "name": "customer",
+          "label": {
+            "es": "Cliente (cus_…)",
+            "en": "Customer (cus_…)"
+          },
+          "placeholder": "cus_123"
+        }
+      ],
+      "result": "data"
+    },
+    {
+      "id": "listCustomers",
+      "name": {
+        "es": "Buscar clientes",
+        "en": "Find customers"
+      },
+      "method": "GET",
+      "path": "/customers",
+      "query": {
+        "email": "{{email}}",
+        "limit": "{{limit}}"
+      },
+      "fields": [
+        {
+          "name": "email",
+          "label": {
+            "es": "Correo",
+            "en": "Email"
+          },
+          "placeholder": "ana@example.com"
+        },
+        {
+          "name": "limit",
+          "label": {
+            "es": "Cuántos (hasta 100)",
+            "en": "How many (up to 100)"
+          },
+          "placeholder": "20"
+        }
+      ],
+      "result": "data"
+    },
+    {
+      "id": "createCustomer",
+      "name": {
+        "es": "Crear un cliente",
+        "en": "Create a customer"
+      },
+      "method": "POST",
+      "path": "/customers",
+      "form": true,
+      "fields": [
+        {
+          "name": "email",
+          "label": {
+            "es": "Correo",
+            "en": "Email"
+          },
+          "required": true
+        },
+        {
+          "name": "name",
+          "label": {
+            "es": "Nombre",
+            "en": "Name"
+          }
+        },
+        {
+          "name": "description",
+          "label": {
+            "es": "Descripción",
+            "en": "Description"
+          }
+        }
+      ],
+      "body": {
+        "email": "{{email}}",
+        "name": "{{name}}",
+        "description": "{{description}}"
+      }
+    },
+    {
+      "id": "listInvoices",
+      "name": {
+        "es": "Facturas",
+        "en": "Invoices"
+      },
+      "method": "GET",
+      "path": "/invoices",
+      "query": {
+        "customer": "{{customer}}",
+        "status": "{{status}}",
+        "limit": "{{limit}}"
+      },
+      "fields": [
+        {
+          "name": "customer",
+          "label": {
+            "es": "Cliente (cus_…)",
+            "en": "Customer (cus_…)"
+          }
+        },
+        {
+          "name": "status",
+          "label": {
+            "es": "Estado (draft, open, paid, uncollectible, void)",
+            "en": "Status (draft, open, paid, uncollectible, void)"
+          },
+          "placeholder": "open"
+        },
+        {
+          "name": "limit",
+          "label": {
+            "es": "Cuántas (hasta 100)",
+            "en": "How many (up to 100)"
+          },
+          "placeholder": "20"
+        }
+      ],
+      "result": "data"
+    },
+    {
+      "id": "createRefund",
+      "name": {
+        "es": "Reembolsar un pago",
+        "en": "Refund a payment"
+      },
+      "method": "POST",
+      "path": "/refunds",
+      "form": true,
+      "fields": [
+        {
+          "name": "payment_intent",
+          "label": {
+            "es": "Pago (pi_…)",
+            "en": "Payment (pi_…)"
+          },
+          "required": true
+        },
+        {
+          "name": "amount",
+          "label": {
+            "es": "Monto en la unidad mínima (vacío: todo)",
+            "en": "Amount in the smallest unit (empty: all)"
+          },
+          "placeholder": "1500"
+        },
+        {
+          "name": "reason",
+          "label": {
+            "es": "Motivo (duplicate, fraudulent, requested_by_customer)",
+            "en": "Reason (duplicate, fraudulent, requested_by_customer)"
+          }
+        }
+      ],
+      "body": {
+        "payment_intent": "{{payment_intent}}",
+        "amount": "{{amount}}",
+        "reason": "{{reason}}"
+      }
+    },
+    {
+      "id": "createPaymentLink",
+      "name": {
+        "es": "Crear un enlace de pago",
+        "en": "Create a payment link"
+      },
+      "method": "POST",
+      "path": "/payment_links",
+      "form": true,
+      "fields": [
+        {
+          "name": "price",
+          "label": {
+            "es": "Precio (price_…)",
+            "en": "Price (price_…)"
+          },
+          "required": true
+        },
+        {
+          "name": "quantity",
+          "label": {
+            "es": "Cantidad",
+            "en": "Quantity"
+          },
+          "placeholder": "1",
+          "default": "1"
+        }
+      ],
+      "body": {
+        "line_items[0][price]": "{{price}}",
+        "line_items[0][quantity]": "{{quantity}}"
+      }
+    }
+  ]
+}

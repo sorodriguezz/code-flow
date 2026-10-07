@@ -1,0 +1,245 @@
+{
+  "id": "confluence",
+  "name": "Confluence",
+  "group": "appsProjects",
+  "baseUrl": "https://{{site}}.atlassian.net/wiki",
+  "auth": "basic",
+  "authHint": {
+    "es": "Tu correo y un token de API de Atlassian como credencial Usuario y contraseña",
+    "en": "Your email and an Atlassian API token as a User and password credential"
+  },
+  "tokenUrl": "https://id.atlassian.com/manage-profile/security/api-tokens",
+  "userLabel": {
+    "es": "Correo de Atlassian",
+    "en": "Atlassian email"
+  },
+  "secretLabel": {
+    "es": "Token de API",
+    "en": "API token"
+  },
+  "test": {
+    "path": "/rest/api/user/current",
+    "label": "{{displayName}} · {{email}}"
+  },
+  "siteField": {
+    "name": "site",
+    "label": {
+      "es": "Sitio (tu-equipo en tu-equipo.atlassian.net)",
+      "en": "Site (your-team in your-team.atlassian.net)"
+    },
+    "placeholder": "acme",
+    "required": true
+  },
+  "errorField": "message",
+  "operations": [
+    {
+      "id": "searchPages",
+      "name": {
+        "es": "Buscar páginas",
+        "en": "Search pages"
+      },
+      "method": "GET",
+      "path": "/rest/api/content/search",
+      "query": {
+        "cql": "{{cql}}",
+        "limit": "{{limit}}"
+      },
+      "fields": [
+        {
+          "name": "cql",
+          "label": {
+            "es": "Búsqueda (CQL)",
+            "en": "Query (CQL)"
+          },
+          "placeholder": "space = OPS and title ~ \"despliegue\"",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "label": {
+            "es": "Cuántas",
+            "en": "How many"
+          },
+          "placeholder": "25"
+        }
+      ],
+      "result": "results"
+    },
+    {
+      "id": "getPage",
+      "name": {
+        "es": "Leer una página",
+        "en": "Read a page"
+      },
+      "method": "GET",
+      "path": "/rest/api/content/{{pageId}}",
+      "query": {
+        "expand": "body.storage,version,space"
+      },
+      "fields": [
+        {
+          "name": "pageId",
+          "label": {
+            "es": "Página (id)",
+            "en": "Page (id)"
+          },
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "createPage",
+      "name": {
+        "es": "Crear una página",
+        "en": "Create a page"
+      },
+      "method": "POST",
+      "path": "/rest/api/content",
+      "fields": [
+        {
+          "name": "spaceKey",
+          "label": {
+            "es": "Espacio",
+            "en": "Space"
+          },
+          "required": true,
+          "lookup": {
+            "path": "/rest/api/space",
+            "query": {
+              "limit": "200"
+            },
+            "result": "results",
+            "value": "key",
+            "label": "{{key}} · {{name}}"
+          }
+        },
+        {
+          "name": "title",
+          "label": {
+            "es": "Título",
+            "en": "Title"
+          },
+          "required": true
+        },
+        {
+          "name": "parentId",
+          "label": {
+            "es": "Página madre (id, opcional)",
+            "en": "Parent page (id, optional)"
+          }
+        },
+        {
+          "name": "content",
+          "label": {
+            "es": "Contenido (HTML de Confluence)",
+            "en": "Content (Confluence HTML)"
+          },
+          "multiline": true,
+          "required": true,
+          "placeholder": "<p>Hola</p>"
+        }
+      ],
+      "body": {
+        "type": "page",
+        "title": "{{title}}",
+        "space": {
+          "key": "{{spaceKey}}"
+        },
+        "ancestors": [
+          {
+            "$when": "parentId",
+            "id": "{{parentId}}"
+          }
+        ],
+        "body": {
+          "storage": {
+            "value": "{{content}}",
+            "representation": "storage"
+          }
+        }
+      }
+    },
+    {
+      "id": "updatePage",
+      "name": {
+        "es": "Reemplazar una página",
+        "en": "Replace a page"
+      },
+      "method": "PUT",
+      "path": "/rest/api/content/{{pageId}}",
+      "fields": [
+        {
+          "name": "pageId",
+          "label": {
+            "es": "Página (id)",
+            "en": "Page (id)"
+          },
+          "required": true
+        },
+        {
+          "name": "title",
+          "label": {
+            "es": "Título",
+            "en": "Title"
+          },
+          "required": true
+        },
+        {
+          "name": "version",
+          "label": {
+            "es": "Nueva versión (la actual + 1)",
+            "en": "New version (the current one + 1)"
+          },
+          "json": true,
+          "required": true,
+          "placeholder": "2"
+        },
+        {
+          "name": "content",
+          "label": {
+            "es": "Contenido (HTML de Confluence)",
+            "en": "Content (Confluence HTML)"
+          },
+          "multiline": true,
+          "required": true
+        }
+      ],
+      "body": {
+        "type": "page",
+        "title": "{{title}}",
+        "version": {
+          "number": "{{version}}"
+        },
+        "body": {
+          "storage": {
+            "value": "{{content}}",
+            "representation": "storage"
+          }
+        }
+      }
+    },
+    {
+      "id": "listSpaces",
+      "name": {
+        "es": "Espacios",
+        "en": "Spaces"
+      },
+      "method": "GET",
+      "path": "/rest/api/space",
+      "query": {
+        "limit": "{{limit}}"
+      },
+      "fields": [
+        {
+          "name": "limit",
+          "label": {
+            "es": "Cuántos",
+            "en": "How many"
+          },
+          "placeholder": "50"
+        }
+      ],
+      "result": "results"
+    }
+  ]
+}

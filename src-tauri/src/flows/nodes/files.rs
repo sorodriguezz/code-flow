@@ -206,6 +206,7 @@ async fn list(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let recursive = flag(&params, "recursive");
     let include = text(&params, "entryKinds");
     let newer = number(&params, "newerThanMinutes").unwrap_or(0.0).max(0.0);
+    let older_days = number(&params, "olderThanDays").unwrap_or(0.0).max(0.0);
     let limit = number(&params, "limit").unwrap_or(0.0).max(0.0) as usize;
     let root = folder.clone();
     let mut found = tokio::task::spawn_blocking(move || {
@@ -215,6 +216,8 @@ async fn list(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     .await
     .map_err(|e| NodeError::failed(e.to_string()))??;
     let cutoff = (newer > 0.0).then(|| SystemTime::now() - Duration::from_secs_f64(newer * 60.0));
+    // The other end: what has not changed for days — old backups to rotate, a cache to clean.
+    let stale = (older_days > 0.0).then(|| SystemTime::now() - Duration::from_secs_f64(older_days * 86_400.0));
     found.retain(|path| {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return false };
         let kind_ok = match include.as_str() {
@@ -226,7 +229,8 @@ async fn list(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             let relative = path.strip_prefix(&folder).unwrap_or(path);
             matcher.is_match(relative) || path.file_name().is_some_and(|name| matcher.is_match(name))
         });
-        let time_ok = cutoff.is_none_or(|cutoff| meta.modified().is_ok_and(|modified| modified >= cutoff));
+        let time_ok = cutoff.is_none_or(|cutoff| meta.modified().is_ok_and(|modified| modified >= cutoff))
+            && stale.is_none_or(|stale| meta.modified().is_ok_and(|modified| modified < stale));
         kind_ok && name_ok && time_ok
     });
     match text(&params, "sortBy").as_str() {
@@ -236,6 +240,27 @@ async fn list(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     }
     if limit > 0 {
         found.truncate(limit);
+    }
+    if text(&params, "listOutput") == "listSummary" {
+        // One item: how many, how big, the oldest and the newest — what a cleanup or an alert reads.
+        let metas: Vec<(PathBuf, std::fs::Metadata)> = found.iter().filter_map(|p| std::fs::metadata(p).ok().map(|m| (p.clone(), m))).collect();
+        let total: u64 = metas.iter().filter(|(_, m)| m.is_file()).map(|(_, m)| m.len()).sum();
+        let by_time = |newest: bool| {
+            metas
+                .iter()
+                .filter_map(|(p, m)| m.modified().ok().map(|t| (p, t)))
+                .reduce(|a, b| if (b.1 > a.1) == newest { b } else { a })
+                .map(|(p, t)| json!({"path": p.to_string_lossy(), "modified": chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()}))
+        };
+        return Ok(vec![vec![Item::new(json!({
+            "folder": folder.to_string_lossy(),
+            "count": metas.len(),
+            "totalBytes": total,
+            "totalSize": crate::containers::engine::human_bytes(total),
+            "oldest": by_time(false),
+            "newest": by_time(true),
+            "paths": found.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        }))]]);
     }
     Ok(vec![found.iter().map(|path| Item::new(describe(path))).collect()])
 }
@@ -393,8 +418,11 @@ pub fn parse_status(output: &str) -> Value {
 
 async fn git(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let params = ctx.resolve_once().await?;
-    let repo = repo_folder(ctx, &params).await?;
     let operation = text(&params, "operation");
+    if operation == "clone" {
+        return clone(ctx, &params).await;
+    }
+    let repo = repo_folder(ctx, &params).await?;
     let remote = {
         let remote = text(&params, "remote");
         if remote.trim().is_empty() { "origin".to_string() } else { remote.trim().to_string() }
@@ -474,14 +502,17 @@ async fn git(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             json!({"diff": output.stdout})
         }
         "log" => {
-            let count = number(&params, "maxCount").unwrap_or(20.0).clamp(1.0, 1000.0) as u32;
-            let output = run(vec![
-                "log".into(),
-                format!("-n{count}"),
-                "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%s".into(),
-            ])
-            .await?
-            .ok_or_fail("git log")?;
+            let count = number(&params, "maxCount").unwrap_or(20.0).clamp(1.0, 5000.0) as u32;
+            let mut args = vec!["log".to_string(), format!("-n{count}"), "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%s".into()];
+            // `v1.2.0..HEAD`: the commits a release is made of — what release notes are written from.
+            let range = text(&params, "logRange");
+            if !range.trim().is_empty() {
+                if range.trim().starts_with('-') {
+                    return Err(NodeError::failed("The range is a revision range, not a flag"));
+                }
+                args.push(range.trim().to_string());
+            }
+            let output = run(args).await?.ok_or_fail("git log")?;
             let commits: Vec<Value> = output
                 .stdout
                 .lines()
@@ -492,6 +523,169 @@ async fn git(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 .collect();
             return Ok(vec![commits.into_iter().map(Item::new).collect()]);
         }
+        "mergeBranch" => {
+            let branch = need_ref(&params, "branch", "branch to merge")?;
+            crate::git::branch::guard_head_unlocked_at(&repo_text).map_err(NodeError::Failed)?;
+            require_clean_state(&repo)?;
+            let mut args = vec!["merge".to_string()];
+            if flag(&params, "ffOnly") {
+                args.push("--ff-only".into());
+            } else {
+                args.push("--no-edit".into());
+            }
+            args.push(branch.clone());
+            let output = run(args).await?;
+            if output.code != Some(0) {
+                // A conflicted merge is undone, so the repository is never left half-merged by a flow.
+                if left_half_done(&repo) {
+                    let _ = run(vec!["merge".into(), "--abort".into()]).await;
+                }
+                return Err(failure(output, "git merge"));
+            }
+            json!({"merged": branch, "output": output.stdout.trim()})
+        }
+        "rebaseOnto" => {
+            let branch = need_ref(&params, "branch", "branch to rebase onto")?;
+            crate::git::branch::guard_head_unlocked_at(&repo_text).map_err(NodeError::Failed)?;
+            require_clean_state(&repo)?;
+            let output = run(vec!["rebase".into(), branch.clone()]).await?;
+            if output.code != Some(0) {
+                if left_half_done(&repo) {
+                    let _ = run(vec!["rebase".into(), "--abort".into()]).await;
+                }
+                return Err(failure(output, "git rebase"));
+            }
+            json!({"rebasedOnto": branch, "output": output.stdout.trim()})
+        }
+        "stashPush" => {
+            let mut args = vec!["stash".to_string(), "push".into(), "--include-untracked".into()];
+            let message = text(&params, "message");
+            if !message.trim().is_empty() {
+                args.extend(["-m".into(), message.trim().to_string()]);
+            }
+            let output = run(args).await?.ok_or_fail("git stash")?;
+            json!({"stashed": !output.stdout.contains("No local changes"), "output": output.stdout.trim()})
+        }
+        "stashPop" => {
+            let output = run(vec!["stash".into(), "pop".into()]).await?.ok_or_fail("git stash pop")?;
+            json!({"output": output.stdout.trim()})
+        }
+        "cherryPick" | "revertCommit" => {
+            let shas: Vec<String> = text(&params, "shas").split([',', ' ', '\n']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
+            if shas.is_empty() {
+                return Err(NodeError::failed("Write the commits (their sha)"));
+            }
+            if shas.iter().any(|sha| sha.starts_with('-')) {
+                return Err(NodeError::failed("A commit is a sha, not a flag"));
+            }
+            crate::git::branch::guard_head_unlocked_at(&repo_text).map_err(NodeError::Failed)?;
+            require_clean_state(&repo)?;
+            let verb = if operation == "cherryPick" { "cherry-pick" } else { "revert" };
+            let mut args = vec![verb.to_string()];
+            if verb == "revert" {
+                args.push("--no-edit".into());
+            }
+            args.extend(shas.iter().cloned());
+            let output = run(args).await?;
+            if output.code != Some(0) {
+                if left_half_done(&repo) {
+                    let _ = run(vec![verb.into(), "--abort".into()]).await;
+                }
+                return Err(failure(output, &format!("git {verb}")));
+            }
+            json!({"applied": shas, "output": output.stdout.trim()})
+        }
+        "deleteBranch" => {
+            let branch = need_ref(&params, "branch", "branch to delete")?;
+            // A locked branch is not deleted by a flow, here or on the remote — the app refuses the
+            // remote half the same way (`remote::delete_remote_branch`): the lock keeps pushes off a
+            // branch, and a deletion is the most final push there is. Asked of the branch named,
+            // not of HEAD, which is never the branch being deleted.
+            crate::git::branch::guard_branch_unlocked_at(&repo_text, &branch).map_err(NodeError::Failed)?;
+            let local = run(vec!["branch".into(), if flag(&params, "forceDelete") { "-D".into() } else { "-d".into() }, branch.clone()]).await?.ok_or_fail("git branch -d")?;
+            let mut remote_out = String::new();
+            if flag(&params, "deleteRemote") {
+                remote_out = run(vec!["push".into(), remote.clone(), "--delete".into(), branch.clone()]).await?.ok_or_fail("git push --delete")?.stderr;
+            }
+            json!({"deleted": branch, "output": format!("{}{}", local.stdout.trim(), remote_out.trim())})
+        }
+        "branches" => {
+            let output = run(vec![
+                "for-each-ref".into(),
+                "--sort=-committerdate".into(),
+                "--format=%(refname:short)%1f%(objectname)%1f%(committerdate:iso-strict)%1f%(authorname)%1f%(upstream:short)%1f%(upstream:track)".into(),
+                "refs/heads".into(),
+            ])
+            .await?
+            .ok_or_fail("git for-each-ref")?;
+            let merged_into = text(&params, "mergedInto");
+            let merged: std::collections::HashSet<String> = if merged_into.trim().is_empty() {
+                Default::default()
+            } else {
+                run(vec!["branch".into(), "--format=%(refname:short)".into(), "--merged".into(), merged_into.trim().to_string()])
+                    .await?
+                    .ok_or_fail("git branch --merged")?
+                    .stdout
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .collect()
+            };
+            let stale_days = number(&params, "staleDays").unwrap_or(0.0).max(0.0);
+            let now = chrono::Utc::now();
+            let current = super::super::triggers::current_branch(&repo_text);
+            let items: Vec<Item> = output
+                .stdout
+                .lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split('\u{1f}').collect();
+                    if parts.len() < 6 {
+                        return None;
+                    }
+                    let date = chrono::DateTime::parse_from_rfc3339(parts[2]).ok()?;
+                    let age_days = (now - date.with_timezone(&chrono::Utc)).num_days();
+                    if stale_days > 0.0 && (age_days as f64) < stale_days {
+                        return None;
+                    }
+                    let name = parts[0].to_string();
+                    if !merged_into.trim().is_empty() && (!merged.contains(&name) || name == merged_into.trim()) {
+                        return None;
+                    }
+                    Some(Item::new(json!({
+                        "branch": name,
+                        "sha": parts[1],
+                        "lastCommit": parts[2],
+                        "ageDays": age_days,
+                        "author": parts[3],
+                        "upstream": parts[4],
+                        "tracking": parts[5],
+                        "current": parts[0] == current,
+                        "merged": merged.contains(parts[0]),
+                    })))
+                })
+                .collect();
+            return Ok(vec![items]);
+        }
+        "tags" => {
+            let count = number(&params, "maxCount").unwrap_or(20.0).clamp(1.0, 5000.0) as usize;
+            let output = run(vec![
+                "for-each-ref".into(),
+                "--sort=-creatordate".into(),
+                "--format=%(refname:short)%1f%(objectname)%1f%(creatordate:iso-strict)%1f%(subject)".into(),
+                "refs/tags".into(),
+            ])
+            .await?
+            .ok_or_fail("git for-each-ref")?;
+            let items: Vec<Item> = output
+                .stdout
+                .lines()
+                .take(count)
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split('\u{1f}').collect();
+                    (parts.len() >= 4).then(|| Item::new(json!({"tag": parts[0], "sha": parts[1], "date": parts[2], "subject": parts[3]})))
+                })
+                .collect();
+            return Ok(vec![items]);
+        }
         _ => {
             let output = run(vec!["status".into(), "--porcelain=v2".into(), "--branch".into()]).await?.ok_or_fail("git status")?;
             parse_status(&output.stdout)
@@ -501,6 +695,96 @@ async fn git(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     if let Value::Object(map) = &mut json {
         map.insert("repository".into(), json!(repo_text));
     }
+    Ok(vec![vec![if ctx.items().is_empty() { Item::new(json) } else { Item::paired(json, 0) }]])
+}
+
+/// Refuses to start a merge, rebase, cherry-pick or revert while the repository is in the middle of
+/// one already. That one is somebody's — most likely the user's, conflicts half resolved by hand —
+/// and the `--abort` that undoes a failed step of a flow would throw their work away with its own.
+fn require_clean_state(repo: &Path) -> Result<(), NodeError> {
+    let state = git2::Repository::discover(repo).map_err(|e| NodeError::failed(e.message().to_string()))?.state();
+    if state == git2::RepositoryState::Clean {
+        return Ok(());
+    }
+    Err(NodeError::failed(format!(
+        "{} has a {} in progress — finish it or abort it first; a flow does not start another on top of it",
+        repo.display(),
+        state_name(state)
+    )))
+}
+
+/// Whether the step that just failed left an operation half done. The repository was clean when it
+/// started (`require_clean_state`), so whatever is in progress now is the step's own — the only thing
+/// its `--abort` may undo. A step that failed before starting one (a branch that does not exist, a
+/// working tree git would not touch) has nothing to abort.
+fn left_half_done(repo: &Path) -> bool {
+    git2::Repository::discover(repo).is_ok_and(|repository| repository.state() != git2::RepositoryState::Clean)
+}
+
+fn state_name(state: git2::RepositoryState) -> &'static str {
+    use git2::RepositoryState as State;
+    match state {
+        State::Merge => "merge",
+        State::Revert | State::RevertSequence => "revert",
+        State::CherryPick | State::CherryPickSequence => "cherry-pick",
+        State::Rebase | State::RebaseInteractive | State::RebaseMerge | State::ApplyMailboxOrRebase => "rebase",
+        State::ApplyMailbox => "git am",
+        State::Bisect => "bisect",
+        State::Clean => "clean state",
+    }
+}
+
+/// A failed command as the node's error, in `ok_or_fail`'s words.
+fn failure(output: super::process::ProgramOutput, label: &str) -> NodeError {
+    output.ok_or_fail(label).err().unwrap_or_else(|| NodeError::failed(format!("{label} failed")))
+}
+
+/// A branch or ref the user wrote — never one that git would read as a flag.
+fn need_ref(params: &Value, name: &str, what: &str) -> Result<String, NodeError> {
+    let value = text(params, name).trim().to_string();
+    if value.is_empty() {
+        return Err(NodeError::failed(format!("Write the {what}")));
+    }
+    if value.starts_with('-') {
+        return Err(NodeError::failed(format!("\"{value}\" is not a branch")));
+    }
+    Ok(value)
+}
+
+/// `git clone` into a folder (made when missing; refused when it already holds a repository).
+async fn clone(ctx: &NodeCtx, params: &Value) -> Result<Ports, NodeError> {
+    let url = text(params, "cloneUrl").trim().to_string();
+    if url.is_empty() || url.starts_with('-') {
+        return Err(NodeError::failed("Write the repository's URL"));
+    }
+    let into = need_path(params, "cloneInto", "folder to clone into")?;
+    let name = url.trim_end_matches('/').rsplit(['/', ':']).next().unwrap_or("repo").trim_end_matches(".git").to_string();
+    // A folder that exists and has things in it gets the repository inside it, the way `git clone` would.
+    let target = if into.exists() && std::fs::read_dir(&into).map(|mut d| d.next().is_some()).unwrap_or(false) { into.join(&name) } else { into.clone() };
+    if target.join(".git").exists() {
+        return Err(NodeError::failed(format!("{} is already a repository", target.display())));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| NodeError::failed(e.to_string()))?;
+    }
+    let mut args = vec!["clone".to_string()];
+    let depth = number(params, "depth").unwrap_or(0.0);
+    if depth >= 1.0 {
+        args.push(format!("--depth={}", depth as u64));
+    }
+    let branch = text(params, "branch");
+    if !branch.trim().is_empty() {
+        if branch.trim().starts_with('-') {
+            return Err(NodeError::failed("The branch is a name, not a flag"));
+        }
+        args.extend(["--branch".into(), branch.trim().to_string()]);
+    }
+    args.push("--".into());
+    args.push(url.clone());
+    args.push(target.to_string_lossy().into_owned());
+    run_program(ctx, "git", args, None, git_env(), None).await?.ok_or_fail("git clone")?;
+    let head = super::super::triggers::current_branch(&target.to_string_lossy());
+    let json = json!({"cloned": url, "path": target.to_string_lossy(), "branch": head});
     Ok(vec![vec![if ctx.items().is_empty() { Item::new(json) } else { Item::paired(json, 0) }]])
 }
 
@@ -589,6 +873,33 @@ mod tests {
         assert_eq!(status["files"][1]["staged"], true);
         assert_eq!(status["files"][2], json!({"path": "new.txt", "status": "untracked"}));
         assert_eq!(parse_status("# branch.head main\n")["clean"], true);
+    }
+
+    #[test]
+    fn a_repository_mid_operation_is_refused_and_only_a_flows_own_step_is_aborted() {
+        let dir = std::env::temp_dir().join(format!("cf-files-git-{}", uuid::Uuid::new_v4()));
+        git2::Repository::init(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        assert!(require_clean_state(&dir).is_ok());
+        assert!(!left_half_done(&dir), "a failure that started nothing has nothing to abort");
+
+        // The user's merge, conflicts half resolved: a flow neither starts on top of it nor aborts it.
+        std::fs::write(dir.join(".git/MERGE_HEAD"), "4b825dc642cb6eb9a060e54bf8d69288fbee4904\n").unwrap();
+        let refused = require_clean_state(&dir).unwrap_err();
+        assert!(matches!(refused, NodeError::Failed(ref text) if text.contains("merge in progress")), "{refused:?}");
+        assert!(require_clean_state(&dir.join("src")).is_err(), "a folder inside the repository answers for it");
+        assert!(left_half_done(&dir));
+
+        std::fs::remove_file(dir.join(".git/MERGE_HEAD")).unwrap();
+        std::fs::create_dir_all(dir.join(".git/rebase-merge")).unwrap();
+        let refused = require_clean_state(&dir).unwrap_err();
+        assert!(matches!(refused, NodeError::Failed(ref text) if text.contains("rebase in progress")), "{refused:?}");
+
+        std::fs::remove_dir_all(dir.join(".git/rebase-merge")).unwrap();
+        std::fs::write(dir.join(".git/CHERRY_PICK_HEAD"), "4b825dc642cb6eb9a060e54bf8d69288fbee4904\n").unwrap();
+        let refused = require_clean_state(&dir).unwrap_err();
+        assert!(matches!(refused, NodeError::Failed(ref text) if text.contains("cherry-pick in progress")), "{refused:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

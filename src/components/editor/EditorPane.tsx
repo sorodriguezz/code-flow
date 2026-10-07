@@ -97,6 +97,7 @@ import {
 import { usePackageManagerStore } from "../../state/packageManagerStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import { useNpmInstallStore } from "../../state/npmInstallStore";
+import { ensureFlowContextEntries, pickAndRunFlow } from "../../state/flowContextStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { isNotebookPath, notebookKey } from "../../lib/notebook/host";
 import { notebookActions, useNotebookStore } from "../../state/notebookStore";
@@ -2318,6 +2319,35 @@ export function EditorPane({
         const model = ed.getModel();
         const position = ed.getPosition();
         if (model && position) void findAllImplementations(model, position, projectRef.current);
+      },
+    });
+    /**
+     * The selection (or the caret's line) handed to a flow that offers itself on a right click of
+     * selected text («Menú contextual» trigger) — one row that asks which flow when several do.
+     */
+    editorInstance.addAction({
+      id: "cf-run-flow",
+      label: tRef.current("flows.context.editorAction"),
+      contextMenuGroupId: "9_cutcopypaste",
+      contextMenuOrder: 99,
+      run: (ed) => {
+        const model = ed.getModel();
+        const selection = ed.getSelection();
+        if (!model || !selection) return;
+        const text = selection.isEmpty() ? model.getLineContent(selection.startLineNumber) : model.getValueInRange(selection);
+        const relative = activePathRef.current ?? "";
+        const root = projectRef.current.local_path.replace(/[\\/]+$/, "");
+        ensureFlowContextEntries();
+        void pickAndRunFlow("selection", relative, {
+          text,
+          path: relative ? `${root}/${relative}` : "",
+          relativePath: relative,
+          language: model.getLanguageId(),
+          startLine: selection.startLineNumber,
+          endLine: selection.endLineNumber,
+          projectId: projectRef.current.id,
+          repoPath: projectRef.current.local_path,
+        });
       },
     });
     editorInstance.addAction({

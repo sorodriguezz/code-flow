@@ -82,7 +82,7 @@ pub const LOOP_TYPE: &str = "logic.loop";
 
 /// The last milestone whose nodes this build runs. A node from a later one can be drawn and saved,
 /// and the engine says which milestone brings it when a run reaches it.
-pub const RUNS_THROUGH: u8 = 11;
+pub const RUNS_THROUGH: u8 = 12;
 
 const fn node(type_id: &'static str, family: Family, icon: &'static str, milestone: u8) -> NodeDescriptor {
     let inputs = if matches!(family, Family::Trigger) { 0 } else { 1 };
@@ -147,6 +147,7 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("trigger.hotkey", Trigger, "keyboard", 2).group("triggerTime"),
     node("trigger.phone", Trigger, "smartphone", 5).group("triggerTime"),
     node("trigger.link", Trigger, "link-2", 11).group("triggerTime"),
+    node("trigger.context", Trigger, "menu", 12).group("triggerTime"),
     node("trigger.webhook", Trigger, "webhook", 2).group("triggerIncoming"),
     node("trigger.listen", Trigger, "radio-tower", 4).group("triggerIncoming"),
     node("trigger.bot", Trigger, "bot-message-square", 11).group("triggerIncoming"),
@@ -156,25 +157,40 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("trigger.db", Trigger, "database", 11).group("triggerIncoming"),
     node("trigger.remoteFile", Trigger, "folder-sync", 11).group("triggerIncoming"),
     node("trigger.google", Trigger, "calendar-clock", 11).group("triggerIncoming"),
+    node("trigger.microsoft", Trigger, "app-window", 12).group("triggerIncoming"),
+    node("trigger.connector", Trigger, "blocks", 12).group("triggerIncoming"),
+    node("trigger.form", Trigger, "clipboard-pen-line", 12).group("triggerIncoming"),
     node("trigger.repo", Trigger, "git-commit-horizontal", 2).group("triggerRepos"),
     node("trigger.pr", Trigger, "git-pull-request", 2).group("triggerRepos"),
     node("trigger.pipeline", Trigger, "activity", 2).group("triggerRepos"),
     node("trigger.github", Trigger, "git-merge", 9).group("triggerRepos"),
+    node("trigger.package", Trigger, "package", 12).group("triggerRepos"),
+    node("trigger.container", Trigger, "container", 12).group("triggerInfra"),
+    node("trigger.k8s", Trigger, "ship-wheel", 12).group("triggerInfra"),
+    node("trigger.logLine", Trigger, "scroll-text", 12).group("triggerInfra"),
     node("trigger.app", Trigger, "layers", 2).group("triggerLocal"),
     node("trigger.file", Trigger, "folder-open", 2).group("triggerLocal"),
     node("trigger.system", Trigger, "monitor-cog", 11).group("triggerLocal"),
+    node("trigger.clipboard", Trigger, "clipboard-copy", 12).group("triggerLocal"),
+    node("trigger.chat", Trigger, "message-circle", 12).group("triggerLocal"),
     node("trigger.error", Trigger, "triangle-alert", 2).group("triggerLocal"),
+    node("trigger.flowDone", Trigger, "circle-check-big", 12).group("triggerLocal"),
     node("trigger.subflow", Trigger, "route", 2).group("triggerLocal"),
     node("trigger.tool", Trigger, "wrench", 11).group("triggerLocal"),
     // AI — subscription CLIs, APIs and local models.
     node("ai.agent", Ai, "bot", 3).group("aiModels"),
     node("ai.local", Ai, "cpu", 3).group("aiModels"),
     node("ai.api", Ai, "brain-circuit", 9).group("aiModels"),
+    node("ai.compare", Ai, "columns-3", 12).group("aiModels"),
     node("ai.classify", Ai, "list-checks", 3).group("aiTasks"),
     node("ai.extract", Ai, "file-braces", 3).group("aiTasks"),
     node("ai.summarize", Ai, "message-square-text", 3).group("aiTasks"),
     node("ai.vision", Ai, "scan-search", 11).group("aiTasks"),
     node("ai.transcribe", Ai, "audio-lines", 11).group("aiTasks"),
+    node("ai.image", Ai, "image-plus", 12).group("aiTasks"),
+    node("ai.speech", Ai, "volume-2", 12).group("aiTasks"),
+    branching("ai.guard", Ai, "shield-alert", &["pass", "blocked"], 12).group("aiTasks"),
+    node("ai.transform", Ai, "wand-sparkles", 12).group("aiTasks"),
     node("ai.chat", Ai, "messages-square", 7).group("aiTasks"),
     node("ai.embed", Ai, "binary", 9).group("aiRag"),
     node("ai.vectors", Ai, "database-zap", 9).group("aiRag"),
@@ -189,10 +205,15 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("code.notebook", Code, "notebook-pen", 6),
     node("code.docker", Code, "container", 4),
     node("code.ssh", Code, "server", 4),
+    node("code.container", Code, "box", 12),
+    node("code.k8s", Code, "ship-wheel", 12),
     // Git, pull requests and CI — wherever their prefix says they were first filed.
     node("files.git", Files, "git-branch", 4).shown_in(Git).group("gitRepo"),
     node("ai.commit", Ai, "pencil", 3).shown_in(Git).group("gitRepo"),
     node("ai.review", Ai, "eye", 3).shown_in(Git).group("gitRepo"),
+    node("files.version", Files, "tag", 12).shown_in(Git).group("gitRepo"),
+    node("app.search", App, "file-search", 12).shown_in(Git).group("gitRepo"),
+    node("app.audit", App, "shield-half", 12).shown_in(Git).group("gitRepo"),
     node("app.prList", App, "git-pull-request-arrow", 10).shown_in(Git).group("gitPrs"),
     node("files.pr", Files, "git-pull-request", 4).shown_in(Git).group("gitPrs"),
     node("app.prComments", App, "message-square-reply", 10).shown_in(Git).group("gitPrs"),
@@ -208,12 +229,17 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("net.graphql", Net, "braces", 4).group("netApis"),
     node("net.grpc", Net, "network", 4).group("netApis"),
     node("net.respond", Net, "arrow-right", 2).group("netApis"),
+    node("net.soap", Net, "file-code", 12).group("netApis"),
+    node("net.aws", Net, "cloud", 12).group("netApis"),
     node("net.websocket", Net, "cable", 4).group("netRealtime"),
     node("net.socketio", Net, "plug", 4).group("netRealtime"),
     node("net.sse", Net, "radio-receiver", 4).group("netRealtime"),
     node("net.webPage", Net, "scan-text", 8).group("netWeb"),
     node("net.feed", Net, "newspaper", 11).group("netWeb"),
     node("net.check", Net, "radar", 8).group("netWeb"),
+    node("net.search", Net, "search", 12).group("netWeb"),
+    node("net.browser", Net, "app-window-mac", 12).group("netWeb"),
+    node("net.wol", Net, "power", 12).group("netWeb"),
     // Messaging — mail and brokers.
     node("net.email", Net, "mail", 4).shown_in(Messaging),
     node("net.imap", Net, "mails", 9).shown_in(Messaging),
@@ -228,14 +254,20 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("data.mongo", Data, "boxes", 4).group("dataDatabases"),
     node("data.redis", Data, "box", 4).group("dataDatabases"),
     node("data.dbml", Data, "table-2", 7).group("dataDatabases"),
+    node("data.schemaDiff", Data, "git-compare-arrows", 12).group("dataDatabases"),
     node("data.state", Data, "archive", 1).group("dataMemory"),
     node("data.vars", Data, "variable", 1).group("dataMemory"),
+    node("data.table", Data, "table", 12).group("dataMemory"),
+    node("data.fake", Data, "dices", 12).group("dataGenerate"),
     // Files — on this computer, documents, and elsewhere.
     node("files.file", Files, "file-text", 4).group("filesLocal"),
     node("files.list", Files, "folder", 4).group("filesLocal"),
     node("files.move", Files, "trash-2", 4).group("filesLocal"),
     node("files.pdf", Files, "file-type", 8).group("filesDocuments"),
     node("files.image", Files, "image", 8).group("filesDocuments"),
+    node("files.media", Files, "film", 12).group("filesDocuments"),
+    node("files.docx", Files, "file-pen", 12).group("filesDocuments"),
+    node("files.ics", Files, "calendar-days", 12).group("filesDocuments"),
     node("data.sheet", Data, "file-spreadsheet", 4).shown_in(Files).group("filesDocuments"),
     node("transform.compress", Transform, "file-archive", 4).shown_in(Files).group("filesDocuments"),
     node("net.download", Net, "download", 4).shown_in(Files).group("filesRemote"),
@@ -263,6 +295,8 @@ pub const CATALOG: &[NodeDescriptor] = &[
     terminal("logic.stop", Logic, "octagon-x", 1),
     node("logic.ratelimit", Logic, "gauge", 4),
     node("logic.until", Logic, "timer", 8),
+    branching("logic.businessHours", Logic, "briefcase-business", &["inHours", "outHours"], 12),
+    node("logic.assert", Logic, "badge-check", 12),
     terminal("logic.noop", Logic, "circle-dashed", 1),
     // Transform — the list of items, and the values in them.
     node("transform.set", Transform, "rectangle-ellipsis", 1).group("transformItems"),
@@ -271,6 +305,8 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("transform.split", Transform, "scissors", 1).group("transformItems"),
     node("transform.aggregate", Transform, "sigma", 1).group("transformItems"),
     node("transform.dedupe", Transform, "copy", 1).group("transformItems"),
+    node("transform.limit", Transform, "list-start", 12).group("transformItems"),
+    branching("transform.validate", Transform, "list-checks", &["valid", "invalid"], 12).group("transformItems"),
     NodeDescriptor {
         type_id: "transform.compare",
         family: Transform,
@@ -291,6 +327,8 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("transform.convert", Transform, "shuffle", 4).group("transformValues"),
     node("transform.crypto", Transform, "key", 4).group("transformValues"),
     node("transform.redact", Transform, "eye-off", 11).group("transformValues"),
+    node("transform.number", Transform, "hash", 12).group("transformValues"),
+    node("transform.chatFormat", Transform, "message-square-code", 12).group("transformValues"),
     // CodeFlow itself.
     node("app.notify", App, "bell", 1),
     node("app.note", App, "notebook-pen", 4),
@@ -300,6 +338,12 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("app.clipboard", App, "clipboard-list", 4),
     node("app.vault", App, "key-round", 4),
     node("app.apiRequest", App, "send", 7),
+    node("app.apiCollection", App, "library", 12),
+    node("app.diagram", App, "workflow", 12),
+    node("app.story", App, "book-open-text", 12),
+    node("app.aiUsage", App, "gauge", 12),
+    node("app.process", App, "activity", 12),
+    node("app.runData", App, "tags", 12),
     node("code.service", Code, "circle-play", 2).shown_in(App),
 ];
 
@@ -419,19 +463,19 @@ mod tests {
     #[test]
     fn the_catalogue_has_the_families_the_plan_lists() {
         let count = |family: Family| CATALOG.iter().filter(|d| d.family == family).count();
-        assert_eq!(count(Trigger), 24);
-        assert_eq!(count(Ai), 11);
-        assert_eq!(count(Code), 10);
-        assert_eq!(count(Git), 13);
-        assert_eq!(count(Net), 10);
+        assert_eq!(count(Trigger), 35);
+        assert_eq!(count(Ai), 16);
+        assert_eq!(count(Code), 12);
+        assert_eq!(count(Git), 16);
+        assert_eq!(count(Net), 15);
         assert_eq!(count(Messaging), 4);
         assert_eq!(count(Apps), 3);
-        assert_eq!(count(Data), 6);
-        assert_eq!(count(Files), 10);
-        assert_eq!(count(Logic), 11);
-        assert_eq!(count(Transform), 16);
-        assert_eq!(count(App), 9);
-        assert_eq!(CATALOG.len(), 127);
+        assert_eq!(count(Data), 9);
+        assert_eq!(count(Files), 13);
+        assert_eq!(count(Logic), 13);
+        assert_eq!(count(Transform), 20);
+        assert_eq!(count(App), 15);
+        assert_eq!(CATALOG.len(), 171);
     }
 
     #[test]

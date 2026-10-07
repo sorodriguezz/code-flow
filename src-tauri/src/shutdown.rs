@@ -78,6 +78,8 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // Cancelled first so each run files itself as canceled; the processes that have not gone
         // when the grace is up are ended directly.
         crate::flows::triggers::shutdown();
+        // The panel's `kubectl port-forward`s: children of a task no runtime will run again.
+        crate::containers::forward::shutdown();
         crate::flows::runs::shutdown(std::time::Duration::from_secs(3));
         // Services, stopped the way the Stop button stops them — Ctrl-C first — rather than
         // by the process exiting under them. The difference is Compose: its Ctrl-C takes the

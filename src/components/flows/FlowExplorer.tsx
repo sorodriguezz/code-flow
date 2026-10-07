@@ -28,6 +28,7 @@ import {
   Play,
   Plus,
   Search,
+  Table2,
   Trash2,
   Upload,
   Users,
@@ -334,7 +335,7 @@ export function FlowExplorer() {
         onClick={() => {
           if (swallowClick.current) return;
           void store().openFlow(flow.id);
-          if (useFlowRunsStore.getState().pane === "schedule") useFlowRunsStore.getState().setPane("editor");
+          if (["schedule", "tables"].includes(useFlowRunsStore.getState().pane)) useFlowRunsStore.getState().setPane("editor");
         }}
         onContextMenu={(event) => flowMenu(event, flow)}
         onPointerDown={(event) => own && pressRow(event, "flow", flow.id, listId)}
@@ -407,9 +408,11 @@ export function FlowExplorer() {
     >
       {templatesFor && <TemplatesDialog folderId={templatesFor.folderId} onClose={() => setTemplatesFor(null)} />}
       {shareFor && <FlowShareDialog flowId={shareFor} onClose={() => setShareFor(null)} />}
-      <div className={explorerHeadClass}>
+      {/* A container, so the title steps aside (rather than truncating to one letter) when the
+          explorer is too narrow for it and every button. */}
+      <div className={`${explorerHeadClass} @container`}>
         <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-muted)]">
-          {t("flows.title")}
+          <span className="@max-[330px]:hidden">{t("flows.title")}</span>
         </span>
         <button
           type="button"
@@ -421,6 +424,17 @@ export function FlowExplorer() {
           data-tour="flows-schedule-button"
         >
           <CalendarClock size={14} />
+        </button>
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm", active: pane === "tables" })}
+          title={t("flows.tables.title")}
+          aria-label={t("flows.tables.title")}
+          aria-pressed={pane === "tables"}
+          onClick={() => useFlowRunsStore.getState().setPane(pane === "tables" ? "editor" : "tables")}
+          data-tour="flows-tables-button"
+        >
+          <Table2 size={14} />
         </button>
         <button
           type="button"

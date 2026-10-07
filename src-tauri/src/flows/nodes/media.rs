@@ -483,8 +483,222 @@ pub(crate) fn image_op(params: &Value) -> Result<Value, String> {
             };
             save(&turned, &path_of(params, "savePath", "file to write")?, params)
         }
+        "stripMetadata" => strip_metadata(&input, &picture, &path_of(params, "savePath", "file to write")?, params),
+        "watermark" => watermark(picture, params),
+        "imageCompare" => compare_images(&input, &picture, params),
         _ => save(&picture, &path_of(params, "savePath", "file to write")?, params),
     }
+}
+
+/// Without what a photo says about where and with what it was taken (EXIF, XMP, IPTC, comments).
+/// A JPEG or PNG loses only those segments, byte for byte — no re-encoding, no quality lost.
+fn strip_metadata(input: &Path, picture: &image::DynamicImage, output: &Path, params: &Value) -> Result<Value, String> {
+    let bytes = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+    let stripped = if bytes.starts_with(&[0xFF, 0xD8]) {
+        Some(strip_jpeg(&bytes)?)
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(strip_png(&bytes)?)
+    } else {
+        None
+    };
+    let removed;
+    match stripped {
+        Some(clean) => {
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            removed = bytes.len().saturating_sub(clean.len());
+            std::fs::write(output, &clean).map_err(|e| format!("{}: {e}", output.display()))?;
+        }
+        // Any other format: decoded and written again, which keeps no metadata.
+        None => {
+            save(picture, output, params)?;
+            removed = 0;
+        }
+    }
+    Ok(json!({"path": output.to_string_lossy(), "width": picture.width(), "height": picture.height(), "bytesRemoved": removed}))
+}
+
+/// A JPEG without its APP1 (EXIF, XMP), APP12–APP15 (IPTC, vendor) and COM segments.
+pub(crate) fn strip_jpeg(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = vec![0xFF, 0xD8];
+    let mut i = 2;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xFF {
+            return Err("The JPEG's structure could not be read".into());
+        }
+        let marker = bytes[i + 1];
+        // Start of scan: everything after it is the picture itself.
+        if marker == 0xDA {
+            out.extend_from_slice(&bytes[i..]);
+            return Ok(out);
+        }
+        let length = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        let end = (i + 2 + length).min(bytes.len());
+        let drop = marker == 0xE1 || (0xEC..=0xEF).contains(&marker) || marker == 0xFE;
+        if !drop {
+            out.extend_from_slice(&bytes[i..end]);
+        }
+        i = end;
+    }
+    Ok(out)
+}
+
+/// A PNG without its text and EXIF chunks (`tEXt`, `iTXt`, `zTXt`, `eXIf`, `tIME`).
+pub(crate) fn strip_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = bytes[..8].to_vec();
+    let mut i = 8;
+    while i + 12 <= bytes.len() {
+        let length = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
+        let kind = &bytes[i + 4..i + 8];
+        let end = i + 12 + length;
+        if end > bytes.len() {
+            return Err("The PNG's structure could not be read".into());
+        }
+        if !matches!(kind, b"tEXt" | b"iTXt" | b"zTXt" | b"eXIf" | b"tIME") {
+            out.extend_from_slice(&bytes[i..end]);
+        }
+        i = end;
+    }
+    Ok(out)
+}
+
+/// The first readable font among the system's usual ones — for a text watermark.
+fn system_font() -> Option<Vec<u8>> {
+    let candidates: &[&str] = &[
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ];
+    candidates.iter().find_map(|path| std::fs::read(path).ok())
+}
+
+fn place(position: &str, canvas: (u32, u32), mark: (u32, u32)) -> (i64, i64) {
+    let margin = (canvas.0.min(canvas.1) as f64 * 0.03).round() as i64;
+    let (cw, ch, mw, mh) = (canvas.0 as i64, canvas.1 as i64, mark.0 as i64, mark.1 as i64);
+    match position {
+        "posTopLeft" => (margin, margin),
+        "posTopRight" => (cw - mw - margin, margin),
+        "posBottomLeft" => (margin, ch - mh - margin),
+        "posCenter" => ((cw - mw) / 2, (ch - mh) / 2),
+        _ => (cw - mw - margin, ch - mh - margin),
+    }
+}
+
+/// A logo or a line of text laid over the picture, at a corner (or the centre), half see-through.
+fn watermark(picture: image::DynamicImage, params: &Value) -> Result<Value, String> {
+    use image::{GenericImageView, Pixel};
+    let mut canvas = picture.to_rgba8();
+    let opacity = (number(params, "watermarkOpacity").unwrap_or(50.0).clamp(0.0, 100.0) / 100.0) as f32;
+    let position = text(params, "watermarkPosition");
+    let logo_path = text(params, "watermarkImage");
+    let line = text(params, "watermarkText");
+    if logo_path.trim().is_empty() && line.trim().is_empty() {
+        return Err("Choose a watermark image or write its text".into());
+    }
+    if !logo_path.trim().is_empty() {
+        let logo_path = expand_path(logo_path.trim());
+        let logo = image::open(&logo_path).map_err(|e| format!("{}: {e}", logo_path.display()))?;
+        // A fifth of the picture's width, never larger than it was drawn.
+        let target_w = ((canvas.width() as f64 * 0.2).round() as u32).clamp(1, logo.width().max(1));
+        let target_h = ((logo.height() as f64 * target_w as f64 / logo.width().max(1) as f64).round() as u32).max(1);
+        let logo = logo.resize(target_w, target_h, image::imageops::FilterType::Lanczos3).to_rgba8();
+        let (x, y) = place(&position, (canvas.width(), canvas.height()), (logo.width(), logo.height()));
+        for (lx, ly, pixel) in logo.enumerate_pixels() {
+            let (cx, cy) = (x + lx as i64, y + ly as i64);
+            if cx < 0 || cy < 0 || cx >= canvas.width() as i64 || cy >= canvas.height() as i64 {
+                continue;
+            }
+            let mut faded = *pixel;
+            faded.0[3] = (faded.0[3] as f32 * opacity) as u8;
+            canvas.get_pixel_mut(cx as u32, cy as u32).blend(&faded);
+        }
+    }
+    if !line.trim().is_empty() {
+        use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
+        let data = system_font().ok_or("No font was found on this computer for a text watermark: use an image")?;
+        let font = FontRef::try_from_slice(&data).map_err(|e| format!("The system font could not be read: {e}"))?;
+        let size = (canvas.height().min(canvas.width()) as f32 * 0.05).clamp(12.0, 200.0);
+        let scaled = font.as_scaled(PxScale::from(size));
+        let width: f32 = line.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum();
+        let height = scaled.ascent() - scaled.descent();
+        let (x, y) = place(&position, (canvas.width(), canvas.height()), (width.ceil() as u32, height.ceil() as u32));
+        // A soft shadow first, so white text reads on a white sky too.
+        for (dx, dy, colour) in [(size * 0.06, size * 0.06, [0u8, 0, 0]), (0.0, 0.0, [255u8, 255, 255])] {
+            let mut caret = x as f32 + dx;
+            for c in line.chars() {
+                let glyph = scaled.scaled_glyph(c);
+                let advance = scaled.h_advance(glyph.id);
+                let mut glyph = glyph;
+                glyph.position = ab_glyph::point(caret, y as f32 + dy + scaled.ascent());
+                if let Some(outlined) = font.outline_glyph(glyph) {
+                    let bounds = outlined.px_bounds();
+                    outlined.draw(|gx, gy, coverage| {
+                        let px = bounds.min.x as i64 + gx as i64;
+                        let py = bounds.min.y as i64 + gy as i64;
+                        if px < 0 || py < 0 || px >= canvas.width() as i64 || py >= canvas.height() as i64 {
+                            return;
+                        }
+                        let alpha = (coverage * opacity * if colour == [0, 0, 0] { 0.6 } else { 1.0 } * 255.0) as u8;
+                        canvas.get_pixel_mut(px as u32, py as u32).blend(&image::Rgba([colour[0], colour[1], colour[2], alpha]));
+                    });
+                }
+                caret += advance;
+            }
+        }
+    }
+    let output = path_of(params, "savePath", "file to write")?;
+    let _ = picture.dimensions();
+    save(&image::DynamicImage::ImageRgba8(canvas), &output, params)
+}
+
+/// Two pictures compared pixel by pixel — a screenshot against its baseline. Pixels that differ by
+/// more than the tolerance in any channel count, and are painted red over a faded copy when a
+/// `savePath` is given.
+fn compare_images(input: &Path, picture: &image::DynamicImage, params: &Value) -> Result<Value, String> {
+    let other_path = path_of(params, "comparePath", "image to compare with")?;
+    let other = image::open(&other_path).map_err(|e| format!("{}: {e}", other_path.display()))?;
+    let a = picture.to_rgba8();
+    let size_mismatch = other.width() != a.width() || other.height() != a.height();
+    let b = if size_mismatch { other.resize_exact(a.width(), a.height(), image::imageops::FilterType::Triangle).to_rgba8() } else { other.to_rgba8() };
+    let threshold = number(params, "diffThreshold").unwrap_or(16.0).clamp(0.0, 255.0) as i32;
+    let mut diff = image::RgbaImage::new(a.width(), a.height());
+    let mut different = 0u64;
+    for (x, y, pa) in a.enumerate_pixels() {
+        let pb = b.get_pixel(x, y);
+        let delta = (0..4).map(|c| (pa.0[c] as i32 - pb.0[c] as i32).abs()).max().unwrap_or(0);
+        if delta > threshold {
+            different += 1;
+            diff.put_pixel(x, y, image::Rgba([230, 30, 30, 255]));
+        } else {
+            let grey = ((pa.0[0] as u32 + pa.0[1] as u32 + pa.0[2] as u32) / 3) as u8;
+            let faded = 255 - (255 - grey) / 3;
+            diff.put_pixel(x, y, image::Rgba([faded, faded, faded, 255]));
+        }
+    }
+    let total = (a.width() as u64 * a.height() as u64).max(1);
+    let percent = (different as f64 / total as f64 * 10000.0).round() / 100.0;
+    let mut out = json!({
+        "path": input.to_string_lossy(),
+        "comparedWith": other_path.to_string_lossy(),
+        "same": different == 0,
+        "differentPixels": different,
+        "totalPixels": total,
+        "differencePercent": percent,
+        "sizeMismatch": size_mismatch,
+    });
+    let output = text(params, "savePath");
+    if !output.trim().is_empty() {
+        let saved = save(&image::DynamicImage::ImageRgba8(diff), &expand_path(output.trim()), params)?;
+        out["diffPath"] = saved["path"].clone();
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -531,6 +745,41 @@ mod tests {
         let crop = image_op(&json!({"operation": "crop", "path": qr.to_string_lossy(), "x": 10, "y": 10, "width": 50, "height": 40, "savePath": dir.join("c.webp").to_string_lossy()})).unwrap();
         assert_eq!((crop["width"].as_u64(), crop["height"].as_u64()), (Some(50), Some(40)));
         assert!(image_op(&json!({"operation": "crop", "path": qr.to_string_lossy(), "x": 5000, "width": 5, "height": 5, "savePath": "x.png"})).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_is_stripped_and_pictures_compare() {
+        let dir = std::env::temp_dir().join(format!("cf-image-meta-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A real JPEG, then an EXIF segment spliced in after its SOI.
+        let plain = dir.join("a.jpg");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(40, 30, image::Rgb([200, 30, 30]))).save(&plain).unwrap();
+        let mut bytes = std::fs::read(&plain).unwrap();
+        let exif = [0xFF, 0xE1, 0x00, 0x08, b'E', b'x', b'i', b'f', 0x00, 0x00];
+        bytes.splice(2..2, exif.iter().cloned());
+        let tagged = dir.join("tagged.jpg");
+        std::fs::write(&tagged, &bytes).unwrap();
+        let clean = strip_jpeg(&bytes).unwrap();
+        assert_eq!(clean.len(), bytes.len() - exif.len());
+        assert!(image::load_from_memory(&clean).is_ok(), "still a JPEG");
+
+        let other = dir.join("b.png");
+        let mut changed = image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 30, 30, 255]));
+        for x in 0..10 {
+            changed.put_pixel(x, 0, image::Rgba([0, 0, 255, 255]));
+        }
+        image::DynamicImage::ImageRgba8(changed).save(&other).unwrap();
+        let base = dir.join("base.png");
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 30, 30, 255]))).save(&base).unwrap();
+        let params = json!({"operation": "imageCompare", "path": base.to_string_lossy(), "comparePath": other.to_string_lossy(), "diffThreshold": 16, "savePath": dir.join("diff.png").to_string_lossy()});
+        let answer = image_op(&params).unwrap();
+        assert_eq!(answer["differentPixels"], 10);
+        assert_eq!(answer["same"], false);
+        assert!(dir.join("diff.png").exists());
+
+        let stamped = image_op(&json!({"operation": "watermark", "path": base.to_string_lossy(), "watermarkImage": other.to_string_lossy(), "watermarkOpacity": 80, "savePath": dir.join("stamped.png").to_string_lossy()})).unwrap();
+        assert_eq!(stamped["width"], 40);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

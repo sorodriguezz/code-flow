@@ -7,7 +7,7 @@
 //! through `yaml-rust2`, Markdown through `pulldown-cmark` with tables, task lists and footnotes.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -747,29 +747,266 @@ fn add_to_zip(writer: &mut zip::ZipWriter<std::fs::File>, path: &Path, name: &st
     }
 }
 
-/// Extracts a zip into `into`, refusing an entry whose name would land outside it.
+// ------------------------------------------------------------------------ unpacking, within limits
+
+/// Unpacking is where a small file becomes a huge one — a zip bomb is a few kilobytes that unpack to
+/// petabytes, and a flow may unpack whatever lands in a folder — so every unpacking here (zip,
+/// tar.gz, gzip) runs within these limits: generous for real archives (a release bundle, a dataset),
+/// and stopping well before the disk is full. Past any of them the operation fails, saying which,
+/// and the files it had written are removed.
+const MAX_ENTRIES: usize = 100_000;
+const MAX_ENTRY_BYTES: u64 = 4_000_000_000;
+const MAX_UNPACKED_BYTES: u64 = 10_000_000_000;
+/// What must stay free on the disk an archive unpacks to: the app's database and its runs live there
+/// too, and a full disk fails them in ways that are much harder to read than this node's error.
+const KEEP_FREE_BYTES: u64 = 2_000_000_000;
+/// How much is written between two looks at the disk's free space.
+const FREE_CHECK_EVERY: u64 = 256_000_000;
+
+/// Free bytes on the disk `path` is (or will be) on — the longest mount point holding it. `None`
+/// when that cannot be told, which skips the check rather than refusing.
+fn free_bytes(path: &Path) -> Option<u64> {
+    let mut existing = path.to_path_buf();
+    while !existing.exists() {
+        if !existing.pop() {
+            return None;
+        }
+    }
+    let target = std::fs::canonicalize(&existing).unwrap_or(existing);
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|disk| target.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        .map(|disk| disk.available_space())
+}
+
+fn size_text(bytes: u64) -> String {
+    crate::containers::engine::human_bytes(bytes)
+}
+
+/// What an unpacking may still write, and what it wrote — removed again if it is refused part-way.
+struct Budget {
+    into: PathBuf,
+    max_entries: usize,
+    entries_left: usize,
+    entry_cap: u64,
+    total_cap: u64,
+    bytes_left: u64,
+    keep_free: u64,
+    since_check: u64,
+    wrote: Vec<PathBuf>,
+}
+
+impl Budget {
+    fn new(into: &Path) -> Self {
+        Self::within(into, MAX_ENTRIES, MAX_ENTRY_BYTES, MAX_UNPACKED_BYTES, KEEP_FREE_BYTES)
+    }
+
+    fn within(into: &Path, max_entries: usize, entry_cap: u64, total_cap: u64, keep_free: u64) -> Self {
+        Self {
+            into: into.to_path_buf(),
+            max_entries,
+            entries_left: max_entries,
+            entry_cap,
+            total_cap,
+            bytes_left: total_cap,
+            keep_free,
+            since_check: 0,
+            wrote: Vec::new(),
+        }
+    }
+
+    /// What the archive says it holds, refused before anything is written. Only a first answer: a
+    /// header can lie, and what is really written is measured as it is (`copy`).
+    fn expect(&self, entries: usize, declared: Option<u64>) -> Result<(), String> {
+        if entries > self.max_entries {
+            return Err(format!("The archive holds {entries} files, more than the {} this unpacks", self.max_entries));
+        }
+        let Some(total) = declared else { return Ok(()) };
+        if total > self.total_cap {
+            return Err(format!("The archive unpacks to {}, more than the {} this unpacks", size_text(total), size_text(self.total_cap)));
+        }
+        self.room_for(total)
+    }
+
+    /// Whether the disk has `bytes` to spare and still keeps its reserve.
+    fn room_for(&self, bytes: u64) -> Result<(), String> {
+        match free_bytes(&self.into) {
+            Some(free) if free < bytes.saturating_add(self.keep_free) => Err(format!(
+                "Unpacking needs {} and the disk has {} free — it would leave less than {} for everything else",
+                size_text(bytes),
+                size_text(free),
+                size_text(self.keep_free)
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// One more entry of the archive, which declares `size` bytes when the format says.
+    fn admit(&mut self, name: &str, size: Option<u64>) -> Result<(), String> {
+        if self.entries_left == 0 {
+            return Err(format!("The archive holds more than the {} files this unpacks", self.max_entries));
+        }
+        self.entries_left -= 1;
+        if let Some(size) = size {
+            self.fits(name, size, self.bytes_left)?;
+            // A big file is measured against the disk at once; small ones as they add up (`copy`).
+            if size >= FREE_CHECK_EVERY {
+                self.room_for(size)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a file of `size` bytes fits: its own limit, and the `left` of the whole.
+    fn fits(&self, name: &str, size: u64, left: u64) -> Result<(), String> {
+        if size > self.entry_cap {
+            return Err(format!("{name} unpacks to more than {}, the limit for one file", size_text(self.entry_cap)));
+        }
+        if size > left {
+            return Err(format!("The archive unpacks to more than {} (at {name})", size_text(self.total_cap)));
+        }
+        Ok(())
+    }
+
+    /// A file now written by this unpacking.
+    fn wrote(&mut self, path: &Path) {
+        self.wrote.push(path.to_path_buf());
+    }
+
+    /// `bytes` more were written: off the total, and the disk looked at again once enough has gone.
+    fn spend(&mut self, bytes: u64) -> Result<(), String> {
+        self.bytes_left = self.bytes_left.saturating_sub(bytes);
+        self.since_check += bytes;
+        if self.since_check >= FREE_CHECK_EVERY {
+            self.since_check = 0;
+            self.room_for(0)?;
+        }
+        Ok(())
+    }
+
+    /// One file's contents, stopping at the limits whatever the archive declared for it.
+    fn copy(&mut self, name: &str, reader: &mut dyn Read, out: &mut dyn Write) -> Result<(), String> {
+        let mut buffer = vec![0u8; 64 * 1024];
+        // What was left before this file: `spend` lowers the total as the file is written.
+        let left = self.bytes_left;
+        let mut copied = 0u64;
+        loop {
+            let read = reader.read(&mut buffer).map_err(|e| format!("{name}: {e}"))?;
+            if read == 0 {
+                return Ok(());
+            }
+            copied += read as u64;
+            self.fits(name, copied, left)?;
+            out.write_all(&buffer[..read]).map_err(|e| format!("{name}: {e}"))?;
+            self.spend(read as u64)?;
+        }
+    }
+
+    /// Refused part-way: what this unpacking wrote goes, so a bomb leaves nothing behind.
+    fn undo(&self) {
+        for path in self.wrote.iter().rev() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Extracts a zip into `into`, refusing an entry whose name would land outside it, within the
+/// unpacking limits.
 pub fn unzip(archive: &Path, into: &Path) -> Result<Vec<PathBuf>, String> {
+    unzip_within(archive, into, Budget::new(into))
+}
+
+fn unzip_within(archive: &Path, into: &Path, mut budget: Budget) -> Result<Vec<PathBuf>, String> {
     let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("Not a zip archive: {e}"))?;
-    let mut written = Vec::new();
-    for index in 0..zip.len() {
-        let mut entry = zip.by_index(index).map_err(|e| e.to_string())?;
-        let Some(relative) = entry.enclosed_name() else {
-            return Err(format!("The archive holds an unsafe path: {}", entry.name()));
-        };
-        let target = into.join(relative);
-        if entry.is_dir() {
-            std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-            continue;
+    budget.expect(zip.len(), zip.decompressed_size().map(|total| u64::try_from(total).unwrap_or(u64::MAX)))?;
+    let result = (|| {
+        let mut written = Vec::new();
+        for index in 0..zip.len() {
+            let mut entry = zip.by_index(index).map_err(|e| e.to_string())?;
+            let Some(relative) = entry.enclosed_name() else {
+                return Err(format!("The archive holds an unsafe path: {}", entry.name()));
+            };
+            let name = entry.name().to_string();
+            budget.admit(&name, Some(entry.size()))?;
+            let target = into.join(relative);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+                continue;
+            }
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
+            budget.wrote(&target);
+            budget.copy(&name, &mut entry, &mut out)?;
+            written.push(target);
         }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let mut out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
-        written.push(target);
+        Ok(written)
+    })();
+    if result.is_err() {
+        budget.undo();
     }
-    Ok(written)
+    result
+}
+
+/// Extracts a .tar.gz into `into` — `unpack_in` refuses names that climb out of it — within the
+/// unpacking limits. A tar header gives each file's exact size and the reader never yields more,
+/// so a file is checked before a byte of it is written.
+pub fn untar_gz(archive: &Path, into: &Path) -> Result<Vec<PathBuf>, String> {
+    untar_gz_within(archive, into, Budget::new(into))
+}
+
+fn untar_gz_within(archive: &Path, into: &Path, mut budget: Budget) -> Result<Vec<PathBuf>, String> {
+    // `unpack_in` wants the folder there already.
+    std::fs::create_dir_all(into).map_err(|e| format!("Could not create {}: {e}", into.display()))?;
+    let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let result = (|| {
+        let mut written = Vec::new();
+        for entry in archive.entries().map_err(|e| e.to_string())? {
+            let mut entry = entry.map_err(|e| e.to_string())?;
+            let relative = entry.path().map(|path| path.into_owned()).map_err(|e| e.to_string())?;
+            let name = relative.to_string_lossy().into_owned();
+            let size = entry.size();
+            budget.admit(&name, Some(size))?;
+            if entry.unpack_in(into).map_err(|e| e.to_string())? {
+                let target = into.join(&relative);
+                if target.is_file() {
+                    budget.wrote(&target);
+                }
+                budget.spend(size)?;
+                written.push(target);
+            }
+        }
+        Ok(written)
+    })();
+    if result.is_err() {
+        budget.undo();
+    }
+    result
+}
+
+/// Inflates a .gz into `target`, within the unpacking limits — gzip says nothing reliable about the
+/// size inside, so it is measured as it is written.
+fn gunzip_to(source: &Path, target: &Path) -> Result<(), String> {
+    gunzip_within(source, target, Budget::new(target.parent().unwrap_or_else(|| Path::new("."))))
+}
+
+fn gunzip_within(source: &Path, target: &Path, mut budget: Budget) -> Result<(), String> {
+    let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut decoder = flate2::read::GzDecoder::new(std::fs::File::open(source).map_err(|e| e.to_string())?);
+    budget.admit(&name, None)?;
+    let mut out = std::fs::File::create(target).map_err(|e| e.to_string())?;
+    budget.wrote(target);
+    let result = budget.copy(&name, &mut decoder, &mut out);
+    if result.is_err() {
+        budget.undo();
+    }
+    result
 }
 
 async fn compress(ctx: &NodeCtx) -> Result<Ports, NodeError> {
@@ -805,19 +1042,7 @@ async fn compress(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 let tar = operation == "untarGz";
                 let files = tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>, String> {
                     if tar {
-                        let file = std::fs::File::open(&archive).map_err(|e| e.to_string())?;
-                        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
-                        let mut written = Vec::new();
-                        for entry in archive.entries().map_err(|e| e.to_string())? {
-                            let mut entry = entry.map_err(|e| e.to_string())?;
-                            // `unpack_in` refuses names that climb out of the folder.
-                            if entry.unpack_in(&folder_clone).map_err(|e| e.to_string())? {
-                                if let Ok(path) = entry.path() {
-                                    written.push(folder_clone.join(path));
-                                }
-                            }
-                        }
-                        Ok(written)
+                        untar_gz(&archive, &folder_clone)
                     } else {
                         unzip(&archive, &folder_clone)
                     }
@@ -833,12 +1058,7 @@ async fn compress(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 let target = into(name)?;
                 let source = sources[0].clone();
                 let destination_path = target.clone();
-                tokio::task::spawn_blocking(move || -> Result<(), String> {
-                    let mut decoder = flate2::read::GzDecoder::new(std::fs::File::open(&source).map_err(|e| e.to_string())?);
-                    let mut out = std::fs::File::create(&destination_path).map_err(|e| e.to_string())?;
-                    std::io::copy(&mut decoder, &mut out).map_err(|e| format!("Not gzip: {e}"))?;
-                    Ok(())
-                })
+                tokio::task::spawn_blocking(move || gunzip_to(&source, &destination_path))
                 .await
                 .map_err(|e| NodeError::failed(e.to_string()))?
                 .map_err(NodeError::Failed)?;
@@ -1048,6 +1268,91 @@ mod tests {
         }
         assert!(unzip(&archive, &dir.join("out")).is_err());
         assert!(!dir.join("escape.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_zip_is_unpacked_within_its_limits_and_a_refused_one_leaves_nothing() {
+        let dir = scratch("unzip");
+        // Two megabytes of zeros in a few kilobytes, after a small file that is written first.
+        let archive = dir.join("bomb.zip");
+        {
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+            let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file("small.txt", options).unwrap();
+            writer.write_all(b"hola").unwrap();
+            writer.start_file("zeros.bin", options).unwrap();
+            writer.write_all(&vec![0u8; 2_000_000]).unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(std::fs::metadata(&archive).unwrap().len() < 100_000);
+        let out = dir.join("out");
+        let error = unzip_within(&archive, &out, Budget::within(&out, 100, 1_000_000, 10_000_000, 0)).unwrap_err();
+        assert!(error.contains("limit for one file"), "{error}");
+        assert!(!out.join("small.txt").exists(), "what was written before the refusal is removed");
+        let error = unzip_within(&archive, &out, Budget::within(&out, 100, 10_000_000, 1_500_000, 0)).unwrap_err();
+        assert!(error.contains("unpacks to"), "the whole, over its limit: {error}");
+        let error = unzip_within(&archive, &out, Budget::within(&out, 1, u64::MAX, u64::MAX, 0)).unwrap_err();
+        assert!(error.contains("files"), "{error}");
+        if free_bytes(&dir).is_some() {
+            let error = unzip_within(&archive, &out, Budget::within(&out, 100, u64::MAX, u64::MAX, u64::MAX)).unwrap_err();
+            assert!(error.contains("free"), "a disk that cannot keep its reserve: {error}");
+        }
+        assert_eq!(unzip_within(&archive, &out, Budget::within(&out, 100, 10_000_000, 10_000_000, 0)).unwrap().len(), 2);
+        assert_eq!(std::fs::metadata(out.join("zeros.bin")).unwrap().len(), 2_000_000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_copy_stops_at_the_limit_whatever_its_archive_declared() {
+        let mut budget = Budget::within(Path::new("/"), 10, 1_000, 5_000, 0);
+        let error = budget.copy("a", &mut std::io::repeat(b'x').take(2_000), &mut Vec::new()).unwrap_err();
+        assert!(error.contains("limit for one file"), "{error}");
+        let mut budget = Budget::within(Path::new("/"), 10, 3_000, 5_000, 0);
+        budget.copy("a", &mut std::io::repeat(b'x').take(3_000), &mut Vec::new()).unwrap();
+        let error = budget.copy("b", &mut std::io::repeat(b'x').take(3_000), &mut Vec::new()).unwrap_err();
+        assert!(error.contains("more than"), "the files add up: {error}");
+    }
+
+    #[test]
+    fn a_tar_gz_and_a_gz_are_held_to_the_same_limits() {
+        let dir = scratch("untar");
+        let data = vec![0u8; 2_000_000];
+        let archive = dir.join("bomb.tar.gz");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::default()));
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, "zeros.bin", &data[..]).unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        let out = dir.join("out");
+        let error = untar_gz_within(&archive, &out, Budget::within(&out, 100, 1_000_000, u64::MAX, 0)).unwrap_err();
+        assert!(error.contains("limit for one file"), "{error}");
+        assert!(!out.join("zeros.bin").exists());
+        assert_eq!(untar_gz_within(&archive, &out, Budget::within(&out, 100, 10_000_000, u64::MAX, 0)).unwrap().len(), 1);
+
+        let gz = dir.join("zeros.gz");
+        {
+            let mut encoder = flate2::write::GzEncoder::new(std::fs::File::create(&gz).unwrap(), flate2::Compression::default());
+            encoder.write_all(&data).unwrap();
+            encoder.finish().unwrap();
+        }
+        let target = dir.join("zeros");
+        let error = gunzip_within(&gz, &target, Budget::within(&dir, 10, 1_000_000, u64::MAX, 0)).unwrap_err();
+        assert!(error.contains("limit for one file"), "{error}");
+        assert!(!target.exists(), "the half-written file is removed");
+        gunzip_within(&gz, &target, Budget::within(&dir, 10, 10_000_000, u64::MAX, 0)).unwrap();
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), 2_000_000);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

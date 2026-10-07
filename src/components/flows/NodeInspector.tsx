@@ -48,7 +48,7 @@ import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
  * there is none, everything up to it.
  */
 
-const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "scan-eye", "messages-square", "pencil", "brain-circuit", "binary", "database-zap", "wand", "reply"]);
+const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "scan-eye", "messages-square", "pencil", "brain-circuit", "binary", "database-zap", "wand", "reply", "scan-search", "audio-lines", "columns-3", "image-plus", "volume-2", "shield-alert", "wand-sparkles"]);
 const DATA_LIMIT = 200;
 /** Stable empties, so what is handed to the fields only changes when the data does. */
 const NO_PORTS: unknown[][] = [];
@@ -131,12 +131,24 @@ function nodeTip(type: string, params: Record<string, unknown>, t: (key: Transla
   if (type === "trigger.github") return t("flows.help.github");
   if (type === "trigger.email" || type === "net.imap") return t("flows.help.email");
   if (type === "net.queue") return t("flows.help.queue");
+  if ((type === "ai.local" || type === "ai.api") && Array.isArray(params.toolFlows) && params.toolFlows.length > 0) return t("flows.help.tools");
   if (type === "ai.api") return t("flows.help.apiChat");
   if (type === "ai.vectors") return t("flows.help.vectors");
   if (type === "app.prDecide") return t("flows.help.prDecide");
   if (type === "app.prMemory") return t("flows.help.prMemory");
   if (type === "ai.prFix") return t("flows.help.prFix");
   if (type === "ai.prReply") return t("flows.help.prReply");
+  if (type === "trigger.form") return t("flows.help.form");
+  if (type === "trigger.chat") return t("flows.help.chatTrigger");
+  if (type === "trigger.context") return t("flows.help.context");
+  if (type === "trigger.clipboard") return t("flows.help.clipboard");
+  if (type === "trigger.subflow" && params.publishAsNode === true) return t("flows.help.publishedNode");
+  if (type === "ai.transform") return t("flows.help.transform");
+  if (type === "ai.guard") return t("flows.help.guard");
+  if (type === "data.table") return t("flows.help.table");
+  if (type === "logic.assert") return t("flows.help.assert");
+  if (type === "app.runData") return t("flows.help.runData");
+  if (type === "net.browser") return t("flows.help.browser");
   return "";
 }
 

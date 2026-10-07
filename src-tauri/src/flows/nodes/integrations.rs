@@ -23,6 +23,11 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "app.clipboard" => clipboard(ctx).await,
         "app.vault" => vault(ctx).await,
         "app.apiRequest" => api_request(ctx).await,
+        "app.apiCollection" => api_collection(ctx).await,
+        "app.diagram" => diagram(ctx).await,
+        "app.story" => story(ctx).await,
+        "app.aiUsage" => ai_usage(ctx).await,
+        "app.runData" => run_data(ctx).await,
         other => Err(NodeError::failed(format!("No executor for {other}"))),
     }
 }
@@ -363,7 +368,45 @@ async fn note(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let mut out = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
         let content = text(params, "content");
-        let answer = if text(params, "operation") == "addToEnd" {
+        let operation = text(params, "operation");
+        let chosen = || {
+            let note = text(params, "note");
+            if note.trim().is_empty() {
+                Err(NodeError::failed("Choose the note"))
+            } else {
+                Ok(note.trim().to_string())
+            }
+        };
+        match operation.as_str() {
+            "noteSearch" => {
+                let found = call(
+                    ctx,
+                    "note.search",
+                    json!({"query": text(params, "noteQuery"), "tag": text(params, "noteTagFilter"), "max": number(params, "maxResults").unwrap_or(20.0)}),
+                )
+                .await?;
+                for note in found.as_array().cloned().unwrap_or_default() {
+                    out.push(wrap(ctx, index, note));
+                }
+                continue;
+            }
+            "noteRead" => {
+                let note = call(ctx, "note.read", json!({"noteId": chosen()?})).await?;
+                let mut json = base(ctx, index);
+                set_path(&mut json, "note", note);
+                out.push(wrap(ctx, index, json));
+                continue;
+            }
+            "noteReplace" => {
+                let note = call(ctx, "note.replace", json!({"noteId": chosen()?, "content": content})).await?;
+                let mut json = base(ctx, index);
+                set_path(&mut json, "note", note);
+                out.push(wrap(ctx, index, json));
+                continue;
+            }
+            _ => {}
+        }
+        let answer = if operation == "addToEnd" {
             let note = text(params, "note");
             if note.trim().is_empty() {
                 return Err(NodeError::failed("Choose the note to add to"));
@@ -519,8 +562,17 @@ async fn vault(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     if item.trim().is_empty() {
         return Err(NodeError::failed("Choose the Llavero item"));
     }
-    let answer = call(ctx, "vault.read", json!({"itemId": item.trim(), "field": ctx.param_str("itemField")})).await?;
-    let value = answer.get("value").cloned().unwrap_or(Value::Null);
+    let value = if ctx.param_str("vaultValue") == "vaultTotp" {
+        // The code of the moment and how long it lasts — the seed never leaves the Llavero.
+        let answer = call(ctx, "vault.totp", json!({"itemId": item.trim()})).await?;
+        json!({"code": answer.get("code").cloned().unwrap_or(Value::Null), "secondsRemaining": answer.get("secondsRemaining").cloned().unwrap_or(Value::Null)})
+    } else {
+        let answer = call(ctx, "vault.read", json!({"itemId": item.trim(), "field": ctx.param_str("itemField")})).await?;
+        answer.get("value").cloned().unwrap_or(Value::Null)
+    };
+    if let Some(code) = value.get("code").and_then(Value::as_str) {
+        ctx.run.host.secret_used(code);
+    }
     if let Value::String(secret) = &value {
         // Kept out of everything this run stores — its data files and its log.
         ctx.run.host.secret_used(secret);
@@ -537,6 +589,163 @@ async fn vault(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         out.push(wrap(ctx, index, json));
     }
     Ok(vec![out])
+}
+
+// ------------------------------------------------------------------------------ API collection
+
+/// A whole collection of the API client, in the runner's order, with the scopes carried from one
+/// request to the next (`api.collection` → the window).
+async fn api_collection(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let collection = ctx.param_str("apiCollection");
+    if collection.trim().is_empty() {
+        return Err(NodeError::failed("Choose the collection"));
+    }
+    let params = ctx.resolve_once().await?;
+    let variables: serde_json::Map<String, Value> = pairs(&params, "variables").into_iter().map(|(k, v)| (k, Value::String(v))).collect();
+    let answer = call(
+        ctx,
+        "api.collection",
+        json!({
+            "collectionId": collection.trim(),
+            "environmentId": text(&params, "environment"),
+            "variables": variables,
+            "stopOnFailure": flag(&params, "stopOnFailure"),
+            "delayMs": number(&params, "delayMs").unwrap_or(0.0).clamp(0.0, 60_000.0) as u64,
+        }),
+    )
+    .await?;
+    // Passed, failed and skipped add up to the total: after a stop on failure the rest never ran,
+    // and counting them as passed made "9 of 10 passed" out of one success.
+    let count = |key: &str| answer.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let (passed, total, skipped) = (count("passed"), count("total"), count("skipped"));
+    let not_run = if skipped > 0 { format!(", {skipped} not run after a failure") } else { String::new() };
+    ctx.log(LogStream::Info, &format!("{passed} of {total} requests passed{not_run}"));
+    if text(&params, "collectionOutput") == "collectionSummary" {
+        let mut summary = answer.clone();
+        if let Some(results) = summary.get_mut("results").and_then(Value::as_array_mut) {
+            for row in results.iter_mut() {
+                if let Value::Object(map) = row {
+                    map.remove("body");
+                    map.remove("bodyBase64");
+                    map.remove("headers");
+                }
+            }
+        }
+        return Ok(vec![vec![Item::new(summary)]]);
+    }
+    let rows = answer.get("results").and_then(Value::as_array).cloned().unwrap_or_default();
+    Ok(vec![rows.into_iter().map(Item::new).collect()])
+}
+
+// ----------------------------------------------------------------------------------------- diagram
+
+async fn diagram(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let resolved = ctx.resolve_each().await?;
+    let mut out = Vec::with_capacity(resolved.len());
+    for (index, params) in resolved.iter().enumerate() {
+        let answer = if text(params, "diagramOp") == "diagramRead" {
+            call(ctx, "diagram.read", json!({"title": text(params, "title")})).await?
+        } else {
+            let format = match text(params, "diagramFormat").as_str() {
+                "fmtDrawio" => "drawio",
+                "fmtExcalidraw" => "excalidraw",
+                _ => "dbml",
+            };
+            call(ctx, "diagram.save", json!({"title": text(params, "title"), "format": format, "content": text(params, "content")})).await?
+        };
+        let mut json = base(ctx, index);
+        set_path(&mut json, "diagram", answer);
+        out.push(wrap(ctx, index, json));
+    }
+    Ok(vec![out])
+}
+
+// ----------------------------------------------------------------------------- stories and wiki
+
+async fn story(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let engine: crate::flows::engine::EngineChoice =
+        ctx.params.get("engine").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let resolved = ctx.resolve_each().await?;
+    let mut out = Vec::with_capacity(resolved.len());
+    for (index, params) in resolved.iter().enumerate() {
+        let common = json!({"provider": engine.provider, "model": engine.model});
+        let answer = match text(params, "storyOp").as_str() {
+            "docGenerate" => {
+                let mut args = common.clone();
+                args["title"] = json!(text(params, "docTitle"));
+                args["scope"] = json!(if text(params, "docScope") == "scopeWorkspace" { "workspace" } else { "repo" });
+                args["projectId"] = json!(text(params, "project"));
+                args["instructions"] = json!(text(params, "instructions"));
+                args["useContext"] = json!(flag(params, "useContext"));
+                call(ctx, "doc.generate", args).await?
+            }
+            "docPublish" => call(ctx, "doc.publish", json!({"title": text(params, "docTitle"), "overwrite": flag(params, "overwrite")})).await?,
+            _ => {
+                let story = text(params, "storyText");
+                if story.trim().is_empty() {
+                    return Err(NodeError::failed("There is no story text to review"));
+                }
+                let stage = match text(params, "reviewStage").as_str() {
+                    "stageDescription" => "description",
+                    "stageCriteria" => "criteria",
+                    "stageTasks" => "tasks",
+                    "stageTasksQa" => "tasksqa",
+                    _ => "analyze",
+                };
+                let mut args = common.clone();
+                args["stage"] = json!(stage);
+                args["kind"] = json!(if text(params, "workItemKind") == "kindBug" { "bug" } else { "story" });
+                args["story"] = json!(story);
+                args["projectId"] = json!(text(params, "project"));
+                args["useContext"] = json!(flag(params, "useContext"));
+                call(ctx, "story.review", args).await?
+            }
+        };
+        let mut json = base(ctx, index);
+        set_path(&mut json, "result", answer);
+        out.push(wrap(ctx, index, json));
+    }
+    Ok(vec![out])
+}
+
+// ---------------------------------------------------------------------------------------- AI usage
+
+async fn ai_usage(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let answer = call(
+        ctx,
+        "ai.usage",
+        json!({"period": ctx.param_str("usagePeriod"), "group": ctx.param_str("usageGroup"), "quota": flag(&ctx.params, "includeQuota")}),
+    )
+    .await?;
+    Ok(vec![vec![Item::new(answer)]])
+}
+
+// -------------------------------------------------------------------------------------- run data
+
+/// Files key/values on the run, to find it by them in Ejecuciones; the items pass through.
+async fn run_data(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let resolved = ctx.resolve_each().await?;
+    let mut fields = serde_json::Map::new();
+    for params in &resolved {
+        for (key, value) in pairs(params, "runFields") {
+            let key = key.trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            if key.chars().count() > 64 || value.chars().count() > 512 {
+                return Err(NodeError::failed("Run data keeps keys to 64 characters and values to 512"));
+            }
+            fields.insert(key, Value::String(value));
+        }
+    }
+    if fields.len() > 50 {
+        return Err(NodeError::failed("A run files at most 50 fields"));
+    }
+    if !fields.is_empty() {
+        call(ctx, "run.data", json!({"fields": fields})).await?;
+    }
+    let count = ctx.items().len();
+    Ok(vec![(0..count).map(|index| Item::paired(ctx.items()[index].json.clone(), index)).collect()])
 }
 
 #[cfg(test)]

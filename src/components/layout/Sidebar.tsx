@@ -11,6 +11,7 @@ import {
   CirclePlay,
   Cloud,
   Code2,
+  Container,
   Eye,
   FolderGit2,
   FolderInput,
@@ -21,13 +22,13 @@ import {
   GitMerge,
   GitPullRequest,
   Globe,
-  RefreshCw,
-  Rocket,
   Loader2,
   Lock,
   LockOpen,
   Pencil,
   Plus,
+  RefreshCw,
+  Rocket,
   Settings,
   TerminalSquare,
   Trash2,
@@ -89,7 +90,8 @@ import { monogram, monogramActiveStyle, monogramMarkColor, monogramStyle } from 
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ImportReposModal } from "./ImportReposModal";
 import { CreateBranchModal } from "./CreateBranchModal";
-import { ContextMenu } from "../common/ContextMenu";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { ensureFlowContextEntries, flowMenuItems } from "../../state/flowContextStore";
 import { SubmodulesSection, TagsSection, WorktreesSection } from "../git/RepoSections";
 import { useGitToolsStore } from "../../state/gitToolsStore";
 import { projectMenuItems } from "./projectMenu";
@@ -1005,6 +1007,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   const [hosting, setHosting] = useState<HostingState | undefined>(undefined);
   const [showConnect, setShowConnect] = useState<false | VcsProvider>(false);
   const [showCreatePr, setShowCreatePr] = useState(false);
+  const [prMenu, setPrMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   /** Which status groups the user has folded or unfolded. Only the ones they've touched are in
    * here; the rest fall back to `PR_SECTIONS`, where merged and closed start folded on purpose —
    * a repository with a long history has dozens of them, and listing them all pushed the sections
@@ -1447,6 +1450,26 @@ function PullRequestsSection({ project }: { project: Project }) {
                       <button
                         key={pr.id}
                         onClick={() => openPr(pr)}
+                        onContextMenu={(event) => {
+                          // A pull request has no menu of its own; active flows may offer one
+                          // («Menú contextual» triggers on a PR).
+                          ensureFlowContextEntries();
+                          const items = flowMenuItems("pr", null, () => ({
+                            id: pr.id,
+                            title: pr.title,
+                            status: pr.status,
+                            sourceBranch: pr.source_branch,
+                            targetBranch: pr.target_branch,
+                            author: pr.author,
+                            url: pr.url,
+                            provider: pr.provider,
+                            projectId: project.id,
+                            repoPath: project.local_path,
+                          }), false);
+                          if (items.length === 0) return;
+                          event.preventDefault();
+                          setPrMenu({ x: event.clientX, y: event.clientY, items });
+                        }}
                         style={pageDelay(at)}
                         className={`cf-rise flex w-full items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[12px] ${
                           shownPrId === pr.id
@@ -1493,6 +1516,7 @@ function PullRequestsSection({ project }: { project: Project }) {
           onCreated={openPr}
         />
       )}
+      {prMenu && <ContextMenu x={prMenu.x} y={prMenu.y} items={prMenu.items} onClose={() => setPrMenu(null)} />}
     </CollapsibleSection>
   );
 }
@@ -2230,6 +2254,14 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
       tip: hint("panel.terminal", t("terminal.toggle")),
     },
     {
+      tour: "toggle-containers",
+      open: dockOpen && dockView === "containers",
+      onClick: () => toggleDock("containers"),
+      icon: <Container size={17} />,
+      label: t("containers.title"),
+      tip: t("containers.toggle"),
+    },
+    {
       tour: "toggle-services",
       open: dockOpen && dockView === "services",
       onClick: () => toggleDock("services"),
@@ -2298,6 +2330,9 @@ function FootIcon({ icon, running }: { icon: ReactNode; running?: boolean }) {
 }
 
 export function Sidebar() {
+  // The flows that add right-click entries, read as the window opens: a menu is built the instant
+  // it opens, and one started the reading itself showed nothing the first time.
+  useEffect(() => ensureFlowContextEntries(), []);
   const collapsed = useLayoutStore((s) => s.flags.sidebarCollapsed);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);

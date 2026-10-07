@@ -1,0 +1,265 @@
+{
+  "id": "clickup",
+  "name": "ClickUp",
+  "group": "appsProjects",
+  "baseUrl": "https://api.clickup.com/api/v2",
+  "auth": "headers",
+  "authHint": {
+    "es": "Tu token personal de ClickUp (pk_…) como credencial Token",
+    "en": "Your ClickUp personal token (pk_…) as a Token credential"
+  },
+  "tokenUrl": "https://app.clickup.com/settings/apps",
+  "test": {
+    "path": "/user",
+    "label": "{{user.username}} · {{user.email}}"
+  },
+  "headers": {
+    "Authorization": "{{secret}}"
+  },
+  "errorField": "err",
+  "operations": [
+    {
+      "id": "createTask",
+      "name": {
+        "es": "Crear una tarea",
+        "en": "Create a task"
+      },
+      "method": "POST",
+      "path": "/list/{{listId}}/task",
+      "fields": [
+        {
+          "name": "teamId",
+          "label": {
+            "es": "Espacio de trabajo",
+            "en": "Workspace"
+          },
+          "lookup": {
+            "path": "/team",
+            "result": "teams",
+            "value": "id",
+            "label": "{{name}}"
+          }
+        },
+        {
+          "name": "spaceId",
+          "label": {
+            "es": "Espacio",
+            "en": "Space"
+          },
+          "lookup": {
+            "path": "/team/{{teamId}}/space",
+            "result": "spaces",
+            "value": "id",
+            "label": "{{name}}",
+            "needs": [
+              "teamId"
+            ]
+          }
+        },
+        {
+          "name": "listId",
+          "label": {
+            "es": "Lista",
+            "en": "List"
+          },
+          "required": true,
+          "lookup": {
+            "path": "/space/{{spaceId}}/list",
+            "result": "lists",
+            "value": "id",
+            "label": "{{name}}",
+            "needs": [
+              "spaceId"
+            ]
+          }
+        },
+        {
+          "name": "name",
+          "label": {
+            "es": "Nombre",
+            "en": "Name"
+          },
+          "required": true
+        },
+        {
+          "name": "description",
+          "label": {
+            "es": "Descripción (Markdown)",
+            "en": "Description (Markdown)"
+          },
+          "multiline": true
+        },
+        {
+          "name": "priority",
+          "label": {
+            "es": "Prioridad (1 urgente a 4 baja)",
+            "en": "Priority (1 urgent to 4 low)"
+          },
+          "json": true,
+          "placeholder": "3"
+        },
+        {
+          "name": "status",
+          "label": {
+            "es": "Estado",
+            "en": "Status"
+          },
+          "placeholder": "to do"
+        }
+      ],
+      "body": {
+        "name": "{{name}}",
+        "markdown_description": "{{description}}",
+        "priority": "{{priority}}",
+        "status": "{{status}}"
+      }
+    },
+    {
+      "id": "listTasks",
+      "name": {
+        "es": "Tareas de una lista",
+        "en": "A list's tasks"
+      },
+      "method": "GET",
+      "path": "/list/{{listId}}/task",
+      "query": {
+        "include_closed": "{{includeClosed}}"
+      },
+      "fields": [
+        {
+          "name": "teamId",
+          "label": {
+            "es": "Espacio de trabajo",
+            "en": "Workspace"
+          },
+          "lookup": {
+            "path": "/team",
+            "result": "teams",
+            "value": "id",
+            "label": "{{name}}"
+          }
+        },
+        {
+          "name": "spaceId",
+          "label": {
+            "es": "Espacio",
+            "en": "Space"
+          },
+          "lookup": {
+            "path": "/team/{{teamId}}/space",
+            "result": "spaces",
+            "value": "id",
+            "label": "{{name}}",
+            "needs": [
+              "teamId"
+            ]
+          }
+        },
+        {
+          "name": "listId",
+          "label": {
+            "es": "Lista",
+            "en": "List"
+          },
+          "required": true,
+          "lookup": {
+            "path": "/space/{{spaceId}}/list",
+            "result": "lists",
+            "value": "id",
+            "label": "{{name}}",
+            "needs": [
+              "spaceId"
+            ]
+          }
+        },
+        {
+          "name": "includeClosed",
+          "label": {
+            "es": "Incluir cerradas (true/false)",
+            "en": "Include closed (true/false)"
+          },
+          "placeholder": "false"
+        }
+      ],
+      "result": "tasks"
+    },
+    {
+      "id": "updateTask",
+      "name": {
+        "es": "Cambiar una tarea",
+        "en": "Change a task"
+      },
+      "method": "PUT",
+      "path": "/task/{{taskId}}",
+      "fields": [
+        {
+          "name": "taskId",
+          "label": {
+            "es": "Tarea (id)",
+            "en": "Task (id)"
+          },
+          "required": true
+        },
+        {
+          "name": "status",
+          "label": {
+            "es": "Estado",
+            "en": "Status"
+          }
+        },
+        {
+          "name": "name",
+          "label": {
+            "es": "Nombre",
+            "en": "Name"
+          }
+        },
+        {
+          "name": "priority",
+          "label": {
+            "es": "Prioridad (1 a 4)",
+            "en": "Priority (1 to 4)"
+          },
+          "json": true
+        }
+      ],
+      "body": {
+        "status": "{{status}}",
+        "name": "{{name}}",
+        "priority": "{{priority}}"
+      }
+    },
+    {
+      "id": "addComment",
+      "name": {
+        "es": "Comentar una tarea",
+        "en": "Comment on a task"
+      },
+      "method": "POST",
+      "path": "/task/{{taskId}}/comment",
+      "fields": [
+        {
+          "name": "taskId",
+          "label": {
+            "es": "Tarea (id)",
+            "en": "Task (id)"
+          },
+          "required": true
+        },
+        {
+          "name": "comment",
+          "label": {
+            "es": "Comentario",
+            "en": "Comment"
+          },
+          "multiline": true,
+          "required": true
+        }
+      ],
+      "body": {
+        "comment_text": "{{comment}}",
+        "notify_all": false
+      }
+    }
+  ]
+}

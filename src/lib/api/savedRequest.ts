@@ -21,7 +21,7 @@ import {
   parseVariables,
   type StoredSettings,
 } from "../../state/apiStore";
-import { defaultApiSettings, type ApiResponse } from "../../types/api";
+import { defaultApiSettings, type ApiRequestRow, type ApiResponse } from "../../types/api";
 
 /**
  * A saved request of the API client, sent from a flow (`app.apiRequest` → `flows::bridge`).
@@ -79,36 +79,64 @@ function bodyOf(text: string, headers: [string, string][]): unknown {
   }
 }
 
-export async function runSavedRequest(ask: SavedRequestAsk, signal?: AbortSignal): Promise<SavedRequestAnswer> {
+interface Loaded {
+  tree: Awaited<ReturnType<typeof apiLoadTree>>;
+  environments: Awaited<ReturnType<typeof apiListEnvironments>>;
+  settings: ReturnType<typeof defaultApiSettings>;
+  cookies: Awaited<ReturnType<typeof apiListCookies>>;
+  activeEnvironment: string | null;
+}
+
+async function load(workspaceId: string): Promise<Loaded> {
   const [tree, environments, rawSettings, cookies, activeEnvironment] = await Promise.all([
-    apiLoadTree(ask.workspaceId),
-    apiListEnvironments(ask.workspaceId),
+    apiLoadTree(workspaceId),
+    apiListEnvironments(workspaceId),
     apiLoadSettings().catch(() => null),
-    apiListCookies(ask.workspaceId).catch(() => []),
-    getSetting(activeEnvironmentKey(ask.workspaceId)).catch(() => null),
+    apiListCookies(workspaceId).catch(() => []),
+    getSetting(activeEnvironmentKey(workspaceId)).catch(() => null),
   ]);
-  const row = tree.requests.find((request) => request.id === ask.requestId);
-  if (!row) throw new Error("That request is no longer in the API client");
+  const stored = parseJson<StoredSettings>(rawSettings, {});
+  const settings = migrateSettings(stored) ?? { ...defaultApiSettings(), ...stored };
+  return { tree, environments, settings, cookies, activeEnvironment };
+}
+
+/** The environment a run uses: `""` the one active in the API client, `"none"` none. */
+function environmentOf(loaded: Loaded, asked: string) {
+  const environmentId = asked === "" ? loaded.activeEnvironment : asked === "none" ? null : asked;
+  const environment = loaded.environments.find((candidate) => candidate.id === environmentId && !candidate.is_global);
+  if (asked !== "" && asked !== "none" && !environment) {
+    throw new Error("That environment is no longer in the API client");
+  }
+  return environment;
+}
+
+/**
+ * One saved request, start to end. `carried` is what an earlier request of the same collection run
+ * left in the scopes — its scripts' `pm.environment.set(…)` — so a log-in request's token reaches
+ * the next one, as in the runner.
+ */
+async function runRow(
+  loaded: Loaded,
+  row: ApiRequestRow,
+  environmentId: string,
+  variables: Record<string, string>,
+  carried: SandboxScopes | null,
+  signal?: AbortSignal,
+): Promise<{ answer: SavedRequestAnswer; scopes: SandboxScopes }> {
+  const { tree, environments, settings, cookies } = loaded;
   const spec = parseSpec(row);
   if (spec.protocol !== "http") {
     throw new Error(`Only HTTP requests run from a flow — “${row.name}” is ${spec.protocol}`);
   }
-
-  const stored = parseJson<StoredSettings>(rawSettings, {});
-  const settings = migrateSettings(stored) ?? { ...defaultApiSettings(), ...stored };
-  const environmentId = ask.environmentId === "" ? activeEnvironment : ask.environmentId === "none" ? null : ask.environmentId;
-  const environment = environments.find((candidate) => candidate.id === environmentId && !candidate.is_global);
-  if (ask.environmentId !== "" && ask.environmentId !== "none" && !environment) {
-    throw new Error("That environment is no longer in the API client");
-  }
+  const environment = environmentOf(loaded, environmentId);
   const globals = environments.find((candidate) => candidate.is_global);
   const collection = tree.collections.find((candidate) => candidate.id === row.collection_id) ?? null;
   const ctx: VariableContext = {
-    local: { ...ask.variables },
-    data: {},
-    environment: parseVariables(environment?.variables),
-    collection: parseVariables(collection?.variables),
-    global: parseVariables(globals?.variables),
+    local: { ...(carried?.local ?? {}), ...variables },
+    data: carried?.data ?? {},
+    environment: carried?.environment ?? parseVariables(environment?.variables),
+    collection: carried?.collection ?? parseVariables(collection?.variables),
+    global: carried?.global ?? parseVariables(globals?.variables),
     collectionId: row.collection_id,
   };
   const authChain = [spec.auth, ...ancestorAuthIn(tree.folders, tree.collections, row.collection_id, row.folder_id)];
@@ -152,12 +180,13 @@ export async function runSavedRequest(ask: SavedRequestAsk, signal?: AbortSignal
   if (runnablePost.length > 0) {
     const response: ApiResponse = { ...http, tests: [], consoleLines: [], visualizer: null, error: null };
     const after = await runScriptChain(runnablePost, { request: resolved, response, scopes });
+    scopes = after.scopes;
     tests.push(...after.tests);
     if (after.errors.length > 0) throw new Error(`A test script failed: ${after.errors[0].error}`);
   }
 
   const passed = tests.filter((test) => test.passed).length;
-  return {
+  const answer: SavedRequestAnswer = {
     name: row.name,
     method: resolved.method,
     url: resolved.url,
@@ -173,5 +202,104 @@ export async function runSavedRequest(ask: SavedRequestAsk, signal?: AbortSignal
     testsFailed: tests.length - passed,
     skippedScripts: gate?.skipped.length ?? 0,
     interrupted: http.interrupted ?? null,
+  };
+  return { answer, scopes };
+}
+
+export async function runSavedRequest(ask: SavedRequestAsk, signal?: AbortSignal): Promise<SavedRequestAnswer> {
+  const loaded = await load(ask.workspaceId);
+  const row = loaded.tree.requests.find((request) => request.id === ask.requestId);
+  if (!row) throw new Error("That request is no longer in the API client");
+  return (await runRow(loaded, row, ask.environmentId, ask.variables, null, signal)).answer;
+}
+
+// ------------------------------------------------------------------------------- a whole collection
+
+export interface SavedCollectionAsk {
+  workspaceId: string;
+  collectionId: string;
+  environmentId: string;
+  variables: Record<string, string>;
+  stopOnFailure: boolean;
+  delayMs: number;
+}
+
+export type CollectionRowAnswer = (SavedRequestAnswer & { ok: boolean; error?: undefined }) | { name: string; ok: false; error: string };
+
+export interface SavedCollectionAnswer {
+  collection: string;
+  /** One per request sent, in the order they went. */
+  results: CollectionRowAnswer[];
+  /** Every HTTP request of the collection; `passed + failed + skipped`. */
+  total: number;
+  passed: number;
+  /** Sent, and did not pass. */
+  failed: number;
+  /** Never sent: «Parar al fallar» ended the run before them. */
+  skipped: number;
+  durationMs: number;
+}
+
+/**
+ * A collection's HTTP requests in the order the runner (`RunnerModal`) runs them: the requests
+ * directly under a node before its subfolders' contents, each level by `sort_order`.
+ */
+export function requestsInRunOrder(tree: Loaded["tree"], collectionId: string): ApiRequestRow[] {
+  const out: ApiRequestRow[] = [];
+  const seen = new Set<string>();
+  const visit = (parentId: string | null) => {
+    out.push(
+      ...tree.requests
+        .filter((r) => r.collection_id === collectionId && r.folder_id === parentId && r.protocol === "http")
+        .sort((a, b) => a.sort_order - b.sort_order),
+    );
+    for (const folder of tree.folders.filter((f) => f.collection_id === collectionId && f.parent_id === parentId).sort((a, b) => a.sort_order - b.sort_order)) {
+      if (seen.has(folder.id)) continue;
+      seen.add(folder.id);
+      visit(folder.id);
+    }
+  };
+  visit(null);
+  return out;
+}
+
+/** A collection run from a flow (`app.apiCollection`): every HTTP request in the runner's order,
+ *  the scopes carried from one to the next. A request "passes" with a status below 400 and no
+ *  failed test; after a stop on failure, the ones never sent are counted apart (`skipped`) — not
+ *  as passed, and not as failed. */
+export async function runSavedCollection(ask: SavedCollectionAsk, signal?: AbortSignal): Promise<SavedCollectionAnswer> {
+  const started = Date.now();
+  const loaded = await load(ask.workspaceId);
+  const collection = loaded.tree.collections.find((candidate) => candidate.id === ask.collectionId);
+  if (!collection) throw new Error("That collection is no longer in the API client");
+  environmentOf(loaded, ask.environmentId);
+  const rows = requestsInRunOrder(loaded.tree, ask.collectionId);
+  if (rows.length === 0) throw new Error(`“${collection.name}” has no HTTP request to run`);
+  const results: CollectionRowAnswer[] = [];
+  let scopes: SandboxScopes | null = null;
+  for (const [index, row] of rows.entries()) {
+    if (signal?.aborted) throw new Error("Stopped");
+    let ok = false;
+    try {
+      const done = await runRow(loaded, row, ask.environmentId, ask.variables, scopes, signal);
+      scopes = done.scopes;
+      ok = done.answer.status > 0 && done.answer.status < 400 && done.answer.testsFailed === 0 && !done.answer.interrupted;
+      results.push({ ...done.answer, ok });
+    } catch (error) {
+      if (signal?.aborted) throw new Error("Stopped");
+      results.push({ name: row.name, ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    if (!ok && ask.stopOnFailure) break;
+    if (ask.delayMs > 0 && index < rows.length - 1) await new Promise((resolve) => setTimeout(resolve, ask.delayMs));
+  }
+  const passed = results.filter((result) => result.ok).length;
+  return {
+    collection: collection.name,
+    results,
+    total: rows.length,
+    passed,
+    failed: results.length - passed,
+    skipped: rows.length - results.length,
+    durationMs: Date.now() - started,
   };
 }

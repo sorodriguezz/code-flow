@@ -23,6 +23,8 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "logic.merge" => merge(ctx),
         "logic.wait" => wait(ctx).await,
         "logic.approval" => approval(ctx).await,
+        "logic.businessHours" => business_hours(ctx).await,
+        "logic.assert" => assert(ctx).await,
         "logic.stop" => {
             let params = ctx.resolve_once().await?;
             let message = text(&params, "message");
@@ -194,7 +196,16 @@ pub async fn subflow(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         return Err(NodeError::failed("A flow that calls itself stops after three levels"));
     }
     let wait = text(&ctx.params, "mode") != "fire";
-    let items: Vec<Item> = ctx.items().into_iter().map(|item| Item::new(item.json.clone())).collect();
+    // «Enviar»: the items as they are, or one item per input built from the called flow's fields.
+    let items: Vec<Item> = if text(&ctx.params, "subflowInput") == "sendInputs" {
+        ctx.resolve_each()
+            .await?
+            .into_iter()
+            .map(|params| Item::new(params.get("inputs").cloned().filter(Value::is_object).unwrap_or_else(|| serde_json::json!({}))))
+            .collect()
+    } else {
+        ctx.items().into_iter().map(|item| Item::new(item.json.clone())).collect()
+    };
     let work = ctx.run.host.subflow(target.trim(), items, wait);
     let produced = tokio::select! {
         result = work => result.map_err(NodeError::failed)?,
@@ -233,7 +244,7 @@ fn hours(params: &Value, name: &str) -> Option<Duration> {
 }
 
 /// Parks the run at this node until the wait is decided.
-async fn park(ctx: &NodeCtx, kind: &str, message: String, timeout: Option<Duration>) -> Result<WaitAnswer, NodeError> {
+async fn park(ctx: &NodeCtx, kind: &str, message: String, timeout: Option<Duration>, links: bool) -> Result<WaitAnswer, NodeError> {
     let request = WaitRequest {
         node_id: ctx.node.id.clone(),
         node_name: ctx.node.name.clone(),
@@ -241,6 +252,7 @@ async fn park(ctx: &NodeCtx, kind: &str, message: String, timeout: Option<Durati
         message,
         timeout,
         inputs: ctx.inputs.clone(),
+        links,
     };
     ctx.run.host.wait_for(request, ctx.cancel.clone()).await.map_err(|error| {
         if error.starts_with(crate::ai_runs::CANCELLED_MARKER) {
@@ -275,13 +287,15 @@ pub fn decided_ports(type_id: &str, inputs: &Ports, answer: &WaitAnswer) -> Port
             .collect();
         return if answer.decision == "approved" { vec![out, vec![]] } else { vec![vec![], out] };
     }
+    // A form's answers ride as `form`, a call's body as `call`.
+    let field = if answer.by == "form" { "form" } else { "call" };
     let out = items
         .iter()
         .enumerate()
         .map(|(index, item)| {
             let mut json = object(&item.json);
             if !answer.payload.is_null() {
-                json["call"] = answer.payload.clone();
+                json[field] = answer.payload.clone();
             }
             Item::paired(json, index)
         })
@@ -289,10 +303,15 @@ pub fn decided_ports(type_id: &str, inputs: &Ports, answer: &WaitAnswer) -> Port
     vec![out]
 }
 
-/// Pauses until somebody approves or rejects — in CodeFlow or on the phone.
+/// Pauses until somebody approves or rejects — in CodeFlow or on the phone, or from a link sent by
+/// Telegram, Slack or email (through the tunnel, when one is up, so it opens anywhere).
 async fn approval(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let params = ctx.resolve_once().await?;
-    let answer = park(ctx, "approval", text(&params, "message"), hours(&params, "timeoutHours")).await?;
+    let channels = super::strings(&params, "approvalVia");
+    if !channels.is_empty() {
+        send_approval_links(ctx, &params, &channels).await?;
+    }
+    let answer = park(ctx, "approval", text(&params, "message"), hours(&params, "timeoutHours"), !channels.is_empty()).await?;
     if answer.decision == "expired" && text(&params, "onTimeout") == "fail" {
         return Err(NodeError::failed("Nobody decided before the time limit"));
     }
@@ -301,8 +320,21 @@ async fn approval(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 async fn wait(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let params = ctx.resolve_once().await?;
+    if text(&params, "mode") == "waitForm" {
+        // The form lives at `$execution.resumeFormUrl`: a node before this one sends it.
+        let fields = crate::flows::form::fields_of(&params);
+        if fields.is_empty() {
+            return Err(NodeError::failed("Add at least one field to the form"));
+        }
+        let spec = json!({"title": text(&params, "formTitle"), "fields": params.get("fields").cloned().unwrap_or(json!([]))});
+        let answer = park(ctx, "form", spec.to_string(), hours(&params, "timeoutHours"), true).await?;
+        if answer.decision == "expired" {
+            return Err(NodeError::failed("Nobody filled in the form before the time limit"));
+        }
+        return Ok(decided_ports("logic.wait", &ctx.inputs, &answer));
+    }
     if text(&params, "mode") == "webhook" {
-        let answer = park(ctx, "webhook", String::new(), hours(&params, "timeoutHours")).await?;
+        let answer = park(ctx, "webhook", String::new(), hours(&params, "timeoutHours"), false).await?;
         if answer.decision == "expired" {
             return Err(NodeError::failed("No call arrived before the time limit"));
         }
@@ -322,13 +354,179 @@ async fn wait(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         Duration::from_secs_f64((amount * unit).min(30.0 * 86_400.0))
     };
     if duration >= PARK_AFTER {
-        park(ctx, "time", String::new(), Some(duration)).await?;
+        park(ctx, "time", String::new(), Some(duration), false).await?;
         return Ok(vec![ctx.passthrough()]);
     }
     tokio::select! {
         _ = tokio::time::sleep(duration) => Ok(vec![ctx.passthrough()]),
         _ = ctx.cancel.cancelled() => Err(NodeError::Cancelled),
     }
+}
+
+/// The approval's question, sent where the node says with a link to decide it. A channel that fails
+/// is logged and the others still go: the desk and the phone can always decide.
+async fn send_approval_links(ctx: &NodeCtx, params: &Value, channels: &[String]) -> Result<(), NodeError> {
+    let Some(resume) = ctx.run.host.resume_url() else {
+        return Err(NodeError::failed("This run cannot be decided by a link"));
+    };
+    let run_id = resume.rsplit('/').next().unwrap_or_default().to_string();
+    let local = crate::flows::triggers::webhook::approval_url(&run_id, &ctx.node.name);
+    let link = crate::flows::triggers::webhook::public_or_local(&local);
+    let public = link != local;
+    if !public {
+        ctx.log(crate::flows::engine::LogStream::Info, "No tunnel is up: the link only opens on this computer (Flujos → Programación → Túnel)");
+    }
+    let message = text(params, "message");
+    let question = if message.trim().is_empty() { format!("«{}» espera tu aprobación", ctx.run.flow_name) } else { message };
+    let credential_id = text(params, "approvalCredential");
+    let credential = if credential_id.trim().is_empty() { None } else { Some(ctx.credential(credential_id.trim()).await?) };
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| NodeError::failed(e.to_string()))?;
+    for channel in channels {
+        let result: Result<(), String> = async {
+            match channel.as_str() {
+                "viaTelegram" => {
+                    let token = credential.as_ref().filter(|c| c.kind == "bearer").ok_or("Telegram needs the bot's token (a Bearer credential)")?;
+                    let chat = text(params, "approvalChat");
+                    if chat.trim().is_empty() {
+                        return Err("write the Telegram chat id".to_string());
+                    }
+                    // Buttons need a public address; on this computer only, the link goes in the text.
+                    let mut body = json!({"chat_id": chat.trim(), "text": format!("{question}\n\n{link}"), "disable_web_page_preview": true});
+                    if public {
+                        body = json!({
+                            "chat_id": chat.trim(),
+                            "text": question,
+                            "reply_markup": {"inline_keyboard": [[
+                                {"text": "✓ Aprobar", "url": format!("{link}?d=approve")},
+                                {"text": "✕ Rechazar", "url": format!("{link}?d=reject")}
+                            ]]}
+                        });
+                    }
+                    // `without_url`: the address carries the bot's token, which reqwest's errors quote.
+                    let response = http.post(format!("https://api.telegram.org/bot{}/sendMessage", token.secret)).json(&body).send().await.map_err(|e| e.without_url().to_string())?;
+                    let doc: Value = response.json().await.map_err(|e| e.without_url().to_string())?;
+                    if doc.get("ok").and_then(Value::as_bool) != Some(true) {
+                        return Err(doc.get("description").and_then(Value::as_str).unwrap_or("Telegram refused the message").to_string());
+                    }
+                    Ok(())
+                }
+                "viaSlack" => {
+                    let token = credential.as_ref().filter(|c| c.kind == "bearer").ok_or("Slack needs the bot's token (a Bearer credential)")?;
+                    let channel_id = text(params, "approvalChat");
+                    if channel_id.trim().is_empty() {
+                        return Err("write the Slack channel".to_string());
+                    }
+                    let body = json!({
+                        "channel": channel_id.trim(),
+                        "text": question,
+                        "blocks": [
+                            {"type": "section", "text": {"type": "mrkdwn", "text": question}},
+                            {"type": "actions", "elements": [
+                                {"type": "button", "style": "primary", "text": {"type": "plain_text", "text": "Aprobar"}, "url": format!("{link}?d=approve")},
+                                {"type": "button", "style": "danger", "text": {"type": "plain_text", "text": "Rechazar"}, "url": format!("{link}?d=reject")}
+                            ]}
+                        ]
+                    });
+                    let response = http.post("https://slack.com/api/chat.postMessage").bearer_auth(&token.secret).json(&body).send().await.map_err(|e| e.to_string())?;
+                    let doc: Value = response.json().await.map_err(|e| e.to_string())?;
+                    if doc.get("ok").and_then(Value::as_bool) != Some(true) {
+                        return Err(doc.get("error").and_then(Value::as_str).unwrap_or("Slack refused the message").to_string());
+                    }
+                    Ok(())
+                }
+                "viaEmail" => {
+                    let id = credential.as_ref().filter(|c| c.kind == "smtp").map(|_| credential_id.trim().to_string()).ok_or("Email needs an SMTP credential")?;
+                    let to = text(params, "approvalTo");
+                    let html = format!(
+                        "<p>{}</p><p><a href=\"{link}?d=approve\" style=\"display:inline-block;padding:10px 18px;background:#079455;color:#fff;border-radius:8px;text-decoration:none;font-weight:600\">Aprobar</a> &nbsp; <a href=\"{link}?d=reject\" style=\"display:inline-block;padding:10px 18px;border:1px solid #d0d5dd;color:#d92d20;border-radius:8px;text-decoration:none;font-weight:600\">Rechazar</a></p>",
+                        question.replace('&', "&amp;").replace('<', "&lt;")
+                    );
+                    let mail = json!({"credential": id, "to": to, "subject": format!("Aprobación: {}", ctx.run.flow_name), "body": html, "html": true});
+                    super::net::email(ctx, &mail).await.map(|_| ()).map_err(|e| e.to_string())
+                }
+                _ => Ok(()),
+            }
+        }
+        .await;
+        match result {
+            Ok(()) => ctx.log(crate::flows::engine::LogStream::Info, &format!("Approval sent by {}", channel.trim_start_matches("via"))),
+            Err(error) => ctx.log(crate::flows::engine::LogStream::Stderr, &format!("{}: {error}", channel.trim_start_matches("via"))),
+        }
+    }
+    Ok(())
+}
+
+/// «¿Horario hábil?»: each item by its moment (or now) — in working hours, or out of them.
+async fn business_hours(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    use chrono::{Datelike, Timelike};
+    let resolved = ctx.resolve_each().await?;
+    let items = ctx.items();
+    let mut inside = Vec::new();
+    let mut outside = Vec::new();
+    for index in 0..items.len().max(1) {
+        let params = &resolved[index.min(resolved.len() - 1)];
+        let zone_name = text(params, "timezone");
+        let zone: chrono_tz::Tz = if zone_name.trim().is_empty() {
+            iana_time_zone::get_timezone().ok().and_then(|z| z.parse().ok()).unwrap_or(chrono_tz::UTC)
+        } else {
+            zone_name.trim().parse().map_err(|_| NodeError::failed(format!("\"{zone_name}\" is not a time zone")))?
+        };
+        let raw = text(params, "atTime");
+        let moment = if raw.trim().is_empty() {
+            chrono::Utc::now()
+        } else {
+            chrono::DateTime::parse_from_rfc3339(raw.trim())
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .or_else(|_| until_instant(raw.trim()).map_err(|_| ()))
+                .map_err(|_| NodeError::failed(format!("\"{raw}\" is not a date and time")))?
+        };
+        let local = moment.with_timezone(&zone);
+        let days = crate::flows::holidays::workdays_from(&super::strings(params, "days"));
+        let parse_hm = |name: &str, fallback: (u32, u32)| -> (u32, u32) {
+            let value = text(params, name);
+            value.trim().split_once(':').and_then(|(h, m)| Some((h.trim().parse().ok()?, m.trim().parse().ok()?))).unwrap_or(fallback)
+        };
+        let (from_h, from_m) = parse_hm("workFrom", (9, 0));
+        let (to_h, to_m) = parse_hm("workTo", (18, 0));
+        let minute = local.hour() * 60 + local.minute();
+        let (from, to) = (from_h * 60 + from_m, to_h * 60 + to_m);
+        // A shift across midnight (22:00–06:00) is in hours on either side of it.
+        let in_time = if from <= to { minute >= from && minute < to } else { minute >= from || minute < to };
+        let in_day = days.contains(&local.weekday());
+        let mut holiday = false;
+        if super::flag(params, "skipHolidays") {
+            let country = crate::flows::holidays::country_code(&text(params, "holidayCountry")).map_err(NodeError::failed)?;
+            let holidays = crate::flows::holidays::for_year(&country, local.year()).await;
+            holiday = holidays.contains(&local.date_naive());
+        }
+        let ok = in_time && in_day && !holiday;
+        let reason = if holiday { "holiday" } else if !in_day { "dayOff" } else if !in_time { "afterHours" } else { "inHours" };
+        let mut json = items.get(index).map(|i| i.json.clone()).unwrap_or(json!({}));
+        if !json.is_object() {
+            json = json!({"value": json});
+        }
+        json["businessHours"] = json!({"inHours": ok, "reason": reason, "at": local.to_rfc3339()});
+        let item = if items.is_empty() { Item::new(json) } else { Item::paired(json, index) };
+        if ok {
+            inside.push(item);
+        } else {
+            outside.push(item);
+        }
+    }
+    Ok(vec![inside, outside])
+}
+
+/// «Comprobar»: every item must meet the conditions — the run fails, naming the first one that does
+/// not, otherwise the items pass on untouched. What a flow's test checks.
+async fn assert(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let verdicts = test_items(ctx).await?;
+    if let Some(index) = verdicts.iter().position(|ok| !ok) {
+        let params = ctx.resolve_once().await?;
+        let message = text(&params, "assertMessage");
+        let message = if message.trim().is_empty() { "A condition was not met".to_string() } else { message };
+        return Err(NodeError::failed(format!("{message} (item {})", index + 1)));
+    }
+    Ok(vec![ctx.passthrough()])
 }
 
 // ------------------------------------------------------------------------------------- rate limit

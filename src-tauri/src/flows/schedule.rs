@@ -35,6 +35,8 @@ pub enum Schedule {
     /// Every `step` from midnight in `zone`.
     Every { step: Duration, zone: Tz },
     Cron { cron: Box<Cron>, zone: Tz },
+    /// One moment, once («Una sola vez»).
+    Once { at: DateTime<Utc> },
 }
 
 const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -62,6 +64,14 @@ pub fn zone_of(params: &Value, flow_zone: Option<&str>) -> Result<Tz, String> {
 pub fn parse_all(params: &Value, flow_zone: Option<&str>) -> Result<Vec<Schedule>, String> {
     let zone = zone_of(params, flow_zone)?;
     match text(params, "mode").as_str() {
+        "once" => {
+            let raw = text(params, "onceAt");
+            if raw.is_empty() {
+                return Err("Write the date and time to run at".into());
+            }
+            let at = once_instant(&raw, zone).ok_or_else(|| format!("\"{raw}\" is not a date and time (YYYY-MM-DD HH:MM)"))?;
+            Ok(vec![Schedule::Once { at }])
+        }
         "cron" => {
             let expression = text(params, "cron");
             if expression.is_empty() {
@@ -123,10 +133,32 @@ pub fn parse_all(params: &Value, flow_zone: Option<&str>) -> Result<Vec<Schedule
     }
 }
 
+/// `2026-12-24 09:00` (or with seconds, a `T`, or an offset of its own) as an instant, read in `zone`.
+pub fn once_instant(raw: &str, zone: Tz) -> Option<DateTime<Utc>> {
+    let raw = raw.trim();
+    if let Ok(at) = DateTime::parse_from_rfc3339(raw) {
+        return Some(at.with_timezone(&Utc));
+    }
+    ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d-%m-%Y %H:%M", "%d/%m/%Y %H:%M"]
+        .iter()
+        .find_map(|format| chrono::NaiveDateTime::parse_from_str(raw, format).ok())
+        .and_then(|local| zone.from_local_datetime(&local).earliest())
+        .map(|at| at.with_timezone(&Utc))
+}
+
+/// The zone a schedule reads its days in — the holidays' calendar.
+pub fn zone_of_schedule(schedules: &[Schedule]) -> Option<Tz> {
+    schedules.iter().find_map(|s| match s {
+        Schedule::Every { zone, .. } | Schedule::Cron { zone, .. } => Some(*zone),
+        Schedule::Once { .. } => None,
+    })
+}
+
 impl Schedule {
     /// The first occurrence strictly after `after`.
     pub fn next_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
         match self {
+            Schedule::Once { at } => (*at > after).then_some(*at),
             Schedule::Every { step, zone } => {
                 let local = after.with_timezone(zone);
                 let midnight = zone
@@ -250,7 +282,22 @@ pub fn decide(schedules: &[Schedule], pending: DateTime<Utc>, now: DateTime<Utc>
 /// A short human sentence for a schedule, for the Programación view and the node's subtitle.
 pub fn describe(params: &Value, spanish: bool) -> String {
     let mode = text(params, "mode");
-    match mode.as_str() {
+    let holidays = params.get("skipHolidays").and_then(Value::as_bool) == Some(true) && mode != "once";
+    let said = describe_when(params, &mode, spanish);
+    if holidays {
+        let country = text(params, "holidayCountry");
+        let country = if country.is_empty() { "CL".to_string() } else { country.to_uppercase() };
+        return if spanish { format!("{said}, sin feriados ({country})") } else { format!("{said}, not on holidays ({country})") };
+    }
+    said
+}
+
+fn describe_when(params: &Value, mode: &str, spanish: bool) -> String {
+    match mode {
+        "once" => {
+            let at = text(params, "onceAt");
+            if spanish { format!("una vez, {at}") } else { format!("once, {at}") }
+        }
         "cron" => text(params, "cron"),
         "times" => {
             let times: Vec<String> = params
@@ -454,4 +501,16 @@ mod tests {
             "lun–vie a las 09:00"
         );
     }
+
+    #[test]
+    fn once_fires_once_in_its_zone() {
+        let s = parse_all(&params(json!({"mode": "once", "onceAt": "2026-12-24 09:00", "timezone": "America/Santiago"})), None).unwrap();
+        // Santiago is UTC−3 in December (summer time).
+        assert_eq!(next_of(&s, utc("2026-12-01T00:00:00Z")), Some(utc("2026-12-24T12:00:00Z")));
+        assert_eq!(next_of(&s, utc("2026-12-24T12:00:00Z")), None, "and never again");
+        assert!(parse_all(&params(json!({"mode": "once", "onceAt": "mañana"})), None).is_err());
+        assert!(describe(&params(json!({"mode": "once", "onceAt": "2026-12-24 09:00"})), true).starts_with("una vez"));
+        assert!(describe(&params(json!({"mode": "times", "at": ["09:00"], "skipHolidays": true, "holidayCountry": "cl"})), true).ends_with("sin feriados (CL)"));
+    }
+
 }

@@ -178,9 +178,31 @@ pub async fn ai_quota_status(
 
     let providers = crate::ai_quota::fetch_all(engines, trigger).await;
     // Every reading is offered to the flows that wait on a plan filling up ("Evento de CodeFlow");
-    // the trigger's own threshold, once per window, decides (`flows::triggers::app_event`).
+    // the trigger's own threshold, once per window, decides (`flows::triggers::app_event`). A window
+    // that moved on — a later reset instant, and less of it used — is a plan that renewed.
+    static WINDOWS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (f64, String)>>> =
+        std::sync::LazyLock::new(Default::default);
     for provider in &providers {
         for limit in &provider.limits {
+            let key = format!("{}|{}|{}|{}", provider.provider, provider.account_id.clone().unwrap_or_default(), limit.kind, limit.scope);
+            let before = WINDOWS.lock().ok().and_then(|mut windows| windows.insert(key, (limit.used_percent, limit.resets_at.clone())));
+            if let Some((used_before, resets_before)) = before {
+                if !resets_before.is_empty() && limit.resets_at != resets_before && limit.used_percent < used_before {
+                    crate::flows::triggers::app_event(
+                        &app,
+                        "aiQuotaReset",
+                        serde_json::json!({
+                            "provider": provider.provider,
+                            "plan": provider.plan,
+                            "kind": limit.kind,
+                            "scope": limit.scope,
+                            "usedPercent": limit.used_percent,
+                            "usedBefore": used_before,
+                            "resetsAt": limit.resets_at,
+                        }),
+                    );
+                }
+            }
             crate::flows::triggers::app_event(
                 &app,
                 "aiQuotaHigh",

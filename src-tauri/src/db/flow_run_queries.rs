@@ -33,10 +33,13 @@ pub struct FlowRunRow {
     /// `flows:run` event for runs nobody started by hand; not a column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<String>,
+    /// What the run filed about itself with «Datos de la ejecución» — `{}` when nothing.
+    #[serde(default)]
+    pub custom_data: Value,
 }
 
 const RUN_COLUMNS: &str = "id, flow_id, workspace_id, flow_name, flow_version, mode, trigger_node, target_node, \
-     status, error, error_node, started_at, finished_at, duration_ms, data_bytes";
+     status, error, error_node, started_at, finished_at, duration_ms, data_bytes, custom_data";
 
 fn run_row(row: &Row<'_>) -> rusqlite::Result<FlowRunRow> {
     Ok(FlowRunRow {
@@ -56,6 +59,10 @@ fn run_row(row: &Row<'_>) -> rusqlite::Result<FlowRunRow> {
         duration_ms: row.get(13)?,
         data_bytes: row.get(14)?,
         notify: None,
+        custom_data: row
+            .get::<_, Option<String>>(15)?
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_else(|| Value::Object(Default::default())),
     })
 }
 
@@ -104,7 +111,7 @@ const RUN_NODE_COLUMNS: &str = "run_id, node_id, node_name, node_type, status, s
 
 pub fn insert_run(conn: &Connection, run: &FlowRunRow) -> rusqlite::Result<()> {
     conn.execute(
-        &format!("INSERT INTO flow_runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"),
+        &format!("INSERT INTO flow_runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"),
         params![
             run.id,
             run.flow_id,
@@ -120,7 +127,8 @@ pub fn insert_run(conn: &Connection, run: &FlowRunRow) -> rusqlite::Result<()> {
             run.started_at,
             run.finished_at,
             run.duration_ms,
-            run.data_bytes
+            run.data_bytes,
+            if run.custom_data.is_object() { run.custom_data.to_string() } else { "{}".to_string() }
         ],
     )?;
     Ok(())
@@ -174,6 +182,32 @@ pub fn upsert_run_node(conn: &Connection, node: &FlowRunNodeRow) -> rusqlite::Re
 }
 
 /// A flow's executions, newest first; `before` pages by `started_at`.
+/// A flow's runs whose filed data («Datos de la ejecución»), id or error holds `search`.
+pub fn search_runs(conn: &Connection, flow_id: &str, search: &str, limit: i64, before: Option<&str>) -> rusqlite::Result<Vec<FlowRunRow>> {
+    let pattern = format!("%{}%", search.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let mut statement = conn.prepare(&format!(
+        "SELECT {RUN_COLUMNS} FROM flow_runs
+         WHERE flow_id = ?1 AND (?2 IS NULL OR started_at < ?2)
+           AND (custom_data LIKE ?4 ESCAPE '\\' OR error LIKE ?4 ESCAPE '\\' OR id = ?5)
+         ORDER BY started_at DESC LIMIT ?3"
+    ))?;
+    let rows = statement.query_map(params![flow_id, before, limit, pattern, search.trim()], run_row)?;
+    rows.collect()
+}
+
+/// Merges `fields` into what a run filed about itself.
+pub fn add_custom_data(conn: &Connection, run_id: &str, fields: &serde_json::Map<String, Value>) -> rusqlite::Result<Value> {
+    let current: Option<String> = conn.query_row("SELECT custom_data FROM flow_runs WHERE id = ?1", [run_id], |row| row.get(0)).optional()?;
+    let mut data = current.and_then(|text| serde_json::from_str::<Value>(&text).ok()).filter(Value::is_object).unwrap_or_else(|| Value::Object(Default::default()));
+    if let Value::Object(map) = &mut data {
+        for (key, value) in fields {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+    conn.execute("UPDATE flow_runs SET custom_data = ?2 WHERE id = ?1", params![run_id, data.to_string()])?;
+    Ok(data)
+}
+
 pub fn list_runs(conn: &Connection, flow_id: &str, limit: i64, before: Option<&str>) -> rusqlite::Result<Vec<FlowRunRow>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {RUN_COLUMNS} FROM flow_runs
@@ -952,6 +986,7 @@ mod tests {
             duration_ms: None,
             data_bytes: 0,
             notify: None,
+            custom_data: Value::Object(Default::default()),
         }
     }
 

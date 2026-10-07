@@ -188,9 +188,11 @@ async fn telegram(
     let get = |url: String| {
         let http = http.clone();
         async move {
-            let response = http.get(&url).send().await.map_err(|e| format!("Telegram: {e}"))?;
+            // `without_url`: the URL carries the bot's token (`/bot<token>/…`), and reqwest's errors
+            // quote it — into the Programación card and the log.
+            let response = http.get(&url).send().await.map_err(|e| format!("Telegram: {}", e.without_url()))?;
             let status = response.status();
-            let body: Value = response.json().await.map_err(|e| format!("Telegram answered something that is not JSON: {e}"))?;
+            let body: Value = response.json().await.map_err(|e| format!("Telegram answered something that is not JSON: {}", e.without_url()))?;
             if status.as_u16() == 409 {
                 return Err("This bot has a webhook set, and Telegram allows one or the other: remove it (deleteWebhook) to use it from here".to_string());
             }

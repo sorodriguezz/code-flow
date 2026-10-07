@@ -146,6 +146,11 @@ pub const TABLES: &[&str] = &[
     "flow_repo_links",
     // The user's own flow templates: hang off nothing, and are as much a definition as a flow.
     "flow_templates",
+    // Flujos' own tables (the «Tabla de Flujos» node): a table hangs off a workspace, its rows off it.
+    "flow_data_tables",
+    "flow_data_rows",
+    // A flow's tests hang off the flow.
+    "flow_tests",
     // History, activity and agent work. Last because every one of them hangs off a project or a
     // workspace, and `agent_chain_steps` and `agent_chain_repos` hang off `agent_chains` in turn.
     "activity_log",
@@ -287,6 +292,11 @@ pub const CORE_TABLES: &[&str] = &[
     "flow_repo_links",
     // Templates saved from flows: worked out once, like the flows themselves.
     "flow_templates",
+    // What the flows wrote into their tables is data the user's automations depend on, like `flow_state`.
+    "flow_data_tables",
+    "flow_data_rows",
+    // A flow's tests are part of how it was made.
+    "flow_tests",
 ];
 
 /// The optional groups, in the order the panel lists them.

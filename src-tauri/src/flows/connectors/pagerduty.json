@@ -1,0 +1,205 @@
+{
+  "id": "pagerduty",
+  "name": "PagerDuty",
+  "group": "appsDevops",
+  "baseUrl": "https://api.pagerduty.com",
+  "auth": "headers",
+  "authHint": {
+    "es": "Una clave de API REST de PagerDuty como credencial Token",
+    "en": "A PagerDuty REST API key as a Token credential"
+  },
+  "tokenUrl": "https://support.pagerduty.com/main/docs/api-access-keys",
+  "test": {
+    "path": "/abilities",
+    "label": "PagerDuty · {{abilities.0}}"
+  },
+  "headers": {
+    "Authorization": "Token token={{secret}}",
+    "Accept": "application/vnd.pagerduty+json;version=2"
+  },
+  "errorField": "error.message",
+  "operations": [
+    {
+      "id": "listIncidents",
+      "name": {
+        "es": "Incidentes abiertos",
+        "en": "Open incidents"
+      },
+      "method": "GET",
+      "path": "/incidents",
+      "query": {
+        "statuses[]": "{{status}}",
+        "limit": "{{limit}}"
+      },
+      "fields": [
+        {
+          "name": "status",
+          "label": {
+            "es": "Estado (triggered, acknowledged, resolved)",
+            "en": "Status (triggered, acknowledged, resolved)"
+          },
+          "placeholder": "triggered",
+          "default": "triggered"
+        },
+        {
+          "name": "limit",
+          "label": {
+            "es": "Cuántos",
+            "en": "How many"
+          },
+          "placeholder": "25"
+        }
+      ],
+      "result": "incidents"
+    },
+    {
+      "id": "createIncident",
+      "name": {
+        "es": "Abrir un incidente",
+        "en": "Open an incident"
+      },
+      "method": "POST",
+      "path": "/incidents",
+      "headers": {
+        "From": "{{from}}"
+      },
+      "fields": [
+        {
+          "name": "from",
+          "label": {
+            "es": "Tu correo en PagerDuty",
+            "en": "Your PagerDuty email"
+          },
+          "required": true
+        },
+        {
+          "name": "serviceId",
+          "label": {
+            "es": "Servicio",
+            "en": "Service"
+          },
+          "required": true,
+          "lookup": {
+            "path": "/services",
+            "query": {
+              "limit": "100"
+            },
+            "result": "services",
+            "value": "id",
+            "label": "{{name}}"
+          }
+        },
+        {
+          "name": "title",
+          "label": {
+            "es": "Título",
+            "en": "Title"
+          },
+          "required": true
+        },
+        {
+          "name": "details",
+          "label": {
+            "es": "Detalle",
+            "en": "Details"
+          },
+          "multiline": true
+        },
+        {
+          "name": "urgency",
+          "label": {
+            "es": "Urgencia (high, low)",
+            "en": "Urgency (high, low)"
+          },
+          "placeholder": "high"
+        }
+      ],
+      "body": {
+        "incident": {
+          "type": "incident",
+          "title": "{{title}}",
+          "service": {
+            "id": "{{serviceId}}",
+            "type": "service_reference"
+          },
+          "urgency": "{{urgency}}",
+          "body": {
+            "$when": "details",
+            "type": "incident_body",
+            "details": "{{details}}"
+          }
+        }
+      },
+      "result": "incident"
+    },
+    {
+      "id": "updateIncident",
+      "name": {
+        "es": "Reconocer o resolver un incidente",
+        "en": "Acknowledge or resolve an incident"
+      },
+      "method": "PUT",
+      "path": "/incidents/{{incidentId}}",
+      "headers": {
+        "From": "{{from}}"
+      },
+      "fields": [
+        {
+          "name": "from",
+          "label": {
+            "es": "Tu correo en PagerDuty",
+            "en": "Your PagerDuty email"
+          },
+          "required": true
+        },
+        {
+          "name": "incidentId",
+          "label": {
+            "es": "Incidente (id)",
+            "en": "Incident (id)"
+          },
+          "required": true
+        },
+        {
+          "name": "status",
+          "label": {
+            "es": "Nuevo estado (acknowledged, resolved)",
+            "en": "New status (acknowledged, resolved)"
+          },
+          "required": true,
+          "placeholder": "resolved"
+        }
+      ],
+      "body": {
+        "incident": {
+          "type": "incident_reference",
+          "status": "{{status}}"
+        }
+      },
+      "result": "incident"
+    },
+    {
+      "id": "oncalls",
+      "name": {
+        "es": "Quién está de turno",
+        "en": "Who is on call"
+      },
+      "method": "GET",
+      "path": "/oncalls",
+      "query": {
+        "limit": "{{limit}}"
+      },
+      "fields": [
+        {
+          "name": "limit",
+          "label": {
+            "es": "Cuántos",
+            "en": "How many"
+          },
+          "placeholder": "25"
+        }
+      ],
+      "result": "oncalls"
+    }
+  ]
+}

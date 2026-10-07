@@ -282,6 +282,7 @@ pub fn flows_set_active(app: AppHandle, db: State<Db>, id: String, active: bool)
     }
     let parsed = spec::parse(&row.spec)?;
     triggers::validate(&app, &id, &parsed)?;
+    triggers::check_switch_on(&parsed)?;
     let meta = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         flow_queries::set_active(&conn, &id, true).map_err(|e| e.to_string())?
@@ -981,9 +982,20 @@ pub fn flows_active_runs(db: State<Db>, workspace_id: String) -> Result<Vec<Flow
 }
 
 #[tauri::command]
-pub fn flows_list_runs(db: State<Db>, flow_id: String, limit: Option<i64>, before: Option<String>) -> Result<Vec<FlowRunRow>, String> {
+pub fn flows_list_runs(
+    db: State<Db>,
+    flow_id: String,
+    limit: Option<i64>,
+    before: Option<String>,
+    search: Option<String>,
+) -> Result<Vec<FlowRunRow>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    flow_run_queries::list_runs(&conn, &flow_id, limit.unwrap_or(50).clamp(1, 500), before.as_deref()).map_err(|e| e.to_string())
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    match search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(search) => flow_run_queries::search_runs(&conn, &flow_id, search, limit, before.as_deref()),
+        None => flow_run_queries::list_runs(&conn, &flow_id, limit, before.as_deref()),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// How a flow has been doing over its last `days` (of the executions kept): counts, timings, a bar
@@ -1152,6 +1164,349 @@ pub async fn flows_preview_expression(
         Ok(value) => json!({"ok": true, "value": value["value"], "type": value["type"], "items": items.len()}),
         Err(error) => json!({"ok": false, "error": error.to_string(), "items": items.len()}),
     })
+}
+
+/// What «Transformar con IA» is told before it writes: the Code node's world, and what it may not
+/// reach for.
+const TRANSFORM_SYSTEM: &str = "Escribes el cuerpo de una función JavaScript asíncrona para el nodo «Código» de CodeFlow Flujos.\n\
+- Variables disponibles: `items` (todos los ítems de entrada, cada uno `{ json }`), `$input.all()` y `$input.first()` (lo mismo, \
+como función), `$json` (el json del primer ítem), `$vars` (variables del espacio), `$now` y `DateTime` (Luxon), `console.log`.\n\
+- Termina con `return` de un arreglo: cada elemento es un ítem de salida, `{ json: {...} }` o el objeto plano.\n\
+- Sin `import` ni `require`, sin red ni archivos, sin `eval`: solo transformar los datos que llegan.\n\
+- Tolera campos ausentes (`?.`, valores por defecto) y no supongas un orden que los datos no muestren.\n\
+- Responde SOLO el JSON pedido: `code` (el cuerpo de la función, sin envoltorio ni bloque de código) y `summary` (una frase \
+de lo que hace, en el idioma de la petición).";
+
+fn transform_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"code": {"type": "string"}, "summary": {"type": "string"}},
+        "required": ["code", "summary"],
+        "additionalProperties": false,
+    })
+}
+
+/// The answer's code without the fence a model wraps it in anyway.
+fn bare_code(code: &str) -> String {
+    let trimmed = code.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else { return trimmed.to_string() };
+    let rest = rest.split_once('\n').map(|(_, body)| body).unwrap_or("");
+    rest.trim_end().trim_end_matches("```").trim().to_string()
+}
+
+/// «Generar código» of «Transformar con IA»: the model writes the JavaScript from the description
+/// and a sample of the node's input in the flow's newest run; it is run once against that input
+/// before it is handed back, and a failure goes back to the model once. **Nothing is saved**: the
+/// inspector puts the code in the node, where the user reads it before the flow runs it.
+#[tauri::command]
+pub async fn flows_ai_transform_code(
+    app: AppHandle,
+    db: State<'_, Db>,
+    flow_id: String,
+    node_id: String,
+    spec: Option<String>,
+    run_id: Option<String>,
+) -> Result<Value, String> {
+    let (parsed, newest, workspace_id, vars, locale, flow_name) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let flow = flow_queries::get_flow(&conn, &flow_id).map_err(|e| e.to_string())?.ok_or("This flow no longer exists")?;
+        let parsed = spec::parse(&spec.unwrap_or_else(|| flow.spec.clone()))?;
+        let newest = flow_run_queries::list_runs(&conn, &flow_id, 1, None).map_err(|e| e.to_string())?;
+        let vars = flow_run_queries::variables_map(&conn, &flow.meta.workspace_id).map_err(|e| e.to_string())?;
+        let language = crate::db::queries::get_setting(&conn, "app_language").ok().flatten();
+        let locale = if language.as_deref() == Some("es") { "es" } else { "en-US" };
+        (parsed, newest.first().map(|run| run.id.clone()), flow.meta.workspace_id.clone(), vars, locale.to_string(), flow.meta.name)
+    };
+    let node = parsed.nodes.iter().find(|n| n.id == node_id).cloned().ok_or("No such node")?;
+    let goal = node.params.get("transformGoal").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    if goal.is_empty() {
+        return Err("Describe the change first".into());
+    }
+    let current = node.params.get("code").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let engine: crate::flows::engine::EngineChoice = node.params.get("engine").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let spec = Arc::new(parsed);
+    let source = newest.clone();
+    let lookup_node = node_id.clone();
+    let (worker, items) = tauri::async_runtime::spawn_blocking(move || -> Result<(ExprWorker, Vec<Value>), String> {
+        let mut stored = runs::StoredRun::new(source.as_deref().unwrap_or("none"), spec);
+        let input = if source.is_some() { stored.input_of(&lookup_node) } else { Default::default() };
+        let items: Vec<Value> = input.inputs.iter().flatten().map(|item| item.json.clone()).collect();
+        Ok((ExprWorker::start(Arc::new(stored), &locale)?, items))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let mut sample = serde_json::to_string_pretty(&items.iter().take(5).collect::<Vec<_>>()).unwrap_or_default();
+    if sample.chars().count() > 6_000 {
+        sample = sample.chars().take(6_000).collect::<String>() + "\n… (cortado)";
+    }
+    let mut data = if items.is_empty() {
+        "Todavía no hay una ejecución con datos de entrada para este nodo: escribe el código según la descripción.".to_string()
+    } else {
+        format!("Hay {} ítems de entrada. Los primeros:\n{sample}", items.len())
+    };
+    if !current.is_empty() {
+        data.push_str(&format!("\n\nEl código actual del nodo, para modificarlo en vez de empezar de cero:\n{current}"));
+    }
+    let ask = format!("Escribe el código para esto: {goal}");
+    let schema = transform_schema();
+    let test = |code: String| {
+        let job = json!({
+            "kind": "code",
+            "mode": "all",
+            "code": code,
+            "items": items,
+            "context": {
+                "node": node.name,
+                "flow": {"id": flow_id, "name": flow_name, "active": false},
+                "execution": {"id": newest.clone().unwrap_or_default(), "mode": "manual"},
+                "vars": vars,
+                "timezone": Value::Null,
+                "workspace": workspace_id,
+            }
+        });
+        let worker = &worker;
+        async move { worker.run(&job, std::time::Duration::from_secs(10)).await }
+    };
+    let read = |text: &str| -> Result<(String, String), String> {
+        let answer: Value = serde_json::from_str(text.trim()).map_err(|_| "The model did not answer with the code".to_string())?;
+        let code = bare_code(answer.get("code").and_then(Value::as_str).unwrap_or_default());
+        if code.is_empty() {
+            return Err("The model answered without code".into());
+        }
+        Ok((code, answer.get("summary").and_then(Value::as_str).unwrap_or_default().trim().to_string()))
+    };
+
+    let first = crate::flows::ai_host::ask_outside(&app, &workspace_id, &engine, TRANSFORM_SYSTEM, &ask, &data, &schema, run_id.clone()).await?;
+    let (mut code, mut summary) = read(&first)?;
+    let mut outcome = test(code.clone()).await;
+    if let Err(error) = &outcome {
+        let again = format!("{data}\n\nTu código anterior falló al probarlo con esos ítems:\n{error}\n\nCódigo anterior:\n{code}\n\nCorrígelo.");
+        let second = crate::flows::ai_host::ask_outside(&app, &workspace_id, &engine, TRANSFORM_SYSTEM, &ask, &again, &schema, run_id).await?;
+        (code, summary) = read(&second)?;
+        outcome = test(code.clone()).await;
+    }
+    Ok(match outcome {
+        Ok(result) => {
+            let produced: Vec<Value> = result.get("items").and_then(Value::as_array).into_iter().flatten().map(|item| item["json"].clone()).collect();
+            json!({"code": code, "summary": summary, "tested": !items.is_empty(), "inputCount": items.len(), "outputCount": produced.len(), "preview": produced.into_iter().take(5).collect::<Vec<_>>()})
+        }
+        Err(error) => json!({"code": code, "summary": summary, "tested": !items.is_empty(), "inputCount": items.len(), "error": error.to_string()}),
+    })
+}
+
+// ---------- tests («Pruebas») ----------
+
+#[tauri::command]
+pub fn flows_tests_list(db: State<Db>, flow_id: String) -> Result<Vec<crate::flows::testing::FlowTest>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::testing::list(&conn, &flow_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn flows_test_save(db: State<Db>, test: crate::flows::testing::FlowTest) -> Result<crate::flows::testing::FlowTest, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::testing::save(&conn, &test)
+}
+
+#[tauri::command]
+pub fn flows_test_delete(db: State<Db>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::testing::delete(&conn, &id).map_err(|e| e.to_string())
+}
+
+/// Runs a flow's tests one after another — `ids`, or all of them.
+#[tauri::command]
+pub async fn flows_tests_run(app: AppHandle, db: State<'_, Db>, flow_id: String, ids: Option<Vec<String>>) -> Result<Vec<crate::flows::testing::TestOutcome>, String> {
+    let tests = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::flows::testing::list(&conn, &flow_id).map_err(|e| e.to_string())?
+    };
+    let wanted: Vec<_> = tests.iter().filter(|t| ids.as_ref().is_none_or(|ids| ids.contains(&t.id))).collect();
+    let mut out = Vec::with_capacity(wanted.len());
+    for test in wanted {
+        out.push(crate::flows::testing::run(&app, test).await);
+    }
+    Ok(out)
+}
+
+// ---------- «Mis nodos» ----------
+
+/// Flows published as nodes: their «Llamado por otro flujo» trigger says «Publicar como nodo». The
+/// palette offers each one as an «Ejecutar flujo» node set to send its inputs.
+#[tauri::command]
+pub fn flows_published_nodes(db: State<Db>, workspace_id: String) -> Result<Vec<Value>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let tree = flow_queries::load_tree(&conn, &workspace_id).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for meta in tree.flows.iter().filter(|meta| meta.trigger_types.contains("trigger.subflow")) {
+        let Some(row) = flow_queries::get_flow(&conn, &meta.id).map_err(|e| e.to_string())? else { continue };
+        let Ok(parsed) = spec::parse(&row.spec) else { continue };
+        let Some(entry) = parsed.nodes.iter().find(|n| n.type_id == "trigger.subflow" && !n.disabled) else { continue };
+        let params = params::with_defaults(&entry.type_id, &entry.params);
+        if params.get("publishAsNode").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        out.push(json!({
+            "flowId": row.meta.id,
+            "name": row.meta.name,
+            "icon": params.get("nodeIcon").and_then(Value::as_str).unwrap_or("box"),
+            "description": params.get("nodeDescription").and_then(Value::as_str).filter(|d| !d.trim().is_empty()).unwrap_or(&row.meta.description),
+            "fields": crate::flows::form::fields_of(&params),
+            "scope": row.meta.scope,
+        }));
+    }
+    out.sort_by(|a, b| a["name"].as_str().unwrap_or_default().to_lowercase().cmp(&b["name"].as_str().unwrap_or_default().to_lowercase()));
+    Ok(out)
+}
+
+// ---------- right-click entries and chat flows ----------
+
+/// What active flows offer on a right click at `place` (`file`, `folder`, `selection`, `commit`,
+/// `pr`) — for a file, the entries whose pattern its name matches.
+#[tauri::command]
+pub fn flows_context_entries(workspace_id: String, place: String, path: Option<String>) -> Vec<triggers::ContextEntry> {
+    triggers::context_entries(&workspace_id, &place, path.as_deref())
+}
+
+#[tauri::command]
+pub fn flows_context_run(app: AppHandle, flow_id: String, node_id: String, payload: Value) -> Result<Value, String> {
+    triggers::fire_context(&app, &flow_id, &node_id, payload)
+}
+
+/// The flows the Chat app can talk to.
+#[tauri::command]
+pub fn flows_chat_assistants(workspace_id: String) -> Vec<triggers::ChatAssistant> {
+    triggers::chat_assistants(&workspace_id)
+}
+
+/// One message to a chat flow; its answer, as text.
+#[tauri::command]
+pub async fn flows_chat_turn(app: AppHandle, flow_id: String, message: String, history: Vec<Value>, conversation_id: Option<String>) -> Result<Value, String> {
+    // No conversation row behind this door, so no workspace to hold the flow to and no Stop to obey.
+    triggers::chat_turn(&app, &flow_id, &message, history, conversation_id.as_deref().unwrap_or_default(), "", std::future::pending()).await
+}
+
+// ---------- tables («Tablas») ----------
+
+#[tauri::command]
+pub fn flows_tables_list(db: State<Db>, workspace_id: String) -> Result<Vec<crate::flows::tables::TableInfo>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::tables::list(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn flows_table_create(db: State<Db>, workspace_id: String, name: String) -> Result<crate::flows::tables::TableInfo, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::tables::create(&conn, &workspace_id, &name)
+}
+
+#[tauri::command]
+pub fn flows_table_rename(db: State<Db>, table_id: String, name: String) -> Result<crate::flows::tables::TableInfo, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::tables::rename(&conn, &table_id, &name)
+}
+
+#[tauri::command]
+pub fn flows_table_delete(db: State<Db>, table_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::tables::delete(&conn, &table_id).map_err(|e| e.to_string())
+}
+
+/// A page of a table's rows, with the total that matches `search`.
+#[tauri::command]
+pub fn flows_table_rows(
+    db: State<Db>,
+    table_id: String,
+    offset: Option<i64>,
+    limit: Option<i64>,
+    search: Option<String>,
+) -> Result<Value, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let table = crate::flows::tables::get(&conn, &table_id).map_err(|e| e.to_string())?.ok_or("This table no longer exists")?;
+    let (rows, total) = crate::flows::tables::rows(&conn, &table_id, offset.unwrap_or(0), limit.unwrap_or(200), search.as_deref()).map_err(|e| e.to_string())?;
+    Ok(json!({"table": table, "rows": rows, "total": total}))
+}
+
+/// A row as the grid edits it: its whole data, under its key (`previous_key` when the key itself
+/// was changed).
+#[tauri::command]
+pub fn flows_table_put_row(
+    db: State<Db>,
+    table_id: String,
+    key: String,
+    data: Value,
+    previous_key: Option<String>,
+) -> Result<Option<crate::flows::tables::RowView>, String> {
+    use crate::flows::tables::{put, rename_row, Write};
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    let key = key.trim();
+    // One transaction, so a write refused halfway (a key too long, a row too big) leaves the table as
+    // it was instead of a renamed row's old key deleted and its data nowhere.
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let written = match previous_key.as_deref() {
+        // «Agregar fila»: the key must be free. A Replace here wiped whatever row already had it.
+        None => put(&tx, &table_id, Some(key), &data, Write::Insert)?,
+        Some(previous) => {
+            if previous != key {
+                rename_row(&tx, &table_id, previous, key)?;
+            }
+            put(&tx, &table_id, Some(key), &data, Write::Replace)?
+        }
+    };
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(written)
+}
+
+#[tauri::command]
+pub fn flows_table_delete_rows(db: State<Db>, table_id: String, keys: Vec<String>) -> Result<usize, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut deleted = 0;
+    for key in keys {
+        if crate::flows::tables::delete_row(&conn, &table_id, &key).map_err(|e| e.to_string())? {
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+#[tauri::command]
+pub fn flows_table_clear(db: State<Db>, table_id: String) -> Result<usize, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::tables::clear(&conn, &table_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn flows_table_drop_column(db: State<Db>, table_id: String, column: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::tables::drop_column(&conn, &table_id, &column)
+}
+
+#[tauri::command]
+pub fn flows_table_set_columns(db: State<Db>, table_id: String, columns: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::flows::tables::set_columns(&conn, &table_id, &columns)
+}
+
+/// Rows from a file the window read (CSV or JSON): each one's key from `key_field`, or a new one.
+/// One transaction, so a bad row leaves the table as it was.
+#[tauri::command]
+pub fn flows_table_import(db: State<Db>, table_id: String, rows: Vec<Value>, key_field: Option<String>) -> Result<usize, String> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let field = key_field.as_deref().map(str::trim).filter(|f| !f.is_empty());
+    let mut written = 0;
+    for (index, row) in rows.iter().enumerate() {
+        let key = field.and_then(|f| row.get(f)).map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+        let how = if key.is_some() { crate::flows::tables::Write::Upsert } else { crate::flows::tables::Write::Insert };
+        crate::flows::tables::put(&tx, &table_id, key.as_deref(), row, how).map_err(|e| format!("Row {}: {e}", index + 1))?;
+        written += 1;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(written)
 }
 
 // ---------- pinned output ----------

@@ -143,6 +143,34 @@ pub fn defaults(fields: &[FormField]) -> Result<Value, String> {
     coerce(fields, &Value::Object(Map::new()))
 }
 
+/// The triggers whose `fields` are asked like a manual trigger's when a person runs the flow by hand:
+/// the web form, a subflow's declared inputs and a tool's arguments.
+pub fn asks(type_id: &str) -> bool {
+    matches!(type_id, "trigger.manual" | "trigger.form" | "trigger.subflow" | "trigger.tool")
+}
+
+/// An item of the fields' shape for a run nobody can ask — a step tried on the canvas: each default,
+/// and where a required field has none, a placeholder of its type (its label for text). `defaults`
+/// fails there instead, and a form whose «Nombre» is required could not be built past its trigger.
+pub fn sample(fields: &[FormField]) -> Value {
+    let mut out = Map::new();
+    for field in fields {
+        let value = match typed(field, &field.default) {
+            Ok(Some(value)) => value,
+            _ if field.kind == "boolean" => Value::Bool(false),
+            _ if !field.required => Value::Null,
+            _ => match field.kind.as_str() {
+                "number" => Value::from(0),
+                "select" => Value::String(field.options.first().cloned().unwrap_or_else(|| field.label.clone())),
+                "date" => Value::String(chrono::Local::now().format("%Y-%m-%d").to_string()),
+                _ => Value::String(field.label.clone()),
+            },
+        };
+        out.insert(field.name.clone(), value);
+    }
+    Value::Object(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +186,17 @@ mod tests {
             {"name": "", "type": "text"},
             {"name": "cliente", "type": "number"},
         ]}))
+    }
+
+    #[test]
+    fn a_sample_never_fails_and_keeps_each_type() {
+        let item = sample(&fields());
+        assert_eq!(item["cliente"], "Cliente", "required text without a default: its label");
+        assert_eq!(item["cantidad"], 3.0);
+        assert_eq!(item["urgente"], false);
+        assert_eq!(item["region"], "sur");
+        assert_eq!(item["desde"], Value::Null, "optional and blank stays blank");
+        assert!(defaults(&fields()).is_err(), "defaults still refuse the missing required field");
     }
 
     #[test]

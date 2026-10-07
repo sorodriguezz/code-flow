@@ -23,6 +23,8 @@ export interface PaletteEntry {
   preset?: Record<string, unknown>;
   /** A service mark (`appLogo`) to draw instead of the Lucide glyph. */
   logo?: string;
+  /** A Lucide glyph other than the node type's — a published flow's own («Mis nodos»). */
+  icon?: string;
   /** More words search should match: the service's id. */
   keywords?: string;
 }
@@ -132,4 +134,39 @@ export function paletteEntries(
     .map((e, index) => ({ e, index }))
     .sort((a, b) => families.indexOf(a.e.descriptor.family) - families.indexOf(b.e.descriptor.family) || headingRank(a.e) - headingRank(b.e) || a.index - b.index)
     .map(({ e }) => e);
+}
+
+/** A flow published as a node, as the palette needs it (`flows_published_nodes`). */
+export interface PublishedNode {
+  flowId: string;
+  name: string;
+  icon: string;
+  description: string;
+  fields: { name: string }[];
+}
+
+/**
+ * «Mis nodos»: each published flow as an «Ejecutar flujo» node already pointing at it — sending its
+ * declared inputs, one per field, when it declares any — at the head of the Logic family, where the
+ * node they are made of lives. The flow being edited is not offered to itself.
+ */
+export function publishedEntries(published: readonly PublishedNode[], subflow: FlowNodeDescriptor | undefined, editingFlowId: string): PaletteEntry[] {
+  if (!subflow) return [];
+  return published
+    .filter((node) => node.flowId !== editingFlowId)
+    .map((node) => ({
+      key: `${subflow.typeId}:${node.flowId}`,
+      descriptor: subflow,
+      name: node.name,
+      description: node.description,
+      group: "myNodes",
+      icon: node.icon,
+      keywords: "mis nodos my nodes",
+      preset: {
+        flow: node.flowId,
+        mode: "wait",
+        subflowInput: node.fields.length > 0 ? "sendInputs" : "sendItems",
+        inputs: Object.fromEntries(node.fields.map((field) => [field.name, ""])),
+      },
+    }));
 }

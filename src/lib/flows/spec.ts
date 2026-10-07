@@ -16,7 +16,7 @@ export const SPEC_SCHEMA = 1;
 /** The only node a cycle may pass through — `catalog::LOOP_TYPE`. */
 export const LOOP_TYPE = "logic.loop";
 /** `catalog::RUNS_THROUGH`: the last milestone whose nodes this build runs. */
-export const RUNS_THROUGH = 11;
+export const RUNS_THROUGH = 12;
 /** `spec::MAX_NAME`. */
 export const MAX_NODE_NAME = 120;
 

@@ -80,6 +80,11 @@ const handlers: Record<string, Handler> = {
     const { runSavedRequest } = await import("../api/savedRequest");
     return runSavedRequest(payload as Parameters<typeof runSavedRequest>[0], signal);
   },
+  /** A whole collection, in the runner's order (`app.apiCollection`). */
+  "api.collection": async (payload, signal) => {
+    const { runSavedCollection } = await import("../api/savedRequest");
+    return runSavedCollection(payload as Parameters<typeof runSavedCollection>[0], signal);
+  },
 };
 
 /** Registers another kind of question — the API client's requests register theirs from their own module. */

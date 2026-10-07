@@ -1,0 +1,149 @@
+{
+  "id": "googledocs",
+  "name": "Google Docs",
+  "group": "appsProjects",
+  "baseUrl": "https://docs.googleapis.com/v1",
+  "auth": "bearer",
+  "authHint": {
+    "es": "Un inicio de sesión de Google (OAuth) con permiso sobre Documentos",
+    "en": "A Google sign-in (OAuth) allowed to use Documents"
+  },
+  "oauth": {
+    "provider": "google",
+    "scopes": "openid email https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive.file"
+  },
+  "test": {
+    "url": "https://www.googleapis.com/oauth2/v3/userinfo",
+    "label": "{{email}}"
+  },
+  "errorField": "error.message",
+  "operations": [
+    {
+      "id": "getDocument",
+      "name": {
+        "es": "Leer un documento",
+        "en": "Read a document"
+      },
+      "method": "GET",
+      "path": "/documents/{{documentId}}",
+      "fields": [
+        {
+          "name": "documentId",
+          "label": {
+            "es": "Documento (id de la URL)",
+            "en": "Document (id from the URL)"
+          },
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "createDocument",
+      "name": {
+        "es": "Crear un documento",
+        "en": "Create a document"
+      },
+      "method": "POST",
+      "path": "/documents",
+      "fields": [
+        {
+          "name": "title",
+          "label": {
+            "es": "Título",
+            "en": "Title"
+          },
+          "required": true
+        }
+      ],
+      "body": {
+        "title": "{{title}}"
+      }
+    },
+    {
+      "id": "appendText",
+      "name": {
+        "es": "Agregar texto al final",
+        "en": "Append text"
+      },
+      "method": "POST",
+      "path": "/documents/{{documentId}}:batchUpdate",
+      "fields": [
+        {
+          "name": "documentId",
+          "label": {
+            "es": "Documento (id de la URL)",
+            "en": "Document (id from the URL)"
+          },
+          "required": true
+        },
+        {
+          "name": "text",
+          "label": {
+            "es": "Texto",
+            "en": "Text"
+          },
+          "multiline": true,
+          "required": true
+        }
+      ],
+      "body": {
+        "requests": [
+          {
+            "insertText": {
+              "endOfSegmentLocation": {},
+              "text": "{{text}}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "replaceText",
+      "name": {
+        "es": "Reemplazar texto",
+        "en": "Replace text"
+      },
+      "method": "POST",
+      "path": "/documents/{{documentId}}:batchUpdate",
+      "fields": [
+        {
+          "name": "documentId",
+          "label": {
+            "es": "Documento (id de la URL)",
+            "en": "Document (id from the URL)"
+          },
+          "required": true
+        },
+        {
+          "name": "find",
+          "label": {
+            "es": "Buscar",
+            "en": "Find"
+          },
+          "required": true,
+          "placeholder": "{{cliente}}"
+        },
+        {
+          "name": "replace",
+          "label": {
+            "es": "Reemplazar por",
+            "en": "Replace with"
+          }
+        }
+      ],
+      "body": {
+        "requests": [
+          {
+            "replaceAllText": {
+              "containsText": {
+                "text": "{{find}}",
+                "matchCase": true
+              },
+              "replaceText": "{{replace}}"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

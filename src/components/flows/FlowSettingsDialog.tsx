@@ -36,6 +36,7 @@ export function FlowSettingsDialog({ onClose }: { onClose: () => void }) {
   const [notifyOn, setNotifyOn] = useState(typeof settings.notifyOn === "string" ? settings.notifyOn : "failure");
   const [aiPerHour, setAiPerHour] = useState(typeof settings.aiPerHour === "number" ? String(settings.aiPerHour) : "60");
   const [skipOnBattery, setSkipOnBattery] = useState(settings.skipOnBattery === true);
+  const [settleSec, setSettleSec] = useState(typeof settings.settleSec === "number" ? String(settings.settleSec) : "0");
 
   const save = () => {
     const draft = useFlowsStore.getState().draft;
@@ -49,6 +50,9 @@ export function FlowSettingsDialog({ onClose }: { onClose: () => void }) {
     next.aiPerHour = Number.isFinite(cap) && cap >= 0 ? Math.min(cap, 10_000) : 60;
     if (skipOnBattery) next.skipOnBattery = true;
     else delete next.skipOnBattery;
+    const settle = Number.parseFloat(settleSec);
+    if (Number.isFinite(settle) && settle > 0) next.settleSec = Math.min(settle, 3_600);
+    else delete next.settleSec;
     useFlowsStore.getState().edit({ ...draft.spec, settings: next });
     onClose();
   };
@@ -110,6 +114,18 @@ export function FlowSettingsDialog({ onClose }: { onClose: () => void }) {
               size="sm"
             />
           </div>,
+        )}
+        {row(
+          t("flows.settingsDialog.settle"),
+          <input
+            type="number"
+            min={0}
+            max={3600}
+            className={fieldClass({ size: "sm", className: "w-32" })}
+            value={settleSec}
+            onChange={(event) => setSettleSec(event.target.value)}
+          />,
+          t("flows.settingsDialog.settleHint"),
         )}
         {row(
           t("flows.settingsDialog.notifyOn"),

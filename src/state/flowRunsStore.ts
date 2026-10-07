@@ -64,7 +64,7 @@ interface History {
   more: boolean;
 }
 
-export type FlowPane = "editor" | "executions" | "schedule";
+export type FlowPane = "editor" | "executions" | "tests" | "schedule" | "tables";
 
 interface FlowRunsState {
   /** Per flow: the run its canvas shows — the newest this window started, saw arrive, or loaded. */

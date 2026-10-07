@@ -39,6 +39,7 @@ import { renderFileTree, treeFileName } from "../../lib/fileTreeText";
 import { eventToChord, isTypingTarget } from "../../lib/keys";
 import { useExplorerClipboardStore, type ExplorerClipboardMode } from "../../state/explorerClipboardStore";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { ensureFlowContextEntries, flowMenuItems } from "../../state/flowContextStore";
 import { Tooltip } from "../common/Tooltip";
 import { iconButtonClass, Kbd } from "../common/Button";
 import { explorerHeadClass, explorerTitleClass } from "../common/recipes";
@@ -823,6 +824,9 @@ export function FileTree({
    *  it re-resolves every unfolded manifest at once. */
   const loadManager = usePackageManagerStore((s) => s.load);
 
+  // The right-click rows active flows add («Menú contextual»), followed from here on.
+  useEffect(() => ensureFlowContextEntries(), []);
+
   useEffect(() => {
     childrenRef.current = childrenByDir;
   }, [childrenByDir]);
@@ -1506,6 +1510,21 @@ export function FileTree({
             icon: ClipboardCopy,
             onClick: () => copyToClipboard(selectedPathsRef.current().join("\n")),
           },
+        );
+      }
+      // What active flows offer here («Menú contextual» triggers) — the file or folder as their item.
+      if (entry) {
+        const relative = entry.path;
+        const absolute = `${repoPath.replace(/[\\/]+$/, "")}/${relative}`;
+        items.push(
+          ...flowMenuItems(entry.is_dir ? "folder" : "file", relative, () => ({
+            path: absolute,
+            relativePath: relative,
+            name: relative.split("/").pop() ?? relative,
+            repoPath,
+            projectId: projectId ?? null,
+            paths: selectedPathsRef.current().map((path) => `${repoPath.replace(/[\\/]+$/, "")}/${path}`),
+          })),
         );
       }
       // A folder's, or the root's from the empty space — never a file's, which has no structure to

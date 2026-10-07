@@ -192,7 +192,7 @@ impl RunHost for Host {
         Box::pin(async move {
             self.script.local_calls.lock().unwrap().push(call);
             let text = self.script.next()?;
-            Ok(LocalAnswer { text, server: "ollama".into(), model: "qwen".into(), prompt_tokens: Some(7), completion_tokens: Some(3), cut: false })
+            Ok(LocalAnswer { text, server: "ollama".into(), model: "qwen".into(), prompt_tokens: Some(7), completion_tokens: Some(3), ..Default::default() })
         })
     }
     fn project_path(&self, project_id: &str) -> Result<String, String> {

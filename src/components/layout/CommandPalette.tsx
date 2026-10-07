@@ -8,6 +8,7 @@ import {
   CirclePlay,
   ClipboardList,
   Cloud,
+  Container,
   Database,
   Download,
   FolderGit2,
@@ -34,6 +35,7 @@ import {
 } from "lucide-react";
 import { canPasteJsonHere, pasteJsonInFocusedEditor } from "../editor/pasteJsonAsCode";
 import { fetchNow, pullNow, pushNow } from "../../lib/gitActions";
+import { ensureFlowContextEntries, flowEntriesFor, runFlowEntry, useFlowContextStore } from "../../state/flowContextStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { useMissingProjectsStore } from "../../state/missingProjectsStore";
@@ -166,8 +168,11 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
   const toggleDock = useTerminalStore((s) => s.toggleDock);
   const quickAskChord = useQuickAskHotkeyStore((s) => s.accelerator);
+  // Read so the list is rebuilt when the armed flows arrive — the rows themselves ask the store.
+  const folderFlows = useFlowContextStore((s) => s.entries.folder);
   useEffect(() => {
     void useQuickAskHotkeyStore.getState().load();
+    ensureFlowContextEntries();
   }, []);
 
   const items = useMemo<PaletteItem[]>(() => {
@@ -231,6 +236,13 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       },
       // Its own entry since the dock split into two panels (2026-09-30), the same toggle as its
       // button at the foot of the projects panel.
+      {
+        key: "view:containers",
+        icon: Container,
+        label: t("containers.title"),
+        group: "views" as const,
+        onSelect: () => toggleDock("containers"),
+      },
       {
         key: "view:services",
         icon: CirclePlay,
@@ -307,6 +319,20 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
         onSelect: () => void quickAskOpen().catch((e: unknown) => pushErrorToast(String(e))),
         keys: quickAskChord ? acceleratorKeycaps(quickAskChord, isMac()) : undefined,
       },
+      // Flows that act on a folder («Menú contextual» on a folder), on the repository that is open —
+      // the same run the file tree's right click on its root starts.
+      ...(() => {
+        const repo = projects.find((p) => p.id === useWorkspaceStore.getState().activeProjectId);
+        if (!repo) return [];
+        return flowEntriesFor("folder", repo.local_path).map((entry) => ({
+          key: `action:flow:${entry.flowId}:${entry.nodeId}`,
+          icon: Workflow,
+          label: `${entry.label} · ${repo.name}`,
+          group: "actions" as const,
+          onSelect: () =>
+            void runFlowEntry(entry, { place: "folder", path: repo.local_path, relativePath: "", name: repo.name, repoPath: repo.local_path, projectId: repo.id }),
+        }));
+      })(),
       // Where VS Code users look for it (⇧⌘P, "paste json"). Listed only with a file open in the
       // Editor — there is nothing to paste into anywhere else, and every row here has to do
       // something. Runs from this very click or Enter, which the clipboard read needs.
@@ -429,6 +455,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     toggleTerminalPanel,
     toggleDock,
     quickAskChord,
+    folderFlows,
   ]);
 
   const groups = SCOPE_GROUPS[scope];

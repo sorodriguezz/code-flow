@@ -18,7 +18,7 @@ component's own licence wins — which is what section 6 says.
 | What ships | Count |
 |---|---|
 | npm packages (production tree) | 343 resolved versions of 314 packages |
-| Rust crates (resolved for macOS and Windows) | 811 resolved versions of 710 crates |
+| Rust crates (resolved for macOS and Windows) | 814 resolved versions of 713 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 10 |
@@ -1221,10 +1221,12 @@ because there the order carries meaning.
 | `zip` | 4.6.1, 8.6.0 | MIT | <https://github.com/zip-rs/zip2> |
 | `zmij` | 1.0.23 | MIT | <https://github.com/dtolnay/zmij> |
 
-### Apache-2.0 — 23 crates
+### Apache-2.0 — 26 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
+| `ab_glyph` | 0.2.32 | Apache-2.0 | <https://github.com/alexheretic/ab-glyph> |
+| `ab_glyph_rasterizer` | 0.1.10 | Apache-2.0 | <https://github.com/alexheretic/ab-glyph> |
 | `backon` | 1.6.0 | Apache-2.0 | <https://github.com/Xuanwo/backon> |
 | `flagset` | 0.4.7 | Apache-2.0 | <https://github.com/enarx/flagset> |
 | `gethostname` | 1.1.0 | Apache-2.0 | <https://codeberg.org/swsnr/gethostname.rs> |
@@ -1236,6 +1238,7 @@ because there the order carries meaning.
 | `mongocrypt-sys` | 0.1.6+1.18.2 | Apache-2.0 | <https://github.com/mongodb/libmongocrypt-rust> |
 | `mongodb` | 3.8.0 | Apache-2.0 | <https://github.com/mongodb/mongo-rust-driver> |
 | `mongodb-internal-macros` | 3.8.0 | Apache-2.0 | <https://github.com/mongodb/mongo-rust-driver> |
+| `owned_ttf_parser` | 0.25.1 | Apache-2.0 | <https://github.com/alexheretic/owned-ttf-parser> |
 | `prost` | 0.14.4 | Apache-2.0 | <https://github.com/tokio-rs/prost> |
 | `prost-derive` | 0.14.4 | Apache-2.0 | <https://github.com/tokio-rs/prost> |
 | `prost-types` | 0.14.4 | Apache-2.0 | <https://github.com/tokio-rs/prost> |

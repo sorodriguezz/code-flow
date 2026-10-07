@@ -1,4 +1,5 @@
 import { useId, useMemo, type ReactNode } from "react";
+import { Workflow } from "lucide-react";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { BRAND_LOGOS, type BrandLogo } from "../../lib/icons/brandLogos";
 
@@ -79,6 +80,9 @@ export function ProviderGlyph({
   /** Applies to the fallback glyph as well, so a caller can tint the one and leave the other. */
   className?: string;
 }) {
+  // A thread answered by a flow («Asistente del Chat») is no engine's: it wears the flow's mark,
+  // the one its chip in the composer carries, rather than no mark at all.
+  if (providerId === "flow") return <Workflow size={size} className={`shrink-0 ${className}`} />;
   const Fallback = AI_PROVIDERS.find((provider) => provider.id === providerId)?.icon;
   return (
     <BrandGlyph

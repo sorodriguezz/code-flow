@@ -105,6 +105,14 @@ export function ChatView() {
   // is describing what the *next* one will start on, which is the workspace routing. Once a
   // conversation exists its own row wins — `chat_send` runs on that, not on the routing.
   const model = session.model || routedModel;
+  // A flow assistant picked before there is a conversation: the empty state has no row to point at
+  // it, so it is held here until the first message creates one (see `onSend`). A model picked in the
+  // chip meanwhile — which writes the routing — means the model, so it lets go of the flow.
+  const [pendingFlow, setPendingFlow] = useState<string | null>(null);
+  // And a flow is a workspace's own: switching workspace lets go of it too, or the first chat there
+  // would be answered by a flow the picker no longer even lists.
+  const activeWorkspace = useWorkspaceStore((s) => s.activeWorkspaceId);
+  useEffect(() => setPendingFlow(null), [routedProvider, routedModel, activeWorkspace]);
   /**
    * Two gates, and they answer different questions: does this CLI take the flag, and would the
    * model it is pointed at do anything with it. The first is fixed for a build and read once at
@@ -485,6 +493,25 @@ export function ChatView() {
    * The passage is carried **unquoted**. In a new chat it is the entire message and there is
    * nothing to distinguish it *from*; see `lib/quoteSelection`.
    */
+  /**
+   * A pick the open thread cannot take (see `ChatComposer`'s `onNewChatOn`): the empty state, holding
+   * it — a flow as the pending flow, a model as the routing the next chat starts on. `deselect`, not
+   * `create`, for the reason `onQuoteNewChat` gives: the first message mints the row.
+   */
+  const onNewChatOn = useCallback(
+    (nextProvider: string, nextModel: string) => {
+      deselect();
+      setEditingTurn(null);
+      if (nextProvider === "flow") {
+        setPendingFlow(nextModel);
+      } else {
+        setPendingFlow(null);
+        void useAiProviderStore.getState().setTaskRouting("chat", nextProvider, nextModel);
+      }
+    },
+    [deselect, setEditingTurn],
+  );
+
   const onQuoteNewChat = useCallback(
     (passage: string) => {
       deselect();
@@ -522,11 +549,13 @@ export function ChatView() {
         submit(activeId, message, over);
         return;
       }
-      void create(null, provider, routedModel).then((id) => {
+      // A flow picked on the empty state starts the conversation on it, and is spent doing so.
+      void create(null, pendingFlow ? "flow" : provider, pendingFlow ?? routedModel).then((id) => {
         if (id) send(id, message, over);
       });
+      setPendingFlow(null);
     },
-    [activeId, submit, send, create, provider, routedModel, setEditingTurn],
+    [activeId, submit, send, create, provider, routedModel, pendingFlow, setEditingTurn],
   );
 
   /**
@@ -791,11 +820,12 @@ export function ChatView() {
                 what creates the conversation, so the empty state is a place to start typing rather
                 than a place to press a button first. */}
             <ChatComposer
-              provider={provider}
-              model={model}
+              provider={pendingFlow ? "flow" : provider}
+              model={pendingFlow ?? model}
               effort={pendingEffort}
-              effortSupported={effortSupported}
+              effortSupported={effortSupported && !pendingFlow}
               onPickEffort={setPendingEffort}
+              onPickFlow={setPendingFlow}
               // The style `/caveman` left here for the conversation the first message will create.
               // Held rather than written, because there is no row yet — see `pendingCaveman`.
               caveman={{ level: pendingCaveman, levels: cavemanLevels, onPick: setPendingCaveman }}
@@ -852,6 +882,7 @@ export function ChatView() {
               effort={session.effort}
               effortSupported={effortSupported}
               onPickEngine={activeId ? (p, m, a) => setEngine(activeId, p, m, a) : undefined}
+              onNewChatOn={onNewChatOn}
               onContinueOn={
                 activeId
                   ? (p, m, a) =>

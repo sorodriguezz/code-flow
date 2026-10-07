@@ -7,6 +7,7 @@ import { FlowVaultDialog } from "./FlowVaultDialog";
 import { FlowCollabDialog } from "./FlowCollabDialog";
 import { FlowRunFormDialog } from "./RunForm";
 import { ScheduleView } from "./ScheduleView";
+import { TablesView } from "./TablesView";
 import { TrustDialog } from "./TrustDialog";
 import { ensureFlowRunEvents, useFlowRunsStore } from "../../state/flowRunsStore";
 import { ensureFlowsStoreLoaded, useFlowsStore } from "../../state/flowsStore";
@@ -78,6 +79,8 @@ export function FlowsView() {
       <div className="relative flex min-w-0 flex-1 flex-col">
         {pane === "schedule" ? (
           <ScheduleView />
+        ) : pane === "tables" ? (
+          <TablesView />
         ) : activeId ? (
           <Suspense fallback={<ViewSkeleton />}>
             <FlowEditor />

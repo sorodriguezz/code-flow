@@ -166,11 +166,17 @@ fn nonblank(text: &str) -> Option<String> {
 
 /// One request to a local model.
 pub(super) async fn local(host: &AppHost, call: LocalCall, cancel: CancellationToken) -> Result<LocalAnswer, String> {
+    local_on(&host.app, Some(host), call, cancel).await
+}
+
+/// [`local`] for a run (`host`, which the status bar names) or for a command outside one.
+async fn local_on(app: &tauri::AppHandle, host: Option<&AppHost>, call: LocalCall, cancel: CancellationToken) -> Result<LocalAnswer, String> {
     if cancel.is_cancelled() {
         return Err(ai_runs::CANCELLED_MARKER.to_string());
     }
     let settings = {
-        let conn = lock_db(host)?;
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
         local_config::read(&conn)?
     };
     let api_key = call.api_key.clone().or_else(local_config::api_key);
@@ -211,7 +217,17 @@ pub(super) async fn local(host: &AppHost, call: LocalCall, cancel: CancellationT
     };
 
     let run_id = format!("flow-local-{}", uuid::Uuid::new_v4());
-    announce(host, &run_id, &call.node_name);
+    if let Some(host) = host {
+        announce(host, &run_id, &call.node_name);
+    }
+    let label = match kind {
+        BackendKind::Bundled => "Local model",
+        BackendKind::Ollama => "Ollama",
+        BackendKind::Openai => "Local server",
+    };
+    if !call.messages.is_empty() || !call.tools.is_empty() {
+        return converse(app, &run_id, label, kind, &endpoint, &live.model, context, &call, cancel).await;
+    }
     let request = ChatRequest {
         model: &live.model,
         system: &call.system,
@@ -222,11 +238,6 @@ pub(super) async fn local(host: &AppHost, call: LocalCall, cancel: CancellationT
         think: None,
         keep_alive: (kind == BackendKind::Ollama).then_some("5m"),
         schema: call.schema.as_ref(),
-    };
-    let label = match kind {
-        BackendKind::Bundled => "Local model",
-        BackendKind::Ollama => "Ollama",
-        BackendKind::Openai => "Local server",
     };
     let work = async {
         let mut stop = None;
@@ -242,7 +253,7 @@ pub(super) async fn local(host: &AppHost, call: LocalCall, cancel: CancellationT
         };
         local_llm::chat(&endpoint, &request, |_| {}, stopped).await
     };
-    let outcome = ai_runs::scoped(host.app.clone(), Some(run_id.clone()), work).await;
+    let outcome = ai_runs::scoped(app.clone(), Some(run_id.clone()), work).await;
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(LocalError::Cancelled) if cancel.is_cancelled() => return Err(ai_runs::CANCELLED_MARKER.to_string()),
@@ -262,7 +273,110 @@ pub(super) async fn local(host: &AppHost, call: LocalCall, cancel: CancellationT
         prompt_tokens: outcome.prompt_tokens,
         completion_tokens: outcome.completion_tokens,
         cut: outcome.finish == local_llm::Finish::Length,
+        ..Default::default()
     })
+}
+
+/// A local model's turn in a conversation — remembered turns, other flows as tools.
+#[allow(clippy::too_many_arguments)]
+async fn converse(
+    app: &tauri::AppHandle,
+    run_id: &str,
+    label: &str,
+    kind: BackendKind,
+    endpoint: &Endpoint,
+    model: &str,
+    context: u32,
+    call: &LocalCall,
+    cancel: CancellationToken,
+) -> Result<LocalAnswer, String> {
+    let mut messages = Vec::with_capacity(call.messages.len() + 1);
+    if !call.system.trim().is_empty() {
+        messages.push(json!({ "role": "system", "content": call.system }));
+    }
+    messages.extend(call.messages.iter().cloned());
+    let request = local_llm::ConverseRequest {
+        model,
+        messages: &messages,
+        tools: &call.tools,
+        no_more_tools: call.no_more_tools,
+        num_ctx: (kind == BackendKind::Ollama).then_some(context),
+        max_tokens: call.max_tokens.max(16),
+        temperature: call.temperature,
+        keep_alive: (kind == BackendKind::Ollama).then_some("5m"),
+    };
+    let work = async {
+        let mut stop = None;
+        if let Some(scope) = ai_runs::current() {
+            ai_runs::emit_engine(&scope, "local", label, model, None);
+            stop = ai_runs::subscribe(run_id);
+        }
+        let stopped = async {
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = ai_runs::cancelled(&mut stop) => {}
+            }
+        };
+        local_llm::converse(endpoint, &request, stopped).await
+    };
+    let outcome = match ai_runs::scoped(app.clone(), Some(run_id.to_string()), work).await {
+        Ok(outcome) => outcome,
+        Err(LocalError::Cancelled) if cancel.is_cancelled() => return Err(ai_runs::CANCELLED_MARKER.to_string()),
+        Err(LocalError::Cancelled) => return Err("The local model run was stopped from the status bar".to_string()),
+        Err(error) => return Err(error.sentence()),
+    };
+    let usage = crate::ai::AiUsage {
+        input_tokens: outcome.prompt_tokens.unwrap_or(0) as i64,
+        output_tokens: outcome.completion_tokens.unwrap_or(0) as i64,
+        ..Default::default()
+    };
+    crate::ai_usage::record("local", model, crate::ai::task::FLOWS, None, &usage);
+    Ok(LocalAnswer {
+        text: outcome.text,
+        server: kind.as_str().to_string(),
+        model: model.to_string(),
+        prompt_tokens: outcome.prompt_tokens,
+        completion_tokens: outcome.completion_tokens,
+        cut: outcome.finish == local_llm::Finish::Length,
+        message: Some(outcome.message),
+        tool_calls: outcome.tool_calls,
+    })
+}
+
+/// One question outside a run — «Generar código» of «Transformar con IA» — on the node's engine.
+/// `run_id` files it in the AI run log, where its Stop works. Answers the model's text.
+#[allow(clippy::too_many_arguments)]
+pub async fn ask_outside(
+    app: &tauri::AppHandle,
+    workspace_id: &str,
+    engine: &EngineChoice,
+    system: &str,
+    prompt: &str,
+    data: &str,
+    schema: &Value,
+    run_id: Option<String>,
+) -> Result<String, String> {
+    if engine.is_local() {
+        let call = LocalCall {
+            server: "auto".into(),
+            model: engine.model.clone(),
+            system: system.to_string(),
+            prompt: format!("{prompt}\n\n{data}"),
+            schema: Some(schema.clone()),
+            temperature: 0.2,
+            max_tokens: 8_192,
+            node_name: "Transformar con IA".into(),
+            ..Default::default()
+        };
+        return local_on(app, None, call, CancellationToken::new()).await.map(|answer| answer.text);
+    }
+    let config = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        engine_config(&conn, engine, workspace_id)?
+    };
+    let schema = schema.to_string();
+    ai_runs::scoped(app.clone(), run_id, crate::ai::build_flow(&*config.engine, &config.binary, &config.model, system, prompt, data, &schema)).await
 }
 
 /// The template the user keeps for one of the shortcuts, or `""` for the built-in one.

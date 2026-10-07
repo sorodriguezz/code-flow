@@ -65,6 +65,43 @@ pub fn reference(path: &Path, name: &str, mime: &str, size: u64) -> Value {
     json!({"$file": true, "path": path.to_string_lossy(), "name": name, "mimeType": mime, "size": size})
 }
 
+/// The type a file's extension says it is — the other direction of [`extension_for`].
+pub fn mime_for(path: &Path) -> &'static str {
+    match path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default().as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "csv" => "text/csv",
+        "txt" | "log" => "text/plain",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "flac" => "audio/flac",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "ics" => "text/calendar",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The reference to a file already on disk: its name, its type by extension and its size.
+pub fn reference_of(path: &Path) -> Value {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    reference(path, &name, mime_for(path), size)
+}
+
 /// The file a value points at: a reference, an object holding one in `file`, or a path as text.
 pub fn path_of(value: &Value) -> Option<PathBuf> {
     match value {

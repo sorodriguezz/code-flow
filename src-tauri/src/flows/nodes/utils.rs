@@ -112,6 +112,23 @@ fn collapse_space(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// A page's main content as Markdown, with its title and address — for the nodes that read pages
+/// they found (a search's results, a browser's rendering).
+pub(crate) fn page_markdown(html: &str, url: Option<&url::Url>) -> Value {
+    match read_page(html, url, &json!({"mode": "markdown", "mainOnly": true})) {
+        Ok(Read::One(value)) => value,
+        _ => json!({}),
+    }
+}
+
+/// A page's readable text (no markup), main content only.
+pub(crate) fn page_text(html: &str, url: Option<&url::Url>) -> Value {
+    match read_page(html, url, &json!({"mode": "pageText", "mainOnly": true})) {
+        Ok(Read::One(value)) => value,
+        _ => json!({}),
+    }
+}
+
 fn read_page(html: &str, url: Option<&url::Url>, params: &Value) -> Result<Read, NodeError> {
     let document = dom_query::Document::from(html);
     let title = document.select("title").text().trim().to_string();
@@ -229,15 +246,19 @@ async fn site_check(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let mut out = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
         let target = text(params, "siteTarget");
-        if target.trim().is_empty() {
+        let which = text(params, "check");
+        if target.trim().is_empty() && which != "publicIp" {
             return Err(NodeError::failed("Write what to check"));
         }
         let timeout = Duration::from_millis(number(params, "timeoutMs").unwrap_or(10_000.0).clamp(500.0, 120_000.0) as u64);
         let check = async {
-            match text(params, "check").as_str() {
+            match which.as_str() {
                 "tlsCheck" => tls_check(&target, params, timeout).await,
                 "dnsCheck" => dns_check(&target, params).await,
                 "portCheck" => port_check(&target, params, timeout).await,
+                "pingCheck" => ping_check(&target, params, timeout).await,
+                "domainExpiry" => domain_expiry(&target, params, timeout).await,
+                "publicIp" => public_ip(timeout).await,
                 _ => http_check(&target, params, timeout).await,
             }
         };
@@ -273,6 +294,124 @@ async fn http_check(target: &str, params: &Value, timeout: Duration) -> Value {
             })
         }
         Err(error) => json!({"target": address, "ok": false, "latencyMs": started.elapsed().as_millis() as u64, "error": error.to_string()}),
+    }
+}
+
+/// The system's own `ping` (ICMP needs privileges a program here does not have): replies and the
+/// round trip, read from its summary lines in any of the three dialects.
+async fn ping_check(target: &str, params: &Value, timeout: Duration) -> Value {
+    let host = host_of(target);
+    if host.starts_with('-') || host.contains(char::is_whitespace) {
+        return json!({"target": host, "ok": false, "error": "not a host name"});
+    }
+    let count = number(params, "pingCount").unwrap_or(3.0).clamp(1.0, 10.0) as u32;
+    let args: Vec<String> = if cfg!(windows) {
+        vec!["-n".into(), count.to_string(), "-w".into(), timeout.as_millis().min(10_000).to_string(), host.clone()]
+    } else {
+        vec!["-c".into(), count.to_string(), host.clone()]
+    };
+    let limit = timeout + Duration::from_secs(count as u64 + 2);
+    let output = match tokio::time::timeout(limit, crate::proc::command("ping").args(&args).output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return json!({"target": host, "ok": false, "error": format!("ping: {error}")}),
+        Err(_) => return json!({"target": host, "ok": false, "error": "ping did not finish in time"}),
+    };
+    let text_out = String::from_utf8_lossy(&output.stdout).into_owned();
+    let (sent, received) = ping_counts(&text_out).unwrap_or((count, 0));
+    let average = ping_average(&text_out);
+    json!({
+        "target": host,
+        "ok": received > 0,
+        "sent": sent,
+        "received": received,
+        "lossPercent": if sent > 0 { ((sent - received.min(sent)) as f64 / sent as f64 * 100.0).round() } else { 100.0 },
+        "averageMs": average,
+    })
+}
+
+/// `3 packets transmitted, 3 received` (macOS/BSD), `3 packets transmitted, 3 received` / `3 received`
+/// (Linux), `Sent = 3, Received = 3` (Windows).
+fn ping_counts(text: &str) -> Option<(u32, u32)> {
+    let unix = regex::Regex::new(r"(\d+) packets transmitted, (\d+) (?:packets )?received").ok()?;
+    if let Some(c) = unix.captures(text) {
+        return Some((c[1].parse().ok()?, c[2].parse().ok()?));
+    }
+    let windows = regex::Regex::new(r"Sent = (\d+), Received = (\d+)").ok()?;
+    windows.captures(text).and_then(|c| Some((c[1].parse().ok()?, c[2].parse().ok()?)))
+}
+
+/// `round-trip min/avg/max/stddev = 1.1/2.2/3.3/0.4 ms`, `rtt … = …`, or Windows' `Average = 2ms`.
+fn ping_average(text: &str) -> Option<f64> {
+    let unix = regex::Regex::new(r"= [\d.]+/([\d.]+)/").ok()?;
+    if let Some(c) = unix.captures(text) {
+        return c[1].parse().ok();
+    }
+    let windows = regex::Regex::new(r"Average = (\d+)ms").ok()?;
+    windows.captures(text).and_then(|c| c[1].parse().ok())
+}
+
+/// A domain's registration: when it expires and how many days are left, from RDAP (`rdap.org`
+/// redirects to the registry that keeps it).
+async fn domain_expiry(target: &str, params: &Value, timeout: Duration) -> Value {
+    let host = host_of(target);
+    // The registered domain: the last two labels (three for a second-level registry like .com.ar or .co.uk).
+    let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
+    let second_level = labels.len() >= 3 && matches!(labels[labels.len() - 2], "com" | "co" | "org" | "net" | "gob" | "edu" | "ac" | "gov");
+    let take = if second_level { 3 } else { 2 };
+    let domain = labels[labels.len().saturating_sub(take)..].join(".");
+    let warn_days = number(params, "warnDays").unwrap_or(14.0) as i64;
+    let client = match http_client(timeout) {
+        Ok(client) => client,
+        Err(_) => return json!({"target": domain, "ok": false, "error": "Could not prepare the request"}),
+    };
+    let doc: Value = match client.get(format!("https://rdap.org/domain/{domain}")).header("Accept", "application/rdap+json").send().await {
+        Ok(response) if response.status().is_success() => response.json().await.unwrap_or(Value::Null),
+        Ok(response) => return json!({"target": domain, "ok": false, "error": format!("RDAP answered {}", response.status())}),
+        Err(error) => return json!({"target": domain, "ok": false, "error": error.to_string()}),
+    };
+    let event = |name: &str| {
+        doc.get("events")
+            .and_then(Value::as_array)
+            .and_then(|events| events.iter().find(|e| e.get("eventAction").and_then(Value::as_str) == Some(name)))
+            .and_then(|e| e.get("eventDate").and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    let Some(expires) = event("expiration") else {
+        return json!({"target": domain, "ok": false, "error": "The registry does not publish an expiration date"});
+    };
+    let days_left = chrono::DateTime::parse_from_rfc3339(&expires).map(|d| (d.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_days()).unwrap_or(0);
+    json!({
+        "target": domain,
+        "ok": days_left > warn_days,
+        "expires": expires,
+        "daysLeft": days_left,
+        "registered": event("registration"),
+        "registrar": doc.pointer("/entities/0/vcardArray/1/1/3").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// This network's address on the internet, as two services agree (the second only if the first fails).
+async fn public_ip(timeout: Duration) -> Value {
+    let client = match http_client(timeout) {
+        Ok(client) => client,
+        Err(_) => return json!({"ok": false, "error": "Could not prepare the request"}),
+    };
+    if let Ok(response) = client.get("https://api.ipify.org?format=json").send().await {
+        if let Ok(doc) = response.json::<Value>().await {
+            if let Some(ip) = doc.get("ip").and_then(Value::as_str) {
+                return json!({"ok": true, "ip": ip, "source": "ipify"});
+            }
+        }
+    }
+    match client.get("https://1.1.1.1/cdn-cgi/trace").send().await {
+        Ok(response) => {
+            let body = response.text().await.unwrap_or_default();
+            match body.lines().find_map(|l| l.strip_prefix("ip=")) {
+                Some(ip) => json!({"ok": true, "ip": ip, "source": "cloudflare"}),
+                None => json!({"ok": false, "error": "No service said the address"}),
+            }
+        }
+        Err(error) => json!({"ok": false, "error": error.to_string()}),
     }
 }
 
@@ -385,17 +524,25 @@ async fn until(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let limit = Duration::from_secs_f64(number(&params, "timeoutSec").unwrap_or(300.0).clamp(1.0, 24.0 * 3600.0));
     let started = Instant::now();
     let mut attempts = 0u32;
-    let by_command = text(&params, "check") == "commandUntil";
-    if by_command && text(&params, "command").trim().is_empty() {
-        return Err(NodeError::failed("Write the command to run"));
-    }
-    if !by_command && text(&params, "url").trim().is_empty() {
-        return Err(NodeError::failed("Write the address to ask"));
+    let check = text(&params, "check");
+    match check.as_str() {
+        "commandUntil" if text(&params, "command").trim().is_empty() => return Err(NodeError::failed("Write the command to run")),
+        "fileUntil" if text(&params, "untilPath").trim().is_empty() => return Err(NodeError::failed("Write the file or folder to wait for")),
+        "portUntil" if number(&params, "port").unwrap_or(0.0) <= 0.0 => return Err(NodeError::failed("Write the port to wait for")),
+        "sqlUntil" if text(&params, "connection").trim().is_empty() => return Err(NodeError::failed("Pick the database connection")),
+        "httpUntil" | "" if text(&params, "url").trim().is_empty() => return Err(NodeError::failed("Write the address to ask")),
+        _ => {}
     }
     let report = loop {
         attempts += 1;
         let remaining = limit.saturating_sub(started.elapsed());
-        let attempt = if by_command { command_attempt(&params, remaining.min(Duration::from_secs(120))).await } else { http_attempt(&params, remaining.min(Duration::from_secs(60))).await };
+        let attempt = match check.as_str() {
+            "commandUntil" => command_attempt(&params, remaining.min(Duration::from_secs(120))).await,
+            "fileUntil" => file_attempt(&params),
+            "portUntil" => port_attempt(&params, remaining.min(Duration::from_secs(10))).await,
+            "sqlUntil" => sql_attempt(ctx, &params).await,
+            _ => http_attempt(&params, remaining.min(Duration::from_secs(60))).await,
+        };
         let (ok, mut seen) = attempt;
         if ok {
             seen["ok"] = json!(true);
@@ -435,6 +582,36 @@ async fn until(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             Item::paired(json, index)
         })
         .collect()])
+}
+
+/// A path appearing (or, with `untilGone`, disappearing).
+fn file_attempt(params: &Value) -> (bool, Value) {
+    let path = super::expand_path(&text(params, "untilPath"));
+    let exists = path.exists();
+    let gone = flag(params, "untilGone");
+    let size = std::fs::metadata(&path).map(|m| m.len()).ok();
+    (exists != gone, json!({"path": path.to_string_lossy(), "exists": exists, "size": size}))
+}
+
+/// A TCP port accepting connections — a database or a dev server that finished starting.
+async fn port_attempt(params: &Value, timeout: Duration) -> (bool, Value) {
+    let host = { let h = text(params, "host"); if h.trim().is_empty() { "localhost".to_string() } else { h.trim().to_string() } };
+    let port = number(params, "port").unwrap_or(0.0) as u16;
+    match tokio::time::timeout(timeout.max(Duration::from_millis(500)), tokio::net::TcpStream::connect((host.as_str(), port))).await {
+        Ok(Ok(_)) => (true, json!({"host": host, "port": port, "open": true})),
+        Ok(Err(error)) => (false, json!({"host": host, "port": port, "open": false, "error": error.to_string()})),
+        Err(_) => (false, json!({"host": host, "port": port, "open": false, "error": "no answer"})),
+    }
+}
+
+/// A query that returns at least one row.
+async fn sql_attempt(ctx: &NodeCtx, params: &Value) -> (bool, Value) {
+    let connection = text(params, "connection");
+    let query = text(params, "untilQuery");
+    match super::data::query_rows(ctx, &connection, &query).await {
+        Ok(rows) => (!rows.is_empty(), json!({"rows": rows.len(), "first": rows.first().cloned().unwrap_or(Value::Null)})),
+        Err(error) => (false, json!({"error": error.to_string()})),
+    }
 }
 
 fn clip(text: &str, max: usize) -> String {

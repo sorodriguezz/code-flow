@@ -18,6 +18,7 @@ const ACCOUNT_NODES: Record<string, string> = {
   "net.google": "Google",
   "trigger.google": "Google",
   "net.microsoft": "Microsoft 365",
+  "trigger.microsoft": "Microsoft 365",
 };
 
 const blank = (value: unknown) => value === undefined || value === null || (typeof value === "string" && value.trim() === "");
@@ -29,6 +30,9 @@ export function nodeIssues(
   credentialIds: ReadonlySet<string>,
   say: (label: FlowLabel) => string,
   t: Translate,
+  /** The catalogue's `call` for the node's type: a node that never touched it runs on it (the
+   *  inspector shows it picked), so it is no missing service. */
+  defaultCall?: unknown,
 ): string[] {
   if (node.disabled) return [];
   const params = node.params ?? {};
@@ -41,9 +45,10 @@ export function nodeIssues(
 
   const account = ACCOUNT_NODES[node.type];
   if (account) return credentialIssue(account);
-  if (node.type !== "net.connector" || connectors.length === 0) return [];
+  if ((node.type !== "net.connector" && node.type !== "trigger.connector") || connectors.length === 0) return [];
 
-  const call = params.call && typeof params.call === "object" ? (params.call as Record<string, unknown>) : {};
+  const given = params.call ?? defaultCall;
+  const call = given && typeof given === "object" ? (given as Record<string, unknown>) : {};
   const connector = connectors.find((c) => c.id === call.connector);
   if (!connector) return [t("flows.issue.service")];
   const out: string[] = [];

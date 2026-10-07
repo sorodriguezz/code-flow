@@ -4,39 +4,278 @@
   "group": "appsProjects",
   "baseUrl": "https://api.notion.com/v1",
   "auth": "bearer",
-  "authHint": { "es": "Token de una integración interna como credencial Bearer", "en": "An internal integration token as a Bearer credential" },
+  "authHint": {
+    "es": "Token de una integración interna como credencial Bearer",
+    "en": "An internal integration token as a Bearer credential"
+  },
   "tokenUrl": "https://www.notion.so/my-integrations",
-  "test": {"path": "/users/me", "label": "{{name}} · {{bot.workspace_name}}"},
-  "headers": { "Notion-Version": "2022-06-28" },
+  "test": {
+    "path": "/users/me",
+    "label": "{{name}} · {{bot.workspace_name}}"
+  },
+  "headers": {
+    "Notion-Version": "2022-06-28"
+  },
   "operations": [
     {
       "id": "createPage",
-      "name": { "es": "Crear una página en una base de datos", "en": "Create a page in a database" },
+      "name": {
+        "es": "Crear una página en una base de datos",
+        "en": "Create a page in a database"
+      },
       "method": "POST",
       "path": "/pages",
       "fields": [
-        { "name": "databaseId", "label": { "es": "Base de datos", "en": "Database" }, "required": true, "lookup": {"method": "POST", "path": "/search", "body": {"filter": {"property": "object", "value": "database"}, "page_size": 100}, "result": "results", "value": "id", "label": "{{title.0.plain_text}}"} },
-        { "name": "titleProperty", "label": { "es": "Propiedad del título", "en": "Title property" }, "placeholder": "Name", "required": true },
-        { "name": "title", "label": { "es": "Título", "en": "Title" }, "required": true },
-        { "name": "content", "label": { "es": "Texto de la página", "en": "Page text" }, "multiline": true }
+        {
+          "name": "databaseId",
+          "label": {
+            "es": "Base de datos",
+            "en": "Database"
+          },
+          "required": true,
+          "lookup": {
+            "method": "POST",
+            "path": "/search",
+            "body": {
+              "filter": {
+                "property": "object",
+                "value": "database"
+              },
+              "page_size": 100
+            },
+            "result": "results",
+            "value": "id",
+            "label": "{{title.0.plain_text}}"
+          }
+        },
+        {
+          "name": "titleProperty",
+          "label": {
+            "es": "Propiedad del título",
+            "en": "Title property"
+          },
+          "placeholder": "Name",
+          "required": true
+        },
+        {
+          "name": "title",
+          "label": {
+            "es": "Título",
+            "en": "Title"
+          },
+          "required": true
+        },
+        {
+          "name": "content",
+          "label": {
+            "es": "Texto de la página",
+            "en": "Page text"
+          },
+          "multiline": true
+        }
       ],
       "body": {
-        "parent": { "database_id": "{{databaseId}}" },
-        "properties": { "{{titleProperty}}": { "title": [{ "text": { "content": "{{title}}" } }] } },
-        "children": [{ "$when": "content", "object": "block", "type": "paragraph", "paragraph": { "rich_text": [{ "type": "text", "text": { "content": "{{content}}" } }] } }]
+        "parent": {
+          "database_id": "{{databaseId}}"
+        },
+        "properties": {
+          "{{titleProperty}}": {
+            "title": [
+              {
+                "text": {
+                  "content": "{{title}}"
+                }
+              }
+            ]
+          }
+        },
+        "children": [
+          {
+            "$when": "content",
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "{{content}}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
       }
     },
     {
       "id": "queryDatabase",
-      "name": { "es": "Consultar una base de datos", "en": "Query a database" },
+      "name": {
+        "es": "Consultar una base de datos",
+        "en": "Query a database"
+      },
       "method": "POST",
       "path": "/databases/{{databaseId}}/query",
       "fields": [
-        { "name": "databaseId", "label": { "es": "Base de datos", "en": "Database" }, "required": true, "lookup": {"method": "POST", "path": "/search", "body": {"filter": {"property": "object", "value": "database"}, "page_size": 100}, "result": "results", "value": "id", "label": "{{title.0.plain_text}}"} },
-        { "name": "filter", "label": { "es": "Filtro (JSON de Notion)", "en": "Filter (Notion JSON)" }, "multiline": true, "json": true }
+        {
+          "name": "databaseId",
+          "label": {
+            "es": "Base de datos",
+            "en": "Database"
+          },
+          "required": true,
+          "lookup": {
+            "method": "POST",
+            "path": "/search",
+            "body": {
+              "filter": {
+                "property": "object",
+                "value": "database"
+              },
+              "page_size": 100
+            },
+            "result": "results",
+            "value": "id",
+            "label": "{{title.0.plain_text}}"
+          }
+        },
+        {
+          "name": "filter",
+          "label": {
+            "es": "Filtro (JSON de Notion)",
+            "en": "Filter (Notion JSON)"
+          },
+          "multiline": true,
+          "json": true
+        }
       ],
-      "body": { "filter": "{{filter}}" },
+      "body": {
+        "filter": "{{filter}}"
+      },
       "result": "results"
+    },
+    {
+      "id": "appendBlocks",
+      "name": {
+        "es": "Agregar un párrafo a una página",
+        "en": "Append a paragraph to a page"
+      },
+      "method": "PATCH",
+      "path": "/blocks/{{pageId}}/children",
+      "fields": [
+        {
+          "name": "pageId",
+          "label": {
+            "es": "Página (id)",
+            "en": "Page (id)"
+          },
+          "required": true
+        },
+        {
+          "name": "text",
+          "label": {
+            "es": "Texto",
+            "en": "Text"
+          },
+          "multiline": true,
+          "required": true
+        }
+      ],
+      "body": {
+        "children": [
+          {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "{{text}}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "result": "results"
+    },
+    {
+      "id": "updatePage",
+      "name": {
+        "es": "Cambiar propiedades de una página",
+        "en": "Change a page's properties"
+      },
+      "method": "PATCH",
+      "path": "/pages/{{pageId}}",
+      "fields": [
+        {
+          "name": "pageId",
+          "label": {
+            "es": "Página (id)",
+            "en": "Page (id)"
+          },
+          "required": true
+        },
+        {
+          "name": "properties",
+          "label": {
+            "es": "Propiedades (JSON de Notion)",
+            "en": "Properties (Notion JSON)"
+          },
+          "json": true,
+          "required": true,
+          "multiline": true,
+          "placeholder": "{\"Estado\": {\"status\": {\"name\": \"Hecho\"}}}"
+        }
+      ],
+      "body": {
+        "properties": "{{properties}}"
+      }
+    },
+    {
+      "id": "search",
+      "name": {
+        "es": "Buscar páginas y bases",
+        "en": "Search pages and databases"
+      },
+      "method": "POST",
+      "path": "/search",
+      "fields": [
+        {
+          "name": "query",
+          "label": {
+            "es": "Texto",
+            "en": "Text"
+          },
+          "required": true
+        }
+      ],
+      "body": {
+        "query": "{{query}}",
+        "page_size": 25
+      },
+      "result": "results"
+    },
+    {
+      "id": "getPage",
+      "name": {
+        "es": "Leer una página",
+        "en": "Read a page"
+      },
+      "method": "GET",
+      "path": "/pages/{{pageId}}",
+      "fields": [
+        {
+          "name": "pageId",
+          "label": {
+            "es": "Página (id)",
+            "en": "Page (id)"
+          },
+          "required": true
+        }
+      ]
     }
   ]
 }

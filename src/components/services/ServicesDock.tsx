@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { CirclePlay, Pencil, Plus, SplitSquareHorizontal, TerminalSquare, X } from "lucide-react";
+import { CirclePlay, Container, Maximize2, Minimize2, Pencil, Plus, SplitSquareHorizontal, TerminalSquare, X } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { TerminalPane } from "../terminal/TerminalPane";
@@ -11,6 +11,7 @@ import { ServiceImportModal } from "./ServiceImportModal";
 import { ServiceConsole } from "./ServiceConsole";
 import { PortsPanel } from "./PortsPanel";
 import { HeaderButton, PortsRow, SectionHeader, ServiceActions, ServiceList } from "./ServiceList";
+import { ContainersList, ContainersPane, ContainersSummary, useContainersPulse } from "../containers/ContainersPanel";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
 import { STATUS_TONE, useServicesStore } from "../../state/servicesStore";
@@ -93,8 +94,11 @@ export function ServicesDock() {
   const rename = useTerminalStore((s) => s.rename);
   const dockView = useTerminalStore((s) => s.dockView);
   const hidePanel = useTerminalStore((s) => s.hidePanel);
+  const maximized = useTerminalStore((s) => s.dockMaximized);
+  const toggleMaximized = useTerminalStore((s) => s.toggleDockMaximized);
   const height = useLayoutStore((s) => s.sizes.terminalPanelHeight);
-  const listWidth = useLayoutStore((s) => s.sizes.servicesListWidth);
+  const servicesListWidth = useLayoutStore((s) => s.sizes.servicesListWidth);
+  const containersListWidth = useLayoutStore((s) => s.sizes.containersListWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
 
@@ -106,6 +110,11 @@ export function ServicesDock() {
   const showServices = isMainWindow();
   /** The panel on screen — always the terminals in a satellite, which has nothing else. */
   const view: DockView = showServices ? dockView : "terminal";
+  /** The containers' list carries a runtime, its sections and rows three levels deep: its own width. */
+  const listKeyName = view === "containers" ? "containersListWidth" : "servicesListWidth";
+  const listWidth = view === "containers" ? containersListWidth : servicesListWidth;
+  // The engines are read only while their panel is on screen.
+  useContainersPulse(view === "containers");
 
   const [selection, setSelection] = useState<ServiceSelection | null>(null);
   /** The service whose console the pane shows, when that is what is picked. */
@@ -201,7 +210,8 @@ export function ServicesDock() {
   const terminalsLabel = project ? t("terminal.forRepo", { name: project.name }) : t("terminal.title");
   /** What the title row calls the panel. A satellite keeps the one name it always had, with the
    *  list's heading below it naming the repository. */
-  const panelTitle = view === "services" ? t("services.title") : showServices ? terminalsLabel : t("terminal.panelTitle");
+  const panelTitle =
+    view === "services" ? t("services.title") : view === "containers" ? t("containers.title") : showServices ? terminalsLabel : t("terminal.panelTitle");
 
   // What the header says about this workspace's services at a glance — the reason to look below.
   const here = services.map((service) => runtimeMap[service.id]).filter(Boolean);
@@ -214,22 +224,26 @@ export function ServicesDock() {
     <div
       // The second sheet of the work column, under the view. It opens at its height with its
       // contents fading in — not by animating `height`, which relaid out the window every frame.
-      style={{ height }}
+      // Maximized, it grows a hundred times faster than the view above, which keeps only its floor.
+      style={maximized ? { flex: "100 1 0%" } : { height }}
       data-tour="terminal-dock"
       // Shrinkable, and `min-h-0` with it: at `shrink-0` a panel taller than the room left in the
       // column overflows under the status bar, which paints on top — taking the prompt with it.
       className="cf-sheet cf-panel-in flex min-h-0 flex-col"
     >
-      <ResizeHandle
-        axis="y"
-        value={height}
-        min={MIN_HEIGHT}
-        max={MAX_HEIGHT}
-        invert
-        onChange={(h) => setSize("terminalPanelHeight", h)}
-        onCommit={(h) => commitSize("terminalPanelHeight", h)}
-        seamless
-      />
+      {/* No handle while maximized: dragging a height the dock is not using would do nothing. */}
+      {!maximized && (
+        <ResizeHandle
+          axis="y"
+          value={height}
+          min={MIN_HEIGHT}
+          max={MAX_HEIGHT}
+          invert
+          onChange={(h) => setSize("terminalPanelHeight", h)}
+          onCommit={(h) => commitSize("terminalPanelHeight", h)}
+          seamless
+        />
+      )}
 
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2">
         {/* The panel on screen and what it covers — the one heading it has. The list below does not
@@ -237,6 +251,8 @@ export function ServicesDock() {
             combined panel after neither half. */}
         {view === "services" ? (
           <CirclePlay size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+        ) : view === "containers" ? (
+          <Container size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
         ) : (
           <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
         )}
@@ -275,6 +291,8 @@ export function ServicesDock() {
           </span>
         )}
 
+        {view === "containers" && <ContainersSummary />}
+
         <div className="flex-1" />
 
         {showServices && view === "terminal" && terminalActions}
@@ -282,6 +300,15 @@ export function ServicesDock() {
         {/* A ×, not the ⌄ it used to be: right after the shell menu's own ⌄ the two read as the same
             control twice (user report, 2026-10-01). × is how the assistant's header closes its
             panel too, and what VS Code's "Hide Panel" draws. */}
+        <button
+          onClick={toggleMaximized}
+          title={maximized ? t("terminal.restoreDock") : t("terminal.maximizeDock")}
+          aria-label={maximized ? t("terminal.restoreDock") : t("terminal.maximizeDock")}
+          aria-pressed={maximized}
+          className="ml-1 flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
+        >
+          {maximized ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+        </button>
         <button
           onClick={hidePanel}
           title={t("terminal.hide")}
@@ -298,7 +325,9 @@ export function ServicesDock() {
           className="flex min-h-0 shrink-0 flex-col border-r border-[var(--cf-border)]"
           style={{ width: listWidth }}
         >
-          {view === "services" ? (
+          {view === "containers" ? (
+            <ContainersList />
+          ) : view === "services" ? (
             <>
               {/* Detect, new group, new service: small, at the top of the column they act on — not in
                   the panel's title row, where they sat over the console and read as its controls.
@@ -383,15 +412,17 @@ export function ServicesDock() {
           axis="x"
           value={listWidth}
           min={160}
-          max={400}
-          onChange={(w) => setSize("servicesListWidth", w)}
-          onCommit={(w) => commitSize("servicesListWidth", w)}
+          max={view === "containers" ? 520 : 400}
+          onChange={(w) => setSize(listKeyName, w)}
+          onCommit={(w) => commitSize(listKeyName, w)}
         />
 
         {/* The pane area. Every terminal stays mounted here whichever panel is up; with the
             services on screen, a service's console or the ports mount on top of them. */}
         <div className="relative flex min-h-0 min-w-0 flex-1">
-          {view === "services" ? (
+          {view === "containers" ? (
+            <ContainersPane />
+          ) : view === "services" ? (
             selection?.kind === "ports" ? (
               <PortsPanel onOpenService={setSelectedId} />
             ) : selectedService ? (

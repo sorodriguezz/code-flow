@@ -266,6 +266,16 @@ pub const EXECUTABLE_TYPES: &[&str] = &[
     "data.sql",
     "data.mongo",
     "data.redis",
+    // Added with milestone 12 — the first two had been missing since they were built: a notebook runs
+    // its cells and a shortcut / AppleScript runs whatever it says. `migrations::rehash_flow_trust`
+    // carries the trust already given across the change.
+    "code.notebook",
+    "code.osascript",
+    "code.container",
+    "code.k8s",
+    "ai.transform",
+    "app.process",
+    "net.browser",
 ];
 
 /// The nodes of `spec` that run code, in id order.

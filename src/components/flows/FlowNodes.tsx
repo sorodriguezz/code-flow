@@ -96,10 +96,11 @@ export const CanvasActionsContext = createContext<CanvasActions>({
   noteColorNoneLabel: "",
 });
 
-const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "scan-eye", "messages-square", "pencil", "brain-circuit", "binary", "database-zap", "wand", "reply", "scan-search", "audio-lines"]);
+const AI_GLYPHS = new Set<string>(["bot", "cpu", "list-checks", "file-braces", "message-square-text", "eye", "scan-eye", "messages-square", "pencil", "brain-circuit", "binary", "database-zap", "wand", "reply", "scan-search", "audio-lines", "columns-3", "image-plus", "volume-2", "shield-alert", "wand-sparkles"]);
 
-/** AI nodes that compute vectors rather than reason: no ThinkingOrb while they run. */
-const COMPUTES_ONLY = new Set<string>(["ai.embed", "ai.vectors"]);
+/** AI nodes that compute rather than reason — vectors, a voice, code already written: no
+ *  ThinkingOrb while they run. */
+const COMPUTES_ONLY = new Set<string>(["ai.embed", "ai.vectors", "ai.speech", "ai.transform"]);
 
 /** Where the `index`-th of `count` ports sits along the tile's edge. */
 const portTop = (index: number, count: number) => (count <= 1 ? "50%" : `${((index + 1) / (count + 1)) * 100}%`);

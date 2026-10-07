@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ArrowUp, ListPlus, Paperclip, Puzzle, Square, X } from "lucide-react";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
+import { FlowAssistantPicker } from "./FlowAssistantPicker";
 import { EffortPicker } from "./EffortPicker";
 import { useTextMenu } from "../common/TextMenu";
 import { AttachmentBar } from "./AttachmentBar";
@@ -17,6 +18,7 @@ import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProvider
 import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
+import { pushErrorToast } from "../../state/toastStore";
 
 /** How tall the box may grow before it starts scrolling instead. Roughly twelve lines — past that
  *  the composer is eating the transcript it is supposed to be a footnote to, and the text being
@@ -60,6 +62,8 @@ export function ChatComposer({
   onAttachBytes,
   onRemoveAttachment,
   onPickEngine,
+  onPickFlow,
+  onNewChatOn,
   onContinueOn,
   account,
   onPickEffort,
@@ -106,6 +110,14 @@ export function ChatComposer({
    *  chip writes the workspace's chat routing itself, which is what the next question will run on.
    *  `account` is passed only when one was picked. */
   onPickEngine?: (provider: string, model: string, account?: string) => void | Promise<void>;
+  /** The empty state's flow pick (`null` back to the model): held by the view and applied to the
+   *  conversation the first message creates, the way the effort is. Once there is a conversation
+   *  `onPickEngine` re-points that one instead. */
+  onPickFlow?: (flowId: string | null) => void;
+  /** Where a pick goes that this thread cannot take — a model on a thread a flow has answered (the
+   *  backend refuses to move a thread with messages to another provider), a flow on one an engine
+   *  has: the engine of a new chat, held on the empty state until its first message. */
+  onNewChatOn?: (provider: string, model: string) => void;
   /** A version of a provider this thread is locked out of, picked anyway: where it goes instead —
    *  "continuar en un hilo nuevo" on that engine. */
   onContinueOn?: (provider: string, model: string, account?: string) => void;
@@ -389,11 +401,32 @@ export function ChatComposer({
             <div data-tour="chat-model" className="flex min-w-0 shrink items-center">
               <ChatModelPicker
                 liveModel={null}
-                chatActive={turns > 0}
-                bound={onPickEngine ? { provider, model, account } : undefined}
-                onPick={onPickEngine}
+                chatActive={turns > 0 && provider !== "flow"}
+                // On a flow the chip offers the models to go back to — the routing's, not the thread's.
+                bound={onPickEngine && provider !== "flow" ? { provider, model, account } : undefined}
+                onPick={
+                  provider === "flow" && turns > 0 && onPickEngine
+                    ? (next, version, picked) =>
+                        onNewChatOn
+                          ? onNewChatOn(next, version)
+                          : Promise.resolve(onPickEngine(next, version, picked)).catch((error: unknown) => pushErrorToast(String(error)))
+                    : onPickEngine
+                }
                 onLockedPick={onContinueOn}
               />
+              {onPickEngine ? (
+                <FlowAssistantPicker
+                  provider={provider}
+                  model={model}
+                  locked={turns > 0 && provider !== "flow"}
+                  onPick={(next, flow) => onPickEngine(next, flow)}
+                  onLocked={onNewChatOn ? (flow) => onNewChatOn("flow", flow) : undefined}
+                />
+              ) : (
+                onPickFlow && (
+                  <FlowAssistantPicker provider={provider} model={model} locked={false} onPick={(_, flow) => onPickFlow(flow)} onLeave={() => onPickFlow(null)} />
+                )
+              )}
             </div>
 
             {onPickEffort && (

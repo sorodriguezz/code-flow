@@ -122,7 +122,7 @@ fn schema_of(field: &FormField) -> Value {
     schema
 }
 
-fn input_schema(fields: &[FormField]) -> Value {
+pub(crate) fn input_schema(fields: &[FormField]) -> Value {
     let properties: Map<String, Value> = fields.iter().map(|f| (f.name.clone(), schema_of(f))).collect();
     let required: Vec<&str> = fields.iter().filter(|f| f.required).map(|f| f.name.as_str()).collect();
     json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})

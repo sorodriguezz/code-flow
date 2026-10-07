@@ -1,7 +1,8 @@
 //! Declarative connectors — Slack, Discord, Telegram, WhatsApp, Teams (a webhook, or a signed-in account
 //! through Microsoft Graph), Google Chat, Mattermost, ntfy,
-//! Pushover, Twilio, Notion, Jira, GitHub, GitLab, Azure DevOps, Bitbucket, Trello, Linear, Vercel,
-//! Netlify, Cloudflare, Supabase and Sentry — as JSON, one node to call them.
+//! Pushover, Twilio, Notion, Jira, Confluence, GitHub, GitLab, Azure DevOps, Bitbucket, Trello,
+//! Linear, Todoist, ClickUp, Google Docs, Vercel, Netlify, Cloudflare, Supabase, Sentry, PagerDuty,
+//! Stripe, Airtable, Dropbox and mindicador.cl — as JSON, one node to call them.
 //!
 //! **A connector is data, not code.** Each file in `connectors/` names a service's base URL, how it
 //! signs in, and its operations — method, path, the fields a person fills in, the JSON body with
@@ -374,6 +375,15 @@ const SOURCES: &[&str] = &[
     include_str!("connectors/teamsgraph.json"),
     include_str!("connectors/googlechat.json"),
     include_str!("connectors/mattermost.json"),
+    include_str!("connectors/stripe.json"),
+    include_str!("connectors/airtable.json"),
+    include_str!("connectors/confluence.json"),
+    include_str!("connectors/googledocs.json"),
+    include_str!("connectors/todoist.json"),
+    include_str!("connectors/clickup.json"),
+    include_str!("connectors/dropbox.json"),
+    include_str!("connectors/pagerduty.json"),
+    include_str!("connectors/mindicador.json"),
 ];
 
 pub static CONNECTORS: LazyLock<Vec<Connector>> =
@@ -565,7 +575,7 @@ mod tests {
 
     #[test]
     fn every_shipped_connector_parses_and_its_placeholders_name_its_fields() {
-        assert_eq!(all().len(), 25);
+        assert_eq!(all().len(), 34);
         for connector in all() {
             assert!(connector.auth == "none" || !connector.credential_kinds().is_empty(), "{} signs in with {}", connector.id, connector.auth);
             for operation in &connector.operations {
