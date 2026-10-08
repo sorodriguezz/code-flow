@@ -172,6 +172,20 @@ async fn a_row_that_is_not_there_saves_nothing_of_the_batch() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// "Probar paso" on a node nothing is wired into yet: it runs once, on its own, rather than being
+/// refused for having no input.
+#[tokio::test]
+async fn a_lone_node_can_be_tried_by_itself() {
+    let (dir, connection) = temp_db("alone");
+    let seed = chain(vec![node("start", "trigger.manual", json!({})), setup(&connection)]);
+    succeeded(&run(seed).await);
+    let lone = flow(vec![db("tables", &connection, json!({"dbOp": "dbTables"}))], vec![]);
+    let ran = run_with(lone, RunMode::Step { node: "tables".into() }, HashMap::new(), CancellationToken::new()).await;
+    succeeded(&ran);
+    assert!(ran.output("tables", 0).iter().any(|t| t["name"] == "pedidos"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn a_table_without_a_key_asks_for_one() {
     let (dir, connection) = temp_db("nokey");

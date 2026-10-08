@@ -260,6 +260,9 @@ pub fn plan(
         }
         RunMode::UpTo { node: target } => {
             let target_node = node(target).ok_or_else(|| format!("No node {target} in this flow"))?;
+            if !is_trigger(target_node) && parents_of(spec, target).is_empty() {
+                return Ok(standalone(target));
+            }
             let leads = upstream(spec, target);
             if is_trigger(target_node) {
                 let start = chosen_trigger(Some(&HashSet::from([target.clone()])))?;
@@ -280,7 +283,7 @@ pub fn plan(
             let parents: HashSet<String> =
                 spec.connections.iter().filter(|w| w.to == *target).map(|w| w.from.clone()).collect();
             if parents.is_empty() {
-                return Err(format!("\"{}\" has nothing connected to its input", target_node.name));
+                return Ok(standalone(target));
             }
             let mut seeds = HashMap::new();
             for parent in &parents {
@@ -294,6 +297,20 @@ pub fn plan(
             }
             Ok(Plan { trigger: None, active: HashSet::from([target.clone()]), seeds, trigger_output: None, quiet: HashSet::new(), decided: None })
         }
+    }
+}
+
+/// A node nothing is wired into, tried on its own: it starts the run the way a trigger would, once,
+/// with no items — so a node that needs no input (a query, a request, a table read) can be tested
+/// before anything feeds it. It used to be refused ("has nothing connected to its input").
+fn standalone(target: &str) -> Plan {
+    Plan {
+        trigger: Some(target.to_string()),
+        active: HashSet::from([target.to_string()]),
+        seeds: HashMap::new(),
+        trigger_output: None,
+        quiet: HashSet::new(),
+        decided: None,
     }
 }
 
@@ -364,7 +381,11 @@ mod tests {
     fn up_to_runs_only_what_leads_to_the_node() {
         let plan = plan(&spec(), &RunMode::UpTo { node: "b".into() }, None, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(ids(&plan.active), vec!["a", "b", "t"]);
-        let refused = super::plan(&spec(), &RunMode::UpTo { node: "d".into() }, None, &HashMap::new(), &HashMap::new());
+        // Fed by a node no trigger reaches: there is nothing to start from.
+        let mut fed = spec();
+        fed.nodes.push(node("e", "transform.set", 400.0));
+        fed.connections.push(wire("d", "e"));
+        let refused = super::plan(&fed, &RunMode::UpTo { node: "e".into() }, None, &HashMap::new(), &HashMap::new());
         assert_eq!(refused, Err("no-trigger".into()));
     }
 
@@ -389,6 +410,17 @@ mod tests {
         assert_eq!(ids(&step.active), vec!["c"]);
         assert!(step.trigger.is_none());
         assert!(!step.seeds["b"].1, "reused, not pinned");
+    }
+
+    /// A node nothing feeds is tried on its own, by step or up to it: it is the run's start.
+    #[test]
+    fn a_node_nothing_feeds_runs_on_its_own() {
+        for mode in [RunMode::Step { node: "d".into() }, RunMode::UpTo { node: "d".into() }] {
+            let alone = plan(&spec(), &mode, None, &HashMap::new(), &HashMap::new()).unwrap();
+            assert_eq!(ids(&alone.active), vec!["d"]);
+            assert_eq!(alone.trigger.as_deref(), Some("d"));
+            assert!(alone.seeds.is_empty());
+        }
     }
 
     #[test]
