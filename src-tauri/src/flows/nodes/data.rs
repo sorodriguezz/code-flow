@@ -337,7 +337,23 @@ async fn dbml(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 // ------------------------------------------------------------------------------- binding values
 
-fn literal_for(value: &Value, dialect: SqlDialect) -> Result<String, String> {
+/// Gives a result whose driver reported no column types — Postgres' simple-query path carries none —
+/// the types the statement's plan says, so its rows come back as numbers and booleans, not text.
+pub(crate) async fn retype(session: &Session, result: &mut DbStatementResult) {
+    let untyped = !result.rows.is_empty() && result.columns.iter().all(|c| c.type_name.is_empty());
+    if !untyped || result.error.is_some() {
+        return;
+    }
+    if let Some(types) = session.column_types(&result.statement).await {
+        if types.len() == result.columns.len() {
+            for (column, type_name) in result.columns.iter_mut().zip(types) {
+                column.type_name = type_name;
+            }
+        }
+    }
+}
+
+pub(crate) fn literal_for(value: &Value, dialect: SqlDialect) -> Result<String, String> {
     Ok(match value {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => match dialect {
@@ -592,16 +608,7 @@ async fn query(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             }
         };
         for statement_result in result.results.iter_mut() {
-            let untyped = !statement_result.rows.is_empty() && statement_result.columns.iter().all(|c| c.type_name.is_empty());
-            if untyped && statement_result.error.is_none() {
-                if let Some(types) = session.column_types(&statement_result.statement).await {
-                    if types.len() == statement_result.columns.len() {
-                        for (column, type_name) in statement_result.columns.iter_mut().zip(types) {
-                            column.type_name = type_name;
-                        }
-                    }
-                }
-            }
+            retype(&session, statement_result).await;
         }
         for statement_result in &result.results {
             if let Some(error) = &statement_result.error {

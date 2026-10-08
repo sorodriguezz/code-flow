@@ -15,6 +15,8 @@ import { openNewChat } from "../../lib/aiPanelNav";
 import { moveChatToApp } from "../../lib/moveChatToApp";
 import { openTerminal } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
+import { registerDictationSend } from "../../state/dictationStore";
+import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
 import { useIsQueued, repoHolder } from "../../lib/repoQueue";
 import { resolveAccount } from "../../lib/aiAccounts";
 import { ChatMessageBubble, dayDivider } from "../chat/ChatMessageBubble";
@@ -278,6 +280,11 @@ export function PanelChat({
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
+  // «Dictar»: stop-and-send runs the submit of the render that holds the transcript.
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
+  useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()));
+  const dictating = useDictatingHere(boxRef);
 
   // ── Images ────────────────────────────────────────────────────────────────────────────────
   // Offered only where the model can look at one (`useModelReadsImages`): copied into this
@@ -536,6 +543,7 @@ export function PanelChat({
           {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
           <textarea
             ref={boxRef}
+            data-ai-input="inline"
             value={draft}
             rows={1}
             onChange={(e) => setDraft(e.target.value)}
@@ -553,6 +561,11 @@ export function PanelChat({
             aria-label={t("assistant.askPlaceholder", { repo: repoName })}
             className="max-h-[180px] resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
           />
+          {dictating ? (
+            <div className="flex items-center gap-1.5 px-0.5">
+              <DictationBar />
+            </div>
+          ) : (
           <div className="flex items-center gap-1.5 px-0.5">
             <ChatModelPicker
               liveModel={session.model}
@@ -600,17 +613,21 @@ export function PanelChat({
                 </button>
               </>
             ) : (
-              <button
-                onClick={submit}
-                disabled={!draft.trim()}
-                title={t("chat.send")}
-                aria-label={t("chat.send")}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40"
-              >
-                <ArrowUp size={13} />
-              </button>
+              <>
+                <DictationMic field={boxRef} className="h-6 w-6" iconSize={13} />
+                <button
+                  onClick={submit}
+                  disabled={!draft.trim()}
+                  title={t("chat.send")}
+                  aria-label={t("chat.send")}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40"
+                >
+                  <ArrowUp size={13} />
+                </button>
+              </>
             )}
           </div>
+          )}
         </div>
       </div>
     </div>

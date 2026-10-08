@@ -517,6 +517,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
         <Group title={t("stories.generation")} collapsible defaultOpen={false}>
           <Field label={t("stories.instructions")} hint={t("stories.instructionsRailHint")}>
             <textarea
+              data-ai-input
               value={instructions}
               rows={4}
               onChange={(e) => setInstructions(e.target.value)}

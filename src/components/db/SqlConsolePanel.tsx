@@ -57,6 +57,8 @@ import { useDbObjectDragStore } from "../../state/dbObjectDragStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useThemeStore } from "../../state/themeStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { registerDictationSend } from "../../state/dictationStore";
+import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
 import { useConnectionDriver } from "../../state/driverStore";
 import { useT } from "../../state/languageStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -804,6 +806,9 @@ function ConsoleAiPanel({
   const store = useDbStore.getState();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
+  // «Dictar»: the question is in the store by the time this runs, so stop-and-send simply asks.
+  useEffect(() => registerDictationSend(inputRef.current, () => void useDbStore.getState().askConsoleAi(tab.id)));
+  const dictating = useDictatingHere(inputRef);
 
   // Opening the panel puts the caret in it — the point of the shortcut is to type the question, and
   // a second ⌘I with it already open comes back here rather than closing what is being read.
@@ -922,6 +927,7 @@ function ConsoleAiPanel({
         <div className="rounded-lg border border-[var(--cf-field-border)] bg-[var(--cf-field)] transition-colors focus-within:border-[var(--cf-accent)]">
           <textarea
             ref={inputRef}
+            data-ai-input="inline"
             rows={1}
             value={ai.question}
             placeholder={
@@ -942,6 +948,11 @@ function ConsoleAiPanel({
             }}
             className="block max-h-[160px] w-full resize-none bg-transparent px-2.5 pb-1 pt-2 text-[13px] leading-[18px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
           />
+          {dictating ? (
+            <div className="flex items-center gap-1.5 px-2 pb-1.5">
+              <DictationBar />
+            </div>
+          ) : (
           <div className="flex items-center gap-1.5 px-2 pb-1.5">
             {/* The chat's own picker, on this task's row: what it writes is the "Database console"
                 routing Settings shows, so it is a second door to one setting rather than a second
@@ -967,17 +978,21 @@ function ConsoleAiPanel({
                 <Square size={9} />
               </button>
             ) : (
-              <button
-                onClick={() => void store.askConsoleAi(tab.id)}
-                disabled={!ai.question.trim()}
-                title={t("db.aiAsk")}
-                aria-label={t("db.aiAsk")}
-                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:cursor-not-allowed disabled:opacity-30"
-              >
-                <ArrowUp size={12} />
-              </button>
+              <>
+                <DictationMic field={inputRef} className="h-[22px] w-[22px]" iconSize={12} />
+                <button
+                  onClick={() => void store.askConsoleAi(tab.id)}
+                  disabled={!ai.question.trim()}
+                  title={t("db.aiAsk")}
+                  aria-label={t("db.aiAsk")}
+                  className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:cursor-not-allowed disabled:opacity-30"
+                >
+                  <ArrowUp size={12} />
+                </button>
+              </>
             )}
           </div>
+          )}
         </div>
       </div>
     </aside>

@@ -177,6 +177,7 @@ export function DocAiPanel({
       </label>
 
       <textarea
+        data-ai-input
         // Not while a run is going: the window was opened to follow it, and the caret belongs in the
         // document the user came back to.
         autoFocus={!running}

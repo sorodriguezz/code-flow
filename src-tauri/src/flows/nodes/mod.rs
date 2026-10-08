@@ -16,6 +16,7 @@ mod browser;
 pub(crate) mod connector;
 mod containers;
 pub(crate) mod data;
+mod database;
 pub(crate) mod devtools;
 mod docs;
 pub(crate) mod feed;
@@ -352,6 +353,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "code.notebook" => notebook::execute(ctx).await,
         "data.sql" | "data.mongo" | "data.redis" | "data.sheet" | "data.dbml" | "data.schemaDiff" => data::execute(ctx).await,
         "data.table" => table::execute(ctx).await,
+        "data.database" => database::execute(ctx).await,
         "code.ssh" | "net.transfer" | "net.storage" => remote::execute(ctx).await,
         "files.pr" | "files.pipeline" | "app.note" | "app.reviewer" | "app.open" | "app.terminal" | "app.clipboard" | "app.vault"
         | "app.apiRequest" | "app.apiCollection" | "app.diagram" | "app.story" | "app.aiUsage" | "app.runData" => {

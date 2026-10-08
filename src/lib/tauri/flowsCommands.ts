@@ -64,6 +64,8 @@ export type FlowParamKind =
   | { type: "agent" }
   | { type: "chainTemplate" }
   | { type: "dbConnection"; kinds: string[] }
+  | { type: "dbTable" }
+  | { type: "dbFilters" }
   | { type: "remoteHost"; kinds: string[] }
   | { type: "note" }
   | { type: "vaultItem" }
@@ -288,6 +290,7 @@ export const EXECUTABLE_TYPES = new Set([
   "data.sql",
   "data.mongo",
   "data.redis",
+  "data.database",
 ]);
 
 export const flowsCreateFlow = (workspaceId: string, folderId: string | null, name: string, spec?: string) =>

@@ -125,6 +125,7 @@ export function ContinueWithModal({ taskId, onClose }: { taskId: string; onClose
 
         <Field label={t("agents.chainSteps")}>
           <textarea
+            data-ai-input
             autoFocus
             value={instruction}
             rows={5}

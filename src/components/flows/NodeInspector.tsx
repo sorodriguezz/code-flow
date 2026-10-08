@@ -122,6 +122,7 @@ function nodeTip(type: string, params: Record<string, unknown>, t: (key: Transla
   if (type === "trigger.manual") return t("flows.help.manualForm");
   if (type === "ai.chat") return t("flows.help.chat");
   if (type === "data.dbml") return t("flows.help.dbml");
+  if (type === "data.database") return t("flows.help.database");
   if (type === "app.apiRequest") return t("flows.help.apiRequest");
   if (type === "transform.changes") return t("flows.help.changes");
   if (type === "transform.template") return t("flows.help.template");

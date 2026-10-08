@@ -28,6 +28,7 @@ import {
 } from "./AiFields";
 import { DbConnectionPicker, NotePicker, RemoteHostPicker, VaultItemPicker, ApiEnvironmentPicker, ApiRequestPicker } from "./AppFields";
 import { ApiCollectionPicker, FakeFieldsEditor, FlowTablePicker, SubflowInputsEditor, TransformCodeButton, ValidationRulesEditor } from "./MoreFields";
+import { DbFiltersEditor, DbTableField } from "./DbFields";
 import { visible } from "../../lib/flows/paramVisibility";
 import { serializeSpec } from "../../lib/flows/spec";
 import {
@@ -1201,6 +1202,12 @@ function ParamField({
       case "dbConnection":
         editor = <DbConnectionPicker value={value} onChange={onChange} kinds={kind.kinds} />;
         break;
+      case "dbTable":
+        editor = <DbTableField value={value} onChange={onChange} place={dbPlace(params)} />;
+        break;
+      case "dbFilters":
+        editor = <DbFiltersEditor value={value} onChange={onChange} place={dbPlace(params)} table={str(params.dbTable)} />;
+        break;
       case "remoteHost":
         editor = <RemoteHostPicker value={value} onChange={onChange} kinds={kind.kinds} />;
         break;
@@ -1263,10 +1270,16 @@ function ParamField({
       {editor}
       {expression && kind.type === "code" && <ExpressionPreview flowId={flowId} nodeId={nodeId} expression={value} />}
       {typeId === "ai.agent" && spec.name === "access" && <AccessHint params={params} />}
+      {typeId === "data.database" && (spec.name === "dbKeys" || spec.name === "dbFields") && !(Array.isArray(value) && value.length > 0) && (
+        <span className="text-[11.5px] text-[var(--cf-text-muted)]">{t(spec.name === "dbKeys" ? "flows.db.keysEmpty" : "flows.db.fieldsEmpty")}</span>
+      )}
       {typeId === "ai.transform" && spec.name === "transformGoal" && <TransformCodeButton flowId={flowId} nodeId={nodeId} params={params} setParam={setParam} />}
     </div>
   );
 }
+
+/** Where a database node points, for the fields that list what is there. */
+const dbPlace = (params: Record<string, unknown>) => ({ connection: str(params.connection), database: str(params.database), schema: str(params.schema) });
 
 export function ParamFields({
   specs,

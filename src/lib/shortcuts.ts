@@ -12,6 +12,7 @@ import { useDbCommandStore } from "../state/dbCommandStore";
 import { useDbStore } from "../state/dbStore";
 import { useDbModalStore } from "../state/dbModalStore";
 import { usePreferencesStore } from "../state/preferencesStore";
+import { useDictationStore } from "../state/dictationStore";
 import { fetchNow, pullNow, pushNow } from "./gitActions";
 import type { Chord } from "./keys";
 import type { TranslationKey } from "./i18n/translations";
@@ -39,6 +40,7 @@ export type ShortcutId =
   | "app.commandPalette"
   | "app.settings"
   | "app.shortcuts"
+  | "dictation.toggle"
   | "panel.sidebar"
   | "panel.ai"
   | "panel.terminal"
@@ -343,6 +345,15 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "shortcuts.cmdShortcuts",
     defaultChord: "Mod+Alt+K",
     run: () => useUiStore.getState().toggleShortcutsModal(),
+  },
+  {
+    // «Dictar»: starts in the AI field that has the focus, and a second press writes the text.
+    // Anywhere else it does nothing — and nothing at all until dictation is installed.
+    id: "dictation.toggle",
+    group: "general",
+    labelKey: "shortcuts.cmdDictate",
+    defaultChord: "Mod+Shift+Space",
+    run: () => useDictationStore.getState().toggle(),
   },
 
   {

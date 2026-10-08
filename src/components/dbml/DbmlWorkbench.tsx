@@ -163,6 +163,13 @@ const CHROME_FADE = "transition-opacity duration-200 motion-reduce:transition-no
 const FLOAT_BAR =
   "flex items-center gap-0.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[3px] shadow-[var(--cf-shadow)]";
 
+/**
+ * An icon button on a float bar: 24px, the height of the text buttons on them ("Vista", the zoom
+ * readout), so every bar in the corner is the same 32px. The recipe's `sm` square is 26px, which
+ * made the laser's and the zoom's bars two pixels taller than "Vista" between them.
+ */
+const BAR_ICON = "!h-6 !w-6";
+
 /** The counts strip under the canvas. Its height is also how far the left fold tab is lifted, so the
  *  two tabs sit level: the right one is centred on the canvas, the left on the canvas *and* this. */
 const STRIP_HEIGHT = 28;
@@ -1524,6 +1531,16 @@ export function DbmlWorkbench({
     parser !== null &&
     (schema.tables.length > 0 || schema.enums.length > 0);
 
+  /**
+   * How far the fold tabs sit above the middle of the row: half the counts strip, while the strip is
+   * drawn. The seams' grips are lifted by the same amount, so each is centred on the tab riding it
+   * rather than peeking out under one end of it.
+   */
+  const tabLift =
+    surface === "diagram" && parser !== null && (schema.tables.length > 0 || schema.enums.length > 0)
+      ? STRIP_HEIGHT / 2
+      : 0;
+
   const workbench = (
     <div
       className={
@@ -1867,6 +1884,7 @@ export function DbmlWorkbench({
             value={editorWidth}
             min={240}
             max={720}
+            gripOffset={tabLift}
             onChange={(value) => setSize("dbmlEditorWidth", value)}
             onCommit={(value) => commitSize("dbmlEditorWidth", value)}
           />
@@ -1892,7 +1910,7 @@ export function DbmlWorkbench({
             above
             // Level with the inspector's tab: that one is centred on the canvas, this container also
             // holds the counts strip under it.
-            lift={surface === "diagram" && parser && (schema.tables.length > 0 || schema.enums.length > 0) ? STRIP_HEIGHT / 2 : 0}
+            lift={tabLift}
             title={t(editorOpen ? "dbml.collapseEditor" : "dbml.expandEditor")}
             onClick={toggleEditorPane}
           />
@@ -2083,7 +2101,7 @@ export function DbmlWorkbench({
                           onClick={() => setLaser((on) => !on)}
                           aria-pressed={laser}
                           aria-label={t("diagrams.laser")}
-                          className={iconButtonClass({ size: "sm", active: laser })}
+                          className={iconButtonClass({ size: "sm", active: laser, className: BAR_ICON })}
                         >
                           <LaserGlyph colour={laserInk(laserColour)} />
                         </button>
@@ -2098,7 +2116,7 @@ export function DbmlWorkbench({
                           aria-haspopup="menu"
                           aria-label={t("diagrams.laserColour")}
                           // Up, not down: the menu opens upwards from the canvas's bottom edge.
-                          className="flex h-[26px] w-4 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] aria-expanded:bg-[var(--cf-press)] aria-expanded:text-[var(--cf-text)]"
+                          className="flex h-6 w-4 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] aria-expanded:bg-[var(--cf-press)] aria-expanded:text-[var(--cf-text)]"
                         >
                           <ChevronUp size={12} />
                         </button>
@@ -2318,6 +2336,7 @@ export function DbmlWorkbench({
                     value={inspectorWidth}
                     min={200}
                     max={520}
+                    gripOffset={tabLift}
                     onChange={(value) => setSize("dbmlInspectorWidth", value)}
                     onCommit={(value) => commitSize("dbmlInspectorWidth", value)}
                   />
@@ -2631,7 +2650,7 @@ function ZoomStep({
         type="button"
         onClick={onClick}
         aria-label={title}
-        className={iconButtonClass({ size: "sm" })}
+        className={iconButtonClass({ size: "sm", className: BAR_ICON })}
       >
         {children}
       </button>

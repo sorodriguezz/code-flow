@@ -73,6 +73,11 @@ pub enum Kind {
     ChainTemplate,
     /// A saved connection of the Databases workspace, of one of these engines.
     DbConnection { kinds: &'static [&'static str] },
+    /// A table (or view, or collection) of the node's `connection`, typed or picked from what it lists.
+    DbTable,
+    /// `{ combinator, conditions: [{ column, op, value }] }` — what rows a database node reads,
+    /// pushed down to the server as a `WHERE` (or a filter document) rather than tested on items.
+    DbFilters,
     /// A host of the Remote workspace, of one of these kinds.
     RemoteHost { kinds: &'static [&'static str] },
     /// A note of the workspace, by id.
@@ -1140,6 +1145,33 @@ const MONGO: &[ParamSpec] = &[
     p("queryText", Kind::Code { lang: "javascript" }, "\"db.coleccion.find({})\""),
     p("maxRows", COUNT, "10000").literal(),
     EACH,
+];
+
+/// Engines with tables — every saved connection but Redis.
+const TABLE_ENGINES: &[&str] = &["postgres", "supabase", "sqlserver", "iris", "mysql", "mariadb", "sqlite", "oracle", "jdbc", "mongodb"];
+/// The operations that work on one table.
+const ON_A_TABLE: &[&str] = &["dbRead", "dbCount", "dbInsert", "dbUpdate", "dbUpsert", "dbDelete", "dbColumns"];
+
+/// «Base de datos»: a table of a saved connection, without SQL (`nodes::database`).
+const DATABASE: &[ParamSpec] = &[
+    p("connection", Kind::DbConnection { kinds: TABLE_ENGINES }, "\"\"").literal(),
+    p(
+        "dbOp",
+        select(&["dbRead", "dbCount", "dbInsert", "dbUpdate", "dbUpsert", "dbDelete", "dbTables", "dbColumns"]),
+        "\"dbRead\"",
+    )
+    .literal(),
+    p("database", text(""), "\"\"").literal(),
+    p("schema", text(""), "\"\"").literal(),
+    p("dbTable", Kind::DbTable, "\"\"").literal().when("dbOp", ON_A_TABLE),
+    p("dbFilters", Kind::DbFilters, r#"{"combinator":"and","conditions":[]}"#).literal().when("dbOp", &["dbRead", "dbCount"]),
+    p("dbSort", Kind::SortKeys, "[]").literal().when("dbOp", &["dbRead"]),
+    p("maxRows", COUNT, "100").literal().when("dbOp", &["dbRead"]),
+    p("dbOffset", COUNT, "0").when("dbOp", &["dbRead"]),
+    p("rowData", text("{{ $json }}"), "\"={{ $json }}\"").when("dbOp", &["dbInsert", "dbUpdate", "dbUpsert", "dbDelete"]),
+    p("dbKeys", Kind::Strings, "[]").literal().when("dbOp", &["dbUpdate", "dbUpsert", "dbDelete"]),
+    p("dbFields", Kind::Strings, "[]").literal().when("dbOp", &["dbInsert", "dbUpdate", "dbUpsert"]),
+    p("runFor", select(&["each", "once"]), "\"each\"").literal().when("dbOp", &["dbRead", "dbCount"]),
 ];
 
 const REDIS: &[ParamSpec] = &[
@@ -2527,6 +2559,7 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "code.ssh" => SSH,
         "code.docker" => DOCKER,
         "data.sql" => SQL,
+        "data.database" => DATABASE,
         "data.mongo" => MONGO,
         "data.redis" => REDIS,
         "data.sheet" => SHEET,

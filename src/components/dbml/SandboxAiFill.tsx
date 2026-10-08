@@ -239,6 +239,7 @@ export function SandboxAiFill({
               {t("dbml.sandbox.aiFillLabel")}
             </label>
             <textarea
+              data-ai-input
               ref={box}
               value={instruction}
               onChange={(event) => setInstruction(event.target.value)}

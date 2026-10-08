@@ -175,6 +175,7 @@ export function GeneratePrompt({ sessionKey, cellKey }: { sessionKey: string; ce
         <AiSparkles size={13} />
       </ChatModelPicker>
       <input
+        data-ai-input
         autoFocus
         value={text}
         onChange={(event) => setText(event.target.value)}

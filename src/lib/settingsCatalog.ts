@@ -32,6 +32,7 @@ import {
   Cloud,
   Compass,
   Cpu,
+  Mic,
   Database,
   DatabaseBackup,
   Download,
@@ -322,6 +323,15 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         hintKey: "localexec.hint",
         icon: Cpu,
         searchKey: "settings.searchTermsLocalModel",
+      },
+      // Speaking into the AI fields — a third thing on this machine that runs a model, beside the two
+      // above, and installed from here the same way: nothing until a model is chosen.
+      {
+        id: "dictation",
+        labelKey: "dictation.title",
+        hintKey: "dictation.hint",
+        icon: Mic,
+        searchKey: "settings.searchTermsDictation",
       },
       // How the "a model is thinking" mark is drawn. Last of the panes that set something up, before
       // the two that only report — and in this section rather than Appearance because the mark is

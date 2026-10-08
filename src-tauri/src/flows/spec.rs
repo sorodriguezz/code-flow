@@ -266,6 +266,8 @@ pub const EXECUTABLE_TYPES: &[&str] = &[
     "data.sql",
     "data.mongo",
     "data.redis",
+    // Writes rows, so a review shows it like the SQL node.
+    "data.database",
     // Added with milestone 12 — the first two had been missing since they were built: a notebook runs
     // its cells and a shortcut / AppleScript runs whatever it says. `migrations::rehash_flow_trust`
     // carries the trust already given across the change.

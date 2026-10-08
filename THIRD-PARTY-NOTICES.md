@@ -18,7 +18,7 @@ component's own licence wins — which is what section 6 says.
 | What ships | Count |
 |---|---|
 | npm packages (production tree) | 343 resolved versions of 314 packages |
-| Rust crates (resolved for macOS and Windows) | 814 resolved versions of 713 crates |
+| Rust crates (resolved for macOS and Windows) | 815 resolved versions of 714 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 10 |
@@ -1369,10 +1369,11 @@ because there the order carries meaning.
 | `option-ext` | 0.2.0 | MPL-2.0 | <https://github.com/soc/option-ext> |
 | `selectors` | 0.36.1 | MPL-2.0 | <https://github.com/servo/stylo> |
 
-### ISC — 3 crates
+### ISC — 4 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
+| `libloading` | 0.7.4 | ISC | <https://github.com/nagisa/rust_libloading> |
 | `rustls-webpki` | 0.101.7, 0.102.8, 0.103.13 | ISC | <https://github.com/rustls/webpki> |
 | `starship-battery` | 0.11.1 | ISC | <https://github.com/starship/rust-battery> |
 | `untrusted` | 0.9.0 | ISC | <https://github.com/briansmith/untrusted> |

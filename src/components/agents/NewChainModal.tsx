@@ -424,6 +424,7 @@ export function NewChainModal({
 
         <Field label={t("agents.goal")}>
           <textarea
+            data-ai-input
             autoFocus
             value={goal}
             rows={3}
@@ -528,6 +529,7 @@ export function NewChainModal({
                     </p>
                   )}
                 <textarea
+                  data-ai-input
                   value={step.instruction}
                   rows={2}
                   onChange={(e) => patch(step.key, { instruction: e.target.value })}

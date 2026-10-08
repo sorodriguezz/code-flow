@@ -113,6 +113,7 @@ export function GroupView({ group }: { group: ChatGroup }) {
 
           <div className="rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface-2)] p-3">
             <textarea
+              data-ai-input
               ref={boxRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -262,6 +263,7 @@ function InstructionsBox({ value, onCommit }: { value: string; onCommit: (text: 
 
   return (
     <textarea
+      data-ai-input
       value={text}
       onChange={(event) => setText(event.target.value)}
       onBlur={() => {

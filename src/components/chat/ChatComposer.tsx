@@ -19,6 +19,8 @@ import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { registerDictationSend } from "../../state/dictationStore";
+import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
 
 /** How tall the box may grow before it starts scrolling instead. Roughly twelve lines — past that
  *  the composer is eating the transcript it is supposed to be a footnote to, and the text being
@@ -217,6 +219,13 @@ export function ChatComposer({
     setSkill(null);
   }, [draft, sending, queue, disabled, onSend, onDraftChange, onRunAppCommand, surface, skill]);
 
+  /** «Dictar»'s stop-and-send runs the submit of the render that already holds the transcript. */
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
+  useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()));
+  /** While this box records, the bar takes the toolbar's place — the controls are the recording's. */
+  const dictating = useDictatingHere(boxRef);
+
   /**
    * The queue as the strip is handed it, with "edit" finished here: the store takes the message out
    * of the queue (and puts its files back on the tray), and the box — which is this component's —
@@ -368,6 +377,7 @@ export function ChatComposer({
           {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
           <textarea
             ref={boxRef}
+            data-ai-input="inline"
             value={draft}
             rows={1}
             disabled={disabled}
@@ -393,6 +403,11 @@ export function ChatComposer({
           />
           {textMenu.menu}
 
+          {dictating ? (
+            <div className="flex items-center gap-1.5 px-0.5">
+              <DictationBar />
+            </div>
+          ) : (
           <div className="flex items-center gap-1.5 px-0.5">
             {/* `bound` is what makes this chip tell the truth: the conversation's engine, not the
                 workspace's chat routing. Without it the padlock lands on the provider the thread is
@@ -522,18 +537,24 @@ export function ChatComposer({
                 </button>
               </div>
             ) : (
-              <button
-                type="button"
-                onClick={submit}
-                disabled={!draft.trim() || disabled}
-                title={t("chat.send")}
-                aria-label={t("chat.send")}
-                className="ml-auto flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40"
-              >
-                <ArrowUp size={15} />
-              </button>
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                {/* Beside send, where the desktop chat apps put it: dictating is another way of
+                    writing the message that button sends. Absent until dictation is installed. */}
+                <DictationMic field={boxRef} />
+                <button
+                  type="button"
+                  onClick={submit}
+                  disabled={!draft.trim() || disabled}
+                  title={t("chat.send")}
+                  aria-label={t("chat.send")}
+                  className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40"
+                >
+                  <ArrowUp size={15} />
+                </button>
+              </div>
             )}
           </div>
+          )}
         </div>
 
         {/* Nothing under the box. The strip that used to live here listed what the engine could not

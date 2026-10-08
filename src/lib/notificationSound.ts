@@ -4,6 +4,7 @@
  */
 import type { TranslationKey } from "./i18n/translations";
 import { NOTIFICATION_SOUND_ASSETS } from "./notificationSoundAssets";
+import { reportError } from "./diagnostics";
 
 export type NotificationSoundId =
   | "double-ping" | "ping" | "mellow-chime" | "soft-bell" | "activity-beacon"
@@ -217,14 +218,32 @@ function audioContext(): AudioContext | null {
   return context;
 }
 
+/** How long a suspended context may take to resume before the attempt is called failed. */
+const RESUME_MS = 3000;
+
+/**
+ * Silent for the user, but not for the log: a sound that does not play is reported to the app log
+ * with why (no context, a resume that never settled, a fetch or a decode that failed), since a
+ * release build has no console to read it in.
+ */
 function whenAudible(play: (ctx: AudioContext) => Promise<void>): void {
   try {
     const ctx = audioContext();
-    if (!ctx) return;
-    const ready = ctx.state === "suspended" ? ctx.resume() : Promise.resolve();
-    void ready.then(() => play(ctx)).catch(() => {});
-  } catch {
-    // Missing audio devices, refused resumes and failed decoding stay silent.
+    if (!ctx) {
+      reportError("sound", "no AudioContext in this webview");
+      return;
+    }
+    const ready =
+      ctx.state === "suspended"
+        ? Promise.race([
+            ctx.resume(),
+            new Promise<void>((_, fail) => setTimeout(() => fail(new Error(`resume did not settle in ${RESUME_MS} ms`)), RESUME_MS)),
+          ])
+        : Promise.resolve();
+    void ready.then(() => play(ctx)).catch((error: unknown) => reportError("sound", error, `context ${ctx.state}`));
+  } catch (error) {
+    // Missing audio devices, refused resumes and failed decoding stay silent on screen.
+    reportError("sound", error);
   }
 }
 

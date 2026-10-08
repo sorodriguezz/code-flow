@@ -5,6 +5,7 @@ import { EmptyState } from "./components/common/EmptyState";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SatelliteTitleBar } from "./components/layout/SatelliteTitleBar";
 import { ToastContainer } from "./components/common/Toast";
+import { DictationOverlay } from "./components/dictation/DictationOverlay";
 import { TitleTooltips } from "./components/common/TitleTooltips";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
@@ -601,6 +602,7 @@ export default function SatelliteApp() {
           this window does not have. */}
       <ToastContainer />
       <ConfirmModal />
+      <DictationOverlay shortcut />
       <PromptModal />
       <TitleTooltips />
       {/* An app island switches its own workspace with the lock; a repository window holds one

@@ -26,6 +26,8 @@ import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { fieldClass, toolbarClass } from "../common/recipes";
 import { Select } from "../common/Select";
 import { Tooltip } from "../common/Tooltip";
+import { registerDictationSend } from "../../state/dictationStore";
+import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useUiStore } from "../../state/uiStore";
@@ -326,6 +328,14 @@ function AgentComposer({ taskId }: { taskId: string }) {
     if (text) setInput((current) => (current.trim() ? current : text));
   }, [bounced, taskId]);
 
+  // «Dictar», above the early return so the hooks run on every render: stop-and-send runs the
+  // submit of the render that holds the transcript, registered again each render because the box
+  // is not there while the task is loading.
+  const boxRef = useRef<HTMLTextAreaElement>(null);
+  const submitRef = useRef<() => void>(() => {});
+  useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()));
+  const dictating = useDictatingHere(boxRef);
+
   if (!task) return null;
 
   const submit = () => {
@@ -334,6 +344,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
     // `blockedBy` — a render behind — waved through, and emptying the box then lost the message.
     if (useAgentsStore.getState().send(taskId, input)) setInput("");
   };
+  submitRef.current = submit;
 
   return (
     // A card rather than a box under a rule: the field and the controls that decide how it is sent
@@ -341,6 +352,8 @@ function AgentComposer({ taskId }: { taskId: string }) {
     <div className="shrink-0 px-4 pb-4 pt-2">
       <div className="mx-auto w-full max-w-[760px] rounded-[12px] border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-3 pb-2 pt-2.5 shadow-[var(--cf-shadow-lift)] transition-[border-color,box-shadow] duration-100 focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]">
         <textarea
+          ref={boxRef}
+          data-ai-input="inline"
           value={input}
           rows={3}
           disabled={chainLocked || localExec}
@@ -365,6 +378,11 @@ function AgentComposer({ taskId }: { taskId: string }) {
           aria-label={t("agents.followUpPlaceholder")}
           className="block w-full resize-none bg-transparent text-[13px] leading-relaxed text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)] disabled:opacity-50"
         />
+        {dictating ? (
+          <div className="mt-1.5 flex items-center gap-2">
+            <DictationBar />
+          </div>
+        ) : (
         <div className="mt-1.5 flex items-center gap-2">
           {!localExec && <AgentModelMenu taskId={taskId} />}
           {blockedBy && (
@@ -383,19 +401,23 @@ function AgentComposer({ taskId }: { taskId: string }) {
               {cancelling ? t("ai.stopping") : t("ai.stop")}
             </button>
           ) : (
-            <Tooltip label={t("agents.send")}>
-              <button
-                type="button"
-                onClick={submit}
-                disabled={!input.trim() || blockedBy !== null || chainLocked || localExec}
-                aria-label={t("agents.send")}
-                className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:pointer-events-none disabled:opacity-40"
-              >
-                <Send size={14} />
-              </button>
-            </Tooltip>
+            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              {!(chainLocked || localExec) && <DictationMic field={boxRef} className="h-7 w-7" iconSize={14} />}
+              <Tooltip label={t("agents.send")}>
+                <button
+                  type="button"
+                  onClick={submit}
+                  disabled={!input.trim() || blockedBy !== null || chainLocked || localExec}
+                  aria-label={t("agents.send")}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:pointer-events-none disabled:opacity-40"
+                >
+                  <Send size={14} />
+                </button>
+              </Tooltip>
+            </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );

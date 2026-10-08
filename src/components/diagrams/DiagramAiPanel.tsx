@@ -348,6 +348,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
 
       <div className="flex flex-col gap-2 p-2.5">
         <textarea
+          data-ai-input
           value={instruction}
           onChange={(event) => setInstruction(event.target.value)}
           onKeyDown={(event) => {

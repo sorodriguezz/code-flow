@@ -303,6 +303,7 @@ export function NoteAiPanel({
       )}
 
       <textarea
+        data-ai-input
         // Only when the window was opened by the user. Reopening a note that has a run of its own
         // opens it too — and stealing the caret out of the note somebody just went back to, to
         // put it in a field they did not ask for, is how the diagram panel earned its complaint.

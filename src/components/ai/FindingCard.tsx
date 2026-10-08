@@ -349,6 +349,7 @@ export function ResolveWithAiButton({
       </div>
       {!hideAi && noteOpen && (
         <textarea
+          data-ai-input
           value={extra}
           onChange={(e) => setExtra(e.target.value)}
           disabled={resolving}

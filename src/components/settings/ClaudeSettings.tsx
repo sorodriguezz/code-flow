@@ -3,6 +3,7 @@ import { AiAccountsSettings } from "./AiAccountsSettings";
 import { AiCompletionSettings } from "./AiCompletionSettings";
 import { AiTasksSettings } from "./AiTasksSettings";
 import { LocalModelSettings } from "./LocalModelSettings";
+import { DictationSettings } from "./DictationSettings";
 import { useT } from "../../state/languageStore";
 import { ProvidersSection } from "./ProvidersSection";
 import { QuotaSection } from "./QuotaSection";
@@ -102,6 +103,7 @@ export function ClaudeSettings() {
             {tab === "tasks" && <AiTasksSettings />}
             {tab === "completion" && <AiCompletionSettings />}
             {tab === "localModel" && <LocalModelSettings />}
+            {tab === "dictation" && <DictationSettings />}
             {tab === "thinking" && <ThinkingDesignSettings />}
             {tab === "limits" && <QuotaSection />}
             {tab === "usage" && <UsageStatsSection />}

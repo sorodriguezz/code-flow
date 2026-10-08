@@ -250,6 +250,7 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("net.google", Net, "layout-grid", 9).shown_in(Apps).group("appsGoogle"),
     node("net.microsoft", Net, "app-window", 11).shown_in(Apps).group("appsMicrosoft"),
     // Data — the database workspace's connections, and the flow's own memory.
+    node("data.database", Data, "table-properties", 12).group("dataDatabases"),
     node("data.sql", Data, "database", 4).group("dataDatabases"),
     node("data.mongo", Data, "boxes", 4).group("dataDatabases"),
     node("data.redis", Data, "box", 4).group("dataDatabases"),
@@ -470,12 +471,12 @@ mod tests {
         assert_eq!(count(Net), 15);
         assert_eq!(count(Messaging), 4);
         assert_eq!(count(Apps), 3);
-        assert_eq!(count(Data), 9);
+        assert_eq!(count(Data), 10);
         assert_eq!(count(Files), 13);
         assert_eq!(count(Logic), 13);
         assert_eq!(count(Transform), 20);
         assert_eq!(count(App), 15);
-        assert_eq!(CATALOG.len(), 171);
+        assert_eq!(CATALOG.len(), 172);
     }
 
     #[test]

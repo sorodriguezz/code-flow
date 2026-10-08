@@ -434,7 +434,13 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
         if quota_signal(stdout) {
             return Err(format!("{QUOTA_MARKER}{}", stdout.trim()));
         }
-        let detail = [stderr.trim(), stdout.trim()]
+        // With `--json` the reason a turn failed is an event on stdout, and stderr holds only the
+        // banner `codex exec` prints when stdin is piped. Taking stderr first showed that banner —
+        // "Reading additional input from stdin..." — as the error, and hid the server's answer (a
+        // model this CLI version may not use, say) one stream over.
+        let failure = parse_events(stdout).and_then(|events| events.error);
+        let stderr = without_stdin_banner(stderr);
+        let detail = [failure.as_deref().unwrap_or(""), stderr.trim(), stdout.trim()]
             .into_iter()
             .find(|s| !s.is_empty())
             .unwrap_or("sin salida en stdout ni stderr");
@@ -475,10 +481,41 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
     })
 }
 
-/// What one `codex exec --json` run said: the agent's reply, and what it spent.
+/// What one `codex exec --json` run said: the agent's reply, what it spent, and why it failed.
 struct CodexEvents {
     message: String,
     usage: Option<AiUsage>,
+    /// The last `turn.failed` reason, else the last `error` event's — already unwrapped from the
+    /// API's JSON envelope when it arrived in one.
+    error: Option<String>,
+}
+
+/// `stderr` without the line `codex exec` prints whenever its stdin is piped, which is every run
+/// here: it says nothing about why one failed.
+fn without_stdin_banner(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| !line.trim().starts_with("Reading additional input from stdin"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// An error event's message as a person reads it. The API's own errors arrive as JSON text inside
+/// the message (`{"type":"error","status":400,"error":{"message":"…"}}`); the sentence is the inner
+/// `message`.
+fn error_text(message: &str) -> String {
+    let trimmed = message.trim();
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .or_else(|| value.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
 /// Reads the JSONL event stream.
@@ -494,6 +531,8 @@ fn parse_events(stdout: &str) -> Option<CodexEvents> {
     let mut saw_event = false;
     let mut message = String::new();
     let mut usage = None;
+    let mut failed: Option<String> = None;
+    let mut error: Option<String> = None;
 
     for line in stdout.lines() {
         let line = line.trim();
@@ -525,11 +564,23 @@ fn parse_events(stdout: &str) -> Option<CodexEvents> {
                     usage = parse_usage(reported);
                 }
             }
+            // An `item.completed` of type `error` is a warning the run went on past ("model metadata
+            // not found"), so only these two say why it stopped — `turn.failed` the more precisely.
+            "turn.failed" => {
+                if let Some(text) = event.pointer("/error/message").and_then(|m| m.as_str()) {
+                    failed = Some(error_text(text));
+                }
+            }
+            "error" => {
+                if let Some(text) = event.get("message").and_then(|m| m.as_str()) {
+                    error = Some(error_text(text));
+                }
+            }
             _ => {}
         }
     }
 
-    saw_event.then_some(CodexEvents { message, usage })
+    saw_event.then_some(CodexEvents { message, usage, error: failed.or(error) })
 }
 
 /// One `turn.completed` usage object in this app's terms.
@@ -697,6 +748,30 @@ mod tests {
     fn surfaces_the_failure_detail() {
         let err = interpret_output(false, "exit status: 1", "", "not logged in — run `codex login`").unwrap_err();
         assert_eq!(err, "codex exited with an error (exit status: 1): not logged in — run `codex login`");
+    }
+
+    /// What 0.155.0 printed for a model the account's client may not use: the reason is on stdout as
+    /// events, and stderr holds only the piped-stdin banner — which used to be the whole message.
+    #[test]
+    fn a_failed_turn_says_why_rather_than_the_stdin_banner() {
+        let stdout = concat!(
+            r#"{"type":"thread.started","thread_id":"01a11900-c919-7923-bd5e-aef75cde6804"}"#, "\n",
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `example-model` not found."}}"#, "\n",
+            r#"{"type":"turn.started"}"#, "\n",
+            r#"{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'example-model' model is not supported.\"}}"}"#, "\n",
+            r#"{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'example-model' model is not supported.\"}}"}}"#, "\n",
+        );
+        let err = interpret_output(false, "exit status: 1", stdout, "Reading additional input from stdin...\n").unwrap_err();
+        assert_eq!(err, "codex exited with an error (exit status: 1): The 'example-model' model is not supported.");
+    }
+
+    /// An error event in plain words is kept as written, and stderr still speaks when stdout has no
+    /// events — once the banner is out of the way.
+    #[test]
+    fn error_text_unwraps_only_json() {
+        assert_eq!(error_text("stream disconnected"), "stream disconnected");
+        let err = interpret_output(false, "exit status: 1", "", "Reading additional input from stdin...\nauth expired").unwrap_err();
+        assert_eq!(err, "codex exited with an error (exit status: 1): auth expired");
     }
 
     #[test]

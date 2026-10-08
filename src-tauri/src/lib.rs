@@ -34,6 +34,7 @@ mod dap;
 mod datasource;
 mod db;
 mod debugger;
+mod dictation;
 mod flows;
 mod fsops;
 mod codex;
@@ -451,6 +452,8 @@ pub fn run() {
         // The cancel channels for model downloads and in-flight completions. Same shape
         // and same neighbourhood as `ApiRegistry` above; see `localai::LocalAiRegistry`.
         .manage(localai::LocalAiRegistry::default())
+        // The dictation engine's one install at a time — see `commands::dictation_cmd`.
+        .manage(commands::dictation_cmd::DictationRegistry::default())
         .manage(tray::QuittingFlag::default())
         // Whether a quit the user asked for is waiting on the unsaved-work question. See `quit_guard`.
         .manage(quit_guard::QuitGuard::default())
@@ -1701,6 +1704,12 @@ pub fn run() {
             commands::localai_cmd::localai_set_model,
             commands::localai_cmd::localai_download_model,
             commands::localai_cmd::localai_cancel_download,
+            commands::dictation_cmd::dictation_status,
+            commands::dictation_cmd::dictation_install,
+            commands::dictation_cmd::dictation_cancel_install,
+            commands::dictation_cmd::dictation_remove,
+            commands::dictation_cmd::dictation_transcribe,
+            commands::dictation_cmd::dictation_cancel,
             commands::localai_cmd::localai_delete_model,
             commands::localai_cmd::localai_stop_engine,
             commands::localai_cmd::localai_complete,

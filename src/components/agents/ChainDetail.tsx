@@ -298,6 +298,7 @@ export function ChainDetail({ chainId }: { chainId: string }) {
           <div className="shrink-0 border-t border-[var(--cf-border)] px-4 py-2.5">
             <p className="mb-1.5 text-[12px] text-[var(--cf-text-muted)]">{t("agents.gatePreview")}</p>
             <textarea
+              data-ai-input
               value={draft ?? ""}
               rows={6}
               onChange={(e) => setDraft(e.target.value)}

@@ -426,6 +426,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
 
         <Field label={t("stories.instructions")} hint={t("stories.instructionsHint")}>
           <textarea
+            data-ai-input
             value={instructions}
             rows={3}
             onChange={(e) => setInstructions(e.target.value)}

@@ -87,6 +87,7 @@ export function FlowAiPanel({ flowId, diff, onClose }: { flowId: string; diff: F
 
       <div className="flex flex-col gap-2 p-2.5">
         <textarea
+          data-ai-input
           ref={field}
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}

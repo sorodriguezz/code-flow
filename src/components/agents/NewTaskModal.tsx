@@ -613,6 +613,7 @@ export function NewTaskModal({
 
         <Field label={t("agents.goal")}>
           <textarea
+            data-ai-input
             autoFocus={!templateId}
             value={goal}
             rows={7}

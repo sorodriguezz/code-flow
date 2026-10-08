@@ -31,11 +31,21 @@
 
   Windows has no equivalent, which is why a host that works from the Windows build can be
   unreachable from this one on the same network.
+
+  NSMicrophoneUsageDescription
+  ----------------------------
+  «Dictar» records from the webview (`getUserMedia`). Without this key macOS does not ask: the
+  capture is refused outright, and a bundled app that touches the microphone with no stated reason
+  can be terminated by the system. Only asked the first time someone presses the microphone, which
+  appears only after dictation has been installed from Settings. Windows asks through WebView2's own
+  prompt the first time.
 -->
 <plist version="1.0">
   <dict>
     <key>NSPrefersDisplaySafeAreaLayoutGuide</key>
     <false/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>CodeFlow uses the microphone only while you dictate into an AI field. The audio is transcribed on this computer and is not kept.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>CodeFlow needs this to reach the machines on your network — SSH hosts, screens and file shares you connect to by local address.</string>
   </dict>

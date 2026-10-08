@@ -364,6 +364,7 @@ export function StoryRealizerModal({
 
         <Field label={t("agents.storyNotes")}>
           <textarea
+            data-ai-input
             value={notes}
             rows={3}
             onChange={(e) => setNotes(e.target.value)}

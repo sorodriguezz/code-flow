@@ -38,6 +38,12 @@ interface ResizeHandleProps {
    * already draws its own hairline, and a second one a pixel away read as a doubled edge.
    */
   seamless?: boolean;
+  /**
+   * How far before the seam's middle the grip sits, in pixels. For a seam with a control riding it
+   * that is centred on a shorter box than the seam (a fold tab over a canvas with a strip under
+   * it): the grip is centred on the control instead of peeking out of one end of it.
+   */
+  gripOffset?: number;
 }
 
 export function ResizeHandle({
@@ -51,6 +57,7 @@ export function ResizeHandle({
   seamless = false,
   invert,
   quiet,
+  gripOffset = 0,
 }: ResizeHandleProps) {
   const valueRef = useRef(value);
   valueRef.current = value;
@@ -169,6 +176,7 @@ export function ResizeHandle({
       {!quiet && (
         <span
           aria-hidden
+          style={gripOffset ? { [axis === "x" ? "top" : "left"]: `calc(50% - ${gripOffset}px)` } : undefined}
           className={`pointer-events-none absolute rounded-full bg-[var(--cf-text-muted)]/20 transition-colors group-hover:bg-[var(--cf-accent-fill)] group-active:bg-[var(--cf-accent-fill)] ${
             axis === "x"
               ? "left-1/2 top-1/2 h-5 w-[2px] -translate-x-1/2 -translate-y-1/2"
