@@ -37,7 +37,9 @@ export function initialSpring(meta: SpringMeta, saved?: Partial<SpringState>): S
     groupId: saved?.groupId || meta.groupDefault,
     packageName: "",
     packageEdited: false,
-    dependencies: saved?.dependencies?.length ? saved.dependencies : ["web"],
+    // None, and never last project's: every dependency picker starts empty (user, 2026-10-08: "que
+    // no tenga seleccionados por defecto"). Spring Web used to be pre-picked; it is first in POPULAR.
+    dependencies: [],
   };
 }
 

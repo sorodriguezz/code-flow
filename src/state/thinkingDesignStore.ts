@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
 import { watchSettings } from "../lib/settingsSync";
-import { DEFAULT_THINKING_DESIGN, isThinkingDesign, type ThinkingDesign } from "../lib/thinkingDesigns";
+import { DEFAULT_THINKING_DESIGN, storedThinkingDesign, type ThinkingDesign } from "../lib/thinkingDesigns";
 
 const KEY = "ai_thinking_design";
 
@@ -27,8 +27,9 @@ export const useThinkingDesignStore = create<ThinkingDesignState>((set, get) => 
     const stored = await getSetting(KEY).catch(() => undefined);
     if (stored === undefined) return;
     // Unset, or an id this release does not know — written by a newer one, or one of the twelve
-    // retired marks an older one offered (reactor, sparkle…): the default.
-    const design = isThinkingDesign(stored) ? stored : DEFAULT_THINKING_DESIGN;
+    // retired marks an older one offered (reactor, sparkle…): the default. A replaced design reads
+    // as its successor (Estrella → Gato).
+    const design = storedThinkingDesign(stored);
     if (design !== get().design) set({ design });
   },
 

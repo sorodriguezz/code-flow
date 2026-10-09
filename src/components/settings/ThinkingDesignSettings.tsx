@@ -1,7 +1,10 @@
 import { useState } from "react";
 import { Check } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
+import { Segmented } from "../common/Segmented";
 import { THINKING_DESIGNS, type ThinkingDesign } from "../../lib/thinkingDesigns";
+import type { ThinkingActivity } from "../../lib/thinking/activity";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
 import { useT } from "../../state/languageStore";
 import { onRadioKeys } from "./settingsNav";
@@ -14,25 +17,67 @@ import { onRadioKeys } from "./settingsNav";
  * works large is one to know about before picking it. Tiles and selection ring are the Appearance
  * section's mode tiles, so "picked" reads the same way in both.
  *
- * Twelve tiles, four across once there is room and two before — column counts they fill. Choosing is
+ * Sixteen tiles, four across once there is room and two before — column counts they fill. Choosing is
  * instant and global: every orb in every window subscribes to the one setting (`thinkingDesignStore`),
  * the run card's included. The large preview runs in the "thinking" phase, where every design that
  * reacts to a phase shows its liveliest light; pointing at a tile (or focusing it) plays its finish
  * — what a turn's gutter shows the moment the answer lands, otherwise seen only in passing.
+ *
+ * Above the grid, the state every tile previews (user: "no tiene animación como de trabajando,
+ * pensando, error…" — the reactions existed but only "thinking" could be seen here). Seven peers in
+ * one segmented row: they are all the same question, "what does it look like when…". On an ending
+ * (Terminado, Error) pointing at a tile replays it.
  */
-/** Module-level, so the tiles hand every orb the same object across renders — a new `done` object
- *  is what replays a finish, so only a fresh hover may make one. */
-const THINKING_PREVIEW = { phase: "think" } as const;
-const DONE_PREVIEW = { done: true } as const;
+type PreviewState = "think" | "read" | "work" | "write" | "quiet" | "done" | "failed";
+
+/** Module-level, so the tiles hand every orb the same object across renders. */
+const PREVIEWS: Record<PreviewState, ThinkingActivity> = {
+  think: { phase: "think" },
+  read: { phase: "read" },
+  work: { phase: "edit" },
+  write: { phase: "write" },
+  quiet: { phase: "think", quiet: true },
+  done: { done: true },
+  failed: { failed: true },
+};
+
+const PREVIEW_LABELS: Record<PreviewState, TranslationKey> = {
+  think: "settings.thinkingState.think",
+  read: "settings.thinkingState.read",
+  work: "settings.thinkingState.work",
+  write: "settings.thinkingState.write",
+  quiet: "settings.thinkingState.quiet",
+  done: "settings.thinkingState.done",
+  failed: "settings.thinkingState.failed",
+};
 
 export function ThinkingDesignSettings() {
   const t = useT();
   const design = useThinkingDesignStore((s) => s.design);
   const setDesign = useThinkingDesignStore((s) => s.setDesign);
   const [finishing, setFinishing] = useState<ThinkingDesign | null>(null);
+  const [preview, setPreview] = useState<PreviewState>("think");
+  /** Per tile, how many times an ending has been replayed: the orb is keyed by it, and a fresh mount
+   *  is what plays an ending again when the state itself has not changed. */
+  const [replays, setReplays] = useState<Partial<Record<ThinkingDesign, number>>>({});
+  const ending = preview === "done" || preview === "failed";
+  const point = (id: ThinkingDesign) => {
+    setFinishing(id);
+    if (ending) setReplays((was) => ({ ...was, [id]: (was[id] ?? 0) + 1 }));
+  };
 
   return (
     <div className="@container">
+      <div className="mb-2.5 overflow-x-auto p-0.5">
+        <Segmented
+          size="sm"
+          layoutId="thinking-preview"
+          ariaLabel={t("settings.thinkingPreview")}
+          value={preview}
+          onChange={setPreview}
+          options={(Object.keys(PREVIEWS) as PreviewState[]).map((value) => ({ value, label: t(PREVIEW_LABELS[value]) }))}
+        />
+      </div>
       <div
         role="radiogroup"
         aria-label={t("settings.thinkingTitle")}
@@ -51,9 +96,9 @@ export function ThinkingDesignSettings() {
               onClick={() => {
                 if (!selected) void setDesign(id);
               }}
-              onPointerEnter={() => setFinishing(id)}
+              onPointerEnter={() => point(id)}
               onPointerLeave={() => setFinishing((was) => (was === id ? null : was))}
-              onFocus={() => setFinishing(id)}
+              onFocus={() => point(id)}
               onBlur={() => setFinishing((was) => (was === id ? null : was))}
               title={t("settings.thinkingFinishHint")}
               // The ring is the selection; a box-shadow, so picking a tile moves nothing.
@@ -64,7 +109,12 @@ export function ThinkingDesignSettings() {
               }`}
             >
               <span aria-hidden className="flex h-[76px] items-center justify-center rounded-md bg-[var(--cf-sunken)]">
-                <ThinkingOrb size="lg" design={id} activity={finishing === id ? DONE_PREVIEW : THINKING_PREVIEW} />
+                <ThinkingOrb
+                  key={replays[id] ?? 0}
+                  size="lg"
+                  design={id}
+                  activity={!ending && finishing === id ? PREVIEWS.done : PREVIEWS[preview]}
+                />
               </span>
               <span
                 className={`flex items-center gap-2 px-0.5 text-[13px] font-medium ${

@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactElement } from "react";
 import { thinkingDesignKind, type ThinkingDesign } from "../../lib/thinkingDesigns";
-import { thinkingState, type ThinkingActivity } from "../../lib/thinking/activity";
+import { phaseGroup, thinkingState, type ThinkingActivity } from "../../lib/thinking/activity";
 import { ORB_PX, register, prefersReducedMotion, type OrbSize, type Painter } from "../../lib/thinking/ticker";
 import { createSphere } from "../../lib/thinking/sphere";
 import { createOrb } from "../../lib/thinking/orb";
@@ -8,8 +8,12 @@ import { createNetwork } from "../../lib/thinking/network";
 import { createWave } from "../../lib/thinking/wave";
 import { createLiquid } from "../../lib/thinking/liquid";
 import { createCrystal } from "../../lib/thinking/crystal";
-import { createStar } from "../../lib/thinking/star";
+import { createCat } from "../../lib/thinking/cat";
 import { createPixels } from "../../lib/thinking/pixels";
+import { createGhost } from "../../lib/thinking/ghost";
+import { createCrab } from "../../lib/thinking/crab";
+import { createMoon } from "../../lib/thinking/moon";
+import { createAtom } from "../../lib/thinking/atom";
 import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
 
 /**
@@ -17,14 +21,15 @@ import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
  * a story generation, a review stage, a wiki write. Never a generic loading spinner: work that
  * runs no model wears `LoaderCircle` instead.
  *
- * It has twelve looks (`lib/thinkingDesigns`), chosen once in Settings and followed by every orb
+ * It has sixteen looks (`lib/thinkingDesigns`), chosen once in Settings and followed by every orb
  * in every window. `design` pins one look regardless of the setting — for the picker that previews
  * all of them.
  *
  * `activity` is what the run is doing, when the caller knows: the run card passes its phase, and
- * whether it has gone quiet, is stopping or has just finished. Canvas designs light up by it (the
- * globe's spotlights while thinking, its scan while reading…); CSS designs read the coarse state
- * off `data-state`. Without it a mark simply runs.
+ * whether it has gone quiet, is stopping, has just finished or has just failed. Canvas designs light
+ * up by it (the globe's spotlights while thinking, its scan while reading…); CSS designs read the
+ * state off `data-state` and, while running, the kind of phase off `data-phase` (thinking, reading,
+ * working, writing). A failed run turns every design red. Without it a mark simply runs.
  *
  * `aria-hidden`: it says nothing a screen reader can use. Every caller sits next to text that
  * already names what is running, and a second announcement per row would be noise.
@@ -41,13 +46,16 @@ export function ThinkingOrb({
   const chosen = useThinkingDesignStore((s) => s.design);
   const look = design ?? chosen;
   const state = thinkingState(activity);
+  const kind = thinkingDesignKind(look);
   return (
     <span
       className={`cf-orb cf-orb-${size} cf-orb--${look}`}
       data-state={state === "run" ? undefined : state}
+      // Only where it is read, and only while running: the canvas designs take the phase itself.
+      data-phase={kind === "css" && state === "run" && activity?.phase ? phaseGroup(activity.phase) : undefined}
       aria-hidden="true"
     >
-      {thinkingDesignKind(look) === "canvas" ? (
+      {kind === "canvas" ? (
         // Keyed by look and size: a painter is built for one canvas at one size.
         <OrbCanvas key={`${look}-${size}`} design={look} px={ORB_PX[size]} activity={activity} />
       ) : (
@@ -64,8 +72,12 @@ const PAINTERS: Partial<Record<ThinkingDesign, (canvas: HTMLCanvasElement, px: n
   wave: createWave,
   liquid: createLiquid,
   crystal: createCrystal,
-  star: createStar,
+  cat: createCat,
   pixels: createPixels,
+  ghost: createGhost,
+  crab: createCrab,
+  moon: createMoon,
+  atom: createAtom,
 };
 
 function OrbCanvas({ design, px, activity }: { design: ThinkingDesign; px: number; activity?: ThinkingActivity }) {
@@ -93,14 +105,15 @@ function OrbCanvas({ design, px, activity }: { design: ThinkingDesign; px: numbe
   const phase = activity?.phase;
   const quiet = activity?.quiet;
   const done = activity?.done;
+  const failed = activity?.failed;
   const stopping = activity?.stopping;
   useEffect(() => {
     const p = painter.current;
     if (!p) return;
-    p.setActivity({ phase, quiet, done, stopping });
+    p.setActivity({ phase, quiet, done, failed, stopping });
     // With no loop running, the still frame is the only frame — repaint it in the new state.
     if (prefersReducedMotion()) p.still();
-  }, [phase, quiet, done, stopping]);
+  }, [phase, quiet, done, failed, stopping]);
 
   return <canvas ref={ref} className="cf-orb-canvas" />;
 }

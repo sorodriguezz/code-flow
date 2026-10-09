@@ -1,5 +1,5 @@
 import type { RunPhase, ThinkingActivity } from "./activity";
-import { aiCycle, clamp01, easeIn, easeOut, finishClock, makeBurst, rgba, TAU } from "./finish";
+import { aiCycle, clamp01, easeIn, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 
@@ -10,7 +10,8 @@ import { prepareCanvas, type Painter } from "./ticker";
  *
  * How fast it turns and how much energy runs through it is the phase. Finish: the spin races (the
  * wind-up), it bursts into sparks, pulls itself back together in green, and its corners catch the
- * light one after another.
+ * light one after another. Failed: it stops dead, turns red and a third of its edges go dark —
+ * cracked.
  */
 
 const GOAL: Partial<Record<RunPhase, [spin: number, energy: number]>> = {
@@ -64,6 +65,7 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
   let alpha = 1;
 
   function goal(activity: ThinkingActivity | undefined): [number, number] {
+    if (activity?.failed) return [0, 0];
     if (activity?.done) return [0.35, 0];
     if (activity?.stopping) return [0.2, 0];
     if (activity?.quiet) return [0.15, 0.1];
@@ -74,10 +76,14 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
     if (!ctx) return;
     const p = palette();
     const fin = clock.fin;
+    const failed = clock.failed;
     ctx.clearRect(0, 0, px, px);
     const c = px / 2;
-    const burst = fin >= 0.35 && fin < 1.05 ? Math.sin(((fin - 0.35) / 0.7) * Math.PI) : 0;
-    const green = fin >= 0 ? clamp01((fin - 0.3) / 0.45) : 0;
+    const burst = !failed && fin >= 0.35 && fin < 1.05 ? Math.sin(((fin - 0.35) / 0.7) * Math.PI) : 0;
+    const green = fin >= 0 ? clamp01((fin - (failed ? 0 : 0.3)) / 0.45) : 0;
+    const end = endColor(p, failed);
+    // A failure cracks it: a third of its edges go dark.
+    const crack = failed && fin >= 0 ? clamp01((fin - 0.2) / 0.3) : 0;
     const R = px * 0.4 * (1 + burst * 0.5) * (fin >= 0 ? 0.92 : 1);
     const cx = Math.cos(tiltX);
     const sx = Math.sin(tiltX);
@@ -93,7 +99,7 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
     });
     // The core: light inside the glass.
     const core = ctx.createRadialGradient(c, c, 0, c, c, px * 0.36);
-    const coreHue = mix(aiCycle(p, 0.35 + Math.sin(time * 0.7) * 0.2), p.success, green);
+    const coreHue = mix(aiCycle(p, 0.35 + Math.sin(time * 0.7) * 0.2), end, green);
     core.addColorStop(0, rgba(coreHue, (0.35 + energy * 0.25 + burst * 0.5) * alpha));
     core.addColorStop(1, rgba(coreHue, 0));
     ctx.fillStyle = core;
@@ -106,9 +112,9 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
     const sorted = EDGES.map(([i, j], n) => [i, j, n, (pts[i][2] + pts[j][2]) / 2] as const).sort((a, b) => a[3] - b[3]);
     for (const [i, j, n, depth] of sorted) {
       let col = mix(p.text, aiCycle(p, n / EDGES.length + time * 0.05), 0.55);
-      col = mix(col, p.success, green);
+      col = mix(col, end, green);
       col = mix(col, p.warning, warn * 0.3);
-      ctx.strokeStyle = rgba(col, (0.12 + 0.6 * depth) * alpha * edgeAlpha);
+      ctx.strokeStyle = rgba(col, (0.12 + 0.6 * depth) * alpha * edgeAlpha * (n % 3 === 0 ? 1 - crack : 1));
       ctx.lineWidth = lw * (0.6 + 0.6 * depth);
       ctx.beginPath();
       ctx.moveTo(pts[i][0], pts[i][1]);
@@ -131,16 +137,16 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
     pts.forEach(([x, y, depth], i) => {
       const glow = 0.5 + 0.5 * Math.sin(time * 3 + i * 1.7);
       let col = mix(p.text, aiCycle(p, i / 12 + time * 0.08), 0.5 + 0.5 * glow * energy);
-      col = mix(col, p.success, green);
+      col = mix(col, end, green);
       col = mix(col, p.warning, warn * 0.3);
-      const shine = fin > 1.0 && fin < 1.7 ? Math.max(0, Math.sin(((fin - 1.0) / 0.7) * Math.PI * 1.5 - i * 0.35)) : 0;
+      const shine = !failed && fin > 1.0 && fin < 1.7 ? Math.max(0, Math.sin(((fin - 1.0) / 0.7) * Math.PI * 1.5 - i * 0.35)) : 0;
       col = mix(col, white, shine);
       ctx.fillStyle = rgba(col, (0.25 + 0.75 * depth) * alpha);
       ctx.beginPath();
       ctx.arc(x, y, Math.max(0.7, px / 30) * (0.6 + 0.7 * depth) * (1 + shine * 0.8), 0, TAU);
       ctx.fill();
     });
-    if (fin > 0.35 && fin < 1.4) {
+    if (!failed && fin > 0.35 && fin < 1.4) {
       const s = fin - 0.35;
       for (const spark of sparks) {
         const dist = easeOut(s / 0.8) * px * 0.48 * spark.speed;
@@ -169,7 +175,7 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
       warn += ((act?.quiet ? 1 : 0) - warn) * Math.min(1, dt * 3);
       alpha += ((act?.stopping ? 0.35 : act?.quiet ? 0.6 : 1) - alpha) * Math.min(1, dt * 3);
       // The wind-up before the burst: the spin races, then lets go.
-      const boost = fin >= 0 ? (fin < 0.35 ? easeIn(fin / 0.35) * 9 : Math.max(0, 9 * (1 - (fin - 0.35) / 0.6))) : 0;
+      const boost = fin >= 0 && !clock.failed ? (fin < 0.35 ? easeIn(fin / 0.35) * 9 : Math.max(0, 9 * (1 - (fin - 0.35) / 0.6))) : 0;
       time += dt;
       turnY += dt * (0.7 * spin + boost);
       tiltX = 0.4 + Math.sin(time * 0.35) * 0.35;

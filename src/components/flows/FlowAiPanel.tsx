@@ -4,6 +4,8 @@ import { AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { buttonClass } from "../common/Button";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
+import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
+import { registerDictationSend } from "../../state/dictationStore";
 import type { FlowDiff } from "../../lib/flows/diff";
 import { useFlowsStore } from "../../state/flowsStore";
 import { useT } from "../../state/languageStore";
@@ -56,6 +58,13 @@ export function FlowAiPanel({ flowId, diff, onClose }: { flowId: string; diff: F
     if (!prompt.trim() || busy) return;
     void store().buildWithAi(flowId, prompt);
   };
+  // «Dictar» drawn in the panel's own footer, like the chat composers — the floating pill sat over
+  // the panel's edge and read as something stuck on top of it (user report). Stop-and-send is
+  // Generar, run from the render that holds the transcript.
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
+  useEffect(() => registerDictationSend(field.current, () => submitRef.current()), []);
+  const dictating = useDictatingHere(field);
 
   return (
     <div
@@ -87,7 +96,7 @@ export function FlowAiPanel({ flowId, diff, onClose }: { flowId: string; diff: F
 
       <div className="flex flex-col gap-2 p-2.5">
         <textarea
-          data-ai-input
+          data-ai-input="inline"
           ref={field}
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
@@ -124,10 +133,16 @@ export function FlowAiPanel({ flowId, diff, onClose }: { flowId: string; diff: F
           </div>
         )}
 
-        <div className="flex items-center gap-2">
+        {dictating ? (
+          <div className="flex min-h-[26px] items-center">
+            <DictationBar />
+          </div>
+        ) : (
+        <div className="flex min-h-[26px] items-center gap-2">
           <div className="min-w-0 flex-1">
             <ChatModelPicker task={TASK} liveModel={null} chatActive={false} variant="tag" />
           </div>
+          {!busy && <DictationMic field={field} className="h-6 w-6" iconSize={13} />}
           {busy ? (
             <>
               <ThinkingOrb size="sm" />
@@ -178,6 +193,7 @@ export function FlowAiPanel({ flowId, diff, onClose }: { flowId: string; diff: F
             </button>
           )}
         </div>
+        )}
       </div>
     </div>
   );

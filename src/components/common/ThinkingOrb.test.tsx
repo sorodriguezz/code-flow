@@ -2,7 +2,13 @@ import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThinkingOrb } from "./ThinkingOrb";
-import { DEFAULT_THINKING_DESIGN, isThinkingDesign, thinkingFinishMs, THINKING_DESIGNS } from "../../lib/thinkingDesigns";
+import {
+  DEFAULT_THINKING_DESIGN,
+  isThinkingDesign,
+  storedThinkingDesign,
+  thinkingFinishMs,
+  THINKING_DESIGNS,
+} from "../../lib/thinkingDesigns";
 import { translations } from "../../lib/i18n/translations";
 import { es } from "../../lib/i18n/translations.es";
 
@@ -63,6 +69,34 @@ describe("ThinkingOrb", () => {
     expect(renderToStaticMarkup(<ThinkingOrb activity={{ quiet: true }} />)).toContain('data-state="quiet"');
     expect(renderToStaticMarkup(<ThinkingOrb activity={{ done: true, quiet: true }} />)).toContain('data-state="done"');
     expect(renderToStaticMarkup(<ThinkingOrb activity={{ stopping: true }} />)).toContain('data-state="stopping"');
+    // A failure wins over `done`: the mark must not celebrate a run that failed.
+    expect(renderToStaticMarkup(<ThinkingOrb activity={{ failed: true, done: true }} />)).toContain('data-state="failed"');
+  });
+
+  it("tells the CSS designs what kind of phase is running, and only while it runs", () => {
+    const phaseOf = (activity: Parameters<typeof ThinkingOrb>[0]["activity"], design: "bot" | "sphere" = "bot") =>
+      renderToStaticMarkup(<ThinkingOrb design={design} activity={activity} />).match(/data-phase="(\w+)"/)?.[1];
+    expect(phaseOf({ phase: "think" })).toBe("think");
+    expect(phaseOf({ phase: "search" })).toBe("read");
+    expect(phaseOf({ phase: "edit" })).toBe("work");
+    expect(phaseOf({ phase: "tool" })).toBe("work");
+    expect(phaseOf({ phase: "write" })).toBe("write");
+    expect(phaseOf({ phase: "write", done: true })).toBeUndefined();
+    // The canvas designs read the phase itself.
+    expect(phaseOf({ phase: "edit" }, "sphere")).toBeUndefined();
+  });
+
+  it("styles a failure for every CSS design, and shudders every design", () => {
+    expect(css).toContain('.cf-orb[data-state="failed"] {');
+    expect(css).toContain("--cf-orb-end: var(--cf-danger)");
+    for (const { id, kind } of THINKING_DESIGNS) {
+      if (kind !== "css") continue;
+      const parts = partClasses(renderToStaticMarkup(<ThinkingOrb design={id} />));
+      expect(
+        parts.some((name) => css.includes(`.cf-orb[data-state="failed"] .${name}`)),
+        `${id} has no failed rule`,
+      ).toBe(true);
+    }
   });
 
   it("has a rule in the stylesheet for every part of every design", () => {
@@ -92,16 +126,16 @@ describe("ThinkingOrb", () => {
 });
 
 describe("the thinking designs", () => {
-  it("are twelve, the sphere first and by default", () => {
+  it("are sixteen, the sphere first and by default", () => {
     const ids = THINKING_DESIGNS.map((design) => design.id);
-    expect(ids).toHaveLength(12);
+    expect(ids).toHaveLength(16);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids[0]).toBe("sphere");
     expect(DEFAULT_THINKING_DESIGN).toBe("sphere");
   });
 
   it("give the avatar time for the finishes built around one, and a brief resolve to the rest", () => {
-    for (const id of ["liquid", "crystal", "star", "pixels"] as const) {
+    for (const id of ["orb", "network", "wave", "liquid", "crystal", "cat", "pixels", "ghost", "crab", "moon", "atom"] as const) {
       expect(thinkingFinishMs(id), id).toBeGreaterThanOrEqual(1400);
       // Within the window in which a landed turn still counts as just landed (`AssistantAvatar`).
       expect(thinkingFinishMs(id), id).toBeLessThan(4000);
@@ -121,5 +155,14 @@ describe("the thinking designs", () => {
     expect(isThinkingDesign("reactor")).toBe(false);
     expect(isThinkingDesign("spinner")).toBe(false);
     expect(isThinkingDesign(null)).toBe(false);
+  });
+
+  it("reads a replaced design as its successor, and anything else unknown as the default", () => {
+    expect(isThinkingDesign("star")).toBe(false);
+    expect(storedThinkingDesign("star")).toBe("cat");
+    expect(storedThinkingDesign("panda")).toBe("moon");
+    expect(storedThinkingDesign("cat")).toBe("cat");
+    expect(storedThinkingDesign("reactor")).toBe(DEFAULT_THINKING_DESIGN);
+    expect(storedThinkingDesign(null)).toBe(DEFAULT_THINKING_DESIGN);
   });
 });

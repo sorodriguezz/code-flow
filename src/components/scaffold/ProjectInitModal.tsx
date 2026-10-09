@@ -98,6 +98,24 @@ function defaultLine(lines: VersionLine[]): VersionLine | null {
 }
 
 /**
+ * A template's remembered choices without its dependency picks — the grouped toggles: NestJS's
+ * packages, Quarkus's extensions (Spring's starters are kept out in `initialSpring`). Every project
+ * starts with none picked (user, 2026-10-08: "que no tenga seleccionados por defecto"): last
+ * project's packages are not a default for the next one. Applied when saving, and when reading prefs
+ * an older build saved with them in.
+ */
+function withoutPicks(templateId: string, chosen: Options): Options {
+  const options = TEMPLATES.find((candidate) => candidate.id === templateId)?.options;
+  if (!options) return chosen;
+  return Object.fromEntries(
+    Object.entries(chosen).filter(([id]) => {
+      const option = options.find((o) => o.id === id);
+      return !(option?.kind === "toggle" && option.group);
+    }),
+  );
+}
+
+/**
  * The project initializer: pick a template, answer its few questions, see whether this machine can
  * build it — and install what it cannot, at the version it needs — then generate it in a terminal on
  * screen, make it a repository and import it into whichever workspace the user chose.
@@ -160,7 +178,9 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       setParent(prefs.parent || base.root);
       if (prefs.pm) setPm(prefs.pm);
       if (prefs.commit !== undefined) setCommit(prefs.commit);
-      if (prefs.options) setOptionsById(prefs.options);
+      if (prefs.options) {
+        setOptionsById(Object.fromEntries(Object.entries(prefs.options).map(([id, chosen]) => [id, withoutPicks(id, chosen)])));
+      }
       setReady(true);
     })();
     if (Object.keys(useScaffoldStore.getState().tools).length === 0) void detect(false);
@@ -513,12 +533,16 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       commit,
       options: {
         ...optionsById,
-        // Text answers follow the name (a Go module path), so they are not carried to the next one.
-        [template.id]: Object.fromEntries(
-          Object.entries(optionsById[template.id] ?? {}).filter(([id]) => template.options.find((o) => o.id === id)?.kind !== "text"),
+        // Text answers follow the name (a Go module path), so they are not carried to the next one;
+        // nor are dependency picks — see `withoutPicks`.
+        [template.id]: withoutPicks(
+          template.id,
+          Object.fromEntries(
+            Object.entries(optionsById[template.id] ?? {}).filter(([id]) => template.options.find((o) => o.id === id)?.kind !== "text"),
+          ),
         ),
         ...(spring
-          ? { spring: { type: spring.type, language: spring.language, javaVersion: spring.javaVersion, packaging: spring.packaging, groupId: spring.groupId, dependencies: spring.dependencies } as unknown as Options }
+          ? { spring: { type: spring.type, language: spring.language, javaVersion: spring.javaVersion, packaging: spring.packaging, groupId: spring.groupId } as unknown as Options }
           : {}),
       },
     });
@@ -831,6 +855,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                         onPm={setPm}
                         runtimeLines={runtimeLines}
                         problems={textProblems}
+                        line={Number(version?.line ?? Number.NaN)}
                       />
                     )}
                   </div>

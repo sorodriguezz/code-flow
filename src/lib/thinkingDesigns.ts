@@ -18,7 +18,10 @@
  * Replaced wholesale on 2026-10-07 (the twelve CSS marks before — reactor, sparkle, aurora… — are
  * gone); a stored id from that set falls back to the default. Four more joined the same day —
  * Líquido, Cristal, Estrella, Píxeles — each with a finish of its own (`finishMs`): what plays in a
- * finished turn's gutter before the avatar takes its place.
+ * finished turn's gutter before the avatar takes its place. The Orbe and the Onda got one on 2026-10-08,
+ * and Estrella was replaced by Gato the same day (a stored `star` reads as `cat`). Four more joined
+ * then too — Fantasma, Cangrejo (Ferris's shape, for the Rust core), Panda (soon replaced by Luna),
+ * Átomo — and Red neuronal was rebuilt as a layered network.
  */
 
 import type { TranslationKey } from "./i18n/translations";
@@ -34,8 +37,12 @@ export type ThinkingDesign =
   | "wave"
   | "liquid"
   | "crystal"
-  | "star"
-  | "pixels";
+  | "cat"
+  | "pixels"
+  | "ghost"
+  | "crab"
+  | "moon"
+  | "atom";
 
 export type ThinkingDesignKind = "css" | "canvas";
 
@@ -53,21 +60,38 @@ export const THINKING_DESIGNS: readonly {
   finishMs?: number;
 }[] = [
   { id: "sphere", labelKey: "thinking.sphere", kind: "canvas" },
-  { id: "orb", labelKey: "thinking.orb", kind: "canvas" },
+  { id: "orb", labelKey: "thinking.orb", kind: "canvas", finishMs: 1400 },
   { id: "halo", labelKey: "thinking.halo", kind: "css" },
   { id: "bot", labelKey: "thinking.bot", kind: "css" },
   { id: "blob", labelKey: "thinking.blob", kind: "css" },
-  { id: "network", labelKey: "thinking.network", kind: "canvas" },
+  { id: "network", labelKey: "thinking.network", kind: "canvas", finishMs: 1400 },
   { id: "plasma", labelKey: "thinking.plasma", kind: "css" },
-  { id: "wave", labelKey: "thinking.wave", kind: "canvas" },
-  { id: "liquid", labelKey: "thinking.liquid", kind: "canvas", finishMs: 1500 },
+  { id: "wave", labelKey: "thinking.wave", kind: "canvas", finishMs: 1400 },
+  { id: "liquid", labelKey: "thinking.liquid", kind: "canvas", finishMs: 1400 },
   { id: "crystal", labelKey: "thinking.crystal", kind: "canvas", finishMs: 1750 },
-  { id: "star", labelKey: "thinking.star", kind: "canvas", finishMs: 1700 },
+  { id: "cat", labelKey: "thinking.cat", kind: "canvas", finishMs: 1600 },
   { id: "pixels", labelKey: "thinking.pixels", kind: "canvas", finishMs: 1650 },
+  { id: "ghost", labelKey: "thinking.ghost", kind: "canvas", finishMs: 1500 },
+  { id: "crab", labelKey: "thinking.crab", kind: "canvas", finishMs: 1600 },
+  { id: "moon", labelKey: "thinking.moon", kind: "canvas", finishMs: 1500 },
+  { id: "atom", labelKey: "thinking.atom", kind: "canvas", finishMs: 1500 },
 ];
 
 export function isThinkingDesign(value: unknown): value is ThinkingDesign {
   return THINKING_DESIGNS.some((design) => design.id === value);
+}
+
+/** Designs that were replaced by another rather than dropped: whoever had picked one keeps its
+ *  successor instead of being sent back to the default. Estrella became Gato on 2026-10-08, and the
+ *  Panda the Luna the same day. */
+const SUCCESSORS: Readonly<Record<string, ThinkingDesign>> = { star: "cat", panda: "moon" };
+
+/** What a stored setting reads as: its own design, a replaced one's successor, or the default —
+ *  for an unset row, a retired mark (reactor, sparkle…) or an id from a newer release. */
+export function storedThinkingDesign(value: unknown): ThinkingDesign {
+  if (isThinkingDesign(value)) return value;
+  if (typeof value === "string" && SUCCESSORS[value]) return SUCCESSORS[value];
+  return DEFAULT_THINKING_DESIGN;
 }
 
 export function thinkingDesignKind(design: ThinkingDesign): ThinkingDesignKind {

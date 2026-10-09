@@ -20,7 +20,8 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useWindowStore } from "../../state/windowStore";
 import { useT } from "../../state/languageStore";
 import { Tooltip } from "../common/Tooltip";
-import { AiGlyph } from "../common/AiGlyph";
+import { ThinkingOrb } from "../common/ThinkingOrb";
+import { ActiveMarker } from "../common/ActivePill";
 import { StageChip } from "../common/StageChip";
 import { TourLauncher } from "../tour/TourLauncher";
 import { useShortcutHint } from "../../lib/useShortcutHint";
@@ -456,7 +457,13 @@ export function AppRail() {
               }`}
             >
               {/* The active app wears the same lifted sheet as the active tab and the active project —
-                  one way to say "selected" across the frame. */}
+                  one way to say "selected" across the frame — and, since an accent glyph on a dark
+                  sheet barely showed which one it was (user report, 2026-10-08), the rail's own
+                  "you are here" bar on its edge, the projects panel's. The rail's edge is 6px out
+                  from the 36px button in its 48px column. */}
+              {isActive && !drag && (
+                <ActiveMarker layoutId="app-rail-active" color="var(--cf-accent-fill)" className="-left-1.5 inset-y-2" />
+              )}
               {/* Keyed by the return, so an app that comes back twice in a row drops in twice. */}
               <span key={returning?.id ?? "rest"} className={`flex ${returning ? "cf-return-land" : ""}`}>
                 <Icon size={18} />
@@ -562,10 +569,12 @@ export function AppRail() {
  * reads as; kept apart from the list above because it is not one of the places that list switches
  * between — the panel it opens docks beside whichever of them is on screen.
  *
- * It spent a day in the title bar beating in the accent. Here the glyph is painted in the logo's
- * stroke instead, flowing while the panel is closed so it still reads as the door that matters (see
- * `AiGlyph`). Open, there is nowhere left for it to lead: the flow stops and it
- * holds a tinted pill, the way a pressed toggle does. Not the lifted sheet of the active app — on
+ * It spent a day in the title bar beating in the accent. Since 2026-10-08 its glyph is the thinking
+ * design the user picked (the user: "reemplaza ese icono de IA … por el diseño de pensamiento
+ * elegido") — the assistant's own mark, so the button looks like what it opens — running its base
+ * animation all the time, the user's call (it was first held still between runs, and they asked for
+ * it to move: "que tenga la animación base"). Open, it holds a tinted pill, the way a pressed toggle
+ * does. Not the lifted sheet of the active app — on
  * this rail that sheet means "the view you are in", and with the panel open beside an app the rail
  * would claim two of them.
  */
@@ -587,7 +596,9 @@ function AssistantButton() {
           open ? "bg-[var(--cf-accent)]/15 hover:bg-[var(--cf-accent)]/20" : "hover:bg-[var(--cf-hover)]"
         }`}
       >
-        <AiGlyph size={18} still={open} />
+        {/* `card` (32px) rather than `md`: the designs draw inside their square with room to spare,
+            and at 22px the mark read smaller than the app icons above it (user: "un poco más grande"). */}
+        <ThinkingOrb size="card" />
       </button>
     </Tooltip>
   );

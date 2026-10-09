@@ -71,6 +71,7 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
+import { lockWheelAxis } from "../../lib/axisLockedWheel";
 import { useMinimumSpin } from "../../lib/useMinimumSpin";
 
 /** Repo-relative path of the directory holding `path` ("" for a top-level entry). */
@@ -789,6 +790,12 @@ export function FileTree({
   const [revealTarget, setRevealTarget] = useState<string | null>(null);
   /** The tree's own scroller, so a reveal looks for its row inside this tree and nowhere else. */
   const scrollerRef = useRef<HTMLDivElement>(null);
+  // Once a long name makes the tree scroll sideways too, a swipe moves it one way or the other,
+  // never both at once — see `lockWheelAxis`.
+  useEffect(() => {
+    const element = scrollerRef.current;
+    return element ? lockWheelAxis(element) : undefined;
+  }, []);
   const childrenRef = useRef(childrenByDir);
   // Listings are async, so a switch to another project can land while one is in flight —
   // every write compares against this before touching state.
@@ -2115,7 +2122,11 @@ export function FileTree({
         {!rootEntries ? (
           <SkeletonRows count={10} className="cf-fade-in" />
         ) : (
-          <>
+          // As wide as the widest row and never narrower than the column: a name deep in the tree
+          // that doesn't fit makes the tree scroll sideways instead of being cut to "mantenedor.co…"
+          // (user report). Every row is `w-full` of this, so the selection and hover tints span the
+          // whole scrolled width rather than stopping at the column's edge.
+          <div className="w-max min-w-full">
             {draft?.parent === "" && (
               <DraftRow kind={draft.kind} depth={0} onSubmit={submitDraft} onCancel={cancelDraft} />
             )}
@@ -2155,7 +2166,7 @@ export function FileTree({
                 defaultFolderIcon={defaultFolderIcon}
               />
             ))}
-          </>
+          </div>
         )}
       </div>
 

@@ -1,4 +1,4 @@
-import type { RunPhase, ThinkingActivity } from "./activity";
+import { ended, type RunPhase, type ThinkingActivity } from "./activity";
 import { aiHue, mix, palette, rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 
@@ -9,7 +9,8 @@ import { prepareCanvas, type Painter } from "./ticker";
  * sphere, turning on a tilted axis, drawn back to front with perspective. What is kept is its idea
  * that the *light* says the phase, not the shape: two roaming spotlights while the model thinks, a
  * band scanning down while it reads or searches, a trail running round the rings while it edits or
- * runs a command, a faster one while it writes. Finished, a green sweep runs top to bottom.
+ * runs a command, a faster one while it writes. Finished, a green sweep runs top to bottom; failed,
+ * the sweep is red and the globe stops turning.
  *
  * Scaled down for a gutter: fewer, fatter dots as it shrinks — three hundred hairline dots in 32px
  * read as fog, not as a globe.
@@ -74,6 +75,8 @@ export function createSphere(canvas: HTMLCanvasElement, px: number): Painter {
   const dot = Math.max(0.6, ((2 * R) / rings) * 0.27);
   const weights = [0, 0, 0, 0];
   let light = 1;
+  /** The run ended in an error: the closing sweep is red, and the globe stops turning. */
+  let failed = false;
   let time = 0;
   let turn = 0;
   // Eased toward `goal` every tick; `sweep` runs at its own steady pace.
@@ -81,12 +84,13 @@ export function createSphere(canvas: HTMLCanvasElement, px: number): Painter {
   const goal = { ...now, k: 1 };
 
   function setActivity(activity: ThinkingActivity | undefined) {
-    const done = !!activity?.done;
+    const done = ended(activity);
+    failed = !!activity?.failed;
     const stopping = !!activity?.stopping;
     const quiet = !!activity?.quiet && !done && !stopping;
     light = done || stopping || quiet ? -1 : LIGHT[activity?.phase ?? "work"];
     goal.k = stopping ? 0 : 1;
-    goal.spin = quiet ? 0.18 : done ? 0.3 : 0.9;
+    goal.spin = quiet ? 0.18 : failed ? 0.04 : done ? 0.3 : 0.9;
     goal.gain = quiet ? 0.2 : done ? 0 : 1;
     goal.sweep = done ? 1 : 0;
     goal.alpha = stopping ? 0.3 : 1;
@@ -167,7 +171,7 @@ export function createSphere(canvas: HTMLCanvasElement, px: number): Painter {
       alpha = Math.min(1, alpha) * e * now.alpha * (1 - 0.35 * now.warn);
       if (alpha < 0.02) continue;
       let color = p.text;
-      if (sw > 0.02) color = mix(p.text, p.success, sw * 1.2);
+      if (sw > 0.02) color = mix(p.text, failed ? p.danger : p.success, sw * 1.2);
       else if (g > 0.04) color = mix(p.text, aiHue(p, q.u), g * 2.2);
       if (now.warn > 0.02) color = mix(color, p.warning, now.warn * 0.45);
       const size = (dot * (0.55 + 0.6 * ma) * persp + dot * g + dot * 0.25 * sw) * (0.45 + 0.55 * e);

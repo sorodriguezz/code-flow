@@ -111,12 +111,14 @@ export function AiPanel() {
     // `pt-px`: room for the sheet's outside ring under this wrapper's `overflow-hidden` — the work
     // column's reason, in `App.tsx`. Flush, the panel's top edge was clipped away.
     //
-    // `pl-1.5` goes *before* the handle, and the sheet sits flush after it. The sheet's hairline is
-    // a ring drawn one pixel outside its box, so the handle's one pixel of layout is exactly the
-    // column that ring paints — the glow and the grip light the edge that moves. With the gap
-    // between them instead (it used to be the sheet's `ml-1.5`) they lit a line of frame 6px to the
-    // left of it, and the real edge never changed (user report, 2026-09-26).
-    <div className="cf-panel-in flex shrink-0 overflow-hidden px-1.5 pb-1.5 pt-px">
+    // No room before the handle, and the sheet sits flush after it. The sheet's hairline is a ring
+    // drawn one pixel outside its box, so the handle's one pixel of layout is exactly the column
+    // that ring paints — the glow and the grip light the edge that moves (user report, 2026-09-26,
+    // when the gap sat between them instead). The gap that used to stand before the handle
+    // (`pl-1.5`) is gone too: the rail already keeps its own room either side, and the extra 6px
+    // left more space between the rail and the chat than between the view and the rail (user
+    // report, 2026-10-08: "deja en común el más pequeño").
+    <div className="cf-panel-in flex shrink-0 overflow-hidden pr-1.5 pb-1.5 pt-px">
       <ResizeHandle
         axis="x"
         value={width}

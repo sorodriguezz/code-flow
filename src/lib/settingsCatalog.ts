@@ -93,8 +93,8 @@ export interface SettingsTabDef {
   id: string;
   labelKey: TranslationKey;
   icon: LucideIcon;
-  /** The one-line explanation shown above the pane. Optional only because three panes are
-   *  self-evident enough that a line under their own name would repeat it. */
+  /** The one-line explanation shown above the pane. Optional because a few panes are self-evident
+   *  enough that a line under their own name would repeat it. */
   hintKey?: TranslationKey;
   /**
    * Extra words this pane should answer to in the search, as a translated comma-separated list.
@@ -336,10 +336,11 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       // How the "a model is thinking" mark is drawn. Last of the panes that set something up, before
       // the two that only report — and in this section rather than Appearance because the mark is
       // the assistant's own, and this is where somebody looking for it is already standing.
+      // No line under the title: the user asked for it gone (2026-10-08) — the tiles running above
+      // the state picker say what this is better than a sentence did.
       {
         id: "thinking",
         labelKey: "settings.thinkingTitle",
-        hintKey: "settings.thinkingHint",
         icon: BrainCircuit,
         searchKey: "settings.searchTermsThinking",
       },

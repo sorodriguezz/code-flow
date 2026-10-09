@@ -267,7 +267,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
    */
   const assistantTurn = (content: ReactNode) => (
     <div className={`group grid grid-cols-[auto_minmax(0,1fr)] ${reading ? "gap-x-3" : "gap-x-2.5"}`}>
-      <AssistantAvatar reading={reading} landedAt={message.createdAt} />
+      <AssistantAvatar reading={reading} landedAt={message.createdAt} failed={!!message.isError} />
       <div className={`min-w-0 space-y-1.5 ${reading ? "pt-[5px]" : "pt-[2px]"}`}>
         {traceLog}
         {content}
@@ -468,10 +468,11 @@ const SETTLE_WINDOW_MS = 4000;
  * A turn that has only just landed first shows the thinking mark resolving — the run card that sat
  * in this gutter a moment ago, finishing — and then the avatar springs in in its place. How long
  * that takes is the design's own finish (`thinkingFinishMs`: a brief resolve for most, a little
- * show for the ones built around it). A turn read back from history is simply the avatar:
+ * show for the ones built around it). A turn that failed plays the mark's failure instead — red, no
+ * celebration. A turn read back from history is simply the avatar:
  * replaying that for every old message would be a flourish pretending something had just happened.
  */
-function AssistantAvatar({ reading, landedAt }: { reading: boolean; landedAt?: string }) {
+function AssistantAvatar({ reading, landedAt, failed }: { reading: boolean; landedAt?: string; failed: boolean }) {
   const [settling, setSettling] = useState(() => {
     const when = parseStamp(landedAt);
     const age = when ? Date.now() - when.getTime() : -1;
@@ -488,7 +489,8 @@ function AssistantAvatar({ reading, landedAt }: { reading: boolean; landedAt?: s
   return (
     <span className={`flex ${box} shrink-0 items-center justify-center`}>
       {settling ? (
-        <ThinkingOrb size={reading ? "card" : "md"} activity={{ done: true }} />
+        // A turn that failed ends red — the mark's failure, not its celebration.
+        <ThinkingOrb size={reading ? "card" : "md"} activity={failed ? { failed: true } : { done: true }} />
       ) : (
         <span
           className={`flex ${box} items-center justify-center rounded-full bg-[var(--cf-surface-raised)] shadow-[inset_0_0_0_1px_var(--cf-border)] ${

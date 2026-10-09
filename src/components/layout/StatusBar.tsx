@@ -67,7 +67,7 @@ export function StatusBar() {
 
   if (!project) {
     return (
-      <footer className="flex h-7 shrink-0 items-center gap-2 pl-[17px] pr-2 text-[12px] text-[var(--cf-text-muted)]">
+      <footer className="flex h-7 shrink-0 items-center gap-2 pl-[17px] text-[12px] text-[var(--cf-text-muted)]">
         <SidebarFoldButton />
         <span>{t("statusbar.openProject")}</span>
         {/* Also here, with no project open: agent runs, generations and API work are scoped to the
@@ -80,7 +80,7 @@ export function StatusBar() {
           <SystemMeter />
           <BatteryMeter />
           <UsageMeter />
-          <NotificationBell />
+          <BellSlot />
         </div>
       </footer>
     );
@@ -89,7 +89,7 @@ export function StatusBar() {
   const current = branches.find((b) => b.is_head);
 
   return (
-    <footer className="flex h-7 shrink-0 items-center gap-2.5 pl-[17px] pr-2 text-[12px] text-[var(--cf-text-muted)]">
+    <footer className="flex h-7 shrink-0 items-center gap-2.5 pl-[17px] text-[12px] text-[var(--cf-text-muted)]">
       {/* The fold button leads the row, on the axis of the panel's foot: `17px` puts the 22px
           button's centre on 28, the centre of the column the dock and settings buttons stand in
           (`SidebarFoot`), folded or not. The repository follows after the row's own gap. Before the
@@ -168,8 +168,23 @@ export function StatusBar() {
         <SystemMeter />
         <BatteryMeter />
         <UsageMeter />
-        <NotificationBell />
+        <BellSlot />
       </div>
     </footer>
+  );
+}
+
+/**
+ * The bell, in a slot as wide as the app rail above it and flush with the window's edge — so it
+ * stands in the rail's column, centred under its icons (user report, 2026-10-08: it sat a few
+ * pixels off that axis). That is also why the bar has no right padding of its own. The hairline
+ * before it (`.cf-bar-rail` in `index.css`) stands on the column's edge, where the view's sheet
+ * ends above.
+ */
+function BellSlot() {
+  return (
+    <div className="cf-bar-rail flex w-12 shrink-0 justify-center">
+      <NotificationBell />
+    </div>
   );
 }

@@ -78,6 +78,72 @@ describe("NestJS", () => {
     expect(bare.steps.map((step) => step.title)).toEqual(["scaffold.step.generate"]);
   });
 
+  it("adds @nestjs/resilience on Nest 12, and leaves it out of a project generated at an older major", () => {
+    const deps = (version?: TemplateContext["version"]) =>
+      template("nest")
+        .plan(context({ language: "ts", platform: "express", nestResilience: true, nestConfig: true }, version ? { version } : {}))
+        .steps.find((step) => step.title === "scaffold.step.deps")?.argv;
+    expect(deps(nest12)).toEqual(["npm", "install", "@nestjs/config", "@nestjs/resilience"]);
+    // No version known (no picker, or it failed): the CLI's latest, which is 12 — kept.
+    expect(deps()).toEqual(["npm", "install", "@nestjs/config", "@nestjs/resilience"]);
+    const nest11 = { line: "11", version: "11.0.10", channel: "latest" } as TemplateContext["version"];
+    expect(deps(nest11)).toEqual(["npm", "install", "@nestjs/config"]);
+  });
+
+  describe("the core team's other packages", () => {
+    const nest11 = { line: "11", version: "11.0.10", channel: "latest" } as TemplateContext["version"];
+    const option = (id: string) => template("nest").options.find((o) => o.id === id)!;
+    const offered = (id: string, line: number, platform = "express") => option(id).when?.({ platform }, line) ?? true;
+    const planned = (opts: Record<string, string | boolean>, version?: TemplateContext["version"]) =>
+      template("nest").plan(context({ language: "ts", platform: "express", ...opts }, version ? { version } : {}));
+    const deps = (opts: Record<string, string | boolean>, version?: TemplateContext["version"]) =>
+      planned(opts, version).steps.find((step) => step.title === "scaffold.step.deps")?.argv;
+
+    it("offers each only on the Nest lines its peer range accepts", () => {
+      // Azure has not moved past 11; CQRS and authentication start at 12.
+      expect(offered("nestAzureDatabase", 11)).toBe(true);
+      expect(offered("nestAzureDatabase", 12)).toBe(false);
+      expect(offered("nestCqrs", 11)).toBe(false);
+      expect(offered("nestCqrs", 12)).toBe(true);
+      // Not knowing the version reads as the CLI's current major.
+      expect(offered("nestCqrs", Number.NaN)).toBe(true);
+      expect(offered("nestAzureDatabase", Number.NaN)).toBe(false);
+      // And a pick the form would hide is not installed either.
+      expect(deps({ nestAzureDatabase: true, nestCqrs: true }, nest12)).toEqual(["npm", "install", "@nestjs/cqrs"]);
+      expect(deps({ nestAzureDatabase: true, nestCqrs: true }, nest11)).toEqual(["npm", "install", "@nestjs/azure-database"]);
+    });
+
+    it("keeps Mercurius to Fastify, and gives Apollo its platform's integration on GraphQL 16", () => {
+      expect(offered("nestMercurius", 12, "express")).toBe(false);
+      expect(offered("nestMercurius", 12, "fastify")).toBe(true);
+      expect(deps({ nestApollo: true }, nest12)).toEqual([
+        "npm",
+        "install",
+        "@nestjs/graphql",
+        "@nestjs/apollo",
+        "@apollo/server",
+        "@as-integrations/express5",
+        "graphql@^16",
+      ]);
+    });
+
+    it("installs a package two picks share once", () => {
+      // Outbox is picked on its own and is also what Webhooks need: one install, in catalogue order.
+      expect(deps({ nestWebhooks: true, nestOutbox: true }, nest12)).toEqual(["npm", "install", "@nestjs/outbox", "@nestjs/webhooks"]);
+      expect(deps({ nestWebhooks: true }, nest12)).toEqual(["npm", "install", "@nestjs/webhooks", "@nestjs/outbox"]);
+    });
+
+    it("lets the CLI set Observe up on Nest 12, and installs it before", () => {
+      const generate = (version: TemplateContext["version"], observe: boolean) =>
+        planned({ nestObserve: observe }, version).steps.find((step) => step.title === "scaffold.step.generate")?.argv ?? [];
+      expect(generate(nest12, true)).toContain("--observe");
+      expect(generate(nest12, false)).toContain("--no-observe");
+      expect(deps({ nestObserve: true }, nest12)).toBeUndefined();
+      expect(deps({ nestObserve: true }, nest11)).toEqual(["npm", "install", "@nestjs/observe"]);
+      expect(generate(nest11, true).some((arg) => arg.includes("observe"))).toBe(false);
+    });
+  });
+
   /** The switch as the runner will execute it: through the sh script, on the `main.ts` NestJS 12
    *  generates (ESM, `.js` imports, top-level await) — and loudly refused on one it does not know. */
   it("puts the generated application on Fastify, quoted as the script quotes it", () => {

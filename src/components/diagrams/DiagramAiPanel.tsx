@@ -5,6 +5,8 @@ import { ThinkingOrb } from "../common/ThinkingOrb";
 import { DiagramPreview } from "./DiagramPreview";
 import { DbmlCanvas } from "../dbml/DbmlCanvas";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
+import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
+import { registerDictationSend } from "../../state/dictationStore";
 import { diagramsDrawWithAi } from "../../lib/tauri/diagramsCommands";
 import { documentOutline, graphToMxGraph, parseAiGraph } from "../../lib/diagrams/aiLayout";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
@@ -108,6 +110,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
   }, [result]);
 
   const panel = useRef<HTMLDivElement>(null);
+  const field = useRef<HTMLTextAreaElement>(null);
   /** Null until the window is dragged: it sits at its default corner, laid out by the browser, so
    *  a pane resize keeps it in the corner instead of stranding it at coordinates from a wider one. */
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
@@ -315,6 +318,14 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
     onClose();
   };
 
+  // «Dictar» drawn in the window's own footer, like the chat composers — the floating pill sat over
+  // the window's edge and read as something stuck on top of it (user report). Stop-and-send is
+  // Generate, run from the render that holds the transcript.
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
+  useEffect(() => registerDictationSend(field.current, () => void submitRef.current()), []);
+  const dictating = useDictatingHere(field);
+
   return (
     <div
       ref={panel}
@@ -348,7 +359,8 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
 
       <div className="flex flex-col gap-2 p-2.5">
         <textarea
-          data-ai-input
+          data-ai-input="inline"
+          ref={field}
           value={instruction}
           onChange={(event) => setInstruction(event.target.value)}
           onKeyDown={(event) => {
@@ -427,11 +439,17 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
           </div>
         )}
 
-        <div className="flex items-center gap-2">
+        {dictating ? (
+          <div className="flex min-h-[26px] items-center">
+            <DictationBar />
+          </div>
+        ) : (
+        <div className="flex min-h-[26px] items-center gap-2">
           <div className="min-w-0 flex-1">
             <ChatModelPicker task={TASK} liveModel={null} chatActive={false} />
           </div>
 
+          {!busy && <DictationMic field={field} className="h-6 w-6" iconSize={13} />}
           {busy ? (
             <>
               <ThinkingOrb size="sm" />
@@ -486,6 +504,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
             </button>
           )}
         </div>
+        )}
       </div>
     </div>
   );

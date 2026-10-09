@@ -1,3 +1,4 @@
+import { ended } from "./activity";
 import { aiCycle, clamp01, finishClock, rgba, TAU } from "./finish";
 import { mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
@@ -10,7 +11,9 @@ import { prepareCanvas, type Painter } from "./ticker";
  * writing, a wave runs through it; starting, light spreads out from the centre. Quiet, the face
  * falls asleep and a "z" floats up out of the corner.
  *
- * Finish: a big ^‿^ smile, a wink, and the face wipes diagonally into a green tick.
+ * Finish: a big ^‿^ smile, a wink, and the face itself turns green along a diagonal wipe. The face
+ * stays: it used to be wiped away into a green tick, dropped at the user's ask (2026-10-08) for the
+ * smiling face going green. Failed: X X eyes over a frown, and that face wipes to red.
  */
 
 type Cell = readonly [col: number, row: number];
@@ -23,13 +26,9 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
   const mid = (G - 1) / 2;
   const level = new Float32Array(G * G);
   const want = new Float32Array(G * G);
-  /** Per LED: 0 the AI hues, 1 green (the tick), 2 the sleepy warning tint. */
+  /** Per LED: 0 the AI hues, 1 green (the finish), 2 the sleepy warning tint, 3 red (a failure). */
   const tone = new Uint8Array(G * G);
   const clock = finishClock();
-  const CHECK: Cell[] =
-    G === 7
-      ? [[1, 4], [2, 5], [3, 4], [4, 3], [5, 2], [6, 1]]
-      : [[0, 2], [1, 3], [2, 2], [3, 1], [4, 0]];
   const HAPPY: { left: Cell[]; right: Cell[]; wink: Cell[]; mouth: Cell[] } =
     G === 7
       ? {
@@ -44,6 +43,15 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
           wink: [[0, 1], [1, 1]],
           mouth: [[0, 3], [1, 4], [2, 4], [3, 4], [4, 3]],
         };
+  const SAD: Cell[] =
+    G === 7
+      ? [
+          // X X — and a frown under them.
+          [0, 1], [2, 1], [1, 2], [0, 3], [2, 3],
+          [4, 1], [6, 1], [5, 2], [4, 3], [6, 3],
+          [1, 6], [2, 5], [3, 5], [4, 5], [5, 6],
+        ]
+      : [[1, 1], [3, 1], [0, 4], [1, 3], [2, 3], [3, 3], [4, 4]];
   let time = 0;
   let alpha = 1;
 
@@ -90,26 +98,26 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
     const act = clock.act;
     const fin = clock.fin;
     if (act?.stopping) return;
-    if (act?.done) {
-      if (fin < 1.0) {
-        happy(fin);
-        return;
-      }
-      // The wipe: cells cross over to the tick along a diagonal front, which runs past the far
-      // corner so its bright edge leaves the matrix instead of stopping on it.
-      const front = clamp01((fin - 1.0) / 0.4) * 2.45;
-      happy(fin);
-      const before = want.slice();
-      want.fill(0);
+    if (ended(act)) {
+      // A failure has no wink to wait for: its face is up at once and goes red sooner.
+      const failed = clock.failed;
+      const tint = failed ? 3 : 1;
+      if (failed) for (const [c, r] of SAD) set(c, r);
+      else happy(fin);
+      const start = failed ? 0.45 : 1.0;
+      if (fin < start) return;
+      // The wipe: the face crosses over to green along a diagonal front, which runs past the far
+      // corner so its bright edge leaves the matrix instead of stopping on it. The edge lights the
+      // dark LEDs it passes, faintly, so the sweep reads as one even where there is no face.
+      const front = clamp01((fin - start) / 0.4) * 2.45;
       for (let r = 0; r < G; r++) {
         for (let c = 0; c < G; c++) {
           const at = ((c + r) / (2 * (G - 1))) * 2;
-          const crossed = at < front;
-          if (!crossed && before[r * G + c] > 0) set(c, r, before[r * G + c]);
-          if (crossed && front - at < 0.35) set(c, r, 0.5, 1);
+          if (at >= front) continue;
+          if (want[r * G + c] > 0) tone[r * G + c] = tint;
+          else if (front - at < 0.35) set(c, r, 0.35, tint);
         }
       }
-      for (const [c, r] of CHECK) if (((c + r) / (2 * (G - 1))) * 2 < front) set(c, r, 1, 1);
       return;
     }
     if (act?.quiet) {
@@ -176,6 +184,7 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
         let color = aiCycle(p, (col + row) / (2 * G) + time * 0.1);
         if (tone[i] === 1) color = p.success;
         if (tone[i] === 2) color = mix(color, p.warning, 0.4);
+        if (tone[i] === 3) color = p.danger;
         ctx.fillStyle = rgba(color, v * alpha);
         ctx.beginPath();
         ctx.arc(x, y, radius * (0.85 + 0.25 * v), 0, TAU);

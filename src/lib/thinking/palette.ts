@@ -21,6 +21,8 @@ export interface Palette {
   c: Rgb;
   success: Rgb;
   warning: Rgb;
+  /** A failed run's colour. */
+  danger: Rgb;
   /** Whether the page is dark — additive blending only reads as light on a dark ground. */
   dark: boolean;
 }
@@ -33,6 +35,7 @@ const FALLBACK: Palette = {
   c: [6, 182, 212],
   success: [74, 222, 128],
   warning: [251, 191, 36],
+  danger: [248, 113, 113],
   dark: true,
 };
 
@@ -87,6 +90,7 @@ function read(): Palette {
     c: resolve("--cf-ai-c", FALLBACK.c),
     success: resolve("--cf-success", FALLBACK.success),
     warning: resolve("--cf-warning", FALLBACK.warning),
+    danger: resolve("--cf-danger", FALLBACK.danger),
     dark: false,
   };
   probe.remove();

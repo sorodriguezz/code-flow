@@ -57,6 +57,7 @@ export function RecordGrid({
   primaryKeys,
   foreignKeys,
   onFollowForeignKey,
+  bottomInset = 0,
   fieldWidth: fieldWidthProp,
   onFieldWidth,
   recordWidth: recordWidthProp,
@@ -284,7 +285,7 @@ export function RecordGrid({
                     onFollowForeignKey(facts.reference, value);
                   }}
                   style={{ width: recordWidth }}
-                  className={`group/cell flex shrink-0 items-center gap-0.5 border-b border-r border-[var(--cf-border)] px-2 ${
+                  className={`group/cell flex shrink-0 items-center border-b border-r border-[var(--cf-border)] px-2 ${
                     isChanged && !inserted
                       ? "bg-[var(--cf-warning)]/[0.12]"
                       : inserted
@@ -354,6 +355,8 @@ export function RecordGrid({
           </div>
           );
         })}
+        {/* Room past the last field for the selection bar — see `bottomInset` in `ResultGrid`. */}
+        {bottomInset > 0 && <div aria-hidden style={{ height: bottomInset }} />}
       </div>
     </div>
   );

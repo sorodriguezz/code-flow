@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ExternalLink, Maximize2, type LucideIcon } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { ColumnResizer, MIN_COLUMN_WIDTH, useRowSweep } from "../common/gridBits";
@@ -58,13 +58,18 @@ export const CELL_PREVIEW_LIMIT = 300;
 
 /**
  * The icon buttons a cell reveals on hover — expand the value, follow its foreign key. Each is a 14px
- * target around its 10px glyph, and the cell keeps a 2px gap between its children: bare glyphs with
- * no gap sat flush against each other and against the value (user report: "esos iconos juntos").
- * Shown on hover, and on keyboard focus; their space stays reserved either way, so nothing shifts.
+ * target around its 10px glyph with 2px before it: bare glyphs with no gap sat flush against each
+ * other and against the value (user report: "esos iconos juntos").
+ *
+ * Collapsed to zero width until the cell is hovered or the button has keyboard focus. Reserving
+ * their room on every cell cut every value short by up to 32px for buttons nobody was looking at
+ * (user report: the columns gave up space "desde el inicio"); now only the hovered cell's value
+ * makes way. Zero width rather than `hidden`, so Tab still reaches them. The cell itself has no
+ * `gap` for the same reason: a gap is paid even beside a zero-width child.
  * Shared with the record layout, which draws the same two buttons.
  */
 export const CELL_ACTION =
-  "inline-flex shrink-0 items-center justify-center rounded-[3px] p-0.5 text-[var(--cf-text-muted)] opacity-0 transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] focus-visible:opacity-100 group-hover/cell:opacity-100";
+  "inline-flex w-0 shrink-0 items-center justify-center overflow-hidden rounded-[3px] text-[var(--cf-text-muted)] opacity-0 transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] focus-visible:ml-0.5 focus-visible:w-auto focus-visible:p-0.5 focus-visible:opacity-100 group-hover/cell:ml-0.5 group-hover/cell:w-auto group-hover/cell:p-0.5 group-hover/cell:opacity-100";
 
 export interface GridEdit {
   row: number;
@@ -182,6 +187,17 @@ export interface ResultGridProps {
    */
   onFollowForeignKey?: (key: DbForeignKey, value: string | null) => void;
   /**
+   * Room left under the last row, in pixels, for something floating over the bottom of the grid —
+   * the panel's selection bar. Without it the last rows sit under the bar with no way to scroll
+   * them out from under it (user report: the bar covered the last record).
+   */
+  bottomInset?: number;
+  /**
+   * The row the user last picked, kept clear of `bottomInset` — see the effect that reads it.
+   * `null` when there is nothing to keep clear.
+   */
+  keepClear?: number | null;
+  /**
    * Column widths, controlled by the caller so they can be remembered per tab.
    *
    * Optional, with a local fallback: this grid is also used from modals that have no tab to hang a
@@ -220,6 +236,8 @@ export function ResultGrid({
   foreignKeys,
   rowActions,
   onFollowForeignKey,
+  bottomInset = 0,
+  keepClear = null,
   widths: widthsProp,
   onWidths,
 }: ResultGridProps) {
@@ -285,6 +303,43 @@ export function ResultGrid({
       setScrollTop(element.scrollTop);
       setScrollLeft(element.scrollLeft);
     });
+  };
+
+  // The room `bottomInset` leaves was not enough on its own: picking a row near the bottom of the
+  // screen raises the selection bar right over that row (user report, twice), and the room only
+  // helped someone who then thought to scroll. So a picked row the bar would cover is scrolled just
+  // clear of it. A row already off screen is left where it is — scrolling to it would be a jump
+  // nobody asked for.
+  //
+  // Never while the button is still down: the sweep re-reads the row under the pointer every frame,
+  // so scrolling under a held press would extend the selection by itself. The scroll waits for the
+  // release instead, and it is keyed on the row and the inset, never on the selection — during a
+  // sweep the picked row is the anchor and stays put.
+  const pressing = useRef(false);
+  const clearPending = useRef(false);
+  const keepClearRef = useRef({ keepClear, bottomInset });
+  keepClearRef.current = { keepClear, bottomInset };
+  const scrollPickedClear = () => {
+    clearPending.current = false;
+    const element = scrollRef.current;
+    const { keepClear: row, bottomInset: inset } = keepClearRef.current;
+    if (!element || inset <= 0 || row === null) return;
+    const viewportBottom = element.scrollTop + element.clientHeight;
+    const rowBottom = HEADER_HEIGHT + (row + 1) * ROW_HEIGHT;
+    const clearLine = viewportBottom - inset;
+    if (rowBottom > clearLine && rowBottom - ROW_HEIGHT < viewportBottom) {
+      element.scrollTop += rowBottom - clearLine;
+    }
+  };
+  useLayoutEffect(() => {
+    if (pressing.current) clearPending.current = true;
+    else scrollPickedClear();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keepClear, bottomInset]);
+  const endPress = () => {
+    sweep.end();
+    pressing.current = false;
+    if (clearPending.current) scrollPickedClear();
   };
 
   // A new result invalidates the scroll position: row 8000 of the previous page is nowhere in this
@@ -397,9 +452,12 @@ export function ResultGrid({
         ref={scrollRef}
         className="min-h-0 flex-1 overflow-auto"
         onScroll={handleScroll}
+        onPointerDownCapture={() => {
+          pressing.current = true;
+        }}
         onPointerMove={sweep.move}
-        onPointerUp={sweep.end}
-        onPointerCancel={sweep.end}
+        onPointerUp={endPress}
+        onPointerCancel={endPress}
       >
         <div style={{ minWidth: "100%", width: "max-content" }}>
           {/* Sticky so the column names survive scrolling a thousand rows — the single most useful
@@ -534,7 +592,8 @@ export function ResultGrid({
             {rightSpacer > 0 && <div className="shrink-0" style={{ width: rightSpacer }} />}
           </div>
 
-          <div style={{ height: totalRows * ROW_HEIGHT, position: "relative" }}>
+          {/* Rows are positioned absolutely, so `bottomInset` is plain empty room past the last. */}
+          <div style={{ height: totalRows * ROW_HEIGHT + bottomInset, position: "relative" }}>
             {visible.map((row) => {
               const inserted = row >= rows.length;
               const deleted = deletedRows?.has(row) ?? false;
@@ -653,7 +712,7 @@ export function ResultGrid({
                           e.preventDefault();
                           onFollowForeignKey(key, value);
                         }}
-                        className={`group/cell relative flex shrink-0 items-center gap-0.5 border-r border-[var(--cf-border)] px-2 ${
+                        className={`group/cell relative flex shrink-0 items-center border-r border-[var(--cf-border)] px-2 ${
                           isChanged && !inserted ? "bg-[var(--cf-warning)]/[0.12]" : ""
                         } ${deleted ? "line-through decoration-[var(--cf-danger)] opacity-70" : ""}`}
                       >
@@ -679,9 +738,8 @@ export function ResultGrid({
                                 being narrower than its contents, and that is a width the user drags
                                 — an 80-character JSON in a 200px column is cut off just as
                                 thoroughly as a 4000-character one, and used to offer no way in. The
-                                button costs nothing when it isn't needed: it is invisible until the
-                                row is hovered, and its space is reserved either way, so nothing
-                                shifts. */}
+                                button costs nothing when it isn't needed: it takes no width until
+                                the cell is hovered — see `CELL_ACTION`. */}
                             {value !== null && (
                               <button
                                 onClick={() =>

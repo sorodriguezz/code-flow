@@ -23,6 +23,7 @@ export function TemplateOptions({
   onPm,
   runtimeLines,
   problems,
+  line = Number.NaN,
 }: {
   template: Template;
   opts: Options;
@@ -33,9 +34,11 @@ export function TemplateOptions({
   runtimeLines: Record<string, VersionLine[]>;
   /** Per text option id, what is wrong with it. */
   problems: Record<string, string | null>;
+  /** The picked version's major, for options that only exist on some of them. */
+  line?: number;
 }) {
   const t = useT();
-  const visible = template.options.filter((option) => !option.when || option.when(opts));
+  const visible = template.options.filter((option) => !option.when || option.when(opts, line));
   const toggles = visible.filter((option): option is ToggleOption => option.kind === "toggle" && !option.group);
   const groups = new Map<TranslationKey, ToggleOption[]>();
   for (const option of visible) {

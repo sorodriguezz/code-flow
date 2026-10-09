@@ -1060,6 +1060,8 @@ textarea,
    Sizes scale off `--cf-orb-size` alone — every offset below is a fraction of it. */
 .cf-orb {
   --cf-orb-size: 22px;
+  /* What a finish turns a mark: green when the run landed, red when it failed. */
+  --cf-orb-end: var(--cf-success);
   position: relative;
   display: inline-block;
   width: var(--cf-orb-size);
@@ -1092,6 +1094,33 @@ textarea,
 }
 .cf-orb[data-state="stopping"]:not(:has(.cf-orb-canvas)) {
   opacity: 0.3;
+}
+/* A failed run: every design shudders once, whichever kind it is, and ends in red — the canvas ones
+   read `failed` themselves; the CSS ones below swap their finish colour through `--cf-orb-end`. */
+@keyframes cf-orb-shudder {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  14% {
+    transform: translateX(-9%);
+  }
+  30% {
+    transform: translateX(8%);
+  }
+  46% {
+    transform: translateX(-6%);
+  }
+  62% {
+    transform: translateX(4%);
+  }
+  78% {
+    transform: translateX(-2%);
+  }
+}
+.cf-orb[data-state="failed"] {
+  --cf-orb-end: var(--cf-danger);
+  animation: cf-orb-shudder 0.5s ease-out;
 }
 
 /* Halo — the AI loader (21st.dev, @beratberkayg). A disc lit from inside: three inset shadows in
@@ -1141,10 +1170,18 @@ textarea,
     0 0 var(--cf-halo-u) calc(var(--cf-halo-u) * 0.3) color-mix(in oklab, var(--cf-ai-c) 25%, transparent);
   animation: cf-halo-drift 5s ease-in-out infinite;
 }
-.cf-orb[data-state="done"] .cf-orb-halo-glow {
+.cf-orb[data-state="done"] .cf-orb-halo-glow,
+.cf-orb[data-state="failed"] .cf-orb-halo-glow {
+  background: radial-gradient(circle at 50% 72%, color-mix(in oklab, var(--cf-orb-end) 38%, transparent), transparent 70%);
   box-shadow:
-    0 var(--cf-halo-u) calc(var(--cf-halo-u) * 2) 0 var(--cf-success) inset,
-    0 calc(var(--cf-halo-u) * 4) calc(var(--cf-halo-u) * 5) 0 color-mix(in oklab, var(--cf-success) 60%, var(--cf-ai-c)) inset;
+    0 var(--cf-halo-u) calc(var(--cf-halo-u) * 2) 0 var(--cf-orb-end) inset,
+    0 calc(var(--cf-halo-u) * 4) calc(var(--cf-halo-u) * 5) 0 color-mix(in oklab, var(--cf-orb-end) 75%, #fff) inset,
+    0 0 calc(var(--cf-halo-u) * 1.5) calc(var(--cf-halo-u) * 0.4) color-mix(in oklab, var(--cf-orb-end) 55%, transparent);
+}
+/* Ended, the drifting second layer would lay the assistant's hues back over the finish colour. */
+.cf-orb[data-state="done"] .cf-orb-halo-glow-2 {
+  animation: none;
+  opacity: 0;
 }
 
 /* Bot — a small robot head. The visor is dark in both themes: the eyes are lights, and lights
@@ -1253,13 +1290,65 @@ textarea,
   box-shadow: 0 0 calc(var(--cf-orb-size) * 0.08) var(--cf-ai-c);
   animation: cf-bot-blink 3.7s ease-in-out infinite;
 }
-/* Done: a squint — the robot's smile. */
+/* Done: a squint — the robot's smile — and the whole robot turns green, the colour every other
+   mark finishes in (user: "deberían ponerse como de un color verde"). The head's gradient cannot be
+   transitioned, so its green is a layer under the visor that fades in; the rest are plain colours
+   and transition directly. */
+.cf-orb-head::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--cf-orb-end) 72%, #fff),
+    var(--cf-orb-end) 55%,
+    color-mix(in oklab, var(--cf-orb-end) 70%, #000)
+  );
+  opacity: 0;
+  transition: opacity 0.45s ease;
+}
+.cf-orb-antenna,
+.cf-orb-antenna::after,
+.cf-orb-visor,
+.cf-orb-eye {
+  transition:
+    background-color 0.45s ease,
+    box-shadow 0.45s ease,
+    transform 0.45s ease;
+}
+.cf-orb-antenna {
+  transform-origin: 50% 100%;
+}
+.cf-orb[data-state="done"] .cf-orb-head::before,
+.cf-orb[data-state="failed"] .cf-orb-head::before {
+  opacity: 1;
+}
+.cf-orb[data-state="done"] .cf-orb-antenna,
+.cf-orb[data-state="failed"] .cf-orb-antenna {
+  background: color-mix(in oklab, var(--cf-orb-end) 80%, #000);
+}
+.cf-orb[data-state="done"] .cf-orb-antenna::after,
+.cf-orb[data-state="failed"] .cf-orb-antenna::after {
+  animation: none;
+  background: var(--cf-orb-end);
+  box-shadow: 0 0 calc(var(--cf-orb-size) * 0.12) var(--cf-orb-end);
+}
+.cf-orb[data-state="done"] .cf-orb-visor,
+.cf-orb[data-state="failed"] .cf-orb-visor {
+  background: color-mix(in oklab, var(--cf-orb-end) 20%, #06070b);
+}
 .cf-orb[data-state="done"] .cf-orb-eyes,
-.cf-orb[data-state="done"] .cf-orb-eye {
+.cf-orb[data-state="done"] .cf-orb-eye,
+.cf-orb[data-state="failed"] .cf-orb-bot,
+.cf-orb[data-state="failed"] .cf-orb-eyes,
+.cf-orb[data-state="failed"] .cf-orb-eye {
   animation: none;
 }
 .cf-orb[data-state="done"] .cf-orb-eye {
   transform: scaleY(0.4) translateY(-25%);
+  background: color-mix(in oklab, var(--cf-orb-end) 30%, #fff);
+  box-shadow: 0 0 calc(var(--cf-orb-size) * 0.08) var(--cf-orb-end);
 }
 
 /* Gota — a soft creature. The two blobs are uneven shapes turning against each other, which reads
@@ -1343,12 +1432,44 @@ textarea,
   background: #160f2e;
   animation: cf-bot-blink 4.1s ease-in-out infinite;
 }
+/* Done: the eyes squint and the body turns green, like the robot's. Each blob carries its green as
+   a layer that fades in over its gradient — a layer of the blob itself, so it keeps turning with it
+   and the shape goes on changing while the colour does. */
+.cf-orb-goo::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    circle at 32% 28%,
+    color-mix(in oklab, #fff 45%, var(--cf-orb-end)) 0,
+    var(--cf-orb-end) 48%,
+    color-mix(in oklab, var(--cf-orb-end) 62%, #000) 100%
+  );
+  opacity: 0;
+  transition: opacity 0.45s ease;
+}
+.cf-orb-goo-2::after {
+  background: radial-gradient(
+    circle at 70% 70%,
+    color-mix(in oklab, var(--cf-orb-end) 70%, #fff) 0,
+    color-mix(in oklab, var(--cf-orb-end) 80%, transparent) 70%
+  );
+}
+.cf-orb[data-state="done"] .cf-orb-goo::after,
+.cf-orb[data-state="failed"] .cf-orb-goo::after {
+  opacity: 1;
+}
 .cf-orb[data-state="done"] .cf-orb-gaze,
-.cf-orb[data-state="done"] .cf-orb-pupil {
+.cf-orb[data-state="done"] .cf-orb-pupil,
+.cf-orb[data-state="failed"] .cf-orb-blob,
+.cf-orb[data-state="failed"] .cf-orb-gaze,
+.cf-orb[data-state="failed"] .cf-orb-pupil {
   animation: none;
 }
 .cf-orb[data-state="done"] .cf-orb-pupil {
   transform: scaleY(0.4) translateY(-25%);
+  background: color-mix(in oklab, var(--cf-orb-end) 25%, #06140b);
 }
 
 /* Plasma — three blurred lights drifting inside a sphere. The blur is drawn once per light; only
@@ -1425,11 +1546,161 @@ textarea,
   background: radial-gradient(circle at 32% 26%, rgb(255 255 255 / 0.3) 0, transparent 30%);
 }
 .cf-orb[data-state="done"] .cf-orb-blot-1,
-.cf-orb[data-state="done"] .cf-orb-blot-3 {
-  background: var(--cf-success);
+.cf-orb[data-state="done"] .cf-orb-blot-3,
+.cf-orb[data-state="failed"] .cf-orb-blot {
+  background: var(--cf-orb-end);
+}
+
+/* Failed, the shapes (the colour is `--cf-orb-end`, above): the halo stops turning, the robot's eyes
+   sink and its antenna droops, the creature sags with its eyes cast down, the plasma freezes. */
+.cf-orb[data-state="failed"] .cf-orb-halo,
+.cf-orb[data-state="failed"] .cf-orb-blot {
+  animation-play-state: paused;
+}
+.cf-orb[data-state="failed"] .cf-orb-halo-glow-2 {
+  animation: none;
+  opacity: 0;
+}
+.cf-orb[data-state="failed"] .cf-orb-antenna {
+  transform: rotate(32deg);
+}
+.cf-orb[data-state="failed"] .cf-orb-eye {
+  transform: scaleY(0.3) translateY(70%);
+  background: color-mix(in oklab, var(--cf-orb-end) 30%, #fff);
+  box-shadow: 0 0 calc(var(--cf-orb-size) * 0.08) var(--cf-orb-end);
+}
+.cf-orb[data-state="failed"] .cf-orb-blob {
+  transform: scale(1.08, 0.86) translateY(8%);
+}
+.cf-orb[data-state="failed"] .cf-orb-gaze {
+  transform: translateY(calc(var(--cf-orb-size) * 0.08));
+}
+.cf-orb[data-state="failed"] .cf-orb-pupil {
+  transform: scaleY(0.55);
+  background: color-mix(in oklab, var(--cf-orb-end) 25%, #1a0606);
+}
+
+/* While running, what the run is doing (`data-phase`, from `phaseGroup`): thinking is each design's
+   own loop above; reading scans along; working speeds up and narrows to a focus; writing pulses
+   with the words. Motion only, so it all sits behind the motion preference. */
+@keyframes cf-orb-scan {
+  0% {
+    transform: translateX(calc(var(--cf-orb-size) * -0.07));
+  }
+  80% {
+    transform: translateX(calc(var(--cf-orb-size) * 0.07));
+  }
+  100% {
+    transform: translateX(calc(var(--cf-orb-size) * -0.07));
+  }
+}
+@keyframes cf-orb-talk {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(calc(var(--cf-orb-size) * -0.035));
+  }
+}
+@keyframes cf-orb-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.06);
+  }
+}
+@keyframes cf-blob-bounce {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(1.07, 0.93);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .cf-orb[data-phase="read"] .cf-orb-halo {
+    animation-duration: 9s;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-halo {
+    animation-duration: 1.6s;
+  }
+  .cf-orb[data-phase="write"] .cf-orb-halo-glow:not(.cf-orb-halo-glow-2) {
+    animation: cf-orb-pulse 0.55s ease-in-out infinite;
+  }
+
+  .cf-orb[data-phase="read"] .cf-orb-eyes {
+    animation: cf-orb-scan 1.3s ease-in-out infinite;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-eyes {
+    animation: none;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-eye {
+    animation: none;
+    transform: scaleY(0.7);
+  }
+  .cf-orb[data-phase="work"] .cf-orb-antenna::after {
+    animation-duration: 0.35s;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-bot {
+    animation-duration: 0.8s;
+  }
+  .cf-orb[data-phase="write"] .cf-orb-eyes {
+    animation: cf-orb-talk 0.4s ease-in-out infinite;
+  }
+  .cf-orb[data-phase="write"] .cf-orb-antenna::after {
+    animation-duration: 0.6s;
+  }
+
+  .cf-orb[data-phase="read"] .cf-orb-gaze {
+    animation: cf-orb-scan 1.5s ease-in-out infinite;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-blob {
+    animation-duration: 1s;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-goo {
+    animation-duration: 2.4s;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-goo-2 {
+    animation-duration: 3.4s;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-gaze {
+    animation: none;
+  }
+  .cf-orb[data-phase="write"] .cf-orb-blob {
+    animation: cf-blob-bounce 0.45s ease-in-out infinite;
+  }
+
+  .cf-orb[data-phase="read"] .cf-orb-blot-1 {
+    animation-duration: 5s;
+  }
+  .cf-orb[data-phase="read"] .cf-orb-blot-2 {
+    animation-duration: 6.9s;
+  }
+  .cf-orb[data-phase="read"] .cf-orb-blot-3 {
+    animation-duration: 8.3s;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-blot-1 {
+    animation-duration: 1.4s;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-blot-2 {
+    animation-duration: 1.9s;
+  }
+  .cf-orb[data-phase="work"] .cf-orb-blot-3 {
+    animation-duration: 2.3s;
+  }
+  .cf-orb[data-phase="write"] .cf-orb-plasma {
+    animation: cf-orb-pulse 0.5s ease-in-out infinite;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .cf-orb[data-state="failed"] {
+    animation: none;
+  }
   .cf-orb-halo {
     animation: none;
     transform: rotate(160deg);
@@ -1992,6 +2263,14 @@ textarea,
      and a separator nobody can see is a separator that is not there. */
   background: var(--cf-border);
   pointer-events: none;
+}
+/* The bell's slot is the app rail's column (`BellSlot`): no gap before it beyond the hairline's, and
+   the hairline on the column's edge rather than 6px into the meters. */
+.cf-bar-group > .cf-bar-rail {
+  margin-left: 6px;
+}
+.cf-bar-group > .cf-bar-rail::before {
+  left: 0;
 }
 
 /* Tailwind v4's preflight gives buttons `cursor: default`, which left most of the app's icon

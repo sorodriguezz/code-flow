@@ -122,6 +122,8 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
    * reopened with rows 3, 4 and 9 "selected" would be pointing at rows nobody chose.
    */
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  /** The row a press last landed on, which the grid keeps out from under the selection bar. */
+  const [picked, setPicked] = useState<number | null>(null);
   /**
    * How this tab is being looked at — the grid/record layout, which of the three document views is
    * up, and whether the query options are expanded.
@@ -203,6 +205,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   // New rows, new indexes. See the note on `selected`.
   useEffect(() => {
     setSelected(new Set());
+    setPicked(null);
     anchor.current = null;
     kept.current = new Set();
   }, [tab.result]);
@@ -435,6 +438,27 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   );
 
   /**
+   * How tall the floating selection bar stands, so the grid can leave that much room past its last
+   * row — otherwise the last rows sit under the bar with no way to scroll them clear. Measured
+   * rather than assumed: in a narrow panel the bar wraps onto a second line.
+   */
+  const selectionBarRef = useRef<HTMLDivElement>(null);
+  const [selectionBarHeight, setSelectionBarHeight] = useState(0);
+  const hasSelection = selectedRows.length > 0;
+  useEffect(() => {
+    const element = selectionBarRef.current;
+    if (!hasSelection || !element) {
+      setSelectionBarHeight(0);
+      return;
+    }
+    const measure = () => setSelectionBarHeight(element.offsetHeight);
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    measure();
+    return () => observer.disconnect();
+  }, [hasSelection]);
+
+  /**
    * A click on a row number.
    *
    * Plain click picks one, ⇧ extends from the anchor, ⌘/Ctrl adds or removes one — and clicking the
@@ -483,6 +507,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
 
   const selectAll = (on: boolean) => {
     anchor.current = null;
+    setPicked(null);
     kept.current = new Set();
     setSelected(on ? new Set((tab.result?.rows ?? []).map((_, index) => index)) : new Set());
   };
@@ -1032,7 +1057,13 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
                 setMenu({ x: event.clientX, y: event.clientY, kind: "cell", row, column });
               },
               selectedRows: selected,
-              onSelectRow: selectRow,
+              // A press on a row number is the one pick the grid keeps clear of the selection bar
+              // (`keepClear`). Not a right-click: its menu opens at the pointer, and the row
+              // sliding away from under it would leave the menu describing the wrong line.
+              onSelectRow: (row: number, mods: { range: boolean; toggle: boolean }) => {
+                setPicked(row);
+                selectRow(row, mods);
+              },
               onSelectRange: selectRange,
               onSelectAllRows: selectAll,
               primaryKeys,
@@ -1043,6 +1074,9 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               rowActions: documentStore ? rowActions : undefined,
               onFollowForeignKey: (key: DbForeignKey, value: string | null) =>
                 store.followForeignKey(tab, key, value),
+              // The bar floats 8px off the bottom; 8px more keeps the last row from touching it.
+              bottomInset: selectionBarHeight > 0 ? selectionBarHeight + 16 : 0,
+              keepClear: hasSelection ? picked : null,
             };
             return layout === "record" ? (
               <RecordGrid
@@ -1077,12 +1111,16 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
             than stacked above it. In the flow it pushed the whole grid down the instant a selection
             appeared, which during a press-and-drag means the rows move out from under the pointer
             on the very first one. A bar that is always there would cost a row of screen to say
-            "nothing is selected". */}
-        {selectedRows.length > 0 && (
+            "nothing is selected". What it would cover, the grid makes room for (`bottomInset`) and
+            scrolls the picked row clear of once the press ends (`keepClear`). */}
+        {hasSelection && (
           <div className="pointer-events-none absolute inset-x-0 bottom-2 z-20 flex justify-center px-2">
             {/* What acts on the selection, and only that: Apply and Discard stay together in the
                 toolbar above, where they act on every staged change, not on these rows. */}
-            <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-1 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-1 pl-3 pr-1 shadow-[var(--cf-shadow)]">
+            <div
+              ref={selectionBarRef}
+              className="pointer-events-auto flex max-w-full flex-wrap items-center gap-1 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-1 pl-3 pr-1 shadow-[var(--cf-shadow)]"
+            >
               <span className="mr-1 text-[12px] font-medium tabular-nums text-[var(--cf-text)]">
                 {t(counts.selected, { n: String(selectedRows.length) })}
               </span>

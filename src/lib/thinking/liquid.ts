@@ -1,5 +1,5 @@
 import type { RunPhase, ThinkingActivity } from "./activity";
-import { aiCycle, clamp01, drawCheck, easeOut, finishClock, makeBurst, rgba, TAU } from "./finish";
+import { aiCycle, clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 
@@ -9,7 +9,9 @@ import { prepareCanvas, type Painter } from "./ticker";
  * How far apart they roam and how fast is the phase: close and slow while starting, wide while
  * thinking, wider and quicker while editing, quickest while the answer is written; a quiet run lets
  * them sink into one. Finish: they flow into a single drop, it lands with a squash and a splash of
- * droplets, turns green, and a tick draws itself inside it.
+ * droplets, and turns green. Green and nothing else: the white tick that used to draw itself
+ * inside it was taken out at the user's ask (2026-10-08) — the colour already says "done". Failed,
+ * the drop turns red and sags into a puddle, one drip falling from it.
  *
  * The field is evaluated per pixel at the canvas's own resolution (an upscaled field reads as a
  * blur, not a drop) — at the 44px it is used at most, 88² pixels for four drops.
@@ -59,8 +61,10 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
     const p = palette();
     const data = img.data;
     const fin = clock.fin;
+    const failed = clock.failed;
     const merge = fin >= 0 ? easeOut(fin / 0.35) : 0;
-    const green = fin >= 0 ? clamp01((fin - 0.15) / 0.4) : 0;
+    const green = fin >= 0 ? clamp01((fin - (failed ? 0 : 0.15)) / 0.4) : 0;
+    const end = endColor(p, failed);
     const sp = spread * (1 - merge);
     const pos = BALLS.map((b) => [
       Math.sin(time * b.fx + b.ph) * b.ax * sp,
@@ -85,7 +89,7 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
           continue;
         }
         let col = aiCycle(p, 0.5 + x * 0.32 + y * 0.42 + Math.sin(time * 0.5) * 0.15);
-        col = mix(col, p.success, green);
+        col = mix(col, end, green);
         // Lit from the top left, a rim of shade at the bottom right: a drop, not a sticker.
         const light = clamp01(0.5 - (x + y) * 0.45);
         col = mix(col, white, light * light * 0.55 * clamp01((f - 1) * 1.5));
@@ -102,7 +106,12 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
     // The landing: a damped squash and stretch, anchored at the drop's foot.
     let sx = 1;
     let sy = 1;
-    if (fin > 0.3 && fin < 1.1) {
+    if (failed && fin > 0.25) {
+      // The sag: lower and wider, and it stays that way.
+      const k = easeOut((fin - 0.25) / 0.6);
+      sy = 1 - 0.28 * k;
+      sx = 1 + 0.16 * k;
+    } else if (!failed && fin > 0.3 && fin < 1.1) {
       const s = fin - 0.3;
       const q = Math.sin((s / 0.55) * TAU) * Math.exp(-s * 5) * 0.28;
       sy = 1 - q;
@@ -115,7 +124,14 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(off, 0, 0, px, px);
     ctx.restore();
-    if (fin > 0.3 && fin < 1.25) {
+    if (failed && fin > 0.35 && fin < 1.2) {
+      const s = fin - 0.35;
+      ctx.fillStyle = rgba(end, (1 - s / 0.85) * alpha);
+      ctx.beginPath();
+      ctx.arc(c, px * 0.8 + s * s * px * 1.2, Math.max(0.8, px * 0.05), 0, TAU);
+      ctx.fill();
+    }
+    if (!failed && fin > 0.3 && fin < 1.25) {
       const s = fin - 0.3;
       for (const d of drops) {
         const angle = -Math.PI / 2 + Math.cos(d.angle) * 1.1;
@@ -128,7 +144,6 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
         ctx.fill();
       }
     }
-    if (fin > 0.7) drawCheck(ctx, c, c, px * 0.36, (fin - 0.7) / 0.35, "rgba(255,255,255,0.95)", Math.max(1.2, px * 0.075));
   }
 
   return {

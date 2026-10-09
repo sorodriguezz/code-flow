@@ -1,15 +1,19 @@
-import type { ThinkingActivity } from "./activity";
+import { ended, type ThinkingActivity } from "./activity";
 import { aiHue, type Palette, type Rgb } from "./palette";
 import { prefersReducedMotion } from "./ticker";
 
 /**
- * What the marks with a finish animation share: the clock that plays it once, the easings, the
- * tick some of them draw, and the bursts of bits they throw.
+ * What the marks with a finish animation share: the clock that plays it once, the easings and the
+ * bursts of bits they throw.
  *
  * A finish is the few hundred milliseconds between a turn landing and the avatar taking the mark's
  * place (`AssistantAvatar` waits `finishMs` for it — see `lib/thinkingDesigns`). It plays when the
  * mark is told `done`, from the start, every time a new `done` arrives; under reduced motion the
  * mark shows its end pose straight away.
+ *
+ * A run that fails ends too, and plays the same clock — but in red (`palette().danger`) and with
+ * none of the celebration: no jump, no confetti, no smile. The whole mark also shudders, which is
+ * CSS on `.cf-orb[data-state="failed"]` and so the same for every design.
  */
 
 export const TAU = Math.PI * 2;
@@ -28,6 +32,11 @@ export function aiCycle(p: Palette, at: number): Rgb {
   return aiHue(p, ((at % 1) + 1) % 1);
 }
 
+/** What a finish turns its mark: green for a run that landed, red for one that failed. */
+export function endColor(p: Palette, failed: boolean): Rgb {
+  return failed ? p.danger : p.success;
+}
+
 export function rgba(color: Rgb, alpha: number): string {
   return `rgba(${color[0] | 0},${color[1] | 0},${color[2] | 0},${clamp01(alpha)})`;
 }
@@ -36,6 +45,8 @@ export function rgba(color: Rgb, alpha: number): string {
 export interface FinishClock {
   readonly act: ThinkingActivity | undefined;
   readonly fin: number;
+  /** The run ended in an error: the finish plays red, without the celebration. */
+  readonly failed: boolean;
   set(activity: ThinkingActivity | undefined): void;
   step(dt: number): void;
   /** For a still frame: jump to the end pose when motion is reduced, so it shows where it lands. */
@@ -52,58 +63,23 @@ export function finishClock(): FinishClock {
     get fin() {
       return fin;
     },
+    get failed() {
+      return !!act?.failed;
+    },
     set(activity) {
-      // A new `done` object restarts the finish; `ThinkingOrb` only sends one when the state
-      // actually changed, so a re-render never replays it.
-      if (activity?.done && activity !== act) fin = 0;
-      if (!activity?.done) fin = -1;
+      // A new `done` (or `failed`) object restarts the finish; `ThinkingOrb` only sends one when the
+      // state actually changed, so a re-render never replays it.
+      if (ended(activity) && activity !== act) fin = 0;
+      if (!ended(activity)) fin = -1;
       act = activity;
     },
     step(dt) {
       if (fin >= 0) fin += dt;
     },
     settle() {
-      if (act?.done && prefersReducedMotion()) fin = 9;
+      if (ended(act) && prefersReducedMotion()) fin = 9;
     },
   };
-}
-
-/** A tick drawn as a stroke, `progress` 0–1 along its two arms. */
-export function drawCheck(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  size: number,
-  progress: number,
-  color: string,
-  width: number,
-) {
-  if (progress <= 0) return;
-  const pts = [
-    [-0.42, 0.02],
-    [-0.12, 0.32],
-    [0.45, -0.3],
-  ] as const;
-  const l1 = Math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]);
-  const l2 = Math.hypot(pts[2][0] - pts[1][0], pts[2][1] - pts[1][1]);
-  const len = (l1 + l2) * clamp01(progress);
-  ctx.save();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  ctx.moveTo(cx + pts[0][0] * size, cy + pts[0][1] * size);
-  if (len <= l1) {
-    const k = len / l1;
-    ctx.lineTo(cx + (pts[0][0] + (pts[1][0] - pts[0][0]) * k) * size, cy + (pts[0][1] + (pts[1][1] - pts[0][1]) * k) * size);
-  } else {
-    const k = (len - l1) / l2;
-    ctx.lineTo(cx + pts[1][0] * size, cy + pts[1][1] * size);
-    ctx.lineTo(cx + (pts[1][0] + (pts[2][0] - pts[1][0]) * k) * size, cy + (pts[1][1] + (pts[2][1] - pts[1][1]) * k) * size);
-  }
-  ctx.stroke();
-  ctx.restore();
 }
 
 export interface BurstBit {

@@ -46,8 +46,9 @@ interface OptionBase {
   /** Brand words (Pinia, Tailwind CSS) are not translated; everything else is a key. */
   label?: string;
   labelKey?: TranslationKey;
-  /** Shown only when this holds. */
-  when?: (opts: Options) => boolean;
+  /** Shown only when this holds. `line` is the picked version's major — `NaN` when it is not known
+   *  (no picker, or the registry did not answer). */
+  when?: (opts: Options, line: number) => boolean;
 }
 
 export interface ChoiceOption extends OptionBase {
@@ -361,11 +362,23 @@ const NEST_PLATFORM: ChoiceOption = {
 
 /**
  * The integrations NestJS's own documentation walks through (Techniques and Security), picked under
- * "Dependencies" the way Spring's starters are. Only ones that work as installed — no database, whose
- * driver is a decision of its own. Where Express and Fastify need different packages (Helmet,
- * compression, Swagger's static files), the platform picked decides. `core` marks the ones released
- * with `@nestjs/core` itself, which are pinned to the generated project's major so npm does not
- * refuse the peer range.
+ * "Dependencies" the way Spring's starters are — and, since 2026-10-08, every package the Nest core
+ * team publishes (npm's `nestjscore`, the user's ask: "agrega todo este listado porque es del core"),
+ * except the ones every generated project already has (`core`, `common`, `platform-express`,
+ * `testing`, `cli`, `schematics`; Fastify is the HTTP server choice), the deprecated ones
+ * (`azure-serverless`, `serverless-core`), the 2021–22 forks of `class-validator` and
+ * `class-transformer` (Validation installs the maintained originals), Angular Universal's
+ * `ng-universal` (Nest ≤10, and an Angular app, not an API), `bull-shared` (installed by Bull and
+ * BullMQ themselves), `mau` (a CLI installed globally to deploy, not a project dependency) and
+ * `azure-func-http` (stops at Nest 10 *and* at `reflect-metadata` 0.1, which no project the CLI
+ * generates still has — npm refuses it, checked 2026-10-08).
+ *
+ * The ORMs come without a database driver: which database is a decision of its own, and the module
+ * installs and compiles without one. Where Express and Fastify need different packages (Helmet,
+ * compression, Swagger's and serve-static's static files, Apollo's integration), the platform picked
+ * decides. `core` marks the ones released with `@nestjs/core` itself, which are pinned to the
+ * generated project's major so npm does not refuse the peer range; `since` and `until` bound the
+ * others to the Nest majors their peer ranges accept (see `nestFits`).
  */
 interface NestDependency {
   id: string;
@@ -378,6 +391,22 @@ interface NestDependency {
   /** TypeScript only. */
   types?: (fastify: boolean) => string[];
   core?: boolean;
+  /** The first Nest major it works with, and the last. Outside them the picker does not offer it and
+   *  the plan leaves it out — npm would refuse its peer range. Not said in the description: the user
+   *  cut it to the features ("deja el texto solo hasta fallbacks"). */
+  since?: number;
+  until?: number;
+  /** Offered only when this holds — Mercurius only exists on Fastify. */
+  when?: (opts: Options) => boolean;
+}
+
+/**
+ * Whether a dependency can go into a project generated at Nest `line`. Unknown (`NaN`: no version
+ * answer) reads as the CLI's current major, which is past every `since` and beyond every `until`.
+ */
+function nestFits(dependency: NestDependency, line: number): boolean {
+  const at = Number.isFinite(line) ? line : Number.POSITIVE_INFINITY;
+  return (!dependency.since || at >= dependency.since) && (!dependency.until || at <= dependency.until);
 }
 
 const NEST_DEPENDENCIES: NestDependency[] = [
@@ -457,6 +486,90 @@ const NEST_DEPENDENCIES: NestDependency[] = [
     packages: () => ["@nestjs/terminus"],
   },
   {
+    // Released 2026-10-08 as 0.0.x (peers: Nest 12; GraphQL, WebSockets and microservices optional,
+    // so nothing extra is installed) — versioned apart from `@nestjs/core`, so not `core`.
+    id: "nestResilience",
+    labelKey: "scaffold.nest.resilience",
+    section: "scaffold.depGroup.ops",
+    descriptionKey: "scaffold.nest.d.resilience",
+    packages: () => ["@nestjs/resilience"],
+    since: 12,
+  },
+  // ── The rest of the core team's packages (see the note above) ──
+  { id: "nestMicroservices", labelKey: "scaffold.nest.microservices", section: "scaffold.depGroup.core", descriptionKey: "scaffold.nest.d.microservices", packages: () => ["@nestjs/microservices"], core: true },
+  { id: "nestCqrs", label: "CQRS", section: "scaffold.depGroup.core", descriptionKey: "scaffold.nest.d.cqrs", packages: () => ["@nestjs/cqrs"], since: 12 },
+  { id: "nestWorkflows", labelKey: "scaffold.nest.workflows", section: "scaffold.depGroup.core", descriptionKey: "scaffold.nest.d.workflows", packages: () => ["@nestjs/workflows"], since: 11 },
+  { id: "nestOutbox", labelKey: "scaffold.nest.outbox", section: "scaffold.depGroup.core", descriptionKey: "scaffold.nest.d.outbox", packages: () => ["@nestjs/outbox"], since: 11 },
+  { id: "nestIdempotency", labelKey: "scaffold.nest.idempotency", section: "scaffold.depGroup.core", descriptionKey: "scaffold.nest.d.idempotency", packages: () => ["@nestjs/idempotency"], since: 11 },
+  { id: "nestLocks", labelKey: "scaffold.nest.locks", section: "scaffold.depGroup.core", descriptionKey: "scaffold.nest.d.locks", packages: () => ["@nestjs/locks"], since: 11 },
+  { id: "nestI18n", labelKey: "scaffold.nest.i18n", section: "scaffold.depGroup.core", descriptionKey: "scaffold.nest.d.i18n", packages: () => ["@nestjs/i18n"], since: 12 },
+  { id: "nestMappedTypes", labelKey: "scaffold.nest.mappedTypes", section: "scaffold.depGroup.core", descriptionKey: "scaffold.nest.d.mappedTypes", packages: () => ["@nestjs/mapped-types"] },
+  { id: "nestAuthentication", labelKey: "scaffold.nest.authentication", section: "scaffold.depGroup.security", descriptionKey: "scaffold.nest.d.authentication", packages: () => ["@nestjs/authentication"], since: 12 },
+  { id: "nestAuthorization", labelKey: "scaffold.nest.authorization", section: "scaffold.depGroup.security", descriptionKey: "scaffold.nest.d.authorization", packages: () => ["@nestjs/authorization"], since: 12 },
+  { id: "nestHttpClient", labelKey: "scaffold.nest.httpClient", section: "scaffold.depGroup.web", descriptionKey: "scaffold.nest.d.httpClient", packages: () => ["@nestjs/http-client"], since: 11 },
+  {
+    // Apollo Server 5 still wants GraphQL 16 (npm's latest is 17), hence the pin; and it reaches the
+    // HTTP server through an integration package of its own per platform.
+    id: "nestApollo",
+    label: "GraphQL (Apollo)",
+    section: "scaffold.depGroup.web",
+    descriptionKey: "scaffold.nest.d.apollo",
+    packages: (fastify) => ["@nestjs/graphql", "@nestjs/apollo", "@apollo/server", fastify ? "@as-integrations/fastify" : "@as-integrations/express5", "graphql@^16"],
+    since: 12,
+  },
+  {
+    id: "nestMercurius",
+    label: "GraphQL (Mercurius)",
+    section: "scaffold.depGroup.web",
+    descriptionKey: "scaffold.nest.d.mercurius",
+    packages: () => ["@nestjs/graphql", "@nestjs/mercurius", "mercurius", "graphql@^16"],
+    since: 12,
+    when: (opts) => opts.platform === "fastify",
+  },
+  { id: "nestWs", label: "WebSockets (ws)", section: "scaffold.depGroup.web", descriptionKey: "scaffold.nest.d.ws", packages: () => ["@nestjs/websockets", "@nestjs/platform-ws"], core: true },
+  {
+    id: "nestServeStatic",
+    labelKey: "scaffold.nest.serveStatic",
+    section: "scaffold.depGroup.web",
+    descriptionKey: "scaffold.nest.d.serveStatic",
+    packages: (fastify) => (fastify ? ["@nestjs/serve-static", "@fastify/static"] : ["@nestjs/serve-static"]),
+    since: 12,
+  },
+  // Webhooks are built on the outbox, which they require.
+  { id: "nestWebhooks", label: "Webhooks", section: "scaffold.depGroup.web", descriptionKey: "scaffold.nest.d.webhooks", packages: () => ["@nestjs/webhooks", "@nestjs/outbox"], since: 12 },
+  { id: "nestMail", labelKey: "scaffold.nest.mail", section: "scaffold.depGroup.web", descriptionKey: "scaffold.nest.d.mail", packages: () => ["@nestjs/mail"], since: 11 },
+  { id: "nestStorage", labelKey: "scaffold.nest.storage", section: "scaffold.depGroup.web", descriptionKey: "scaffold.nest.d.storage", packages: () => ["@nestjs/storage"], since: 12 },
+  { id: "nestTypeorm", label: "TypeORM", section: "scaffold.depGroup.data", descriptionKey: "scaffold.nest.d.typeorm", packages: () => ["@nestjs/typeorm", "typeorm"] },
+  { id: "nestMongoose", label: "Mongoose (MongoDB)", section: "scaffold.depGroup.data", descriptionKey: "scaffold.nest.d.mongoose", packages: () => ["@nestjs/mongoose", "mongoose"], since: 11 },
+  { id: "nestSequelize", label: "Sequelize", section: "scaffold.depGroup.data", descriptionKey: "scaffold.nest.d.sequelize", packages: () => ["@nestjs/sequelize", "sequelize", "sequelize-typescript"], since: 11 },
+  { id: "nestDrizzle", label: "Drizzle ORM", section: "scaffold.depGroup.data", descriptionKey: "scaffold.nest.d.drizzle", packages: () => ["@nestjs/drizzle", "drizzle-orm"], since: 11 },
+  { id: "nestElasticsearch", label: "Elasticsearch", section: "scaffold.depGroup.data", descriptionKey: "scaffold.nest.d.elasticsearch", packages: () => ["@nestjs/elasticsearch", "@elastic/elasticsearch"] },
+  { id: "nestStoreKit", label: "Store kit (SQL)", section: "scaffold.depGroup.data", descriptionKey: "scaffold.nest.d.storeKit", packages: () => ["@nestjs/store-kit"] },
+  // Azure's two have not moved past Nest 11, so they are offered only on projects generated at 10 or
+  // 11; Blob storage is built on platform-express.
+  { id: "nestAzureDatabase", label: "Azure Database", section: "scaffold.depGroup.data", descriptionKey: "scaffold.nest.d.azureDatabase", packages: () => ["@nestjs/azure-database"], until: 11 },
+  {
+    id: "nestAzureStorage",
+    label: "Azure Blob Storage",
+    section: "scaffold.depGroup.data",
+    descriptionKey: "scaffold.nest.d.azureStorage",
+    packages: () => ["@nestjs/azure-storage"],
+    until: 11,
+    when: (opts) => opts.platform !== "fastify",
+  },
+  { id: "nestBullmq", labelKey: "scaffold.nest.bullmq", section: "scaffold.depGroup.ops", descriptionKey: "scaffold.nest.d.bullmq", packages: () => ["@nestjs/bullmq", "bullmq"] },
+  { id: "nestBull", labelKey: "scaffold.nest.bull", section: "scaffold.depGroup.ops", descriptionKey: "scaffold.nest.d.bull", packages: () => ["@nestjs/bull", "bull"] },
+  {
+    // On Nest 12 the CLI sets it up itself (`--observe`: installed *and* wired in); before, installed.
+    id: "nestObserve",
+    label: "Observe (APM)",
+    section: "scaffold.depGroup.ops",
+    descriptionKey: "scaffold.nest.d.observe",
+    packages: () => ["@nestjs/observe"],
+    since: 11,
+  },
+  { id: "nestDevtools", label: "Devtools", section: "scaffold.depGroup.ops", descriptionKey: "scaffold.nest.d.devtools", packages: () => ["@nestjs/devtools-integration"], since: 12 },
+  {
     id: "nestHelmet",
     label: "Helmet",
     section: "scaffold.depGroup.security",
@@ -487,6 +600,8 @@ const NEST_DEPENDENCY_OPTIONS: ToggleOption[] = NEST_DEPENDENCIES.map((dependenc
   kind: "toggle",
   label: dependency.label,
   labelKey: dependency.labelKey,
+  // Only what this Nest line (and platform) can take — see `nestFits`.
+  when: (opts: Options, line: number) => nestFits(dependency, line) && (!dependency.when || dependency.when(opts)),
   default: false,
   group: "scaffold.opt.dependencies",
   section: dependency.section,
@@ -1584,10 +1699,23 @@ export const TEMPLATES: Template[] = [
       const fastify = ctx.opts.platform === "fastify";
       // Released with `@nestjs/core`, so pinned to the major `nest new` wrote — the CLI's own.
       const core = (name: string) => (Number.isFinite(major(ctx)) ? `${name}@^${major(ctx)}` : name);
-      const picked = NEST_DEPENDENCIES.filter((dependency) => ctx.opts[dependency.id] === true);
+      // Ticked and still on offer: a pick the form hides (a version or platform switched after it)
+      // is not installed either.
+      const picked = NEST_DEPENDENCIES.filter(
+        (dependency) =>
+          ctx.opts[dependency.id] === true && nestFits(dependency, major(ctx)) && (!dependency.when || dependency.when(ctx.opts)),
+      );
+      // On Nest 12 `nest new` installs and wires Observe itself; the flag stands in for the package.
+      const cliObserve = major(ctx) >= 12;
+      const observe = picked.some((dependency) => dependency.id === "nestObserve");
+      // Once each: two picks can share one (Webhooks and Outbox; Apollo and Mercurius on GraphQL).
       const packages = [
-        ...(fastify ? [core("@nestjs/platform-fastify")] : []),
-        ...picked.flatMap((dependency) => dependency.packages(fastify).map((name) => (dependency.core ? core(name) : name))),
+        ...new Set([
+          ...(fastify ? [core("@nestjs/platform-fastify")] : []),
+          ...picked
+            .filter((dependency) => !(cliObserve && dependency.id === "nestObserve"))
+            .flatMap((dependency) => dependency.packages(fastify).map((name) => (dependency.core ? core(name) : name))),
+        ]),
       ];
       const types = ts(ctx) ? picked.flatMap((dependency) => dependency.types?.(fastify) ?? []) : [];
       return {
@@ -1603,7 +1731,7 @@ export const TEMPLATES: Template[] = [
               ctx.pm,
               "--language",
               ts(ctx) ? "TypeScript" : "JavaScript",
-              ...(major(ctx) >= 12 ? ["--no-observe"] : []),
+              ...(cliObserve ? [observe ? "--observe" : "--no-observe"] : []),
             ]),
             // The schematic behind `nest new` asks ESM-or-CommonJS and has no flag for it; told there
             // is no TTY, the schematics runner takes the default (ESM) instead of asking.

@@ -1,5 +1,6 @@
-import type { ThinkingActivity } from "./activity";
-import { palette, rgb } from "./palette";
+import { ended, type ThinkingActivity } from "./activity";
+import { clamp01, easeIn, easeOut, easeOutBack, endColor, finishClock, rgba, TAU } from "./finish";
+import { mix, palette, rgb, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 
 /**
@@ -9,6 +10,11 @@ import { prepareCanvas, type Painter } from "./ticker";
  * The voice here is the run: the orb breathes slowly while the model thinks, chatters while the
  * answer streams (the closest thing a text model has to speaking), and goes nearly still when the
  * run has printed nothing for minutes.
+ *
+ * Finish (asked for 2026-10-08 — it was the one canvas mark that simply stopped): the ring winds up,
+ * pulling in while it spins faster, then lets go — springs back out, turns green and throws a
+ * ripple — and settles into a slow green turn. A failed run gets none of that: the ring flickers,
+ * shrinks a little, turns red and stops turning.
  *
  * **One WebGL context for all of them.** A browser allows a handful of live WebGL contexts per page
  * and a task list can show a dozen orbs, so the shader runs on one shared, detached canvas: each
@@ -173,18 +179,40 @@ function sharedGl(): Shared | null {
   return shared;
 }
 
+/** The finish's beats, in seconds since `done`: the wind-up ends and the release begins at
+ *  `RELEASE`; the green has fully come in by `RELEASE + GREEN_IN`. */
+const RELEASE = 0.3;
+const GREEN_IN = 0.45;
+
 export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
   const ctx = prepareCanvas(canvas, px);
   const buffer = canvas.width;
+  const clock = finishClock();
   let time = 0;
   let turn = 0;
   let voice = 0;
   let alpha = 1;
   let activity: ThinkingActivity | undefined;
 
+  /** How far the ring is drawn at its full size: pulled in during the wind-up, sprung back after —
+   *  or, for a failure, shrunk a little and left there. */
+  function scale(fin: number): number {
+    if (fin < 0) return 1;
+    if (clock.failed) return 1 - 0.1 * easeOut(fin / 0.4);
+    if (fin < RELEASE) return 1 - 0.14 * easeIn(fin / RELEASE);
+    return 0.86 + 0.14 * easeOutBack((fin - RELEASE) / 0.35);
+  }
+
+  /** Extra spin: it builds through the wind-up and runs off after the release. */
+  function spin(fin: number): number {
+    if (fin < 0 || clock.failed) return 0;
+    if (fin < RELEASE) return easeIn(fin / RELEASE) * 8;
+    return Math.max(0, 8 * (1 - (fin - RELEASE) / 0.6));
+  }
+
   /** How loud the "voice" is right now — what the shader's wobble is driven by. */
   function target(): number {
-    if (activity?.done || activity?.stopping) return 0;
+    if (ended(activity) || activity?.stopping) return 0;
     if (activity?.quiet) return 0.05;
     switch (activity?.phase) {
       case "start":
@@ -205,6 +233,23 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
     ctx.clearRect(0, 0, px, px);
     ctx.globalAlpha = alpha;
     const p = palette();
+    const fin = clock.fin;
+    const failed = clock.failed;
+    // Green comes in with the release; red, at once — a failure has no wind-up to wait for.
+    const green = fin >= 0 ? clamp01((fin - (failed ? 0 : RELEASE * 0.8)) / GREEN_IN) : 0;
+    const end = endColor(p, failed);
+    const light: Rgb = mix(end, [255, 255, 255], failed ? 0.12 : 0.35);
+    const hue1 = mix(p.a, end, green);
+    const hue2 = mix(p.c, light, green);
+    const deep = mix(
+      p.b.map((v) => v * 0.6) as unknown as Rgb,
+      end.map((v) => v * 0.45) as unknown as Rgb,
+      green,
+    );
+    // The failure's flicker: the ring stutters off and on while it dies down.
+    if (failed && fin >= 0 && fin < 0.6) ctx.globalAlpha = alpha * (1 - 0.55 * Math.abs(Math.sin(fin * 38)) * (1 - fin / 0.6));
+    const size = px * scale(fin);
+    const at = (px - size) / 2;
     const gl = sharedGl();
     if (gl) {
       const g = gl.gl;
@@ -222,25 +267,34 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
       // What the voice mostly drives is the turn — as in the original.
       g.uniform1f(gl.u.hover, voice * voice * 0.12);
       g.uniform1f(gl.u.rot, turn);
-      g.uniform3f(gl.u.c1, ...unit(p.a));
-      g.uniform3f(gl.u.c2, ...unit(p.c));
+      g.uniform3f(gl.u.c1, ...unit(hue1));
+      g.uniform3f(gl.u.c2, ...unit(hue2));
       // The deep tone under the ring: the indigo, darkened — the published navy, in our hue.
-      g.uniform3f(gl.u.c3, ...unit(p.b.map((v) => v * 0.6)));
+      g.uniform3f(gl.u.c3, ...unit(deep));
       g.drawArrays(g.TRIANGLES, 0, 3);
-      ctx.drawImage(gl.canvas, 0, 0, px, px);
+      ctx.drawImage(gl.canvas, at, at, size, size);
     } else {
       // No WebGL: a ring in the same hues, its brightest point travelling round.
       const r = px * 0.36;
       const grad = ctx.createConicGradient?.(turn * 3, px / 2, px / 2);
       if (grad) {
-        grad.addColorStop(0, rgb(p.a));
-        grad.addColorStop(0.5, rgb(p.c));
-        grad.addColorStop(1, rgb(p.a));
+        grad.addColorStop(0, rgb(hue1));
+        grad.addColorStop(0.5, rgb(hue2));
+        grad.addColorStop(1, rgb(hue1));
       }
       ctx.lineWidth = px * (0.1 + voice * 0.06);
-      ctx.strokeStyle = grad ?? rgb(p.b);
+      ctx.strokeStyle = grad ?? rgb(mix(p.b, p.success, green));
       ctx.beginPath();
-      ctx.arc(px / 2, px / 2, r, 0, Math.PI * 2);
+      ctx.arc(px / 2, px / 2, r * scale(fin), 0, TAU);
+      ctx.stroke();
+    }
+    // The release's ripple: one green ring running out from the orb's rim and fading as it goes.
+    if (!failed && fin > RELEASE && fin < RELEASE + 0.65) {
+      const k = (fin - RELEASE) / 0.65;
+      ctx.strokeStyle = rgba(light, (1 - k) * 0.7 * alpha);
+      ctx.lineWidth = Math.max(0.75, px * 0.05 * (1 - k));
+      ctx.beginPath();
+      ctx.arc(px / 2, px / 2, px * (0.37 + 0.11 * k), 0, TAU);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
@@ -249,17 +303,22 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
   return {
     setActivity(next) {
       activity = next;
+      clock.set(next);
     },
     tick(dt) {
+      clock.step(dt);
       time += dt * (activity?.quiet ? 0.3 : 1);
       voice += (target() - voice) * Math.min(1, dt * 6);
-      turn += dt * (0.3 + voice * 1.5);
+      // A failure brings the turn to a stop over half a second.
+      const halt = clock.failed && clock.fin >= 0 ? 1 - clamp01(clock.fin / 0.5) : 1;
+      turn += dt * ((0.3 + voice * 1.5) * halt + spin(clock.fin));
       const wanted = activity?.stopping ? 0.3 : 1;
       alpha += (wanted - alpha) * Math.min(1, dt * 3.5);
       paint();
     },
     still() {
       if (time === 0) time = 2.2;
+      clock.settle();
       voice = target();
       alpha = activity?.stopping ? 0.3 : 1;
       paint();

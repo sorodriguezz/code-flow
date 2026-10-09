@@ -18,7 +18,7 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { ChevronDown, ClipboardPaste, Copy, CopyPlus, Globe, History, KeyRound, Map as MapIcon, Network, Palette, PanelTop, Pencil, Pin, PinOff, Play, Plus, Power, Redo2, Scan, Scissors, ScrollText, Search, Settings2, ShieldAlert, Square, StepForward, StickyNote, Trash2, Undo2, Users, X, ZoomIn, ZoomOut } from "lucide-react";
-import { AiWand } from "../common/AiGlyph";
+import { AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Button, iconButtonClass } from "../common/Button";
 import { Segmented } from "../common/Segmented";
@@ -1192,8 +1192,10 @@ function Editor() {
               onClick={() => setAiOpen((open) => !open)}
               data-tour="flows-ai"
             >
-              {/* While the model works with its window closed, the orb is where the run shows. */}
-              {aiRun?.status === "running" && !aiOpen ? <ThinkingOrb size="sm" /> : <AiWand size={15} />}
+              {/* While the model works with its window closed, the orb is where the run shows. The
+                  sparkles, not the wand: they are the assistant's own mark everywhere else, and this
+                  opens the assistant (user, 2026-10-08: "el real de IA, que es la estrella"). */}
+              {aiRun?.status === "running" && !aiOpen ? <ThinkingOrb size="sm" /> : <AiSparkles size={15} />}
             </button>
           )}
           </span>
