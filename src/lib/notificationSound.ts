@@ -5,6 +5,7 @@
 import type { TranslationKey } from "./i18n/translations";
 import { NOTIFICATION_SOUND_ASSETS } from "./notificationSoundAssets";
 import { reportError } from "./diagnostics";
+import { audioPlay } from "./tauri/speechCommands";
 
 export type NotificationSoundId =
   | "double-ping" | "ping" | "mellow-chime" | "soft-bell" | "activity-beacon"
@@ -247,16 +248,62 @@ function whenAudible(play: (ctx: AudioContext) => Promise<void>): void {
   }
 }
 
+/** Set while a meeting records (`meetingsStore`): a chime would be recorded into the call's channel. */
+let suppressed = false;
+
+export function setNotificationSoundsSuppressed(on: boolean): void {
+  suppressed = on;
+}
+
+/**
+ * The speaker chosen in «Voz y sonido › Dispositivos», `""` for the system's default. WebKit can only
+ * play on the default, so a chosen one gets the sound rendered here and played by the backend
+ * (`audio_play`). Set by `speechStore`, which owns the setting.
+ */
+let speaker = "";
+
+export function setNotificationOutput(device: string): void {
+  speaker = device;
+}
+
+/** The sound rendered to samples — what goes to a speaker the webview cannot reach. */
+async function renderOffline(id: string, volume: number): Promise<{ samples: number[]; rate: number }> {
+  const rate = 24_000;
+  const sound = soundById(id);
+  const seconds = Math.max(0.3, sound.length + 0.3);
+  const ctor = window.OfflineAudioContext ??
+    (window as unknown as { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext;
+  if (!ctor) throw new Error("no OfflineAudioContext in this webview");
+  const ctx = new ctor(1, Math.ceil(rate * seconds), rate);
+  await renderNotificationSound(ctx, id, volume);
+  const buffer = await ctx.startRendering();
+  return { samples: Array.from(buffer.getChannelData(0)), rate };
+}
+
+function playOnOutput(id: string, volume: number): void {
+  void renderOffline(id, volume)
+    .then(({ samples, rate }) => audioPlay(samples, rate, 1))
+    .catch((error: unknown) => reportError("sound", error, `speaker ${speaker}`));
+}
+
 /** Collapse a burst of arrivals while still displaying every notification. */
 export function playNotificationSound(id: string, volume: number): void {
   const now = Date.now();
-  if (now - lastPlayedAt < MIN_GAP_MS || volumeGain(volume) === 0) return;
+  if (suppressed || now - lastPlayedAt < MIN_GAP_MS || volumeGain(volume) === 0) return;
   lastPlayedAt = now;
+  if (speaker) {
+    playOnOutput(id, volume);
+    return;
+  }
   whenAudible(async (ctx) => { await renderNotificationSound(ctx, id, volume); });
 }
 
 /** Preview clicks bypass the arrival throttle; only the latest click may remain audible. */
 export function previewNotificationSound(id: string, volume: number): void {
+  if (speaker) {
+    if (volumeGain(volume) > 0) playOnOutput(id, volume);
+    return;
+  }
   const request = ++previewRequest;
   whenAudible(async (ctx) => {
     if (request !== previewRequest) return;

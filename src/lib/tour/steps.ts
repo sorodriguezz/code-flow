@@ -214,6 +214,18 @@ const MAIN_TOUR: TourStep[] = [
     radius: 16,
     stage: { settings: "claude" },
   },
+  // Right after the engines: the other half of "what does the AI sound like" — and the newest thing
+  // in the window (2026-10-09), so it lands on the reading aloud rather than on the devices.
+  {
+    id: "settingsVoice",
+    chapterKey: "tour.chapter.settings",
+    titleKey: "tour.settingsVoice.title",
+    bodyKey: "tour.settingsVoice.body",
+    anchors: ['[data-tour="settings-panel"]'],
+    placement: "inside",
+    radius: 16,
+    stage: { settings: "voice", settingsTab: "reading" },
+  },
   {
     id: "settingsIntegrations",
     chapterKey: "tour.chapter.settings",

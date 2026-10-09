@@ -595,6 +595,8 @@ const APP_EVENTS: &[&str] = &[
     "aiQuotaHigh",
     "aiQuotaReset",
     "noteSaved",
+    // «Reuniones»: a meeting finished — its transcript, speakers and note in the item.
+    "meetingReady",
 ];
 const APP_EVENT: &[ParamSpec] = &[
     p("event", select(APP_EVENTS), "\"appStart\"").literal(),
@@ -1334,6 +1336,15 @@ const TERMINAL: &[ParamSpec] = &[
 
 const CLIPBOARD: &[ParamSpec] = &[p("text", long_text("{{ $json.text }}"), "\"={{ $json.text }}\"")];
 
+/// «Decir en voz alta»: the app's reading voice on the user's speaker (`app_ops::speech_say`).
+/// `auto` reads each text in the language it is written in.
+const SAY: &[ParamSpec] = &[
+    p("sayText", long_text("{{ $json.text }}"), "\"={{ $json.text }}\""),
+    p("sayLanguage", select(&["auto", "es", "en"]), "\"auto\"").literal(),
+    p("sayWait", Kind::Boolean, "true").literal(),
+    p("target", text("speech"), "\"speech\"").literal(),
+];
+
 const VAULT: &[ParamSpec] = &[
     p("item", Kind::VaultItem, "\"\"").literal(),
     // A field as stored, or the item's current 2FA code (never its secret).
@@ -1705,11 +1716,11 @@ const VISION: &[ParamSpec] = &[
 /// Gemini, or Whisper on this computer (whisper.cpp or OpenAI's Python CLI).
 const TRANSCRIBE: &[ParamSpec] = &[
     p("audioPath", file("{{ $json.path }}"), "\"\""),
-    p("transcribeEngine", select(&["openaiApi", "compatible", "gemini", "whisperLocal"]), "\"openaiApi\"").literal(),
+    p("transcribeEngine", select(&["openaiApi", "compatible", "gemini", "whisperLocal", "codeflowWhisper"]), "\"openaiApi\"").literal(),
     p("baseUrl", text("https://api.groq.com/openai/v1"), "\"\"").literal().when("transcribeEngine", &["compatible"]),
     p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal().when("transcribeEngine", &["openaiApi", "compatible", "gemini"]),
     p("transcribeModel", text("whisper-1"), "\"\"").literal().when("transcribeEngine", &["openaiApi", "compatible", "gemini"]),
-    p("whisperModel", text("base"), "\"\"").literal().when("transcribeEngine", &["whisperLocal"]),
+    p("whisperModel", text("base"), "\"\"").literal().when("transcribeEngine", &["whisperLocal", "codeflowWhisper"]),
     p("audioLanguage", text("es"), "\"\""),
     p("audioPrompt", long_text("CodeFlow, Supabase, Vercel"), "\"\""),
     p("timestamps", Kind::Boolean, "false").literal(),
@@ -2153,7 +2164,7 @@ const AI_IMAGE: &[ParamSpec] = &[
 
 /// «Texto a voz»: OpenAI, ElevenLabs or this computer's own voice.
 const AI_SPEECH: &[ParamSpec] = &[
-    p("speechEngine", select(&["openaiApi", "elevenlabs", "systemVoice"]), "\"systemVoice\"").literal(),
+    p("speechEngine", select(&["openaiApi", "elevenlabs", "systemVoice", "localVoice"]), "\"systemVoice\"").literal(),
     p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal().when("speechEngine", &["openaiApi", "elevenlabs"]),
     p("speechText", long_text("{{ $json.text }}"), "\"={{ $json.text }}\""),
     p("voice", text("alloy"), "\"\""),
@@ -2574,6 +2585,7 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "app.open" => OPEN,
         "app.terminal" => TERMINAL,
         "app.clipboard" => CLIPBOARD,
+        "app.say" => SAY,
         "app.vault" => VAULT,
         "logic.ratelimit" => RATE_LIMIT,
         "transform.convert" => CONVERT,

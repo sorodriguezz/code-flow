@@ -15,6 +15,7 @@ import { createCrab } from "../../lib/thinking/crab";
 import { createMoon } from "../../lib/thinking/moon";
 import { createAtom } from "../../lib/thinking/atom";
 import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
+import { voiceLevel } from "../../lib/thinking/voice";
 
 /**
  * The "something is working" mark, shown wherever an engine is actually running — an agent turn,
@@ -47,9 +48,27 @@ export function ThinkingOrb({
   const look = design ?? chosen;
   const state = thinkingState(activity);
   const kind = thinkingDesignKind(look);
+  const speaking = state === "run" && activity?.phase === "speak";
+  const ref = useRef<HTMLSpanElement>(null);
+  // While it speaks, the whole mark breathes with the voice: one value per frame, written straight
+  // to a CSS variable on the shared ticker (visible marks only), so nothing re-renders.
+  useEffect(() => {
+    const el = ref.current;
+    if (!speaking || !el) return;
+    const off = register(el, {
+      tick: () => el.style.setProperty("--cf-orb-voice", voiceLevel().toFixed(3)),
+      still: () => el.style.setProperty("--cf-orb-voice", "0"),
+      setActivity: () => {},
+    });
+    return () => {
+      off();
+      el.style.removeProperty("--cf-orb-voice");
+    };
+  }, [speaking]);
   return (
     <span
-      className={`cf-orb cf-orb-${size} cf-orb--${look}`}
+      ref={ref}
+      className={`cf-orb cf-orb-${size} cf-orb--${look}${speaking ? " cf-orb--speaking" : ""}`}
       data-state={state === "run" ? undefined : state}
       // Only where it is read, and only while running: the canvas designs take the phase itself.
       data-phase={kind === "css" && state === "run" && activity?.phase ? phaseGroup(activity.phase) : undefined}
@@ -80,6 +99,9 @@ const PAINTERS: Partial<Record<ThinkingDesign, (canvas: HTMLCanvasElement, px: n
   atom: createAtom,
 };
 
+/** The canvas designs that draw speaking from the voice itself (`lib/thinking/voice`). */
+const VOICE_AWARE = new Set<ThinkingDesign>(["orb", "wave"]);
+
 function OrbCanvas({ design, px, activity }: { design: ThinkingDesign; px: number; activity?: ThinkingActivity }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const painter = useRef<Painter | null>(null);
@@ -101,8 +123,10 @@ function OrbCanvas({ design, px, activity }: { design: ThinkingDesign; px: numbe
     };
   }, [design, px]);
 
-  // Primitives, so a caller passing a fresh object each render does not re-run this.
-  const phase = activity?.phase;
+  // Primitives, so a caller passing a fresh object each render does not re-run this. Speaking is
+  // drawn as writing by the designs that have no voice of their own; the two that do (the orb's
+  // shader, the waves) take the phase and the voice's loudness themselves.
+  const phase = activity?.phase === "speak" && !VOICE_AWARE.has(design) ? "write" : activity?.phase;
   const quiet = activity?.quiet;
   const done = activity?.done;
   const failed = activity?.failed;

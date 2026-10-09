@@ -93,7 +93,15 @@ impl WhisperModel {
 /// Smallest first. Sizes and digests from the Hugging Face API (`lfs.oid` is the SHA-256).
 /// `small` is the one recommended: measured here, it wrote "CodeFlow" and "pull request" where
 /// `base` heard "Coldflow" and "pulrico", and still answered a five-second clip in 0.6 s.
+/// `tiny` is there for «Reuniones» on a modest laptop: the one model that keeps up with live text
+/// beside a call on four slow cores, at the cost of more misheard words.
 pub const MODELS: &[WhisperModel] = &[
+    WhisperModel {
+        id: "tiny",
+        file: "ggml-tiny-q5_1.bin",
+        size_bytes: 32_152_673,
+        sha256: "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7",
+    },
     WhisperModel {
         id: "base",
         file: "ggml-base-q5_1.bin",

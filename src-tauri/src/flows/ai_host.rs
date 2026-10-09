@@ -205,7 +205,7 @@ async fn local_on(app: &tauri::AppHandle, host: Option<&AppHost>, call: LocalCal
             }
             let model = nonblank(&call.model)
                 .or(resolved.model.clone())
-                .ok_or_else(|| "No local model is set up — choose one in Settings › Local model".to_string())?;
+                .ok_or_else(|| "No local model is set up — choose one in Settings › AI engines › Local model".to_string())?;
             let context = if call.context > 0 { call.context } else { resolved.ctx };
             (resolved.kind, resolved.url.clone(), model, context)
         }

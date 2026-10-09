@@ -278,6 +278,8 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
             };
             Ok(json!({"title": item.meta.title, "value": value}))
         }
+        "speech.say" => speech_say(host, &args, cancel).await,
+        "whisper.transcribe" => whisper_transcribe(host, &args, cancel).await,
         "app.open" | "app.terminal" => {
             // The windows draw these; the main window listens.
             let event = if op == "app.open" { "flows:open" } else { "flows:terminal" };
@@ -806,6 +808,123 @@ async fn reviewer(host: &AppHost, args: &Value, cancel: CancellationToken) -> Re
     }
     let summary = crate::reviewer::analysis::last(&suggestion.project_key);
     Ok(json!({"projectKey": suggestion.project_key, "summary": to_json(summary)?}))
+}
+
+// ----------------------------------------------------------------------------------------- voice
+
+/// «Decir en voz alta»: the reading-aloud voice the user set up (Settings › Voz y sonido), on their
+/// speaker, in the queue with everything else it says — the thinking mark moves with it and
+/// «Callar» stops it. A flow speaks unasked, so the window's quiet rules hold here too: not over a
+/// meeting being recorded, not into a dictation's microphone.
+async fn speech_say(host: &AppHost, args: &Value, cancel: CancellationToken) -> Result<Value, String> {
+    let text = arg(args, "text");
+    let (quiet_meeting, quiet_dictation, fallback) = {
+        let state = db(host);
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        // The window's reading: unset or "true" is on.
+        let on = |key: &str| matches!(crate::db::queries::get_setting(&conn, key).ok().flatten().as_deref().map(str::trim), None | Some("") | Some("true"));
+        (on("speech_quiet_meeting"), on("speech_quiet_dictation"), crate::speech::app_language(&conn))
+    };
+    if quiet_meeting && crate::commands::meetings_cmd::recording(&host.app) {
+        return Ok(json!({"said": false, "skipped": "meeting"}));
+    }
+    if quiet_dictation && crate::commands::dictation_cmd::dictating() {
+        return Ok(json!({"said": false, "skipped": "dictation"}));
+    }
+    let fixed = match arg(args, "language").trim() {
+        "es" => Some("es"),
+        "en" => Some("en"),
+        _ => None,
+    };
+    let receiver = crate::speech::say_and_wait(&host.app, &text, "flow", fixed, fallback);
+    if !args.get("wait").and_then(Value::as_bool).unwrap_or(true) {
+        return Ok(json!({"said": true, "queued": true}));
+    }
+    let said = tokio::select! {
+        said = receiver => said.ok(),
+        _ = cancel.cancelled() => {
+            crate::speech::stop();
+            return Err(crate::ai_runs::CANCELLED_MARKER.to_string());
+        }
+    };
+    match said {
+        Some(said) if said.phase == "failed" => Err(format!("The voice could not speak: {}", said.error.unwrap_or_default())),
+        Some(said) => Ok(json!({"said": said.phase == "done", "phase": said.phase, "language": said.lang, "durationMs": said.duration_ms})),
+        // Dropped before it played: «Callar», or a burst of things to say pushed it out.
+        None => Ok(json!({"said": false, "phase": "stopped"})),
+    }
+}
+
+/// The longest audio CodeFlow's Whisper takes in one go: 90 minutes of 16 kHz samples is about
+/// 350 MB held in memory. A longer recording belongs in «Reuniones», which works through it in pieces.
+const WHISPER_MAX_SECONDS: u32 = 90 * 60;
+
+/// «Transcribir audio» with CodeFlow's own Whisper: the engine and a model downloaded for «Dictar»
+/// or «Reuniones», nothing else to install. The model is the one named, else the one dictation
+/// uses, else the most capable one downloaded. It runs on a context of its own
+/// (`engine::FLOWS`), freed when done, so it never swaps out the model dictation is holding.
+async fn whisper_transcribe(host: &AppHost, args: &Value, cancel: CancellationToken) -> Result<Value, String> {
+    use crate::dictation::{self, engine};
+    if dictation::engine_library().is_none() {
+        return Err("CodeFlow's Whisper is not downloaded — Settings › Voice & sound › Models".into());
+    }
+    let downloaded = |model: &&dictation::WhisperModel| dictation::model_path(model).is_file();
+    let named = arg(args, "model");
+    let model = if named.trim().is_empty() {
+        let chosen = {
+            let state = db(host);
+            let conn = state.0.lock().map_err(|e| e.to_string())?;
+            crate::db::queries::get_setting(&conn, "dictation_model").ok().flatten().unwrap_or_default()
+        };
+        dictation::model(chosen.trim())
+            .filter(downloaded)
+            .or_else(|| dictation::MODELS.iter().rev().find(downloaded))
+            .ok_or("No Whisper model is downloaded — Settings › Voice & sound › Models")?
+    } else {
+        dictation::model(named.trim())
+            .filter(downloaded)
+            .ok_or_else(|| format!("The Whisper model «{}» is not downloaded: tiny, base, small or turbo, from Settings › Voice & sound › Models", named.trim()))?
+    };
+    let path = std::path::PathBuf::from(arg(args, "path"));
+    let options = engine::Options {
+        language: match arg(args, "language").trim() {
+            "" => "auto".to_string(),
+            written => written.to_lowercase(),
+        },
+        prompt: arg(args, "prompt"),
+        ..engine::Options::default()
+    };
+    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let (abort, cancel) = (abort.clone(), cancel.clone());
+        tokio::spawn(async move {
+            cancel.cancelled().await;
+            abort.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+    let model_path = dictation::model_path(model);
+    let worked = tokio::task::spawn_blocking(move || {
+        let samples = crate::meetings::encode::decode_mono(&path, WHISPER_MAX_SECONDS)?;
+        let seconds = samples.len() as f64 / f64::from(crate::meetings::audio::RATE);
+        let segments = engine::segments(&engine::FLOWS, &model_path, &samples, &options, &abort);
+        engine::unload_slot(&engine::FLOWS);
+        segments.map(|segments| (segments, seconds))
+    })
+    .await
+    .map_err(|e| e.to_string());
+    watcher.abort();
+    if cancel.is_cancelled() {
+        return Err(crate::ai_runs::CANCELLED_MARKER.to_string());
+    }
+    let (segments, seconds) = worked??;
+    let joined: String = segments.iter().map(|segment| segment.text.as_str()).collect();
+    let text = joined.replace("[BLANK_AUDIO]", " ").split_whitespace().collect::<Vec<_>>().join(" ");
+    let segments: Vec<Value> = segments
+        .iter()
+        .filter(|segment| !segment.text.trim().is_empty())
+        .map(|segment| json!({"start": segment.start_ms as f64 / 1000.0, "end": segment.end_ms as f64 / 1000.0, "text": segment.text.trim()}))
+        .collect();
+    Ok(json!({"text": text, "segments": segments, "model": model.id, "seconds": seconds}))
 }
 
 #[cfg(test)]

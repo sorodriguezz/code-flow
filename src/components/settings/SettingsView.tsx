@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, ChevronsLeft, ChevronsRight, CornerDownLeft, Search, X, type LucideIcon } from "lucide-react";
 import { ThemeSettings } from "./ThemeSettings";
-import { ProjectsSettings } from "./ProjectsSettings";
+import { ProjectsSection } from "./ProjectsSettings";
 import { GitHostingSettings } from "./GitHostingSettings";
 import { ClaudeSettings } from "./ClaudeSettings";
 import { ReviewSettings } from "./ReviewSettings";
-import { SkillsSettings } from "./SkillsSettings";
-import { McpSettings } from "./McpSettings";
+import { ToolsSettings } from "./ToolsSettings";
+import { TasksSettings } from "./TasksSettings";
+import { VoiceSoundSettings } from "./VoiceSoundSettings";
+import { DatabasesSettings } from "./DatabasesSettings";
 import { GitSettings } from "./GitSettings";
 import { TerminalSettings } from "./TerminalSettings";
 import { GeneralSettings } from "./GeneralSettings";
@@ -15,7 +17,6 @@ import { RemoteSettings } from "./RemoteSettings";
 import { ShortcutsSettings } from "./ShortcutsSettings";
 import { VaultSettings } from "./VaultSettings";
 import { NotificationSettings } from "./NotificationSettings";
-import { PipelinesSettings } from "./PipelinesSettings";
 import { ReviewerSettings } from "./ReviewerSettings";
 import { ApiSettingsBody } from "../api/ApiSettingsPanel";
 import { ActivePill } from "../common/ActivePill";
@@ -24,14 +25,15 @@ import { chipClass, fieldClass } from "../common/recipes";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Tooltip } from "../common/Tooltip";
 import { useLayoutStore } from "../../state/layoutStore";
-import { useWorkspaceStore } from "../../state/workspaceStore";
 import { EditorSettings } from "./EditorSettings";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import { isTopLayer, useFocusTrap } from "../../lib/useFocusTrap";
 import { scrollEdgeMask, useScrollEdges } from "../../lib/useScrollEdges";
+import { useSettingsFrame } from "../../lib/useSettingsFrame";
 import {
   SELF_SCROLLING_SECTIONS,
+  SETTINGS_GROUPS,
   SETTINGS_SECTIONS,
   searchSettings,
   type SettingsHit,
@@ -62,9 +64,8 @@ const ALPHA_SECTIONS = new Set<SettingsSectionId>();
  * tabs: the accent fill is the shared [`ActivePill`], so picking a section slides it there rather
  * than repainting two backgrounds.
  *
- * Both groups share the one `layoutId`, deliberately — the pill travels between "Global" and the
- * workspace group as one continuous movement, which is exactly what the eye expects from a single
- * list of sections. It works because every row stays mounted for as long as the nav is open.
+ * Every group shares the one `layoutId`, deliberately — the pill travels between groups as one
+ * continuous movement, which is exactly what the eye expects from a single list of sections. It works because every row stays mounted for as long as the nav is open.
  */
 function SectionButton({
   id,
@@ -118,7 +119,7 @@ function SectionButton({
             : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         }`}
       >
-        {active && <ActivePill layoutId="cf-settings-pill" />}
+        {active && <ActivePill layoutId="cf-settings-pill" mark />}
         {/* Above the pill, which is absolutely positioned over the whole button.
             `flex-1` only while there is a label to stretch. It is what lets the name take the row
             and push the alpha badge to the end — and it is exactly what breaks the folded rail,
@@ -290,18 +291,16 @@ export function SettingsView() {
   const setSection = useUiStore((s) => s.openSettings);
   const openSettingsAt = useUiStore((s) => s.openSettingsAt);
   const navWidth = useLayoutStore((s) => s.sizes.settingsNavWidth);
-  // The window always opens with the nav folded to its icons (the user's call), and » unfolds it for
-  // this visit only. It used to be a remembered layout flag that defaulted to unfolded.
-  const [collapsed, setCollapsed] = useState(true);
+  // The window always opens with the nav unfolded, names beside the icons (the user's call,
+  // 2026-10-09 — it opened folded to icons since 2026-09-24), and « folds it for this visit only.
+  // Not a remembered layout flag: each opening starts the same way.
+  const [collapsed, setCollapsed] = useState(false);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
-  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const activeWorkspaceName = useWorkspaceStore(
-    (s) => s.workspaces.find((w) => w.id === activeWorkspaceId)?.name,
-  );
   const t = useT();
 
   const panelRef = useRef<HTMLDivElement>(null);
+  const frame = useSettingsFrame();
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -332,17 +331,14 @@ export function SettingsView() {
   // which after narrowing the list is a different row than the one the user was looking at.
   useEffect(() => setCursor(0), [query]);
 
-  // Every opening starts with an empty box and the nav folded: a search left over from last time
-  // makes the window open on a filtered list with no obvious cause, and a nav unfolded last visit is
+  // Every opening starts with an empty box and the nav unfolded: a search left over from last time
+  // makes the window open on a filtered list with no obvious cause, and a nav folded last visit is
   // not how the user wants the next one to start.
   useEffect(() => {
     if (open) return;
     setQuery("");
-    setCollapsed(true);
+    setCollapsed(false);
   }, [open]);
-
-  const globalSections = SETTINGS_SECTIONS.filter((entry) => entry.group === "global");
-  const workspaceSections = SETTINGS_SECTIONS.filter((entry) => entry.group === "workspace");
 
   /** A cue's click: most of a rail's height onward, so the next sections land in view with the last
    *  few seen still above them for context. */
@@ -392,9 +388,13 @@ export function SettingsView() {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
+    <div className="fixed inset-0 z-50 bg-black/20">
       <div
         ref={panelRef}
+        // Over the central sheet, edge to edge (and the AI panel's too, while it is open), and the
+        // whole window when that is too small — see `useSettingsFrame`. It used to be a fixed
+        // 1040×640 box, which the user found too small.
+        style={frame}
         onClick={(e) => e.stopPropagation()}
         data-tour="settings-panel"
         // ⌘, still closes it while it is open — the one app chord that may run over this dialog.
@@ -404,12 +404,8 @@ export function SettingsView() {
         role="dialog"
         aria-modal="true"
         aria-label={t("statusbar.settings")}
-        // 1040 rather than the 880 it was: the nav takes 208 and the content its own padding, which
-        // used to leave the API client's section about 430px once its rail was in — narrow enough
-        // that a project URL showed a dozen characters and a truncation, which is the wrong end of
-        // a value anyone is trying to check. `max-w-[92vw]` still gives way on a small screen.
         // The modal shape every dialog in the app shares: 14px corners and the modal shadow.
-        className="flex h-[640px] max-h-[85vh] w-[1040px] max-w-[92vw] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)]"
+        className="flex flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)]"
       >
         <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--cf-border)] pl-4 pr-3">
           <h2 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--cf-text)]">
@@ -532,55 +528,42 @@ export function SettingsView() {
                     <SearchResults hits={hits} cursor={cursor} query={query.trim()} onPick={pick} onHover={setCursor} />
                   ) : (
                     <>
-                      {folded ? (
-                        // The group headings are the one thing with no icon to fall back on. A rule in
-                        // their place keeps the two groups visibly separate without inventing a glyph.
-                        // 15px, the heading's own fixed line (`leading-[15px]`), so unfolding does not
-                        // move a single icon down the rail.
-                        <div className="mb-1 h-[15px]" />
-                      ) : (
-                        <p className="mb-1 px-2.5 text-[11px] font-semibold uppercase leading-[15px] tracking-[0.06em] text-[var(--cf-text-faint)]">
-                          {t("settings.globalGroup")}
-                        </p>
-                      )}
-                      {globalSections.map((item) => (
-                        <SectionButton
-                          key={item.id}
-                          id={item.id}
-                          labelKey={item.labelKey}
-                          icon={item.icon}
-                          active={section === item.id}
-                          collapsed={folded}
-                          alpha={ALPHA_SECTIONS.has(item.id)}
-                          onSelect={setSection}
-                        />
-                      ))}
-
-                      {folded ? (
-                        // `mx-[15px]` leaves a 20px rule centred in the 50px rail, matching the
-                        // projects sidebar's folded separator (`mx-auto … w-5`). Without it the
-                        // border runs edge to edge — the scroller is `px-0` here and has no gutter —
-                        // and butts into the seam hairline, which reads as a divider *inside* one
-                        // list rather than as the break between two groups.
-                        <div className="mx-[15px] mb-1 mt-4 h-[15px] border-t border-[var(--cf-border)]" />
-                      ) : (
-                        <p className="mb-1 mt-4 break-words px-2.5 text-[11px] font-semibold uppercase leading-[15px] tracking-[0.06em] text-[var(--cf-text-faint)]">
-                          {activeWorkspaceName
-                            ? t("settings.workspaceGroup", { name: activeWorkspaceName })
-                            : t("settings.workspaceGroupGeneric")}
-                        </p>
-                      )}
-                      {workspaceSections.map((item) => (
-                        <SectionButton
-                          key={item.id}
-                          id={item.id}
-                          labelKey={item.labelKey}
-                          icon={item.icon}
-                          active={section === item.id}
-                          collapsed={folded}
-                          alpha={ALPHA_SECTIONS.has(item.id)}
-                          onSelect={setSection}
-                        />
+                      {SETTINGS_GROUPS.map((group, index) => (
+                        <div key={group.id}>
+                          {folded ? (
+                            // The group headings are the one thing with no icon to fall back on. A
+                            // rule in their place keeps the groups visibly apart without inventing a
+                            // glyph — none above the first, which the rail's top edge already starts.
+                            // 15px, the heading's own fixed line (`leading-[15px]`), so unfolding does
+                            // not move a single icon down the rail. `mx-[15px]` leaves a 20px rule
+                            // centred in the 50px rail, matching the projects sidebar's separator.
+                            index === 0 ? (
+                              <div className="mb-1 h-[15px]" />
+                            ) : (
+                              <div className="mx-[15px] mb-1 mt-3 h-[15px] border-t border-[var(--cf-border)]" />
+                            )
+                          ) : (
+                            <p
+                              className={`mb-1 break-words px-2.5 text-[11px] font-semibold uppercase leading-[15px] tracking-[0.06em] text-[var(--cf-text-faint)] ${
+                                index === 0 ? "" : "mt-3"
+                              }`}
+                            >
+                              {t(group.labelKey)}
+                            </p>
+                          )}
+                          {SETTINGS_SECTIONS.filter((item) => item.group === group.id).map((item) => (
+                            <SectionButton
+                              key={item.id}
+                              id={item.id}
+                              labelKey={item.labelKey}
+                              icon={item.icon}
+                              active={section === item.id}
+                              collapsed={folded}
+                              alpha={ALPHA_SECTIONS.has(item.id)}
+                              onSelect={setSection}
+                            />
+                          ))}
+                        </div>
                       ))}
                     </>
                   )}
@@ -657,25 +640,26 @@ export function SettingsView() {
             {/* `h-full` for the sections that scroll their own pane: they pin a header and a rail
                 and let only the pane beside it move, which needs a definite height to divide up. */}
             <div className={`w-full ${SELF_SCROLLING_SECTIONS.has(section) ? "h-full" : ""}`}>
-              {section === "appearance" && <ThemeSettings />}
               {section === "general" && <GeneralSettings />}
+              {section === "appearance" && <ThemeSettings />}
               {section === "keybindings" && <ShortcutsSettings />}
+              {section === "notifications" && <NotificationSettings />}
+              {section === "voice" && <VoiceSoundSettings />}
+              {section === "backup" && <BackupSettings />}
+              {section === "projects" && <ProjectsSection />}
               {section === "editor" && <EditorSettings />}
-              {section === "projects" && <ProjectsSettings />}
-              {section === "git" && <GitSettings />}
               {section === "terminal" && <TerminalSettings />}
+              {section === "git" && <GitSettings />}
               {section === "azure" && <GitHostingSettings />}
               {section === "claude" && <ClaudeSettings />}
-              {section === "api" && <ApiSettingsBody />}
-              {section === "remote" && <RemoteSettings />}
-              {section === "vault" && <VaultSettings />}
-              {section === "pipelines" && <PipelinesSettings />}
-              {section === "reviewer" && <ReviewerSettings />}
-              {section === "notifications" && <NotificationSettings />}
-              {section === "backup" && <BackupSettings />}
+              {section === "tasks" && <TasksSettings />}
               {section === "review" && <ReviewSettings />}
-              {section === "skills" && <SkillsSettings />}
-              {section === "mcp" && <McpSettings />}
+              {section === "tools" && <ToolsSettings />}
+              {section === "api" && <ApiSettingsBody />}
+              {section === "databases" && <DatabasesSettings />}
+              {section === "vault" && <VaultSettings />}
+              {section === "reviewer" && <ReviewerSettings />}
+              {section === "remote" && <RemoteSettings />}
             </div>
           </div>
         </div>

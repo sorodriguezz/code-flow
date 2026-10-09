@@ -332,6 +332,7 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("transform.chatFormat", Transform, "message-square-code", 12).group("transformValues"),
     // CodeFlow itself.
     node("app.notify", App, "bell", 1),
+    node("app.say", App, "speech", 12),
     node("app.note", App, "notebook-pen", 4),
     node("app.agent", App, "bot", 3),
     node("app.open", App, "external-link", 4),
@@ -475,8 +476,8 @@ mod tests {
         assert_eq!(count(Files), 13);
         assert_eq!(count(Logic), 13);
         assert_eq!(count(Transform), 20);
-        assert_eq!(count(App), 15);
-        assert_eq!(CATALOG.len(), 172);
+        assert_eq!(count(App), 16);
+        assert_eq!(CATALOG.len(), 173);
     }
 
     #[test]

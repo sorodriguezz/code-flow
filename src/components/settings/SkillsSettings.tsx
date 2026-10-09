@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, FileArchive, FolderInput, Loader2, PackagePlus, Plus, Trash2 } from "lucide-react";
 import {
@@ -29,7 +29,8 @@ import { fieldClass } from "../common/recipes";
 
 const DEFAULT_SKILL_MD = "---\nname: my-skill\ndescription: What this skill does and when to use it.\n---\n\n# My skill\n\nInstructions for the model…\n";
 
-export function SkillsSettings() {
+/** `bare`: inside «Herramientas de IA», whose rail names the pane — the hint stays, the heading goes. */
+export function SkillsSettings({ bare = false }: { bare?: boolean } = {}) {
   const t = useT();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const [skills, setSkills] = useState<WorkspaceSkill[]>([]);
@@ -66,7 +67,11 @@ export function SkillsSettings() {
   if (!workspaceId) {
     return (
       <section>
-        <SettingsHeader title={t("settings.skillsTitle")} hint={t("settings.skillsSelectWorkspace")} />
+        {bare ? (
+          <p className="mb-3 max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">{t("settings.skillsSelectWorkspace")}</p>
+        ) : (
+          <SettingsHeader title={t("settings.skillsTitle")} hint={t("settings.skillsSelectWorkspace")} />
+        )}
       </section>
     );
   }
@@ -161,7 +166,8 @@ export function SkillsSettings() {
 
   return (
     <section>
-      <SettingsHeader
+      <SkillsHeader
+        bare={bare}
         title={t("settings.skillsTitle")}
         hint={
           <>
@@ -388,4 +394,8 @@ function SkillFilesEditor({ workspaceId, skillName }: { workspaceId: string; ski
       )}
     </div>
   );
+}
+
+function SkillsHeader({ bare, title, hint }: { bare: boolean; title: string; hint: ReactNode }) {
+  return bare ? <p className="mb-3 max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">{hint}</p> : <SettingsHeader title={title} hint={hint} />;
 }

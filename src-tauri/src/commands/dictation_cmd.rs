@@ -175,6 +175,15 @@ pub fn dictation_mic_settings() -> Result<(), String> {
 #[cfg(any(target_os = "macos", windows))]
 static RECORDING: Mutex<Option<(String, dictation::capture::Capture)>> = Mutex::new(None);
 
+/// The microphone is open for a dictation — when a voice the user did not ask for keeps quiet
+/// (`speech.say`): it would be written down.
+pub fn dictating() -> bool {
+    #[cfg(any(target_os = "macos", windows))]
+    return RECORDING.lock().is_ok_and(|slot| slot.is_some());
+    #[cfg(not(any(target_os = "macos", windows)))]
+    false
+}
+
 /// Takes the recording — only `session`'s, when one is named.
 #[cfg(any(target_os = "macos", windows))]
 fn take_recording(session: Option<&str>) -> Option<dictation::capture::Capture> {
@@ -237,7 +246,7 @@ pub async fn dictation_record_finish(session: String, model_id: String, language
         let model = dictation::model(&model_id).ok_or_else(|| format!("Unknown dictation model: {model_id}"))?;
         let path = dictation::model_path(model);
         if !path.is_file() {
-            return Err("The dictation model is not installed — Settings › AI › Dictation".into());
+            return Err("The dictation model is not downloaded — Settings › Voice & sound › Models".into());
         }
         if samples.len() < SHORTEST {
             return Ok(String::new());

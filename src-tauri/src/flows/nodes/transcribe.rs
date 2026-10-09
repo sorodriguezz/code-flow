@@ -2,7 +2,8 @@
 //!
 //! OpenAI's transcription endpoint or a server that speaks it (Groq, a self-hosted faster-whisper),
 //! Gemini with the audio inline, or Whisper on this computer — whisper.cpp (`whisper-cli`, with its
-//! ggml model file) or OpenAI's Python CLI (`whisper`, by model name). The text lands in the item's
+//! ggml model file) or OpenAI's Python CLI (`whisper`, by model name) — or CodeFlow's own Whisper,
+//! the engine and model «Dictar» downloaded, with nothing to install. The text lands in the item's
 //! `target`; with timestamps, the segments beside it as `segments: [{ start, end, text }]`, seconds.
 
 use std::path::{Path, PathBuf};
@@ -54,6 +55,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let transcript = match engine.as_str() {
             "gemini" => gemini(ctx, params, &path).await?,
             "whisperLocal" => whisper_local(ctx, params, &path, index).await?,
+            "codeflowWhisper" => codeflow_whisper(ctx, params, &path).await?,
             _ => openai_like(ctx, params, &path, engine == "compatible").await?,
         };
         let mut json = items.get(index).map(|item| item.json.clone()).filter(Value::is_object).unwrap_or_else(|| json!({}));
@@ -76,6 +78,34 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         out.push(if items.is_empty() { Item::new(json) } else { Item::paired(json, index) });
     }
     Ok(vec![out])
+}
+
+/// CodeFlow's own Whisper — the engine and a model «Dictar» or «Reuniones» downloaded — run by the
+/// app (`app_ops::whisper_transcribe`): «Modelo de Whisper» names one (tiny, base, small, turbo),
+/// empty takes dictation's.
+async fn codeflow_whisper(ctx: &NodeCtx, params: &Value, path: &Path) -> Result<Transcript, NodeError> {
+    let args = json!({
+        "path": path.to_string_lossy(),
+        "model": text(params, "whisperModel"),
+        "language": text(params, "audioLanguage"),
+        "prompt": text(params, "audioPrompt"),
+    });
+    let answer = ctx.run.host.app_call("whisper.transcribe", args, ctx.cancel.clone()).await.map_err(|error| {
+        if error.starts_with(crate::ai_runs::CANCELLED_MARKER) {
+            NodeError::Cancelled
+        } else {
+            NodeError::Failed(error)
+        }
+    })?;
+    let model = answer.get("model").and_then(Value::as_str).unwrap_or_default().to_string();
+    let seconds = answer.get("seconds").and_then(Value::as_f64).unwrap_or(0.0);
+    ctx.log(LogStream::Info, &format!("CodeFlow's Whisper ({model}) read {seconds:.0} s of audio"));
+    Ok(Transcript {
+        text: answer.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
+        segments: answer.get("segments").and_then(Value::as_array).cloned().unwrap_or_default(),
+        language: None,
+        model: format!("whisper.cpp {model}"),
+    })
 }
 
 fn audio_mime(path: &Path) -> &'static str {

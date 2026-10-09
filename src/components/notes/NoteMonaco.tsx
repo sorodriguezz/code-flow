@@ -1,4 +1,5 @@
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
+import { addReadAloudAction } from "../../lib/speech/monacoReadAloud";
 import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 // Side-effect import: this is what points `@monaco-editor/react`'s loader at the *bundled* copy
@@ -10,6 +11,7 @@ import { applyTool, type MarkdownTool } from "../../lib/notes/markdownTools";
 import { findNoteLinks } from "../../lib/notes/noteLinks";
 import { suggestNoteLinks, useNotesStore } from "../../state/notesStore";
 import { useThemeStore } from "../../state/themeStore";
+import { translate } from "../../state/languageStore";
 
 /**
  * The Markdown editing surface: Monaco, configured for prose rather than for code.
@@ -118,6 +120,8 @@ export interface NoteMonacoHandle {
    * safe to press on a document somebody cares about.
    */
   replaceSelection: (text: string) => void;
+  /** Adds `text` at the end of the note, after a blank line, as one undo step, and shows it. */
+  appendText: (text: string) => void;
 }
 
 export function NoteMonaco({
@@ -203,6 +207,17 @@ export function NoteMonaco({
         if (!editor || !selection) return;
         editor.executeEdits("note-ai", [{ range: selection, text }]);
         editor.focus();
+      },
+      appendText: (text) => {
+        const editor = editorRef.current;
+        const model = editor?.getModel();
+        if (!editor || !model) return;
+        const line = model.getLineCount();
+        const column = model.getLineMaxColumn(line);
+        const before = model.getValue().trimEnd().length === 0 ? "" : model.getValue().endsWith("\n\n") ? "" : model.getValue().endsWith("\n") ? "\n" : "\n\n";
+        const range = { startLineNumber: line, startColumn: column, endLineNumber: line, endColumn: column };
+        editor.executeEdits("note-meeting", [{ range, text: `${before}${text}` }]);
+        editor.revealLine(model.getLineCount());
       },
     }),
     [],
@@ -395,6 +410,8 @@ export function NoteMonaco({
     editor.onDidChangeCursorPosition((event) =>
       cursorRef.current?.(event.position.lineNumber),
     );
+    // The selection said aloud, beside Copy — see `addReadAloudAction`.
+    addReadAloudAction(editor, translate("speech.readAloud"));
     // Signals the completion provider's effect that `monacoRef` is now populated.
     setEditorReady((n) => n + 1);
   };

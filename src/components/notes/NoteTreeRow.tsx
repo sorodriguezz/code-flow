@@ -7,11 +7,20 @@ import {
   BookOpen,
   GitBranch,
   Globe,
+  Lock,
+  Mic,
   Pin,
   type LucideIcon,
 } from "lucide-react";
 import type { NoteTreeRow as Row } from "../../types/notes";
 import { bookInk, ROW, ROW_ACTIVE, ROW_IDLE } from "./notesChrome";
+import { useMeetingsStore } from "../../state/meetingsStore";
+
+/** A microphone on a note that has a meeting — its own subscription, so the row's memo is untouched. */
+function MeetingMark({ noteId }: { noteId: string }) {
+  const has = useMeetingsStore((s) => s.notesWith.has(noteId));
+  return has ? <Mic size={10} className="shrink-0 text-[var(--cf-text-muted)]" /> : null;
+}
 
 /** Which part of a row a drop would land in. `null` is "not this row". */
 type DropEdge = "into" | "before" | "after" | null;
@@ -197,6 +206,10 @@ export const NoteTreeRow = memo(function NoteTreeRow({
       {isBook && row.book.scope === "global" && (
         <Globe size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
       )}
+
+      {isBook && row.book.local_only && <Lock size={10} className="shrink-0 text-[var(--cf-text-muted)]" />}
+
+      {!isBook && <MeetingMark noteId={row.note.id} />}
 
       {isBook && row.noteCount > 0 && (
         <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">

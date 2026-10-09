@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Bell, BellOff, Check, Volume1, Volume2, VolumeX } from "lucide-react";
+import { Bell, BellOff, Check, Play, Volume1, Volume2, VolumeX } from "lucide-react";
 import { nativePermission, requestNativePermission } from "../../lib/nativeNotify";
 import {
   NOTIFICATION_SOUNDS,
@@ -23,10 +23,12 @@ import {
 } from "../../lib/notificationSound";
 import { NOTIFICATION_SOURCE_LABEL, notify, type NotificationSource } from "../../state/notificationStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
+import { useSpeechStore } from "../../state/speechStore";
+import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
-import { buttonClass } from "../common/Button";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { rowClass } from "../common/recipes";
 import { Note, Panel, SettingsHeader } from "../api/settingsChrome";
 import { onRadioKeys, PaneBlock, SettingsRail, useSectionTab } from "./settingsNav";
@@ -308,40 +310,92 @@ function DeliveryPane() {
 }
 
 /** About what. Every source the bell knows, each one mutable on its own. */
+/**
+ * Each source, three ways it can reach you: a row in the bell (and the system's notification), a
+ * tone, and the thinking mark saying it. A source turned off is not recorded at all, so its tone and
+ * voice go with it. «Voz» is off for every source until chosen — a voice nobody asked for is the
+ * fastest way to have the feature switched off for good.
+ */
 function SourcesPane() {
   const t = useT();
   const muted = usePreferencesStore((s) => s.mutedNotificationSources);
+  const silent = usePreferencesStore((s) => s.silentNotificationSources);
+  const spoken = usePreferencesStore((s) => s.spokenNotificationSources);
   const setMuted = usePreferencesStore((s) => s.setNotificationSourceMuted);
+  const setSilent = usePreferencesStore((s) => s.setNotificationSourceSilent);
+  const setSpoken = usePreferencesStore((s) => s.setNotificationSourceSpoken);
+  const head = "px-2 py-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
 
   return (
-      <ul>
-        {SOURCES.map((source) => {
-          const off = muted.includes(source);
-          return (
-            <li key={source}>
-              {/* A list row: the whole line toggles, and says so under the pointer. */}
-              <label className="-mx-1.5 flex min-h-8 cursor-pointer items-center gap-2.5 rounded-md px-1.5 py-1 transition-colors duration-100 hover:bg-[var(--cf-hover)]">
-                <span className="shrink-0">
-                  <Checkbox checked={!off} onChange={(value) => void setMuted(source, !value)} />
-                </span>
-                {off ? (
-                  <BellOff size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
-                ) : (
-                  <Bell size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-                )}
-                {/* Wraps rather than truncates, like every other label in this window. */}
-                <span
-                  className={`min-w-0 flex-1 break-words text-[13px] leading-snug ${
-                    off ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"
-                  }`}
-                >
-                  {t(NOTIFICATION_SOURCE_LABEL[source])}
-                </span>
-              </label>
-            </li>
-          );
-        })}
-      </ul>
+    <div>
+      <p className="mb-3 flex flex-wrap items-center gap-x-1.5 text-[12px] leading-snug text-[var(--cf-text-muted)]">
+        <span>{t("notifications.voiceWhere")}</span>
+        <button
+          type="button"
+          className="text-[var(--cf-accent)] hover:underline"
+          onClick={() => useUiStore.getState().openSettingsAt("voice", "reading")}
+        >
+          {t("speech.title")}
+        </button>
+      </p>
+      <div className="overflow-x-auto rounded-lg border border-[var(--cf-border)]">
+        <table className="w-full border-collapse text-[13px]">
+          <thead>
+            <tr className="border-b border-[var(--cf-border)] text-left">
+              <th className={head}>{t("notifications.sourceColumn")}</th>
+              <th className={`${head} w-[68px] text-center`}>{t("notifications.columnShow")}</th>
+              <th className={`${head} w-[68px] text-center`}>{t("notifications.columnSound")}</th>
+              <th className={`${head} w-[68px] text-center`}>{t("notifications.columnVoice")}</th>
+              <th className={`${head} w-[44px]`}>
+                <span className="sr-only">{t("notifications.columnHear")}</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {SOURCES.map((source) => {
+              const off = muted.includes(source);
+              const label = t(NOTIFICATION_SOURCE_LABEL[source]);
+              return (
+                <tr key={source} className="border-b border-[var(--cf-border)] last:border-b-0">
+                  <td className="px-2 py-1">
+                    <span className={`flex items-center gap-2 break-words leading-snug ${off ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"}`}>
+                      {off ? <BellOff size={13} className="shrink-0 text-[var(--cf-text-faint)]" /> : <Bell size={13} className="shrink-0 text-[var(--cf-text-muted)]" />}
+                      {label}
+                    </span>
+                  </td>
+                  <td className="px-2 py-1 text-center">
+                    <span className="inline-flex" title={t("notifications.columnShow")}>
+                      <Checkbox checked={!off} onChange={(value) => void setMuted(source, !value)} />
+                    </span>
+                  </td>
+                  <td className={`px-2 py-1 text-center ${off ? "opacity-40" : ""}`}>
+                    <span className="inline-flex" title={t("notifications.columnSound")}>
+                      <Checkbox checked={!off && !silent.includes(source)} onChange={off ? () => {} : (value) => void setSilent(source, !value)} />
+                    </span>
+                  </td>
+                  <td className={`px-2 py-1 text-center ${off ? "opacity-40" : ""}`}>
+                    <span className="inline-flex" title={t("notifications.columnVoice")}>
+                      <Checkbox checked={!off && spoken.includes(source)} onChange={off ? () => {} : (value) => void setSpoken(source, value)} />
+                    </span>
+                  </td>
+                  <td className="px-1 py-1 text-center">
+                    <button
+                      type="button"
+                      aria-label={t("notifications.hearSource", { source: label })}
+                      title={t("notifications.hearSource", { source: label })}
+                      className={iconButtonClass({ size: "xs" })}
+                      onClick={() => useSpeechStore.getState().say(t("notifications.voiceSample", { source: label }), "test", { interrupt: true })}
+                    >
+                      <Play size={11} />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

@@ -22,6 +22,7 @@
  */
 
 import {
+  AudioLines,
   Bug,
   Calculator,
   ClipboardCheck,
@@ -59,6 +60,7 @@ import {
   setWorkspacePrompt,
 } from "./tauri/commands";
 import { defaultNotebookTemplate } from "./tauri/notebookCommands";
+import { defaultSpokenSummaryTemplate } from "./tauri/speechCommands";
 
 export interface PromptDef {
   /** Stable id, unique across both scopes — used as the React key and the expand target. */
@@ -168,6 +170,16 @@ export const AI_PROMPTS: PromptDef[] = [
     icon: NotebookPen,
     scope: "global",
     key: "notebook_template",
+  },
+  // How a long answer is cut before it is read aloud — «Resumen hablado» (`speech_summarize`).
+  {
+    id: "spoken_summary_template",
+    task: "spoken_summary",
+    labelKey: "prompts.spokenSummary",
+    hintKey: "prompts.spokenSummaryHint",
+    icon: AudioLines,
+    scope: "global",
+    key: "spoken_summary_template",
   },
   // Read by the CI failure analyser since it shipped, and until now editable from nowhere at all.
   {
@@ -393,6 +405,8 @@ export async function loadPromptDefault(prompt: PromptDef): Promise<string> {
       return defaultSampleRowsTemplate().catch(() => "");
     case "notebook_template":
       return defaultNotebookTemplate().catch(() => "");
+    case "spoken_summary_template":
+      return defaultSpokenSummaryTemplate().catch(() => "");
     default:
       return "";
   }

@@ -24,6 +24,8 @@ import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { SettingsHeader } from "../api/settingsChrome";
+import { RailSection } from "./settingsNav";
+import { ThisWorkspaceSettings } from "./ThisWorkspaceSettings";
 import { riseDelay } from "../../lib/rise";
 import type { Project, Workspace } from "../../types/domain";
 import { fieldClass } from "../common/recipes";
@@ -99,7 +101,26 @@ interface WorkspaceRow {
   forcedOpen: boolean;
 }
 
-export function ProjectsSettings() {
+/**
+ * «Workspaces y proyectos»: the workspaces and their repositories, and — since the nav lost its
+ * «Workspace» group (2026-10-09) — everything the open workspace does differently, together.
+ */
+export function ProjectsSection() {
+  const t = useT();
+  return (
+    <RailSection section="projects" title={t("settings.projectsTitle")} hint={t("settings.projectsHint")} fallback="list">
+      {(tab) => (
+        <>
+          {tab === "list" && <ProjectsSettings bare />}
+          {tab === "current" && <ThisWorkspaceSettings />}
+        </>
+      )}
+    </RailSection>
+  );
+}
+
+/** `bare`: inside `ProjectsSection`, whose header already names the section. */
+export function ProjectsSettings({ bare = false }: { bare?: boolean } = {}) {
   const t = useT();
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
@@ -329,7 +350,7 @@ export function ProjectsSettings() {
 
   return (
     <section>
-      <SettingsHeader title={t("settings.projectsTitle")} hint={t("settings.projectsHint")} />
+      {!bare && <SettingsHeader title={t("settings.projectsTitle")} hint={t("settings.projectsHint")} />}
 
       {/* Above the list, not below it: the list grows without bound and a control parked under it
           walks off the bottom of the panel, while the two things this row does — find a workspace,

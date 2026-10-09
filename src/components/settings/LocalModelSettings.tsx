@@ -188,8 +188,21 @@ const FIT_BAR: Record<LocalFit, string> = {
   unknown: "bg-[var(--cf-text-muted)]",
 };
 
-function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+/**
+ * One setting: its name in a column on the left, the control beside it. `stacked` puts the name above
+ * instead, for a control that needs the pane's whole width — the model list, whose rows carry a
+ * verdict, five figures and a button (the user's ask, 2026-10-09).
+ */
+function Row({ label, hint, stacked = false, children }: { label: string; hint?: string; stacked?: boolean; children: ReactNode }) {
   const name = <span className="text-[12px] text-[var(--cf-text-muted)]">{label}</span>;
+  if (stacked) {
+    return (
+      <div className="flex flex-col gap-2 border-t border-[var(--cf-border)] py-2.5 first:border-t-0 first:pt-0">
+        <div>{hint ? <Tooltip label={hint}>{name}</Tooltip> : name}</div>
+        <div className="min-w-0">{children}</div>
+      </div>
+    );
+  }
   return (
     <div className="grid grid-cols-[150px_minmax(0,1fr)] items-start gap-3 border-t border-[var(--cf-border)] py-2.5 first:border-t-0 first:pt-0">
       <div className="pt-[5px]">{hint ? <Tooltip label={hint}>{name}</Tooltip> : name}</div>
@@ -583,7 +596,7 @@ export function LocalModelSettings() {
         </Row>
       )}
 
-      <Row label={t("localexec.model")}>
+      <Row label={t("localexec.model")} stacked>
         {state.backend === "bundled" ? (
           <div className="flex flex-col gap-2">
             <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">

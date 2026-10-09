@@ -1,4 +1,5 @@
 import { Skeleton } from "./Skeleton";
+import { useSettingsFrame } from "../../lib/useSettingsFrame";
 
 /**
  * What a view looks like for the frame or two its code chunk takes to arrive.
@@ -43,12 +44,13 @@ export function ViewSkeleton() {
   );
 }
 
-/** The settings panel's own geometry, down to the backdrop — the numbers are copied from
- *  `SettingsView` so the real panel replaces this without the box moving. */
+/** The settings panel's own geometry, down to the backdrop — the same frame `SettingsView` takes
+ *  (`useSettingsFrame`), so the real panel replaces this without the box moving. */
 export function SettingsSkeleton() {
+  const frame = useSettingsFrame();
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
-      <div className="flex h-[640px] max-h-[85vh] w-[1040px] max-w-[92vw] flex-col gap-3 overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-5 shadow-[var(--cf-shadow-modal)]">
+    <div className="fixed inset-0 z-50 bg-black/20">
+      <div style={frame} className="flex flex-col gap-3 overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-5 shadow-[var(--cf-shadow-modal)]">
         <Skeleton className="h-5 w-40" />
         <div className="flex min-h-0 flex-1 gap-4">
           <div className="flex w-52 shrink-0 flex-col gap-2">

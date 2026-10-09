@@ -13,6 +13,7 @@ import { useDbStore } from "../state/dbStore";
 import { useDbModalStore } from "../state/dbModalStore";
 import { usePreferencesStore } from "../state/preferencesStore";
 import { useDictationStore } from "../state/dictationStore";
+import { speechStop } from "./tauri/speechCommands";
 import { fetchNow, pullNow, pushNow } from "./gitActions";
 import type { Chord } from "./keys";
 import type { TranslationKey } from "./i18n/translations";
@@ -41,6 +42,7 @@ export type ShortcutId =
   | "app.settings"
   | "app.shortcuts"
   | "dictation.toggle"
+  | "speech.stop"
   | "panel.sidebar"
   | "panel.ai"
   | "panel.terminal"
@@ -354,6 +356,15 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "shortcuts.cmdDictate",
     defaultChord: "Mod+Shift+Space",
     run: () => useDictationStore.getState().toggle(),
+  },
+  {
+    // «Callar»: the reading aloud stops, and nothing it was about to say is said. Through the
+    // command rather than the store — nothing here needs to know what was being said.
+    id: "speech.stop",
+    group: "general",
+    labelKey: "shortcuts.cmdHush",
+    defaultChord: "Mod+Alt+.",
+    run: () => void speechStop().catch(() => {}),
   },
 
   {

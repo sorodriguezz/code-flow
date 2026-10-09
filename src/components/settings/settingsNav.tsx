@@ -17,7 +17,7 @@
  * language. The rail is wider than it was (168 → 190) so most labels still take one line anyway.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
@@ -83,9 +83,20 @@ export function SettingsRail({
       className="shrink-0 self-start"
       aria-label={t("settings.sectionNavLabel")}
     >
-      {tabs.map(({ id, labelKey, icon: Icon }) => (
+      {tabs.map(({ id, labelKey, headingKey, icon: Icon }, index) => (
+        <Fragment key={id}>
+        {headingKey && (
+          // A part of a long rail (Motores · Consumo): the nav's own group heading, a step smaller,
+          // with a little more air above it than below — it belongs to the rows under it.
+          <p
+            className={`mb-1 px-2.5 text-[10.5px] font-semibold uppercase leading-[15px] tracking-[0.07em] text-[var(--cf-text-faint)] ${
+              index === 0 ? "" : "mt-3"
+            }`}
+          >
+            {t(headingKey)}
+          </p>
+        )}
         <button
-          key={id}
           type="button"
           onClick={() => onSelect(id)}
           aria-current={active === id ? "page" : undefined}
@@ -100,7 +111,7 @@ export function SettingsRail({
               : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           }`}
         >
-          {active === id && <ActivePill layoutId={layoutId} />}
+          {active === id && <ActivePill layoutId={layoutId} mark />}
           {/* Above the pill, which covers the whole button. */}
           <span className="relative flex min-w-0 flex-1 items-start gap-2">
             {/* `mt-[2px]` puts a 14px glyph on the cap height of the first line rather than
@@ -111,6 +122,7 @@ export function SettingsRail({
             <span className="min-w-0 flex-1 break-words">{t(labelKey)}</span>
           </span>
         </button>
+        </Fragment>
       ))}
     </motion.nav>
   );
@@ -132,11 +144,14 @@ export function RailSection({
   title,
   hint,
   fallback,
+  aside,
   children,
 }: {
   section: SettingsSectionId;
   title: string;
   hint: ReactNode;
+  /** Beside the title — the workspace a workspace-only section belongs to. */
+  aside?: ReactNode;
   /** The pane shown when nothing asked for another. */
   fallback: string;
   /** The pane for a tab id. */
@@ -155,10 +170,11 @@ export function RailSection({
   return (
     <section className="flex h-full min-h-0 flex-col">
       <div className="shrink-0">
-        <SettingsHeader title={title} hint={hint} />
+        <SettingsHeader title={title} hint={hint} aside={aside} />
       </div>
       <div className="flex min-h-0 flex-1 gap-4">
-        <SettingsRail tabs={tabs} active={tab} onSelect={setTab} layoutId={`cf-${section}-settings-pill`} />
+        {/* One pane is a page, not a choice: no rail to pick it from. */}
+        {tabs.length > 1 && <SettingsRail tabs={tabs} active={tab} onSelect={setTab} layoutId={`cf-${section}-settings-pill`} />}
         <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
           <Panel>
             {active?.hintKey && (

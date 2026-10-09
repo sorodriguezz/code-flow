@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { addReadAloudAction } from "../../lib/speech/monacoReadAloud";
 import { createPortal } from "react-dom";
 import Editor, { DiffEditor, type Monaco, type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
@@ -1150,6 +1151,7 @@ export function EditorPane({
   /** Inlay hints on or off — see `editorDisplayStore`. The code only: a diff is read for what
    *  changed, and hints there would be text that is in neither side. */
   const inlayHints = monacoInlayHints(useEditorDisplayStore((s) => s.inlayHints));
+  const fontSize = useEditorDisplayStore((s) => s.fontSize);
 
   const activeAbsolutePath = useMemo(
     () => (activePath ? normalizePath(`${project.local_path}/${activePath}`) : null),
@@ -2405,6 +2407,8 @@ export function EditorPane({
       keybindings: [monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyMod.Shift | monacoInstance.KeyCode.KeyC],
       run: () => captureRef.current(),
     });
+    // The selection said aloud, beside Copy — see `addReadAloudAction`.
+    addReadAloudAction(editorInstance, tRef.current("speech.readAloud"));
     // The clipboard's JSON written out as types for this file's language, beside Paste in the menu
     // since that is what it is. No keybinding here: ⌘⇧V is the registry's (`editor.pasteJsonAsCode`),
     // and the command palette triggers this same action — see `pasteJsonAsCode`.
@@ -2698,7 +2702,8 @@ export function EditorPane({
         onMount={handleMount}
         options={{
           minimap: { enabled: true },
-          fontSize: 13,
+          // Settings › Editor › Visualización.
+          fontSize,
           fontFamily: CODE_FONT_FAMILY,
           automaticLayout: true,
           // At the viewport, never at a column: where a line breaks is the pane's width, so it
@@ -2997,7 +3002,7 @@ export function EditorPane({
                   theme={monacoTheme}
                   options={{
                     readOnly: true,
-                    fontSize: 13,
+                    fontSize,
                     fontFamily: CODE_FONT_FAMILY,
                     // Both sides, so a changed line wraps the same way before and after.
                     wordWrap,

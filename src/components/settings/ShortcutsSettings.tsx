@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, RotateCcw, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import { useShortcutsStore, activeChords, bindingFor } from "../../state/shortcutsStore";
 import { useQuickAskHotkeyStore } from "../../state/quickAskHotkeyStore";
-import { lockChordKeycaps, usableLockChord, useSwitcherLockStore } from "../../state/switcherLockStore";
+import {
+  DEFAULT_LOCK_CHORD,
+  lockChordKeycaps,
+  sameLockChord,
+  usableLockChord,
+  useSwitcherLockStore,
+  type LockAxis,
+} from "../../state/switcherLockStore";
 import { SHORTCUT_COMMANDS, type ShortcutId } from "../../lib/shortcuts";
 import { chordKeycaps, eventToChord, isBindable } from "../../lib/keys";
 import { acceleratorFromKey, acceleratorKeycaps } from "../../lib/globalHotkey";
@@ -46,23 +54,40 @@ function useChordRecorder(active: boolean, onCapture: (chord: string | null) => 
   }, [active, onCapture, onCancel]);
 }
 
-/**
- * The workspace and repository switcher's chord: what is held while the arrows roll it (←/→
- * workspaces, ↑/↓ repositories), recorded by pressing it with any arrow — the arrows are fixed.
- * Its own row because it is not a registry command: it acts on release, and spells Control
- * literally on macOS (see `SwitcherLock`). Backspace switches it off; two modifiers at least.
- */
-function SwitcherLockRow() {
-  const t = useT();
-  const chord = useSwitcherLockStore((s) => s.chord);
-  const recording = useSwitcherLockStore((s) => s.recording);
-  const mac = isMac();
+/** What each switcher row is called, explains, and shows after its chord. */
+const LOCK_ROWS = {
+  workspace: { label: "lock.workspaces", hint: "lock.hintWorkspaces", arrows: "←→" },
+  repo: { label: "lock.repositories", hint: "lock.hintRepositories", arrows: "↑↓" },
+} as const satisfies Record<LockAxis, { label: TranslationKey; hint: TranslationKey; arrows: string }>;
 
+/**
+ * The workspace and repository switcher's chords, one row per drum (split 2026-10-09 — one row for
+ * both left a rebind guessing which it changed): what is held while ←/→ roll workspaces, and what
+ * while ↑/↓ roll repositories. Their own rows because they are not registry commands: they act on
+ * release, and spell Control literally on macOS (see `SwitcherLock`).
+ */
+function SwitcherLockRows() {
   useEffect(() => {
     void useSwitcherLockStore.getState().init();
     // Leaving the section mid-capture would otherwise keep the switcher standing down.
-    return () => useSwitcherLockStore.getState().setRecording(false);
+    return () => useSwitcherLockStore.getState().setRecording(null);
   }, []);
+  return (
+    <>
+      <SwitcherLockRow axis="workspace" />
+      <SwitcherLockRow axis="repo" />
+    </>
+  );
+}
+
+/** One drum's chord, recorded by pressing it with an arrow — the arrows are fixed. Backspace
+ *  switches it off; two modifiers at least. */
+function SwitcherLockRow({ axis }: { axis: LockAxis }) {
+  const t = useT();
+  const chord = useSwitcherLockStore((s) => s.chords[axis]);
+  const recording = useSwitcherLockStore((s) => s.recording === axis);
+  const mac = isMac();
+  const row = LOCK_ROWS[axis];
 
   useEffect(() => {
     if (!recording) return;
@@ -72,39 +97,39 @@ function SwitcherLockRow() {
       e.preventDefault();
       e.stopPropagation();
       if (e.key === "Escape") {
-        store.setRecording(false);
+        store.setRecording(null);
         return;
       }
       if (e.key === "Backspace" || e.key === "Delete") {
-        store.setRecording(false);
-        void store.setChord(null);
+        store.setRecording(null);
+        void store.setChord(axis, null);
         return;
       }
       if (!e.key.startsWith("Arrow")) return;
       const next = { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey };
       // One modifier alone stays listening: it belongs to the text under the cursor.
       if (!usableLockChord(next)) return;
-      store.setRecording(false);
-      void store.setChord(next);
+      store.setRecording(null);
+      void store.setChord(axis, next);
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [recording]);
+  }, [recording, axis]);
 
-  const isDefault = chord !== null && chord.ctrl && chord.shift && chord.alt && !chord.meta;
+  const isDefault = sameLockChord(chord, DEFAULT_LOCK_CHORD);
 
   return (
     <div className="flex min-h-[42px] items-center gap-3 border-b border-[var(--cf-border)] py-1.5">
       <div className="min-w-0 flex-1">
-        <Tooltip label={t("lock.settingLabel")} description={t("lock.settingHint")}>
-          <p className="break-words text-[13px] leading-snug text-[var(--cf-text)]">{t("lock.settingLabel")}</p>
+        <Tooltip label={t(row.label)} description={t(row.hint)}>
+          <p className="break-words text-[13px] leading-snug text-[var(--cf-text)]">{t(row.label)}</p>
         </Tooltip>
       </div>
       <button
         type="button"
-        onClick={() => useSwitcherLockStore.getState().setRecording(!recording)}
+        onClick={() => useSwitcherLockStore.getState().setRecording(recording ? null : axis)}
         aria-pressed={recording}
-        aria-label={t("lock.settingLabel")}
+        aria-label={t(row.label)}
         className={`flex h-7 min-w-[120px] items-center justify-center gap-1 rounded-md px-2 transition-colors duration-100 ${
           recording
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent)]"
@@ -118,7 +143,7 @@ function SwitcherLockRow() {
             {lockChordKeycaps(chord, mac).map((key) => (
               <Kbd key={key}>{key}</Kbd>
             ))}
-            <span className="pl-0.5 text-[11px] text-[var(--cf-text-muted)]">+ ←→↑↓</span>
+            <span className="pl-0.5 text-[11px] text-[var(--cf-text-muted)]">+ {row.arrows}</span>
           </>
         ) : (
           <span className="text-[11px] italic text-[var(--cf-text-faint)]">{t("shortcuts.unbound")}</span>
@@ -127,7 +152,7 @@ function SwitcherLockRow() {
       <Tooltip label={t("shortcuts.clear")}>
         <button
           type="button"
-          onClick={() => void useSwitcherLockStore.getState().setChord(null)}
+          onClick={() => void useSwitcherLockStore.getState().setChord(axis, null)}
           disabled={!chord}
           aria-label={t("shortcuts.clear")}
           className={iconButtonClass({ size: "md" })}
@@ -138,7 +163,7 @@ function SwitcherLockRow() {
       <Tooltip label={t("shortcuts.resetOne")}>
         <button
           type="button"
-          onClick={() => void useSwitcherLockStore.getState().reset()}
+          onClick={() => void useSwitcherLockStore.getState().reset(axis)}
           disabled={isDefault}
           aria-label={t("shortcuts.resetOne")}
           className={iconButtonClass({ size: "md" })}
@@ -373,7 +398,7 @@ export function ShortcutsSettings() {
         <>
           {/* First in General: the one chord that works from any application, not only here. */}
           {tab === "general" && <QuickAskHotkeyRow />}
-          {tab === "general" && <SwitcherLockRow />}
+          {tab === "general" && <SwitcherLockRows />}
           {SHORTCUT_COMMANDS.filter((command) => command.group === tab).map((command) => rowFor(command.id))}
 
           <div className="mt-4 border-t border-[var(--cf-border)] pt-4">

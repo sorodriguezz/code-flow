@@ -2008,6 +2008,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_flow_tables_store(conn)?;
     add_custom_data_to_flow_runs(conn)?;
     add_flow_tests(conn)?;
+    add_meeting_tables(conn)?;
     Ok(())
 }
 
@@ -2126,6 +2127,90 @@ pub(crate) fn add_flow_tests(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS flow_tests_flow ON flow_tests (flow_id, sort_order);
         "#,
     )
+}
+
+/// «Reuniones» (`crate::meetings`, `db::meeting_queries`): meetings recorded into notes, their lines
+/// and speakers, a workspace's own AI recipes, the voices the user named — and the flag that makes a
+/// book local-only. Authored content: it travels with the Notes switch of a backup (the audio does
+/// not — it stays on the machine it was recorded on).
+pub(crate) fn add_meeting_tables(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS meetings (
+            id               TEXT PRIMARY KEY,
+            workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            note_id          TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            kind             TEXT NOT NULL DEFAULT 'virtual',
+            mode             TEXT NOT NULL DEFAULT 'balanced',
+            transcriber      TEXT NOT NULL DEFAULT 'local',
+            language         TEXT NOT NULL DEFAULT '',
+            status           TEXT NOT NULL DEFAULT 'recording',
+            stage            TEXT NOT NULL DEFAULT '',
+            error            TEXT NOT NULL DEFAULT '',
+            started_at       TEXT NOT NULL,
+            ended_at         TEXT NOT NULL DEFAULT '',
+            duration_ms      INTEGER NOT NULL DEFAULT 0,
+            channels         TEXT NOT NULL DEFAULT '["mic"]',
+            audio_file       TEXT NOT NULL DEFAULT '',
+            audio_bytes      INTEGER NOT NULL DEFAULT 0,
+            audio_expires_at TEXT NOT NULL DEFAULT '',
+            speakers_hint    INTEGER NOT NULL DEFAULT 0,
+            live_complete    INTEGER NOT NULL DEFAULT 0,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_meetings_note ON meetings (note_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_meetings_workspace ON meetings (workspace_id);
+        CREATE TABLE IF NOT EXISTS meeting_speakers (
+            meeting_id  TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+            key         TEXT NOT NULL,
+            name        TEXT NOT NULL DEFAULT '',
+            color       INTEGER NOT NULL DEFAULT 0,
+            is_me       INTEGER NOT NULL DEFAULT 0,
+            voice_id    TEXT NOT NULL DEFAULT '',
+            embedding   BLOB,
+            talk_ms     INTEGER NOT NULL DEFAULT 0,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (meeting_id, key)
+        );
+        CREATE TABLE IF NOT EXISTS meeting_lines (
+            meeting_id  TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+            seq         INTEGER NOT NULL,
+            channel     TEXT NOT NULL,
+            speaker     TEXT NOT NULL,
+            start_ms    INTEGER NOT NULL,
+            end_ms      INTEGER NOT NULL,
+            text        TEXT NOT NULL,
+            pass        TEXT NOT NULL DEFAULT 'final',
+            edited      INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (meeting_id, seq)
+        );
+        CREATE INDEX IF NOT EXISTS idx_meeting_lines_time ON meeting_lines (meeting_id, start_ms);
+        CREATE TABLE IF NOT EXISTS meeting_recipes (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            prompt       TEXT NOT NULL,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS voice_profiles (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            is_me       INTEGER NOT NULL DEFAULT 0,
+            embedding   BLOB NOT NULL,
+            samples     INTEGER NOT NULL DEFAULT 1,
+            model       TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        "#,
+    )?;
+    if table_exists(conn, "note_books")? && !has_column(conn, "note_books", "local_only")? {
+        conn.execute_batch("ALTER TABLE note_books ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    Ok(())
 }
 
 /// The user's own flow templates, beside the ones the app ships (`lib/flows/templates.ts`): a flow

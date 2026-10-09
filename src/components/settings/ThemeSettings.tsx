@@ -13,6 +13,7 @@ import type { ThemePreference } from "../../types/domain";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { PaneBlock, RailSection } from "./settingsNav";
+import { ThinkingDesignSettings } from "./ThinkingDesignSettings";
 
 const OPTIONS: { id: ThemePreference; labelKey: TranslationKey; icon: typeof Sun }[] = [
   { id: "light", labelKey: "settings.themeLight", icon: Sun },
@@ -362,6 +363,8 @@ export function ThemeSettings() {
               )}
             </>
           )}
+
+          {tab === "thinking" && <ThinkingDesignSettings />}
 
           {tab === "themes" && (
             <div className="space-y-5">

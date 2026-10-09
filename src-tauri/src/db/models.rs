@@ -1150,6 +1150,10 @@ pub struct NoteBookRow {
     /// deserialises; see `migrations::add_scope_to_scoped_tables`.
     #[serde(default = "scope_workspace")]
     pub scope: String,
+    /// Meetings filed in this book (or a book inside it) transcribe and run their AI on this
+    /// computer only — see `crate::meetings`. Read in `load_tree`; written by `meeting_queries`.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 /// A note **without its body** — every column of `notes` except `content`.

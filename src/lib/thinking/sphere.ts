@@ -30,6 +30,7 @@ const LIGHT: Record<RunPhase, number> = {
   run: 0,
   delegate: 0,
   write: 3,
+  speak: 3,
 };
 
 function mulberry32(seed: number) {

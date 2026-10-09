@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { speakAnswer } from "../lib/speech/speakAnswer";
 import {
   chatBranchConversation,
   chatCavemanLevels,
@@ -1554,6 +1555,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           status: "success",
           detail: title,
         });
+        // Read aloud when the user asked for answers to be (Settings › Voz y sonido).
+        speakAnswer(reply.text, workspaceId ?? null);
         // Last, once the turn is settled everywhere else: the conversation is free, so whatever
         // was written while this answer was being produced goes next. Not held back for the
         // typewriter — the text is already whole and on disk, the reveal is only the screen

@@ -19,6 +19,10 @@ import {
 const NATIVE_NOTIFICATIONS_KEY = "native_notifications_enabled";
 const NATIVE_ONLY_BACKGROUND_KEY = "native_notifications_only_background";
 const MUTED_SOURCES_KEY = "muted_notification_sources";
+/** Sources that show but do not sound (Notificaciones › Por origen › Sonido). */
+const SILENT_SOURCES_KEY = "silent_notification_sources";
+/** Sources the thinking mark reads aloud (› Voz) — none until chosen. */
+const SPOKEN_SOURCES_KEY = "spoken_notification_sources";
 const PIPELINE_POLL_KEY = "pipeline_poll_seconds";
 const KEY = "auto_fetch_interval_seconds";
 const SECRET_SCAN_KEY = "secret_scan_enabled";
@@ -96,6 +100,10 @@ interface PreferencesState {
    * settings row holds, and the set is a dozen short ids.
    */
   mutedNotificationSources: string[];
+  /** Sources that are recorded and shown but play no tone — the «Sonido» column of «Por origen». */
+  silentNotificationSources: string[];
+  /** Sources whose arrivals the thinking mark says aloud — the «Voz» column. Off for all by default. */
+  spokenNotificationSources: string[];
   /**
    * How often a live pipeline run is re-read, in seconds.
    *
@@ -180,6 +188,8 @@ interface PreferencesState {
   setNativeNotificationsEnabled: (enabled: boolean) => Promise<void>;
   setNativeNotificationsOnlyBackground: (enabled: boolean) => Promise<void>;
   setNotificationSourceMuted: (source: string, muted: boolean) => Promise<void>;
+  setNotificationSourceSilent: (source: string, silent: boolean) => Promise<void>;
+  setNotificationSourceSpoken: (source: string, spoken: boolean) => Promise<void>;
   setPipelinePollSeconds: (seconds: number) => Promise<void>;
   setBlameAnnotationEnabled: (enabled: boolean) => Promise<void>;
   setChatFileGenerationEnabled: (enabled: boolean) => Promise<void>;
@@ -218,6 +228,8 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   nativeNotificationsEnabled: false,
   nativeNotificationsOnlyBackground: true,
   mutedNotificationSources: [],
+  silentNotificationSources: [],
+  spokenNotificationSources: [],
   pipelinePollSeconds: 5,
   blameAnnotationEnabled: false,
   satelliteLimit: DEFAULT_SATELLITE_LIMIT,
@@ -240,6 +252,8 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         NATIVE_NOTIFICATIONS_KEY,
         NATIVE_ONLY_BACKGROUND_KEY,
         MUTED_SOURCES_KEY,
+        SILENT_SOURCES_KEY,
+        SPOKEN_SOURCES_KEY,
         PIPELINE_POLL_KEY,
         BLAME_ANNOTATION_KEY,
         WINDOW_LIMIT_KEY,
@@ -279,10 +293,9 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         ? true
         : stored[NATIVE_ONLY_BACKGROUND_KEY] === "true",
       pipelinePollSeconds: Number(stored[PIPELINE_POLL_KEY]) || 5,
-      mutedNotificationSources: (stored[MUTED_SOURCES_KEY] ?? "")
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter(Boolean),
+      mutedNotificationSources: sourceList(stored[MUTED_SOURCES_KEY]),
+      silentNotificationSources: sourceList(stored[SILENT_SOURCES_KEY]),
+      spokenNotificationSources: sourceList(stored[SPOKEN_SOURCES_KEY]),
       // Same one-liner, same reason: unset and explicit-false are both "don't blame anything".
       blameAnnotationEnabled: stored[BLAME_ANNOTATION_KEY] === "true",
       satelliteLimit: clampWindows(stored[WINDOW_LIMIT_KEY]),
@@ -364,6 +377,22 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     await setSetting(MUTED_SOURCES_KEY, next.join(","));
   },
 
+  setNotificationSourceSilent: async (source, silent) => {
+    const next = silent
+      ? Array.from(new Set([...get().silentNotificationSources, source]))
+      : get().silentNotificationSources.filter((entry) => entry !== source);
+    set({ silentNotificationSources: next });
+    await setSetting(SILENT_SOURCES_KEY, next.join(","));
+  },
+
+  setNotificationSourceSpoken: async (source, spoken) => {
+    const next = spoken
+      ? Array.from(new Set([...get().spokenNotificationSources, source]))
+      : get().spokenNotificationSources.filter((entry) => entry !== source);
+    set({ spokenNotificationSources: next });
+    await setSetting(SPOKEN_SOURCES_KEY, next.join(","));
+  },
+
   // Optimistic like the three above, and for the reason spelled out below `setLockedBranchRules`:
   // there is nothing for the backend to normalise about a boolean, so the value that comes back can
   // only ever be the one that went in — waiting for the write would put a SQLite round trip between
@@ -420,6 +449,8 @@ watchSettings(
     NATIVE_NOTIFICATIONS_KEY,
     NATIVE_ONLY_BACKGROUND_KEY,
     MUTED_SOURCES_KEY,
+    SILENT_SOURCES_KEY,
+    SPOKEN_SOURCES_KEY,
     PIPELINE_POLL_KEY,
     BLAME_ANNOTATION_KEY,
     WINDOW_LIMIT_KEY,
@@ -439,4 +470,12 @@ watchSettings(
  * by the time this runs, and an error toast about a refresh would report the save as failed. */
 async function refreshOpenRepoBranches(): Promise<void> {
   await useRepoStore.getState().refreshBranches().catch(() => {});
+}
+
+/** A comma-separated settings row as source ids. */
+function sourceList(stored: string | undefined): string[] {
+  return (stored ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }

@@ -419,6 +419,8 @@ interface NotesState {
   setBookColor: (id: string, color: string) => Promise<void>;
   /** Puts a book — subtree and notes included — on every workspace's shelf, or takes it back off. */
   setBookScope: (id: string, global: boolean) => Promise<void>;
+  /** «Reuniones»: meetings in this book (and books inside it) stay on this computer. */
+  setBookLocalOnly: (id: string, localOnly: boolean) => Promise<void>;
   /** Moves a book and everything under it to another workspace. Not optimistic: the book leaves
    *  the visible set, so there is nothing to patch — the tree is reloaded instead. */
   moveBookToWorkspace: (id: string, workspaceId: string) => Promise<void>;
@@ -1468,6 +1470,18 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     set({ books: previous.map((f) => (f.id === id ? { ...f, color } : f)) });
     try {
       await notesSetBookColor(id, color);
+    } catch (error) {
+      set({ books: previous });
+      pushErrorToast(String(error));
+    }
+  },
+
+  setBookLocalOnly: async (id, localOnly) => {
+    const previous = get().books;
+    set({ books: previous.map((book) => (book.id === id ? { ...book, local_only: localOnly } : book)) });
+    try {
+      const { meetingsSetBookLocalOnly } = await import("../lib/tauri/meetingsCommands");
+      await meetingsSetBookLocalOnly(id, localOnly);
     } catch (error) {
       set({ books: previous });
       pushErrorToast(String(error));

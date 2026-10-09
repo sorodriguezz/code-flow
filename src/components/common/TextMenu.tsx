@@ -1,8 +1,10 @@
 import { useState, type ReactNode } from "react";
-import { ClipboardPaste, Copy, Scissors, TextSelect } from "lucide-react";
+import { ClipboardPaste, Copy, Scissors, TextSelect, Volume2 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { useSpeechStore } from "../../state/speechStore";
+import { speakNow } from "../../lib/speech/speakAnswer";
 
 type TextField = HTMLTextAreaElement | HTMLInputElement;
 
@@ -61,6 +63,9 @@ export function useTextMenu(extra?: (passage: string) => MenuItem[]): {
 } {
   const t = useT();
   const [open, setOpen] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  // «Leer la selección» (Settings › Voz y sonido › Lectura en voz alta): the thinking mark says it.
+  const readSelection = useSpeechStore((s) => s.readSelection);
+  const readAloud = (text: string): MenuItem => ({ label: t("speech.readAloud"), icon: Volume2, onClick: () => speakNow(text, "selection") });
 
   const onField = (event: React.MouseEvent<TextField>) => {
     event.preventDefault();
@@ -86,6 +91,7 @@ export function useTextMenu(extra?: (passage: string) => MenuItem[]): {
         });
       }
       if (selected) items.push({ label: t("textMenu.copy"), icon: Copy, onClick: () => copy(selected) });
+      if (selected.trim() && readSelection) items.push(readAloud(selected));
       if (editable && clip !== "") {
         items.push({
           label: t("textMenu.paste"),
@@ -123,7 +129,11 @@ export function useTextMenu(extra?: (passage: string) => MenuItem[]): {
     setOpen({
       x: event.clientX,
       y: event.clientY,
-      items: [{ label: t("textMenu.copy"), icon: Copy, onClick: () => copy(passage) }, ...(extra?.(passage.trim()) ?? [])],
+      items: [
+        { label: t("textMenu.copy"), icon: Copy, onClick: () => copy(passage) },
+        ...(readSelection ? [readAloud(passage)] : []),
+        ...(extra?.(passage.trim()) ?? []),
+      ],
     });
   };
 

@@ -555,6 +555,11 @@ fn rehome_global_rows(conn: &Connection, from: &str) -> rusqlite::Result<()> {
             params![from, into],
         )?;
     }
+    // A meeting carries its note's workspace: it moves with a note in a global book.
+    conn.execute(
+        "UPDATE meetings SET workspace_id = ?2 WHERE workspace_id = ?1 AND note_id IN (SELECT id FROM notes WHERE workspace_id = ?2)",
+        params![from, into],
+    )?;
     // `OR IGNORE` because `idx_db_groups_name` is UNIQUE on (workspace_id, name): a global group
     // whose name is already taken in the destination cannot be re-homed. Letting the cascade take
     // that one row is right — its connections have already moved, and they render their own group

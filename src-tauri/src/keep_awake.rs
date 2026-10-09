@@ -82,7 +82,7 @@ static HOLD: Mutex<Option<platform::Hold>> = Mutex::new(None);
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Reason {
-    /// `ai`, `flowRuns`, `flowsArmed`, `services`.
+    /// `ai`, `flowRuns`, `flowsArmed`, `services`, `meetings`.
     pub kind: &'static str,
     pub count: usize,
 }
@@ -151,11 +151,13 @@ fn at_work(app: &AppHandle) -> Vec<Reason> {
         .try_state::<std::sync::Arc<crate::services::supervisor::Supervisor>>()
         .map(|supervisor| supervisor.snapshot().iter().filter(|service| service.alive).count())
         .unwrap_or(0);
-    reasons_from(ai, flow_runs, flows_armed, services)
+    // A meeting being recorded or finished: a sleeping laptop would stop both.
+    let meetings = crate::commands::meetings_cmd::busy_count();
+    reasons_from(ai, flow_runs, flows_armed, services, meetings)
 }
 
-fn reasons_from(ai: usize, flow_runs: usize, flows_armed: usize, services: usize) -> Vec<Reason> {
-    [("ai", ai), ("flowRuns", flow_runs), ("flowsArmed", flows_armed), ("services", services)]
+fn reasons_from(ai: usize, flow_runs: usize, flows_armed: usize, services: usize, meetings: usize) -> Vec<Reason> {
+    [("ai", ai), ("flowRuns", flow_runs), ("flowsArmed", flows_armed), ("services", services), ("meetings", meetings)]
         .into_iter()
         .filter(|(_, count)| *count > 0)
         .map(|(kind, count)| Reason { kind, count })
@@ -315,9 +317,9 @@ mod tests {
 
     #[test]
     fn only_what_is_at_work_is_a_reason() {
-        assert!(reasons_from(0, 0, 0, 0).is_empty());
+        assert!(reasons_from(0, 0, 0, 0, 0).is_empty());
         assert_eq!(
-            reasons_from(2, 0, 3, 0),
+            reasons_from(2, 0, 3, 0, 0),
             vec![Reason { kind: "ai", count: 2 }, Reason { kind: "flowsArmed", count: 3 }]
         );
     }

@@ -6,12 +6,12 @@ import { openable } from "../../lib/shortcuts";
 import { shortcutBlockedByDialog } from "../../lib/useFocusTrap";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import { useDataDirsStore } from "../../state/dataDirsStore";
-import { chordHeld, chordMatches, useSwitcherLockStore } from "../../state/switcherLockStore";
+import { chordHeld, LOCK_ARROWS, lockAxisFor, useSwitcherLockStore, type LockAxis } from "../../state/switcherLockStore";
 import { useT } from "../../state/languageStore";
 import { useTourStore } from "../../state/tourStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 
-type LockKind = "workspace" | "repo";
+type LockKind = LockAxis;
 
 interface LockItem {
   id: string;
@@ -48,29 +48,19 @@ function rowOpacity(offset: number, count: number): number {
   return Math.max(0, Math.min(1 - (Math.abs(offset) * STEP) / 80, reach - Math.abs(offset)));
 }
 
-/** The arrows that roll each lock, as [back, forward]. */
-const AXIS: Record<LockKind, [string, string]> = {
-  workspace: ["ArrowLeft", "ArrowRight"],
-  repo: ["ArrowUp", "ArrowDown"],
-};
-
 /**
- * Which lock a keystroke opens: the chord recorded in Settings (`switcherLockStore`; Ctrl+Shift+Alt
- * by default, ⌃⇧⌥ on macOS — Control literally there, which is why this is not a registry
- * shortcut: `Mod` is ⌘) with ←/→ for workspaces and ↑/↓ for repositories. With any other modifier
- * as well, the chord is somebody else's. Read at the keystroke, so a new chord applies at once.
+ * Which lock a keystroke opens: each axis has its own chord, recorded in Settings
+ * (`switcherLockStore`; Ctrl+Shift+Alt for both by default, ⌃⇧⌥ on macOS — Control literally
+ * there, which is why this is not a registry shortcut: `Mod` is ⌘) — ←/→ with the workspaces'
+ * chord, ↑/↓ with the repositories'. With any other modifier as well, or only the other axis's
+ * chord, the keystroke is somebody else's. Read at the keystroke, so a new chord applies at once.
  */
-function lockFor(e: KeyboardEvent, repos: boolean): LockKind | null {
-  const chord = useSwitcherLockStore.getState().chord;
-  if (!chord || !chordMatches(chord, e)) return null;
-  if (AXIS.workspace.includes(e.key)) return "workspace";
-  if (AXIS.repo.includes(e.key)) return repos ? "repo" : null;
-  return null;
-}
+const lockFor = (e: KeyboardEvent, repos: boolean): LockKind | null =>
+  lockAxisFor(useSwitcherLockStore.getState().chords, e, repos);
 
-/** Whether the chord is still held — letting go of any of its keys is the switch. */
-const held = (e: KeyboardEvent) => {
-  const chord = useSwitcherLockStore.getState().chord;
+/** Whether the open lock's own chord is still held — letting go of any of its keys is the switch. */
+const held = (kind: LockKind, e: KeyboardEvent) => {
+  const chord = useSwitcherLockStore.getState().chords[kind];
   return chord !== null && chordHeld(chord, e);
 };
 
@@ -103,8 +93,9 @@ function repoLock(): { items: LockItem[]; at: number } {
  * registry command does. Its one appearance is the row in Settings → Shortcuts where its chord is
  * changed (asked for 2026-10-05).
  *
- * - The chord (Ctrl+Shift+Alt by default — ⌃⇧⌥ on macOS) with ←/→: workspaces; with ↑/↓:
- *   repositories.
+ * - The workspaces' chord with ←/→, the repositories' chord with ↑/↓ — two rows in Settings, both
+ *   Ctrl+Shift+Alt (⌃⇧⌥ on macOS) until changed. Once a lock is up, it is its own chord that keeps
+ *   it up.
  * - The first arrow opens it on what is current; the next ones roll it, round and round like a
  *   lock's wheel — → and ↓ forward, ← and ↑ back, on the same upright drum. Letting go of the chord
  *   switches — never before. Escape, or the window losing focus, leaves everything as it was.
@@ -159,7 +150,7 @@ export function SwitcherLock({ repos = true }: { repos?: boolean }) {
 
   useEffect(() => {
     const blocked = () =>
-      useSwitcherLockStore.getState().recording ||
+      useSwitcherLockStore.getState().recording !== null ||
       useTourStore.getState().active ||
       (useDataDirsStore.getState().status !== null && !useDataDirsStore.getState().status?.ok) ||
       shortcutBlockedByDialog("workspace.switcher");
@@ -194,12 +185,12 @@ export function SwitcherLock({ repos = true }: { repos?: boolean }) {
           close();
           return;
         }
-        if (e.key.startsWith("Arrow") && held(e)) {
+        if (e.key.startsWith("Arrow") && held(current.kind, e)) {
           // Every arrow is the lock's while it is up: the other axis does nothing, rather than
           // reaching the editor or the field underneath.
           e.preventDefault();
           e.stopPropagation();
-          const [back, forward] = AXIS[current.kind];
+          const [back, forward] = LOCK_ARROWS[current.kind];
           if (e.key === back || e.key === forward) {
             target.current += e.key === back ? -1 : 1;
             animate();
@@ -226,7 +217,7 @@ export function SwitcherLock({ repos = true }: { repos?: boolean }) {
 
     const onKeyUp = (e: KeyboardEvent) => {
       const current = lockRef.current;
-      if (current && !held(e)) commit();
+      if (current && !held(current.kind, e)) commit();
     };
 
     // The window losing focus mid-roll — another app, a dialog of the system's — is not a choice.

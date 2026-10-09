@@ -1,30 +1,19 @@
 /**
- * The Pipelines tab's own settings, behind the same rail every other multi-pane section uses.
+ * The Pipelines tab's own settings — one pane of «Integraciones» since 2026-10-09, beside the
+ * accounts it needs (it was a section of its own, a rail of two panes around one knob).
  *
  * It is the only polling client in the app: every live run costs a request against somebody else's
  * rate limit every five seconds. That is a fine default for one person watching one build and a
- * poor one for a machine watching four repositories on a shared token, which is what the knob in
- * the first pane is for.
- *
- * # Why a rail for what used to be one knob
- *
- * Not to fill space. The second pane answers the question this section is actually opened with —
- * *why is there no Pipelines tab on this repository* — which until now was a footnote underneath
- * the knob, which is the last place anybody looks for it. Giving it a name in the rail is what
- * makes it findable, and it is what the settings search indexes.
- *
- * Same shape as `EditorSettings` and `ClaudeSettings`, down to the sliding pill: a nested nav
- * should read as furniture this window already uses, not as a second idea.
+ * poor one for a machine watching four repositories on a shared token, which is what the knob is
+ * for. Under it, the answer to the question this pane is opened with — *why is there no Pipelines
+ * tab on this repository*.
  */
 
-import { useLayoutEffect, useRef } from "react";
 import { DEFAULT_PIPELINE_POLL, PIPELINE_POLL_CHOICES } from "../../state/ciStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { useT } from "../../state/languageStore";
-import { Note, Panel, SettingsHeader } from "../api/settingsChrome";
+import { Note } from "../api/settingsChrome";
 import { Segmented } from "../common/Segmented";
-import { SettingsRail, useSectionTab } from "./settingsNav";
-import { tabsFor } from "../../lib/settingsCatalog";
 
 function PollingPane() {
   const t = useT();
@@ -67,42 +56,20 @@ function AvailabilityPane() {
   );
 }
 
-export function PipelinesSettings() {
+/**
+ * «Integraciones › Pipelines»: how often a live run is re-read, and where the tab appears — the two
+ * panes of what was a section of its own until 2026-10-09, now one pane beside the accounts it
+ * depends on.
+ */
+export function PipelinesPane() {
   const t = useT();
-  const tabs = tabsFor("pipelines");
-  const [tab, setTab] = useSectionTab("pipelines", tabs, "polling");
-  const active = tabs.find((entry) => entry.id === tab) ?? tabs[0];
-
-  // Land at the top before the frame is painted rather than as a visible correction after it: the
-  // two panes are different heights, so arriving at one while scrolled through the other would
-  // otherwise start it in the middle. Same fix and same reason as `EditorSettings`.
-  const paneRef = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    paneRef.current?.scrollTo({ top: 0 });
-  }, [tab]);
-
   return (
-    <section className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0">
-        <SettingsHeader title={t("tabbar.pipelines")} hint={t("pipelines.settingsHint")} />
+    <div>
+      <PollingPane />
+      <div className="mt-5 border-t border-[var(--cf-border)] pt-4">
+        <h3 className="mb-2.5 text-[13px] font-semibold text-[var(--cf-text)]">{t("pipelines.availabilityTab")}</h3>
+        <AvailabilityPane />
       </div>
-
-      <div className="flex min-h-0 flex-1 gap-4">
-        <SettingsRail tabs={tabs} active={tab} onSelect={setTab} layoutId="cf-pipelines-settings-pill" />
-
-        <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
-          <Panel>
-            {/* The rail names the pane, so no heading is repeated here — but the hint says what the
-                label cannot, so it stays. Same call as the editor and AI sections. */}
-            {active?.hintKey && (
-              <p className="mb-3 text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
-            )}
-
-            {tab === "polling" && <PollingPane />}
-            {tab === "availability" && <AvailabilityPane />}
-          </Panel>
-        </div>
-      </div>
-    </section>
+    </div>
   );
 }

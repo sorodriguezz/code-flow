@@ -355,7 +355,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "data.table" => table::execute(ctx).await,
         "data.database" => database::execute(ctx).await,
         "code.ssh" | "net.transfer" | "net.storage" => remote::execute(ctx).await,
-        "files.pr" | "files.pipeline" | "app.note" | "app.reviewer" | "app.open" | "app.terminal" | "app.clipboard" | "app.vault"
+        "files.pr" | "files.pipeline" | "app.note" | "app.reviewer" | "app.open" | "app.terminal" | "app.clipboard" | "app.say" | "app.vault"
         | "app.apiRequest" | "app.apiCollection" | "app.diagram" | "app.story" | "app.aiUsage" | "app.runData" => {
             integrations::execute(ctx).await
         }

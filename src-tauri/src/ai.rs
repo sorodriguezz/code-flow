@@ -1074,6 +1074,12 @@ pub mod task {
     /// than [`PIPELINE_ANALYZE`]'s: that one reads a repository with tools, this one a log alone, and
     /// counting them together would hide which of the two is spending.
     pub const LOGS_ANALYZE: &str = "logs-analyze";
+    /// A meeting's transcript turned into minutes, decisions, tasks… or a question about it
+    /// answered — see `crate::meetings::ai`.
+    pub const MEETINGS: &str = "meetings";
+    /// A long answer cut to what is worth hearing, before the thinking mark reads it aloud — see
+    /// [`super::spoken_summary`].
+    pub const SPOKEN_SUMMARY: &str = "spoken-summary";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -3705,6 +3711,26 @@ pub async fn write_note(
     Ok(strip_wrapper_fence(&run.text))
 }
 
+/// One answer about a meeting: `system` says how to write it, `ask` is the recipe or the question,
+/// and the transcript (with the meeting's facts above it) goes on stdin. Text only — the engine is
+/// asked to change nothing — so it routes anywhere a note does. See `crate::meetings::ai`.
+pub async fn meeting_answer(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    system: &str,
+    ask: &str,
+    transcript: &str,
+) -> Result<String, String> {
+    let mut inv = AiInvocation::new(ask, transcript);
+    inv.system_prompt = Some(system);
+    inv.model = model;
+    inv.task = task::MEETINGS;
+    inv.read_only = true;
+    let run = run(engine, binary, inv).await?;
+    Ok(strip_wrapper_fence(&run.text))
+}
+
 /// How much of the diagram's own document goes to the engine as context.
 ///
 /// Smaller than [`MAX_NOTE_CONTEXT_CHARS`] on purpose: mxGraph XML is mostly geometry and style,
@@ -4714,6 +4740,33 @@ pub async fn chat_title(engine: &dyn AiEngine, binary: &str, model: &str, questi
     inv.model = model;
     inv.task = task::CHAT_TITLE;
     Ok(run(engine, binary, inv).await?.text)
+}
+
+/// What «Resumen hablado» is told when `spoken_summary_template` is blank.
+pub const SPOKEN_SUMMARY_PROMPT: &str = "Recibes por la entrada estándar una respuesta escrita por un asistente de IA. \
+    Resúmela para decirla en voz alta: quien la oye no está mirando la pantalla.\n\n\
+    Reglas:\n\
+    - En el mismo idioma que la respuesta.\n\
+    - Dos o tres frases cortas, como se lo dirías a alguien en persona.\n\
+    - Di qué se hizo o qué se concluyó, y si falta algo o hay que decidir algo.\n\
+    - No leas código, rutas, comandos, URLs ni tablas: nómbralos por lo que son (\"el archivo de configuración\", \"dos pruebas\").\n\
+    - Sin Markdown, sin listas, sin emojis y sin presentarte.";
+
+/// Cuts an answer to what is worth hearing, for the reading aloud. Text only: the answer goes on
+/// stdin and nothing else is read. `template` is the user's version of [`SPOKEN_SUMMARY_PROMPT`],
+/// blank for the built-in.
+pub async fn spoken_summary(engine: &dyn AiEngine, binary: &str, model: &str, template: &str, text: &str) -> Result<String, String> {
+    let source: String = text.trim().chars().take(12_000).collect();
+    if source.is_empty() {
+        return Err("Nothing to summarise".into());
+    }
+    let instructions = if template.trim().is_empty() { SPOKEN_SUMMARY_PROMPT } else { template };
+    let mut inv = AiInvocation::new(instructions, &source);
+    inv.model = model;
+    inv.task = task::SPOKEN_SUMMARY;
+    inv.read_only = true;
+    let run = run(engine, binary, inv).await?;
+    Ok(strip_wrapper_fence(&run.text))
 }
 
 /// Drafts a pull-request description from the diff between two branches, with the active engine.

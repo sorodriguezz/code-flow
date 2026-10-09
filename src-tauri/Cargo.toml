@@ -483,7 +483,9 @@ windows-core = "0.61"
 # how much memory it has, whatever the vendor — the bundled engine is the Vulkan build, which runs on
 # AMD and Intel cards as well as NVIDIA's, and `nvidia-smi` sees only the last (see
 # `hybrid::hardware`). The same version webview2-com already pulls in; this adds the DXGI module.
-windows = { version = "0.61", features = ["Win32_Graphics_Dxgi"] }
+# Media Foundation's sink writer is «Reuniones»' AAC encoder (`meetings::encode`): the system's own,
+# so no codec is built here. COM is what Media Foundation runs on. Bindings only, like DXGI.
+windows = { version = "0.61", features = ["Win32_Graphics_Dxgi", "Win32_Media_MediaFoundation", "Win32_System_Com"] }
 # `GetProcessMemoryInfo` with `PROCESS_MEMORY_COUNTERS_EX2`, so the panel behind the status bar bills
 # this app for the same private working set Task Manager shows in its own rows — see
 # `sysload::footprint` for why the resident size sysinfo hands out cannot be reconciled with it. Also
@@ -516,6 +518,11 @@ windows-sys = { version = "0.60", features = [
 # it is built on the objc2 crates already in the tree (no bindgen), on Windows on the `windows` 0.62
 # the tree already compiles. Not on Linux: alsa-sys would need libasound, for a platform not shipped.
 cpal = "0.18"
+# «Reuniones»: audio files decoded in pure Rust — the AAC/MP4 a meeting is kept as, and whatever is
+# imported (MP3, WAV, FLAC, Ogg, ALAC). No codec library to build, on either platform.
+symphonia = { version = "0.5.5", default-features = false, features = ["aac", "isomp4", "mp3", "wav", "pcm", "flac", "ogg", "vorbis", "alac", "adpcm"] }
+# sherpa-onnx ships its libraries as `.tar.bz2`; 0.6's default backend is libbz2-rs, pure Rust.
+bzip2 = "0.6"
 # The native half of the see-through window (`glass.rs`): vibrancy on macOS, the DWM backdrops on
 # Windows. Tauri already depends on this exact version on both platforms, so naming it compiles
 # nothing new — it is here so the effect view can be *removed* again, which Tauri's own

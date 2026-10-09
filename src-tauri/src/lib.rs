@@ -35,6 +35,8 @@ mod datasource;
 mod db;
 mod debugger;
 mod dictation;
+mod meetings;
+mod speech;
 mod flows;
 mod fsops;
 mod codex;
@@ -454,6 +456,9 @@ pub fn run() {
         .manage(localai::LocalAiRegistry::default())
         // The dictation engine's one install at a time — see `commands::dictation_cmd`.
         .manage(commands::dictation_cmd::DictationRegistry::default())
+        // «Reuniones»: the one recording, the queue that finishes meetings — see `commands::meetings_cmd`.
+        .manage(commands::meetings_cmd::MeetingsState::default())
+        .manage(commands::speech_cmd::SpeechInstalls::default())
         .manage(tray::QuittingFlag::default())
         // Whether a quit the user asked for is waiting on the unsaved-work question. See `quit_guard`.
         .manage(quit_guard::QuitGuard::default())
@@ -505,6 +510,8 @@ pub fn run() {
             autostart::on_launch(app.handle(), std::env::args().any(|arg| arg == AUTOSTARTED_FLAG));
             // «Evitar que el equipo se suspenda», from the stored choice. See `keep_awake`.
             keep_awake::start(app.handle());
+            // «Reuniones»: meetings a crash or a quit cut short, the audio retention, the call detector.
+            commands::meetings_cmd::start(app.handle());
             // The main window, built here from its own entry in `tauri.conf.json` (which says
             // `"create": false`) rather than by Tauri before `setup` runs — the one difference being
             // `enable_clipboard_access`, which that config has no field for. Without it WebView2 (and
@@ -1716,6 +1723,53 @@ pub fn run() {
             commands::dictation_cmd::dictation_record_finish,
             commands::dictation_cmd::dictation_record_cancel,
             commands::dictation_cmd::dictation_cancel,
+            commands::meetings_cmd::meetings_status,
+            commands::meetings_cmd::meetings_install,
+            commands::speech_cmd::speech_status,
+            commands::speech_cmd::speech_say,
+            commands::speech_cmd::speech_stop,
+            commands::speech_cmd::audio_outputs,
+            commands::speech_cmd::audio_play,
+            commands::speech_cmd::speech_set_key,
+            commands::speech_cmd::speech_install_voice,
+            commands::speech_cmd::speech_cancel_install,
+            commands::speech_cmd::speech_remove_voice,
+            commands::speech_cmd::speech_summarize,
+            commands::claude_cmd::default_spoken_summary_template,
+            commands::meetings_cmd::meetings_cancel_install,
+            commands::meetings_cmd::meetings_remove_voices,
+            commands::meetings_cmd::meetings_set_cloud_key,
+            commands::meetings_cmd::meetings_test_cloud,
+            commands::meetings_cmd::meetings_bench,
+            commands::meetings_cmd::meetings_system_audio_settings,
+            commands::meetings_cmd::meetings_start,
+            commands::meetings_cmd::meetings_pause,
+            commands::meetings_cmd::meetings_stop,
+            commands::meetings_cmd::meetings_discard,
+            commands::meetings_cmd::meetings_delete,
+            commands::meetings_cmd::meetings_cancel_job,
+            commands::meetings_cmd::meetings_reprocess,
+            commands::meetings_cmd::meetings_import,
+            commands::meetings_cmd::meetings_for_note,
+            commands::meetings_cmd::meetings_notes_with,
+            commands::meetings_cmd::meetings_detail,
+            commands::meetings_cmd::meetings_audio,
+            commands::meetings_cmd::meetings_peaks,
+            commands::meetings_cmd::meetings_export_audio,
+            commands::meetings_cmd::meetings_update_line,
+            commands::meetings_cmd::meetings_set_line_speaker,
+            commands::meetings_cmd::meetings_rename_speaker,
+            commands::meetings_cmd::meetings_merge_speakers,
+            commands::meetings_cmd::meetings_add_speaker,
+            commands::meetings_cmd::meetings_set_book_local_only,
+            commands::meetings_cmd::meetings_voices,
+            commands::meetings_cmd::meetings_save_voice,
+            commands::meetings_cmd::meetings_rename_voice,
+            commands::meetings_cmd::meetings_delete_voice,
+            commands::meetings_cmd::meetings_recipes,
+            commands::meetings_cmd::meetings_save_recipe,
+            commands::meetings_cmd::meetings_delete_recipe,
+            commands::meetings_cmd::meetings_ai,
             commands::localai_cmd::localai_delete_model,
             commands::localai_cmd::localai_stop_engine,
             commands::localai_cmd::localai_complete,

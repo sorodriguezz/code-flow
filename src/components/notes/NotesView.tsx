@@ -9,6 +9,7 @@ import { NoteGallery } from "./NoteGallery";
 import { NoteTrash } from "./NoteTrash";
 import { CARD } from "./notesChrome";
 import { ensureNotesStoreLoaded, useNotesStore } from "../../state/notesStore";
+import { ensureMeetingEvents, useMeetingsStore } from "../../state/meetingsStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
 
@@ -29,6 +30,11 @@ import { useT } from "../../state/languageStore";
  */
 export function NotesView() {
   const workspaceId = useNotesStore((s) => s.workspaceId);
+  // Which notes have a meeting (the tree's microphones), for the workspace on screen.
+  useEffect(() => {
+    ensureMeetingEvents();
+    void useMeetingsStore.getState().loadNotesWith(workspaceId);
+  }, [workspaceId]);
   const loading = useNotesStore((s) => s.loading);
   const activeId = useNotesStore((s) => s.activeId);
   const trashOpen = useNotesStore((s) => s.trashOpen);

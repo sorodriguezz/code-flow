@@ -1,5 +1,5 @@
 //! CodeFlow's own features as nodes: pull requests, pipelines, notes, the Reviewer, opening things,
-//! a visible terminal, the clipboard and the Llavero.
+//! a visible terminal, the clipboard, the reading voice and the Llavero.
 //!
 //! Each one is the app's own operation (`flows::app_ops`) — a pull request is created by the same
 //! command the PR form calls — so the node decides only what to ask and how to read the answer.
@@ -21,6 +21,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "app.reviewer" => reviewer(ctx).await,
         "app.open" | "app.terminal" => window(ctx).await,
         "app.clipboard" => clipboard(ctx).await,
+        "app.say" => say(ctx).await,
         "app.vault" => vault(ctx).await,
         "app.apiRequest" => api_request(ctx).await,
         "app.apiCollection" => api_collection(ctx).await,
@@ -553,6 +554,39 @@ async fn clipboard(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         .map_err(NodeError::Failed)?;
     ctx.log(LogStream::Info, &format!("Copied {length} characters"));
     Ok(vec![ctx.passthrough()])
+}
+
+// ------------------------------------------------------------------------------------------- voice
+
+/// «Decir en voz alta»: each item's text said by the app's reading voice (Settings › Voz y sonido)
+/// on the user's speaker, one after another — in the language it is written in, or the one the node
+/// fixes. It keeps quiet over a meeting being recorded or a dictation, as the voice does; what it
+/// did lands in the item's `target` (`said`, `skipped`, `language`, `durationMs`).
+async fn say(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let resolved = ctx.resolve_each().await?;
+    let target = match ctx.param_str("target") {
+        written if written.trim().is_empty() => "speech".to_string(),
+        written => written.trim().to_string(),
+    };
+    let language = ctx.param_str("sayLanguage");
+    let wait = !matches!(ctx.params.get("sayWait"), Some(Value::Bool(false)));
+    let mut out = Vec::with_capacity(resolved.len());
+    for (index, params) in resolved.iter().enumerate() {
+        let said = text(params, "sayText");
+        if said.trim().is_empty() {
+            return Err(NodeError::failed("There is no text to say"));
+        }
+        let answer = call(ctx, "speech.say", json!({"text": said, "language": language, "wait": wait})).await?;
+        match answer.get("skipped").and_then(Value::as_str) {
+            Some("meeting") => ctx.log(LogStream::Info, "Kept quiet: a meeting is being recorded"),
+            Some(_) => ctx.log(LogStream::Info, "Kept quiet: a dictation is under way"),
+            None => {}
+        }
+        let mut json = base(ctx, index);
+        set_path(&mut json, &target, answer);
+        out.push(wrap(ctx, index, json));
+    }
+    Ok(vec![out])
 }
 
 // ------------------------------------------------------------------------------------------- vault

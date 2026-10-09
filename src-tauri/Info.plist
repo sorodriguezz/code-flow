@@ -32,20 +32,30 @@
   Windows has no equivalent, which is why a host that works from the Windows build can be
   unreachable from this one on the same network.
 
+  NSAudioCaptureUsageDescription
+  ------------------------------
+  «Reuniones» records what the computer plays (the other side of a Teams or Meet call) through a
+  Core Audio process tap (macOS 14.6+). macOS asks for "System Audio Recording" the first time, and
+  shows this sentence; without the key the tap delivers silence.
+
   NSMicrophoneUsageDescription
   ----------------------------
-  «Dictar» records from the webview (`getUserMedia`). Without this key macOS does not ask: the
-  capture is refused outright, and a bundled app that touches the microphone with no stated reason
-  can be terminated by the system. Only asked the first time someone presses the microphone, which
-  appears only after dictation has been installed from Settings. Windows asks through WebView2's own
-  prompt the first time.
+  «Dictar» and «Reuniones» read the microphone natively (cpal, AVCaptureDevice). Without this key
+  macOS does not ask: the capture is refused outright, and a bundled app that touches the microphone
+  with no stated reason can be terminated by the system. The key is only the sentence — the signed
+  bundle must also claim `com.apple.security.device.audio-input` (Entitlements.plist), or the
+  hardened runtime refuses without asking and CodeFlow never appears in Privacidad › Micrófono. Only
+  asked the first time someone presses the microphone, which appears only after dictation has been
+  installed from Settings. Windows has no prompt of its own; WASAPI's access-denied is reported.
 -->
 <plist version="1.0">
   <dict>
     <key>NSPrefersDisplaySafeAreaLayoutGuide</key>
     <false/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>CodeFlow uses the microphone only while you dictate into an AI field. The audio is transcribed on this computer and is not kept.</string>
+    <string>CodeFlow uses the microphone while you dictate into an AI field, and while you record a meeting into a note. The audio is transcribed on this computer.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>CodeFlow records the computer's audio only while you record a meeting into a note, so the other participants are transcribed too.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>CodeFlow needs this to reach the machines on your network — SSH hosts, screens and file shares you connect to by local address.</string>
   </dict>

@@ -36,7 +36,7 @@ import { getSetting, setSetting } from "../../lib/tauri/commands";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { AI_PROVIDERS, isAgenticProvider } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
-import { AI_TASKS, AI_TASK_AREAS, type AiTaskDef } from "../../lib/aiTasks";
+import { AI_TASKS, AI_TASK_AREAS, type AiTaskArea, type AiTaskDef } from "../../lib/aiTasks";
 import {
   AI_PROMPTS,
   contractHolds,
@@ -89,7 +89,12 @@ function fold(text: string): string {
     .toLowerCase();
 }
 
-export function AiTasksSettings() {
+/**
+ * `area`: one pane of «Tareas y prompts» per area of the app — only that area's rows, until a search
+ * or the «Solo editados» filter asks for every area at once. Without it, every area (the old single
+ * list).
+ */
+export function AiTasksSettings({ area }: { area?: AiTaskArea } = {}) {
   const t = useT();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
 
@@ -126,7 +131,10 @@ export function AiTasksSettings() {
   const [openTask, setOpenTask] = useState<string | null>(null);
   const [openPrompt, setOpenPrompt] = useState<string | null>(null);
 
-  const effectiveProvider = (task: string) => taskProviders[task]?.trim() || defaultProvider;
+  // The meetings row, unset, inherits the notes row rather than the global default — see
+  // `load_ai_config_in`, which runs it there.
+  const inheritedProvider = (task: string) => (task === "meetings" ? taskProviders.notes?.trim() || defaultProvider : defaultProvider);
+  const effectiveProvider = (task: string) => taskProviders[task]?.trim() || inheritedProvider(task);
 
   // The providers pane may never have mounted, and without its probe every provider reads as fine.
   useEffect(() => {
@@ -273,6 +281,8 @@ export function AiTasksSettings() {
   }, [query, onlyCustom, prompts, t]);
 
   const customCount = useMemo(() => AI_PROMPTS.filter(isCustom).length, [prompts]);
+  /** One area's rows: an area was asked for and nothing is searching across them. */
+  const scoped = !!area && !query.trim() && !onlyCustom;
 
   if (!routingLoaded || !prompts) {
     return (
@@ -288,7 +298,7 @@ export function AiTasksSettings() {
   return (
     <div>
       {/* ---------- what only the free chat may do ---------- */}
-      <FreeChatOptions query={query} t={t} />
+      <FreeChatOptions query={query} t={t} area={area} scoped={scoped} />
 
       {/* ---------- the toolbar ---------- */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -338,12 +348,13 @@ export function AiTasksSettings() {
           {onlyCustom && !query ? t("settings.tasksNoCustom") : t("settings.tasksNoMatch", { query })}
         </p>
       ) : (
-        AI_TASK_AREAS.map((area) => {
-          const rows = visible.filter((entry) => entry.task.area === area.id);
+        AI_TASK_AREAS.filter((group) => !scoped || group.id === area).map((group) => {
+          const rows = visible.filter((entry) => entry.task.area === group.id);
           if (rows.length === 0) return null;
           return (
-            <section key={area.id} className="mb-4 last:mb-0">
-              <h4 className={`mb-1.5 ${SECTION_LABEL}`}>{t(area.labelKey)}</h4>
+            <section key={group.id} className="mb-4 last:mb-0">
+              {/* The pane is the area when it shows one: no heading repeating the rail. */}
+              {!scoped && <h4 className={`mb-1.5 ${SECTION_LABEL}`}>{t(group.labelKey)}</h4>}
               <div className="space-y-1.5">
                 {rows.map(({ task, prompts: taskPrompts, matched }) => (
                   <TaskRow
@@ -363,7 +374,7 @@ export function AiTasksSettings() {
                     savedFlash={savedFlash}
                     workspaceId={workspaceId}
                     // routing
-                    defaultProvider={defaultProvider}
+                    defaultProvider={inheritedProvider(task.key)}
                     selectedProvider={taskProviders[task.key]?.trim() ?? ""}
                     taskModels={taskModels}
                     statuses={statuses}
@@ -405,7 +416,7 @@ export function AiTasksSettings() {
  * Closed, the row says which switches are on. A search that names one of them opens it, the way a
  * search that matches a prompt opens that task.
  */
-function FreeChatOptions({ query, t }: { query: string; t: Translate }) {
+function FreeChatOptions({ query, t, area, scoped }: { query: string; t: Translate; area?: AiTaskArea; scoped: boolean }) {
   const fileGeneration = usePreferencesStore((s) => s.chatFileGenerationEnabled);
   const setFileGeneration = usePreferencesStore((s) => s.setChatFileGenerationEnabled);
   const autoCompact = usePreferencesStore((s) => s.chatAutoCompactEnabled);
@@ -432,7 +443,10 @@ function FreeChatOptions({ query, t }: { query: string; t: Translate }) {
   ];
   const needle = fold(query.trim());
   const matched = needle !== "" && options.some((option) => fold(`${option.label} ${option.hint}`).includes(needle));
-  const open = expanded || matched;
+  // In the per-area panes: always open on the Chat pane, elsewhere only when a search names it.
+  const home = scoped && area === "chat";
+  if (area && !home && !matched) return null;
+  const open = expanded || matched || home;
   const on = options.filter((option) => option.on);
 
   return (

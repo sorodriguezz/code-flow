@@ -96,7 +96,8 @@ function pairs(text: string, separator: "=" | ":"): Record<string, string> {
  * A server that arrived without being written here — a restored backup — waits for "Approve" before
  * any engine starts it.
  */
-export function McpSettings() {
+/** `bare`: inside «Herramientas de IA», whose rail names the pane — the hint stays, the heading goes. */
+export function McpSettings({ bare = false }: { bare?: boolean } = {}) {
   const t = useT();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const [servers, setServers] = useState<McpServer[]>([]);
@@ -122,7 +123,11 @@ export function McpSettings() {
   if (!workspaceId) {
     return (
       <section>
-        <SettingsHeader title={t("settings.mcpTitle")} hint={t("settings.skillsSelectWorkspace")} />
+        {bare ? (
+          <p className="mb-3 max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">{t("settings.skillsSelectWorkspace")}</p>
+        ) : (
+          <SettingsHeader title={t("settings.mcpTitle")} hint={t("settings.skillsSelectWorkspace")} />
+        )}
       </section>
     );
   }
@@ -226,7 +231,11 @@ export function McpSettings() {
 
   return (
     <section>
-      <SettingsHeader title={t("settings.mcpTitle")} hint={t("settings.mcpHint")} />
+      {bare ? (
+        <p className="mb-3 max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">{t("settings.mcpHint")}</p>
+      ) : (
+        <SettingsHeader title={t("settings.mcpTitle")} hint={t("settings.mcpHint")} />
+      )}
 
       <div className="mb-3 flex flex-wrap gap-1.5">
         <button type="button" onClick={() => setDraft({ ...EMPTY })} className={buttonClass({ variant: "primary", size: "sm" })}>

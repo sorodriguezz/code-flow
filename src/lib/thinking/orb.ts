@@ -2,6 +2,7 @@ import { ended, type ThinkingActivity } from "./activity";
 import { clamp01, easeIn, easeOut, easeOutBack, endColor, finishClock, rgba, TAU } from "./finish";
 import { mix, palette, rgb, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { voiceLevel } from "./voice";
 
 /**
  * "Orbe" — the voice-powered orb (21st.dev, @isaiahbjork), the glowing ring whose edge boils with
@@ -220,6 +221,9 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
       case "write":
         // Speech-like: syllables over a slower phrase.
         return 0.25 + 0.75 * Math.abs(Math.sin(time * 9) * Math.sin(time * 2.7));
+      case "speak":
+        // The voice's own loudness (a speech-like shape while it is being prepared).
+        return 0.15 + 0.85 * voiceLevel();
       case "think":
       case "plan":
         return 0.45 + 0.2 * Math.sin(time * 1.3);

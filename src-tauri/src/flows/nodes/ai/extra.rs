@@ -689,7 +689,7 @@ pub(super) async fn speech(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let started = Instant::now();
         let default_ext = match engine.as_str() {
             "systemVoice" if cfg!(target_os = "macos") => "aiff",
-            "systemVoice" => "wav",
+            "systemVoice" | "localVoice" => "wav",
             _ => "mp3",
         };
         let path = target_path(ctx, &asked, "voz", default_ext, 0, 1);
@@ -724,6 +724,7 @@ pub(super) async fn speech(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 }
                 write_file(&path, &bytes)?;
             }
+            "localVoice" => local_voice(ctx, &said, &voice, &path).await?,
             _ => system_voice(ctx, &said, &voice, &path).await?,
         }
         if speak_now {
@@ -743,6 +744,37 @@ pub(super) async fn speech(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         out.push(output_item(ctx, index, Value::Object(json)));
     }
     Ok(vec![out])
+}
+
+/// A natural voice downloaded in Settings › Voz y sonido (Piper, run on this computer): the one named
+/// by its id, else the first downloaded one in the text's language — the reading aloud's own rule.
+/// Saves 16-bit WAV.
+async fn local_voice(ctx: &NodeCtx, said: &str, voice: &str, path: &Path) -> Result<(), NodeError> {
+    use crate::speech::{self, piper};
+    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
+        return Err(NodeError::failed("A downloaded voice saves .wav files — change the file's extension"));
+    }
+    let id = match voice.trim() {
+        "" => {
+            let lang = speech::language_of(said).unwrap_or_else(|| speech::language(&ctx.run.locale));
+            piper::VOICES.iter().find(|v| speech::language(v.lang) == lang && piper::installed(v.id)).map(|v| v.id).ok_or_else(|| {
+                let name = if lang == "es" { "Spanish" } else { "English" };
+                NodeError::failed(format!("No downloaded voice reads {name} — download one in Settings › Voice & sound › Models"))
+            })?
+        }
+        id => piper::spec(id)
+            .filter(|v| piper::installed(v.id))
+            .map(|v| v.id)
+            .ok_or_else(|| NodeError::failed(format!("The voice «{id}» is not downloaded — Settings › Voice & sound › Models")))?,
+    };
+    let words = said.to_string();
+    let (samples, rate) = tokio::task::spawn_blocking(move || piper::synthesize(id, &words, 1.0))
+        .await
+        .map_err(|e| NodeError::failed(e.to_string()))?
+        .map_err(NodeError::Failed)?;
+    ctx.log(LogStream::Info, &format!("{id}: {:.1} s of speech", samples.len() as f64 / f64::from(rate.max(1))));
+    let pcm: Vec<u8> = samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
+    write_file(path, &wav_from_pcm(&pcm, rate)).map(|_| ())
 }
 
 async fn audio_bytes(ctx: &NodeCtx, what: &str, request: reqwest::RequestBuilder) -> Result<Vec<u8>, NodeError> {

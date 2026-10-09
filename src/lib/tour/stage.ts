@@ -88,6 +88,9 @@ export interface TourStage {
   terminal?: boolean;
   /** Settings open on a section, or `null` for closed. Default `null`. */
   settings?: SettingsSectionId | null;
+  /** The pane of `settings` the step lands on, when not the section's first (Voz y sonido's
+   *  reading aloud). Handed over as the settings search hands over a hit — consumed once. */
+  settingsTab?: string;
   /** Which sub-tab of the API client's settings section, for the step about collaboration —
    * that screen is two levels deep and `settings: "api"` alone lands on the wrong one. */
   apiSettingsTab?: ApiSettingsTab;
@@ -210,6 +213,7 @@ export function applyStage(stage: TourStage | undefined): void {
     // Left where it was when the dialog is closed: switching the section under a hidden dialog
     // would make the *next* manual visit to settings land somewhere the user never chose.
     settingsSection: settings ?? current.settingsSection,
+    settingsTab: settings ? (stage?.settingsTab ?? null) : null,
     apiSettingsTab: stage?.apiSettingsTab ?? current.apiSettingsTab,
   });
   // The view only when the step opens the dock: a closed dock's panel is nobody's business, and

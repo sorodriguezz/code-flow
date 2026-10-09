@@ -4,6 +4,8 @@ import { RemoteActions } from "../git/RemoteActions";
 import { AgentActivity } from "./AgentActivity";
 import { ServicesActivity } from "./ServicesActivity";
 import { FlowsActivity } from "./FlowsActivity";
+import { MeetingActivity } from "./MeetingActivity";
+import { SpeechActivity } from "./SpeechActivity";
 import { CompletionActivity } from "./CompletionActivity";
 import { BatteryMeter } from "./BatteryMeter";
 import { SystemMeter } from "./SystemMeter";
@@ -76,6 +78,8 @@ export function StatusBar() {
           <AgentActivity />
           <ServicesActivity />
           <FlowsActivity />
+          <MeetingActivity />
+          <SpeechActivity />
           <CompletionActivity />
           <SystemMeter />
           <BatteryMeter />
@@ -164,6 +168,8 @@ export function StatusBar() {
         <AgentActivity />
         <ServicesActivity />
         <FlowsActivity />
+        <MeetingActivity />
+        <SpeechActivity />
         <CompletionActivity />
         <SystemMeter />
         <BatteryMeter />

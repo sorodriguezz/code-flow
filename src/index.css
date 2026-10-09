@@ -1122,6 +1122,16 @@ textarea,
   --cf-orb-end: var(--cf-danger);
   animation: cf-orb-shudder 0.5s ease-out;
 }
+/* «Hablando»: reading aloud. Every design breathes with the voice — `--cf-orb-voice` is the
+   loudness right now, 0–1, written each frame by `ThinkingOrb` — on top of whatever its writing
+   look is. A still mark under reduced motion: the variable is written, the scale is not. */
+@media (prefers-reduced-motion: no-preference) {
+  .cf-orb--speaking {
+    transform: scale(calc(0.9 + var(--cf-orb-voice, 0) * 0.2));
+    filter: brightness(calc(1 + var(--cf-orb-voice, 0) * 0.25));
+    transition: transform 70ms linear, filter 70ms linear;
+  }
+}
 
 /* Halo — the AI loader (21st.dev, @beratberkayg). A disc lit from inside: three inset shadows in
    the assistant's hues, offset downwards, so turning the disc walks the light round its rim. The

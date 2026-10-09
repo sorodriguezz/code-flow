@@ -81,7 +81,8 @@ async function loadRouting(defaultProvider: string, prefetched?: Record<string, 
   for (const { key } of AI_TASKS) {
     const override = routed[taskProviderKey(key)]?.trim() ?? "";
     taskProviders[key] = override;
-    providerFor[key] = override || defaultProvider;
+    // The meetings row, unset, is the notes row — Rust's `load_ai_config_in` says the same.
+    providerFor[key] = override || (key === "meetings" ? providerFor.notes : "") || defaultProvider;
   }
 
   // Wave two. Deduped through a Set because tasks sharing a provider share its base model key —
@@ -106,7 +107,9 @@ async function loadRouting(defaultProvider: string, prefetched?: Record<string, 
       key === "commit" || key === "chat_title"
         ? AI_PROVIDERS.find((p) => p.id === providerFor[key])?.commitMessageModel
         : undefined;
-    taskModels[key] = override?.trim() || dedicated || base?.trim() || "";
+    // The meetings row, with no model of its own, writes with the notes row's.
+    const inheritedModel = key === "meetings" ? taskModels.notes : undefined;
+    taskModels[key] = override?.trim() || inheritedModel || dedicated || base?.trim() || "";
   }
   // Handed back rather than read again by the caller: it rode along in the wave-two call, and
   // `?? null` restores exactly the `string | null` the old `read(modelKey(providerId))` returned.

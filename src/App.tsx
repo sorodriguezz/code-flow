@@ -22,6 +22,7 @@ import { UpdateAlert } from "./components/layout/UpdateAlert";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
 import { DictationOverlay } from "./components/dictation/DictationOverlay";
+import { MeetingSuggestion } from "./components/notes/meetings/MeetingSuggestion";
 import { TitleTooltips } from "./components/common/TitleTooltips";
 import { NotificationPopups } from "./components/layout/NotificationPopups";
 import { ConfirmModal } from "./components/common/ConfirmModal";
@@ -1294,6 +1295,8 @@ export default function App() {
       <ToastContainer />
       {/* «Dictar» for the AI fields without a microphone of their own; asleep until one has focus. */}
       <DictationOverlay />
+      {/* «¿Tomar notas de esta reunión?» when a call app takes the microphone — it only asks. */}
+      <MeetingSuggestion />
       {/* Watches the notification store rather than being pushed to, so every `notify` gets a card
           — including the ones a paired phone raises, which no call site here knows about. */}
       <NotificationPopups />

@@ -34,26 +34,45 @@ export function ActivePill({
   inset = "inset-0",
   radius = "rounded-md",
   variant = "soft",
+  mark = false,
 }: {
   layoutId: string;
   inset?: string;
   radius?: string;
   variant?: "soft" | "raised";
+  /**
+   * A short accent bar on the selected row's left edge, on top of the fill — the Settings window's
+   * nav and pane rails (the user's ask, 2026-10-09: "ponle una marca al menú y submenú
+   * seleccionados"). Its own `layoutId` (`<id>-mark`), so it slides with the pill without being
+   * stretched by the pill's scale while two rows of different heights trade places.
+   */
+  mark?: boolean;
 }) {
   const reduceMotion = useReducedMotion();
+  const transition = reduceMotion ? { duration: 0 } : SLIDE;
   return (
-    <motion.span
-      layoutId={layoutId}
-      aria-hidden
-      className={`absolute ${inset} ${radius} ${
-        variant === "raised"
-          ? // `--cf-control`, not the sheet's tone: a see-through window clears that inside a sheet,
-            // and the lifted pill has to keep reading as something lifted (see `index.css`).
-            "bg-[var(--cf-control)] shadow-[var(--cf-shadow-lift),0_0_0_1px_var(--cf-border)]"
-          : "bg-[var(--cf-accent-soft)]"
-      }`}
-      transition={reduceMotion ? { duration: 0 } : SLIDE}
-    />
+    <>
+      <motion.span
+        layoutId={layoutId}
+        aria-hidden
+        className={`absolute ${inset} ${radius} ${
+          variant === "raised"
+            ? // `--cf-control`, not the sheet's tone: a see-through window clears that inside a sheet,
+              // and the lifted pill has to keep reading as something lifted (see `index.css`).
+              "bg-[var(--cf-control)] shadow-[var(--cf-shadow-lift),0_0_0_1px_var(--cf-border)]"
+            : "bg-[var(--cf-accent-soft)]"
+        }`}
+        transition={transition}
+      />
+      {mark && (
+        <motion.span
+          layoutId={`${layoutId}-mark`}
+          aria-hidden
+          className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-[var(--cf-accent)]"
+          transition={transition}
+        />
+      )}
+    </>
   );
 }
 

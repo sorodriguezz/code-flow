@@ -11,6 +11,7 @@ import {
   BookPlus,
   LayoutTemplate,
   Palette,
+  Lock,
   Pencil,
   Pin,
   PinOff,
@@ -481,7 +482,7 @@ export function NoteExplorer() {
   /** `event` is needed for its coordinates: the colour entry replaces the menu in place, at the
    *  same point the first one opened at. */
   const bookMenu = useCallback(
-    (event: React.MouseEvent, bookId: string, name: string, scope: RowScope): MenuItem[] => {
+    (event: React.MouseEvent, bookId: string, name: string, scope: RowScope, localOnly: boolean): MenuItem[] => {
       return [
         {
           label: t("notes.newNoteHere"),
@@ -560,6 +561,13 @@ export function NoteExplorer() {
             void useNotesStore.getState().moveBookToWorkspace(bookId, workspaceId),
           separated: true,
         }),
+        // «Reuniones»: a meeting filed here — or in a book inside this one — transcribes and runs its
+        // AI on this computer only, whatever the settings say.
+        {
+          label: localOnly ? t("meetings.book.allowCloud") : t("meetings.book.localOnly"),
+          icon: Lock,
+          onClick: () => void useNotesStore.getState().setBookLocalOnly(bookId, !localOnly),
+        },
         {
           label: t("notes.deleteBook"),
           icon: Trash2,
@@ -622,7 +630,7 @@ export function NoteExplorer() {
         y: event.clientY,
         items:
           row.kind === "book"
-            ? bookMenu(event, row.book.id, row.book.name, row.book.scope)
+            ? bookMenu(event, row.book.id, row.book.name, row.book.scope, !!row.book.local_only)
             : noteMenu(row.note.id, row.note.pinned),
       });
     },

@@ -397,6 +397,9 @@ const REVIEWED = new Set([
   "Unlicense",
   "Zlib",
   "blessing",
+  // libbz2-rs-sys (sherpa-onnx's `.tar.bz2` downloads, «Reuniones»): bzip2's own BSD-style licence —
+  // keep the notice, mark altered sources, no endorsement. Read 2026-10-09.
+  "bzip2-1.0.6",
 ]);
 
 /** Copyleft that no permissive branch has disarmed. Stops the run; a person decides. */
@@ -1412,6 +1415,35 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, m
     w(`| ${model.label} | ${model.licence} | <https://huggingface.co/${model.repo}> |`);
   }
   w("");
+  // «Dictar», «Reuniones» and «Lectura en voz alta» install these from Settings, pinned by SHA-256
+  // in `dictation/mod.rs`, `meetings/mod.rs` and `speech/piper.rs`: nothing of them is in the
+  // installer either.
+  w(
+    "### Speech: dictation, meetings and reading aloud",
+    "",
+    "Downloaded only when dictation, meetings or a natural voice are installed from Settings, into your",
+    "own data directory, each pinned by its digest in [`src-tauri/src/dictation/mod.rs`](src-tauri/src/dictation/mod.rs),",
+    "[`src-tauri/src/meetings/mod.rs`](src-tauri/src/meetings/mod.rs) and [`src-tauri/src/speech/piper.rs`](src-tauri/src/speech/piper.rs).",
+    "",
+    "| Component | Licence (SPDX) | Published at |",
+    "|---|---|---|",
+    "| whisper.cpp (the engine library) | MIT | <https://github.com/ggml-org/whisper.cpp> |",
+    "| Whisper models (ggml conversions) | MIT | <https://huggingface.co/ggerganov/whisper.cpp> |",
+    "| Silero VAD (ggml conversion) | MIT | <https://huggingface.co/ggml-org/whisper-vad> |",
+    "| sherpa-onnx (the C library) | Apache-2.0 | <https://github.com/k2-fsa/sherpa-onnx> |",
+    "| ONNX Runtime (shipped inside sherpa-onnx's archive) | MIT | <https://github.com/microsoft/onnxruntime> |",
+    "| 3D-Speaker CAM++ speaker model | Apache-2.0 | <https://github.com/modelscope/3D-Speaker> |",
+    "| espeak-ng (built into sherpa-onnx's library, and its phoneme data) | GPL-3.0-or-later | <https://github.com/espeak-ng/espeak-ng> |",
+    "| Piper voice es_MX «claude» | Apache-2.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |",
+    "| Piper voice es_ES «davefx» | CC0-1.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |",
+    "| Piper voice es_AR «daniela» | CC-BY-SA-4.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |",
+    "| Piper voice en_US «ljspeech» (LJ Speech recordings) | LicenseRef-PublicDomain | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |",
+    "| Piper voice en_US «norman» (LibriVox recordings) | LicenseRef-PublicDomain | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |",
+    "| Piper voice en_US «sam» | Apache-2.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |",
+    "| Piper voice en_GB «cori» (LibriVox recordings) | LicenseRef-PublicDomain | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |",
+    "| Piper voice en_GB «northern_english_male» | CC-BY-SA-4.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |",
+    "",
+  );
 
   // -- Keeping it honest ---------------------------------------------------
 

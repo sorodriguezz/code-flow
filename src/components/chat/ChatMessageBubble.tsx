@@ -1,6 +1,8 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { Check, Copy, FileText, GitBranch, ImageIcon, Pencil, Puzzle, RefreshCw, Square, type LucideIcon } from "lucide-react";
+import { Check, Copy, FileText, GitBranch, ImageIcon, Pencil, Puzzle, RefreshCw, Square, Volume2, type LucideIcon } from "lucide-react";
+import { speakNow } from "../../lib/speech/speakAnswer";
+import { speakable } from "../../lib/speech/speakable";
 import { splitAttachmentNote } from "../../lib/attachmentNote";
 import { renderMarkdown } from "../../lib/markdown";
 import { parseClaudeError } from "../../lib/claudeError";
@@ -329,6 +331,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   const controls = (
     <div className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 hover:opacity-100">
       <BubbleAction icon={copied ? Check : Copy} label={t("chat.copyMessage")} onClick={() => copy(copyText)} done={copied} />
+      {!isUser && <BubbleAction icon={Volume2} label={t("speech.readAloud")} onClick={() => speakNow(speakable(copyText), "message")} />}
       {actions?.onRegenerate && (
         <BubbleAction
           icon={RefreshCw}
@@ -359,18 +362,30 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     </div>
   );
 
-  // The panel's turns have no controls row; a copy button rides the corner on hover instead.
+  // The panel's turns have no controls row; a copy button rides the corner on hover instead — and,
+  // on an answer, the one that reads it aloud beside it.
   const panelCopy = !reading && (
-    <button
-      type="button"
-      onClick={() => copy(copyText)}
-      title={t("chat.copyMessage")}
-      className={`absolute -top-2 flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] opacity-0 shadow-sm group-hover:opacity-100 ${
-        isUser ? "-left-2" : "-right-2"
-      }`}
-    >
-      {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} className="text-[var(--cf-text-muted)]" />}
-    </button>
+    <span className={`absolute -top-2 flex gap-1 opacity-0 group-hover:opacity-100 ${isUser ? "-left-2" : "-right-2"}`}>
+      {!isUser && (
+        <button
+          type="button"
+          onClick={() => speakNow(speakable(copyText), "message")}
+          title={t("speech.readAloud")}
+          aria-label={t("speech.readAloud")}
+          className="flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-sm"
+        >
+          <Volume2 size={11} className="text-[var(--cf-text-muted)]" />
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => copy(copyText)}
+        title={t("chat.copyMessage")}
+        className="flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-sm"
+      >
+        {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} className="text-[var(--cf-text-muted)]" />}
+      </button>
+    </span>
   );
 
   if (isUser) {

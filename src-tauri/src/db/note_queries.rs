@@ -70,6 +70,9 @@ fn map_book(row: &rusqlite::Row) -> rusqlite::Result<NoteBookRow> {
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
         scope: row.get(8)?,
+        // Only the tree's read selects it (see `load_tree`); a row read through `BOOK_COLUMNS`
+        // alone has no tenth column and reads false.
+        local_only: row.get::<_, i64>(9).map(|v| v != 0).unwrap_or(false),
     })
 }
 
@@ -315,7 +318,7 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Note
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut statement = conn.prepare(&format!(
-        "SELECT {BOOK_COLUMNS} FROM note_books WHERE workspace_id = ?1 OR scope = 'global' \
+        "SELECT {BOOK_COLUMNS}, local_only FROM note_books WHERE workspace_id = ?1 OR scope = 'global' \
          ORDER BY sort_order, name"
     ))?;
     let books = statement
@@ -970,6 +973,7 @@ pub fn create_book(
         created_at: timestamp.clone(),
         updated_at: timestamp,
         scope,
+        local_only: false,
     })
 }
 

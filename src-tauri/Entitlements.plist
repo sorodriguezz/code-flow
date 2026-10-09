@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Signed into the macOS bundle (`bundle.macOS.entitlements` in tauri.conf.json). Releases are signed
+  ad-hoc *with the hardened runtime* (`flags=0x10002(adhoc,runtime)`), and the hardened runtime turns
+  each of these off unless the signature claims it. Nothing here matters to `tauri dev`, whose binary
+  is unsigned and whose permissions belong to the terminal that launched it — which is why both
+  failures below only ever showed up in the installed app.
+
+  com.apple.security.device.audio-input
+  -------------------------------------
+  «Dictar» and «Reuniones» read the microphone (cpal / AVCaptureDevice). Without this key macOS
+  answers `requestAccessForMediaType:` with "denied" at once — no prompt, nothing written to TCC — so
+  CodeFlow never appears under Privacidad › Micrófono and the user has no switch to turn on. Measured
+  with a hardened ad-hoc test bundle: status 0 → request → NO in 0.00 s → status 2.
+  NSMicrophoneUsageDescription (Info.plist) is the sentence; this is the permission to ask at all.
+
+  com.apple.security.cs.disable-library-validation
+  ------------------------------------------------
+  The whisper.cpp engine (dictation/engine.rs) and sherpa-onnx (meetings/speaker.rs) are downloaded
+  on demand and loaded with `libloading`. Library validation only admits libraries signed by Apple or
+  by the app's own Team ID, and an ad-hoc signature has no Team ID, so every such `dlopen` fails:
+  "mapping process and mapped file (non-platform) have different Team IDs". The files are verified by
+  sha256 before they are unpacked; this key is what lets the process map them.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

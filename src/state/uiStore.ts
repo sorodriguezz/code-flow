@@ -74,14 +74,18 @@ export type SettingsSectionId =
   /** What the app tells you about, and how loudly. Split out of the notification bell's popover,
    *  where a global preference had no business hiding. */
   | "notifications"
-  /** The CI tab's polling interval. Its own section rather than a line under Git: the tab is
-   *  repository-scoped but the cost is per host, and it is the app's only polling client. */
-  | "pipelines"
   /** The Revisor's switch, its SonarQube download, the rules and the connected servers. */
   | "reviewer"
   | "review"
-  | "skills"
-  | "mcp"
+  /** What listens and what speaks: microphone, speaker, Whisper models and voices, dictation,
+   *  meetings and the reading aloud. Out of the AI section, where three of its panes used to sit. */
+  | "voice"
+  /** Which engine does each AI action and what it is told — a section of its own, one pane per area. */
+  | "tasks"
+  /** Skills and MCP servers: what a model may use beside reading and writing code. */
+  | "tools"
+  /** The database client's drivers, which otherwise live only inside «Orígenes de datos». */
+  | "databases"
   | "api";
 
 /**

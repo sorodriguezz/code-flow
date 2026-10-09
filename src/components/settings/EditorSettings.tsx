@@ -4,7 +4,7 @@ import { useT } from "../../state/languageStore";
 import { SnippetsSettings } from "./SnippetsSettings";
 import { LanguageServersSettings } from "./LanguageServersSettings";
 import { IconRulesSettings } from "./IconRulesSettings";
-import { CsvSettings } from "./CsvSettings";
+import { EditorFilesSettings } from "./EditorFilesSettings";
 import { FormattingSettings } from "./FormattingSettings";
 import { EditorDisplaySettings } from "./EditorDisplaySettings";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
@@ -30,7 +30,7 @@ import { tabsFor } from "../../lib/settingsCatalog";
 export function EditorSettings() {
   const t = useT();
   const tabs = tabsFor("editor");
-  const [tab, setTab] = useSectionTab("editor", tabs, "snippets");
+  const [tab, setTab] = useSectionTab("editor", tabs, "display");
   const active = tabs.find((entry) => entry.id === tab) ?? tabs[0];
 
   // The two panes are nowhere near the same height — a long snippet list and a fourteen-row server
@@ -65,7 +65,7 @@ export function EditorSettings() {
             {tab === "snippets" && <SnippetsSettings />}
             {tab === "languageServers" && <LanguageServersSettings />}
             {tab === "icons" && <IconRulesSettings />}
-            {tab === "csv" && <CsvSettings />}
+            {tab === "files" && <EditorFilesSettings />}
             {tab === "format" && <FormattingSettings />}
             {tab === "display" && <EditorDisplaySettings />}
           </Panel>

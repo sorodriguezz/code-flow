@@ -27,6 +27,8 @@ pub mod notebook_cmd;
 pub mod keyvault_cmd;
 pub mod localai_cmd;
 pub mod dictation_cmd;
+pub mod meetings_cmd;
+pub mod speech_cmd;
 pub mod hybrid_cmd;
 pub mod localexec_cmd;
 pub mod lsp_cmd;

@@ -16,6 +16,13 @@
 //!
 //! One model stays loaded between dictations (loading `small` costs about half a second); a context
 //! is not safe to use from two threads, so every use goes through one mutex.
+//!
+//! **Meetings use the same library through a [`Slot`] of their own** (`crate::meetings`): a context
+//! each, so dictating in the middle of a forty-minute transcription neither waits for it nor swaps
+//! its model out from under it. They also read what dictation does not need — segment times, words
+//! (`max_len = 1` with `split_on_word`, the `-ml 1` of whisper-cli), the no-speech probability — and
+//! whisper.cpp's own voice-activity detector ([`Vad`], Silero in ggml), which cuts a recording into
+//! the stretches somebody is speaking in.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
@@ -29,12 +36,19 @@ const FULL_PARAMS_SIZE: usize = 304;
 /// `sizeof(struct whisper_context_params)` in b5454.
 const CONTEXT_PARAMS_SIZE: usize = 48;
 
-/// Offsets into `whisper_full_params` (b5454).
+/// Offsets into `whisper_full_params` (b5454), measured with `offsetof` against its `whisper.h`.
 mod offset {
+    pub const N_THREADS: usize = 4;
+    pub const NO_CONTEXT: usize = 21;
     pub const NO_TIMESTAMPS: usize = 22;
     pub const PRINT_PROGRESS: usize = 25;
     pub const PRINT_REALTIME: usize = 26;
     pub const PRINT_TIMESTAMPS: usize = 27;
+    pub const TOKEN_TIMESTAMPS: usize = 28;
+    pub const MAX_LEN: usize = 40;
+    pub const SPLIT_ON_WORD: usize = 44;
+    pub const AUDIO_CTX: usize = 56;
+    pub const INITIAL_PROMPT: usize = 72;
     pub const LANGUAGE: usize = 104;
     pub const DETECT_LANGUAGE: usize = 112;
     pub const SUPPRESS_NST: usize = 114;
@@ -58,6 +72,49 @@ impl FullParams {
     fn set_pointer(&mut self, at: usize, value: *const c_void) {
         self.0[at..at + 8].copy_from_slice(&(value as usize as u64).to_ne_bytes());
     }
+
+    fn set_int(&mut self, at: usize, value: i32) {
+        self.0[at..at + 4].copy_from_slice(&value.to_ne_bytes());
+    }
+}
+
+/// `struct whisper_vad_params` (24 bytes) — passed by value, so declared field for field: its
+/// members are all 4 bytes and the struct has no padding, which `sizeof` confirmed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VadParams {
+    /// Probability above which a 32 ms frame counts as speech.
+    pub threshold: f32,
+    pub min_speech_duration_ms: c_int,
+    /// How much silence ends a stretch of speech.
+    pub min_silence_duration_ms: c_int,
+    /// A stretch longer than this is cut even without a pause.
+    pub max_speech_duration_s: f32,
+    /// Added before and after each stretch, so the first and last syllables are not clipped.
+    pub speech_pad_ms: c_int,
+    pub samples_overlap: f32,
+}
+
+impl Default for VadParams {
+    fn default() -> Self {
+        Self {
+            threshold: 0.5,
+            min_speech_duration_ms: 250,
+            min_silence_duration_ms: 500,
+            max_speech_duration_s: 28.0,
+            speech_pad_ms: 120,
+            samples_overlap: 0.1,
+        }
+    }
+}
+
+/// `struct whisper_vad_context_params` (12 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VadContextParams {
+    n_threads: c_int,
+    use_gpu: bool,
+    gpu_device: c_int,
 }
 
 type InitFn = unsafe extern "C" fn(*const c_char, ContextParams) -> *mut c_void;
@@ -69,6 +126,12 @@ type FullFn = unsafe extern "C" fn(*mut c_void, FullParams, *const f32, c_int) -
 type SegmentsFn = unsafe extern "C" fn(*mut c_void) -> c_int;
 type SegmentTextFn = unsafe extern "C" fn(*mut c_void, c_int) -> *const c_char;
 type FreeFn = unsafe extern "C" fn(*mut c_void);
+type SegmentTimeFn = unsafe extern "C" fn(*mut c_void, c_int) -> i64;
+type SegmentProbFn = unsafe extern "C" fn(*mut c_void, c_int) -> f32;
+type VadInitFn = unsafe extern "C" fn(*const c_char, VadContextParams) -> *mut c_void;
+type VadSegmentsFn = unsafe extern "C" fn(*mut c_void, VadParams, *const f32, c_int) -> *mut c_void;
+type VadCountFn = unsafe extern "C" fn(*mut c_void) -> c_int;
+type VadTimeFn = unsafe extern "C" fn(*mut c_void, c_int) -> f32;
 type LogCallback = unsafe extern "C" fn(c_int, *const c_char, *mut c_void);
 type LogSetFn = unsafe extern "C" fn(Option<LogCallback>, *mut c_void);
 
@@ -86,6 +149,16 @@ struct Api {
     segments: SegmentsFn,
     segment_text: SegmentTextFn,
     free: FreeFn,
+    segment_t0: SegmentTimeFn,
+    segment_t1: SegmentTimeFn,
+    segment_no_speech: SegmentProbFn,
+    vad_init: VadInitFn,
+    vad_segments: VadSegmentsFn,
+    vad_count: VadCountFn,
+    vad_t0: VadTimeFn,
+    vad_t1: VadTimeFn,
+    vad_free_segments: FreeFn,
+    vad_free: FreeFn,
 }
 
 // SAFETY: the function pointers are plain C entry points; the library handle is only kept alive.
@@ -152,6 +225,16 @@ fn load(path: &Path) -> Result<Api, String> {
             segments: symbol!("whisper_full_n_segments", SegmentsFn),
             segment_text: symbol!("whisper_full_get_segment_text", SegmentTextFn),
             free: symbol!("whisper_free", FreeFn),
+            segment_t0: symbol!("whisper_full_get_segment_t0", SegmentTimeFn),
+            segment_t1: symbol!("whisper_full_get_segment_t1", SegmentTimeFn),
+            segment_no_speech: symbol!("whisper_full_get_segment_no_speech_prob", SegmentProbFn),
+            vad_init: symbol!("whisper_vad_init_from_file_with_params", VadInitFn),
+            vad_segments: symbol!("whisper_vad_segments_from_samples", VadSegmentsFn),
+            vad_count: symbol!("whisper_vad_segments_n_segments", VadCountFn),
+            vad_t0: symbol!("whisper_vad_segments_get_segment_t0", VadTimeFn),
+            vad_t1: symbol!("whisper_vad_segments_get_segment_t1", VadTimeFn),
+            vad_free_segments: symbol!("whisper_vad_free_segments", FreeFn),
+            vad_free: symbol!("whisper_vad_free", FreeFn),
             _library: library,
         })
     }
@@ -161,7 +244,7 @@ fn api() -> Result<&'static Api, String> {
     if let Some(api) = API.get() {
         return Ok(api);
     }
-    let path = super::engine_library().ok_or("The dictation engine is not installed — Settings › AI › Dictation")?;
+    let path = super::engine_library().ok_or("The Whisper engine is not installed — Settings › Voice & sound › Models")?;
     let loaded = load(&path)?;
     Ok(API.get_or_init(|| loaded))
 }
@@ -172,16 +255,70 @@ struct Loaded {
     context: *mut c_void,
 }
 
-// SAFETY: the context is only ever touched while `MODEL`'s lock is held.
+// SAFETY: the context is only ever touched while its slot's lock is held.
 unsafe impl Send for Loaded {}
 
-static MODEL: Mutex<Option<Loaded>> = Mutex::new(None);
+/// Where one loaded model lives: dictation has one, meetings another, so neither waits for the
+/// other nor swaps its model out.
+pub struct Slot(Mutex<Option<Loaded>>);
+
+impl Slot {
+    const fn new() -> Self {
+        Slot(Mutex::new(None))
+    }
+}
+
+static MODEL: Slot = Slot::new();
+/// The meetings' own context — see the module's doc.
+pub static MEETINGS: Slot = Slot::new();
+/// A flow's «Transcribir audio» — loaded for the node and freed when it is done, so a flow never
+/// swaps out the model dictation or a meeting is holding.
+pub static FLOWS: Slot = Slot::new();
+
+/// How a run is set up, beyond the samples.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// `""` or `"auto"` lets the model tell.
+    pub language: String,
+    /// `0` = whisper.cpp's default (up to four).
+    pub threads: i32,
+    /// One segment per word, each with its own times — for lining words up with speakers.
+    pub words: bool,
+    /// Text the decoder is primed with: the words before this piece, and names it should spell.
+    pub prompt: String,
+    /// Shrinks the encoder's window for a short piece (`0` = the full 30 s): faster, a little less
+    /// accurate. See `crate::meetings` for when it is used.
+    pub audio_ctx: i32,
+}
+
+/// One segment of a run: times in milliseconds from the start of the samples.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Segment {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+    /// The model's own estimate that this was not speech at all.
+    pub no_speech: f32,
+}
 
 /// Text of `samples` — mono, 16 kHz, -1…1 — in `language` (`"auto"` to let the model tell).
 /// Blocking: seconds of CPU or GPU work. Call it off the async runtime.
 pub fn transcribe(model: &Path, samples: &[f32], language: &str) -> Result<String, String> {
+    let options = Options { language: language.to_string(), ..Options::default() };
+    let segments = run(&MODEL, model, samples, &options, &ABORT, false)?;
+    let text: String = segments.iter().map(|segment| segment.text.as_str()).collect();
+    Ok(clean(&text))
+}
+
+/// Segments of `samples`, on `slot`'s context, with times. `abort` stops it at whisper.cpp's next
+/// check. Blocking, like [`transcribe`].
+pub fn segments(slot: &Slot, model: &Path, samples: &[f32], options: &Options, abort: &AtomicBool) -> Result<Vec<Segment>, String> {
+    run(slot, model, samples, options, abort, true)
+}
+
+fn run(slot: &Slot, model: &Path, samples: &[f32], options: &Options, abort: &AtomicBool, timed: bool) -> Result<Vec<Segment>, String> {
     let api = api()?;
-    let mut slot = MODEL.lock().map_err(|_| "The dictation engine is busy".to_string())?;
+    let mut slot = slot.0.lock().map_err(|_| "The dictation engine is busy".to_string())?;
     if slot.as_ref().is_some_and(|loaded| loaded.path != model) {
         if let Some(old) = slot.take() {
             // SAFETY: a context made by `init`, freed once.
@@ -206,9 +343,11 @@ pub fn transcribe(model: &Path, samples: &[f32], language: &str) -> Result<Strin
         *slot = Some(Loaded { path: model.to_path_buf(), context });
     }
     let context = slot.as_ref().map(|loaded| loaded.context).unwrap_or(std::ptr::null_mut());
-    let language = CString::new(if language.trim().is_empty() { "auto" } else { language.trim() }).unwrap_or_else(|_| c"auto".to_owned());
-    ABORT.store(false, Ordering::Relaxed);
-    // SAFETY: as above; `language` and `ABORT` outlive the call that reads them.
+    let language = options.language.trim();
+    let language = CString::new(if language.is_empty() { "auto" } else { language }).unwrap_or_else(|_| c"auto".to_owned());
+    let prompt = CString::new(options.prompt.replace('\0', " ")).unwrap_or_default();
+    abort.store(false, Ordering::Relaxed);
+    // SAFETY: as above; `language`, `prompt` and `abort` outlive the call that reads them.
     let status = unsafe {
         let defaults = (api.full_defaults)(0); // WHISPER_SAMPLING_GREEDY
         if defaults.is_null() {
@@ -216,7 +355,7 @@ pub fn transcribe(model: &Path, samples: &[f32], language: &str) -> Result<Strin
         }
         let mut params = *defaults;
         (api.free_params)(defaults);
-        params.set_bool(offset::NO_TIMESTAMPS, true);
+        params.set_bool(offset::NO_TIMESTAMPS, !timed);
         params.set_bool(offset::PRINT_PROGRESS, false);
         params.set_bool(offset::PRINT_REALTIME, false);
         params.set_bool(offset::PRINT_TIMESTAMPS, false);
@@ -224,40 +363,139 @@ pub fn transcribe(model: &Path, samples: &[f32], language: &str) -> Result<Strin
         params.set_bool(offset::DETECT_LANGUAGE, false);
         // No "[Música]", "(risas)" — a dictation wants the words.
         params.set_bool(offset::SUPPRESS_NST, true);
+        if options.threads > 0 {
+            params.set_int(offset::N_THREADS, options.threads);
+        }
+        if timed && options.words {
+            params.set_bool(offset::TOKEN_TIMESTAMPS, true);
+            params.set_int(offset::MAX_LEN, 1);
+            params.set_bool(offset::SPLIT_ON_WORD, true);
+        }
+        if options.audio_ctx > 0 {
+            params.set_int(offset::AUDIO_CTX, options.audio_ctx);
+        }
+        if !options.prompt.trim().is_empty() {
+            params.set_pointer(offset::INITIAL_PROMPT, prompt.as_ptr().cast());
+        }
+        // Every piece of a meeting is its own call: what the previous one heard comes in through
+        // the prompt, not through the decoder's memory of a different stretch of audio.
+        if timed {
+            params.set_bool(offset::NO_CONTEXT, true);
+        }
         params.set_pointer(offset::ABORT_CALLBACK, should_abort as *const c_void);
-        params.set_pointer(offset::ABORT_CALLBACK_USER_DATA, (&ABORT as *const AtomicBool).cast());
+        params.set_pointer(offset::ABORT_CALLBACK_USER_DATA, (abort as *const AtomicBool).cast());
         (api.full)(context, params, samples.as_ptr(), samples.len() as c_int)
     };
-    if ABORT.load(Ordering::Relaxed) {
+    if abort.load(Ordering::Relaxed) {
         return Err("cancelled".into());
     }
     if status != 0 {
         return Err(format!("The dictation engine failed ({status})"));
     }
-    let mut text = String::new();
+    let mut found = Vec::new();
     // SAFETY: segment texts belong to the context and are copied out before the lock is released.
     unsafe {
         for index in 0..(api.segments)(context) {
             let segment = (api.segment_text)(context, index);
-            if !segment.is_null() {
-                text.push_str(&CStr::from_ptr(segment).to_string_lossy());
+            if segment.is_null() {
+                continue;
             }
+            let text = CStr::from_ptr(segment).to_string_lossy().into_owned();
+            let (start_ms, end_ms, no_speech) = if timed {
+                // whisper.cpp counts in centiseconds.
+                ((api.segment_t0)(context, index) * 10, (api.segment_t1)(context, index) * 10, (api.segment_no_speech)(context, index))
+            } else {
+                (0, 0, 0.0)
+            };
+            found.push(Segment { start_ms, end_ms, text, no_speech });
         }
     }
-    Ok(clean(&text))
+    Ok(found)
 }
 
-/// Stops a transcription under way, at whisper.cpp's next check.
+/// Loads the library from `path` instead of the installed one — for the live tests.
+#[cfg(test)]
+pub fn load_library_for_test(path: &Path) {
+    API.get_or_init(|| load(path).expect("the engine loads"));
+}
+
+/// Stops a dictation's transcription under way, at whisper.cpp's next check.
 pub fn abort() {
     ABORT.store(true, Ordering::Relaxed);
 }
 
 /// Frees the loaded model — before its file is deleted, and when dictation is switched off.
 pub fn unload() {
-    let Ok(mut slot) = MODEL.lock() else { return };
-    if let (Some(loaded), Some(api)) = (slot.take(), API.get()) {
+    unload_slot(&MODEL);
+    unload_slot(&MEETINGS);
+}
+
+/// Frees `slot`'s model, if it holds one — a meeting's after its transcription, so a laptop does
+/// not keep a few hundred megabytes resident for a job that has ended.
+pub fn unload_slot(slot: &Slot) {
+    let Ok(mut held) = slot.0.lock() else { return };
+    if let (Some(loaded), Some(api)) = (held.take(), API.get()) {
         // SAFETY: a context made by `init`, freed once, under the lock.
         unsafe { (api.free)(loaded.context) };
+    }
+}
+
+/// whisper.cpp's voice-activity detector with its Silero model loaded. Not safe to share between
+/// threads — whoever holds one uses it alone.
+pub struct Vad {
+    context: *mut c_void,
+}
+
+// SAFETY: the context is only used through `&mut self`, by one thread at a time.
+unsafe impl Send for Vad {}
+
+impl Vad {
+    pub fn load(model: &Path, threads: i32) -> Result<Vad, String> {
+        let api = api()?;
+        let path = CString::new(model.to_string_lossy().as_bytes()).map_err(|_| "The model's path has a NUL byte".to_string())?;
+        let params = VadContextParams { n_threads: threads.max(1), use_gpu: false, gpu_device: 0 };
+        // SAFETY: a path that outlives the call and a parameter struct of the measured layout.
+        let context = unsafe { (api.vad_init)(path.as_ptr(), params) };
+        if context.is_null() {
+            return Err(format!("The voice detector could not be loaded ({})", model.display()));
+        }
+        Ok(Vad { context })
+    }
+
+    /// The stretches of `samples` (16 kHz mono) somebody speaks in, as `(start_ms, end_ms)`.
+    pub fn speech(&mut self, samples: &[f32], params: VadParams) -> Result<Vec<(i64, i64)>, String> {
+        let api = api()?;
+        if samples.is_empty() {
+            return Ok(Vec::new());
+        }
+        // SAFETY: the samples outlive the call; the result is freed below, after it is read.
+        unsafe {
+            let found = (api.vad_segments)(self.context, params, samples.as_ptr(), samples.len() as c_int);
+            if found.is_null() {
+                return Err("The voice detector failed".into());
+            }
+            let count = (api.vad_count)(found);
+            let mut stretches = Vec::with_capacity(count.max(0) as usize);
+            for index in 0..count {
+                // Centiseconds, like every other whisper.cpp time.
+                let start = ((api.vad_t0)(found, index) * 10.0).round() as i64;
+                let end = ((api.vad_t1)(found, index) * 10.0).round() as i64;
+                if end > start {
+                    stretches.push((start, end));
+                }
+            }
+            (api.vad_free_segments)(found);
+            Ok(stretches)
+        }
+    }
+}
+
+impl Drop for Vad {
+    fn drop(&mut self) {
+        if let Some(api) = API.get() {
+            // SAFETY: a context made by `vad_init`, freed once.
+            unsafe { (api.vad_free)(self.context) };
+        }
     }
 }
 

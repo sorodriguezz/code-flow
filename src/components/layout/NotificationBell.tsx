@@ -166,8 +166,12 @@ export function NotificationBell() {
     // Which sound and how loud are read at the moment of arrival rather than subscribed to: they
     // only matter now, and depending on them would re-run this effect on every step of the slider.
     if (soundEnabled) {
-      const { notificationSoundId, notificationSoundVolume } = usePreferencesStore.getState();
-      playNotificationSound(notificationSoundId, notificationSoundVolume);
+      const { notificationSoundId, notificationSoundVolume, silentNotificationSources } = usePreferencesStore.getState();
+      // The newest arrival's source decides — «Por origen › Sonido» lets a source show without a tone.
+      const newest = useNotificationStore.getState().items[0];
+      if (!newest || !silentNotificationSources.includes(newest.source)) {
+        playNotificationSound(notificationSoundId, notificationSoundVolume);
+      }
     }
     if (reduceMotion) return;
     setBurst((n) => n + 1);

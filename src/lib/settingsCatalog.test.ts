@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   HORIZONTAL_TAB_SECTIONS,
   SELF_SCROLLING_SECTIONS,
+  SETTINGS_GROUPS,
   SETTINGS_SECTIONS,
   searchSettings,
   tabsFor,
@@ -71,9 +72,28 @@ describe("the settings catalog", () => {
   });
 
   it("returns the panes of a section by id", () => {
-    expect(tabsFor("claude").map((tab) => tab.id)).toContain("tasks");
+    expect(tabsFor("tasks").map((tab) => tab.id)).toContain("git");
     expect(tabsFor("general").map((tab) => tab.id)).toContain("language");
-    expect(tabsFor("projects")).toEqual([]);
+    expect(tabsFor("voice").map((tab) => tab.id)).toEqual(["devices", "models", "dictation", "meetings", "reading"]);
+  });
+
+  it("files every section under one of the nav's four groups, in the groups' order", () => {
+    const groups = SETTINGS_GROUPS.map((group) => group.id);
+    expect(groups).toEqual(["app", "code", "ai", "apps"]);
+    const order = SETTINGS_SECTIONS.map((section) => groups.indexOf(section.group));
+    expect(order.every((index) => index >= 0)).toBe(true);
+    // The nav draws the groups one after another, so the catalog lists them that way too.
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    for (const group of SETTINGS_GROUPS) expect(translations.en[group.labelKey]).toBeTruthy();
+  });
+
+  it("translates every rail heading, and starts a headed rail with one", () => {
+    for (const section of SETTINGS_SECTIONS) {
+      const tabs = section.tabs ?? [];
+      for (const tab of tabs) if (tab.headingKey) expect(translations.en[tab.headingKey], `${section.id}/${tab.id}`).toBeTruthy();
+      // A rail that falls into parts names the first part too, or its first rows belong to no one.
+      if (tabs.some((tab) => tab.headingKey)) expect(tabs[0].headingKey, `${section.id} starts without a heading`).toBeTruthy();
+    }
   });
 });
 
@@ -133,8 +153,8 @@ describe("searchSettings", () => {
   it("can leave the workspace sections out", () => {
     const all = searchSettings("review", t);
     const globalOnly = searchSettings("review", t, { includeWorkspace: false });
-    expect(all.some((hit) => hit.section.group === "workspace")).toBe(true);
-    expect(globalOnly.every((hit) => hit.section.group === "global")).toBe(true);
+    expect(all.some((hit) => hit.section.scope === "workspace")).toBe(true);
+    expect(globalOnly.every((hit) => hit.section.scope !== "workspace")).toBe(true);
   });
 
   it("returns nothing for a query that matches nothing", () => {
@@ -144,7 +164,7 @@ describe("searchSettings", () => {
   it("finds the sound and the thinking design by what people call them", () => {
     // Neither pane is looked for by its own name: people type "volume" or "orb".
     expect(searchSettings("volume", t).some((hit) => hit.section.id === "notifications" && hit.tab?.id === "sound")).toBe(true);
-    expect(searchSettings("orb", t).some((hit) => hit.section.id === "claude" && hit.tab?.id === "thinking")).toBe(true);
+    expect(searchSettings("orb", t).some((hit) => hit.section.id === "appearance" && hit.tab?.id === "thinking")).toBe(true);
     // Synonyms live on the panes, not the section: "sound" no longer answers with every
     // notification pane.
     const sound = searchSettings("sound", t).filter((hit) => hit.section.id === "notifications");
@@ -154,11 +174,20 @@ describe("searchSettings", () => {
   it("reaches the panes that used to be unreachable", () => {
     // Terminal, Remote and Backup were missing from the command palette's hand-written list; the
     // catalog is what makes forgetting one impossible.
-    for (const wanted of ["terminal", "remote", "backup", "vault", "notifications", "pipelines"]) {
+    for (const wanted of ["terminal", "remote", "backup", "vault", "notifications", "voice", "tools", "databases"]) {
       const section = SETTINGS_SECTIONS.find((entry) => entry.id === wanted);
       expect(section, `${wanted} is not in the catalog`).toBeTruthy();
       const hits = searchSettings(t(section!.labelKey), t);
       expect(hits.some((hit) => hit.section.id === wanted), `${wanted} is not findable`).toBe(true);
     }
+  });
+
+  it("finds what moved by its old name and by what people call it", () => {
+    // Pipelines is a pane of Integrations now; the speaker and the reading voice are under Voice & sound.
+    expect(searchSettings("pipelines", t).some((hit) => hit.section.id === "azure" && hit.tab?.id === "pipelines")).toBe(true);
+    expect(searchSettings("tts", t).some((hit) => hit.section.id === "voice" && hit.tab?.id === "reading")).toBe(true);
+    expect(searchSettings("speaker", t).some((hit) => hit.section.id === "voice" && hit.tab?.id === "devices")).toBe(true);
+    expect(searchSettings("whisper", t).some((hit) => hit.section.id === "voice" && hit.tab?.id === "models")).toBe(true);
+    expect(searchSettings("commit", t).some((hit) => hit.section.id === "tasks" && hit.tab?.id === "git")).toBe(true);
   });
 });

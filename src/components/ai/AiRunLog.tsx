@@ -131,6 +131,7 @@ const PHASE_LABEL: Record<RunPhase, TranslationKey> = {
   delegate: "ai.phaseDelegate",
   write: "ai.phaseWrite",
   work: "ai.phaseWork",
+  speak: "ai.phaseSpeak",
 };
 
 type StepStatus = "run" | "ok" | "wait" | "stop";

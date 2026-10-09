@@ -84,7 +84,9 @@ export function ModelDownloadRow({
   note?: ReactNode;
   onDownload: () => void;
   onCancel: () => void;
-  onUse: () => void;
+  /** Absent where a row is only downloaded and deleted — the shared Voz pane, whose models each
+   *  feature picks from its own pane. */
+  onUse?: () => void;
   onDelete: () => void;
 }) {
   const t = useT();
@@ -127,7 +129,7 @@ export function ModelDownloadRow({
             </button>
           ) : model.installed ? (
             <>
-              {!active && (
+              {!active && onUse && (
                 <button onClick={onUse} className={buttonClass({ variant: "secondary", size: "sm" })}>
                   <Check size={13} /> {t("localai.use")}
                 </button>

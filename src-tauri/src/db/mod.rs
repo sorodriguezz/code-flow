@@ -13,6 +13,7 @@ pub mod flow_run_queries;
 pub mod flow_share_queries;
 pub mod hybrid_queries;
 pub mod keyvault_queries;
+pub mod meeting_queries;
 pub mod migrations;
 pub mod models;
 pub mod note_queries;

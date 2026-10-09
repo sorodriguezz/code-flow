@@ -22,7 +22,7 @@ export interface AiTaskDef {
 }
 
 /** The groups the AI tasks table is divided into, in the order it shows them. */
-export type AiTaskArea = "git" | "review" | "stories" | "docs" | "code" | "data" | "other";
+export type AiTaskArea = "git" | "review" | "stories" | "docs" | "code" | "data" | "chat" | "other";
 
 export const AI_TASK_AREAS: { id: AiTaskArea; labelKey: TranslationKey }[] = [
   { id: "git", labelKey: "task.areaGit" },
@@ -31,13 +31,14 @@ export const AI_TASK_AREAS: { id: AiTaskArea; labelKey: TranslationKey }[] = [
   { id: "docs", labelKey: "task.areaDocs" },
   { id: "code", labelKey: "task.areaCode" },
   { id: "data", labelKey: "task.areaData" },
+  { id: "chat", labelKey: "task.areaChat" },
   { id: "other", labelKey: "task.areaOther" },
 ];
 
 /** Every AI action that can be pointed at its own provider + model, in the order the settings
  * table lists them (most-used first). */
 export const AI_TASKS: AiTaskDef[] = [
-  { key: "chat", labelKey: "task.chat", hintKey: "task.chatHint", area: "other", modelForKey: "chat.modelForChat" },
+  { key: "chat", labelKey: "task.chat", hintKey: "task.chatHint", area: "chat", modelForKey: "chat.modelForChat" },
   { key: "commit", labelKey: "task.commit", hintKey: "task.commitHint", area: "git", modelForKey: "task.commitModelFor" },
   { key: "analyze", labelKey: "task.analyze", hintKey: "task.analyzeHint", area: "git", modelForKey: "task.analyzeModelFor" },
   { key: "review", labelKey: "task.review", hintKey: "task.reviewHint", area: "review", modelForKey: "task.reviewModelFor" },
@@ -92,7 +93,7 @@ export const AI_TASKS: AiTaskDef[] = [
   // A few words naming a new conversation after its first question, in both chats — written once,
   // after the first answer, without being asked (`chat_title.rs`). Text-only, and like `commit` it
   // runs on the engine's fast model unless this row names another.
-  { key: "chat_title", labelKey: "task.chatTitle", hintKey: "task.chatTitleHint", area: "other", modelForKey: "task.chatTitleModelFor" },
+  { key: "chat_title", labelKey: "task.chatTitle", hintKey: "task.chatTitleHint", area: "chat", modelForKey: "task.chatTitleModelFor" },
   // The AI nodes of a flow that leave their engine automatic (`AiTask::Flows`). A node that names
   // its own engine runs on that one; this row is the default for the rest — and since an agent node
   // may edit, it wants an engine with tools.
@@ -106,6 +107,14 @@ export const AI_TASKS: AiTaskDef[] = [
   // stdin as the pane shows it and nothing else is opened, so it routes anywhere. Its own row rather
   // than `pipeline`'s, which reads a repository with tools — this one reads a log and nothing else.
   { key: "logs", labelKey: "task.logs", hintKey: "task.logsHint", area: "other", modelForKey: "task.logsModelFor" },
+  // «Reuniones»: minutes, decisions, tasks… from a meeting's transcript, and questions about it.
+  // Text-only — the transcript goes on stdin — so it routes anywhere. Unset, it follows the `notes`
+  // row (Rust's `load_ai_config_in`), since a meeting is written into a note.
+  { key: "meetings", labelKey: "task.meetings", hintKey: "task.meetingsHint", area: "docs", modelForKey: "task.meetingsModelFor" },
+  // «Resumen hablado»: a long answer cut to two or three sentences before the thinking mark reads
+  // it aloud (`speechStore.speakAnswer`). Text-only, and like `chat_title` it runs on the engine's
+  // fast model unless this row names another — it runs after every answer the user asked to hear.
+  { key: "spoken_summary", labelKey: "task.spokenSummary", hintKey: "task.spokenSummaryHint", area: "other", modelForKey: "task.spokenSummaryModelFor" },
 ];
 
 export const AI_TASK_KEYS = AI_TASKS.map((t) => t.key);

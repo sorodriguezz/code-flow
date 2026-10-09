@@ -110,6 +110,8 @@ export interface NoteBookRow {
   created_at: string;
   updated_at: string;
   scope: RowScope;
+  /** Meetings filed here (or in a book inside) transcribe and run their AI on this computer only. */
+  local_only?: boolean;
 }
 
 export interface NoteTemplateRow {

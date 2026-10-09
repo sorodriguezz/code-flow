@@ -135,7 +135,7 @@ impl ExecEngine {
 pub async fn ensure_ready(entry: &ExecModelSpec, model_path: PathBuf, launch: Launch) -> Result<Arc<ExecEngine>, String> {
     if !model_path.is_file() {
         return Err(format!(
-            "{} isn't downloaded. Download it in Settings › AI assistant › Local model.",
+            "{} isn't downloaded. Download it in Settings › AI engines › Local model.",
             entry.spec.label
         ));
     }

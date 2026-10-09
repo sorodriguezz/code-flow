@@ -44,6 +44,7 @@ import { NoteOutline } from "./NoteOutline";
 import { NoteTagBar } from "./NoteTagBar";
 import { SaveTemplateModal } from "./SaveTemplateModal";
 import { NoteAiPanel } from "./NoteAiPanel";
+import { MeetingButton, MeetingSection } from "./meetings/MeetingSection";
 import { noteRepoItems } from "./noteRepoItems";
 import { ICON_BUTTON, readingMinutes, relativeTime } from "./notesChrome";
 import type { NoteMonacoHandle } from "./NoteMonaco";
@@ -94,6 +95,7 @@ export function NoteEditor() {
   /** The open note's AI run, if it has one. A stable object reference, so this costs nothing on the
    *  keystrokes that already re-render this component. */
   const noteRun = useNotesStore((s) => (s.draft ? s.aiByNote[s.draft.id] : undefined));
+  const workspaceId = useNotesStore((s) => s.workspaceId);
 
   const editDraft = useNotesStore((s) => s.editDraft);
   const setViewMode = useNotesStore((s) => s.setViewMode);
@@ -210,6 +212,24 @@ export function NoteEditor() {
     return true;
   }, []);
 
+  /**
+   * A meeting's AI writing into its note: at the end, as one Monaco edit so ⌘Z takes it back. With
+   * the editor hidden (preview only) it goes into the draft directly — still saved, just not
+   * undoable. `false` when the note on screen is no longer the one asked about.
+   */
+  const appendFromMeeting = useCallback((noteId: string, markdown: string) => {
+    const state = useNotesStore.getState();
+    if (state.draft?.id !== noteId) return false;
+    const editor = monaco.current;
+    if (editor && state.viewMode !== "preview") {
+      editor.appendText(markdown);
+      return true;
+    }
+    const current = state.draft.content.trimEnd();
+    state.editDraft({ content: current ? `${current}\n\n${markdown}` : markdown });
+    return true;
+  }, []);
+
   // Scrolling the editor scrolls the preview, one way only. Two-way sync is a feedback loop that
   // needs a suppression flag and still stutters where the two panes' heights disagree — and the
   // question a split view answers is "what does what I am writing look like", which is the editor
@@ -323,6 +343,8 @@ export function NoteEditor() {
             onChange={setViewMode}
             options={MODES.map(({ mode, icon, labelKey }) => ({ value: mode, icon, title: t(labelKey) }))}
           />
+
+          <MeetingButton noteId={note.id} />
 
           <button
             type="button"
@@ -459,6 +481,15 @@ export function NoteEditor() {
           <NoteTagBar tags={draft.tags} onChange={(tags) => editDraft({ tags })} />
         </div>
       </div>
+
+      {workspaceId && (
+        <MeetingSection
+          noteId={draft.id}
+          workspaceId={workspaceId}
+          noteTitle={draft.title}
+          onInsert={appendFromMeeting}
+        />
+      )}
 
       {showEditor && (
         <NoteToolbar

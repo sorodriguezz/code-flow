@@ -1,24 +1,24 @@
 import { useLayoutEffect, useRef } from "react";
 import { AiAccountsSettings } from "./AiAccountsSettings";
 import { AiCompletionSettings } from "./AiCompletionSettings";
-import { AiTasksSettings } from "./AiTasksSettings";
 import { LocalModelSettings } from "./LocalModelSettings";
-import { DictationSettings } from "./DictationSettings";
 import { useT } from "../../state/languageStore";
 import { ProvidersSection } from "./ProvidersSection";
 import { QuotaSection } from "./QuotaSection";
-import { ThinkingDesignSettings } from "./ThinkingDesignSettings";
 import { UsageStatsSection } from "./UsageStatsSection";
 import { SettingsRail, useSectionTab } from "./settingsNav";
 import { tabsFor } from "../../lib/settingsCatalog";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
 
 /**
- * The AI assistant settings, behind a side rail — the same shape as the API client's settings,
- * down to the sliding pill, so a nested nav reads as part of the furniture the Settings window
- * already uses rather than as a second idea.
+ * «Motores de IA»: the engines CodeFlow can use and what they cost, behind a side rail — the same
+ * shape as the API client's settings, down to the sliding pill.
  *
- * The panes, in the order you'd actually set them up:
+ * Since 2026-10-09 it holds only that. Voice, dictation and meetings went to «Voz y sonido», the
+ * thinking mark to Appearance, and «Tareas y prompts» became a section of its own: thirteen panes
+ * was a section nobody could hold in their head. The rail falls into two parts — Motores, Consumo.
+ *
+ * The panes, in the order you'd actually set them up (the history below kept for the reasoning):
  *   1. **Providers** — which engines exist, whether they're installed, how each is configured.
  *      **Accounts** follows it: the logins each of those engines has, and which one runs where.
  *   2. **Tasks and prompts** — which engine runs each action, and what it is told to do.
@@ -100,11 +100,8 @@ export function ClaudeSettings() {
 
             {tab === "providers" && <ProvidersSection />}
             {tab === "accounts" && <AiAccountsSettings />}
-            {tab === "tasks" && <AiTasksSettings />}
-            {tab === "completion" && <AiCompletionSettings />}
             {tab === "localModel" && <LocalModelSettings />}
-            {tab === "dictation" && <DictationSettings />}
-            {tab === "thinking" && <ThinkingDesignSettings />}
+            {tab === "completion" && <AiCompletionSettings />}
             {tab === "limits" && <QuotaSection />}
             {tab === "usage" && <UsageStatsSection />}
           </Panel>

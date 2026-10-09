@@ -26,9 +26,10 @@ import { onRadioKeys } from "./settingsNav";
  * Above the grid, the state every tile previews (user: "no tiene animación como de trabajando,
  * pensando, error…" — the reactions existed but only "thinking" could be seen here). Seven peers in
  * one segmented row: they are all the same question, "what does it look like when…". On an ending
- * (Terminado, Error) pointing at a tile replays it.
+ * (Terminado, Error) pointing at a tile replays it. «Hablando» (2026-10-09) is the reading aloud:
+ * every mark breathes with the voice (`.cf-orb--speaking`), here with a speech-like stand-in.
  */
-type PreviewState = "think" | "read" | "work" | "write" | "quiet" | "done" | "failed";
+type PreviewState = "think" | "read" | "work" | "write" | "speak" | "quiet" | "done" | "failed";
 
 /** Module-level, so the tiles hand every orb the same object across renders. */
 const PREVIEWS: Record<PreviewState, ThinkingActivity> = {
@@ -36,6 +37,7 @@ const PREVIEWS: Record<PreviewState, ThinkingActivity> = {
   read: { phase: "read" },
   work: { phase: "edit" },
   write: { phase: "write" },
+  speak: { phase: "speak" },
   quiet: { phase: "think", quiet: true },
   done: { done: true },
   failed: { failed: true },
@@ -46,6 +48,7 @@ const PREVIEW_LABELS: Record<PreviewState, TranslationKey> = {
   read: "settings.thinkingState.read",
   work: "settings.thinkingState.work",
   write: "settings.thinkingState.write",
+  speak: "settings.thinkingState.speak",
   quiet: "settings.thinkingState.quiet",
   done: "settings.thinkingState.done",
   failed: "settings.thinkingState.failed",

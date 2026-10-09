@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { speakAnswer } from "../lib/speech/speakAnswer";
 import {
   chatContextResets,
   getChatConversation,
@@ -731,6 +732,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           status: "success",
           detail: base.title || liveTitle(trimmed),
         });
+        // Read aloud when the user asked for answers to be (Settings › Voz y sonido).
+        speakAnswer(reply.text, workspaceId ?? null);
         // The conversation is free: what was written while this answer was produced goes next.
         get().drainQueue(conversationId);
       })

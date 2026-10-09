@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** `dictation::WhisperModel` + whether it is on disk. */
 export interface DictationModel {
-  id: "base" | "small" | "turbo";
+  id: "tiny" | "base" | "small" | "turbo";
   file: string;
   sizeBytes: number;
   installed: boolean;

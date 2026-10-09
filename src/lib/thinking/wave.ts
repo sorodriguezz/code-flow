@@ -2,6 +2,7 @@ import { ended, type ThinkingActivity } from "./activity";
 import { clamp01, easeOut, endColor, finishClock } from "./finish";
 import { mix, palette, rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { voiceLevel } from "./voice";
 
 /**
  * "Onda" — three voice waves in the assistant's hues, the way a voice assistant draws itself
@@ -46,6 +47,8 @@ export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
         return 0.25;
       case "write":
         return 0.35 + 0.65 * Math.abs(Math.sin(time * 7.3) * Math.sin(time * 2.9));
+      case "speak":
+        return 0.12 + 0.88 * voiceLevel();
       case "think":
       case "plan":
         return 0.6 + 0.2 * Math.sin(time * 1.4);

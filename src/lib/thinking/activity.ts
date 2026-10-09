@@ -17,7 +17,9 @@ export type RunPhase =
   | "run"
   | "delegate"
   | "write"
-  | "work";
+  | "work"
+  /** Reading aloud (`speechStore`): the mark moves with the voice's loudness (`lib/thinking/voice`). */
+  | "speak";
 
 export interface ThinkingActivity {
   phase?: RunPhase;
@@ -66,7 +68,10 @@ export function phaseGroup(phase: RunPhase | undefined): PhaseGroup {
     case "delegate":
     case "work":
       return "work";
+    // Speaking is drawn as writing by the CSS marks — the closest of their four — and pulses with
+    // the voice on top (`.cf-orb--speaking`).
     case "write":
+    case "speak":
       return "write";
     default:
       return "think";

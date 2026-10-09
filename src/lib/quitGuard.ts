@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { quitAppConfirmed, quitGuardAck, quitGuardArm, quitGuardCancel } from "./tauri/commands";
 import { showMainWindow } from "./tauri/windows";
 import { flowsArmedNames } from "./tauri/flowsCommands";
+import { meetingsStatus } from "./tauri/meetingsCommands";
 import { broadcast, onWindowMessage } from "./windowBus";
 import { collectUnsaved, discardAllUnsaved, saveAllUnsaved, type UnsavedItem } from "./unsavedWork";
 import { chooseAction } from "../state/confirmStore";
@@ -87,6 +88,23 @@ export function installQuitGuard(): () => void {
       // A satellite that has closed since it reported took its buffers with it.
       const open = new Set(useWindowStore.getState().satellites.map((s) => s.label));
       for (const label of [...satellites.keys()]) if (!open.has(label)) satellites.delete(label);
+      // A meeting being recorded stops with the app. What was recorded is kept and finished at the
+      // next launch (`meetings_cmd::shutdown`), but a quit in the middle of a call is worth a word.
+      const recording = await meetingsStatus()
+        .then((status) => status.recording)
+        .catch(() => null);
+      if (recording) {
+        await showMainWindow().catch(() => {});
+        const answer = await chooseAction({
+          message: translate("quit.meetingMessage"),
+          danger: true,
+          choices: [{ id: "quit", label: translate("quit.meetingQuit"), variant: "danger" }],
+        });
+        if (answer !== "quit") {
+          await quitGuardCancel();
+          return;
+        }
+      }
       // Active flows stop listening when the process ends — a schedule at 03:00 will not run. Asked
       // before the unsaved work, and only when there are some: most quits have none.
       const armed = await flowsArmedNames().catch(() => [] as string[]);

@@ -58,7 +58,7 @@ pub(crate) fn active_provider(conn: &Connection) -> Result<String, String> {
 /// `ai_provider`) and its own model within that provider (`{provider}_{key}_model`, falling back
 /// to that provider's base model). That's what lets one repo draft commits on a local model
 /// through Cline, review PRs on Opus, and fix findings through opencode.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AiTask {
     /// Commit-message generation — defaults to the engine's fast model, not the base model.
     Commit,
@@ -151,6 +151,16 @@ pub(crate) enum AiTask {
     /// a red build, this one reads a log and nothing else — a different length of run, and routinely
     /// the cheaper engine.
     Logs,
+    /// «Reuniones»: minutes, decisions, tasks… written from a meeting's transcript, and questions
+    /// about it answered. Text-only — the transcript goes on stdin — so it routes anywhere. Unset, it
+    /// takes the [`AiTask::Notes`] row's engine (see [`provider_for`]): a meeting is written into a
+    /// note, and someone who chose an engine for their notes has chosen it for this too.
+    Meetings,
+    /// «Resumen hablado»: a long answer cut to two or three sentences before the thinking mark reads
+    /// it aloud (`crate::speech`). Text-only and short, so like [`AiTask::ChatTitle`] it runs on the
+    /// engine's fast model unless its row names another — it runs behind the user's back, after
+    /// every answer they asked to hear.
+    SpokenSummary,
 }
 
 impl AiTask {
@@ -160,7 +170,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 22] = [
+    pub(crate) const ALL: [AiTask; 24] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -183,6 +193,8 @@ impl AiTask {
         AiTask::Flows,
         AiTask::FlowBuilder,
         AiTask::Logs,
+        AiTask::Meetings,
+        AiTask::SpokenSummary,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -212,6 +224,8 @@ impl AiTask {
             AiTask::Flows => "flows",
             AiTask::FlowBuilder => "flow_builder",
             AiTask::Logs => "logs",
+            AiTask::Meetings => "meetings",
+            AiTask::SpokenSummary => "spoken_summary",
         }
     }
 }
@@ -224,6 +238,8 @@ fn provider_for(conn: &Connection, task: AiTask) -> Result<String, String> {
         .filter(|p| !p.trim().is_empty());
     match routed {
         Some(p) => Ok(p),
+        // A meeting's row, unset, follows the Notes row (which itself falls back to the default).
+        None if task == AiTask::Meetings => provider_for(conn, AiTask::Notes),
         None => active_provider(conn),
     }
 }
@@ -293,6 +309,8 @@ pub(crate) fn load_ai_config_in(
     task: AiTask,
     workspace_id: Option<&str>,
 ) -> Result<AiConfig, String> {
+    // The meetings row follows the Notes row where it says nothing: its provider (`provider_for`),
+    // and below, its model.
     let provider = provider_for(conn, task)?;
     let account = ai_accounts::resolve(conn, &provider, Some(task.key()), workspace_id, ai_accounts::Choice::Auto);
     let engine = ai::engine_as(&provider, account.clone());
@@ -315,10 +333,14 @@ pub(crate) fn load_ai_config_in(
     // Per-task model override → (for commits and chat titles) the engine's dedicated fast model →
     // the base model. The last fallback matters for engines with no fast model of their own (Cline,
     // opencode), whose model depends entirely on what the user configured inside them.
-    let model = match nonblank(get(&format!("{}_model", task.key()))?) {
+    let own = match nonblank(get(&format!("{}_model", task.key()))?) {
+        None if task == AiTask::Meetings => nonblank(get(&format!("{}_model", AiTask::Notes.key()))?),
+        found => found,
+    };
+    let model = match own {
         Some(override_model) => override_model,
         None => match task {
-            AiTask::Commit | AiTask::ChatTitle => {
+            AiTask::Commit | AiTask::ChatTitle | AiTask::SpokenSummary => {
                 let dedicated = engine.commit_message_model();
                 if dedicated.is_empty() { base_model.clone() } else { dedicated.to_string() }
             }
@@ -607,6 +629,12 @@ pub fn default_pipeline_template() -> String {
 #[tauri::command]
 pub fn default_sample_rows_template() -> String {
     ai::DEFAULT_ROWS_PROMPT.to_string()
+}
+
+/// The built-in prompt behind «Resumen hablado» when `spoken_summary_template` is blank.
+#[tauri::command]
+pub fn default_spoken_summary_template() -> String {
+    ai::SPOKEN_SUMMARY_PROMPT.to_string()
 }
 
 /// Snapshots the working tree before an AI action that can write to it, so the run is undoable.
@@ -1410,6 +1438,23 @@ mod tests {
         let failure = ai_classify_failure("QUOTA_EXCEEDED::You've hit your weekly limit · resets Mon 9am".into());
         assert_eq!(failure.kind, ai::AiFailureKind::Quota);
         assert_eq!(failure.resets.as_deref(), Some("Mon 9am"));
+    }
+
+    /// The meetings row says nothing until it is set: it writes with whatever engine and model the
+    /// notes row names — and a model picked on the meetings row alone (its provider still inherited)
+    /// is the one used.
+    #[test]
+    fn the_meetings_row_follows_the_notes_row_until_it_says_otherwise() {
+        let conn = install();
+        queries::set_setting(&conn, "ai_provider_notes", "codex").unwrap();
+        queries::set_setting(&conn, "codex_notes_model", "gpt-notes").unwrap();
+        let config = load_ai_config_in(&conn, AiTask::Meetings, None).unwrap();
+        assert_eq!((config.provider.as_str(), config.model.as_str()), ("codex", "gpt-notes"));
+        queries::set_setting(&conn, "codex_meetings_model", "gpt-meetings").unwrap();
+        let config = load_ai_config_in(&conn, AiTask::Meetings, None).unwrap();
+        assert_eq!((config.provider.as_str(), config.model.as_str()), ("codex", "gpt-meetings"));
+        queries::set_setting(&conn, "ai_provider_meetings", "claude").unwrap();
+        assert_eq!(load_ai_config_in(&conn, AiTask::Meetings, None).unwrap().provider, "claude");
     }
 
     /// A fresh install routes everything to Claude without any setting being written, so the panel

@@ -74,6 +74,14 @@ pub const TABLES: &[&str] = &[
     "note_books",
     "notes",
     "note_templates",
+    // «Reuniones»: a meeting hangs off its note, its lines and speakers off it. Rides with the Notes
+    // switch — a meeting is part of the notebook — and only the text travels: the audio stays on the
+    // machine it was recorded on. Voices are global (no workspace) and go last.
+    "meetings",
+    "meeting_speakers",
+    "meeting_lines",
+    "meeting_recipes",
+    "voice_profiles",
     // The Diagrams workspace, with its own switch for the same reasons the Notes one has. Folders
     // before diagrams: a diagram points at the folder it is filed in. Templates last — they point
     // only at the workspace.
@@ -337,7 +345,7 @@ pub const GROUPS: &[Group] = &[
         // a user trimming a backup wants that choice to be available separately from "everything I
         // ever wrote".
         key: "notes",
-        tables: &["note_books", "notes", "note_templates"],
+        tables: &["note_books", "notes", "note_templates", "meetings", "meeting_speakers", "meeting_lines", "meeting_recipes", "voice_profiles"],
     },
     Group {
         // Its own switch beside `notes` rather than inside it. The argument is the size one: a

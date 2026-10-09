@@ -229,6 +229,10 @@ export const useNotificationStore = create<NotificationState>((set) => ({
         seen: false,
       };
       raiseNative(item);
+      // After the set: a listener that reads the store sees the row it is being told about.
+      queueMicrotask(() => {
+        for (const listener of pushed) listener(item);
+      });
       return { items: [item, ...s.items].slice(0, MAX_ITEMS) };
     }),
 
@@ -239,6 +243,17 @@ export const useNotificationStore = create<NotificationState>((set) => ({
   markAllSeen: () =>
     set((s) => (s.items.some((n) => !n.seen) ? { items: s.items.map((n) => ({ ...n, seen: true })) } : s)),
 }));
+
+const pushed = new Set<(item: AppNotification) => void>();
+
+/**
+ * Hears every row as it is filed — how the reading aloud says a notification without this store
+ * knowing there is a voice (`speechStore` registers itself; importing it here would be a cycle).
+ */
+export function onNotificationPushed(listener: (item: AppNotification) => void): () => void {
+  pushed.add(listener);
+  return () => pushed.delete(listener);
+}
 
 /**
  * Raises the operating system's own notification for a row that was just filed, when the user has

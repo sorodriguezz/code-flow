@@ -59,6 +59,9 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // The quit paths that never touch the close handler: the tray's Quit, ⌘Q, the
         // in-app quit. All three end in `AppHandle::exit`, which is here.
         crate::window_state::save(app);
+        // A meeting being recorded: its last piece closed, queued for the next launch. Early, so
+        // a hang in anything below cannot cost the end of a meeting.
+        crate::commands::meetings_cmd::shutdown(app);
         // The power hold «Evitar que el equipo se suspenda» took, if any — it dies with the process
         // anyway; let go here so the log says so on a normal quit.
         crate::keep_awake::release_on_exit();

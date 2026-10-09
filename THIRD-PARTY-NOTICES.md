@@ -18,7 +18,7 @@ component's own licence wins — which is what section 6 says.
 | What ships | Count |
 |---|---|
 | npm packages (production tree) | 343 resolved versions of 314 packages |
-| Rust crates (resolved for macOS and Windows) | 821 resolved versions of 720 crates |
+| Rust crates (resolved for macOS and Windows) | 839 resolved versions of 738 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 10 |
@@ -55,6 +55,20 @@ the Source Code Form upstream publishes is the Source Code Form inside the insta
 | `dtoa-short` | 0.3.5 | MPL-2.0 | <https://github.com/upsuper/dtoa-short> |
 | `option-ext` | 0.2.0 | MPL-2.0 | <https://github.com/soc/option-ext> |
 | `selectors` | 0.36.1 | MPL-2.0 | <https://github.com/servo/stylo> |
+| `symphonia` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-bundle-flac` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-bundle-mp3` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-aac` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-adpcm` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-alac` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-pcm` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-vorbis` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-core` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-format-isomp4` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-format-ogg` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-format-riff` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-metadata` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-utils-xiph` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
 
 noVNC's core — the VNC client behind the Remote workspace's desktop viewer — is bundled into
 the frontend, minified. Its own `LICENSE.txt` names the files that core took from elsewhere
@@ -638,7 +652,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### Apache-2.0 OR MIT — 425 crates
+### Apache-2.0 OR MIT — 427 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -651,6 +665,7 @@ because there the order carries meaning.
 | `arc-swap` | 1.9.2 | Apache-2.0 OR MIT | <https://github.com/vorner/arc-swap> |
 | `argon2` | 0.5.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/password-hashes/tree/master/argon2> |
 | `arraydeque` | 0.5.1 | Apache-2.0 OR MIT | <https://github.com/andylokandy/arraydeque> |
+| `arrayvec` | 0.7.8 | Apache-2.0 OR MIT | <https://github.com/bluss/arrayvec> |
 | `asn1-rs` | 0.7.2 | Apache-2.0 OR MIT | <https://github.com/rusticata/asn1-rs> |
 | `asn1-rs-derive` | 0.6.0 | Apache-2.0 OR MIT | <https://github.com/rusticata/asn1-rs> |
 | `asn1-rs-impl` | 0.2.0 | Apache-2.0 OR MIT | <https://github.com/rusticata/asn1-rs> |
@@ -681,6 +696,7 @@ because there the order carries meaning.
 | `btoi` | 0.5.0 | Apache-2.0 OR MIT | <https://github.com/niklasf/rust-btoi> |
 | `bumpalo` | 3.20.3 | Apache-2.0 OR MIT | <https://github.com/fitzgen/bumpalo> |
 | `bytecount` | 0.6.9 | Apache-2.0 OR MIT | <https://github.com/llogiq/bytecount> |
+| `bzip2` | 0.6.1 | Apache-2.0 OR MIT | <https://github.com/trifectatechfoundation/bzip2-rs> |
 | `camino` | 1.2.4 | Apache-2.0 OR MIT | <https://github.com/camino-rs/camino> |
 | `cargo-platform` | 0.1.9 | Apache-2.0 OR MIT | <https://github.com/rust-lang/cargo> |
 | `cargo_toml` | 0.22.3 | Apache-2.0 OR MIT | <https://gitlab.com/lib.rs/cargo_toml> |
@@ -1068,7 +1084,7 @@ because there the order carries meaning.
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `zeroize_derive` | 1.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 
-### MIT — 162 crates
+### MIT — 163 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -1103,6 +1119,7 @@ because there the order carries meaning.
 | `ecb` | 0.1.2 | MIT | <https://github.com/magic-akari/ecb> |
 | `email_address` | 0.2.9 | MIT | <https://github.com/johnstonskj/rust-email_address> |
 | `embed-resource` | 3.0.11 | MIT | <https://github.com/nabijaczleweli/rust-embed-resource> |
+| `extended` | 0.1.0 | MIT | <https://github.com/depp/extended-rs> |
 | `fancy-regex` | 0.19.2 | MIT | <https://github.com/fancy-regex/fancy-regex> |
 | `filedescriptor` | 0.8.3 | MIT | <https://github.com/wezterm/wezterm> |
 | `fluent-uri` | 0.4.1 | MIT | <https://github.com/yescallop/fluent-uri-rs> |
@@ -1295,6 +1312,30 @@ because there the order carries meaning.
 | `zune-core` | 0.5.3 | Apache-2.0 OR MIT OR Zlib | <https://github.com/etemesi254/zune-image> |
 | `zune-jpeg` | 0.5.15 | Apache-2.0 OR MIT OR Zlib | <https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg> |
 
+### MPL-2.0 — 19 crates
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `cssparser` | 0.36.0 | MPL-2.0 | <https://github.com/servo/rust-cssparser> |
+| `cssparser-macros` | 0.6.1 | MPL-2.0 | <https://github.com/servo/rust-cssparser> |
+| `dtoa-short` | 0.3.5 | MPL-2.0 | <https://github.com/upsuper/dtoa-short> |
+| `option-ext` | 0.2.0 | MPL-2.0 | <https://github.com/soc/option-ext> |
+| `selectors` | 0.36.1 | MPL-2.0 | <https://github.com/servo/stylo> |
+| `symphonia` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-bundle-flac` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-bundle-mp3` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-aac` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-adpcm` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-alac` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-pcm` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-codec-vorbis` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-core` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-format-isomp4` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-format-ogg` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-format-riff` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-metadata` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+| `symphonia-utils-xiph` | 0.5.5 | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
+
 ### Unicode-3.0 — 18 crates
 
 | Component | Version | Licence (SPDX) | Project |
@@ -1364,16 +1405,6 @@ because there the order carries meaning.
 | `rustls-native-certs` | 0.6.3, 0.7.3, 0.8.4 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/rustls-native-certs> |
 | `rustls-pemfile` | 1.0.4, 2.2.0 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/pemfile> |
 | `sct` | 0.7.1 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/sct.rs> |
-
-### MPL-2.0 — 5 crates
-
-| Component | Version | Licence (SPDX) | Project |
-|---|---|---|---|
-| `cssparser` | 0.36.0 | MPL-2.0 | <https://github.com/servo/rust-cssparser> |
-| `cssparser-macros` | 0.6.1 | MPL-2.0 | <https://github.com/servo/rust-cssparser> |
-| `dtoa-short` | 0.3.5 | MPL-2.0 | <https://github.com/upsuper/dtoa-short> |
-| `option-ext` | 0.2.0 | MPL-2.0 | <https://github.com/soc/option-ext> |
-| `selectors` | 0.36.1 | MPL-2.0 | <https://github.com/servo/stylo> |
 
 ### ISC — 4 crates
 
@@ -1533,6 +1564,12 @@ because there the order carries meaning.
 |---|---|---|---|
 | `borrow-or-share` | 0.2.4 | MIT-0 | <https://github.com/yescallop/borrow-or-share> |
 
+### bzip2-1.0.6 — 1 crate
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `libbz2-rs-sys` | 0.2.5 | bzip2-1.0.6 | <https://github.com/trifectatechfoundation/libbzip2-rs> |
+
 ## Notices the components carry themselves
 
 Some components carry a notices file beside their licence, for code they took from elsewhere or
@@ -1567,6 +1604,30 @@ can point at, and a test there fails the build for any other. The conversions ar
 | Qwen2.5-Coder 0.5B | Apache-2.0 | <https://huggingface.co/ggml-org/Qwen2.5-Coder-0.5B-Q8_0-GGUF> |
 | Qwen2.5-Coder 1.5B | Apache-2.0 | <https://huggingface.co/ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF> |
 | Qwen2.5-Coder 7B | Apache-2.0 | <https://huggingface.co/ggml-org/Qwen2.5-Coder-7B-Q8_0-GGUF> |
+
+### Speech: dictation, meetings and reading aloud
+
+Downloaded only when dictation, meetings or a natural voice are installed from Settings, into your
+own data directory, each pinned by its digest in [`src-tauri/src/dictation/mod.rs`](src-tauri/src/dictation/mod.rs),
+[`src-tauri/src/meetings/mod.rs`](src-tauri/src/meetings/mod.rs) and [`src-tauri/src/speech/piper.rs`](src-tauri/src/speech/piper.rs).
+
+| Component | Licence (SPDX) | Published at |
+|---|---|---|
+| whisper.cpp (the engine library) | MIT | <https://github.com/ggml-org/whisper.cpp> |
+| Whisper models (ggml conversions) | MIT | <https://huggingface.co/ggerganov/whisper.cpp> |
+| Silero VAD (ggml conversion) | MIT | <https://huggingface.co/ggml-org/whisper-vad> |
+| sherpa-onnx (the C library) | Apache-2.0 | <https://github.com/k2-fsa/sherpa-onnx> |
+| ONNX Runtime (shipped inside sherpa-onnx's archive) | MIT | <https://github.com/microsoft/onnxruntime> |
+| 3D-Speaker CAM++ speaker model | Apache-2.0 | <https://github.com/modelscope/3D-Speaker> |
+| espeak-ng (built into sherpa-onnx's library, and its phoneme data) | GPL-3.0-or-later | <https://github.com/espeak-ng/espeak-ng> |
+| Piper voice es_MX «claude» | Apache-2.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
+| Piper voice es_ES «davefx» | CC0-1.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
+| Piper voice es_AR «daniela» | CC-BY-SA-4.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
+| Piper voice en_US «ljspeech» (LJ Speech recordings) | LicenseRef-PublicDomain | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
+| Piper voice en_US «norman» (LibriVox recordings) | LicenseRef-PublicDomain | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
+| Piper voice en_US «sam» | Apache-2.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
+| Piper voice en_GB «cori» (LibriVox recordings) | LicenseRef-PublicDomain | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
+| Piper voice en_GB «northern_english_male» | CC-BY-SA-4.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
 
 ## Licence texts
 
