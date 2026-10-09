@@ -16,9 +16,12 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Permission {
+    /// Only macOS reads it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Granted,
     Denied,
     /// macOS has not asked yet: the first recording will.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Undetermined,
     /// Nothing to read on this platform — the input itself will say.
     Unknown,

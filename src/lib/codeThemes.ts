@@ -14,7 +14,7 @@
  */
 
 import { RAINBOW_COLUMNS } from "./csvDialect";
-import { glassBoost } from "./windowGlass";
+import { contrastHex, glassBoost } from "./windowGlass";
 
 export interface CodeThemeUi {
   bg: string;
@@ -432,6 +432,214 @@ export const DARK_THEMES: CodeTheme[] = [
       "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
     ],
   },
+  {
+    id: "omni-owl",
+    name: "Omni Owl",
+    mode: "dark",
+    // One violet-black for the editor, the side bar and the panel alike; the tab strip and status bar
+    // are the only step, and the line highlight the only lift.
+    ui: {
+      bg: "#13111b",
+      surface: "#15121e",
+      surfaceRaised: "#201b2d",
+      border: "#41414d",
+      text: "#e1e1e6",
+      // The inactive tabs' lavender, without the alpha the theme lays it on with.
+      textMuted: "#988bc7",
+    },
+    tokens: {
+      comment: "#746699",
+      keyword: "#ff79c6",
+      string: "#e7de79",
+      number: "#78d1e1",
+      fn: "#67e480",
+      type: "#988bc7",
+      variable: "#e1e1e6",
+      constant: "#78d1e1",
+      operator: "#ff79c6",
+      tag: "#ff79c6",
+      attribute: "#67e480",
+    },
+    // Terminal: as published in Omni Owl.
+    ansi: [
+      "#201b2d", "#ff79c6", "#67e480", "#e7de79", "#78d1e1", "#988bc7", "#a1efe4", "#e1e1e6",
+      "#626483", "#ed4556", "#00f769", "#e7de79", "#78d1e1", "#988bc7", "#a4ffff", "#f7f7fb",
+    ],
+  },
+  {
+    id: "panda-syntax",
+    name: "Panda Syntax",
+    mode: "dark",
+    ui: {
+      bg: "#292a2b",
+      surface: "#242526",
+      surfaceRaised: "#31353a",
+      border: "#373b41",
+      text: "#e6e6e6",
+      textMuted: "#bbbbbb",
+    },
+    tokens: {
+      comment: "#676b79",
+      keyword: "#ff75b5",
+      string: "#19f9d8",
+      number: "#ffb86c",
+      fn: "#6fc1ff",
+      type: "#19f9d8",
+      variable: "#e6e6e6",
+      constant: "#ffb86c",
+      operator: "#e6e6e6",
+      tag: "#ff2c6d",
+      attribute: "#ffb86c",
+    },
+    // Terminal: as published in Panda Syntax, which names fifteen — black is VS Code's own, as it is
+    // there.
+    ansi: [
+      "#000000", "#ff2c6d", "#19f9d8", "#ffb86c", "#45a9f9", "#ff75b5", "#b084eb", "#cdcdcd",
+      "#757575", "#ff2c6d", "#19f9d8", "#ffcc95", "#6fc1ff", "#ff9ac1", "#bcaafe", "#e6e6e6",
+    ],
+  },
+  {
+    id: "pink-cat-boo",
+    name: "Pink Cat Boo",
+    mode: "dark",
+    ui: {
+      bg: "#202330",
+      // The side bar and tab strip, a step lighter than the editor.
+      surface: "#2d2f42",
+      // The line highlight, which the theme paints the same plum as its selection.
+      surfaceRaised: "#472541",
+      // The tabs' hairline (`#9498a144`) laid onto the side bar it divides.
+      border: "#484b5b",
+      text: "#fff0f5",
+      textMuted: "#9498a1",
+    },
+    tokens: {
+      comment: "#6d7a72",
+      keyword: "#ff4791",
+      string: "#fae8b6",
+      number: "#ff38a2",
+      fn: "#ffc85b",
+      // `support.type`: the theme names no colour for a declared type.
+      type: "#94afe8",
+      variable: "#eba4ac",
+      constant: "#58b896",
+      operator: "#ff4791",
+      tag: "#fa508c",
+      attribute: "#e6a1ff",
+    },
+    // Terminal: Pink Cat Boo names one terminal colour, white as #ffffff; the other fifteen are VS
+    // Code's own, as they are there.
+    ansi: [
+      "#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#ffffff",
+      "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#e5e5e5",
+    ],
+  },
+  {
+    id: "black",
+    name: "Black",
+    mode: "dark",
+    // Black everywhere, as the theme is: the editor, the side bar, the panel, the menus.
+    ui: {
+      bg: "#000000",
+      surface: "#000000",
+      // The hovered row and the active tab — the only grey the theme lifts anything onto.
+      surfaceRaised: "#222222",
+      // The selection grey rather than the #222 hairline: `monacoSetup` paints the selection from
+      // this value, and #222 would make it the line highlight's twin.
+      border: "#353535",
+      text: "#bfd4e1",
+      // The current line's number. The other lines' #666 sits at 3.7:1 on black — fine in a gutter,
+      // too faint for every muted label in the app.
+      textMuted: "#999999",
+    },
+    tokens: {
+      comment: "#729098",
+      keyword: "#e9ca5c",
+      string: "#cee397",
+      number: "#b5cea8",
+      fn: "#e9aeba",
+      type: "#b5b5ad",
+      variable: "#63b0c6",
+      constant: "#e9ca5c",
+      operator: "#d4d4d4",
+      tag: "#e9ca5c",
+      attribute: "#63b0c6",
+    },
+    // No `ansi`: Black names no terminal colours, so the terminal takes VS Code's defaults, as VS Code
+    // does.
+  },
+  {
+    id: "midnight-synth",
+    name: "Midnight Synth",
+    mode: "dark",
+    // Several of the theme's colours carry an alpha, which these values can't (see the test); each is
+    // the colour it paints, laid onto the editor as VS Code lays it.
+    ui: {
+      bg: "#0c0020",
+      surface: "#07071b",
+      // The hovered row's violet.
+      surfaceRaised: "#180043",
+      // The selection wash (`#ffffff20`): the theme's hairlines are neon (#6d2980, #541ec8), and
+      // `monacoSetup` paints the selection from this value too.
+      border: "#2a203c",
+      text: "#dbd4fa",
+      textMuted: "#8e85b0",
+    },
+    tokens: {
+      comment: "#856fa3",
+      keyword: "#ff57f7",
+      string: "#d2c1bf",
+      number: "#ff607b",
+      fn: "#57dae4",
+      type: "#fe4450",
+      variable: "#c368ff",
+      constant: "#ff7164",
+      operator: "#efeef0",
+      tag: "#b78aff",
+      attribute: "#77b7ff",
+    },
+    // Terminal: as published in Midnight Synth, which names twelve — black, white and their bright
+    // twins are VS Code's own, as they are there.
+    ansi: [
+      "#000000", "#d52132", "#72f1b8", "#f9f072", "#2544ce", "#ff7edb", "#03edf9", "#e5e5e5",
+      "#666666", "#fe4450", "#62cca1", "#53d49e", "#039ff9", "#ff7edb", "#66f7ff", "#e5e5e5",
+    ],
+  },
+  {
+    id: "vercel",
+    name: "Vercel",
+    mode: "dark",
+    ui: {
+      bg: "#000000",
+      surface: "#010101",
+      // The tab strip and the hovered row.
+      surfaceRaised: "#0a0a0a",
+      border: "#454d54",
+      text: "#dce3ea",
+      // The comments' grey. The inactive tabs' (`#dce3ea88`, #75797d once laid onto black) is darker
+      // than it, and a doc comment painted in that would read quieter than a plain one — see
+      // `tokenRulesFor`.
+      textMuted: "#888888",
+    },
+    tokens: {
+      comment: "#888888",
+      keyword: "#f75f8f",
+      string: "#62c073",
+      number: "#ffffff",
+      fn: "#bf7af0",
+      type: "#ffffff",
+      variable: "#dce3ea",
+      constant: "#43aaf9",
+      operator: "#43aaf9",
+      tag: "#62c073",
+      attribute: "#bf7af0",
+    },
+    // Terminal: as published in Vercel Theme — yellow included, which it gives the blue's #43aaf9.
+    ansi: [
+      "#34393e", "#e61f44", "#62c073", "#43aaf9", "#43aaf9", "#f75f8f", "#b267e6", "#dce3ea",
+      "#454d54", "#e61f44", "#b7f0e5", "#a7d1f5", "#a7d1f5", "#f75f8f", "#d7c9f0", "#dce3ea",
+    ],
+  },
 ];
 
 export const LIGHT_THEMES: CodeTheme[] = [
@@ -813,6 +1021,211 @@ export const LIGHT_THEMES: CodeTheme[] = [
       "#797593", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
     ],
   },
+  {
+    id: "noctis-hibernus",
+    name: "Noctis Hibernus",
+    mode: "light",
+    ui: {
+      bg: "#f4f6f6",
+      surface: "#e7f2f3",
+      surfaceRaised: "#e0eff1",
+      border: "#b2d2e6",
+      text: "#005661",
+      // The suggest widget's grey, not the side bar's #71838e: that sits at 3.6:1 on this background,
+      // and this one — the theme's too — at 4.1:1.
+      textMuted: "#6a7a7c",
+    },
+    tokens: {
+      comment: "#8ca6a6",
+      keyword: "#ff5792",
+      string: "#00b368",
+      number: "#5842ff",
+      fn: "#0095a8",
+      type: "#0094f0",
+      variable: "#fa8900",
+      constant: "#5842ff",
+      operator: "#ff5792",
+      tag: "#e64100",
+      attribute: "#a88c00",
+    },
+    // Terminal: as published in Noctis Hibernus.
+    ansi: [
+      "#003b42", "#e34e1c", "#00b368", "#f49725", "#0094f0", "#ff5792", "#00bdd6", "#8ca6a6",
+      "#004d57", "#ff4000", "#00d17a", "#ff8c00", "#0fa3ff", "#ff6b9f", "#00cbe6", "#bbc3c4",
+    ],
+  },
+  {
+    id: "light-pink",
+    name: "Light Pink",
+    mode: "light",
+    ui: {
+      bg: "#f5f5f5",
+      surface: "#f5f0f3",
+      // The line highlight's lavender.
+      surfaceRaised: "#ede8fd",
+      // The selection, which `monacoSetup` paints from this value.
+      border: "#d6d1e8",
+      // The theme names no text colour of its own, only VS Code's grey for the workbench; this is its
+      // cursor, the darkest colour it does name.
+      text: "#54494b",
+      // The line numbers and the title bar's text.
+      textMuted: "#736a6d",
+    },
+    tokens: {
+      comment: "#ba9ab9",
+      keyword: "#e17092",
+      string: "#1f6e89",
+      number: "#b08b35",
+      fn: "#9d3c5e",
+      type: "#9466aa",
+      variable: "#9466aa",
+      constant: "#b08b35",
+      operator: "#777777",
+      tag: "#e17092",
+      attribute: "#8190a0",
+    },
+    // No `ansi`: Light Pink names no terminal colours, so the terminal takes VS Code's defaults, as VS
+    // Code does.
+  },
+  {
+    id: "dark-magic-light",
+    name: "Dark Magic Light",
+    mode: "light",
+    // Lavender in two strengths: the editor pale, and the side bar, panel, menus and widgets deeper.
+    ui: {
+      bg: "#eaeaff",
+      surface: "#c6c6ff",
+      surfaceRaised: "#c6c6ff",
+      // The title bar's and the inactive tabs' violet. The theme's own hairlines are near-black
+      // (#0f0f17), and `monacoSetup` paints the selection from this value.
+      border: "#a0a0fb",
+      text: "#3e3f54",
+      // The side bar's ink (`#000a9fdd`) laid onto the side bar: the theme writes its labels in blue.
+      textMuted: "#1a23ac",
+    },
+    tokens: {
+      // `#23262c62`, laid onto the editor.
+      comment: "#9e9fae",
+      keyword: "#1b27db",
+      string: "#ff00fb",
+      number: "#ff006c",
+      fn: "#9900ff",
+      type: "#ea750e",
+      variable: "#27cfa0",
+      constant: "#ff006c",
+      operator: "#ff6c00",
+      tag: "#27cfa0",
+      attribute: "#ff006c",
+    },
+    // Terminal: as published in Dark Magic Light.
+    ansi: [
+      "#111111", "#d90000", "#00ff28", "#cba402", "#009fff", "#ff003c", "#00ffff", "#e3e3ff",
+      "#333333", "#ff0000", "#00ff80", "#ffce00", "#004bff", "#ff006b", "#00ffff", "#f0f0ff",
+    ],
+  },
+  {
+    id: "escook-light-soft",
+    name: "escook Light Soft",
+    mode: "light",
+    ui: {
+      bg: "#fafafa",
+      surface: "#f5f5f5",
+      surfaceRaised: "#ffffff",
+      border: "#dcdee1",
+      text: "#27292f",
+      // The current line's number (`#27292fcc`) laid onto the editor; the others' `66` is 2.5:1.
+      textMuted: "#515358",
+    },
+    tokens: {
+      comment: "#999999",
+      keyword: "#ff3333",
+      // `#1794faf0`, laid onto the editor.
+      string: "#249afa",
+      number: "#0025f5",
+      fn: "#1da11d",
+      type: "#1290bf",
+      variable: "#27292f",
+      constant: "#de5cff",
+      operator: "#ff3333",
+      tag: "#f92672",
+      attribute: "#f77c00",
+    },
+    // Terminal: as published in escook Light Soft.
+    ansi: [
+      "#000000", "#ea6c6d", "#99bf4d", "#eca944", "#3199e1", "#9e75c7", "#46ba94", "#c7c7c7",
+      "#686868", "#f07171", "#86b300", "#f2ae49", "#399ee6", "#a37acc", "#4cbf99", "#d1d1d1",
+    ],
+  },
+  {
+    id: "pink-candy-light",
+    name: "Pink Candy Light",
+    mode: "light",
+    // Tinted, not as published: the theme's own surfaces are white and grey (#fafbfc, #f3f3f3,
+    // #cecece), its pink only on the status bar, the focus ring and the current line number — and in
+    // an app whose accent stays the user's, none of that would show. So the four are that pink
+    // (#ff1277) laid onto white at 4%, 7%, 10% (the strength of the theme's own selection) and 25%.
+    ui: {
+      bg: "#fff6fa",
+      surface: "#ffeef5",
+      surfaceRaised: "#ffe7f1",
+      border: "#ffc4dd",
+      text: "#565869",
+      // The operators' grey: the theme's own muted #999999 sits at 2.8:1 on this background.
+      textMuted: "#777777",
+    },
+    tokens: {
+      comment: "#adb1c2",
+      keyword: "#f767bb",
+      string: "#c69613",
+      number: "#ff5c57",
+      fn: "#09a1ed",
+      type: "#2dae58",
+      variable: "#565869",
+      constant: "#27b0ac",
+      operator: "#777777",
+      tag: "#f767bb",
+      attribute: "#27b0ac",
+    },
+    // Terminal: as published in Pink Candy Light.
+    ansi: [
+      "#fafbfc", "#ff5c57", "#2dae58", "#c69613", "#09a1ed", "#c75af3", "#27b0ac", "#565869",
+      "#8b8fa0", "#db3839", "#1e9347", "#a1790c", "#1684c2", "#a853cb", "#288d8a", "#343545",
+    ],
+  },
+  {
+    id: "i-light",
+    name: "i Light",
+    mode: "light",
+    ui: {
+      bg: "#ffffff",
+      surface: "#f4f6fc",
+      // The line highlight (`#0064ff0c`), laid onto the editor.
+      surfaceRaised: "#f3f8ff",
+      border: "#e7ecf2",
+      text: "#000000",
+      textMuted: "#6b7a88",
+    },
+    // Minimal by design: code is black, set apart by bold and italic rather than by hue, with one grey
+    // for strings and a paler one for comments.
+    tokens: {
+      comment: "#bec9d3",
+      keyword: "#000000",
+      string: "#6b7a88",
+      number: "#000000",
+      fn: "#000000",
+      type: "#000000",
+      variable: "#000000",
+      constant: "#000000",
+      operator: "#000000",
+      tag: "#000000",
+      attribute: "#000000",
+    },
+    // Terminal: as published in i Light, which repeats the eight for the bright ones.
+    ansi: [
+      "#000000", "#ff0032", "#00ff68", "#ffca00", "#004bff", "#7d46fc", "#00d2ff", "#ffffff",
+      "#000000", "#ff0032", "#00ff68", "#ffca00", "#004bff", "#7d46fc", "#00d2ff", "#ffffff",
+    ],
+  },
 ];
 
 export const ALL_THEMES = [...DARK_THEMES, ...LIGHT_THEMES];
@@ -853,10 +1266,11 @@ export interface TokenRule {
  * picked, and every colour is one the theme's author already made readable on its background. The
  * first column is the plain text colour, as it is there.
  *
- * Nine of the shipped schemes have only six distinct token colours, and five more have seven. The gap
- * is filled with the comment colour in the fourth slot (Rainbow CSV's own fourth column is its
- * comment scope) and, after that, even mixes of two neighbouring palette colours — colours the theme
- * does not name but is made of, so they sit in it and stay readable on its background.
+ * Eleven of the shipped schemes have only six distinct token colours, nine more have seven, and Omni
+ * Owl five. The gap is filled with the comment colour in the fourth slot (Rainbow CSV's own fourth
+ * column is its comment scope) and, after that, even mixes of two neighbouring palette colours —
+ * colours the theme does not name but is made of, so they sit in it and stay readable on its
+ * background.
  *
  * The one colour no column may take is the muted text colour: it is what the separators are
  * painted in (`delimiter`), and a column wearing it vanishes into them. GitHub Dark's comments are
@@ -896,8 +1310,21 @@ export function rainbowPalette(theme: CodeTheme): string[] {
   const pads = distinct([t.comment, ...blends]);
   if (palette.length < RAINBOW_COLUMNS && pads.length > 0) palette.splice(3, 0, pads.shift()!);
   while (palette.length < RAINBOW_COLUMNS && pads.length > 0) palette.push(pads.shift()!);
-  // Only reachable by a scheme far sparser than any shipped one: repeat from the start rather than
-  // leave a slot to Monaco's fallback.
+  // A scheme that sets code apart by weight rather than hue runs out here — i Light is black, one grey
+  // for strings and a paler one for comments. Its terminal colours come next: still the author's own,
+  // but drawn for a shell rather than for this background, so one that does not read on it (3:1) is
+  // taken halfway to the text colour first, the way the blends above are made.
+  if (palette.length < RAINBOW_COLUMNS) {
+    const terminal = (theme.ansi ?? []).map((color) =>
+      contrastHex(color, theme.ui.bg) >= 3 ? color : mixHex(color, theme.ui.text),
+    );
+    for (const color of distinct(terminal)) {
+      if (palette.length >= RAINBOW_COLUMNS) break;
+      palette.push(color);
+    }
+  }
+  // Only reachable by a scheme sparser still, with no terminal colours of its own: repeat from the
+  // start rather than leave a slot to Monaco's fallback.
   for (let i = 0; palette.length < RAINBOW_COLUMNS; i += 1) palette.push(palette[i]);
   return palette;
 }
@@ -922,7 +1349,7 @@ export function tokenRulesFor(theme: CodeTheme): TokenRule[] {
     // ObjectScript class those are opposite things, and the doc blocks are long enough that telling
     // them apart pays. `ui.textMuted` rather than a new palette role: it is brighter than `comment` in
     // every dark scheme and darker in every light one, so a doc block reads as *more* present than
-    // dead code in both directions — without editing 24 palettes.
+    // dead code in both directions — without editing 36 palettes.
     { token: "comment.doc", foreground: theme.ui.textMuted, fontStyle: "italic" },
     { token: "keyword", foreground: theme.tokens.keyword },
     { token: "keyword.json", foreground: theme.tokens.constant },

@@ -152,7 +152,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     // are a visit of their own.
     tabs: [
       { id: "look", labelKey: "settings.tabModeColor", icon: SunMoon, searchKey: "settings.searchTermsModeColor" },
-      { id: "themes", labelKey: "settings.editorThemes", hintKey: "settings.codeThemeHint", icon: Palette, searchKey: "settings.searchTermsThemes" },
+      { id: "themes", labelKey: "settings.editorThemes", icon: Palette, searchKey: "settings.searchTermsThemes" },
     ],
   },
   {

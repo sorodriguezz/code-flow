@@ -93,6 +93,11 @@ function over(top: Rgb, alpha: number, under: Rgb): Rgb {
   return top.map((channel, i) => alpha * channel + (1 - alpha) * under[i]) as unknown as Rgb;
 }
 
+/** WCAG's contrast ratio between two `#rrggbb` colours. */
+export function contrastHex(a: string, b: string): number {
+  return contrast(srgb(a), srgb(b));
+}
+
 /** WCAG's contrast ratio. */
 function contrast(a: Rgb, b: Rgb): number {
   const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);

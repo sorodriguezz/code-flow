@@ -91,6 +91,7 @@ fn app_name(app: &AppHandle) -> String {
 }
 
 /// The executable the plugin registers: `current_exe`, canonical — as it does.
+#[cfg(target_os = "macos")]
 fn current_program() -> Option<String> {
     std::env::current_exe()
         .ok()
@@ -100,6 +101,7 @@ fn current_program() -> Option<String> {
 
 /// Gatekeeper runs an app that was opened where it was downloaded from a randomized read-only copy;
 /// that path is gone by the next login.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn translocated(program: &str) -> bool {
     program.contains("/AppTranslocation/")
 }

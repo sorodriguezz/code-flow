@@ -3321,7 +3321,6 @@ export const es = {
   "settings.general": "General",
   "settings.language": "Idioma",
   "settings.codeTheme": "Tema de color",
-  "settings.codeThemeHint": "Un esquema por modo — la app y el editor toman sus colores. Al cambiar entre claro y oscuro se usa el esquema de ese modo.",
   "settings.editorThemes": "Temas del editor",
   "settings.accentPreviewButton": "Botón",
   "settings.accentPreviewSelected": "Seleccionado",

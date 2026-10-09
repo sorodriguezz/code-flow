@@ -3357,7 +3357,6 @@ const en = {
   "settings.general": "General",
   "settings.language": "Language",
   "settings.codeTheme": "Color theme",
-  "settings.codeThemeHint": "One scheme per mode — the app and the editor take its colors. Switching between light and dark swaps to that mode's scheme.",
   "settings.editorThemes": "Editor themes",
   "settings.accentPreviewButton": "Button",
   "settings.accentPreviewSelected": "Selected",

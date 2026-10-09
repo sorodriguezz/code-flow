@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, Laptop, Moon, Sun } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Laptop, Moon, Sun } from "lucide-react";
 import { useThemeStore } from "../../state/themeStore";
 import { useGlassStore } from "../../state/glassStore";
 import { findTheme, themesFor, type CodeThemeUi } from "../../lib/codeThemes";
@@ -300,6 +300,36 @@ function ThemeGrid({ mode }: { mode: "light" | "dark" }) {
   );
 }
 
+/** One mode's schemes under a heading that folds them away. The mode on screen is the one being
+ * edited, so it opens unfolded and the other starts folded — its heading still names the scheme in
+ * force beside it, so nothing has to be opened just to check it. */
+function ModeThemes({ mode, defaultOpen }: { mode: "light" | "dark"; defaultOpen: boolean }) {
+  const t = useT();
+  const [open, setOpen] = useState(defaultOpen);
+  const Chevron = open ? ChevronDown : ChevronRight;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className={`flex w-full items-center gap-2 text-left text-[13px] font-semibold text-[var(--cf-text)] ${
+          open ? "mb-2.5" : ""
+        }`}
+      >
+        <Chevron size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+        {mode === "dark" ? <Moon size={14} /> : <Sun size={14} />}
+        {t(mode === "dark" ? "settings.forDarkMode" : "settings.forLightMode")}
+        <span className="ml-auto flex min-w-0 items-center gap-1.5 font-normal">
+          <ThemeSummary mode={mode} />
+        </span>
+      </button>
+      {open && <ThemeGrid mode={mode} />}
+    </div>
+  );
+}
+
 export function ThemeSettings() {
   const t = useT();
   const resolved = useThemeStore((s) => s.resolved);
@@ -335,19 +365,10 @@ export function ThemeSettings() {
 
           {tab === "themes" && (
             <div className="space-y-5">
+              {/* Keyed on the mode on screen as well, so the folds follow it when it flips while
+                  this tab is open — the system switching at sunset. */}
               {modes.map((mode) => (
-                <div key={mode}>
-                  {/* The scheme in force is named beside its heading, so it reads without hunting
-                      the grid for the ticked card. */}
-                  <p className="mb-2.5 flex items-center gap-2 text-[13px] font-semibold text-[var(--cf-text)]">
-                    {mode === "dark" ? <Moon size={14} /> : <Sun size={14} />}
-                    {t(mode === "dark" ? "settings.forDarkMode" : "settings.forLightMode")}
-                    <span className="ml-auto flex min-w-0 items-center gap-1.5 font-normal">
-                      <ThemeSummary mode={mode} />
-                    </span>
-                  </p>
-                  <ThemeGrid mode={mode} />
-                </div>
+                <ModeThemes key={`${mode}-${resolved}`} mode={mode} defaultOpen={mode === resolved} />
               ))}
             </div>
           )}
