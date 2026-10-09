@@ -106,20 +106,38 @@ async fn fail(status: reqwest::StatusCode, body: String) -> String {
     format!("Jira devolvió {status}: {}", detail.join("; "))
 }
 
-async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, auth: &BoardAuth) -> Result<T, String> {
+/// A failed read, with the HTTP status kept apart from the message.
+///
+/// Most callers only ever show the message, and [`get_json`] hands them exactly that. The status is
+/// for the one decision a message cannot carry: "this host has no such endpoint" (a 404, which is
+/// how a Server or Data Center install answers a Cloud-only route) is a reason to try the older
+/// route, while every other failure — a bad token, a malformed query — would fail there too and
+/// is reported as it is.
+struct Failure {
+    /// `None` when the request never got an answer, or got one that was not the JSON expected.
+    status: Option<reqwest::StatusCode>,
+    message: String,
+}
+
+async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str, auth: &BoardAuth) -> Result<T, Failure> {
     let res = client()
         .get(url)
         .header("Authorization", auth.header())
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| format!("no se pudo conectar con Jira: {e}"))?;
+        .map_err(|e| Failure { status: None, message: format!("no se pudo conectar con Jira: {e}") })?;
     let status = res.status();
     let body = res.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(fail(status, body).await);
+        return Err(Failure { status: Some(status), message: fail(status, body).await });
     }
-    serde_json::from_str(&body).map_err(|e| format!("respuesta inesperada de Jira: {e}"))
+    serde_json::from_str(&body)
+        .map_err(|e| Failure { status: None, message: format!("respuesta inesperada de Jira: {e}") })
+}
+
+async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, auth: &BoardAuth) -> Result<T, String> {
+    fetch_json(url, auth).await.map_err(|failure| failure.message)
 }
 
 async fn send_json(
@@ -754,6 +772,9 @@ struct RawPerson {
     display_name: String,
 }
 
+/// A page of search results — the same `issues` array on both routes. The enhanced route adds
+/// `nextPageToken` and `isLast` where the old one had `startAt` and `total`; neither is read, since
+/// one page of [`MAX_CHILDREN`] is all that is ever asked for.
 #[derive(Deserialize)]
 struct RawSearch {
     #[serde(default)]
@@ -821,20 +842,58 @@ pub async fn get_issue(site: &str, key: &str, auth: &BoardAuth) -> Result<WorkIt
     })
 }
 
+/// Which JQL search endpoint a query goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchRoute {
+    /// `/search/jql` — the only one Jira Cloud still serves. The old route answers **410 Gone**
+    /// there, and has since Atlassian retired it in 2025.
+    Enhanced,
+    /// `/search` — what Server and Data Center speak, and all they speak: neither ever shipped
+    /// `/search/jql`, and both answer it with a 404.
+    Legacy,
+}
+
+/// The search for an issue's children, on either route.
+///
+/// Both stay on REST v2, for the reason the module header gives: v2's `/search/jql` still returns the
+/// description as the string it was written as, where v3's would be ADF. The fields are named
+/// outright because the enhanced route returns only ids unless told otherwise, and the old route's
+/// habit of sending everything is not one the new one kept.
+fn children_search_url(site: &str, key: &str, route: SearchRoute) -> String {
+    let path = match route {
+        SearchRoute::Enhanced => "search/jql",
+        SearchRoute::Legacy => "search",
+    };
+    format!(
+        "{site}/rest/api/2/{path}?jql={}&maxResults={MAX_CHILDREN}\
+         &fields=summary,status,issuetype,description,assignee",
+        encode_segment(&format!("parent={key}"))
+    )
+}
+
 /// The issue's children, by query rather than from its `subtasks` array.
 ///
 /// The array names them but carries no description and no assignee, and the review screen shows
 /// both. One search returns the lot with every field already filled in, and it also picks up the
 /// children of a company-managed project, which are ordinary issues linked by parent rather than
 /// sub-tasks and never appear in that array at all.
+///
+/// **The enhanced route first, the old one only on a 404.** This used to ask the old route alone,
+/// and once Cloud retired it every Cloud issue came back with no children — silently, because
+/// [`get_issue`] treats a failed children query as "none". The review screen then proposed tasks
+/// the issue already had. Falling back on a 404 rather than on any failure keeps a Cloud error
+/// (a bad token, a JQL the site refuses) from being replaced by the old route's 410, which would
+/// say nothing useful. One thing the enhanced route does differently: its index is eventually
+/// consistent, so a child created a moment ago may take a few seconds to be listed.
 async fn children_of(site: &str, key: &str, auth: &BoardAuth) -> Result<Vec<WorkItemChild>, String> {
-    let jql = format!("parent={key}");
-    let url = format!(
-        "{site}/rest/api/2/search?jql={}&maxResults={MAX_CHILDREN}\
-         &fields=summary,status,issuetype,description,assignee",
-        encode_segment(&jql)
-    );
-    let found: RawSearch = get_json(&url, auth).await?;
+    let enhanced = children_search_url(site, key, SearchRoute::Enhanced);
+    let found: RawSearch = match fetch_json(&enhanced, auth).await {
+        Ok(found) => found,
+        Err(failure) if failure.status == Some(reqwest::StatusCode::NOT_FOUND) => {
+            get_json(&children_search_url(site, key, SearchRoute::Legacy), auth).await?
+        }
+        Err(failure) => return Err(failure.message),
+    };
     Ok(found
         .issues
         .into_iter()
@@ -1054,6 +1113,34 @@ mod tests {
         assert_eq!(next_project_page(&project_page(3, None, None), 50), None);
         // An empty page ends it whatever else it claims.
         assert_eq!(next_project_page(&project_page(0, Some(false), Some(500)), 50), None);
+    }
+
+    /// Cloud answers the old route with 410 Gone, so the enhanced one has to be the first asked; the
+    /// old one survives only for self-hosted installs. Both stay on v2 so descriptions stay strings.
+    #[test]
+    fn children_are_searched_on_the_route_each_host_still_serves() {
+        let enhanced = children_search_url("https://acme.atlassian.net", "WEB-42", SearchRoute::Enhanced);
+        assert!(enhanced.starts_with("https://acme.atlassian.net/rest/api/2/search/jql?jql=parent%3DWEB-42&"));
+        // The enhanced route returns only ids unless the fields are named.
+        assert!(enhanced.ends_with("&fields=summary,status,issuetype,description,assignee"));
+
+        let legacy = children_search_url("https://jira.interno.local", "WEB-42", SearchRoute::Legacy);
+        assert!(legacy.starts_with("https://jira.interno.local/rest/api/2/search?jql=parent%3DWEB-42&"));
+    }
+
+    /// The enhanced route's page, as Cloud sends it: token paging instead of `startAt`/`total`, and on
+    /// v2 a description that is still a plain string rather than ADF.
+    #[test]
+    fn an_enhanced_search_page_reads_like_the_old_one() {
+        let page: RawSearch = serde_json::from_str(
+            r#"{"issues":[{"id":"10043","key":"WEB-43","fields":{"summary":"Validar CVV","description":"Texto plano","status":{"name":"To Do"},"issuetype":{"name":"Subtarea"},"assignee":null}}],"nextPageToken":"Ch8jU3RyaW5n","isLast":false}"#,
+        )
+        .unwrap();
+        assert_eq!(page.issues.len(), 1);
+        let child = &page.issues[0];
+        assert_eq!(child.key, "WEB-43");
+        assert_eq!(child.fields.description.as_deref(), Some("Texto plano"));
+        assert!(child.fields.assignee.is_none());
     }
 
     /// The wire shape as Cloud sends it.
