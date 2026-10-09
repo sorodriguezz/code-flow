@@ -510,6 +510,12 @@ windows-sys = { version = "0.60", features = [
 ] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# «Dictar»'s microphone, read through the system's own audio API (CoreAudio, WASAPI) instead of the
+# webview's `getUserMedia` — whose WebView2 prompt read as a browser asking for the microphone, and
+# whose device list has no names until that prompt is answered (see `dictation::capture`). On macOS
+# it is built on the objc2 crates already in the tree (no bindgen), on Windows on the `windows` 0.62
+# the tree already compiles. Not on Linux: alsa-sys would need libasound, for a platform not shipped.
+cpal = "0.18"
 # The native half of the see-through window (`glass.rs`): vibrancy on macOS, the DWM backdrops on
 # Windows. Tauri already depends on this exact version on both platforms, so naming it compiles
 # nothing new — it is here so the effect view can be *removed* again, which Tauri's own
@@ -524,6 +530,10 @@ keyring = { version = "3", features = ["apple-native"] }
 # compiles nothing new.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSProcessInfo", "NSString"] }
+# The completion handler `AVCaptureDevice requestAccessForMediaType:` takes — the system's own
+# microphone question, asked by «Dictar» before it opens the input (`dictation::permission`).
+# Already in the tree at this version (wry is built on it), so this compiles nothing new.
+block2 = "0.6"
 # The universal-apple-darwin release build cross-compiles the x86_64 slice on an
 # aarch64 GitHub runner; git2's default OpenSSL backend then fails to find a
 # matching OpenSSL via pkg-config for the non-host target ("could not find

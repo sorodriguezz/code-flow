@@ -268,8 +268,10 @@ fn clean(text: &str) -> String {
     without.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Little-endian 16-bit PCM as the samples whisper takes.
-pub fn samples_of(pcm: &[u8]) -> Vec<f32> {
+/// Little-endian 16-bit PCM as the samples whisper takes — a WAV's body, for the live test below.
+/// (Recordings arrive as samples already: see `capture`.)
+#[cfg(test)]
+fn samples_of(pcm: &[u8]) -> Vec<f32> {
     pcm.chunks_exact(2).map(|pair| f32::from(i16::from_le_bytes([pair[0], pair[1]])) / 32768.0).collect()
 }
 

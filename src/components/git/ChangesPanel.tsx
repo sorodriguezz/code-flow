@@ -54,6 +54,7 @@ import { SecretScanModal } from "./SecretScanModal";
 import { useUiStore } from "../../state/uiStore";
 import { openAnalysis } from "../../lib/aiPanelNav";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { riseDelay } from "../../lib/rise";
 import { useMinimumSpin } from "../../lib/useMinimumSpin";
@@ -783,21 +784,38 @@ export function ChangesPanel({
     if (!repoPath) return;
     setAiError(null);
     setAiBusy(true);
+    // Read before the first await: the account a commit runs as can depend on the workspace, and
+    // the chip beside Commit resolved it against this one — and the status bar's row has to keep
+    // naming where the work belongs after the user has moved on.
+    const { activeWorkspaceId: workspaceId, activeProject } = useWorkspaceStore.getState();
+    const project = activeProject();
+    // The id is what makes this run exist to the rest of the app: without one the backend's
+    // `ai_runs::scoped` short-circuits — no registry entry, no output, nothing to stop — and the
+    // status bar never listed it, the same gap the pull request description had.
+    const runId = newRunId("commit-msg");
+    const branch = status.current_branch;
+    useAiRunStore.getState().start(runId, {
+      kindKey: "agents.liveKindCommit",
+      detail: [project?.name ?? repoPath.split(/[\\/]/).filter(Boolean).pop(), branch].filter(Boolean).join(" · "),
+      workspaceId,
+      // The message lands in this panel's box, not in the assistant — the row leads back to the
+      // repository and no further.
+      target: project ? { projectId: project.id } : undefined,
+    });
     try {
       // Deliberately **not** the store's `stagedDiff`. That one is fetched at three lines of
       // context (see `LIST_DIFF_CONTEXT_LINES` in `repoStore`), and handing the model keyhole views
       // of each change instead of the surrounding code is a real, silent downgrade in the messages
       // it writes — a perf change has no business costing that. So this one caller still pays for
       // whole-file context, once, on an explicit click, rather than several times a second.
-      // Read before the first await: the account a commit runs as can depend on the workspace, and
-      // the chip beside Commit resolved it against this one.
-      const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
       const full = await getStagedDiff(repoPath);
-      const text = await generateCommitMessage(diffToText(full), undefined, workspaceId);
+      const text = await generateCommitMessage(diffToText(full), runId, workspaceId);
       setMessage(text);
     } catch (e) {
-      setAiError(parseClaudeError(String(e)));
+      // Stopped from the status bar: a decision, not a failure — the box keeps what it had.
+      if (!isCancellation(e)) setAiError(parseClaudeError(String(e)));
     } finally {
+      useAiRunStore.getState().finish(runId);
       setAiBusy(false);
     }
   };

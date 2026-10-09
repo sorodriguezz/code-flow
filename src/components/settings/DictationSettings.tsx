@@ -1,15 +1,26 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Keyboard } from "lucide-react";
-import { Select } from "../common/Select";
+import { Select, type SelectOption } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
+import { Button } from "../common/Button";
 import { formatBytes, ModelDownloadRow, type DownloadableModel } from "./localModelRow";
-import { useDictationChord } from "../dictation/DictationControls";
-import type { DictationModel } from "../../lib/tauri/dictationCommands";
+import { DictationWave, useDictationChord } from "../dictation/DictationControls";
+import {
+  dictationInputs,
+  dictationMicPermission,
+  dictationMicRequest,
+  dictationMicSettings,
+  type DictationModel,
+  type MicInput,
+  type MicPermission,
+} from "../../lib/tauri/dictationCommands";
+import { startRecording, type Recording } from "../../lib/dictation/recorder";
 import type { LocalAiDownloadEvent } from "../../lib/tauri/events";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useT } from "../../state/languageStore";
 import { useConfirmStore } from "../../state/confirmStore";
-import { useDictationStore } from "../../state/dictationStore";
+import { reportMicError, useDictationStore } from "../../state/dictationStore";
+import { pushErrorToast } from "../../state/toastStore";
 
 /**
  * «Dictado»: the one place dictation is installed from. Nothing ships with the app — the first
@@ -131,6 +142,8 @@ export function DictationSettings() {
         </div>
       </div>
 
+      <MicrophoneRow />
+
       {chord && (
         <p className="flex items-center gap-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
           <Keyboard size={12} className="shrink-0" />
@@ -138,5 +151,141 @@ export function DictationSettings() {
         </p>
       )}
     </div>
+  );
+}
+
+/** How long «Probar» listens before it lets go of the microphone by itself. */
+const TEST_MS = 15_000;
+
+/**
+ * Which microphone dictation listens to, a way to hear it before relying on it, and — only when it
+ * needs doing — the system's permission.
+ *
+ * The inputs come from the backend by name (`dictation_inputs`), with nothing to grant first: that
+ * is what reading the microphone natively bought. Re-read when the window regains focus, so a
+ * headset plugged in, or access granted in the system's settings, shows without reopening the pane.
+ */
+function MicrophoneRow() {
+  const t = useT();
+  const device = useDictationStore((store) => store.device);
+  const setDevice = useDictationStore((store) => store.setDevice);
+  const dictating = useDictationStore((store) => store.phase !== "idle");
+  const [inputs, setInputs] = useState<MicInput[] | null>(null);
+  const [permission, setPermission] = useState<MicPermission | null>(null);
+
+  const reload = useCallback(() => {
+    void dictationInputs()
+      .then(setInputs)
+      .catch(() => setInputs([]));
+    void dictationMicPermission()
+      .then(setPermission)
+      .catch(() => setPermission("unknown"));
+  }, []);
+
+  useEffect(() => {
+    reload();
+    window.addEventListener("focus", reload);
+    return () => window.removeEventListener("focus", reload);
+  }, [reload]);
+
+  const fallback = inputs?.find((input) => input.isDefault);
+  const options: SelectOption[] = [
+    { value: "", label: fallback ? t("dictation.micDefaultNamed", { name: fallback.name }) : t("dictation.micDefault") },
+    ...(inputs ?? []).map((input) => ({ value: input.id, label: input.name })),
+  ];
+  // Chosen once and unplugged now: still the choice, and recordings use the default meanwhile.
+  if (device && inputs && !inputs.some((input) => input.id === device)) {
+    options.push({ value: device, label: t("dictation.micAbsent") });
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-3">
+        <span className="w-20 shrink-0 text-[12.5px] text-[var(--cf-text)]">{t("dictation.microphone")}</span>
+        <div className="w-[320px]">
+          <Select value={device} onChange={(next) => void setDevice(next)} options={options} size="sm" ariaLabel={t("dictation.microphone")} />
+        </div>
+        <MicTest device={device} disabled={dictating || permission === "denied"} onRefused={reload} />
+      </div>
+      {(permission === "denied" || permission === "undetermined") && (
+        <div className="flex items-center gap-2 pl-[92px] text-[11.5px] text-[var(--cf-text-muted)]">
+          <span>{t(permission === "denied" ? "dictation.micDenied" : "dictation.micUndetermined")}</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-[var(--cf-accent)]"
+            onClick={() => {
+              if (permission === "denied") {
+                void dictationMicSettings().catch((error) => pushErrorToast(String(error)));
+              } else {
+                void dictationMicRequest()
+                  .then(setPermission)
+                  .catch(() => reload());
+              }
+            }}
+          >
+            {t(permission === "denied" ? "dictation.openPrivacy" : "dictation.micAllow")}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** «Probar»: listens to `device` and draws what it hears — the waveform a dictation would draw. */
+function MicTest({ device, disabled, onRefused }: { device: string; disabled: boolean; onRefused: () => void }) {
+  const t = useT();
+  const [levels, setLevels] = useState<number[] | null>(null);
+  const recording = useRef<Recording | null>(null);
+  /** Bumped by every start and stop, so a start that resolves after it was stopped lets go at once. */
+  const attempt = useRef(0);
+
+  const stop = useCallback(() => {
+    attempt.current += 1;
+    recording.current?.cancel();
+    recording.current = null;
+    setLevels(null);
+  }, []);
+
+  // Let go on leaving the pane, on choosing another input, and after a while on its own.
+  useEffect(() => stop, [device, stop]);
+  const testing = levels !== null;
+  useEffect(() => {
+    if (!testing) return;
+    const timer = window.setTimeout(stop, TEST_MS);
+    return () => window.clearTimeout(timer);
+  }, [testing, stop]);
+
+  const start = async () => {
+    const mine = ++attempt.current;
+    setLevels([]);
+    try {
+      const started = await startRecording(
+        device,
+        (level) => {
+          if (attempt.current === mine) setLevels((current) => [...(current ?? []).slice(-40), level]);
+        },
+        stop,
+      );
+      if (attempt.current !== mine) started.cancel();
+      else recording.current = started;
+    } catch (error) {
+      if (attempt.current === mine) setLevels(null);
+      reportMicError(error);
+      onRefused();
+    }
+  };
+
+  return (
+    <>
+      <Button size="sm" variant="secondary" disabled={disabled && !testing} onClick={() => (testing ? stop() : void start())}>
+        {t(testing ? "dictation.micTestStop" : "dictation.micTest")}
+      </Button>
+      {testing && (
+        <div className="flex h-5 w-[120px] items-center">
+          <DictationWave levels={levels} max={16} />
+        </div>
+      )}
+    </>
   );
 }

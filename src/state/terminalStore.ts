@@ -45,7 +45,6 @@ export function activeGroup(proj: ProjectTerminals | undefined): string[] {
   return found ?? proj.groups[proj.groups.length - 1] ?? [];
 }
 
-const PANEL_OPEN_KEY = "terminal_panel_open";
 const DOCK_VIEW_KEY = "terminal_dock_view";
 
 /**
@@ -60,7 +59,10 @@ const DOCK_VIEW_KEY = "terminal_dock_view";
 export type DockView = "terminal" | "containers" | "services";
 
 interface TerminalState {
-  /** Hidden by default — only opens when the user asks for it (or a new terminal is created). */
+  /** Hidden by default — only opens when the user asks for it (or a new terminal is created).
+   *  Never restored at launch: it used to be (`terminal_panel_open`), and a dock last left on the
+   *  services then greeted every start with the services console the user had not asked for
+   *  (2026-10-09). Which panel it shows *is* remembered — see `dockView`. */
   panelOpen: boolean;
   /** What the dock shows while it is open. Remembered in the main window, so it reopens on the panel
    *  it was closed on. */
@@ -264,13 +266,11 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   init: async () => {
     // At app start, so the router is live well before any pane asks for one.
     startTerminalRouter();
-    const [raw, view] = await Promise.all([
-      getSetting(PANEL_OPEN_KEY).catch(() => null),
-      // The main window's alone: a satellite's dock is terminals only, and a remembered "services"
-      // there would turn its ⌘J into "switch to terminals" instead of "close".
-      isMainWindow() ? getSetting(DOCK_VIEW_KEY).catch(() => null) : Promise.resolve(null),
-    ]);
-    set({ panelOpen: raw === "1", dockView: view === "services" || view === "containers" ? view : "terminal" });
+    // The main window's alone: a satellite's dock is terminals only, and a remembered "services"
+    // there would turn its ⌘J into "switch to terminals" instead of "close". Only the view comes
+    // back — the dock itself starts hidden (see `panelOpen`).
+    const view = isMainWindow() ? await getSetting(DOCK_VIEW_KEY).catch(() => null) : null;
+    set({ dockView: view === "services" || view === "containers" ? view : "terminal" });
   },
 
   togglePanel: () => get().toggleDock("terminal"),
@@ -283,13 +283,11 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
 
   showDock: (view) => {
     set({ panelOpen: true, dockView: view });
-    void setSetting(PANEL_OPEN_KEY, "1");
     if (isMainWindow()) void setSetting(DOCK_VIEW_KEY, view);
   },
 
   hidePanel: () => {
     set({ panelOpen: false, dockMaximized: false });
-    void setSetting(PANEL_OPEN_KEY, "0");
   },
 
   openNew: async (projectId, cwd, opts) => {

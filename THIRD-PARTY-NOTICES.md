@@ -18,7 +18,7 @@ component's own licence wins — which is what section 6 says.
 | What ships | Count |
 |---|---|
 | npm packages (production tree) | 343 resolved versions of 314 packages |
-| Rust crates (resolved for macOS and Windows) | 815 resolved versions of 714 crates |
+| Rust crates (resolved for macOS and Windows) | 821 resolved versions of 720 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 10 |
@@ -638,7 +638,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### Apache-2.0 OR MIT — 423 crates
+### Apache-2.0 OR MIT — 425 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -709,6 +709,7 @@ because there the order carries meaning.
 | `core-foundation-sys` | 0.8.7 | Apache-2.0 OR MIT | <https://github.com/servo/core-foundation-rs> |
 | `core-graphics` | 0.25.0 | Apache-2.0 OR MIT | <https://github.com/servo/core-foundation-rs> |
 | `core-graphics-types` | 0.2.0 | Apache-2.0 OR MIT | <https://github.com/servo/core-foundation-rs> |
+| `coreaudio-rs` | 0.14.2 | Apache-2.0 OR MIT | <https://github.com/RustAudio/coreaudio-rs> |
 | `cpubits` | 0.1.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `cpufeatures` | 0.2.17, 0.3.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `crc32c` | 0.6.8 | Apache-2.0 OR MIT | <https://github.com/zowens/crc32c> |
@@ -724,6 +725,7 @@ because there the order carries meaning.
 | `ctr` | 0.10.1, 0.9.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/block-modes> |
 | `ctutils` | 0.4.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `curve25519-dalek-derive` | 0.1.1 | Apache-2.0 OR MIT | <https://github.com/dalek-cryptography/curve25519-dalek> |
+| `dasp_sample` | 0.11.0 | Apache-2.0 OR MIT | <https://github.com/rustaudio/sample> |
 | `dbl` | 0.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `debug_unsafe` | 0.1.4 | Apache-2.0 OR MIT | <https://github.com/RoDmitry/debug_unsafe> |
 | `der` | 0.7.10 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/der> |
@@ -1233,13 +1235,14 @@ because there the order carries meaning.
 | `zip` | 4.6.1, 8.6.0 | MIT | <https://github.com/zip-rs/zip2> |
 | `zmij` | 1.0.23 | MIT | <https://github.com/dtolnay/zmij> |
 
-### Apache-2.0 — 26 crates
+### Apache-2.0 — 27 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `ab_glyph` | 0.2.32 | Apache-2.0 | <https://github.com/alexheretic/ab-glyph> |
 | `ab_glyph_rasterizer` | 0.1.10 | Apache-2.0 | <https://github.com/alexheretic/ab-glyph> |
 | `backon` | 1.6.0 | Apache-2.0 | <https://github.com/Xuanwo/backon> |
+| `cpal` | 0.18.2 | Apache-2.0 | <https://github.com/RustAudio/cpal> |
 | `flagset` | 0.4.7 | Apache-2.0 | <https://github.com/enarx/flagset> |
 | `gethostname` | 1.1.0 | Apache-2.0 | <https://codeberg.org/swsnr/gethostname.rs> |
 | `memo-map` | 0.3.4 | Apache-2.0 | <https://github.com/mitsuhiko/memo-map> |
@@ -1264,7 +1267,7 @@ because there the order carries meaning.
 | `unicode-general-category` | 1.1.0 | Apache-2.0 | <https://github.com/yeslogic/unicode-general-category> |
 | `zopfli` | 0.8.3 | Apache-2.0 | <https://github.com/zopfli-rs/zopfli> |
 
-### Apache-2.0 OR MIT OR Zlib — 20 crates
+### Apache-2.0 OR MIT OR Zlib — 23 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -1274,6 +1277,9 @@ because there the order carries meaning.
 | `lru-slab` | 0.1.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Ralith/lru-slab> |
 | `miniz_oxide` | 0.8.9 | Apache-2.0 OR MIT OR Zlib | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
 | `objc2-app-kit` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-audio-toolbox` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-core-audio` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
+| `objc2-core-audio-types` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
 | `objc2-core-foundation` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
 | `objc2-core-graphics` | 0.3.2 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |
 | `objc2-exception-helper` | 0.1.1 | Apache-2.0 OR MIT OR Zlib | <https://github.com/madsmtm/objc2> |

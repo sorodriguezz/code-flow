@@ -5,17 +5,20 @@ import {
   dictationCancelInstall,
   dictationInstall,
   dictationRemove,
+  dictationMicSettings,
   dictationStatus,
-  dictationTranscribe,
+  MIC_DENIED,
+  MIC_NONE,
   onDictationProgress,
   type DictationProgress,
   type DictationStatus,
 } from "../lib/tauri/dictationCommands";
-import { pcmToBase64, startRecording, type Recording } from "../lib/dictation/recorder";
+import { startRecording, type Recording } from "../lib/dictation/recorder";
 import { aiFieldOf, insertDictation, type DictationField } from "../lib/dictation/insert";
 import { watchSettings } from "../lib/settingsSync";
 import { useLanguageStore, translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
+import { useConfirmStore } from "./confirmStore";
 
 /**
  * «Dictar»: what is installed (Settings), and the one recording that may be under way (the fields).
@@ -32,6 +35,8 @@ import { pushErrorToast, useToastStore } from "./toastStore";
 
 const KEY_MODEL = "dictation_model";
 const KEY_LANGUAGE = "dictation_language";
+/** The input's id (`dictation::capture::InputDevice`); `""` follows the system's default. */
+const KEY_DEVICE = "dictation_device";
 /** How many levels the waveform keeps — more than any bar is wide. */
 const LEVELS = 240;
 
@@ -43,6 +48,8 @@ interface DictationStore {
   model: string;
   /** `dictation_language`: `""` follows the app's language, `"auto"` lets the model tell. */
   language: string;
+  /** `dictation_device`: the microphone's id, `""` for the system's default. */
+  device: string;
   /** Install progress by item (`"engine"` or a model id) — dropped when it settles. */
   progress: Record<string, DictationProgress>;
   /** The model whose install is under way: the engine's progress is drawn on its row. */
@@ -61,6 +68,7 @@ interface DictationStore {
   remove: (modelId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
   setLanguage: (language: string) => Promise<void>;
+  setDevice: (device: string) => Promise<void>;
 
   /** Starts recording for `field`. `inline` when the field's own surface draws the bar. */
   start: (field: DictationField, inline: boolean) => Promise<void>;
@@ -112,17 +120,32 @@ function language(written: string): string {
   return useLanguageStore.getState().language === "es" ? "es" : "en";
 }
 
-function micMessage(error: unknown): string {
-  const name = error instanceof DOMException ? error.name : "";
-  if (name === "NotAllowedError" || name === "SecurityError") return translate("dictation.micBlocked");
-  if (name === "NotFoundError") return translate("dictation.noMic");
-  return translate("dictation.micFailed", { error: String(error) });
+/**
+ * The system refused the microphone: said in the app's own dialog, with the one button that undoes
+ * it — the system's privacy page — rather than a toast spelling out where that page is.
+ */
+export async function offerMicSettings(): Promise<void> {
+  const open = await useConfirmStore.getState().ask({
+    message: translate("dictation.micBlocked"),
+    confirmLabel: translate("dictation.openPrivacy"),
+    danger: false,
+  });
+  if (open) await dictationMicSettings().catch((error) => pushErrorToast(String(error)));
+}
+
+/** Says why the microphone did not start — the refusal as a question, the rest as a toast. */
+export function reportMicError(error: unknown): void {
+  const message = String(error);
+  if (message.includes(MIC_DENIED)) void offerMicSettings();
+  else if (message.includes(MIC_NONE)) pushErrorToast(translate("dictation.noMic"));
+  else pushErrorToast(translate("dictation.micFailed", { error: message }));
 }
 
 export const useDictationStore = create<DictationStore>((set, get) => ({
   status: null,
   model: "",
   language: "",
+  device: "",
   progress: {},
   installing: null,
   phase: "idle",
@@ -150,8 +173,8 @@ export const useDictationStore = create<DictationStore>((set, get) => ({
 
   refresh: async () => {
     try {
-      const [status, settings] = await Promise.all([dictationStatus(), getSettings([KEY_MODEL, KEY_LANGUAGE])]);
-      set({ status, model: settings[KEY_MODEL] ?? "", language: settings[KEY_LANGUAGE] ?? "" });
+      const [status, settings] = await Promise.all([dictationStatus(), getSettings([KEY_MODEL, KEY_LANGUAGE, KEY_DEVICE])]);
+      set({ status, model: settings[KEY_MODEL] ?? "", language: settings[KEY_LANGUAGE] ?? "", device: settings[KEY_DEVICE] ?? "" });
     } catch {
       // Silent: the pane shows what it last knew, and the microphone stays hidden.
     }
@@ -203,6 +226,11 @@ export const useDictationStore = create<DictationStore>((set, get) => ({
     await setSetting(KEY_LANGUAGE, next).catch((error) => pushErrorToast(String(error)));
   },
 
+  setDevice: async (next) => {
+    set({ device: next });
+    await setSetting(KEY_DEVICE, next).catch((error) => pushErrorToast(String(error)));
+  },
+
   start: async (field, inline) => {
     if (get().phase !== "idle" || !dictationReady(get())) return;
     const mine = ++session;
@@ -210,6 +238,7 @@ export const useDictationStore = create<DictationStore>((set, get) => ({
     set({ phase: "starting", target: field, inline, levels: [] });
     try {
       const started = await startRecording(
+        get().device,
         (level) => {
           if (session !== mine) return;
           set((current) => {
@@ -233,7 +262,7 @@ export const useDictationStore = create<DictationStore>((set, get) => ({
       window.addEventListener("keydown", onEscape, true);
     } catch (error) {
       if (session === mine) set({ phase: "idle", target: null });
-      pushErrorToast(micMessage(error));
+      reportMicError(error);
     }
   },
 
@@ -242,12 +271,13 @@ export const useDictationStore = create<DictationStore>((set, get) => ({
     if (phase !== "recording" || !recording || !target) return;
     const mine = session;
     window.removeEventListener("keydown", onEscape, true);
-    const pcm = recording.stop();
+    const current = recording;
     recording = null;
     set({ phase: "transcribing" });
     window.addEventListener("keydown", onEscape, true);
     try {
-      const text = await dictationTranscribe(pcmToBase64(pcm), model, language(get().language));
+      // The backend releases the microphone first, then transcribes.
+      const text = await current.finish(model, language(get().language));
       if (session !== mine) return;
       if (!text.trim()) {
         useToastStore.getState().pushToast(translate("dictation.noSpeech"), "info");
@@ -299,6 +329,6 @@ export const useDictationStore = create<DictationStore>((set, get) => ({
 }));
 
 // Another window chose a model, installed one or changed the language.
-watchSettings([KEY_MODEL, KEY_LANGUAGE], () => {
+watchSettings([KEY_MODEL, KEY_LANGUAGE, KEY_DEVICE], () => {
   if (useDictationStore.getState().status) void useDictationStore.getState().refresh();
 });

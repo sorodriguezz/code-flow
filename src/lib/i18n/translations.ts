@@ -2928,7 +2928,7 @@ const en = {
   "settings.searchTermsTasks": "model, routing, prompt, template, instructions, engine per task",
   "settings.searchTermsCompletion": "autocomplete, inline, local model, llama, gguf, ghost text",
   "settings.searchTermsLocalModel": "local model, ollama, lm studio, litellm, vllm, llama.cpp, hybrid, executor, context, vram, gpu",
-  "settings.searchTermsDictation": "dictation, voice, microphone, speech, whisper, transcribe, talk",
+  "settings.searchTermsDictation": "dictation, voice, microphone, speech, whisper, transcribe, talk, permission, input, audio",
   "settings.searchTermsLimits": "quota, plan, spend, cap, budget",
   "settings.searchTermsUsage": "cost, tokens, spend, statistics",
   "settings.searchTermsSnippets": "abbreviations, expansions, templates",
@@ -4662,7 +4662,18 @@ const en = {
   "dictation.stop": "Stop and write",
   "dictation.send": "Stop and send",
   "dictation.transcribing": "Transcribing…",
-  "dictation.micBlocked": "CodeFlow may not use the microphone. Allow it in System Settings › Privacy & Security › Microphone (on Windows: Settings › Privacy › Microphone).",
+  "dictation.micBlocked": "CodeFlow has no access to the microphone. Give it access in the system's privacy settings, then dictate again.",
+  "dictation.openPrivacy": "Open privacy settings",
+  "dictation.microphone": "Microphone",
+  "dictation.micDefault": "System default",
+  "dictation.micDefaultNamed": "System default · {name}",
+  /** The input chosen earlier is not plugged in: recordings use the default until it is back. */
+  "dictation.micAbsent": "Not connected — using the system's",
+  "dictation.micTest": "Test",
+  "dictation.micTestStop": "Stop",
+  "dictation.micDenied": "CodeFlow has no access to the microphone.",
+  "dictation.micUndetermined": "The system asks for the microphone the first time you dictate.",
+  "dictation.micAllow": "Allow now",
   "dictation.noMic": "No microphone was found.",
   "dictation.micFailed": "The microphone could not start: {error}",
   "dictation.noSpeech": "Nothing was heard.",
@@ -11144,6 +11155,8 @@ const en = {
   /** The "write my pull request description" run. It used to be invisible here — the modal invoked
    *  the engine without a run id at all, so nothing could show it and nothing could stop it. */
   "agents.liveKindPrDescription": "Pull request description",
+  /** "Generate commit message with AI" — invisible here for the same reason the PR description was. */
+  "agents.liveKindCommit": "Commit message",
   "agents.liveKindDb": "Database assistant",
   "agents.liveKindUnknown": "AI run",
   /** A run this window did not start — kicked off from a paired phone or tablet. Registered from

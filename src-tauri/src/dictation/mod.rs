@@ -10,10 +10,18 @@
 //! command-line binary — only an xcframework — so the library is what both platforms have in common:
 //! the macOS slice of that framework (one universal dylib with Metal and Accelerate inside, nothing
 //! but system frameworks outside), and `whisper.dll` with its `ggml*.dll` on Windows. `engine.rs`
-//! talks to it through its C API. Audio arrives from the webview already at 16 kHz mono; nothing
-//! is written to disk and nothing leaves the machine.
+//! talks to it through its C API.
+//!
+//! **The microphone is read here too** (`capture`, through the system's audio API), not in the
+//! webview: the webview's `getUserMedia` brought its own browser-style permission prompt and could
+//! not name the inputs for Settings' picker. `permission` asks the system's own question instead.
+//! The audio stays in this process, is downsampled to 16 kHz mono here, and is never written to
+//! disk; nothing leaves the machine.
 
+#[cfg(any(target_os = "macos", windows))]
+pub mod capture;
 pub mod engine;
+pub mod permission;
 
 use std::path::{Path, PathBuf};
 
