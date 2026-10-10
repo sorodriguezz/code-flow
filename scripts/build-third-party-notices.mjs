@@ -271,6 +271,8 @@ const LINKS_REVIEWED = [
   { name: "openssl-sys", why: "builds the OpenSSL that `openssl-src` carries, listed above, and links nothing else" },
   { name: "ring", why: "its C and assembly are ring's own and BoringSSL's, covered by the licence the crate declares" },
   { name: "objc2-exception-helper", why: "a few lines of Objective-C of its own, under the crate's licence" },
+  { name: "tree-sitter", why: "compiles tree-sitter's own `lib.c` (the parser runtime), covered by the crate's MIT licence" },
+  { name: "tree-sitter-language", why: "its build script only exports wasm header paths for wasm32 targets; it compiles nothing" },
   {
     name: "mongocrypt-sys",
     why: "declares a link to a system libmongocrypt and compiles nothing; the driver feature that would load it is off",

@@ -142,8 +142,15 @@ impl AiEngine for ClaudeEngine {
             cmd.arg("--tools").arg(tools.join(","));
             cmd.arg("--strict-mcp-config");
         }
-        if !inv.allowed_tools.is_empty() {
-            cmd.arg("--allowedTools").arg(inv.allowed_tools.join(","));
+        // The app's own servers this run loads — in a read-only run only the repository map, the one
+        // server that can do nothing but read (`codemap::mcp`).
+        let app_servers = crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only);
+        let mut allowed: Vec<String> = inv.allowed_tools.to_vec();
+        if app_servers.iter().any(|server| server.name == crate::codemap::mcp::SERVER_NAME) {
+            allowed.push(crate::codemap::mcp::allow_rule());
+        }
+        if !allowed.is_empty() {
+            cmd.arg("--allowedTools").arg(allowed.join(","));
         }
         // The user's servers this conversation keeps out: denied by rule, which also takes their
         // tools off the list the model is shown — context a turn no longer pays for.
@@ -154,8 +161,8 @@ impl AiEngine for ClaudeEngine {
         // The app's own servers: a private document of `${VAR}`s, deleted with the run, and the
         // values in this process's environment — never on the command line, never in the file.
         // Additive to the user's own servers (no `--strict-mcp-config` here).
-        if !inv.app_mcp.is_empty() && !inv.read_only {
-            let (document, vars) = crate::mcp_registry::claude_config(&inv.app_mcp);
+        if !app_servers.is_empty() {
+            let (document, vars) = crate::mcp_registry::claude_config(&app_servers);
             if let Some(path) = inv.prompt_files.write("claude-mcp", "json", &document) {
                 cmd.arg("--mcp-config").arg(path);
                 for (name, value) in vars {
@@ -1089,6 +1096,30 @@ mod tests {
         // An ordinary run is untouched by any of it.
         let plain = command_args(&ClaudeEngine.build_command("claude", &AiInvocation::new("hola", "")));
         assert!(!plain.iter().any(|a| a == "--tools" || a == "--strict-mcp-config"), "{plain:?}");
+    }
+
+    /// The repository map is the one server a read-only run still loads — read-only itself, and
+    /// pre-approved so `-p` does not deny it. A user's server stays out.
+    #[test]
+    fn a_read_only_run_keeps_the_repository_map_and_nothing_else() {
+        let server = |name: &str| crate::mcp_registry::LiveServer {
+            name: name.to_string(),
+            transport: "http".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: "http://127.0.0.1:47811/mcp/code".into(),
+            headers: vec![("Authorization".into(), "Bearer t".into())],
+        };
+        let mut inv = AiInvocation::new("¿quién usa esto?", "");
+        inv.read_only = true;
+        inv.app_mcp = vec![server(crate::codemap::mcp::SERVER_NAME), server("trello")];
+        let args = command_args(&ClaudeEngine.build_command("claude", &inv));
+        let at = args.iter().position(|a| a == "--mcp-config").expect("the map's config");
+        let config = std::fs::read_to_string(&args[at + 1]).unwrap();
+        assert!(config.contains("codeflow_map") && !config.contains("trello"), "{config}");
+        assert!(args.windows(2).any(|pair| pair[0] == "--allowedTools" && pair[1].contains("mcp__codeflow_map")), "{args:?}");
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
     }
 
     /// A failed run that spent tokens says so on its `result` event, and the meter now reads it.

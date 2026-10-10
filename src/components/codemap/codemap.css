@@ -1,0 +1,57 @@
+/* The «Mapa» canvas, dressed in CodeFlow's tokens the way the Flujos canvas is (`flows.css`): React
+   Flow draws the pane and the edges, the nodes are ours. Travels in the view's lazy chunk. */
+
+.cf-map-canvas {
+  --xy-background-color: transparent;
+  --xy-edge-stroke: var(--cf-border-strong);
+  --xy-background-pattern-color: color-mix(in oklab, var(--cf-text) 14%, transparent);
+  background-color: var(--cf-sunken);
+}
+
+.cf-map-canvas .react-flow__pane {
+  cursor: default;
+}
+.cf-map-canvas .react-flow__pane.dragging {
+  cursor: grabbing;
+}
+
+.cf-map-canvas .react-flow__edge-path {
+  stroke: color-mix(in oklab, var(--cf-text) 28%, transparent);
+  transition: stroke 0.12s, opacity 0.12s;
+}
+.cf-map-canvas .cf-map-edge--lit .react-flow__edge-path {
+  stroke: var(--cf-accent);
+}
+.cf-map-canvas .cf-map-edge--dim {
+  opacity: 0.18;
+}
+
+/* The handles only anchor the edges; nothing connects here. */
+.cf-map-canvas .react-flow__handle {
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+}
+
+.cf-map-node {
+  width: 220px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--cf-border);
+  background: var(--cf-surface);
+  cursor: pointer;
+  transition: border-color 0.12s, opacity 0.12s, box-shadow 0.12s;
+}
+.cf-map-node:hover {
+  border-color: var(--cf-border-strong);
+}
+.cf-map-node--selected {
+  border-color: var(--cf-accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--cf-accent) 18%, transparent);
+}
+.cf-map-node--dimmed {
+  opacity: 0.35;
+}

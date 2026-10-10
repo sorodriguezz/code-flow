@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from "react";
-import { ChevronRight, Code2, FolderGit2, GitBranch, History, Layers, Route, ShieldCheck, type LucideIcon } from "lucide-react";
+import { ChevronRight, Code2, FolderGit2, GitBranch, History, Layers, Network, Route, ShieldCheck, type LucideIcon } from "lucide-react";
 import { useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
@@ -46,7 +46,10 @@ const REVIEWER_TAB: Tab = {
   // Wore "beta" from 2026-10-04 until the user took it off on 2026-10-09.
 };
 
-const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "reviewer", "pipelines"];
+/** The repository map, after the Revisor (which the user placed right after Editor). */
+const CODEMAP_TAB: Tab = { id: "codemap", labelKey: "tabbar.codemap", icon: Network, shortcut: "view.codemap" };
+
+const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "reviewer", "codemap", "pipelines"];
 
 /**
  * The colour of the dot the Revisor tab wears: the selected repository's last review. Nothing while
@@ -157,6 +160,7 @@ export function ChromeScope() {
     const tabs = [
       ...TABS,
       ...(reviewerEnabled ? [REVIEWER_TAB] : []),
+      CODEMAP_TAB,
       ...(pipelinesAvailable(project, connections) ? [PIPELINES_TAB] : []),
     ];
     return (

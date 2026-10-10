@@ -12,6 +12,7 @@ pub mod containers_cmd;
 pub mod containers_kube_cmd;
 pub mod checkpoint_cmd;
 pub mod claude_cmd;
+pub mod codemap_cmd;
 pub mod db_cmd;
 pub mod debug_cmd;
 pub mod diagrams_cmd;

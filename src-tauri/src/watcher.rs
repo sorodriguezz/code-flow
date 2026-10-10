@@ -343,6 +343,8 @@ pub fn start_watching(
         // silently ignored — we don't know what changed, so the safe move is to refresh.
         let mut last_emit = Instant::now() - Duration::from_secs(10);
         let mut pending = false;
+        // The repository map trusts this thread's reports while it runs — see `codemap`.
+        crate::codemap::set_watched(&repo_path, true);
 
         loop {
             // Read here only to choose how long to wait. The emit below re-reads it, because this
@@ -374,11 +376,18 @@ pub fn start_watching(
                 Ok(Ok(event)) => {
                     if !is_noise(&root, &event) {
                         pending = true;
+                        crate::codemap::changed_paths(&repo_path, &event.paths);
                     }
                 }
-                Ok(Err(_)) => pending = true,
+                Ok(Err(_)) => {
+                    pending = true;
+                    crate::codemap::invalidate(&repo_path);
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    crate::codemap::set_watched(&repo_path, false);
+                    break;
+                }
             }
             // Nothing is emitted when nobody is reading. The webview's handler for this event
             // refreshes the repository — a git status walk and the panels that redraw from it —

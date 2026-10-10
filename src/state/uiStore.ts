@@ -25,6 +25,9 @@ export type MainView =
    * conditional like Pipelines, for another reason: it exists only while the user has switched it on
    * in Settings › Revisor. See `reviewerEnabled` and the guard in `App.tsx`. */
   | "reviewer"
+  /** «Mapa» — the repository's folders, files and the imports between them, from the same map the
+   *  agents read (`codemap`). Repository-scoped like Graph, Changes and Editor, and unconditional. */
+  | "codemap"
   | "api"
   | "agents"
   | "stories"

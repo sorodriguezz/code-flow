@@ -121,6 +121,7 @@ const PipelinesView = lazy(() =>
 const ReviewerView = lazy(() =>
   import("./components/reviewer/ReviewerView").then((m) => ({ default: m.ReviewerView })),
 );
+const CodeMapView = lazy(() => import("./components/codemap/CodeMapView").then((m) => ({ default: m.CodeMapView })));
 const ApiView = lazy(() => import("./components/api/ApiView").then((m) => ({ default: m.ApiView })));
 const AgentsView = lazy(() => import("./components/agents/AgentsView").then((m) => ({ default: m.AgentsView })));
 const StoriesView = lazy(() => import("./components/stories/StoriesView").then((m) => ({ default: m.StoriesView })));
@@ -288,6 +289,7 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "pipelines", render: () => <PipelinesView /> },
   // The Revisor, conditional on a setting rather than on a host — same guard below, same reason.
   { id: "reviewer", render: () => <ReviewerView /> },
+  { id: "codemap", render: () => <CodeMapView /> },
 ];
 
 /** Views that aren't about a repository, so the "no project open" empty state must not swallow

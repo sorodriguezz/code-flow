@@ -236,6 +236,12 @@ fn patterns_for(path: &str) -> Option<&'static Vec<Regex>> {
     })
 }
 
+/// Whether the outline has declaration patterns for `path`'s language — the repository map reads
+/// every such file with them when it has no grammar for it.
+pub fn has_patterns(path: &str) -> bool {
+    patterns_for(path).is_some()
+}
+
 /// Whether a line opens a declaration rather than a control-flow block that merely looks like one.
 ///
 /// `if (x) {` matches the "class method" shape in every C-like language, and a file full of them
@@ -254,7 +260,7 @@ fn is_declaration(line: &str, patterns: &[Regex]) -> bool {
 }
 
 /// Trims a declaration line down to the label a bundle header carries.
-fn label_of(line: &str) -> String {
+pub(crate) fn label_of(line: &str) -> String {
     let trimmed = line.trim().trim_end_matches(['{', ':']).trim();
     if trimmed.chars().count() <= MAX_LABEL_CHARS {
         return trimmed.to_string();
@@ -297,10 +303,52 @@ pub fn symbols_for(path: &str, content: &str, changed: &BTreeSet<usize>) -> Vec<
     if changed.is_empty() {
         return Vec::new();
     }
+    if let Some(exact) = parsed_symbols_for(path, content, changed) {
+        return exact;
+    }
     declarations(path, content)
         .into_iter()
         .filter(|s| changed.iter().any(|ln| (s.start..=s.end).contains(ln)))
         .collect()
+}
+
+/// The touched declarations with their **syntactic** ranges, for the languages the repository map
+/// parses (TypeScript/JavaScript, Java, C#, Python) — `None` for the rest, which keep the regex
+/// ranges above.
+///
+/// For each changed line, the innermost declaration around it: the method, not its class. A line in
+/// a container but outside every member (a field, an import inside a namespace) gets the stretch
+/// between the members around it, under the container's label — the regex outline's "class line to
+/// first method" range, generalised — so a field change never pulls a 900-line class into a bundle.
+fn parsed_symbols_for(path: &str, content: &str, changed: &BTreeSet<usize>) -> Option<Vec<Symbol>> {
+    let facts = crate::codemap::extract::extract(path, content);
+    if !facts.precise {
+        return None;
+    }
+    let symbols = &facts.symbols;
+    let mut out: Vec<Symbol> = Vec::new();
+    for line in changed {
+        let line = *line as u32;
+        let Some((index, sym)) =
+            symbols.iter().enumerate().filter(|(_, s)| s.start <= line && line <= s.end).min_by_key(|(_, s)| s.end - s.start)
+        else {
+            continue;
+        };
+        let children: Vec<_> = symbols.iter().filter(|s| s.parent == Some(index as u32)).collect();
+        let (start, end) = if children.is_empty() {
+            (sym.start, sym.end)
+        } else {
+            let before = children.iter().filter(|c| c.end < line).map(|c| c.end + 1).max().unwrap_or(sym.start);
+            let after = children.iter().filter(|c| c.start > line).map(|c| c.start - 1).min().unwrap_or(sym.end);
+            (before.max(sym.start), after.min(sym.end))
+        };
+        let symbol = Symbol { start: start as usize, end: end as usize, label: sym.label.clone() };
+        if !out.iter().any(|known| known.start == symbol.start && known.end == symbol.end) {
+            out.push(symbol);
+        }
+    }
+    out.sort_by_key(|s| s.start);
+    Some(out)
 }
 
 /// The bare identifier a declaration declares — `async function pagar(dto)` → `pagar`,
@@ -428,6 +476,30 @@ export class PagoRepository {
         assert!(syms[0].label.starts_with("export function pagar"));
         // The range runs to the line before the next declaration, so the method arrives whole.
         assert!(syms[0].end >= 5);
+    }
+
+    #[test]
+    fn a_parsed_language_gets_the_exact_method_and_a_field_gets_only_its_stretch() {
+        let src = "\
+export class Servicio {
+  private nombre = 'a';
+  private total = 0;
+
+  procesar(pago: Pago) {
+    return pago;
+  }
+
+  cerrar() {
+    return 1;
+  }
+}
+";
+        let syms = symbols_for("src/servicio.ts", src, &changed(&[6]));
+        assert_eq!(syms.len(), 1);
+        assert_eq!((syms[0].start, syms[0].end), (5, 7), "the method itself, not up to the next one");
+        let syms = symbols_for("src/servicio.ts", src, &changed(&[2]));
+        assert_eq!((syms[0].start, syms[0].end), (1, 4), "the fields, not the whole class");
+        assert!(syms[0].label.starts_with("export class Servicio"));
     }
 
     #[test]

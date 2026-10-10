@@ -153,6 +153,11 @@ const CODEFLOW_TOOLS: Record<string, string> = {
   edit_file: "Edit",
   write_file: "Write",
   run_command: "Bash",
+  // The repository map's tools (`codemap`): looking a name up reads as a search, a file's outline
+  // as a listing — neither is a file the run read.
+  find_symbol: "Grep",
+  find_usages: "Grep",
+  outline: "LS",
 };
 
 function codeflowLine(event: Record<string, unknown>): string | null {
@@ -175,6 +180,11 @@ function codeflowLine(event: Record<string, unknown>): string | null {
       return typeof event.text === "string" && event.text.trim() ? truncate(event.text) : null;
     case "note":
       return typeof event.text === "string" ? `${STATUS_MARK}${event.text}` : null;
+    // The repository map the run was handed, said once at its start.
+    case "map":
+      return typeof event.files === "number" && typeof event.ms === "number"
+        ? `${STATUS_MARK}${translate("codemap.logLine", { files: event.files, ms: event.ms })}`
+        : null;
     default:
       return null;
   }

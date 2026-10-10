@@ -36,6 +36,12 @@ pub fn attach(app: AppHandle) {
     let _ = APP.set(app);
 }
 
+/// The app's handle, once `setup` has attached it — for a module deep in the run plumbing that has
+/// to reach a server the app owns (the code map's MCP route on the webhook port).
+pub(crate) fn app() -> Option<&'static AppHandle> {
+    APP.get()
+}
+
 /// One `app_settings` row, read through the same handle — for the few settings the run plumbing in
 /// `ai.rs` has to consult for itself (the watchdog's limit, the language its message is written in)
 /// without an argument threaded through every operation to carry them.

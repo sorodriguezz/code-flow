@@ -15,8 +15,11 @@
 //!   is `--allowedTools mcp__<server>`; off is `--disallowedTools mcp__<server>`, which also takes
 //!   the tools out of what the model is shown.
 //! - **Codex**: on or off exactly as its own config has it, and a switch turned off here is
-//!   `-c mcp_servers.<name>.enabled=false` for that run. Its servers need no approval (`exec` runs
-//!   with `approval_policy="never"`), so "on" is simply "not turned off".
+//!   `-c mcp_servers.<name>.enabled=false` for that run. `exec` runs with `approval_policy="never"`,
+//!   and since Codex 0.161 that *fails* every MCP tool not annotated read-only unless the server's
+//!   `default_tools_approval_mode` says otherwise ("requires approval, but approval policy is
+//!   never", measured 2026-10-10). The servers CodeFlow declares are approved for the run
+//!   (`mcp_registry::codex_args`); the user's own keep whatever their config sets.
 //! - **Grok**: listed, not switchable — it has no per-run way to leave one server out.
 //! - agy, opencode, Cline: nothing is listed.
 //!

@@ -570,12 +570,23 @@ pub fn claude_config(servers: &[LiveServer]) -> (String, Vec<(String, String)>) 
 /// and quoted, so nothing in it can break out of the value on any shell. A stdio server's secrets
 /// travel under their own names through `env_vars` (the server reads the variable it expects); a
 /// remote one's headers through `env_http_headers`. An SSE server is not something Codex speaks.
+///
+/// **Approved, every one of them** (`default_tools_approval_mode = "approve"`). `codex exec` runs
+/// under `approval_policy = "never"`, and Codex 0.161 then fails any MCP tool not annotated
+/// read-only — "MCP tool call requires approval, but approval policy is never" (measured live with a
+/// server whose one tool carried no annotations: refused; with this key: ran). These are the servers
+/// CodeFlow itself hands this run — the ones the user declared and switched on for it — which is
+/// exactly what Claude's `--allowedTools mcp__<name>` pre-approves on the other engine.
 pub fn codex_args(servers: &[LiveServer]) -> (Vec<String>, Vec<(String, String)>) {
     let mut args = Vec::new();
     let mut vars = Vec::new();
     let quote = |text: &str| serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
     for (index, server) in servers.iter().enumerate() {
         let key = format!("mcp_servers.cf_{}", server.name);
+        if matches!(server.transport.as_str(), "stdio" | "http") {
+            args.push("-c".into());
+            args.push(format!("{key}.default_tools_approval_mode={}", quote("approve")));
+        }
         match server.transport.as_str() {
             "stdio" => {
                 args.push("-c".into());
@@ -844,6 +855,8 @@ mod tests {
         assert!(joined.contains(r#"mcp_servers.cf_github.env_vars=["GITHUB_TOKEN"]"#), "{joined}");
         assert!(!joined.contains("ghp_secret"));
         assert_eq!(vars, vec![("GITHUB_TOKEN".to_string(), "ghp_secret".to_string())]);
+        // Approved: `codex exec` runs with approval_policy=never, which otherwise fails every call.
+        assert!(joined.contains(r#"mcp_servers.cf_github.default_tools_approval_mode="approve""#), "{joined}");
     }
 
     #[test]
@@ -882,5 +895,95 @@ mod tests {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM workspace_mcps", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 0);
         assert_eq!(absorb_legacy(&conn, &store).unwrap(), 0, "a no-op afterwards");
+    }
+}
+
+/// Against the real Codex CLI, so ignored by default (it spends a little of the user's quota). A
+/// throwaway MCP server whose one tool carries no annotations — like most real servers' write tools —
+/// is handed to `codex exec` through the app's own builder, and the tool call has to complete:
+/// `CODEX_LIVE_MCP=1 [CODEX_LIVE_MODEL=…] cargo test --lib mcp_registry::live -- --ignored --nocapture --test-threads=1`
+#[cfg(test)]
+mod live {
+    use super::*;
+    use crate::ai::{AiEngine, AiInvocation};
+    use axum::body::Bytes;
+    use axum::http::HeaderMap;
+    use serde_json::{json, Value};
+
+    async fn tool_server() -> u16 {
+        async fn route(headers: HeaderMap, body: Bytes) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer secret") {
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
+            let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            // A notification (no id) gets no answer, as the transport says.
+            let Some(id) = message.get("id").cloned() else { return axum::http::StatusCode::ACCEPTED.into_response() };
+            let result = match message["method"].as_str().unwrap_or_default() {
+                "initialize" => json!({ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "notes", "version": "1" } }),
+                "tools/list" => json!({ "tools": [{
+                    "name": "save_note",
+                    "description": "Saves a short note and answers with its id.",
+                    "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] }
+                }] }),
+                "tools/call" => json!({ "content": [{ "type": "text", "text": "Saved as note-42." }] }),
+                _ => json!({}),
+            };
+            axum::Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = axum::Router::new().route("/mcp", axum::routing::post(route));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        port
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codex_runs_a_tool_of_a_server_the_app_hands_it() {
+        if std::env::var("CODEX_LIVE_MCP").is_err() {
+            return;
+        }
+        let port = tool_server().await;
+        let dir = std::env::temp_dir().join(format!("codeflow-codex-mcp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        let model = std::env::var("CODEX_LIVE_MODEL").unwrap_or_else(|_| "gpt-6-luna".to_string());
+        let mut inv = AiInvocation::new("Save a note that says \"hola\" with the notes server's save_note tool, then tell me the id it answered with.", "");
+        inv.model = &model;
+        inv.cwd = Some(&root);
+        inv.app_mcp = vec![LiveServer {
+            name: "notes".into(),
+            transport: "http".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: format!("http://127.0.0.1:{port}/mcp"),
+            headers: vec![("Authorization".into(), "Bearer secret".into())],
+        }];
+        let engine = crate::codex::CodexEngine;
+        let mut cmd = engine.build_command("codex", &inv);
+        crate::ai::apply_command_path(&mut cmd);
+        cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+        eprintln!("$ codex {}", cmd.as_std().get_args().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>().join(" "));
+        let payload = engine.stdin_payload(&inv);
+        let mut child = cmd.spawn().expect("codex started");
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(payload.as_bytes()).await;
+        }
+        let output = tokio::time::timeout(std::time::Duration::from_secs(240), child.wait_with_output()).await.expect("under 4 minutes").expect("codex ran");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let calls: Vec<Value> = stdout
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v["type"] == "item.completed" && v["item"]["type"] == "mcp_tool_call")
+            .map(|v| v["item"].clone())
+            .collect();
+        eprintln!("calls: {calls:#?}");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(calls.iter().any(|c| c["status"] == "completed" && c["tool"] == "save_note"), "the tool call did not complete:\n{stdout}");
     }
 }

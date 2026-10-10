@@ -39,6 +39,8 @@ const COMMAND_OUTPUT_CHARS: usize = 8_000;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// Files a non-git folder is walked for, at most — a chat's own folder, not a whole disk.
 const PLAIN_WALK_LIMIT: usize = 5_000;
+/// Names in the plain file list a run falls back to when the repository map cannot be built.
+const MAP_FALLBACK_FILES: usize = 200;
 /// Folders never walked in a non-git folder; a repository's own ignore rules cover the git case.
 const SKIPPED_DIRS: &[&str] = &[".git", "node_modules", "target", "dist", "build", ".next", ".venv", "__pycache__"];
 
@@ -58,6 +60,12 @@ pub struct Toolbox {
     /// it is in here — Claude Code's rule, and for the same reason: a model that has not looked at
     /// a file rewrites it from imagination. Seen live: a 7B replaced a README it had never opened.
     read: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Whether the repository map's tools are offered (`find_symbol`, `find_usages`, `outline`).
+    /// Off only to measure what the map is worth (the live test's `CODEFLOW_LIVE_NO_MAP`).
+    map: bool,
+    /// Declarations this run renamed or removed — checked again before it may finish
+    /// ([`Toolbox::dangling`]).
+    renamed: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 /// One tool call's result: the text the model reads, and a short line for the run log.
@@ -86,7 +94,43 @@ impl Toolbox {
         let git = git2::Repository::open(&root_path).ok().and_then(|repo| repo.workdir().map(Path::to_path_buf)).is_some_and(|workdir| {
             workdir.canonicalize().is_ok_and(|workdir| workdir == root_path)
         });
-        Ok(Self { root_str: root_path.to_string_lossy().to_string(), root: root_path, git, grants, read: Default::default() })
+        Ok(Self {
+            root_str: root_path.to_string_lossy().to_string(),
+            root: root_path,
+            git,
+            grants,
+            read: Default::default(),
+            map: true,
+            renamed: Default::default(),
+        })
+    }
+
+    /// The same toolbox without the repository map — the baseline the map is measured against.
+    #[cfg(test)]
+    pub fn without_map(mut self) -> Self {
+        self.map = false;
+        self
+    }
+
+    /// What the model reads before its first step: every file of the project, each code file with
+    /// what it declares — or, past `budget` characters, the folders and the most-used declarations
+    /// (`codemap::summary`). Built from the repository map, which this also brings up to date.
+    /// Falls back to the plain file list when the map cannot be built.
+    pub async fn project_map(&self, budget: usize) -> (String, Option<crate::codemap::BuildInfo>) {
+        let files = self.files().unwrap_or_default();
+        if !self.map {
+            return (format!("Project files:\n{}", self.file_map(MAP_FALLBACK_FILES)), None);
+        }
+        let root = self.root_str.clone();
+        let built = tokio::task::spawn_blocking(move || crate::codemap::snapshot(&root)).await.ok().and_then(Result::ok);
+        match built {
+            Some((map, info)) if !files.is_empty() => (crate::codemap::summary::project_map(&map, &files, budget), Some(info)),
+            _ => (format!("Project files:\n{}", self.file_map(MAP_FALLBACK_FILES)), None),
+        }
+    }
+
+    pub fn has_map(&self) -> bool {
+        self.map
     }
 
     pub fn grants(&self) -> Grants {
@@ -110,7 +154,31 @@ impl Toolbox {
 
     /// The tool schemas, OpenAI-shaped, for what this run may do.
     pub fn schemas(&self) -> Vec<Value> {
-        let mut tools = vec![
+        let mut tools = Vec::new();
+        if self.map {
+            tools.push(tool(
+                "find_symbol",
+                "Find where a function, method, class or type is declared, by name. Returns path:start-end for each. Use it instead of search to locate a definition.",
+                json!({ "name": { "type": "string", "description": "The name, e.g. applyDiscount or Cart.total" } }),
+                &["name"],
+            ));
+            tools.push(tool(
+                "find_usages",
+                "List the files that use a function or class (and the line), leaving out files that only have a different thing with the same name. Use it before changing a function's parameters, or to see where a value comes from.",
+                json!({
+                    "name": { "type": "string", "description": "The function or class name." },
+                    "path": { "type": "string", "description": "The file that declares it, if the name is declared in several files. Optional." }
+                }),
+                &["name"],
+            ));
+            tools.push(tool(
+                "outline",
+                "List what a file declares with line numbers (so read_file can start at the right line), plus the files it imports and the files that import it.",
+                json!({ "path": { "type": "string", "description": "File path relative to the project root." } }),
+                &["path"],
+            ));
+        }
+        tools.extend(vec![
             tool(
                 "list_files",
                 "List the files and folders in one folder of the project (one level). Folders end with '/'.",
@@ -143,7 +211,7 @@ impl Toolbox {
                 }),
                 &["query"],
             ),
-        ];
+        ]);
         if self.grants.write {
             tools.push(tool(
                 "edit_file",
@@ -186,6 +254,7 @@ impl Toolbox {
             "find_files" => self.find_files(&text("pattern")),
             "read_file" => self.read_file(&text("path"), line_arg(args, "start_line"), line_arg(args, "end_line")),
             "search" => self.search(&text("query"), args.get("regex").and_then(Value::as_bool).unwrap_or(false), &text("include")),
+            "find_symbol" | "find_usages" | "outline" if self.map => self.map_tool(name, args).await,
             "edit_file" | "write_file" if !self.grants.write => {
                 Outcome::err("this conversation is read-only: files cannot be changed here")
             }
@@ -369,8 +438,20 @@ impl Toolbox {
         } else {
             (old.to_string(), new.to_string())
         };
+        // Not read yet: nothing is changed, and the file is shown as read_file would — so the next
+        // call can copy old_text from it instead of failing again. A live 7B sent edit_file to every
+        // file of the project at once, unread, and looped on the bare refusal to its last step.
         if !self.was_read(&rel) {
-            return Outcome::err(format!("read {rel} with read_file before editing it"));
+            let shown = self.read_file(&rel, None, None);
+            let present = original.contains(old.as_str()) || (has_line_numbers(&old) && original.contains(strip_line_numbers(&old).as_str()));
+            let verdict = if present {
+                "The text you want to replace is in it: call edit_file again with old_text copied from these lines."
+            } else {
+                "The text you want to replace does not appear in this file — it probably needs no change."
+            };
+            let mut outcome = Outcome::err(format!("{rel} had not been read, so nothing was changed."));
+            outcome.content = format!("{rel} had not been read yet, so nothing was changed. Here it is:\n{}\n{verdict}", shown.content);
+            return outcome;
         }
         // The model copied `read_file`'s output line numbers along with the code (qwen3:8b did, ten
         // times in a row, on a live run): when the text as sent is not there, try it without them.
@@ -417,13 +498,35 @@ impl Toolbox {
         self.finish_edit(&rel, &full, &original, &updated, count)
     }
 
+    /// The repository map's three tools, answered as `codemap::mcp` answers Claude Code and Codex.
+    async fn map_tool(&self, name: &str, args: &Value) -> Outcome {
+        let tool = if name == "outline" { "file_outline" } else { name };
+        let key = if name == "outline" { "path" } else { "name" };
+        let subject = args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        if subject.is_empty() {
+            return Outcome::err(format!("{key} is empty"));
+        }
+        match crate::codemap::mcp::call_tool(&self.root_str, tool, args).await {
+            Ok(content) => {
+                let count = if name == "outline" { None } else { Some(content.lines().filter(|l| l.contains(':')).count()) };
+                Outcome::ok(content, count.map(|n| format!("{subject} · {n}")).unwrap_or(subject))
+            }
+            Err(error) => Outcome::err(error),
+        }
+    }
+
     fn finish_edit(&self, rel: &str, full: &Path, original: &str, updated: &str, count: usize) -> Outcome {
         if let Err(error) = crate::hybrid::apply::write_atomic(full, updated) {
             return Outcome::err(format!("could not write {rel}: {error}"));
         }
+        crate::codemap::touch(&self.root_str, rel);
         let (added, removed) = crate::hybrid::apply::line_stats(original, updated);
         let mut outcome = Outcome::ok(
-            format!("Edited {rel}: {count} replacement{} (+{added} −{removed} lines).", if count == 1 { "" } else { "s" }),
+            format!(
+                "Edited {rel}: {count} replacement{} (+{added} −{removed} lines).{}",
+                if count == 1 { "" } else { "s" },
+                self.dangling_note(rel, original, updated)
+            ),
             format!("{rel} · +{added} −{removed}"),
         );
         outcome.changed = Some((added, removed));
@@ -456,11 +559,68 @@ impl Toolbox {
         if let Err(error) = crate::hybrid::apply::write_atomic(&full, &text) {
             return Outcome::err(format!("could not write {rel}: {error}"));
         }
+        crate::codemap::touch(&self.root_str, &rel);
         let (added, removed) = crate::hybrid::apply::line_stats(original.as_deref().unwrap_or(""), &text);
         let verb = if original.is_some() { "Rewrote" } else { "Created" };
-        let mut outcome = Outcome::ok(format!("{verb} {rel} (+{added} −{removed} lines)."), format!("{rel} · +{added} −{removed}"));
+        let note = original.as_deref().map(|before| self.dangling_note(&rel, before, &text)).unwrap_or_default();
+        let mut outcome = Outcome::ok(format!("{verb} {rel} (+{added} −{removed} lines).{note}"), format!("{rel} · +{added} −{removed}"));
         outcome.changed = Some((added, removed));
         outcome
+    }
+
+    /// After an edit that renamed or removed a declaration: where the old name is still written,
+    /// as a note on the edit's result — what an IDE's rename would have updated, and what a small
+    /// model forgets (a live 7B renamed `cartTotal` in its declaration, then answered "done" with the
+    /// export and the caller in another file still on the old name).
+    fn dangling_note(&self, rel: &str, original: &str, updated: &str) -> String {
+        let before = crate::codemap::extract::extract(rel, original);
+        let after = crate::codemap::extract::extract(rel, updated);
+        let gone: Vec<String> = before
+            .symbols
+            .iter()
+            .map(|s| s.name.clone())
+            .filter(|name| crate::codemap::index::specific(name) && !after.symbols.iter().any(|s| &s.name == name))
+            .collect();
+        let mut out = String::new();
+        for name in gone {
+            let places = self.occurrences(&name);
+            if let Ok(mut renamed) = self.renamed.lock() {
+                renamed.insert(name.clone());
+            }
+            if !places.is_empty() {
+                out.push_str(&format!(
+                    "\n`{name}` no longer exists here, but it is still used at:\n{}\nUpdate each of those too (read the file first), unless they mean something else.",
+                    places.join("\n")
+                ));
+            }
+        }
+        out
+    }
+
+    /// Where `name` is written as a whole word in the project, as `path:line: text`.
+    fn occurrences(&self, name: &str) -> Vec<String> {
+        let pattern = format!(r"\b{}\b", regex::escape(name));
+        let found = if self.git {
+            let options = search::SearchOptions { whole_word: true, case_sensitive: true, ..Default::default() };
+            search::search(&self.root_str, name, &options, 20)
+                .map(|outcome| outcome.hits.into_iter().map(|hit| format!("{}:{}: {}", hit.path, hit.line_no, hit.line.trim())).collect())
+                .unwrap_or_default()
+        } else {
+            plain_search(&self.root, &pattern, true, 20).map(|(hits, _)| hits).unwrap_or_default()
+        };
+        found
+    }
+
+    /// Declarations this run renamed or removed that are still written somewhere, with where.
+    pub fn dangling(&self) -> Vec<(String, Vec<String>)> {
+        let names: Vec<String> = self.renamed.lock().map(|set| set.iter().cloned().collect()).unwrap_or_default();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let places = self.occurrences(&name);
+                (!places.is_empty()).then_some((name, places))
+            })
+            .collect()
     }
 
     fn was_read(&self, rel: &str) -> bool {
@@ -696,7 +856,7 @@ fn tail_chars(text: &str, max: usize) -> &str {
 
 /// Every file under a folder that is not a git working copy, relative and `/`-separated, skipping
 /// hidden and dependency folders.
-fn plain_walk(root: &Path, limit: usize) -> Vec<String> {
+pub(crate) fn plain_walk(root: &Path, limit: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -908,6 +1068,47 @@ mod tests {
             .await;
         assert!(colon.ok, "{}", colon.content);
         assert!(std::fs::read_to_string(dir.path().join("src/app.ts")).unwrap().contains("  return 2;\n"));
+    }
+
+    #[tokio::test]
+    async fn an_unread_edit_changes_nothing_but_shows_the_file() {
+        let dir = temp_repo();
+        let tools = toolbox(&dir, WRITE);
+        let args = json!({ "path": "src/app.ts", "old_text": "return 0;", "new_text": "return 1;" });
+        let first = tools.call("edit_file", &args, &mut None).await;
+        assert!(!first.ok);
+        assert!(first.content.contains("export function total(items)"), "the file is shown: {}", first.content);
+        assert!(first.content.contains("is in it"));
+        assert!(std::fs::read_to_string(dir.path().join("src/app.ts")).unwrap().contains("return 0;"), "nothing changed");
+        let second = tools.call("edit_file", &args, &mut None).await;
+        assert!(second.ok, "now it has been read: {}", second.content);
+        let elsewhere = tools.call("edit_file", &json!({ "path": "README.md", "old_text": "cartTotal()", "new_text": "x" }), &mut None).await;
+        assert!(elsewhere.content.contains("does not appear"), "{}", elsewhere.content);
+    }
+
+    #[tokio::test]
+    async fn a_rename_names_the_places_still_on_the_old_name() {
+        let dir = temp_repo();
+        std::fs::write(dir.path().join("src/use.ts"), "import { total } from './app';\nexport const t = total([]);\n").unwrap();
+        std::fs::write(dir.path().join("src/app.ts"), "export function totalize(items) {\n  return 0;\n}\n").unwrap();
+        let tools = toolbox(&dir, WRITE);
+        tools.call("read_file", &json!({ "path": "src/app.ts" }), &mut None).await;
+        let out = tools
+            .call("edit_file", &json!({ "path": "src/app.ts", "old_text": "function totalize(", "new_text": "function computeTotal(" }), &mut None)
+            .await;
+        assert!(out.ok);
+        assert!(!out.content.contains("still used"), "nothing else wrote totalize: {}", out.content);
+
+        std::fs::write(dir.path().join("src/app.ts"), "export function total(items) {\n  return 0;\n}\n").unwrap();
+        tools.call("read_file", &json!({ "path": "src/app.ts" }), &mut None).await;
+        let out = tools
+            .call("edit_file", &json!({ "path": "src/app.ts", "old_text": "function total(", "new_text": "function sumAll(" }), &mut None)
+            .await;
+        assert!(out.content.contains("`total` no longer exists here"), "{}", out.content);
+        assert!(out.content.contains("src/use.ts:1"), "{}", out.content);
+        assert_eq!(tools.dangling().len(), 1);
+        std::fs::write(dir.path().join("src/use.ts"), "import { sumAll } from './app';\nexport const t = sumAll([]);\n").unwrap();
+        assert!(tools.dangling().is_empty(), "fixed everywhere");
     }
 
     #[test]

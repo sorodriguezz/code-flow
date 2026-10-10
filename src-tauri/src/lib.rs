@@ -23,6 +23,7 @@ mod boot_guard;
 mod caveman;
 mod chain_memory;
 mod chat_mcp;
+mod codemap;
 mod chat_title;
 mod git_exclude;
 mod ci;
@@ -1707,6 +1708,12 @@ pub fn run() {
             commands::reviewer_cmd::reviewer_cancel_run,
             commands::reviewer_cmd::reviewer_active_run,
             commands::reviewer_cmd::reviewer_last_run,
+            commands::codemap_cmd::codemap_graph,
+            commands::codemap_cmd::codemap_global,
+            commands::codemap_cmd::codemap_outline,
+            commands::codemap_cmd::codemap_find,
+            commands::codemap_cmd::codemap_usages,
+            commands::codemap_cmd::codemap_key_symbols,
             commands::localai_cmd::localai_state,
             commands::localai_cmd::localai_set_enabled,
             commands::localai_cmd::localai_set_model,

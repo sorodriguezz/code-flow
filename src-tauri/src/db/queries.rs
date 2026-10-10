@@ -2316,13 +2316,20 @@ pub fn create_story_chain(
     implementer_agent_id: &str,
     agent_project_id: &str,
     work_item: &NewStoryWorkItem,
+    starting_points: &std::collections::HashMap<String, String>,
 ) -> rusqlite::Result<ChainDetail> {
     let goal = compose_story_goal(work_item, notes);
     let mut steps: Vec<NewChainStep> = Vec::with_capacity(project_ids.len() * 2);
     for id in project_ids {
+        // Where the repository map says this story most plausibly lands — a place to start reading,
+        // appended to this repository's analysis only (`codemap::story_hint`).
+        let instruction = match starting_points.get(id) {
+            Some(hint) => format!("{STORY_ANALYZE_INSTRUCTION}\n\n{hint}"),
+            None => STORY_ANALYZE_INSTRUCTION.to_string(),
+        };
         steps.push(NewChainStep {
             agent_id: analyst_agent_id.to_string(),
-            instruction: STORY_ANALYZE_INSTRUCTION.to_string(),
+            instruction,
             gate: false,
             project_id: id.clone(),
             phase: "analyze".to_string(),
@@ -6382,7 +6389,7 @@ ok", "").unwrap().unwrap();
             ..Default::default()
         };
         let story =
-            create_story_chain(&conn, &[project.clone()], "Historia", "", &agent.id, &agent.id, "", &item).unwrap();
+            create_story_chain(&conn, &[project.clone()], "Historia", "", &agent.id, &agent.id, "", &item, &Default::default()).unwrap();
         resume_chain(&conn, &story.chain.id).unwrap();
         assert_eq!(story_phase(&conn, "run-story"), None, "nothing claimed yet");
 

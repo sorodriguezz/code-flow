@@ -3795,7 +3795,14 @@ body.cf-dragging * {
   scale: 0.95;
 }
 /* Every other button gives a little too — in the components layer, so a button that times its own
-   transitions (a Tailwind `transition-*`) keeps them, and only presses without the ease. */
+   transitions (a Tailwind `transition-*`) keeps them, and only presses without the ease.
+
+   Not a button that is a whole row (a disclosure header, a list item: `flex-1`, `w-full`,
+   `text-left`). Shrunk to 97% around its centre, a 300px row pulls each edge in by 4–5px: the
+   chevron at its left end slid right under the pointer, and a press on the chevron let go outside
+   the button, so the click never reached it (user report, 2026-10-10, the Proveedores rows — "se
+   mueve hacia la derecha y no se abre"; measured in a WKWebView: left edge 727 → 731px mid-press).
+   A row says it was pressed with its hover tone. */
 @layer components {
   :root[data-motion="full"] button {
     transition-property:
@@ -3804,7 +3811,7 @@ body.cf-dragging * {
     transition-duration: 0.16s;
     transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
   }
-  :root[data-motion="full"] button:not(:disabled):active {
+  :root[data-motion="full"] button:not(:disabled, .flex-1, .w-full, .text-left):active {
     scale: 0.97;
   }
 }
@@ -3934,4 +3941,32 @@ body.cf-dragging * {
   .cf-return-pill {
     animation: cf-return-pill-still 2200ms linear both;
   }
+}
+
+/* An icon that turns (a disclosure chevron, a select's caret) turns with `transform`, not with the
+ * `rotate` property Tailwind 4's `rotate-*` utilities set. WebKit — the engine of the macOS app —
+ * starts a transition of `rotate` on an <svg> and then leaves it on its first frame: measured in a
+ * WKWebView on 2026-10-10, a provider row clicked shut kept its chevron at 0deg, pointing down as
+ * if still open, so a click that worked looked like one that had not ("se ve bug y no lo hace").
+ * The same turn written as a `transform` animates in every engine, and `transition-transform`
+ * already lists `transform`. Unlayered, so it outranks the utilities layer it overrides. */
+svg.rotate-45 {
+  rotate: none;
+  transform: rotate(45deg);
+}
+svg.rotate-90 {
+  rotate: none;
+  transform: rotate(90deg);
+}
+svg.\-rotate-90 {
+  rotate: none;
+  transform: rotate(-90deg);
+}
+svg.rotate-180 {
+  rotate: none;
+  transform: rotate(180deg);
+}
+svg.\-rotate-180 {
+  rotate: none;
+  transform: rotate(-180deg);
 }

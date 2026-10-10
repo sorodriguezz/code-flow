@@ -80,6 +80,13 @@ describe("CodeFlow's own engine", () => {
     expect(line({ event: "tool", tool: "run_command", arg: "npm test", ok: true })).toBe("⏵ Bash: npm test");
   });
 
+  it("reads the repository map's lookups as searches and listings, and says the map once", () => {
+    expect(line({ event: "tool", tool: "find_symbol", arg: "applyDiscount", ok: true })).toBe("⏵ Grep: applyDiscount");
+    expect(line({ event: "tool", tool: "find_usages", arg: "cartTotal", ok: true })).toBe("⏵ Grep: cartTotal");
+    expect(line({ event: "tool", tool: "outline", arg: "src/cart.js", ok: true })).toBe("⏵ LS: src/cart.js");
+    expect(line({ event: "map", files: 23, symbols: 30, parsed: 23, ms: 3 })).toMatch(/^· .*23.*3 ms$/);
+  });
+
   it("keeps a failed call's reason off the path, on a line of its own", () => {
     expect(line({ event: "tool", tool: "edit_file", arg: "a.ts", ok: false, detail: "old_text was not found" })).toBe(
       "⏵ Edit: a.ts\n· old_text was not found",

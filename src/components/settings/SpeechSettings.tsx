@@ -188,7 +188,9 @@ export function SpeechSettings() {
         )}
         <Row label={t("speech.notifications")}>
           <span className="text-[12.5px] text-[var(--cf-text)]">{t("speech.notificationsCount", { n: spoken.length })}</span>
-          <Link onClick={() => go("notifications", "sources")}>{t("speech.notificationsChoose")}</Link>
+          <span className="text-[12.5px]">
+            <Link onClick={() => go("notifications", "sources")}>{t("speech.notificationsChoose")}</Link>
+          </span>
         </Row>
         <label className="flex items-start gap-2.5 py-1.5">
           <span className="mt-[1px]">

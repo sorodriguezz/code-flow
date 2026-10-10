@@ -293,15 +293,25 @@ pub async fn run(
         log(&format!("  {} pista(s) históricas sobre estos archivos", request.hints.len()));
         contexts.push(("Hallazgos ya evaluados en otros PRs de este repo".to_string(), block));
     }
-    let impacts = graph::blast_radius(
-        request.repo_path,
-        request.target_ref,
-        &plan.files,
-        &request.engine.scope,
-        &request.engine.graph,
-    );
+    // Off the async worker: the first review of a branch parses its tree (`codemap`), seconds on a
+    // large repository; later ones are mostly cache hits.
+    let impacts = {
+        let (repo, target, files, scope, cfg) = (
+            request.repo_path.to_string(),
+            request.target_ref.to_string(),
+            plan.files.clone(),
+            request.engine.scope.clone(),
+            request.engine.graph.clone(),
+        );
+        tokio::task::spawn_blocking(move || graph::blast_radius(&repo, &target, &files, &scope, &cfg)).await.unwrap_or_default()
+    };
     if let Some(block) = graph::block(&impacts) {
-        log(&format!("  {} símbolo(s) con referencias fuera del PR", impacts.len()));
+        let contracts = impacts.iter().filter(|impact| impact.change.is_some()).count();
+        log(&format!(
+            "  {} símbolo(s) con referencias fuera del PR{}",
+            impacts.len(),
+            if contracts > 0 { format!(" · {contracts} con cambio de firma o eliminados") } else { String::new() }
+        ));
         contexts.push(("Impacto fuera del PR (referencias)".to_string(), block));
     }
     let preamble = ai::review_preamble(request.pr_title, request.pr_description, &contexts);

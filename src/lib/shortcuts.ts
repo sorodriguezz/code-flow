@@ -63,6 +63,7 @@ export type ShortcutId =
   | "view.remote"
   | "view.pipelines"
   | "view.reviewer"
+  | "view.codemap"
   | "db.newConsole"
   | "db.connections"
   | "db.refresh"
@@ -560,6 +561,14 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
       usePreferencesStore.getState().reviewerEnabled
         ? useUiStore.getState().setActiveView("reviewer")
         : useUiStore.getState().openSettings("reviewer"),
+  },
+  {
+    id: "view.codemap",
+    group: "views",
+    labelKey: "tabbar.codemap",
+    // O for overview — M (map) is the meetings recorder's.
+    defaultChord: "Mod+Alt+O",
+    run: () => useUiStore.getState().setActiveView("codemap"),
   },
   {
     id: "view.next",

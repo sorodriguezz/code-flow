@@ -157,7 +157,7 @@ export function MeetingsSettings() {
           ) : status.voicesInstalled ? (
             <div className="flex items-center gap-2 text-[12px]">
               <Check size={13} className="text-[var(--cf-success)]" />
-              <span className="flex-1">{t("meetings.settings.voicesReady")}</span>
+              <span>{t("meetings.settings.voicesReady")}</span>
               <Button
                 size="sm"
                 variant="ghost"
@@ -173,7 +173,7 @@ export function MeetingsSettings() {
             </div>
           ) : (
             <div className="flex items-center gap-2 text-[12px]">
-              <span className="flex-1 text-[var(--cf-text-muted)]">{t("meetings.settings.voicesInstall", { size: formatBytes(status.voicesBytes) })}</span>
+              <span className="text-[var(--cf-text-muted)]">{t("meetings.settings.voicesInstall", { size: formatBytes(status.voicesBytes) })}</span>
               {downloads.voices && downloads.voices.phase !== "done" ? (
                 <>
                   <span className="tabular-nums text-[var(--cf-text-muted)]">

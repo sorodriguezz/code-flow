@@ -27,6 +27,7 @@ import {
   Route,
   SaveAll,
   ShieldCheck,
+  Network,
   Sparkles,
   TerminalSquare,
   Waypoints,
@@ -107,6 +108,7 @@ const VIEW_ITEMS: {
   // Unlike Pipelines, listed only while switched on: the tab is opted into in Settings, and a row
   // here would only bounce off the guard in `App.tsx`. Settings › Revisor is found by the search.
   { id: "reviewer", labelKey: "tabbar.reviewer", icon: ShieldCheck },
+  { id: "codemap", labelKey: "tabbar.codemap", icon: Network },
   { id: "api", workspace: "requests", labelKey: "tabbar.api", icon: Zap },
   { id: "api", workspace: "database", labelKey: "tabbar.databases", icon: Database },
   { id: "agents", labelKey: "tabbar.agents", icon: Bot },

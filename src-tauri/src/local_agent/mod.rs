@@ -31,7 +31,7 @@
 //! get a nudge instead of a failure. None of that makes a 7B a frontier model; it makes it fail
 //! less often in ways that cost the user a turn.
 
-mod tools;
+pub(crate) mod tools;
 
 use std::collections::HashMap;
 
@@ -63,8 +63,11 @@ const SAME_CALL_LIMIT: usize = 2;
 /// of ~13 s, which at ~20 tokens/s is a step writing to the old 4,096 cap. 2,048 halves that.
 const STEP_OUTPUT_TOKENS: u32 = 2_048;
 
-/// File names listed in the agent's first message.
-const MAP_FILES: usize = 200;
+/// The share of a step's input the project map may take, and its bounds in characters: a 16k window
+/// gets about ten thousand characters of map, a 4k one the floor.
+const MAP_SHARE: u64 = 4;
+const MAP_MIN_CHARS: usize = 3_000;
+const MAP_MAX_CHARS: usize = 24_000;
 
 /// How many times an answer that only announces its next step is sent back to be acted on. Five,
 /// not one or two: measured on qwen2.5-coder 7B through Ollama, a run that announces once tends to
@@ -487,13 +490,26 @@ fn fit_user(user: &str, input_budget: u32, system_tokens: u64) -> String {
 
 // --------------------------------------------------------------------------------------- agent
 
-fn agent_system(grants: Grants) -> String {
+/// Characters of project map a step with `input_budget` tokens of input can carry.
+fn map_budget(input_budget: u64) -> usize {
+    (((input_budget / MAP_SHARE) as f64 * 3.5) as usize).clamp(MAP_MIN_CHARS, MAP_MAX_CHARS)
+}
+
+fn agent_system(grants: Grants, map: bool) -> String {
+    let look = if map {
+        "- Look before you answer. The project's files are listed below with what each one declares. find_symbol tells you where a function or class is defined, find_usages which files use it, outline what a file declares with its line numbers; then read_file the part you need (search and find_files help with anything else). Never guess what a file contains.\n"
+    } else {
+        "- Look before you answer. The project's files are listed below; use read_file on the relevant ones (search and find_files help in large projects). Never guess what a file contains.\n"
+    };
     let mut system = String::from(
         "You are CodeFlow's built-in coding agent, running on this computer with a local model. \
 You work inside one project folder; every path you use is relative to it.\n\
 Write your replies in the same language as the user's request.\n\n\
-How to work:\n\
-- Look before you answer. The project's files are listed below; use read_file on the relevant ones (search and find_files help in large projects). Never guess what a file contains.\n\
+How to work:\n",
+    );
+    system.push_str(look);
+    system.push_str(
+        "\
 - Act, don't announce: when you decide to look at or change something, call the tool in that same reply instead of saying you will.\n\
 - Call one tool at a time and use its result before deciding the next step.\n",
     );
@@ -521,11 +537,16 @@ async fn agent(
 ) -> Result<AiRun, String> {
     let root = inv.cwd.unwrap_or_default();
     let toolbox = tools::Toolbox::new(root, grants)?;
+    #[cfg(test)]
+    let toolbox = if std::env::var("CODEFLOW_LIVE_NO_MAP").is_ok() { toolbox.without_map() } else { toolbox };
     let schemas = toolbox.schemas();
     let tools_tokens = budget::estimate_tokens(&Value::Array(schemas.clone()).to_string());
-    let map = format!("Project files:\n{}", toolbox.file_map(MAP_FILES));
-    let system = join_system(&agent_system(toolbox.grants()), inv.system_prompt, &map);
     let input_budget = (session.budget.input as u64).saturating_sub(tools_tokens);
+    let (map, built) = toolbox.project_map(map_budget(input_budget)).await;
+    if let Some(info) = built {
+        log(ctx, json!({ "event": "map", "files": info.files, "symbols": info.symbols, "parsed": info.parsed, "ms": info.millis }));
+    }
+    let system = join_system(&agent_system(toolbox.grants(), toolbox.has_map()), inv.system_prompt, &map);
     let user = fit_user(&user_message(inv), input_budget as u32, budget::estimate_tokens(&system));
     let mut messages = vec![json!({ "role": "system", "content": system }), json!({ "role": "user", "content": user })];
 
@@ -538,6 +559,7 @@ async fn agent(
     let mut claim_nudges = 0usize;
     let mut invented_nudges = 0usize;
     let mut unfixed_nudged = false;
+    let mut dangling_nudged = false;
     let mut calls_seen: HashMap<String, usize> = HashMap::new();
     let mut changed_files = 0usize;
     let max_tokens = session.budget.output.min(STEP_OUTPUT_TOKENS);
@@ -636,6 +658,23 @@ async fn agent(
                 messages.push(json!({ "role": "user", "content": "You have not changed any file yet. Make the fix now with edit_file; if no change is needed, explain why." }));
                 continue;
             }
+            // A rename or a removal finished in one file and not in the rest. Checked against the
+            // project as it now is, once: the model may know better (a same-named thing elsewhere).
+            if toolbox.grants().write && !dangling_nudged && !last_step {
+                let dangling = toolbox.dangling();
+                if !dangling.is_empty() {
+                    dangling_nudged = true;
+                    let list = dangling
+                        .iter()
+                        .map(|(name, places)| format!("`{name}`:\n{}", places.join("\n")))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    log(ctx, json!({ "event": "text", "text": answer }));
+                    messages.push(json!({ "role": "assistant", "content": answer }));
+                    messages.push(json!({ "role": "user", "content": format!("Not finished: you renamed or removed these, and they are still used here:\n{list}\nUpdate each place with edit_file (read the file first), then give your final answer. If one of them is a different thing with the same name, leave it and say so.") }));
+                    continue;
+                }
+            }
             return Ok(AiRun {
                 text: answer,
                 session_id: None,
@@ -654,7 +693,8 @@ async fn agent(
             let name = call["name"].as_str().unwrap_or_default().to_string();
             let args = call.get("arguments").cloned().unwrap_or_else(|| json!({}));
             let key = format!("{name}:{args}");
-            let arg = ["path", "pattern", "query", "command"]
+            // `name` before `path`: `find_usages` takes both, and the symbol is what it was asked about.
+            let arg = ["name", "path", "pattern", "query", "command"]
                 .iter()
                 .find_map(|field| args.get(*field).and_then(Value::as_str))
                 .unwrap_or_default()
@@ -1056,6 +1096,153 @@ mod live {
         assert!(run.usage.is_some_and(|usage| usage.cost_usd == Some(0.0)));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The map's worth, measured: tasks whose cause is not in the file the symptom names. Each runs
+/// `CODEFLOW_LIVE_RUNS` times (default 1) against a fresh copy of a ~25-file project; set
+/// `CODEFLOW_LIVE_NO_MAP=1` for the baseline without the repository map.
+/// `CODEFLOW_LIVE_AGENT=1 [CODEFLOW_LIVE_AGENT_MODEL=…] [CODEFLOW_LIVE_NO_MAP=1] cargo test --lib local_agent::live_map -- --ignored --nocapture --test-threads=1`
+#[cfg(test)]
+mod live_map {
+    use super::*;
+
+    fn settings() -> Option<Settings> {
+        std::env::var("CODEFLOW_LIVE_AGENT").ok()?;
+        let model = std::env::var("CODEFLOW_LIVE_AGENT_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".to_string());
+        Some(Settings {
+            backend: Some(BackendKind::Ollama),
+            url_ollama: None,
+            url_openai: None,
+            model_bundled: None,
+            model_ollama: Some(model),
+            model_openai: None,
+            ctx: Some(16_384),
+            delegate: None,
+            on_fail: config::OnFail::Review,
+            unload: false,
+            review_mode: config::ReviewMode::Local,
+        })
+    }
+
+    fn runs() -> usize {
+        std::env::var("CODEFLOW_LIVE_RUNS").ok().and_then(|n| n.parse().ok()).unwrap_or(1)
+    }
+
+    fn write(dir: &std::path::Path, rel: &str, text: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// A small shop: the discount bug lives in `src/lib/pricing.js`, the symptom in checkout.
+    fn shop() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("codeflow-live-map-{}", uuid::Uuid::new_v4()));
+        git2::Repository::init(&dir).unwrap();
+        write(&dir, "README.md", "# Shop\n\nCart, checkout and a small HTTP API.\n");
+        write(&dir, "package.json", "{\n  \"name\": \"shop\",\n  \"version\": \"1.0.0\"\n}\n");
+        write(&dir, "src/lib/pricing.js", "// Price helpers shared by the cart and the checkout.\n\nfunction applyDiscount(price, percent) {\n  return price * percent / 100;\n}\n\nfunction formatPrice(amount) {\n  return '$' + amount.toFixed(2);\n}\n\nfunction roundCents(amount) {\n  return Math.round(amount * 100) / 100;\n}\n\nmodule.exports = { applyDiscount, formatPrice, roundCents };\n");
+        write(&dir, "src/lib/tax.js", "function taxFor(amount, rate) {\n  return amount * rate;\n}\n\nmodule.exports = { taxFor };\n");
+        write(&dir, "src/lib/strings.js", "function slugify(text) {\n  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-');\n}\n\nfunction capitalize(text) {\n  return text.charAt(0).toUpperCase() + text.slice(1);\n}\n\nmodule.exports = { slugify, capitalize };\n");
+        write(&dir, "src/cart/cart.js", "const { applyDiscount, roundCents } = require('../lib/pricing');\n\nfunction cartSubtotal(items) {\n  let total = 0;\n  for (const item of items) {\n    total += item.price * item.qty;\n  }\n  return total;\n}\n\nfunction cartTotal(items, discountPercent) {\n  const subtotal = cartSubtotal(items);\n  const total = discountPercent ? applyDiscount(subtotal, discountPercent) : subtotal;\n  return roundCents(total);\n}\n\nmodule.exports = { cartSubtotal, cartTotal };\n");
+        write(&dir, "src/cart/items.js", "function addItem(items, item) {\n  return [...items, item];\n}\n\nfunction removeItem(items, id) {\n  return items.filter((item) => item.id !== id);\n}\n\nmodule.exports = { addItem, removeItem };\n");
+        write(&dir, "src/checkout/checkout.js", "const { cartTotal } = require('../cart/cart');\nconst { formatPrice } = require('../lib/pricing');\nconst { taxFor } = require('../lib/tax');\n\nfunction checkoutSummary(items, discountPercent) {\n  const total = cartTotal(items, discountPercent);\n  return { total, tax: taxFor(total, 0), label: formatPrice(total) };\n}\n\nmodule.exports = { checkoutSummary };\n");
+        write(&dir, "src/checkout/receipt.js", "const { formatPrice } = require('../lib/pricing');\n\nfunction receiptLines(items) {\n  return items.map((item) => `${item.name} x${item.qty} ${formatPrice(item.price * item.qty)}`);\n}\n\nmodule.exports = { receiptLines };\n");
+        write(&dir, "src/api/routes.js", "const { checkoutSummary } = require('../checkout/checkout');\nconst { receiptLines } = require('../checkout/receipt');\n\nfunction postCheckout(req) {\n  return checkoutSummary(req.body.items, req.body.discount);\n}\n\nfunction getReceipt(req) {\n  return receiptLines(req.body.items);\n}\n\nmodule.exports = { postCheckout, getReceipt };\n");
+        write(&dir, "src/api/server.js", "const routes = require('./routes');\n\nfunction handle(path, req) {\n  if (path === '/checkout') return routes.postCheckout(req);\n  if (path === '/receipt') return routes.getReceipt(req);\n  return { status: 404 };\n}\n\nmodule.exports = { handle };\n");
+        for (name, body) in [
+            ("users", "function findUser(users, id) {\n  return users.find((u) => u.id === id);\n}\n\nmodule.exports = { findUser };\n"),
+            ("orders", "function orderStatus(order) {\n  return order.paid ? 'paid' : 'pending';\n}\n\nmodule.exports = { orderStatus };\n"),
+            ("stock", "function inStock(product) {\n  return product.stock > 0;\n}\n\nmodule.exports = { inStock };\n"),
+            ("shipping", "function shippingCost(weight) {\n  return weight > 10 ? 15 : 5;\n}\n\nmodule.exports = { shippingCost };\n"),
+            ("reviews", "function averageRating(reviews) {\n  return reviews.reduce((a, r) => a + r.stars, 0) / reviews.length;\n}\n\nmodule.exports = { averageRating };\n"),
+            ("coupons", "function couponValid(coupon, now) {\n  return coupon.expires > now;\n}\n\nmodule.exports = { couponValid };\n"),
+            ("emails", "function welcomeEmail(user) {\n  return `Hola ${user.name}`;\n}\n\nmodule.exports = { welcomeEmail };\n"),
+            ("search", "function searchProducts(products, text) {\n  return products.filter((p) => p.name.includes(text));\n}\n\nmodule.exports = { searchProducts };\n"),
+        ] {
+            write(&dir, &format!("src/domain/{name}.js"), body);
+        }
+        for name in ["CartView", "CheckoutView", "ProductList", "Header", "Footer", "UserMenu"] {
+            write(&dir, &format!("src/ui/{name}.js"), &format!("function {name}(props) {{\n  return {{ type: '{name}', props }};\n}}\n\nmodule.exports = {{ {name} }};\n"));
+        }
+        dir
+    }
+
+    fn node_eval(dir: &std::path::Path, code: &str) -> Option<String> {
+        let out = std::process::Command::new("node").arg("-e").arg(code).current_dir(dir).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn label() -> String {
+        format!(
+            "{} {}",
+            std::env::var("CODEFLOW_LIVE_AGENT_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".to_string()),
+            if std::env::var("CODEFLOW_LIVE_NO_MAP").is_ok() { "WITHOUT map" } else { "with map" }
+        )
+    }
+
+    async fn task(prompt: &str, check: impl Fn(&std::path::Path) -> Result<(), String>) {
+        let Some(settings) = settings() else { return };
+        let mut passed = 0;
+        let mut seconds = Vec::new();
+        for run in 0..runs() {
+            let dir = shop();
+            let root = dir.to_string_lossy().to_string();
+            let mut inv = super::tests_support::bare(prompt, Some(&root), task::FIX_FINDING);
+            inv.auto_approve_edits = true;
+            let started = std::time::Instant::now();
+            let outcome = run_with(&settings, &inv, &None, &mut None).await;
+            let elapsed = started.elapsed().as_secs_f64();
+            seconds.push(elapsed);
+            let verdict = outcome.as_ref().map_err(|e| e.clone()).and_then(|_| check(&dir));
+            if verdict.is_ok() {
+                passed += 1;
+            }
+            eprintln!("[{}] run {}: {} in {:.0} s → {:?}", label(), run + 1, if verdict.is_ok() { "PASS" } else { "FAIL" }, elapsed, verdict.err().unwrap_or_default());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        let mean = seconds.iter().sum::<f64>() / seconds.len().max(1) as f64;
+        eprintln!("[{}] {passed}/{} passed, mean {:.0} s", label(), runs(), mean);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn fixes_a_bug_whose_cause_is_in_another_file() {
+        task(
+            "Con un descuento del 10% sobre una compra de 100, el total del checkout sale 10 en vez de 90. Encuentra la causa en este proyecto y arréglala.",
+            |dir| match node_eval(dir, "console.log(require('./src/checkout/checkout').checkoutSummary([{price: 100, qty: 1}], 10).total)") {
+                Some(total) if total == "90" => Ok(()),
+                Some(total) => Err(format!("checkout total is {total}")),
+                None => Err("the project no longer runs".to_string()),
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn renames_a_function_everywhere_it_is_used() {
+        task(
+            "Renombra la función cartTotal a computeCartTotal en todo el proyecto: la declaración y cada lugar donde se usa.",
+            |dir| {
+                let mut leftovers = Vec::new();
+                for rel in ["src/cart/cart.js", "src/checkout/checkout.js"] {
+                    let text = std::fs::read_to_string(dir.join(rel)).unwrap_or_default();
+                    if text.contains("cartTotal") {
+                        leftovers.push(rel);
+                    }
+                }
+                if !leftovers.is_empty() {
+                    return Err(format!("cartTotal still in {leftovers:?}"));
+                }
+                match node_eval(dir, "console.log(require('./src/checkout/checkout').checkoutSummary([{price: 50, qty: 2}], 0).total)") {
+                    Some(total) if total == "100" => Ok(()),
+                    Some(total) => Err(format!("checkout total is {total}")),
+                    None => Err("the project no longer runs".to_string()),
+                }
+            },
+        )
+        .await;
     }
 }
 

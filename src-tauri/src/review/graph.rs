@@ -8,32 +8,30 @@
 //! **Built here rather than by an external indexer.** The transversal runbook shells out to
 //! Graphify (Python + tree-sitter, installed with `uv`) and caches a networkx graph per branch.
 //! That is not portable to an app that promises to install nothing on the user's machine, and it is
-//! not necessary either: the repository is already checked out, `git2` reads any commit's tree
-//! without touching the working directory, and the contract this feeds is explicitly *pointers
-//! only* — `file:line` plus the enclosing signature, never source. A regex sweep over the target
-//! branch answers exactly that question.
+//! not necessary either: the repository map (`codemap`) reads any commit's tree straight out of
+//! git's object database, with tree-sitter compiled in for the languages most code here is written
+//! in, and caches every file by blob id — so the target branch of a review is mostly a cache hit.
+//!
+//! What the map adds over the name sweep this used to be:
+//! - **Imports, not names.** A file that mentions `guardar` but imports nothing that declares the
+//!   touched one is a namesake and is left out; a use the imports cannot settle (another language,
+//!   an alias nothing resolves) stays, marked as found by name.
+//! - **No ceiling.** The sweep stopped at 4,000 files or 16 MB to stay fast; the cache made that
+//!   unnecessary.
+//! - **Contract changes.** The touched declaration is compared with the target branch's: a changed
+//!   signature, or a symbol the PR removed or renamed while files outside it still use the old one,
+//!   leads the list — the case the whole block exists for.
 //!
 //! It is a **hint, never a filter**: an empty result is the normal outcome for a repository of
 //! configuration files, and nothing downstream is allowed to require it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashSet};
 
-use regex::{escape, Regex, RegexSet};
 use serde::Serialize;
 
 use super::contract::{GraphConfig, ScopeConfig};
-use super::outline::{declarations, normalize_path, symbol_name, ChangedFile};
-
-/// Ceiling on how many files the sweep will open. A monorepo has tens of thousands, and this is a
-/// hint — spending a minute of I/O on it would be worse than not having it.
-const MAX_FILES_SCANNED: usize = 4_000;
-
-/// Ceiling on total bytes read, for the same reason. Whichever ceiling is hit first stops the sweep.
-const MAX_BYTES_SCANNED: usize = 16 * 1024 * 1024;
-
-/// A file bigger than this is generated, vendored or minified in practice — never the caller
-/// somebody wants to be told about.
-const MAX_FILE_BYTES: usize = 512 * 1024;
+use super::outline::{normalize_path, same_path, ChangedFile};
+use crate::codemap::extract::{self, Sym};
 
 /// One place that references a touched symbol.
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +42,18 @@ pub struct Caller {
     /// The declaration the reference sits inside, so the pointer names a function rather than a
     /// line number in the void. Empty when the reference is at top level (an import, a constant).
     pub signature: String,
+    /// The file imports the declaring module (or shares its package). `false`: found by name only.
+    pub confirmed: bool,
+}
+
+/// What the PR did to a symbol's contract, when it did something to it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ContractChange {
+    /// The declaration up to its body differs from the target branch's.
+    Signature { before: String, after: String },
+    /// Declared on the target branch, gone from the PR's version of the file.
+    Removed,
 }
 
 /// One touched symbol and everything that reaches it.
@@ -56,19 +66,8 @@ pub struct Impact {
     pub callers: Vec<Caller>,
     /// The real total, since `callers` is truncated.
     pub callers_total: usize,
-}
-
-/// Extensions worth sweeping. Anything else cannot call a function.
-const CODE_EXT: [&str; 30] = [
-    "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "cs", "java", "kt",
-    "kts", "scala", "swift", "dart", "go", "rs", "py", "rb", "php", "sql", "cls", "mac", "int",
-    "inc", "c", "cpp", "h",
-];
-
-fn is_code(path: &str) -> bool {
-    path.rsplit_once('.')
-        .map(|(_, ext)| CODE_EXT.contains(&ext.to_lowercase().as_str()))
-        .unwrap_or(false)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<ContractChange>,
 }
 
 /// Whether a name is worth looking for at all.
@@ -77,41 +76,32 @@ fn is_code(path: &str) -> bool {
 /// bury a real caller under hundreds of coincidences. The blast radius is only useful when it is
 /// specific, so an ambiguous name is dropped rather than reported badly.
 fn is_searchable(name: &str) -> bool {
-    const TOO_COMMON: [&str; 24] = [
-        "get", "set", "run", "new", "add", "map", "id", "of", "to", "on", "do", "is", "has", "at",
-        "in", "for", "if", "value", "data", "name", "type", "item", "list", "main",
-    ];
-    name.len() >= 4 && !TOO_COMMON.contains(&name.to_lowercase().as_str())
+    crate::codemap::index::specific(name)
 }
 
-/// Every blob under `refname`, as `(path, content)`, bounded by the sweep's ceilings.
-fn walk_tree(repo_path: &str, refname: &str, scope: &ScopeConfig) -> Vec<(String, String)> {
-    let Ok(paths) = crate::git::diff::list_tree(repo_path, refname) else { return Vec::new() };
-
-    let mut out = Vec::new();
-    let mut bytes = 0usize;
-    for path in paths {
-        if out.len() >= MAX_FILES_SCANNED || bytes >= MAX_BYTES_SCANNED {
-            break;
+/// The declarations of `symbols` that contain a changed line — the innermost one for each line.
+fn touched<'a>(symbols: &'a [Sym], changed: &std::collections::BTreeSet<usize>) -> Vec<&'a Sym> {
+    let mut out: Vec<&Sym> = Vec::new();
+    for line in changed {
+        let line = *line as u32;
+        if let Some(sym) = symbols.iter().filter(|s| s.start <= line && line <= s.end).min_by_key(|s| s.end - s.start) {
+            if !out.iter().any(|known| std::ptr::eq(*known, sym)) {
+                out.push(sym);
+            }
         }
-        if !is_code(&path) || !super::plan::in_scope(&path, scope) {
-            continue;
-        }
-        let Ok(content) = crate::git::diff::file_at_ref(repo_path, refname, &path) else { continue };
-        if content.len() > MAX_FILE_BYTES {
-            continue;
-        }
-        bytes += content.len();
-        out.push((path, content));
     }
     out
 }
 
+fn normalized(signature: &str) -> String {
+    signature.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The blast radius of the symbols `files` touched, resolved against `target_ref`.
 ///
-/// Returns the widest radiuses first and truncates to the configured caps: a symbol with two
-/// hundred callers is exactly the one worth knowing about, and exactly the one that must not enter
-/// a prompt whole.
+/// Returns contract changes first, then the widest radiuses, truncated to the configured caps: a
+/// symbol with two hundred callers is exactly the one worth knowing about, and exactly the one that
+/// must not enter a prompt whole.
 pub fn blast_radius(
     repo_path: &str,
     target_ref: &str,
@@ -119,120 +109,110 @@ pub fn blast_radius(
     scope: &ScopeConfig,
     cfg: &GraphConfig,
 ) -> Vec<Impact> {
-    if !cfg.enabled {
+    if !cfg.enabled || files.is_empty() {
         return Vec::new();
     }
+    let Ok(map) = crate::codemap::snapshot_at(repo_path, target_ref) else { return Vec::new() };
+    let changed_paths: HashSet<String> = files.iter().map(|f| normalize_path(&f.path)).collect();
 
-    // Which symbol each searchable name belongs to. A name declared in two changed files is
-    // ambiguous — reporting callers of "one of them" would be a guess, so it is dropped.
-    let mut owner: BTreeMap<String, Option<String>> = BTreeMap::new();
+    // What each changed file touched, by name — and what it removed. A name touched in two changed
+    // files is ambiguous: reporting callers of "one of them" would be a guess, so it is dropped.
+    let mut owner: BTreeMap<String, Option<(String, Option<ContractChange>)>> = BTreeMap::new();
     for file in files {
-        for symbol in &file.symbols {
-            let Some(name) = symbol_name(&symbol.label).filter(|n| is_searchable(n)) else { continue };
+        let path = normalize_path(&file.path);
+        let head = if file.is_readable() { extract::extract(&path, &file.content) } else { extract::Facts::default() };
+        let before = map.index_of(&path).filter(|i| map.path(*i) == path).map(|i| map.facts(i).clone());
+        let mut claims: Vec<(String, Option<ContractChange>)> = Vec::new();
+        for sym in touched(&head.symbols, &file.changed) {
+            let change = before.as_ref().and_then(|facts| {
+                let old = facts.symbols.iter().find(|s| s.name == sym.name && s.kind == sym.kind)?;
+                (normalized(&old.signature) != normalized(&sym.signature))
+                    .then(|| ContractChange::Signature { before: old.signature.clone(), after: sym.signature.clone() })
+            });
+            claims.push((sym.name.clone(), change));
+        }
+        if let Some(facts) = &before {
+            for old in facts.symbols.iter().filter(|s| s.parent.is_none() || !s.kind.is_container()) {
+                if !head.symbols.iter().any(|s| s.name == old.name) {
+                    claims.push((old.name.clone(), Some(ContractChange::Removed)));
+                }
+            }
+        }
+        for (name, change) in claims {
+            if !is_searchable(&name) {
+                continue;
+            }
             owner
                 .entry(name)
                 .and_modify(|slot| {
-                    if slot.as_deref() != Some(file.path.as_str()) {
+                    if slot.as_ref().is_some_and(|(home, _)| home != &path) {
                         *slot = None;
                     }
                 })
-                .or_insert_with(|| Some(file.path.clone()));
+                .or_insert_with(|| Some((path.clone(), change)));
         }
     }
-    let names: Vec<String> =
-        owner.iter().filter(|(_, home)| home.is_some()).map(|(n, _)| n.clone()).collect();
-    if names.is_empty() {
-        return Vec::new();
-    }
 
-    // One pass per file for all names at once: a per-name scan over a whole repository is the
-    // difference between a second and a minute.
-    let patterns: Vec<String> = names.iter().map(|n| format!(r"\b{}\b", escape(n))).collect();
-    let Ok(set) = RegexSet::new(&patterns) else { return Vec::new() };
-    let compiled: Vec<Regex> = patterns.iter().filter_map(|p| Regex::new(p).ok()).collect();
-    if compiled.len() != names.len() {
-        return Vec::new();
-    }
-
-    let mut hits: HashMap<String, Vec<Caller>> = HashMap::new();
-    for (path, content) in walk_tree(repo_path, target_ref, scope) {
-        let matched: Vec<usize> = set.matches(&content).into_iter().collect();
-        if matched.is_empty() {
+    let mut out: Vec<Impact> = Vec::new();
+    for (symbol, slot) in owner {
+        let Some((home, change)) = slot else { continue };
+        let report = map.usages(&symbol, Some(&home), usize::MAX);
+        let mut callers: Vec<Caller> = report
+            .usages
+            .into_iter()
+            .filter(|usage| super::plan::in_scope(&usage.path, scope))
+            // A file the PR changed too is reviewed in its own right — and for a removed symbol,
+            // the PR probably updated it.
+            .filter(|usage| !(matches!(change, Some(ContractChange::Removed)) && changed_paths.iter().any(|p| same_path(p, &usage.path))))
+            .map(|usage| Caller { file: usage.path, line: usage.line as usize, signature: usage.signature, confirmed: usage.confirmed })
+            .collect();
+        if callers.is_empty() {
             continue;
         }
-        // Only resolved once, and only for a file that actually matched something.
-        let decls = declarations(&path, &content);
-
-        for index in matched {
-            let name = &names[index];
-            // A symbol's own declaration file is not a caller of itself.
-            if owner
-                .get(name)
-                .and_then(|h| h.as_deref())
-                .is_some_and(|home| super::outline::same_path(home, &path))
-            {
-                continue;
-            }
-            for (i, line) in content.lines().enumerate() {
-                if !compiled[index].is_match(line) {
-                    continue;
-                }
-                let lineno = i + 1;
-                let signature = decls
-                    .iter()
-                    .filter(|d| d.start <= lineno && lineno <= d.end)
-                    .next_back()
-                    .map(|d| d.label.clone())
-                    .unwrap_or_default();
-                hits.entry(name.clone()).or_default().push(Caller {
-                    file: normalize_path(&path),
-                    line: lineno,
-                    signature,
-                });
-                // One pointer per file per symbol: the point is "this file uses it", and eleven
-                // lines of the same file crowd out ten other callers.
-                break;
-            }
-        }
+        callers.sort_by(|a, b| b.confirmed.cmp(&a.confirmed).then_with(|| a.file.cmp(&b.file)));
+        let total = callers.len();
+        callers.truncate(cfg.max_callers);
+        out.push(Impact { symbol, file: home, callers, callers_total: total, change });
     }
-
-    let mut out: Vec<Impact> = hits
-        .into_iter()
-        .filter_map(|(symbol, mut callers)| {
-            let home = owner.get(&symbol)?.clone()?;
-            callers.sort_by(|a, b| a.file.cmp(&b.file));
-            let total = callers.len();
-            callers.truncate(cfg.max_callers);
-            Some(Impact { symbol, file: home, callers, callers_total: total })
-        })
-        .collect();
-
-    out.sort_by(|a, b| b.callers_total.cmp(&a.callers_total).then_with(|| a.symbol.cmp(&b.symbol)));
+    out.sort_by(|a, b| {
+        b.change.is_some().cmp(&a.change.is_some()).then_with(|| b.callers_total.cmp(&a.callers_total)).then_with(|| a.symbol.cmp(&b.symbol))
+    });
     out.truncate(cfg.max_symbols);
     out
 }
 
 /// The blast radius rendered as one review-prompt context block.
 ///
-/// Stated as pointers and framed as a hint, because that is what it is: the sweep proves a name
-/// appears there, not that it is the same symbol. Telling the model to go look is right; telling it
-/// these are definitely callers would not be.
+/// Stated as pointers and framed as a hint, because that is what it is: imports settle most uses,
+/// but a use found by name only is said to be one, and the model is told to go look rather than
+/// that these are definitely callers.
 pub fn block(impacts: &[Impact]) -> Option<String> {
     if impacts.is_empty() {
         return None;
     }
     let mut out = String::from(
-        "\nOtros lugares del repositorio que mencionan los símbolos que toca este PR. Es una \
-         PISTA, no una certeza: se detectó por nombre, así que confirma abriendo el archivo antes \
-         de reportar nada. Úsalo sobre todo para cambios de contrato o de firma — si el cambio \
-         rompe a alguno de estos, ese es un hallazgo.\n\n",
+        "\nOtros lugares del repositorio que usan los símbolos que toca este PR, según el mapa del \
+         repositorio (los imports se resolvieron: un archivo que solo tiene otro símbolo con el mismo \
+         nombre ya quedó fuera). Es una PISTA: confirma abriendo el archivo antes de reportar nada. \
+         Úsalo sobre todo para cambios de contrato — si el cambio rompe a alguno de estos, ese es un \
+         hallazgo.\n\n",
     );
     for impact in impacts {
         out.push_str(&format!("- `{}` ({}) — {} referencia(s):\n", impact.symbol, impact.file, impact.callers_total));
+        match &impact.change {
+            Some(ContractChange::Signature { before, after }) => {
+                out.push_str(&format!("  ⚠ Cambió la firma: `{before}` → `{after}`\n"));
+            }
+            Some(ContractChange::Removed) => {
+                out.push_str("  ⚠ Este PR lo elimina o lo renombra, y estos archivos fuera del PR todavía lo usan:\n");
+            }
+            None => {}
+        }
         for caller in &impact.callers {
+            let by_name = if caller.confirmed { "" } else { " (solo por nombre)" };
             match caller.signature.is_empty() {
-                true => out.push_str(&format!("  - `{}:{}`\n", caller.file, caller.line)),
-                false => out.push_str(&format!("  - `{}:{}` — {}\n", caller.file, caller.line, caller.signature)),
+                true => out.push_str(&format!("  - `{}:{}`{by_name}\n", caller.file, caller.line)),
+                false => out.push_str(&format!("  - `{}:{}` — {}{by_name}\n", caller.file, caller.line, caller.signature)),
             }
         }
         if impact.callers_total > impact.callers.len() {
@@ -245,6 +225,7 @@ pub fn block(impacts: &[Impact]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn only_specific_names_are_worth_searching_for() {
@@ -253,15 +234,6 @@ mod tests {
         assert!(!is_searchable("get"), "would match everywhere");
         assert!(!is_searchable("id"));
         assert!(!is_searchable("x"));
-    }
-
-    #[test]
-    fn only_files_that_could_call_something_are_swept() {
-        assert!(is_code("src/a.ts"));
-        assert!(is_code("Pkg/Cls.cls"));
-        assert!(!is_code("README.md"));
-        assert!(!is_code("logo.png"));
-        assert!(!is_code("Makefile"));
     }
 
     #[test]
@@ -274,14 +246,69 @@ mod tests {
     /// A repository that cannot be read is a missing hint, never a failed review.
     #[test]
     fn an_unreadable_repository_yields_no_hint_rather_than_an_error() {
-        let impacts = blast_radius(
-            "/definitely/not/a/repo",
-            "main",
-            &[],
-            &ScopeConfig::default(),
-            &GraphConfig::default(),
-        );
+        let file = changed("src/a.ts", "export function alpha() {}\n", &[1]);
+        let impacts = blast_radius("/definitely/not/a/repo", "main", &[file], &ScopeConfig::default(), &GraphConfig::default());
         assert!(impacts.is_empty());
+    }
+
+    fn changed(path: &str, content: &str, lines: &[usize]) -> ChangedFile {
+        let changed: BTreeSet<usize> = lines.iter().copied().collect();
+        ChangedFile {
+            path: path.into(),
+            status: "modified".into(),
+            lines: content.lines().count(),
+            content: content.into(),
+            deletions: 0,
+            symbols: super::super::outline::symbols_for(path, content, &changed),
+            changed,
+        }
+    }
+
+    /// The target branch: `applyDiscount` used by the cart, and a namesake in `legacy.ts` that
+    /// imports nothing.
+    fn repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("codeflow-review-graph-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let repo = git2::Repository::init(&dir).unwrap();
+        std::fs::write(dir.join("src/pricing.ts"), "export function applyDiscount(price: number) {\n  return price;\n}\n\nexport function formatPrice(p: number) {\n  return `$${p}`;\n}\n").unwrap();
+        std::fs::write(dir.join("src/cart.ts"), "import { applyDiscount, formatPrice } from './pricing';\nexport function cartTotal() {\n  return formatPrice(applyDiscount(1));\n}\n").unwrap();
+        std::fs::write(dir.join("src/legacy.ts"), "export function legacy() {\n  return applyDiscount(2);\n}\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_changed_signature_leads_with_its_real_callers_only() {
+        let dir = repo();
+        let head = "export function applyDiscount(price: number, percent: number) {\n  return price - price * percent / 100;\n}\n\nexport function formatPrice(p: number) {\n  return `$${p}`;\n}\n";
+        let file = changed("src/pricing.ts", head, &[1, 2]);
+        let impacts = blast_radius(dir.to_str().unwrap(), "HEAD", &[file], &ScopeConfig::default(), &GraphConfig::default());
+        assert_eq!(impacts.len(), 1, "{impacts:?}");
+        let impact = &impacts[0];
+        assert_eq!(impact.symbol, "applyDiscount");
+        assert!(matches!(&impact.change, Some(ContractChange::Signature { after, .. }) if after.contains("percent")));
+        let files: Vec<&str> = impact.callers.iter().map(|c| c.file.as_str()).collect();
+        assert_eq!(files, vec!["src/cart.ts"], "legacy.ts imports nothing that declares it");
+        assert!(impact.callers[0].confirmed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_removed_symbol_still_used_outside_the_pr_is_reported() {
+        let dir = repo();
+        let head = "export function applyDiscount(price: number) {\n  return price;\n}\n";
+        let mut file = changed("src/pricing.ts", head, &[]);
+        file.deletions = 4;
+        let impacts = blast_radius(dir.to_str().unwrap(), "HEAD", &[file], &ScopeConfig::default(), &GraphConfig::default());
+        let removed = impacts.iter().find(|i| i.symbol == "formatPrice").expect("formatPrice was removed");
+        assert_eq!(removed.change, Some(ContractChange::Removed));
+        assert_eq!(removed.callers[0].file, "src/cart.ts");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -290,22 +317,29 @@ mod tests {
     }
 
     #[test]
-    fn the_block_names_pointers_and_says_how_many_were_left_out() {
+    fn the_block_names_pointers_contract_changes_and_how_many_were_left_out() {
         let impacts = vec![Impact {
             symbol: "guardarPago".into(),
             file: "src/services/pago.ts".into(),
-            callers: vec![Caller {
-                file: "src/controllers/pagoController.ts".into(),
-                line: 42,
-                signature: "async function crearPago(req, res)".into(),
-            }],
+            callers: vec![
+                Caller {
+                    file: "src/controllers/pagoController.ts".into(),
+                    line: 42,
+                    signature: "async function crearPago(req, res)".into(),
+                    confirmed: true,
+                },
+                Caller { file: "db/procs.sql".into(), line: 7, signature: String::new(), confirmed: false },
+            ],
             callers_total: 12,
+            change: Some(ContractChange::Signature { before: "guardarPago(p)".into(), after: "guardarPago(p, opts)".into() }),
         }];
         let block = block(&impacts).expect("impacts produce a block");
         assert!(block.contains("guardarPago"));
         assert!(block.contains("src/controllers/pagoController.ts:42"));
         assert!(block.contains("crearPago"));
-        assert!(block.contains("(+11 más)"));
+        assert!(block.contains("(+10 más)"));
+        assert!(block.contains("Cambió la firma"));
+        assert!(block.contains("`db/procs.sql:7` (solo por nombre)"));
         assert!(block.contains("PISTA"), "it is framed as a hint, not as a fact");
     }
 }

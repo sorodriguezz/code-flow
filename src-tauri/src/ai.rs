@@ -2538,6 +2538,27 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     if let Some(cwd) = inv.cwd {
         inv.skills_note = skills_note(cwd, engine.native_skills_dir());
     }
+    // The repository map for the two CLIs that take an app-declared MCP server per run (`--mcp-config`,
+    // `-c mcp_servers…`): a token bound to this repository, revoked when `_map_grant` drops at the end
+    // of the run. Not for a run the caller already gave a server of that name.
+    // Antigravity takes MCP servers only from files: a workspace plugin, for the run's length. Only
+    // for a run that skips agy's permission prompts (one that may write): a read-only run cannot
+    // answer the "mcp" permission headlessly, agy denies the call, and on a live run the model then
+    // gave up with an empty reply — worse than no map. Allow-rules live in the user's own settings,
+    // which this never writes.
+    let _agy_map_grant = match inv.cwd {
+        Some(cwd) if engine.id() == "gemini" && inv.auto_approve_edits && !inv.read_only => crate::codemap::mcp::for_agy(cwd),
+        _ => None,
+    };
+    let _map_grant = match inv.cwd {
+        Some(cwd) if matches!(engine.id(), "claude" | "codex") && !inv.app_mcp.iter().any(|s| s.name == crate::codemap::mcp::SERVER_NAME) => {
+            crate::codemap::mcp::for_repository(cwd).map(|(server, grant)| {
+                inv.app_mcp.push(server);
+                grant
+            })
+        }
+        _ => None,
+    };
 
     let ctx = ai_runs::current();
     let mut cancel = ctx.as_ref().and_then(|c| ai_runs::subscribe(&c.run_id));
@@ -4959,6 +4980,7 @@ pub async fn verify_stories_against_code(
         }
         stdin_payload.push('\n');
     }
+    stdin_payload.push_str(&starting_points_block(cwd, &truncated).await);
     stdin_payload.push_str("=== HISTORIAS Y CRITERIOS A VERIFICAR ===\n");
     stdin_payload.push_str(&truncated);
 
@@ -4975,6 +4997,16 @@ pub async fn verify_stories_against_code(
     inv.task = task::STORIES_VERIFY;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
+}
+
+/// Where a story most plausibly lands in the repository at `cwd`, as a block for a run's stdin —
+/// empty when the map has nothing to say. See `codemap::story_hint`.
+async fn starting_points_block(cwd: &str, story: &str) -> String {
+    let (root, story) = (cwd.to_string(), story.to_string());
+    match tokio::task::spawn_blocking(move || crate::codemap::story_hint(&root, &story)).await {
+        Ok(Some(hint)) => format!("PUNTOS DE PARTIDA (mapa del repositorio de CodeFlow):\n{hint}\n"),
+        _ => String::new(),
+    }
 }
 
 /// One stage of reviewing a story that already exists on the board.
@@ -5028,6 +5060,9 @@ pub async fn review_work_item(
             stdin_payload.push_str(&format!("- {name}: {content}\n"));
         }
         stdin_payload.push('\n');
+    }
+    if let Some(cwd) = cwd {
+        stdin_payload.push_str(&starting_points_block(cwd, &truncated).await);
     }
     stdin_payload.push_str("=== HISTORIA DE USUARIO ===\n");
     stdin_payload.push_str(&truncated);
@@ -5330,6 +5365,10 @@ pub enum DocScope {
     Workspace,
 }
 
+/// How much of the repository map a documentation run is handed — enough for the folders and the
+/// most-used declarations of a large repository, small next to what the run will read itself.
+const MAX_DOC_MAP_CHARS: usize = 14_000;
+
 /// Writes the technical documentation for one repository, by reading it.
 ///
 /// The counterpart of the review runs: same grounding, opposite direction — instead of judging a
@@ -5355,6 +5394,15 @@ pub async fn generate_repo_doc(
     }
     if !instructions.trim().is_empty() {
         stdin_payload.push_str(&format!("INSTRUCCIONES ADICIONALES DEL USUARIO:\n{}\n\n", instructions.trim()));
+    }
+    // Where to start reading: the folders, the files and what is most used, from the repository map
+    // (`codemap`) — so the run spends its turns reading what matters instead of listing directories.
+    let root = cwd.to_string();
+    if let Ok(Some(map)) = tokio::task::spawn_blocking(move || crate::codemap::orientation(&root, MAX_DOC_MAP_CHARS)).await {
+        stdin_payload.push_str(&format!(
+            "MAPA DEL REPOSITORIO (generado por CodeFlow a partir del código; úsalo para orientarte y abre \
+             los archivos antes de afirmar nada):\n{map}\n\n"
+        ));
     }
     stdin_payload.push_str(
         "El repositorio está en tu directorio de trabajo. Léelo antes de escribir: todo lo que \

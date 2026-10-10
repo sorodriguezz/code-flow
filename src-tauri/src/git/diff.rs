@@ -366,7 +366,7 @@ pub fn get_commit_file_diff(
 /// branch that may be stale — a stale local branch is exactly what makes an up-to-date PR diff
 /// come back empty. A caller may also pass a full ref path (e.g. a freshly-fetched
 /// `refs/pull/<n>/head` PR ref), which is used verbatim.
-fn resolve_branch_commit<'a>(repo: &'a git2::Repository, name: &str) -> Result<git2::Commit<'a>, String> {
+pub(crate) fn resolve_branch_commit<'a>(repo: &'a git2::Repository, name: &str) -> Result<git2::Commit<'a>, String> {
     let candidates: Vec<String> = if name.starts_with("refs/") {
         vec![name.to_string()]
     } else {
@@ -480,29 +480,6 @@ pub fn quick_diff_base(path: &str, file_path: &str, staged: bool) -> Result<Opti
         return Ok(None);
     }
     Ok(std::str::from_utf8(blob.content()).ok().map(str::to_owned))
-}
-
-/// Every file path under `refname`, repository-relative with forward slashes.
-///
-/// From the commit's tree rather than from `search::list_files`, which walks the working directory:
-/// the review's blast radius is about the pull request's target branch, and the checkout is on
-/// whatever the user happens to have out.
-pub fn list_tree(path: &str, refname: &str) -> Result<Vec<String>, String> {
-    let repo = open(path)?;
-    let commit = resolve_branch_commit(&repo, refname)?;
-    let tree = commit.tree().map_err(|e| e.message().to_string())?;
-
-    let mut out = Vec::new();
-    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-        if entry.kind() == Some(git2::ObjectType::Blob) {
-            if let Some(name) = entry.name() {
-                out.push(format!("{dir}{name}").replace('\\', "/"));
-            }
-        }
-        git2::TreeWalkResult::Ok
-    })
-    .map_err(|e| e.message().to_string())?;
-    Ok(out)
 }
 
 /// Flattens file diffs into plain unified-diff-ish text suitable for a Claude prompt.

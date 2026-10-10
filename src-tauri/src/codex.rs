@@ -132,8 +132,9 @@ impl AiEngine for CodexEngine {
         // dotted `-c` path, which the flag does not document; such a server is left as it is.
         // The app's own servers, for this run only — prefixed `cf_`, their secrets in this
         // process's environment rather than on the command line. See `mcp_registry::codex_args`.
-        if !inv.read_only && !inv.app_mcp.is_empty() {
-            let (args, vars) = crate::mcp_registry::codex_args(&inv.app_mcp);
+        let app_servers = crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only);
+        if !app_servers.is_empty() {
+            let (args, vars) = crate::mcp_registry::codex_args(&app_servers);
             cmd.args(args);
             for (name, value) in vars {
                 cmd.env(name, value);

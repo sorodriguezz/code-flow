@@ -430,8 +430,8 @@ pub fn create_agent_chain(
 /// pass.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn create_story_chain(
-    db: State<Db>,
+pub async fn create_story_chain(
+    db: State<'_, Db>,
     project_ids: Vec<String>,
     title: String,
     notes: String,
@@ -452,6 +452,21 @@ pub fn create_story_chain(
     if analyst_agent_id.trim().is_empty() || implementer_agent_id.trim().is_empty() {
         return Err("chain.agentNotRoutable".to_string());
     }
+    // Each repository's likely starting points, from its map — read before the lock is taken, since
+    // the first map of a repository reads its whole tree.
+    let roots: Vec<(String, String)> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        project_ids
+            .iter()
+            .filter_map(|id| queries::get_project(&conn, id).ok().flatten().map(|p| (id.clone(), p.local_path)))
+            .collect()
+    };
+    let story = format!("{}\n{}\n{}", work_item.title, work_item.body, notes);
+    let starting_points: std::collections::HashMap<String, String> = tokio::task::spawn_blocking(move || {
+        roots.into_iter().filter_map(|(id, root)| crate::codemap::story_hint(&root, &story).map(|hint| (id, hint))).collect()
+    })
+    .await
+    .unwrap_or_default();
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::create_story_chain(
         &conn,
@@ -462,6 +477,7 @@ pub fn create_story_chain(
         &implementer_agent_id,
         &agent_project_id,
         &work_item,
+        &starting_points,
     )
     .map_err(|e| e.to_string())
 }

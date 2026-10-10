@@ -18,7 +18,7 @@ component's own licence wins — which is what section 6 says.
 | What ships | Count |
 |---|---|
 | npm packages (production tree) | 343 resolved versions of 314 packages |
-| Rust crates (resolved for macOS and Windows) | 839 resolved versions of 738 crates |
+| Rust crates (resolved for macOS and Windows) | 846 resolved versions of 745 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 10 |
@@ -652,7 +652,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### Apache-2.0 OR MIT — 427 crates
+### Apache-2.0 OR MIT — 428 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -980,6 +980,7 @@ because there the order carries meaning.
 | `spki` | 0.7.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats/tree/master/spki> |
 | `stable_deref_trait` | 1.2.1 | Apache-2.0 OR MIT | <https://github.com/storyyeller/stable_deref_trait> |
 | `stop-token` | 0.7.0 | Apache-2.0 OR MIT | <https://github.com/async-rs/stop-token> |
+| `streaming-iterator` | 0.1.9 | Apache-2.0 OR MIT | <https://github.com/sfackler/streaming-iterator> |
 | `string_cache` | 0.9.0 | Apache-2.0 OR MIT | <https://github.com/servo/string-cache> |
 | `string_cache_codegen` | 0.6.1 | Apache-2.0 OR MIT | <https://github.com/servo/string-cache> |
 | `stringprep` | 0.1.5 | Apache-2.0 OR MIT | <https://github.com/sfackler/rust-stringprep> |
@@ -1084,7 +1085,7 @@ because there the order carries meaning.
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `zeroize_derive` | 1.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 
-### MIT — 163 crates
+### MIT — 169 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -1233,6 +1234,12 @@ because there the order carries meaning.
 | `tracing-attributes` | 0.1.31 | MIT | <https://github.com/tokio-rs/tracing> |
 | `tracing-core` | 0.1.36 | MIT | <https://github.com/tokio-rs/tracing> |
 | `trash` | 5.2.6 | MIT | <https://github.com/ArturKovacs/trash> |
+| `tree-sitter` | 0.25.10 | MIT | <https://github.com/tree-sitter/tree-sitter> |
+| `tree-sitter-c-sharp` | 0.23.5 | MIT | <https://github.com/tree-sitter/tree-sitter-c-sharp> |
+| `tree-sitter-java` | 0.23.5 | MIT | <https://github.com/tree-sitter/tree-sitter-java> |
+| `tree-sitter-language` | 0.1.9 | MIT | <https://github.com/tree-sitter/tree-sitter> |
+| `tree-sitter-python` | 0.23.6 | MIT | <https://github.com/tree-sitter/tree-sitter-python> |
+| `tree-sitter-typescript` | 0.23.2 | MIT | <https://github.com/tree-sitter/tree-sitter-typescript> |
 | `try-lock` | 0.2.5 | MIT | <https://github.com/seanmonstar/try-lock> |
 | `twox-hash` | 2.1.4 | MIT | <https://github.com/shepmaster/twox-hash> |
 | `type1-encoding-parser` | 0.1.1 | MIT | <https://github.com/jrmuizel/type1-encoding-parser> |

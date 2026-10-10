@@ -364,11 +364,13 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
         expanded ? "" : "hover:border-[var(--cf-border-strong)]"
       }`}
     >
-      <div className="flex items-center gap-2 px-3 py-2.5">
+      {/* The toggle owns the header's padding on three sides, so a click anywhere on the row's left
+          part opens it — not only on the 20px of text and chevron inside that padding. */}
+      <div className="flex items-center gap-2 pr-3">
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className="flex min-w-0 flex-1 items-center gap-2 self-stretch py-2.5 pl-3 text-left"
         >
           <ChevronDown
             size={14}

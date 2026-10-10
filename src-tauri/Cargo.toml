@@ -172,6 +172,16 @@ des = "0.8"
 rc2 = "0.8"
 aes = "0.8"
 globset = "0.4.19"
+# The repository map (`codemap`): exact symbols, imports and references for the languages most
+# projects here are written in. A grammar is a generated C parser compiled into the binary — no
+# runtime, no download, nothing installed on the user's machine — and every other language keeps the
+# review outline's regex extractor. TSX's grammar also reads plain JavaScript and JSX, which is why
+# there is no separate JavaScript crate.
+tree-sitter = "0.25"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-java = "0.23.5"
+tree-sitter-c-sharp = "0.23.1"
+tree-sitter-python = "0.23.6"
 
 # ---------------- API client ----------------
 # The built-in Postman-style client needs a transport per protocol plus the primitives to sign

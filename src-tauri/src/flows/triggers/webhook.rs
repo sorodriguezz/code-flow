@@ -717,6 +717,11 @@ async fn handle(State(app): State<AppHandle>, method: Method, uri: Uri, headers:
     if !through_tunnel(&headers) && foreign_origin(&headers) {
         return json_response(StatusCode::FORBIDDEN, json!({"error": "requests from other sites are not accepted here"}));
     }
+    // The repository map for the CLI agents CodeFlow runs — see `codemap::mcp`. A token per run, and
+    // never through a tunnel.
+    if crate::codemap::mcp::serves(uri.path()) {
+        return crate::codemap::mcp::handle(&method, uri.path(), &headers, &body, through_tunnel(&headers)).await;
+    }
     // Flows as tools for AI agents — see `flows::mcp`. Its own bearer token, through a tunnel too.
     if uri.path().trim_end_matches('/') == "/mcp" {
         return crate::flows::mcp::handle(&app, &method, &headers, &body).await;

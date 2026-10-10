@@ -19,6 +19,7 @@ import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { SettingsHeader } from "../api/settingsChrome";
 import { buttonClass } from "../common/Button";
+import { getSetting, setSetting } from "../../lib/tauri/commands";
 import { fieldClass } from "../common/recipes";
 
 /** What a stored secret reads as, and what sending it back means: keep it. */
@@ -97,6 +98,42 @@ function pairs(text: string, separator: "=" | ":"): Record<string, string> {
  * any engine starts it.
  */
 /** `bare`: inside «Herramientas de IA», whose rail names the pane — the hint stays, the heading goes. */
+/** The setting that keeps the repository map out of the CLI agents' runs; anything but "false" is on. */
+const CODEMAP_MCP_KEY = "codemap_mcp";
+
+/**
+ * Whether Claude Code and Codex get CodeFlow's own server — the repository map (`codemap::mcp`) —
+ * on every run in a repository. Not a row of the list below: it is not the user's server, has no
+ * command, and is not per workspace.
+ */
+function CodemapServerToggle() {
+  const t = useT();
+  const [on, setOn] = useState<boolean | null>(null);
+  useEffect(() => {
+    void getSetting(CODEMAP_MCP_KEY)
+      .then((value) => setOn(value !== "false"))
+      .catch(() => setOn(true));
+  }, []);
+  if (on === null) return null;
+  return (
+    <label className="mb-3 flex items-start gap-2.5 py-1.5">
+      <span className="mt-[1px]">
+        <Checkbox
+          checked={on}
+          onChange={(next) => {
+            setOn(next);
+            void setSetting(CODEMAP_MCP_KEY, next ? "true" : "false").catch((e: unknown) => pushErrorToast(String(e)));
+          }}
+        />
+      </span>
+      <span className="text-[12.5px] text-[var(--cf-text)]">
+        {t("codemap.mcpLabel")}
+        <span className="mt-0.5 block text-[11.5px] text-[var(--cf-text-muted)]">{t("codemap.mcpHint")}</span>
+      </span>
+    </label>
+  );
+}
+
 export function McpSettings({ bare = false }: { bare?: boolean } = {}) {
   const t = useT();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
@@ -236,6 +273,8 @@ export function McpSettings({ bare = false }: { bare?: boolean } = {}) {
       ) : (
         <SettingsHeader title={t("settings.mcpTitle")} hint={t("settings.mcpHint")} />
       )}
+
+      <CodemapServerToggle />
 
       <div className="mb-3 flex flex-wrap gap-1.5">
         <button type="button" onClick={() => setDraft({ ...EMPTY })} className={buttonClass({ variant: "primary", size: "sm" })}>
