@@ -12559,7 +12559,6 @@ export const es = {
 
   // --- Revisor (Reviewer): el pipeline de calidad del proyecto ---
   "tabbar.reviewer": "Revisor",
-  "reviewer.betaHint": "Beta: es nuevo y todavía cambia. Descarga SonarQube y lo corre en este equipo.",
   "reviewer.settingsHint": "El pipeline de calidad del proyecto — build, tests, SonarQube y Quality Gate — corriendo en tu máquina, como lo corre el CI de una empresa.",
   "reviewer.paneGeneral": "General",
   "reviewer.paneGeneralHint": "Muestra la pestaña y define cómo corre cada revisión.",
@@ -12701,6 +12700,15 @@ export const es = {
   "reviewer.openFile": "Abrir",
   "reviewer.openInSonar": "Abrir en SonarQube",
   "reviewer.testsSummary": "{passed} pasan · {failed} fallan · {skipped} omitidos · {duration}",
+  "reviewer.testsFilterAll": "Todos",
+  "reviewer.testsFilterPassed": "Pasan",
+  "reviewer.testsFilterFailed": "Fallan",
+  "reviewer.testsFilterSkipped": "Omitidos",
+  "reviewer.testsNoSuite": "(sin suite)",
+  "reviewer.testsTruncated": "Se muestran los primeros {shown} de {total} casos.",
+  "reviewer.testsNoCases": "Esta revisión se guardó antes de que se guardara cada caso. Vuelve a ejecutarla para verlos.",
+  "reviewer.testsReports": "Leído de",
+  "reviewer.revealReport": "Mostrar en la carpeta",
   "reviewer.noCoverage": "No se midió cobertura. La etapa de tests tiene que escribir un reporte de cobertura — los comandos sugeridos lo hacen.",
   "reviewer.coverageSummary": "{coverage} de {lines} líneas · {uncovered} sin cubrir",
   "reviewer.uncovered": "{n} sin cubrir",

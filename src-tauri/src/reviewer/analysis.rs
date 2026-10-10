@@ -855,6 +855,19 @@ async fn pipeline(
     summary
 }
 
+/// Where the scanner runs its engine: on the JDK the CLI runs on, never one it downloads or finds.
+///
+/// Skipping provisioning only skips the download: the scanner still forks its engine into a JVM of its
+/// own, looked for in JAVA_HOME and then on PATH — "Cannot find java executable in PATH" on a machine
+/// whose only Java is the JDK we downloaded (user report, 2026-10-09), or a stray older Java the
+/// engine refuses.
+fn engine_properties(java: &Path) -> [(String, String); 2] {
+    [
+        ("sonar.scanner.skipJreProvisioning".into(), "true".into()),
+        ("sonar.scanner.javaExePath".into(), java.to_string_lossy().into_owned()),
+    ]
+}
+
 /// Runs the scanner and waits for the server to process its report. Answers with a client signed in
 /// to the local server, for reading the results.
 async fn scan(
@@ -928,7 +941,7 @@ async fn scan(
     }
     properties.push(("sonar.working.directory".into(), work.to_string_lossy().into_owned()));
     properties.push(("sonar.userHome".into(), user_home.to_string_lossy().into_owned()));
-    properties.push(("sonar.scanner.skipJreProvisioning".into(), "true".into()));
+    properties.extend(engine_properties(&java));
 
     let mut command = crate::proc::command(&java);
     command
@@ -1325,6 +1338,14 @@ mod tests {
     }
 
     #[test]
+    fn the_scanner_engine_runs_on_our_jdk() {
+        let java = Path::new("C:/cf/jdk/bin/java.exe");
+        let properties = engine_properties(java);
+        assert!(properties.contains(&("sonar.scanner.skipJreProvisioning".into(), "true".into())));
+        assert!(properties.contains(&("sonar.scanner.javaExePath".into(), "C:/cf/jdk/bin/java.exe".into())));
+    }
+
+    #[test]
     fn effort_strings_become_minutes() {
         assert_eq!(effort_minutes("5min"), Some(5));
         assert_eq!(effort_minutes("1h30min"), Some(90));
@@ -1408,7 +1429,24 @@ mod tests {
             println!("  {} {} {}:{:?} {}", issue.severity, issue.quality, issue.path, issue.line, issue.message);
         }
         println!("tests: {:?}", summary.tests.as_ref().map(|t| (t.total, t.failed, t.files)));
+        if let Some(tests) = &summary.tests {
+            println!("  reports: {:?}", tests.reports);
+            for case in tests.cases.iter().take(10) {
+                println!("  {:?} {} › {} {:?}", case.status, case.suite, case.name, case.duration_ms);
+            }
+        }
         println!("coverage: {:?}", summary.coverage);
+        // The scanner's engine found a Java: the bug this run guards ran it on PATH's, and a machine
+        // with none failed here. Run it with no `java` on PATH and no JAVA_HOME to mean anything.
+        let sonar = summary.stages.iter().find(|s| s.id == StageId::Sonar).expect("a sonar stage");
+        assert_eq!(sonar.status, StageStatus::Ok, "the scanner ran: {:?}", sonar.detail);
+        if std::env::var_os("CODEFLOW_TEST_REVIEWER_TEST").is_some() {
+            // Every case is kept as evidence, not only the failing ones, with the files it came from.
+            let tests = summary.tests.as_ref().expect("the tests left a report");
+            assert!(tests.files > 0 && tests.total > 0, "{tests:?}");
+            assert_eq!(tests.cases.len(), (tests.total as usize).min(reports::MAX_CASES));
+            assert_eq!(tests.reports.len(), tests.files as usize);
+        }
         assert!(summary.gate.is_some(), "the gate was read");
         assert!(matches!(summary.status.as_str(), "passed" | "failed"), "{}", summary.status);
         assert!(last(&summary.project_key).is_some());

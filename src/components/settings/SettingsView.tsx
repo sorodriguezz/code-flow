@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ChevronDown, ChevronUp, ChevronsLeft, ChevronsRight, CornerDownLeft, Search, X, type LucideIcon } from "lucide-react";
 import { ThemeSettings } from "./ThemeSettings";
 import { ProjectsSection } from "./ProjectsSettings";
@@ -20,7 +20,7 @@ import { NotificationSettings } from "./NotificationSettings";
 import { ReviewerSettings } from "./ReviewerSettings";
 import { ApiSettingsBody } from "../api/ApiSettingsPanel";
 import { ActivePill } from "../common/ActivePill";
-import { Kbd, iconButtonClass } from "../common/Button";
+import { iconButtonClass } from "../common/Button";
 import { chipClass, fieldClass } from "../common/recipes";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Tooltip } from "../common/Tooltip";
@@ -56,8 +56,54 @@ const NAV_MAX = 320;
  */
 const ALPHA_SECTIONS = new Set<SettingsSectionId>();
 
+const SECTION_COLORS = Object.fromEntries(SETTINGS_SECTIONS.map((s) => [s.id, s.color])) as Record<SettingsSectionId, string>;
+
 // `SELF_SCROLLING_SECTIONS` is imported from the catalog rather than kept here: it is the second
 // half of building a sub-rail, and a section can only be given one in the catalog.
+
+/** A section's colour pulled a quarter of the way toward the theme's text: its glyphs' ink, which
+ *  stays legible on the dark frame and the light one alike (`monogramStyle` does the same). */
+function sectionInk(color: string): string {
+  return `color-mix(in oklab, ${color} 75%, var(--cf-text))`;
+}
+
+/**
+ * A section's glyph on a tile of its own colour — the projects rail's monogram tile
+ * (`monogramStyle`): a wash, the colour as ink, a hairline ring, so the two rails speak one
+ * language. The selected section's tile fills, the one solid shape in the nav.
+ */
+function SectionTile({
+  icon: Icon,
+  color,
+  active,
+  size,
+}: {
+  icon: LucideIcon;
+  color: string;
+  active: boolean;
+  /** `md` for the folded rail, where the tile is the whole row. */
+  size: "sm" | "md";
+}) {
+  return (
+    <span
+      aria-hidden
+      className={`flex shrink-0 items-center justify-center transition-[background-color,color,box-shadow] duration-150 ${
+        size === "md" ? "h-[26px] w-[26px] rounded-[7px]" : "h-[22px] w-[22px] rounded-[6px]"
+      }`}
+      style={
+        active
+          ? { background: color, color: "#fff", boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${color} 75%, #000)` }
+          : {
+              background: `color-mix(in oklab, ${color} 16%, transparent)`,
+              color: sectionInk(color),
+              boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${color} 30%, transparent)`,
+            }
+      }
+    >
+      <Icon size={size === "md" ? 15 : 13} />
+    </span>
+  );
+}
 
 /**
  * One row of the settings nav, wearing the same selected treatment as the Graph/Changes/Editor
@@ -70,7 +116,8 @@ const ALPHA_SECTIONS = new Set<SettingsSectionId>();
 function SectionButton({
   id,
   labelKey,
-  icon: Icon,
+  icon,
+  color,
   active,
   collapsed,
   alpha,
@@ -79,6 +126,7 @@ function SectionButton({
   id: SettingsSectionId;
   labelKey: TranslationKey;
   icon: LucideIcon;
+  color: string;
   active: boolean;
   collapsed: boolean;
   /** Marks the section as not finished yet — see the `ALPHA_SECTIONS` note. */
@@ -104,18 +152,20 @@ function SectionButton({
         aria-label={collapsed ? label : undefined}
         // Selection changes colour and nothing else — no weight change, exactly like the tabs.
         // Bolding on select re-measures the text and made the row jump every time it was picked.
-        // Colour plus the pill is already the whole signal.
+        // The filled tile plus the pill is the whole signal, so the name goes to full text rather
+        // than the accent: an accent label beside a tile of another colour read as two selections.
         // Folded, a fixed 36×36 centred in the 50px rail rather than the rail's full width: the pill
         // was drawn edge to edge and read as a band across the rail, not as a mark on one icon. The
         // 7px either side and the 4px between rows are the breathing room the user asked for.
-        // Unfolded, 32px at least — one line or, for a long name, two.
+        // Unfolded, 32px at least — one line or, for a long name, two; `py-[5px]` around the 22px
+        // tile makes the one-line row exactly that.
         className={`relative flex rounded-md text-left text-[13px] leading-[1.35] transition-colors duration-100 ${
           collapsed
             ? "mx-auto mb-1 h-9 w-9 items-center justify-center"
-            : "mb-0.5 min-h-8 w-full items-start px-2.5 py-1.5"
+            : "mb-0.5 min-h-8 w-full items-start px-2 py-[5px]"
         } ${
           active
-            ? "text-[var(--cf-accent)]"
+            ? "text-[var(--cf-text)]"
             : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         }`}
       >
@@ -127,10 +177,9 @@ function SectionButton({
             distribute, so the icon lands hard against the left edge instead of in the middle.
             Measured: 7px from the rail's left edge rather than 25. Without it the span shrinks to
             its content and the centring works. */}
-        <span className={`relative flex min-w-0 items-start gap-2 ${collapsed ? "" : "flex-1"}`}>
-          {/* 16px folded, where the glyph is the whole row — the size the app rail's icons read at
-              — and 14px beside a label, on the cap height of its first line. */}
-          <Icon size={collapsed ? 16 : 14} className={`shrink-0 ${collapsed ? "" : "mt-[2px]"}`} />
+        <span className={`relative flex min-w-0 items-start gap-2.5 ${collapsed ? "" : "flex-1"}`}>
+          {/* 26px folded, where the tile is the whole row, and 22px beside a label. */}
+          <SectionTile icon={icon} color={color} active={active} size={collapsed ? "md" : "sm"} />
           {collapsed
             ? alpha && (
                 // The badge, shrunk to the only thing that survives at rail width: a dot on the
@@ -148,9 +197,10 @@ function SectionButton({
                       cut in half there is a section you cannot identify. Two lines is the cost; the
                       name in full is the point. `break-words` so one long word gives way rather
                       than widening the rail. */}
-                  <span className="min-w-0 flex-1 break-words">{label}</span>
+                  {/* `mt-[2px]`: the first line's 17.5px centred on the 22px tile. */}
+                  <span className="mt-[2px] min-w-0 flex-1 break-words">{label}</span>
                   {alpha && (
-                    <span className={chipClass("warn", "uppercase")}>{t("settings.alpha")}</span>
+                    <span className={chipClass("warn", "mt-[2px] uppercase")}>{t("settings.alpha")}</span>
                   )}
                 </>
               )}
@@ -213,12 +263,13 @@ function SearchResults({
               onClick={() => onPick(hit)}
               // The highlighted hit wears the selected-row fill every list in the app uses, with its
               // glyph in the accent — the cursor *is* the selection here, so they look alike.
-              className={`flex min-h-8 w-full items-start gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors duration-100 ${
+              className={`flex min-h-8 w-full items-start gap-2.5 rounded-md px-2 py-[5px] text-left transition-colors duration-100 ${
                 selected ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
               }`}
             >
-              <Icon size={14} className={`mt-[2px] shrink-0 ${selected ? "text-[var(--cf-accent)]" : ""}`} />
-              <span className="min-w-0 flex-1">
+              {/* The section's tile, filled under the cursor as a picked section's is. */}
+              <SectionTile icon={Icon} color={hit.section.color} active={selected} size="sm" />
+              <span className="mt-[2px] min-w-0 flex-1">
                 {/* Nothing truncates here either: a result you can only half-read is a result you
                     have to open to identify. */}
                 <span className="block break-words text-[13px] leading-snug text-[var(--cf-text)]">
@@ -232,7 +283,7 @@ function SearchResults({
                   </span>
                 )}
               </span>
-              {selected && <CornerDownLeft size={13} className="mt-[2px] shrink-0 text-[var(--cf-text-faint)]" />}
+              {selected && <CornerDownLeft size={13} className="mt-[4px] shrink-0 text-[var(--cf-text-faint)]" />}
             </button>
           </li>
         );
@@ -388,7 +439,12 @@ export function SettingsView() {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/20">
+    <div className="fixed inset-0 z-50">
+      {/* Acrylic, so what is behind reads as out of reach — see `.cf-settings-scrim`. And the
+          window's drag handle while it covers the title bar: it took the drag with the clicks, and
+          the window could not be moved with Settings open (user report, 2026-10-09). A double click
+          maximises, as on the title bar. Only hits on the scrim itself drag — never the panel. */}
+      <div aria-hidden data-tauri-drag-region className="cf-settings-scrim absolute inset-0" />
       <div
         ref={panelRef}
         // Over the central sheet, edge to edge (and the AI panel's too, while it is open), and the
@@ -469,14 +525,21 @@ export function SettingsView() {
               </button>
             )}
           </div>
-          <Tooltip label={t("common.close")} trailing={<Kbd>esc</Kbd>} side="bottom">
+          {/* The way out, quiet but unmistakable: a hairline pill, faint at rest, holding the key that
+              also closes it beside the cross. A bare 15px X was the brightest glyph in the header and
+              looked like one more control (user report, 2026-10-09); "esc ×" says exit, and says how.
+              26px tall, the search field's height, so the header keeps one line. The key is on the
+              pill now, so the tooltip only names it. */}
+          <Tooltip label={t("common.close")} side="bottom">
             <button
               type="button"
               onClick={closeSettings}
               aria-label={t("common.close")}
-              className={iconButtonClass({ size: "sm" })}
+              aria-keyshortcuts="Escape"
+              className="flex h-[26px] shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] pl-2.5 pr-2 text-[var(--cf-text-faint)] transition-colors duration-100 hover:border-[var(--cf-border-strong)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
             >
-              <X size={15} />
+              <span className="text-[10.5px] font-medium leading-none">esc</span>
+              <X size={13} />
             </button>
           </Tooltip>
         </div>
@@ -557,6 +620,7 @@ export function SettingsView() {
                               id={item.id}
                               labelKey={item.labelKey}
                               icon={item.icon}
+                              color={item.color}
                               active={section === item.id}
                               collapsed={folded}
                               alpha={ALPHA_SECTIONS.has(item.id)}
@@ -636,7 +700,13 @@ export function SettingsView() {
               Reserving the gutter costs 10px of ~780 and keeps everything still; the track is
               transparent and the thumb isn't drawn when there is nothing to scroll, so a short
               section looks exactly as it did. */}
-          <div data-settings-scroll className="flex-1 overflow-x-auto overflow-y-scroll px-7 py-6">
+          {/* `--cf-section-ink`: the open section's colour, for the glyphs of its rail (`SettingsRail`),
+              so a section's panes wear the colour of the tile that opened them. */}
+          <div
+            data-settings-scroll
+            style={{ "--cf-section-ink": sectionInk(SECTION_COLORS[section]) } as CSSProperties}
+            className="flex-1 overflow-x-auto overflow-y-scroll px-7 py-6"
+          >
             {/* `h-full` for the sections that scroll their own pane: they pin a header and a rail
                 and let only the pane beside it move, which needs a definite height to divide up. */}
             <div className={`w-full ${SELF_SCROLLING_SECTIONS.has(section) ? "h-full" : ""}`}>

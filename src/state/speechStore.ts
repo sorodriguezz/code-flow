@@ -123,8 +123,10 @@ interface SpeechStoreState {
   cancelInstall: () => Promise<void>;
   remove: (id: string) => Promise<void>;
 
-  /** Says `text` unless a quiet rule says not now. `interrupt` cuts what is playing first. */
-  say: (text: string, origin: SpeechOrigin, options?: { interrupt?: boolean }) => void;
+  /** Says `text` unless a quiet rule says not now. `interrupt` cuts what is playing first. Answers
+   *  with the utterance's id — the one `speaking.id` carries while it plays, so the control that
+   *  asked can tell its own reading from any other — or `null` when nothing was queued. */
+  say: (text: string, origin: SpeechOrigin, options?: { interrupt?: boolean }) => Promise<number | null>;
   /** An AI answer, as the answers setting says to read it. */
   speakAnswer: (markdown: string, workspaceId: string | null) => void;
   stop: () => void;
@@ -254,16 +256,19 @@ export const useSpeechStore = create<SpeechStoreState>((set, get) => ({
     await get().refresh();
   },
 
-  say: (text, origin, options) => {
+  say: async (text, origin, options) => {
     const said = text.trim();
-    if (!said) return;
+    if (!said) return null;
     // What the user just asked to hear is said even in a quiet moment; what arrives on its own is not.
     const asked = origin === "test" || origin === "message" || origin === "selection";
-    if (!asked && quietNow()) return;
+    if (!asked && quietNow()) return null;
     // The window's language only settles a text too short to tell its own (`speech::language_of`).
-    void speechSay(said, origin, options?.interrupt ?? false, useLanguageStore.getState().language).catch((error) =>
-      pushErrorToast(String(error)),
-    );
+    try {
+      return await speechSay(said, origin, options?.interrupt ?? false, useLanguageStore.getState().language);
+    } catch (error) {
+      pushErrorToast(String(error));
+      return null;
+    }
   },
 
   speakAnswer: (markdown, workspaceId) => {

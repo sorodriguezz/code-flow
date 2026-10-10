@@ -3552,6 +3552,29 @@ body.cf-dragging * {
   background-color: transparent;
 }
 
+/* The ground around the Settings window: acrylic, not a dim. Under a 20% black the rails, tabs and
+   title bar behind it stayed sharp and looked as clickable as ever, though the scrim takes every
+   click (user report, 2026-10-09). Blurred to shapes and washed in the app's own ground tone they
+   read as "behind" in either theme; the grain is what makes the blur read as a material rather
+   than a smudge. A sibling of the panel, never its parent: a blur makes its element the backdrop
+   root of all it holds, and the panel's own acrylic (glass mode) would see this tint and nothing
+   else. In every mode, not only glass — what it says is "not now", not "see-through window". */
+.cf-settings-scrim {
+  background-color: color-mix(in oklab, var(--cf-bg-solid, var(--cf-bg)) 45%, transparent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)' opacity='.05'/%3E%3C/svg%3E");
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  backdrop-filter: blur(20px) saturate(1.4);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .cf-settings-scrim {
+    background-color: color-mix(in oklab, var(--cf-bg-solid, var(--cf-bg)) 85%, transparent);
+    background-image: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
 /* A panel appearing: its content fades in rather than the panel growing from zero width — a width
    animation relays out the whole window on every frame (it used to, on four panels). */
 @keyframes cf-panel-in {

@@ -19,6 +19,7 @@ import {
   Circle,
   ExternalLink,
   FileCode2,
+  FolderOpen,
   Loader2,
   MinusCircle,
   Play,
@@ -33,7 +34,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { useT, type Translate } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
-import { openExternalUrl } from "../../lib/tauri/commands";
+import { openExternalUrl, revealInFileManager } from "../../lib/tauri/commands";
 import { EMPTY_PROJECT_CONFIG, effectiveCommands, useReviewerStore, type ReviewerProjectConfig } from "../../state/reviewerStore";
 import type {
   ReviewerHistoryEntry,
@@ -45,6 +46,8 @@ import type {
   ReviewerStage,
   ReviewerStageId,
   ReviewerSuggestion,
+  ReviewerTestCase,
+  ReviewerTestStatus,
 } from "../../lib/tauri/reviewerCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { buttonClass } from "../common/Button";
@@ -339,6 +342,7 @@ export function ReviewerView() {
 }
 
 const EMPTY_LOG: ReviewerLogLine[] = [];
+const EMPTY_CASES: ReviewerTestCase[] = [];
 
 function rulesName(t: Translate, kind: string): string {
   return kind === "strict" ? t("reviewer.rulesStrict") : kind === "max" ? t("reviewer.rulesMax") : kind === "server" ? t("reviewer.rulesServer") : "Sonar way";
@@ -676,20 +680,134 @@ function IssueRow({ issue, projectKey, serverUrl }: { issue: ReviewerIssue; proj
   );
 }
 
+export interface SuiteGroup {
+  suite: string;
+  cases: ReviewerTestCase[];
+  passed: number;
+  failed: number;
+  skipped: number;
+  durationMs: number;
+}
+
+/** The cases by suite, the suites in the order the reports first name them. */
+export function groupCases(cases: ReviewerTestCase[]): SuiteGroup[] {
+  const groups = new Map<string, SuiteGroup>();
+  for (const test of cases) {
+    let group = groups.get(test.suite);
+    if (!group) {
+      group = { suite: test.suite, cases: [], passed: 0, failed: 0, skipped: 0, durationMs: 0 };
+      groups.set(test.suite, group);
+    }
+    group.cases.push(test);
+    group[test.status] += 1;
+    group.durationMs += test.durationMs ?? 0;
+  }
+  return [...groups.values()];
+}
+
+/** One test's time: "12 ms", "1.4 s", and past a minute the stage strip's own format. */
+export function formatTestTime(ms: number | null | undefined): string {
+  if (ms == null) return "";
+  // The backend keeps whole milliseconds, and most unit tests take less than one.
+  if (ms === 0) return "<1 ms";
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+  return formatDuration(ms);
+}
+
+type CaseFilter = "all" | ReviewerTestStatus;
+
+const CASE_FILTERS: { id: CaseFilter; labelKey: TranslationKey }[] = [
+  { id: "all", labelKey: "reviewer.testsFilterAll" },
+  { id: "passed", labelKey: "reviewer.testsFilterPassed" },
+  { id: "failed", labelKey: "reviewer.testsFilterFailed" },
+  { id: "skipped", labelKey: "reviewer.testsFilterSkipped" },
+];
+
+/** Past this many cases the suites start folded, so a big report opens as a list of suites. */
+const FOLD_SUITES_ABOVE = 200;
+
+function CaseIcon({ status }: { status: ReviewerTestStatus }) {
+  if (status === "failed") return <XCircle size={13} className="shrink-0 text-[var(--cf-danger)]" />;
+  if (status === "skipped") return <MinusCircle size={13} className="shrink-0 text-[var(--cf-text-faint)]" />;
+  return <CheckCircle2 size={13} className="shrink-0 text-[var(--cf-success)]" />;
+}
+
+/**
+ * Every case the reports listed — the evidence behind "72 pass", which used to be all the tab said
+ * when nothing failed (user report, 2026-10-09). Failures still come first with their stack; below
+ * them each suite and its cases, then the report files themselves.
+ */
 function TestsPanel({ summary }: { summary: ReviewerRunSummary | null }) {
   const t = useT();
   const [open, setOpen] = useState<number | null>(null);
+  const [filter, setFilter] = useState<CaseFilter>("all");
+  // Suites whose fold the user flipped from the default — see `FOLD_SUITES_ABOVE`.
+  const [flipped, setFlipped] = useState<ReadonlySet<string>>(new Set());
   const tests = summary?.tests;
+  const cases = tests?.cases ?? EMPTY_CASES;
+  const groups = useMemo(
+    () => groupCases(filter === "all" ? cases : cases.filter((test) => test.status === filter)),
+    [cases, filter],
+  );
+  // A new run is a new list: what was folded or filtered was about the last one.
+  useEffect(() => {
+    setFilter("all");
+    setFlipped(new Set());
+  }, [summary?.runId]);
   if (!summary) return null;
   if (!tests || tests.files === 0) {
     return <p className="px-3 py-3 text-[12px] text-[var(--cf-text-muted)]">{t("reviewer.noTestReportLong")}</p>;
   }
+  const counts: Record<CaseFilter, number> = { all: tests.total, passed: tests.passed, failed: tests.failed, skipped: tests.skipped };
+  // A filtered list is short by intent, so it opens unfolded whatever its size.
+  const foldedByDefault = filter === "all" && cases.length > FOLD_SUITES_ABOVE;
+  const toggleSuite = (suite: string) =>
+    setFlipped((current) => {
+      const next = new Set(current);
+      if (next.has(suite)) next.delete(suite);
+      else next.add(suite);
+      return next;
+    });
   return (
     <div>
-      <p className="border-b border-[var(--cf-border)] px-3 py-2 text-[11px] text-[var(--cf-text-muted)]">
-        {t("reviewer.testsSummary", { passed: tests.passed, failed: tests.failed, skipped: tests.skipped, duration: formatDuration(tests.durationMs) })}
-      </p>
-      {tests.failures.map((failure, index) => (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-[var(--cf-border)] px-3 py-2">
+        {/* `formatTestTime`, finer than the stage strip: a fast suite's whole run is milliseconds,
+            which the strip's whole seconds round to "0 s". */}
+        <p className="min-w-0 flex-1 text-[11px] text-[var(--cf-text-muted)]">
+          {t("reviewer.testsSummary", { passed: tests.passed, failed: tests.failed, skipped: tests.skipped, duration: formatTestTime(tests.durationMs) })}
+        </p>
+        {cases.length > 0 && (
+          <div className="flex items-center gap-0.5" role="group">
+            {CASE_FILTERS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                aria-pressed={filter === option.id}
+                disabled={option.id !== "all" && counts[option.id] === 0}
+                onClick={() => setFilter(option.id)}
+                className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors duration-100 disabled:pointer-events-none disabled:opacity-40 ${
+                  filter === option.id
+                    ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                    : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+                }`}
+              >
+                {t(option.labelKey)}
+                <span className="tabular-nums opacity-70">{counts[option.id]}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {cases.length === 0 && tests.total > 0 && (
+        <p className="border-b border-[var(--cf-border)] px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("reviewer.testsNoCases")}</p>
+      )}
+      {cases.length > 0 && cases.length < tests.total && (
+        <p className="border-b border-[var(--cf-border)] px-3 py-2 text-[11px] text-[var(--cf-text-muted)]">
+          {t("reviewer.testsTruncated", { shown: cases.length, total: tests.total })}
+        </p>
+      )}
+      {(filter === "all" || filter === "failed") && tests.failures.map((failure, index) => (
         <div key={`${failure.suite}-${failure.name}-${index}`} className="border-b border-[var(--cf-border)]">
           <div className="flex min-w-0 items-center gap-2.5 px-3 py-1.5 hover:bg-[var(--cf-hover)]">
             <XCircle size={14} className="shrink-0 text-[var(--cf-danger)]" />
@@ -718,6 +836,86 @@ function TestsPanel({ summary }: { summary: ReviewerRunSummary | null }) {
           )}
         </div>
       ))}
+      {/* The failures above carry their stack; under "Fallan" the list below would only repeat them. */}
+      {filter !== "failed" &&
+        groups.map((group) => {
+          const expanded = foldedByDefault === flipped.has(group.suite);
+          return (
+            <div key={group.suite} className="border-b border-[var(--cf-border)]">
+              <button
+                type="button"
+                onClick={() => toggleSuite(group.suite)}
+                aria-expanded={expanded}
+                className="flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)]"
+              >
+                <ChevronRight
+                  size={12}
+                  className={`shrink-0 text-[var(--cf-text-faint)] transition-transform duration-100 ${expanded ? "rotate-90" : ""}`}
+                />
+                <CaseIcon status={group.failed > 0 ? "failed" : group.passed > 0 ? "passed" : "skipped"} />
+                <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-[var(--cf-text)]" title={group.suite}>
+                  {group.suite || t("reviewer.testsNoSuite")}
+                </span>
+                <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+                  {filter === "all" ? `${group.passed}/${group.cases.length}` : group.cases.length}
+                  {group.durationMs > 0 ? ` · ${formatTestTime(group.durationMs)}` : ""}
+                </span>
+              </button>
+              {expanded &&
+                group.cases.map((test, index) => (
+                  <div
+                    key={`${test.name}-${index}`}
+                    className="group flex min-w-0 items-center gap-2 py-1 pl-[42px] pr-3 hover:bg-[var(--cf-hover)]"
+                  >
+                    <CaseIcon status={test.status} />
+                    <span
+                      className={`min-w-0 flex-1 truncate text-[12px] ${
+                        test.status === "skipped" ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"
+                      }`}
+                      title={test.name}
+                    >
+                      {test.name}
+                    </span>
+                    {test.file && (
+                      <button
+                        type="button"
+                        onClick={() => useUiStore.getState().openInEditor(test.file ?? "", test.line ?? undefined)}
+                        className={buttonClass({ variant: "ghost", size: "sm", className: "opacity-0 group-hover:opacity-100 focus-visible:opacity-100" })}
+                      >
+                        <FileCode2 size={12} />
+                        {t("reviewer.openFile")}
+                      </button>
+                    )}
+                    <span className="w-14 shrink-0 text-right text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+                      {formatTestTime(test.durationMs)}
+                    </span>
+                  </div>
+                ))}
+            </div>
+          );
+        })}
+      {tests.reports.length > 0 && (
+        <div className="px-3 py-2.5">
+          <p className="mb-1 text-[11px] font-medium text-[var(--cf-text-muted)]">{t("reviewer.testsReports")}</p>
+          {tests.reports.map((path) => (
+            <div key={path} className="group flex min-w-0 items-center gap-2 py-0.5">
+              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]" title={path}>
+                {path}
+              </span>
+              <Tooltip label={t("reviewer.revealReport")}>
+                <button
+                  type="button"
+                  onClick={() => void revealInFileManager(path).catch((e: unknown) => pushErrorToast(String(e)))}
+                  aria-label={t("reviewer.revealReport")}
+                  className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] opacity-0 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover:opacity-100"
+                >
+                  <FolderOpen size={12} />
+                </button>
+              </Tooltip>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -11,9 +11,10 @@ export function speakAnswer(markdown: string, workspaceId: string | null): void 
     .catch(() => {});
 }
 
-/** Text the user asked to hear right now — a message's «Leer en voz alta», a selection. */
-export function speakNow(text: string, origin: "message" | "selection"): void {
-  void import("../../state/speechStore")
+/** Text the user asked to hear right now — a message's «Leer en voz alta», a selection. Answers with
+ *  the utterance's id (see `say`), `null` when nothing was queued; never rejects. */
+export function speakNow(text: string, origin: "message" | "selection"): Promise<number | null> {
+  return import("../../state/speechStore")
     .then(({ useSpeechStore }) => useSpeechStore.getState().say(text, origin, { interrupt: true }))
-    .catch(() => {});
+    .catch(() => null);
 }

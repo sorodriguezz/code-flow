@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { formatDuration, formatEffort, logText, stageDetail } from "./ReviewerView";
+import { formatDuration, formatEffort, formatTestTime, groupCases, logText, stageDetail } from "./ReviewerView";
 import { EMPTY_PROJECT_CONFIG, effectiveCommands } from "../../state/reviewerStore";
-import type { ReviewerStage, ReviewerSuggestion } from "../../lib/tauri/reviewerCommands";
+import type { ReviewerStage, ReviewerSuggestion, ReviewerTestCase } from "../../lib/tauri/reviewerCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 // A translator that names the key and its params, so the assertions say which sentence was chosen.
@@ -24,6 +24,35 @@ describe("reviewer view helpers", () => {
     expect(formatDuration(6_400)).toBe("6 s");
     expect(formatDuration(72_000)).toBe("1 m 12 s");
     expect(formatDuration(7_380_000)).toBe("2 h 3 m");
+  });
+
+  it("formats one test's time finer than a stage's", () => {
+    expect(formatTestTime(null)).toBe("");
+    expect(formatTestTime(0)).toBe("<1 ms");
+    expect(formatTestTime(12)).toBe("12 ms");
+    expect(formatTestTime(1_440)).toBe("1.4 s");
+    expect(formatTestTime(72_000)).toBe("1 m 12 s");
+  });
+
+  it("groups cases by suite in the order the reports name them, with each suite's tally", () => {
+    const test = (suite: string, status: ReviewerTestCase["status"], durationMs: number | null): ReviewerTestCase => ({
+      suite,
+      name: `${suite}-${status}`,
+      status,
+      durationMs,
+      file: null,
+      line: null,
+    });
+    const groups = groupCases([
+      test("orders", "passed", 10),
+      test("payments", "failed", 5),
+      test("orders", "skipped", null),
+      test("orders", "passed", 20),
+    ]);
+    expect(groups.map((g) => [g.suite, g.cases.length, g.passed, g.failed, g.skipped, g.durationMs])).toEqual([
+      ["orders", 3, 2, 0, 1, 30],
+      ["payments", 1, 0, 1, 0, 5],
+    ]);
   });
 
   it("formats SonarQube's remediation effort in its own units", () => {

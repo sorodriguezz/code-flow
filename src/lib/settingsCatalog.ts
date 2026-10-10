@@ -124,6 +124,14 @@ export interface SettingsSectionDef {
   /** Which of the nav's four groups lists it: the app itself, code, AI, or one of the apps. */
   group: "app" | "code" | "ai" | "apps";
   /**
+   * The section's own colour: its tile in the nav and the search, and the glyphs of its rail. Twenty
+   * grey glyphs of one size and weight made the nav one flat column to read word by word (user
+   * report, 2026-10-09); a colour per section is recognised before its name is read. Spread around
+   * the wheel so neighbours never share a hue, and mid-strength (Tailwind's 600s, mostly) so the white
+   * glyph on the selected row's solid tile reads in both themes.
+   */
+  color: string;
+  /**
    * `workspace`: every setting in it belongs to the open workspace (PR review). The nav used to
    * have a group for these; now the section says it in its header, and a row that may differ per
    * workspace says it on the row — see «Workspaces y proyectos › Este workspace».
@@ -148,6 +156,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.general",
     icon: Globe,
     group: "app",
+    color: "#64748b",
     // The grouping the user chose: the language beside the version (updates, the site, Ko-fi — all in
     // `UpdateSection`), the window limit on its own, the tours on their own, and the app's own files.
     tabs: [
@@ -165,6 +174,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.appearance",
     icon: Palette,
     group: "app",
+    color: "#db2777",
     // The two small choices about the whole app's look share a pane; the schemes, a grid per mode,
     // are a visit of their own. The thinking mark came here from the AI section (2026-10-09): it is
     // how something looks, and its voice is in «Voz y sonido».
@@ -181,6 +191,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "shortcuts.title",
     icon: Keyboard,
     group: "app",
+    color: "#4f46e5",
     // One pane per group of commands, in the order the list used to run — a list that took six
     // screens to scroll through. Ids are `ShortcutGroup`s and the labels the groups' own
     // (`SHORTCUT_GROUP_LABELS`); a test holds the two lists to each other.
@@ -208,6 +219,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     // The bell, the same glyph as the status bar's notification centre these settings are about.
     icon: Bell,
     group: "app",
+    color: "#dc2626",
     // The questions in the order they get asked: what it sounds like, whether it reaches me when I
     // am not looking, and about what — and, per source, whether it shows, sounds or is said aloud.
     // The synonyms are per pane rather than on the section — a section-level list answers for every
@@ -242,6 +254,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "voice.sectionTitle",
     icon: AudioWaveform,
     group: "app",
+    color: "#ea580c",
     tabs: [
       { id: "devices", labelKey: "voice.devices", hintKey: "voice.devicesHint", icon: Speaker, searchKey: "settings.searchTermsDevices" },
       { id: "models", labelKey: "voice.modelsTab", hintKey: "voice.hint", icon: Download, searchKey: "settings.searchTermsVoice" },
@@ -255,6 +268,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "backup.title",
     icon: DatabaseBackup,
     group: "app",
+    color: "#0d9488",
     tabs: [
       {
         id: "content",
@@ -276,6 +290,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.projects",
     icon: FolderGit2,
     group: "code",
+    color: "#d97706",
     // The second pane is what replaced the nav's «Workspace» group: everything the open workspace
     // does differently, together, each row a way to the pane that sets it.
     tabs: [
@@ -288,6 +303,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.editorSection",
     icon: FileCode2,
     group: "code",
+    color: "#2563eb",
     // Most used first: how the text looks, whether a save formats it, how each kind of file opens —
     // then the three lists you maintain.
     tabs: [
@@ -345,6 +361,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.terminal",
     icon: TerminalSquare,
     group: "code",
+    color: "#52525b",
     tabs: [
       { id: "default", labelKey: "settings.terminalDefault", hintKey: "settings.terminalDefaultHint", icon: TerminalSquare },
       { id: "detected", labelKey: "settings.terminalDetected", hintKey: "settings.terminalDetectedHint", icon: ScanSearch },
@@ -357,6 +374,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.git",
     icon: GitBranch,
     group: "code",
+    color: "#f05032",
     tabs: [
       { id: "identity", labelKey: "settings.tabGitIdentity", hintKey: "settings.gitIdentityHint", icon: UserRound, searchKey: "settings.searchTermsGitIdentity" },
       { id: "fetch", labelKey: "settings.tabAutoFetch", hintKey: "settings.autoFetchDescription", icon: RefreshCw, searchKey: "settings.searchTermsAutoFetch" },
@@ -370,6 +388,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.integrationsSection",
     icon: Blocks,
     group: "code",
+    color: "#0891b2",
     // The accounts, by their brand names (`HOSTING_PROVIDERS` — `GitHostingSettings` draws them with
     // their marks), then what the app does with them. Pipelines' one setting came here from a
     // section of its own (2026-10-09): it only means anything once a host is connected above it.
@@ -393,6 +412,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.aiSection",
     icon: Bot,
     group: "ai",
+    color: "#7c3aed",
     // The engines and what they cost. Voice, dictation and meetings went to «Voz y sonido», the
     // thinking mark to Appearance and the tasks to a section of their own (2026-10-09) — thirteen
     // panes was a section nobody could hold in their head.
@@ -456,6 +476,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.tasksTitle",
     icon: SlidersHorizontal,
     group: "ai",
+    color: "#c026d3",
     tabs: [
       { id: "git", labelKey: "task.areaGit", icon: GitBranch, searchKey: "settings.searchTermsTasksGit" },
       { id: "review", labelKey: "task.areaReview", icon: ShieldCheck, searchKey: "settings.searchTermsTasksReview" },
@@ -473,6 +494,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.review",
     icon: GitPullRequest,
     group: "ai",
+    color: "#16a34a",
     scope: "workspace",
     // Its two prompts (the standard, the PR description) are edited in «Tareas y prompts» only —
     // they used to be editable from both places.
@@ -490,6 +512,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.toolsTitle",
     icon: Plug,
     group: "ai",
+    color: "#0284c7",
     tabs: [
       { id: "skills", labelKey: "settings.skills", icon: PackagePlus, searchKey: "settings.searchTermsSkills" },
       { id: "mcp", labelKey: "settings.mcp", icon: Plug, searchKey: "settings.searchTermsMcp" },
@@ -502,6 +525,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "api.settings.title",
     icon: Wrench,
     group: "apps",
+    color: "#e11d48",
     tabs: [
       { id: "network", labelKey: "api.settings.network", icon: Network, searchKey: "settings.searchTermsNetwork" },
       { id: "proxy", labelKey: "api.settings.proxy", icon: Waypoints, searchKey: "settings.searchTermsProxy" },
@@ -522,6 +546,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.databasesTitle",
     icon: Database,
     group: "apps",
+    color: "#0e7490",
     tabs: [{ id: "drivers", labelKey: "settings.driversTitle", hintKey: "settings.driversHint", icon: Database, searchKey: "settings.searchTermsDrivers" }],
   },
   {
@@ -529,6 +554,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "tabbar.vault",
     icon: KeyRound,
     group: "apps",
+    color: "#ca8a04",
     // Two panes because they are two different errands, not because the pane was long: one is
     // configuration you set and forget, the other is a report you come back to read.
     tabs: [
@@ -550,6 +576,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.reviewerSection",
     icon: ShieldCheck,
     group: "apps",
+    color: "#059669",
     tabs: [
       { id: "general", labelKey: "reviewer.paneGeneral", hintKey: "reviewer.paneGeneralHint", icon: Power, searchKey: "settings.searchTermsReviewerGeneral" },
       { id: "sonarqube", labelKey: "reviewer.paneSonar", hintKey: "reviewer.paneSonarHint", icon: Server, searchKey: "settings.searchTermsReviewerSonar" },
@@ -562,6 +589,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "remote.title",
     icon: Smartphone,
     group: "apps",
+    color: "#6366f1",
     // The groups the one long panel was built from, each now its own pane — in the order they are
     // needed: switch the server on, pair a phone, then look after what is paired and what it may do.
     tabs: [

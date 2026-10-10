@@ -153,6 +153,33 @@ pub struct TestFailure {
     pub line: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TestStatus {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+/// One test case as the report wrote it, whatever its outcome — the evidence behind the counts. A
+/// run where everything passed used to show "72 pass" and an empty tab, with nothing to say which
+/// 72 (user report, 2026-10-09).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCase {
+    pub suite: String,
+    pub name: String,
+    pub status: TestStatus,
+    /// `None` when the reporter left `time` out.
+    pub duration_ms: Option<u64>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+}
+
+/// How many cases a summary keeps. The counts always cover every case; past this the list stops,
+/// so a monorepo's tens of thousands of tests do not swell `last.json` and the event that carries it.
+pub const MAX_CASES: usize = 5000;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TestReport {
@@ -162,8 +189,12 @@ pub struct TestReport {
     pub skipped: u32,
     pub duration_ms: u64,
     pub failures: Vec<TestFailure>,
+    /// Every case in report order, up to [`MAX_CASES`]. Empty in a summary saved before it existed.
+    pub cases: Vec<TestCase>,
     /// How many report files were read — 0 means the numbers came from nowhere and the tab says so.
     pub files: u32,
+    /// Those files' paths, so the tab can say where the numbers came from.
+    pub reports: Vec<String>,
 }
 
 /// JUnit XML files written by this review's tests: Surefire/Failsafe and Gradle's folders, and any
@@ -225,15 +256,83 @@ fn strip_cdata(text: &str) -> String {
     text.replace("<![CDATA[", "").replace("]]>", "")
 }
 
+/// Where each `<testsuite>` of a report opens (with its name) and closes, in file order.
+/// `<testsuites>` is not one, and neither is a self-closing, empty suite.
+fn suite_events(text: &str) -> Vec<(usize, Option<String>)> {
+    let mut events: Vec<(usize, Option<String>)> = text
+        .match_indices("<testsuite")
+        .filter_map(|(at, needle)| {
+            let tail = &text[at + needle.len()..];
+            if !tail.starts_with(|c: char| c.is_whitespace() || c == '>') {
+                return None;
+            }
+            let tag = &tail[..tail.find('>')?];
+            (!tag.ends_with('/')).then(|| (at, Some(attribute(tag, "name").unwrap_or_default())))
+        })
+        .chain(text.match_indices("</testsuite>").map(|(at, _)| (at, None)))
+        .collect();
+    events.sort_by_key(|(at, _)| *at);
+    events
+}
+
+/// One `<testcase>` as read, before its file decides which name groups it.
+struct Parsed {
+    classname: String,
+    testsuite: String,
+    name: String,
+    status: TestStatus,
+    duration_ms: Option<u64>,
+    file: Option<String>,
+    line: Option<u32>,
+    /// The failure's message and detail.
+    failure: Option<(String, String)>,
+}
+
+/// Which name a file's cases are grouped by: `classname`, or the `<testsuite>` around them.
+///
+/// Reporters disagree about which one names the group. Surefire, Gradle and Vitest give both the same
+/// value; pytest wraps everything in one suite called "pytest" and puts the module in `classname`;
+/// jest-junit writes a `classname` of its own for every test (describe title + test title), and
+/// Node's built-in reporter writes `classname="test"` for all of them and nests describes as suites.
+/// So `classname`, unless it says nothing the suites do not say better: one value for every case
+/// while the suites have several (Node), or a value per case while the suites have fewer (jest).
+fn groups_by_classname(cases: &[Parsed]) -> bool {
+    let distinct = |key: fn(&Parsed) -> &str| cases.iter().map(key).collect::<std::collections::HashSet<_>>().len();
+    let classes = distinct(|c| c.classname.as_str());
+    let suites = distinct(|c| c.testsuite.as_str());
+    let all_alike = classes == 1 && suites > 1;
+    let one_per_case = cases.len() > 1 && classes == cases.len() && suites < classes;
+    !(all_alike || one_per_case)
+}
+
 /// Reads every `<testcase>` of the files. Counted from the cases rather than the suites' attributes,
 /// which reporters fill in inconsistently (some count a skipped test as a failure, some leave
 /// `tests` out).
 pub fn read_junit(files: &[PathBuf]) -> TestReport {
-    let mut report = TestReport { files: files.len() as u32, ..Default::default() };
+    let mut report = TestReport {
+        files: files.len() as u32,
+        reports: files.iter().map(|f| f.to_string_lossy().into_owned()).collect(),
+        ..Default::default()
+    };
     for file in files {
         let Ok(text) = std::fs::read_to_string(file) else { continue };
+        let events = suite_events(&text);
+        let mut next_event = 0;
+        let mut suites: Vec<String> = Vec::new();
+        let mut parsed: Vec<Parsed> = Vec::new();
         let mut rest = text.as_str();
         while let Some(start) = rest.find("<testcase") {
+            // The suites open around this case: every open and close before it, applied in order.
+            let at = text.len() - rest.len() + start;
+            while let Some((_, event)) = events.get(next_event).filter(|(position, _)| *position < at) {
+                match event {
+                    Some(name) => suites.push(name.clone()),
+                    None => {
+                        suites.pop();
+                    }
+                }
+                next_event += 1;
+            }
             let after = &rest[start..];
             let Some(open_end) = after.find('>') else { break };
             let open = &after[..open_end];
@@ -248,13 +347,7 @@ pub fn read_junit(files: &[PathBuf]) -> TestReport {
             };
             rest = &after[consumed..];
 
-            report.total += 1;
-            if let Some(seconds) = attribute(open, "time").and_then(|t| t.replace(',', "").parse::<f64>().ok()) {
-                report.duration_ms += (seconds * 1000.0).round() as u64;
-            }
-            let failure_at = body.find("<failure").or_else(|| body.find("<error"));
-            if let Some(at) = failure_at {
-                report.failed += 1;
+            let failure = body.find("<failure").or_else(|| body.find("<error")).map(|at| {
                 let tag_end = body[at..].find('>').map(|e| at + e).unwrap_or(body.len());
                 let tag = &body[at..tag_end];
                 let inner = if tag.ends_with('/') {
@@ -270,16 +363,61 @@ pub fn read_junit(files: &[PathBuf]) -> TestReport {
                 };
                 let detail: String = inner.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(12).collect::<Vec<_>>().join("\n");
                 let message = attribute(tag, "message").unwrap_or_else(|| detail.lines().next().unwrap_or_default().to_string());
-                report.failures.push(TestFailure {
-                    suite: attribute(open, "classname").unwrap_or_default(),
-                    name: attribute(open, "name").unwrap_or_default(),
-                    message: message.chars().take(400).collect(),
-                    detail,
-                    file: attribute(open, "file"),
-                    line: attribute(open, "line").and_then(|l| l.parse().ok()),
-                });
+                (message.chars().take(400).collect::<String>(), detail)
+            });
+            let status = if failure.is_some() {
+                TestStatus::Failed
             } else if body.contains("<skipped") {
-                report.skipped += 1;
+                TestStatus::Skipped
+            } else {
+                TestStatus::Passed
+            };
+            parsed.push(Parsed {
+                classname: attribute(open, "classname").unwrap_or_default(),
+                testsuite: suites.last().cloned().unwrap_or_default(),
+                name: attribute(open, "name").unwrap_or_default(),
+                status,
+                duration_ms: attribute(open, "time")
+                    .and_then(|t| t.replace(',', "").parse::<f64>().ok())
+                    .map(|seconds| (seconds * 1000.0).round() as u64),
+                file: attribute(open, "file"),
+                line: attribute(open, "line").and_then(|l| l.parse().ok()),
+                failure,
+            });
+        }
+
+        let by_classname = groups_by_classname(&parsed);
+        for case in parsed {
+            // The other name stands in where the chosen one is empty — a top-level test in Node's
+            // report has no suite around it.
+            let (first, second) = if by_classname { (case.classname, case.testsuite) } else { (case.testsuite, case.classname) };
+            let suite = if first.is_empty() { second } else { first };
+            report.total += 1;
+            report.duration_ms += case.duration_ms.unwrap_or(0);
+            match case.status {
+                TestStatus::Failed => report.failed += 1,
+                TestStatus::Skipped => report.skipped += 1,
+                TestStatus::Passed => {}
+            }
+            if let Some((message, detail)) = case.failure {
+                report.failures.push(TestFailure {
+                    suite: suite.clone(),
+                    name: case.name.clone(),
+                    message,
+                    detail,
+                    file: case.file.clone(),
+                    line: case.line,
+                });
+            }
+            if report.cases.len() < MAX_CASES {
+                report.cases.push(TestCase {
+                    suite,
+                    name: case.name,
+                    status: case.status,
+                    duration_ms: case.duration_ms,
+                    file: case.file,
+                    line: case.line,
+                });
             }
         }
     }
@@ -328,12 +466,25 @@ mod tests {
 </testsuite></testsuites>"#,
         )
         .unwrap();
-        let report = read_junit(&[file]);
+        let report = read_junit(&[file.clone()]);
         assert_eq!(report.total, 4);
         assert_eq!(report.failed, 2);
         assert_eq!(report.skipped, 1);
         assert_eq!(report.passed, 1);
         assert_eq!(report.duration_ms, 5030);
+        // Every case is kept, in order, with what it came to — the passing ones included.
+        let statuses: Vec<_> = report.cases.iter().map(|c| (c.name.as_str(), c.status, c.duration_ms)).collect();
+        assert_eq!(
+            statuses,
+            vec![
+                ("totals", TestStatus::Passed, Some(12)),
+                ("rejects an empty basket", TestStatus::Failed, Some(18)),
+                ("refund is idempotent", TestStatus::Failed, Some(5000)),
+                ("later", TestStatus::Skipped, None),
+            ]
+        );
+        assert_eq!(report.cases[1].file.as_deref(), Some("tests/orders.test.ts"));
+        assert_eq!(report.reports, vec![file.to_string_lossy().into_owned()]);
         assert_eq!(report.failures[0].name, "rejects an empty basket");
         assert_eq!(report.failures[0].message, "expected EmptyBasketError, got undefined");
         assert_eq!(report.failures[0].file.as_deref(), Some("tests/orders.test.ts"));
@@ -341,6 +492,60 @@ mod tests {
         assert!(report.failures[0].detail.contains("at tests/orders.test.ts:42:5"));
         assert_eq!(report.failures[1].suite, "payments");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Suite names per case, in order, for one report.
+    fn suites_of(xml: &str) -> Vec<String> {
+        let dir = temp();
+        let file = dir.join("junit.xml");
+        std::fs::write(&file, xml).unwrap();
+        let report = read_junit(&[file]);
+        let _ = std::fs::remove_dir_all(&dir);
+        report.cases.into_iter().map(|c| c.suite).collect()
+    }
+
+    #[test]
+    fn jest_junit_cases_group_by_their_suite_not_their_own_classname() {
+        // jest-junit's default `classname` is "describe title + test title": one per test.
+        let suites = suites_of(
+            r#"<testsuites name="jest tests">
+  <testsuite name="orders" tests="2"><testcase classname="orders totals" name="orders totals" time="0.01"></testcase>
+    <testcase classname="orders rejects" name="orders rejects" time="0.02"></testcase></testsuite>
+  <testsuite name="payments" tests="1"><testcase classname="payments refund" name="payments refund" time="0.01"></testcase></testsuite>
+</testsuites>"#,
+        );
+        assert_eq!(suites, ["orders", "orders", "payments"]);
+    }
+
+    #[test]
+    fn node_cases_group_by_describe_and_top_level_ones_by_classname() {
+        // Node's built-in reporter: `classname="test"` everywhere, a describe nests as a suite.
+        let suites = suites_of(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+	<testsuite name="orders" tests="2">
+		<testsuite name="refunds" tests="1">
+			<testcase name="is idempotent" time="0.001" classname="test"/>
+		</testsuite>
+		<testcase name="totals" time="0.001" classname="test"/>
+	</testsuite>
+	<testcase name="top level" time="0.001" classname="test"/>
+	<testsuite name="empty"/>
+</testsuites>"#,
+        );
+        assert_eq!(suites, ["refunds", "orders", "test"]);
+    }
+
+    #[test]
+    fn pytest_cases_group_by_classname_inside_its_one_suite() {
+        let suites = suites_of(
+            r#"<testsuites><testsuite name="pytest" tests="3">
+<testcase classname="tests.test_orders" name="test_totals" time="0.001"/>
+<testcase classname="tests.test_orders" name="test_rejects" time="0.001"/>
+<testcase classname="tests.test_payments" name="test_refund" time="0.001"/>
+</testsuite></testsuites>"#,
+        );
+        assert_eq!(suites, ["tests.test_orders", "tests.test_orders", "tests.test_payments"]);
     }
 
     #[test]

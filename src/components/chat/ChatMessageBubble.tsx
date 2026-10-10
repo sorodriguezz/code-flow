@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type React
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, FileText, GitBranch, ImageIcon, Pencil, Puzzle, RefreshCw, Square, Volume2, type LucideIcon } from "lucide-react";
 import { speakNow } from "../../lib/speech/speakAnswer";
+import { useSpeechStore } from "../../state/speechStore";
 import { speakable } from "../../lib/speech/speakable";
 import { splitAttachmentNote } from "../../lib/attachmentNote";
 import { renderMarkdown } from "../../lib/markdown";
@@ -17,6 +18,7 @@ import { thinkingFinishMs } from "../../lib/thinkingDesigns";
 import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
 import { LazyTrace } from "./LazyTrace";
 import { CostChip, formatResponseTime, parseStamp, useCopy, useLocale } from "./chatChrome";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { fenceLabelOf, highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
 import { bodyForBlock, fileNameForBlock } from "../../lib/codeFileName";
 import { OutputBar } from "./OutputBar";
@@ -157,6 +159,11 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
 }) {
   const t = useT();
   const [copied, copy] = useCopy();
+  // This turn's own reading aloud: the id `say` answered with, and whether the voice is on it now.
+  // Matched by id, not by text — the backend reshapes what it says (`speech::speakable`), and two
+  // turns can say the same thing.
+  const [utterance, setUtterance] = useState<number | null>(null);
+  const speakingHere = useSpeechStore((s) => utterance !== null && s.speaking?.id === utterance);
   const reading = variant === "reading";
 
   // The recorded process behind this answer — "Thought for 15 s · 5 steps", over the answer and
@@ -269,7 +276,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
    */
   const assistantTurn = (content: ReactNode) => (
     <div className={`group grid grid-cols-[auto_minmax(0,1fr)] ${reading ? "gap-x-3" : "gap-x-2.5"}`}>
-      <AssistantAvatar reading={reading} landedAt={message.createdAt} failed={!!message.isError} />
+      <AssistantAvatar reading={reading} landedAt={message.createdAt} failed={!!message.isError} speaking={speakingHere} />
       <div className={`min-w-0 space-y-1.5 ${reading ? "pt-[5px]" : "pt-[2px]"}`}>
         {traceLog}
         {content}
@@ -327,11 +334,40 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     The stamp is the only part drawn at rest; the controls appear when the turn is hovered (or
     focused, so the keyboard can reach what the mouse uncovers), on whichever side faces the middle
     of the column, so they grow into empty space instead of pushing the stamp.
+
+    The AI panel's turns wear the same row, smaller. Copy and read-aloud used to ride the corner of
+    the turn there, two bordered squares over its first line — the user asked for them under the
+    answer, beside the stamp, where they are in the chat workspace (2026-10-09). `-my-1` keeps the
+    row the stamp's height, so the transcript does not grow by a button under every turn.
+
+    While the turn is being read aloud the row stays up without a hover, and read-aloud has become
+    its stop: the way out of a long reading has to be where it was started, and findable without
+    knowing to hover (the user's ask, 2026-10-09). The bar's «Hablando» stops it too.
   */
   const controls = (
-    <div className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 hover:opacity-100">
-      <BubbleAction icon={copied ? Check : Copy} label={t("chat.copyMessage")} onClick={() => copy(copyText)} done={copied} />
-      {!isUser && <BubbleAction icon={Volume2} label={t("speech.readAloud")} onClick={() => speakNow(speakable(copyText), "message")} />}
+    <div
+      className={`flex items-center gap-0.5 transition-opacity ${
+        speakingHere ? "opacity-100" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100 hover:opacity-100"
+      } ${reading ? "" : "-my-1"}`}
+    >
+      <BubbleAction icon={copied ? Check : Copy} label={t("chat.copyMessage")} onClick={() => copy(copyText)} done={copied} dense={!reading} />
+      {!isUser &&
+        (speakingHere ? (
+          <BubbleAction
+            icon={Square}
+            label={t("speech.stop")}
+            onClick={() => useSpeechStore.getState().stop()}
+            live
+            dense={!reading}
+          />
+        ) : (
+          <BubbleAction
+            icon={Volume2}
+            label={t("speech.readAloud")}
+            onClick={() => void speakNow(speakable(copyText), "message").then(setUtterance)}
+            dense={!reading}
+          />
+        ))}
       {actions?.onRegenerate && (
         <BubbleAction
           icon={RefreshCw}
@@ -360,32 +396,6 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         />
       )}
     </div>
-  );
-
-  // The panel's turns have no controls row; a copy button rides the corner on hover instead — and,
-  // on an answer, the one that reads it aloud beside it.
-  const panelCopy = !reading && (
-    <span className={`absolute -top-2 flex gap-1 opacity-0 group-hover:opacity-100 ${isUser ? "-left-2" : "-right-2"}`}>
-      {!isUser && (
-        <button
-          type="button"
-          onClick={() => speakNow(speakable(copyText), "message")}
-          title={t("speech.readAloud")}
-          aria-label={t("speech.readAloud")}
-          className="flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-sm"
-        >
-          <Volume2 size={11} className="text-[var(--cf-text-muted)]" />
-        </button>
-      )}
-      <button
-        type="button"
-        onClick={() => copy(copyText)}
-        title={t("chat.copyMessage")}
-        className="flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-sm"
-      >
-        {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} className="text-[var(--cf-text-muted)]" />}
-      </button>
-    </span>
   );
 
   if (isUser) {
@@ -418,16 +428,11 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
             </span>
           )}
           {body}
-          {panelCopy}
         </div>
-        {reading ? (
-          <div className="flex items-center justify-end gap-1.5 pt-0.5">
-            {controls}
-            {stampRow}
-          </div>
-        ) : (
-          stampRow
-        )}
+        <div className={`flex items-center justify-end gap-1.5 ${reading ? "pt-0.5" : ""}`}>
+          {controls}
+          {stampRow}
+        </div>
       </div>
     );
   }
@@ -452,7 +457,6 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         ) : (
           body
         )}
-        {panelCopy}
       </div>
       {/* The files the turn read or changed — its sources — then the files it wrote. Both are part
           of what this turn said; the row after them is what you *do* about it. */}
@@ -462,20 +466,19 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
           <OutputBar conversationId={outputs.conversationId} files={outputs.files} label={false} />
         </div>
       )}
-      {reading ? (
-        <div className="flex items-center gap-1.5">
-          {stampRow}
-          {controls}
-        </div>
-      ) : (
-        stampRow
-      )}
+      <div className="flex items-center gap-1.5">
+        {stampRow}
+        {controls}
+      </div>
     </>,
   );
 });
 
 /** How recently a turn must have landed for its avatar to arrive by way of the thinking mark. */
 const SETTLE_WINDOW_MS = 4000;
+
+/** Module-level, so the speaking orb is handed the same object every render (as `SpeechActivity`). */
+const SPEAKING = { phase: "speak" } as const;
 
 /**
  * The assistant's mark beside its turn.
@@ -486,8 +489,21 @@ const SETTLE_WINDOW_MS = 4000;
  * show for the ones built around it). A turn that failed plays the mark's failure instead — red, no
  * celebration. A turn read back from history is simply the avatar:
  * replaying that for every old message would be a flourish pretending something had just happened.
+ *
+ * While the turn is read aloud the mark comes back speaking — breathing with the voice, as it does
+ * in the bar's «Hablando» — so the reading is seen on the answer it is reading.
  */
-function AssistantAvatar({ reading, landedAt, failed }: { reading: boolean; landedAt?: string; failed: boolean }) {
+function AssistantAvatar({
+  reading,
+  landedAt,
+  failed,
+  speaking,
+}: {
+  reading: boolean;
+  landedAt?: string;
+  failed: boolean;
+  speaking: boolean;
+}) {
   const [settling, setSettling] = useState(() => {
     const when = parseStamp(landedAt);
     const age = when ? Date.now() - when.getTime() : -1;
@@ -503,7 +519,9 @@ function AssistantAvatar({ reading, landedAt, failed }: { reading: boolean; land
   const box = reading ? "h-8 w-8" : "h-[22px] w-[22px]";
   return (
     <span className={`flex ${box} shrink-0 items-center justify-center`}>
-      {settling ? (
+      {speaking ? (
+        <ThinkingOrb size={reading ? "card" : "md"} activity={SPEAKING} />
+      ) : settling ? (
         // A turn that failed ends red — the mark's failure, not its celebration.
         <ThinkingOrb size={reading ? "card" : "md"} activity={failed ? { failed: true } : { done: true }} />
       ) : (
@@ -519,7 +537,7 @@ function AssistantAvatar({ reading, landedAt, failed }: { reading: boolean; land
   );
 }
 
-/** One control on the hover row under a reading-variant turn. */
+/** One control on the hover row under a turn. */
 function BubbleAction({
   icon: Icon,
   label,
@@ -527,6 +545,8 @@ function BubbleAction({
   done,
   cost,
   costTitle,
+  dense,
+  live,
 }: {
   icon: LucideIcon;
   label: string;
@@ -534,6 +554,11 @@ function BubbleAction({
   done?: boolean;
   cost?: number;
   costTitle?: string;
+  /** The AI panel's size: a 11px glyph in a 20px target, beside a 10.5px stamp. */
+  dense?: boolean;
+  /** Something running that this control ends — the stop of a reading aloud: in the accent, its
+   *  glyph filled, so it reads as the one thing to press while the voice goes on. */
+  live?: boolean;
 }) {
   return (
     <button
@@ -541,9 +566,14 @@ function BubbleAction({
       onClick={onClick}
       title={label}
       aria-label={label}
-      className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+      className={`flex items-center gap-1 rounded-md transition-colors hover:bg-[var(--cf-hover)] ${
+        live ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+      } ${dense ? "h-5 min-w-5 justify-center px-1" : "px-1.5 py-1"}`}
     >
-      <Icon size={12} className={done ? "text-[var(--cf-success)]" : undefined} />
+      <Icon
+        size={live ? (dense ? 9 : 10) : dense ? 11 : 12}
+        className={done ? "text-[var(--cf-success)]" : live ? "fill-current" : undefined}
+      />
       {cost !== undefined && cost > 0 && costTitle && <CostChip turns={cost} title={costTitle} />}
     </button>
   );
@@ -865,14 +895,23 @@ function ChatStamp({ message, detail }: { message: ChatBubbleMessage; detail: Ch
   const locale = useLocale();
   const when = parseStamp(message.createdAt);
 
-  const parts: string[] = [];
+  const parts: ReactNode[] = [];
   if (message.role === "assistant") {
     // A turn with a trace or reasoning already says how long it took, in its "Thought for…" line.
     const saysDuration = (message.trace?.length ?? 0) > 0 || !!message.thinking?.trim() || !!message.traceId;
     if (detail === "full" && message.responseTimeMs !== undefined && !saysDuration) {
       parts.push(`⏱ ${formatResponseTime(message.responseTimeMs)}`);
     }
-    if (message.provider) parts.push(providerDisplayLabel(message.provider, t));
+    // The engine's own mark before its name — the one the providers list and the model picker
+    // draw — so "which engine wrote this?" is answered at a glance, not by reading the line.
+    if (message.provider) {
+      parts.push(
+        <span className="inline-flex items-center gap-1">
+          <ProviderGlyph providerId={message.provider} size={11} />
+          {providerDisplayLabel(message.provider, t)}
+        </span>,
+      );
+    }
     // An empty provider still yields the raw model id, which is the honest answer for a turn
     // recorded before the provider was tracked.
     if (message.model) parts.push(modelDisplayLabel(message.provider ?? "", message.model, t));
@@ -884,11 +923,16 @@ function ChatStamp({ message, detail }: { message: ChatBubbleMessage; detail: Ch
   return (
     <div
       title={when?.toLocaleString(locale)}
-      className={`px-0.5 text-[10.5px] leading-tight text-[var(--cf-text-muted)] ${
-        message.role === "user" ? "text-right" : ""
-      }`}
+      className="flex min-w-0 flex-wrap items-center px-0.5 text-[10.5px] leading-tight text-[var(--cf-text-muted)]"
     >
-      {parts.join(" · ")}
+      {/* Each part keeps its separator *after* it, so a narrow panel breaks the line after a dot
+          rather than opening the next line with one. */}
+      {parts.map((part, index) => (
+        <span key={index} className="inline-flex items-center whitespace-nowrap">
+          {part}
+          {index < parts.length - 1 && <span className="px-1">·</span>}
+        </span>
+      ))}
     </div>
   );
 }

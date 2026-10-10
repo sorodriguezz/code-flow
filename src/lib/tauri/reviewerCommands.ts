@@ -181,6 +181,18 @@ export interface ReviewerTestFailure {
   line: number | null;
 }
 
+export type ReviewerTestStatus = "passed" | "failed" | "skipped";
+
+/** One test case as the JUnit report wrote it, whatever its outcome. */
+export interface ReviewerTestCase {
+  suite: string;
+  name: string;
+  status: ReviewerTestStatus;
+  durationMs: number | null;
+  file: string | null;
+  line: number | null;
+}
+
 export interface ReviewerTestReport {
   total: number;
   passed: number;
@@ -188,7 +200,12 @@ export interface ReviewerTestReport {
   skipped: number;
   durationMs: number;
   failures: ReviewerTestFailure[];
+  /** Every case in report order, capped by the backend (`MAX_CASES`) — fewer than `total` past it,
+   *  and empty in a summary saved before cases were kept. */
+  cases: ReviewerTestCase[];
   files: number;
+  /** The JUnit files the numbers were read from, as absolute paths. */
+  reports: string[];
 }
 
 export interface ReviewerCoverageEntry {

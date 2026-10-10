@@ -12720,7 +12720,6 @@ const en = {
 
   // --- Revisor (Reviewer): the project's quality pipeline ---
   "tabbar.reviewer": "Reviewer",
-  "reviewer.betaHint": "Beta: it is new and still changing. It downloads SonarQube and runs it on this machine.",
   "reviewer.settingsHint": "The project's quality pipeline — build, tests, SonarQube and Quality Gate — run on your machine, the way a company's CI runs it.",
   "reviewer.paneGeneral": "General",
   "reviewer.paneGeneralHint": "Show the tab and decide how a review runs.",
@@ -12862,6 +12861,15 @@ const en = {
   "reviewer.openFile": "Open",
   "reviewer.openInSonar": "Open in SonarQube",
   "reviewer.testsSummary": "{passed} passed · {failed} failed · {skipped} skipped · {duration}",
+  "reviewer.testsFilterAll": "All",
+  "reviewer.testsFilterPassed": "Passed",
+  "reviewer.testsFilterFailed": "Failed",
+  "reviewer.testsFilterSkipped": "Skipped",
+  "reviewer.testsNoSuite": "(no suite)",
+  "reviewer.testsTruncated": "Showing the first {shown} of {total} cases.",
+  "reviewer.testsNoCases": "This review was saved before each case was kept. Run it again to see them.",
+  "reviewer.testsReports": "Read from",
+  "reviewer.revealReport": "Show in folder",
   "reviewer.noCoverage": "No coverage was measured. The test stage has to write a coverage report — the suggested commands do.",
   "reviewer.coverageSummary": "{coverage} of {lines} lines · {uncovered} uncovered",
   "reviewer.uncovered": "{n} uncovered",

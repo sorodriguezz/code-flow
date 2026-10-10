@@ -49,7 +49,8 @@ export function ViewSkeleton() {
 export function SettingsSkeleton() {
   const frame = useSettingsFrame();
   return (
-    <div className="fixed inset-0 z-50 bg-black/20">
+    <div className="fixed inset-0 z-50">
+      <div aria-hidden data-tauri-drag-region className="cf-settings-scrim absolute inset-0" />
       <div style={frame} className="flex flex-col gap-3 overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-5 shadow-[var(--cf-shadow-modal)]">
         <Skeleton className="h-5 w-40" />
         <div className="flex min-h-0 flex-1 gap-4">

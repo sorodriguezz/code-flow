@@ -43,10 +43,7 @@ const REVIEWER_TAB: Tab = {
   labelKey: "tabbar.reviewer",
   icon: ShieldCheck,
   shortcut: "view.reviewer",
-  // Beta, at the user's ask (2026-10-04): the pipeline works end to end, but it is new and leans on
-  // a SonarQube it downloads, so the tab says so before it is opened.
-  stage: "beta",
-  stageHintKey: "reviewer.betaHint",
+  // Wore "beta" from 2026-10-04 until the user took it off on 2026-10-09.
 };
 
 const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "reviewer", "pipelines"];

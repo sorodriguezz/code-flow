@@ -115,8 +115,18 @@ export function SettingsRail({
           {/* Above the pill, which covers the whole button. */}
           <span className="relative flex min-w-0 flex-1 items-start gap-2">
             {/* `mt-[2px]` puts a 14px glyph on the cap height of the first line rather than
-                centred against a label that may be two lines tall. */}
-            <Icon size={14} className={`mt-[2px] shrink-0 ${active === id ? "text-[var(--cf-accent)]" : ""}`} />
+                centred against a label that may be two lines tall.
+                In the open section's colour (`--cf-section-ink`, set by `SettingsView`): full
+                when picked, toward the muted text when not — the panes read as that section's.
+                A rail outside Settings has no section and keeps the accent and the muted text. */}
+            <Icon
+              size={14}
+              className={`mt-[2px] shrink-0 ${
+                active === id
+                  ? "text-[var(--cf-section-ink,var(--cf-accent))]"
+                  : "text-[color-mix(in_oklab,var(--cf-section-ink,var(--cf-text-muted))_65%,var(--cf-text-muted))]"
+              }`}
+            />
             {/* No `truncate`, and `break-words` so a single long word — a provider name, a
                 language server id — wraps instead of pushing the rail wider. */}
             <span className="min-w-0 flex-1 break-words">{t(labelKey)}</span>
