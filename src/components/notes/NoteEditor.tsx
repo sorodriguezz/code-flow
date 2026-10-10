@@ -59,6 +59,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useToastStore } from "../../state/toastStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { scrollBehavior } from "../../lib/motion";
 
 /**
  * Monaco is behind `lazy` so that a workspace opened on its gallery never fetches it. It is the
@@ -586,7 +587,7 @@ export function NoteEditor() {
                   previewPane.current
                     ?.querySelectorAll("h1, h2, h3, h4, h5, h6")
                     .item(index)
-                    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    ?.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
                 }}
               />
               </div>

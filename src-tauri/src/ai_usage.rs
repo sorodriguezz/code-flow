@@ -43,10 +43,17 @@ pub fn attach(app: AppHandle) {
 /// `None` before `setup` has attached the handle, which is every unit test: callers fall back to
 /// their defaults, exactly as for a setting nobody has written.
 pub(crate) fn setting(key: &str) -> Option<String> {
+    with_conn(|conn| queries::get_setting(conn, key).ok().flatten()).flatten()
+}
+
+/// The database itself, through the same handle — for an engine that runs inside this process and
+/// reads a group of settings at once (`crate::local_agent` and the «Modelo local» configuration).
+/// `None` before `setup`, like [`setting`]. Hold it briefly: it is the app's one connection.
+pub(crate) fn with_conn<T>(read: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
     let app = APP.get()?;
     let db = app.try_state::<Db>()?;
     let conn = db.0.lock().ok()?;
-    queries::get_setting(&conn, key).ok().flatten()
+    Some(read(&conn))
 }
 
 /// Files one finished run's usage. Never fails and never blocks the caller.

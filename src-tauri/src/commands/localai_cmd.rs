@@ -167,6 +167,11 @@ pub struct CompletionRequest {
     pub request_id: String,
     pub prefix: String,
     pub suffix: String,
+    /// Block mode — see `localai::complete::Request::multiline`. Absent means one line.
+    #[serde(default)]
+    pub multiline: bool,
+    #[serde(default)]
+    pub indent: u32,
 }
 
 /// The gap-filling text, or `None`.
@@ -216,7 +221,12 @@ pub async fn localai_complete(
 
     let outcome = complete::infill(
         &engine,
-        &complete::Request { prefix: request.prefix, suffix: request.suffix },
+        &complete::Request {
+            prefix: request.prefix,
+            suffix: request.suffix,
+            multiline: request.multiline,
+            indent: request.indent,
+        },
         cancel,
     )
     .await;

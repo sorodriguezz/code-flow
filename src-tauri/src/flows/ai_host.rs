@@ -304,6 +304,7 @@ async fn converse(
         max_tokens: call.max_tokens.max(16),
         temperature: call.temperature,
         keep_alive: (kind == BackendKind::Ollama).then_some("5m"),
+        think: None,
     };
     let work = async {
         let mut stop = None;

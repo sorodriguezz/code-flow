@@ -54,10 +54,24 @@ import { completionIsUsable, useLocalAiStore } from "../state/localAiStore";
  *    predicted must not fetch anything — the remainder of the same suggestion is returned from
  *    memory. Without this, accepting a suggestion character by character issues one request per
  *    keystroke and each one arrives after the next character has already been typed.
- * 2. **A short debounce.** Enough that holding a key down does not queue a request per repeat, low
- *    enough that a pause reads as instant.
+ * 2. **A debounce that waits for a pause, not a gap between keys.** See [`DEBOUNCE_MS`].
  * 3. **Real cancellation.** Monaco cancels the moment the caret moves; that is forwarded so the
  *    server abandons the generation instead of finishing an answer nobody will read.
+ *
+ * # What keeps it from being pushy
+ *
+ * Instant was the easy half. The first version was also relentless: a suggestion on every pause,
+ * several lines at a time, often re-typing code that was already there. Copilot is the reference
+ * for calm, and the rules it follows are the ones copied here:
+ *
+ * - **One line at a time.** A request asks for the rest of the caret's line and nothing more, so
+ *   the end of a finished statement gets no ghost text until Enter is pressed — then the next line
+ *   arrives. Several lines only in an empty block; see [`completionShape`].
+ * - **Not in the middle of a line**, unless all that follows the caret is closers — [`MID_LINE_OK`].
+ * - **Not while deleting.** Backspace is correcting, not writing; a suggestion popping up under it
+ *   is noise. An explicit trigger (Alt+\) still asks.
+ * - **Never re-type what is there.** Done in Rust (`localai::complete::tidy`), which drops an answer
+ *   that only reproduces the line below or above, and closers the line already has.
  */
 
 /**
@@ -65,10 +79,15 @@ import { completionIsUsable, useLocalAiStore } from "../state/localAiStore";
  *
  * `llama.vscode` ships 0, and can afford to: it is talking to a server the user started and left
  * running. Here the engine may be cold, and a burst of requests during a fast run of typing would
- * each start, cancel and restart prompt evaluation. 150 ms is below the threshold where a pause
- * feels like a wait, and Monaco applies its own delay before this on top.
+ * each start, cancel and restart prompt evaluation.
+ *
+ * It was 150 ms, and that was the main reason it felt pushy: ordinary typing leaves 150–250 ms
+ * between keys, so ghost text kept flashing up *between letters* of a word still being typed. 300
+ * is past that gap and still short of a pause that reads as a wait; with the model's ~150–300 ms on
+ * top, a suggestion lands about where Copilot's does. Monaco's own debounce is off (see
+ * `debounceDelayMs` below), so this is the whole delay.
  */
-const DEBOUNCE_MS = 150;
+const DEBOUNCE_MS = 300;
 
 /**
  * How long a request may run before the status bar admits it is running.
@@ -100,14 +119,85 @@ const PREFIX_LINES = 256;
 const SUFFIX_LINES = 64;
 
 /**
- * How much text may follow the caret *on its own line* before completion is skipped.
+ * What may follow the caret *on its own line* for completion to be offered there.
  *
- * `llama.vscode`'s `max_line_suffix`. Completing into the middle of an existing line is almost
- * always wrong — the user is editing, not writing — and the ghost text ends up interleaved with
- * what is already there. A few trailing characters are fine, because those are the closing
- * brackets and semicolons the caret sits inside constantly.
+ * Completing into the middle of an existing line is almost always wrong — the user is editing, not
+ * writing — and the ghost text ends up interleaved with what is already there. Closers are the
+ * exception, because the caret sits inside them constantly: `log(|)`, `"|"`, `{|};`.
+ *
+ * This replaced `llama.vscode`'s `max_line_suffix` (any 8 characters), which let `|foo)` and
+ * `|.then` through — the caret before a word that is already written. The pattern is Copilot's:
+ * closing brackets and quotes, then at most one `:`, `{`, `;` or `,`.
  */
-const MAX_LINE_SUFFIX = 8;
+const MID_LINE_OK = /^\s*[)\]}>"'`]*\s*[:{;,]?\s*$/;
+
+/**
+ * A line that opens a block when it ends like this: braces and brackets, Python's and YAML's `:`,
+ * arrows, and the keyword openers of Ruby, Lua and shell.
+ */
+const BLOCK_OPENER = /(?:[{([:]|=>|->|\b(?:do|then|else|begin))\s*$/;
+
+/** How far up past blank lines [`completionShape`] looks for the line that opened the block. */
+const OPENER_REACH = 3;
+
+/**
+ * How much the next request may write, decided from the lines around the caret.
+ *
+ * One line, unless the caret is on the blank, indented line of an **empty block** — the line Enter
+ * leaves you on after `{` — with that block's closer (or a dedent, or the end of the file) below
+ * it. That is Copilot's `isEmptyBlockStart`, done on indentation instead of a parse tree: the only
+ * place a multi-line answer is plainly what is wanted, because there is nothing there yet and the
+ * block says where to stop. Anywhere else the answer is the rest of the caret's line, and the next
+ * line comes after Enter.
+ *
+ * `indent` is in characters, not columns — it goes to the server as `n_indent`, which counts a tab
+ * as one. Widths compared *here* expand tabs, since a block written with tabs opens under a line
+ * indented with them.
+ */
+export function completionShape(
+  lineAt: (lineNumber: number) => string,
+  lineCount: number,
+  position: { lineNumber: number; column: number },
+  tabSize: number,
+): { multiline: boolean; indent: number } {
+  const single = { multiline: false, indent: 0 };
+  const line = lineAt(position.lineNumber);
+  const before = line.slice(0, position.column - 1);
+  if (before.trim() !== "" || line.trim() !== "") return single;
+
+  const width = widthOf(before, tabSize);
+  if (width === 0) return single;
+
+  let opener: string | null = null;
+  for (let n = position.lineNumber - 1; n >= Math.max(1, position.lineNumber - OPENER_REACH); n--) {
+    const text = lineAt(n);
+    if (text.trim() === "") continue;
+    opener = text;
+    break;
+  }
+  if (opener === null || !BLOCK_OPENER.test(opener)) return single;
+  if (widthOf(leadingSpace(opener), tabSize) >= width) return single;
+
+  // Empty means the next code below sits *outside* the caret's indentation: the closer, a dedent,
+  // or nothing at all. Code at the caret's depth means the block already has a body.
+  for (let n = position.lineNumber + 1; n <= lineCount; n++) {
+    const text = lineAt(n);
+    if (text.trim() === "") continue;
+    if (widthOf(leadingSpace(text), tabSize) >= width) return single;
+    break;
+  }
+  return { multiline: true, indent: before.length };
+}
+
+function leadingSpace(line: string): string {
+  return line.slice(0, line.length - line.trimStart().length);
+}
+
+function widthOf(space: string, tabSize: number): number {
+  let width = 0;
+  for (const char of space) width += char === "\t" ? tabSize - (width % tabSize) : 1;
+  return width;
+}
 
 let installed = false;
 
@@ -224,6 +314,20 @@ export function installInlineCompletion(monaco: Monaco): void {
   if (installed) return;
   installed = true;
 
+  // The version each surface model was at when an edit removed text and added none — Backspace,
+  // Delete, Cut, an undo of typing. Kept by version so a request can tell whether *the edit that
+  // produced what it is looking at* was a deletion, whatever order the listeners ran in.
+  const deletedAt = new WeakMap<MonacoEditorNS.ITextModel, number>();
+  const watch = (model: MonacoEditorNS.ITextModel) => {
+    if (!fileOf(model)) return;
+    model.onDidChangeContent((event) => {
+      if (event.changes.every((change) => change.text === "")) deletedAt.set(model, event.versionId);
+      else deletedAt.delete(model);
+    });
+  };
+  monaco.editor.getModels().forEach(watch);
+  monaco.editor.onDidCreateModel(watch);
+
   const provider: languages.InlineCompletionsProvider = {
     provideInlineCompletions: async (
       model: MonacoEditorNS.ITextModel,
@@ -239,14 +343,19 @@ export function installInlineCompletion(monaco: Monaco): void {
       // competing answers to one keystroke, and accepting either is ambiguous.
       if (context.selectedSuggestionInfo) return undefined;
 
-      // Mid-line editing — see MAX_LINE_SUFFIX.
+      // Mid-line editing — see MID_LINE_OK.
       const restOfLine = model.getValueInRange({
         startLineNumber: position.lineNumber,
         startColumn: position.column,
         endLineNumber: position.lineNumber,
         endColumn: model.getLineMaxColumn(position.lineNumber),
       });
-      if (restOfLine.trim().length > MAX_LINE_SUFFIX) return undefined;
+      if (!MID_LINE_OK.test(restOfLine)) return undefined;
+
+      // Deleting — see the module comment. Before `reuse`, too: backspacing to exactly where a
+      // suggestion was shown would otherwise pop the whole of it back up.
+      const explicit = context.triggerKind === monaco.languages.InlineCompletionTriggerKind.Explicit;
+      if (!explicit && deletedAt.get(model) === model.getVersionId()) return undefined;
 
       const prefix = prefixOf(model, position);
 
@@ -281,10 +390,17 @@ export function installInlineCompletion(monaco: Monaco): void {
         // into the remembered prefix would make "have I already answered this?" depend on a catalog
         // read that may have landed since, and typing along a suggestion would start missing.
         const header = file.context?.(file.uri, model.getValue()) ?? "";
+        const shape = completionShape(
+          (lineNumber) => model.getLineContent(lineNumber),
+          model.getLineCount(),
+          position,
+          model.getOptions().tabSize,
+        );
         const text = await localAiComplete({
           request_id: requestId,
           prefix: header + prefix,
           suffix: suffixOf(model, position),
+          ...shape,
         });
         if (token.isCancellationRequested || !text) return undefined;
 

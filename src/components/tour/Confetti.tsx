@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { motionOff } from "../../lib/motion";
 
 /** How long the burst lasts before the canvas takes itself down, in ms. */
 const DURATION = 3400;
@@ -68,7 +69,7 @@ export function Confetti({ onDone }: { onDone: () => void }) {
   doneRef.current = onDone;
 
   useEffect(() => {
-    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduced = motionOff();
     const timer = window.setTimeout(() => doneRef.current(), DURATION);
     const canvas = canvasRef.current;
     if (reduced || !canvas) return () => window.clearTimeout(timer);

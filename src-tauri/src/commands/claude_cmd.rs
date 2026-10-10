@@ -493,7 +493,7 @@ pub fn ai_classify_failure(error: String) -> ai::AiFailure {
 
 #[tauri::command]
 pub fn ai_read_only_engines() -> Vec<String> {
-    ["claude", "gemini", "codex", "grok", "opencode", "cline"]
+    ["claude", "gemini", "codex", "grok", "opencode", "cline", crate::local_agent::PROVIDER_ID]
         .into_iter()
         .filter(|id| ai::engine_for(id).enforces_read_only())
         .map(str::to_string)
@@ -549,6 +549,12 @@ pub struct ProviderStatus {
 /// found" instead of letting the user discover it when an action fails.
 #[tauri::command]
 pub async fn check_ai_provider(db: State<'_, Db>, provider: String) -> Result<ProviderStatus, String> {
+    // The provider that is part of the app has no binary to look for: it is ready when the «Local
+    // model» pane's model is, and `detail` carries the model (or why it is not).
+    if provider == crate::local_agent::PROVIDER_ID {
+        let (available, detail) = crate::local_agent::status().await;
+        return Ok(ProviderStatus { available, detail, binary: String::new() });
+    }
     let binary = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let engine = ai::engine_for(&provider);
@@ -862,6 +868,41 @@ fn session_for_engine(
     }
 }
 
+/// Characters of transcript a sessionless engine is re-sent each panel turn: the newest turns win.
+const PANEL_REPLAY_CHARS: usize = 16_000;
+
+/// A repository conversation's turns so far, since its last `/clear`, for an engine that does not
+/// carry them itself. Failed turns are left out: an error is this app's sentence, not the model's.
+fn panel_transcript(conn: &Connection, project_id: &str, conversation_id: &str) -> Option<String> {
+    let turns = queries::get_conversation_messages_lite(conn, project_id, conversation_id).ok()?;
+    let cleared = queries::conversation_resets(conn, conversation_id).ok().and_then(|resets| resets.into_iter().max());
+    let clip = |text: &str, max: usize| -> String {
+        let text = text.trim();
+        if text.chars().count() <= max {
+            text.to_string()
+        } else {
+            format!("{}…", text.chars().take(max).collect::<String>())
+        }
+    };
+    let parts: Vec<String> = turns
+        .iter()
+        .filter(|turn| !turn.is_error && !turn.answer.trim().is_empty())
+        .filter(|turn| cleared.as_deref().map_or(true, |at| turn.created_at.as_str() > at))
+        .map(|turn| format!("User: {}\nAssistant: {}", clip(&turn.question, 2_000), clip(&turn.answer, 3_000)))
+        .collect();
+    let mut kept: Vec<&String> = Vec::new();
+    let mut total = 0;
+    for part in parts.iter().rev() {
+        if total + part.len() > PANEL_REPLAY_CHARS && !kept.is_empty() {
+            break;
+        }
+        total += part.len();
+        kept.push(part);
+    }
+    kept.reverse();
+    (!kept.is_empty()).then(|| kept.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("\n\n"))
+}
+
 /// Open-ended chat about the project — "preguntas abiertas del repositorio", the free-text
 /// half of the AI panel alongside PR review and change analysis.
 ///
@@ -1038,6 +1079,17 @@ pub async fn send_chat_message(
     // The active agent's own instructions go first, so the role frames the whole turn.
     if let Some(prompt) = agent_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
         enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
+    }
+    // An engine that keeps no session of its own (Cline, CodeFlow's) hears the conversation again on
+    // every turn, as the chat workspace already does for it — otherwise every question asked in the
+    // panel reaches it as the first one.
+    if !config.engine.resumes_sessions() {
+        let replay = conversation_id.as_deref().and_then(|id| {
+            db.0.lock().ok().and_then(|conn| panel_transcript(&conn, &project_id, id))
+        });
+        if let Some(replay) = replay {
+            enabled_contexts.push(("Conversation so far".to_string(), replay));
+        }
     }
 
 
@@ -1425,11 +1477,12 @@ mod tests {
         conn
     }
 
-    /// The three engines whose read-only mode their CLI enforces, and only those — the list the UI
-    /// uses to decide between promising "text only" and saying it is a request.
+    /// The engines whose read-only mode is enforced — by their CLI, or for CodeFlow's own engine by
+    /// never offering a write tool — and only those: the list the UI uses to decide between
+    /// promising "text only" and saying it is a request.
     #[test]
     fn only_engines_that_enforce_read_only_are_reported() {
-        assert_eq!(ai_read_only_engines(), vec!["claude", "codex", "grok"]);
+        assert_eq!(ai_read_only_engines(), vec!["claude", "codex", "grok", "codeflow"]);
     }
 
     /// The command is the classifier itself, not a second copy of it.

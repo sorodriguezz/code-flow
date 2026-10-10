@@ -16,6 +16,7 @@ mod ai_prompt_files;
 mod ai_quota;
 mod ai_runs;
 mod ai_usage;
+mod local_agent;
 mod backup;
 /// Opening the database at startup without a panic, and the watchdog for a frontend that never loads.
 mod boot_guard;

@@ -16,6 +16,7 @@ import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Tooltip } from "../common/Tooltip";
 import { RunningGlyph, StatusGlyph } from "./RunList";
 import type { PipelineJob } from "../../types/domain";
+import { scrollBehavior } from "../../lib/motion";
 
 /** One rendered line's height, in px. Fixed because the window below is computed from it. */
 const LINE_H = 20;
@@ -144,7 +145,7 @@ export function JobLogPane({
   const jumpToError = () => {
     const index = firstErrorIndex(visible);
     if (index < 0 || !scroller.current) return;
-    scroller.current.scrollTo({ top: Math.max(0, index * LINE_H - 80), behavior: "smooth" });
+    scroller.current.scrollTo({ top: Math.max(0, index * LINE_H - 80), behavior: scrollBehavior() });
   };
 
   const askWhy = async () => {

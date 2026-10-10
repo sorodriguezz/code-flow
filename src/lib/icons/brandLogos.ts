@@ -131,6 +131,17 @@ export const BRAND_LOGOS: Record<string, BrandLogo> = {
     body:
       "<path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M64 20H192A20 20 0 0 1 212 40V216A20 20 0 0 1 192 236H64A20 20 0 0 1 44 216V40A20 20 0 0 1 64 20ZM76 56V166A6 6 0 0 0 82 172H174A6 6 0 0 0 180 166V56A6 6 0 0 0 174 50H82A6 6 0 0 0 76 56Z\"/>",
   },
+  /**
+   * CodeFlow's own mark, for the provider that is part of the app — the one-stroke `</>` from
+   * `src-tauri/icons/icon.svg`, in the logo gradient. The gradient id is made unique per instance by
+   * `scopeIds`, like every id a body declares.
+   */
+  codeflow: {
+    width: 1024,
+    height: 1024,
+    body:
+      "<defs><linearGradient id=\"cf-provider-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"148\" y1=\"512\" x2=\"876\" y2=\"512\"><stop offset=\"0\" stop-color=\"#8B5CF6\"/><stop offset=\"0.5\" stop-color=\"#6366F1\"/><stop offset=\"1\" stop-color=\"#06B6D4\"/></linearGradient></defs><path d=\"M397.6 236.4 L187 469.1 Q148 512 187 554.9 L361.2 748.6 Q397.6 787.6 418.4 738.2 L605.6 285.8 Q626.4 236.4 662.8 276.7 L837 469.1 Q876 512 837 554.9 L626.4 787.6\" fill=\"none\" stroke=\"url(#cf-provider-flow)\" stroke-width=\"119.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+  },
 
   // ---------------------------------------------------------------------------
   // The platforms `vcsProviders.ts` lists — repositories, pull requests and boards.

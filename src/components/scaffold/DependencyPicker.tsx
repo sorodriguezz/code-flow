@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
 import { Check, Plus, Search, X } from "lucide-react";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 import { useT } from "../../state/languageStore";
@@ -199,7 +199,7 @@ function PickerMenu({
 }) {
   const t = useT();
   const present = useIsPresent();
-  const reduced = useReducedMotion();
+  const reduced = useReducedMotionConfig();
   const menuRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();

@@ -34,6 +34,7 @@ import { useUiStore } from "../../state/uiStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { scrollBehavior } from "../../lib/motion";
 
 /**
  * One task, open: who is doing it, where, what has been said so far, and the box to say the next
@@ -73,7 +74,7 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
   const repoTaken = useAgentsStore((s) => (task ? s.runningInProject(task.project_id, task.id) !== null : false));
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: scrollBehavior() });
   }, [messages.length, sending, taskId]);
 
   // The overflow menu portals to `document.body`, and this view is hidden rather than unmounted —

@@ -23,6 +23,7 @@ import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import { PAGE, pageDelay, useIncremental } from "../../lib/useIncremental";
 import { useFocusTrap } from "../../lib/useFocusTrap";
+import { useSectionFold } from "../../state/sidebarFoldStore";
 import type { SubmoduleInfo, WorktreeInfo } from "../../lib/tauri/gitCommands";
 
 /**
@@ -53,6 +54,7 @@ function ShowMore({ hidden, onClick }: { hidden: number; onClick: () => void }) 
 
 /** Tags: click one to find it in the graph; push it, push them all, delete it here or on the remote. */
 export function TagsSection() {
+  const fold = useSectionFold("tags");
   const tags = useGitToolsStore((s) => s.tags);
   const pending = useGitToolsStore((s) => s.pending);
   const pushTag = useGitToolsStore((s) => s.pushTag);
@@ -71,6 +73,7 @@ export function TagsSection() {
 
   return (
     <CollapsibleSection
+      {...fold}
       icon={Tag}
       title={`${t("tags.title")} (${tags.length})`}
       action={
@@ -153,6 +156,7 @@ function submoduleTitle(sm: SubmoduleInfo, t: ReturnType<typeof useT>): string {
 
 /** Submodules: where each stands against what the superproject records, updating them, opening one. */
 export function SubmodulesSection() {
+  const fold = useSectionFold("submodules");
   const submodules = useGitToolsStore((s) => s.submodules);
   const pending = useGitToolsStore((s) => s.pending);
   const update = useGitToolsStore((s) => s.updateSubmodules);
@@ -165,6 +169,7 @@ export function SubmodulesSection() {
 
   return (
     <CollapsibleSection
+      {...fold}
       icon={Boxes}
       title={`${t("submodules.title")} (${submodules.length})`}
       action={
@@ -233,6 +238,7 @@ export function SubmodulesSection() {
 
 /** Worktrees: every checkout of this repository, a new one, removing one, opening one. */
 export function WorktreesSection() {
+  const fold = useSectionFold("worktrees");
   const worktrees = useGitToolsStore((s) => s.worktrees);
   const pending = useGitToolsStore((s) => s.pending);
   const removeWorktree = useGitToolsStore((s) => s.removeWorktree);
@@ -246,6 +252,7 @@ export function WorktreesSection() {
   return (
     <>
       <CollapsibleSection
+        {...fold}
         icon={FolderTree}
         title={linked.length > 0 ? `${t("worktrees.title")} (${linked.length})` : t("worktrees.title")}
         action={({ expand }) => (

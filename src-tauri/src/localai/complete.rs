@@ -25,6 +25,23 @@
 //! that ran to completion always has one — but the server notices on the order of a second rather
 //! than immediately. [`T_MAX_PREDICT_MS`] is what bounds the waste in the meantime, and it is the
 //! reason that field exists at all.
+//!
+//! # One line at a time
+//!
+//! The first version let the model write until it chose to stop, and it read as pushy: every pause
+//! at the end of a finished statement (`let total = 0;|`) produced three new lines nobody had asked
+//! for, and a fresh line above `return total;` happily offered `return total;`. Copilot feels calm
+//! for two reasons this module now copies — measured against Qwen2.5-Coder 1.5B on the same buffer:
+//!
+//! 1. **A line, not a block.** By default generation stops at the first newline
+//!    ([`Request::multiline`] false), so a finished line gets nothing until Enter is pressed and
+//!    the suggestion arrives one line at a time. Only an *empty block* — the caret on the indented
+//!    line under a `{` whose closer sits below — asks for several lines, and then
+//!    [`Request::indent`] goes to the server as `n_indent`, which ends generation at the first line
+//!    that falls out of the block instead of letting it run on into the next function.
+//! 2. **Never re-type what is there.** [`tidy`] drops a suggestion that only reproduces the line
+//!    below (or the one above), and strips closers the rest of the line already has. The editor
+//!    decides *when* to ask; this side decides whether the answer is worth drawing.
 
 use std::time::Duration;
 
@@ -77,6 +94,14 @@ pub struct Request {
     pub prefix: String,
     /// Everything after it, likewise.
     pub suffix: String,
+    /// Whether the answer may run past the caret's line. False — one line — unless the editor saw
+    /// an empty block; see the module comment.
+    #[serde(default)]
+    pub multiline: bool,
+    /// The caret line's indentation in characters, sent as `n_indent` in block mode: the server
+    /// stops at the first generated line indented less than this, which is the end of the block.
+    #[serde(default)]
+    pub indent: u32,
 }
 
 impl Request {
@@ -143,7 +168,10 @@ struct Infill<'a> {
     /// default nine — `penalties`, `dry` and `xtc` are shaped for prose and actively harm code,
     /// where repeating a token you have just seen is usually correct.
     samplers: [&'static str; 3],
-    stop: &'a [&'a str],
+    stop: Vec<&'a str>,
+    /// Minimum indentation of every generated line after the first; 0 turns it off. Checked by the
+    /// server on each newline, so a block completion ends where the block does.
+    n_indent: u32,
 }
 
 /// Sequences that end a completion.
@@ -166,6 +194,10 @@ const STOP: &[&str] = &[
 struct InfillResponse {
     #[serde(default)]
     content: String,
+    /// `eos`, `word` (a stop string) or `limit`. Only `limit` is read: it is the one way a block
+    /// completion can end in the middle of a line.
+    #[serde(default)]
+    stop_type: Option<String>,
 }
 
 /// What the server answers when it refuses.
@@ -194,6 +226,13 @@ pub async fn infill(
     engine.touch();
     let (prefix, suffix) = request.clamp();
 
+    // Line mode is a stop string rather than a cut afterwards, so the model stops spending time on
+    // lines that would be thrown away.
+    let mut stop = STOP.to_vec();
+    if !request.multiline {
+        stop.push("\n");
+    }
+
     let body = Infill {
         input_prefix: prefix,
         input_suffix: suffix,
@@ -206,7 +245,8 @@ pub async fn infill(
         t_max_prompt_ms: T_MAX_PROMPT_MS,
         t_max_predict_ms: T_MAX_PREDICT_MS,
         samplers: ["top_k", "top_p", "temperature"],
-        stop: STOP,
+        stop,
+        n_indent: if request.multiline { request.indent } else { 0 },
     };
 
     let send = engine
@@ -256,7 +296,8 @@ pub async fn infill(
     let parsed: InfillResponse = serde_json::from_str(&text)
         .map_err(|e| format!("Couldn't parse the completion response: {e}"))?;
 
-    Ok(tidy(&parsed.content, suffix))
+    let cut_short = parsed.stop_type.as_deref() == Some("limit");
+    Ok(tidy(&parsed.content, prefix, suffix, request.multiline, cut_short))
 }
 
 /// The marker a cancelled request returns, so the command layer can drop it silently instead of
@@ -265,22 +306,47 @@ pub const CANCELLED: &str = "__codeflow_completion_cancelled__";
 
 /// Cleans up a raw completion into something that can be inserted.
 ///
-/// Three problems, all of them things a base model does routinely:
+/// The problems, all of them things a base model does routinely:
 ///
 /// 1. **A stop token that leaked.** `stop` sequences are matched by the server and removed, but a
 ///    partial one at the very end of the budget is not.
-/// 2. **Trailing blank lines.** The model finishes the block and then starts a new one; the ghost
+/// 2. **A block cut off mid-line.** `cut_short` — the server hit a limit — leaves the last line
+///    half-written; in block mode that line is dropped, so the suggestion ends on a whole line.
+///    (`t_max_predict_ms` and `n_indent` only ever stop at a newline, so this is the token cap.)
+/// 3. **Trailing blank lines.** The model finishes the block and then starts a new one; the ghost
 ///    text should end where the code does.
-/// 3. **Re-writing the suffix.** The most visible failure of all: the model completes the gap and
+/// 4. **Re-writing the suffix.** The most visible failure of all: the model completes the gap and
 ///    then continues with lines the user already has below the caret, so accepting duplicates
 ///    them. Caught by trimming the longest tail of the completion that the suffix already begins
 ///    with.
-fn tidy(raw: &str, suffix: &str) -> String {
+/// 5. **Re-typing a neighbour.** A suggestion that only turns the caret's line into a copy of the
+///    line below or above is dropped whole; see [`Caret::repeats`].
+/// 6. **Closers twice.** `cartTotal(|);` answered with `items);` — see
+///    [`Caret::drop_doubled_closers`].
+fn tidy(raw: &str, prefix: &str, suffix: &str, multiline: bool, cut_short: bool) -> String {
     let mut text = raw.to_string();
 
     for marker in STOP {
         if let Some(at) = text.find(marker) {
             text.truncate(at);
+        }
+    }
+
+    if !multiline {
+        // The server stops at the newline already; this covers an answer that arrived anyway.
+        if let Some(at) = text.find('\n') {
+            text.truncate(at);
+        }
+    } else if text.split('\n').next().is_some_and(|first| first.trim().is_empty()) {
+        // A block that opens with a blank line would leave the caret's line as trailing
+        // whitespace and start the code one line down. Line mode gets nothing in the same case
+        // (the stop string fires first); a block gets the same answer.
+        return String::new();
+    } else if cut_short {
+        if let Some(at) = text.rfind('\n') {
+            if !text[at + 1..].trim().is_empty() {
+                text.truncate(at);
+            }
         }
     }
 
@@ -312,7 +378,108 @@ fn tidy(raw: &str, suffix: &str) -> String {
         }
     }
 
-    text.trim_end_matches(['\n', '\r', ' ', '\t']).to_string()
+    let caret = Caret::of(prefix, suffix);
+    let text = if multiline { text } else { caret.drop_doubled_closers(&text) };
+    let text = text.trim_end_matches(['\n', '\r', ' ', '\t']);
+    if text.trim().is_empty() || caret.repeats(text) {
+        return String::new();
+    }
+    text.to_string()
+}
+
+/// The caret's surroundings, read off the prefix and suffix the request already carries.
+struct Caret<'a> {
+    /// The caret's line up to the caret, indentation included.
+    line_prefix: &'a str,
+    /// The caret's line after the caret.
+    rest_of_line: &'a str,
+    /// The nearest non-blank line above the caret's, right-trimmed; indentation kept.
+    line_above: &'a str,
+    /// The nearest non-blank line below it, likewise.
+    line_below: &'a str,
+}
+
+impl<'a> Caret<'a> {
+    fn of(prefix: &'a str, suffix: &'a str) -> Self {
+        let (before, line_prefix) = match prefix.rfind('\n') {
+            Some(at) => (&prefix[..at], &prefix[at + 1..]),
+            None => ("", prefix),
+        };
+        let (rest_of_line, after) = match suffix.find('\n') {
+            Some(at) => (&suffix[..at], &suffix[at + 1..]),
+            None => (suffix, ""),
+        };
+        let solid = |line: &'a str| {
+            let line = line.trim_end();
+            (!line.is_empty()).then_some(line)
+        };
+        Self {
+            line_prefix,
+            rest_of_line: rest_of_line.trim_end_matches('\r'),
+            line_above: before.lines().rev().find_map(solid).unwrap_or(""),
+            line_below: after.lines().find_map(solid).unwrap_or(""),
+        }
+    }
+
+    /// The caret's line as it would read with `text` accepted — its first line, for a block.
+    fn line_with(&self, text: &str) -> String {
+        match text.split_once('\n') {
+            Some((first, _)) => format!("{}{first}", self.line_prefix),
+            None => format!("{}{text}{}", self.line_prefix, self.rest_of_line),
+        }
+    }
+
+    /// Whether accepting `text` would only make the caret's line a copy of a neighbour.
+    ///
+    /// Compared with indentation, so a `}` that closes an inner block is not mistaken for the outer
+    /// one below it. The line below always counts — retyping the very next line is never the
+    /// intent, it is the model reading the suffix back. The line above needs a few characters: a
+    /// repeated `end` or `i++;` can be real code, a repeated import or assertion is a loop.
+    fn repeats(&self, text: &str) -> bool {
+        let line = self.line_with(text);
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            return false;
+        }
+        line == self.line_below || (line == self.line_above && line.trim().len() > 4)
+    }
+
+    /// One line whose end the rest of the line already has: `cartTotal(|);` answered `items);`.
+    ///
+    /// Stripped only when that makes the line's brackets and quotes balance better — never on
+    /// matching characters alone, because `log(|)` answered `foo(bar)` ends in a `)` that is
+    /// right: it closes `foo(`, and the `)` already there closes `log(`.
+    fn drop_doubled_closers(&self, text: &str) -> String {
+        let rest = self.rest_of_line.trim();
+        if rest.is_empty() || text.contains('\n') {
+            return text.to_string();
+        }
+        let whole =
+            |candidate: &str| format!("{}{candidate}{}", self.line_prefix, self.rest_of_line);
+        let before = imbalance(&whole(text));
+        // Longest overlap first, so a doubled run such as `))` goes in one piece.
+        let ends = rest.char_indices().map(|(at, c)| at + c.len_utf8()).collect::<Vec<_>>();
+        for end in ends.into_iter().rev() {
+            if let Some(candidate) = text.strip_suffix(&rest[..end]) {
+                if imbalance(&whole(candidate)) < before {
+                    return candidate.to_string();
+                }
+            }
+        }
+        text.to_string()
+    }
+}
+
+/// How far a line is from closing everything it opens: the gap per bracket pair, plus one for each
+/// quote kind left odd. Only ever compared between two versions of the same line.
+fn imbalance(line: &str) -> usize {
+    let count = |wanted: char| line.chars().filter(|&c| c == wanted).count();
+    let brackets: usize = [('(', ')'), ('[', ']'), ('{', '}')]
+        .iter()
+        .map(|&(open, close)| count(open).abs_diff(count(close)))
+        .sum();
+    let quotes: usize = ['"', '\'', '`'].iter().map(|&quote| count(quote) % 2).sum();
+    brackets + quotes
 }
 
 #[cfg(test)]
@@ -324,6 +491,8 @@ mod tests {
         let request = Request {
             prefix: "a".repeat(MAX_SIDE_CHARS) + "TAIL",
             suffix: "HEAD".to_string() + &"b".repeat(MAX_SIDE_CHARS),
+            multiline: false,
+            indent: 0,
         };
         let (prefix, suffix) = request.clamp();
         assert!(prefix.ends_with("TAIL"), "the prefix must keep the text nearest the caret");
@@ -341,6 +510,8 @@ mod tests {
             // the two offsets this produces.
             prefix: "é".repeat(MAX_SIDE_CHARS),
             suffix: "ñ".repeat(MAX_SIDE_CHARS),
+            multiline: false,
+            indent: 0,
         };
         let (prefix, suffix) = request.clamp();
         assert!(prefix.chars().all(|c| c == 'é'));
@@ -349,19 +520,20 @@ mod tests {
 
     #[test]
     fn short_sides_are_untouched() {
-        let request = Request { prefix: "let x = ".into(), suffix: ";\n".into() };
+        let request =
+            Request { prefix: "let x = ".into(), suffix: ";\n".into(), multiline: false, indent: 0 };
         assert_eq!(request.clamp(), ("let x = ", ";\n"));
     }
 
     #[test]
     fn tidy_strips_a_leaked_stop_token() {
-        assert_eq!(tidy("doThing();<|endoftext|>", ""), "doThing();");
-        assert_eq!(tidy("a();<|file_sep|>b();", ""), "a();");
+        assert_eq!(tidy("doThing();<|endoftext|>", "", "", false, false), "doThing();");
+        assert_eq!(tidy("a();<|file_sep|>b();", "", "", true, false), "a();");
     }
 
     #[test]
     fn tidy_drops_trailing_blank_lines() {
-        assert_eq!(tidy("doThing();\n\n\n", ""), "doThing();");
+        assert_eq!(tidy("doThing();\n\n\n", "", "", true, false), "doThing();");
     }
 
     /// The duplicated-suffix case: the model completes the gap and then rewrites what is already
@@ -370,19 +542,86 @@ mod tests {
     fn tidy_removes_text_the_suffix_already_has() {
         let suffix = "\n  return total;\n}\n";
         let raw = "total += item.price;\n  return total;\n}";
-        assert_eq!(tidy(raw, suffix), "total += item.price;");
+        assert_eq!(tidy(raw, "  ", suffix, true, false), "total += item.price;");
     }
 
     /// The other side of that threshold. A closing brace at the end of a completion is normal
     /// output, not a repeat, and trimming it would break every block completion.
     #[test]
     fn tidy_keeps_a_short_incidental_overlap() {
-        assert_eq!(tidy("if (a) {\n  b();\n}", "\n}\n"), "if (a) {\n  b();\n}");
+        let prefix = "function f() {\n  ";
+        let raw = "if (a) {\n    b();\n  }";
+        assert_eq!(tidy(raw, prefix, "\n}\n", true, false), raw);
     }
 
     #[test]
     fn tidy_leaves_ordinary_completions_alone() {
-        assert_eq!(tidy("setCount(count + 1);", "\n  };\n"), "setCount(count + 1);");
+        let text = "setCount(count + 1);";
+        assert_eq!(tidy(text, "  ", "\n  };\n", false, false), text);
+    }
+
+    /// Line mode is the default: whatever follows the first newline is for the next request.
+    #[test]
+    fn tidy_keeps_one_line_in_line_mode() {
+        assert_eq!(tidy("a();\n  b();", "  ", "\n", false, false), "a();");
+    }
+
+    /// A block the token cap cut mid-line ends on its last whole line instead of half a statement.
+    #[test]
+    fn tidy_drops_the_half_line_a_cut_block_ends_on() {
+        let raw = "let total = 0;\n  for (const item of items) {\n    total +=";
+        assert_eq!(
+            tidy(raw, "  ", "\n}\n", true, true),
+            "let total = 0;\n  for (const item of items) {",
+        );
+        // Not cut short: the model chose to end there, so the line stays.
+        assert_eq!(tidy(raw, "  ", "\n}\n", true, false), raw);
+        // Cut short at a newline — what `n_indent` and `t_max_predict_ms` do — loses nothing.
+        assert_eq!(tidy("a();\n  b();\n", "  ", "\n}\n", true, true), "a();\n  b();");
+    }
+
+    #[test]
+    fn tidy_refuses_a_block_that_opens_with_a_blank_line() {
+        assert_eq!(tidy("\n  console.log(total);", "  ", "\n}\n", true, false), "");
+    }
+
+    /// Measured: typing `ret` on a new line above `return total;` got `urn total;` back.
+    #[test]
+    fn tidy_drops_a_suggestion_that_retypes_the_line_below() {
+        let prefix = "  for (const item of items) {\n    total += item.price;\n  }\n  ret";
+        let suffix = "\n  return total;\n}\n";
+        assert_eq!(tidy("urn total;", prefix, suffix, false, false), "");
+        // Blank lines between do not hide it.
+        assert_eq!(tidy("return total;", "  }\n  ", "\n\n  return total;\n", false, false), "");
+    }
+
+    /// Compared with indentation: the `}` closing an inner `if` is not the function's `}` below.
+    #[test]
+    fn tidy_keeps_an_inner_closer_above_an_outer_one() {
+        let prefix = "function f() {\n  if (a) {\n    b();\n  ";
+        assert_eq!(tidy("}", prefix, "\n}\n", false, false), "}");
+    }
+
+    #[test]
+    fn tidy_drops_a_copy_of_the_line_above_unless_it_is_short() {
+        let prefix = "import { a } from \"./a\";\n";
+        assert_eq!(tidy("import { a } from \"./a\";", prefix, "\n", false, false), "");
+        // `end` twice, `i++;` twice: real code often enough to leave alone.
+        assert_eq!(tidy("end", "  end\n  ", "\nend\n", false, false), "end");
+    }
+
+    #[test]
+    fn tidy_strips_closers_the_line_already_has() {
+        let prefix = "  const total = cartTotal(";
+        assert_eq!(tidy("items);", prefix, ");\n", false, false), "items");
+        assert_eq!(tidy("world\"", "log(\"hello ", "\");\n", false, false), "world");
+    }
+
+    /// Matching characters are not enough: this `)` closes `foo(`, and the one already there
+    /// closes `log(`.
+    #[test]
+    fn tidy_keeps_a_closer_that_belongs_to_the_completion() {
+        assert_eq!(tidy("foo(bar)", "console.log(", ")\n", false, false), "foo(bar)");
     }
 
     /// The request body is a contract with a process this repo does not build. If a field name
@@ -402,7 +641,8 @@ mod tests {
             t_max_prompt_ms: T_MAX_PROMPT_MS,
             t_max_predict_ms: T_MAX_PREDICT_MS,
             samplers: ["top_k", "top_p", "temperature"],
-            stop: STOP,
+            stop: STOP.to_vec(),
+            n_indent: 2,
         };
         let json = serde_json::to_value(&body).expect("serializes");
         for field in [
@@ -416,6 +656,7 @@ mod tests {
             "t_max_predict_ms",
             "samplers",
             "stop",
+            "n_indent",
         ] {
             assert!(json.get(field).is_some(), "missing `{field}` from the /infill body");
         }
@@ -455,13 +696,17 @@ mod live_tests {
             eprintln!("localai live: no engine — run `pnpm llama:runtime`. Skipping.");
             return;
         }
-        // The smallest catalogue entry, so a developer who wants this to run pays 531 MB and not
-        // eight gigabytes.
-        let spec = catalogue::find("qwen2.5-coder-0.5b").expect("catalogue entry");
-        if !models::is_installed(spec) {
-            eprintln!("localai live: {} is not downloaded. Skipping.", spec.id);
+        // The smallest catalogue entry that is downloaded, so a developer who wants this to run
+        // pays 531 MB and not eight gigabytes — and one who already has the default 1.5B from
+        // Settings pays nothing.
+        let Some(spec) = catalogue::CATALOGUE
+            .iter()
+            .filter(|spec| models::is_installed(spec))
+            .min_by_key(|spec| spec.size_bytes)
+        else {
+            eprintln!("localai live: no catalogue model is downloaded. Skipping.");
             return;
-        }
+        };
 
         let started = std::time::Instant::now();
         let engine = engine::ensure(spec, models::path_of(spec))
@@ -479,6 +724,8 @@ mod live_tests {
             prefix: "const total = items.reduce((sum, item) => sum + item.price, 0);\nconsole.log("
                 .to_string(),
             suffix: ");\n".to_string(),
+            multiline: false,
+            indent: 0,
         };
         let answered = std::time::Instant::now();
         let text = infill(&engine, &request, rx).await.expect("infill should answer");
@@ -494,6 +741,34 @@ mod live_tests {
             !text.contains("```"),
             "the completion contains a markdown fence, which means the catalogue is pointing at \
              an instruction-tuned model rather than a base one: {text:?}",
+        );
+
+        // Line mode, where the model most wants to run on: the end of a finished statement.
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let line = Request {
+            prefix: "function cartTotal(items) {\n  let total = 0;".to_string(),
+            suffix: "\n}\n".to_string(),
+            multiline: false,
+            indent: 0,
+        };
+        let text = infill(&engine, &line, rx).await.expect("infill should answer");
+        eprintln!("localai live: line mode → {text:?}");
+        assert!(!text.contains('\n'), "line mode answered with more than one line: {text:?}");
+
+        // Block mode stops where the block does: `n_indent` must keep the closer — and anything
+        // after it — out of the answer, whatever the model would have written.
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let block = Request {
+            prefix: "function cartAverage(items) {\n  ".to_string(),
+            suffix: "\n\nfunction cartCount(items) {\n  return items.length;\n}\n".to_string(),
+            multiline: true,
+            indent: 2,
+        };
+        let text = infill(&engine, &block, rx).await.expect("infill should answer");
+        eprintln!("localai live: block mode → {text:?}");
+        assert!(
+            text.lines().skip(1).all(|line| line.starts_with("  ") || line.trim().is_empty()),
+            "a block completion ran out of its block: {text:?}",
         );
 
         // Cancellation, fired before the request is even issued. The `biased` select must take the

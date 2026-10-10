@@ -7,7 +7,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotionConfig } from "framer-motion";
 import "./MorphToast.css";
 
 /**
@@ -163,7 +163,7 @@ export function MorphToast({
   onActivate,
   activateLabel,
 }: MorphToastProps) {
-  const reduce = useReducedMotion() ?? false;
+  const reduce = useReducedMotionConfig() ?? false;
   // `useId` spells itself with characters a `url(#…)` reference does not survive in every engine.
   const filterId = `cf-goo-${useId().replace(/[^\w-]/g, "")}`;
   const hasBody = body !== undefined && body !== null && body !== false;

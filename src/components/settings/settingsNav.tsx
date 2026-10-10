@@ -24,6 +24,7 @@ import { Panel, SettingsHeader } from "../api/settingsChrome";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import { tabsFor, type SettingsTabDef } from "../../lib/settingsCatalog";
+import { useSwapFade } from "../../lib/useSwapFade";
 
 /** Wide enough for every shipped label in both languages on one line, bar two that wrap. */
 export const RAIL_WIDTH = 190;
@@ -176,6 +177,7 @@ export function RailSection({
   useLayoutEffect(() => {
     paneRef.current?.scrollTo({ top: 0 });
   }, [tab]);
+  useSwapFade(paneRef, tab);
 
   return (
     <section className="flex h-full min-h-0 flex-col">

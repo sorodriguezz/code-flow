@@ -2,14 +2,18 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import SatelliteApp from "./SatelliteApp";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
-// The same four document-level listeners `main.tsx` starts, and for the same reasons — a satellite
-// is a webview like any other: it scrolls, it holds links that must open in the browser rather than
-// replacing the window, it has a right-click menu that is not the app's, and it draws its own title
-// bar under modal backdrops. See the notes in `main.tsx`, which are not repeated here.
+import { MotionLevel } from "./components/common/MotionLevel";
+// The same document-level listeners `main.tsx` starts, and for the same reasons — a satellite is a
+// webview like any other: it scrolls, it holds links that must open in the browser rather than
+// replacing the window, it has a right-click menu that is not the app's, it draws its own title bar
+// under modal backdrops, and it can go fullscreen. See the notes in `main.tsx`, which are not
+// repeated here.
 import { startScrollFeedback } from "./lib/scrollFeedback";
 import { startExternalLinks } from "./lib/externalLinks";
 import { startContextMenuGuard } from "./lib/contextMenuGuard";
 import { startOverlayDragRegion } from "./lib/overlayDragRegion";
+import { startEscapeFullscreenGuard } from "./lib/escapeFullscreenGuard";
+import { startEnterAnimator } from "./lib/enterAnimator";
 // Uncaught errors and unhandled rejections into `codeflow.log` — until this they reached the
 // console and nowhere a user could send. See `lib/diagnostics.ts`.
 import { installErrorReporting } from "./lib/diagnostics";
@@ -27,6 +31,8 @@ startScrollFeedback();
 startExternalLinks();
 startContextMenuGuard();
 startOverlayDragRegion();
+startEscapeFullscreenGuard();
+startEnterAnimator();
 installErrorReporting();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
@@ -35,7 +41,9 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
         The reload this offers rebuilds the webview without restarting the process, which is exactly
         the right cost here: everything this window shows lives in Rust or in SQLite. */}
     <ErrorBoundary fatal>
-      <SatelliteApp />
+      <MotionLevel>
+        <SatelliteApp />
+      </MotionLevel>
     </ErrorBoundary>
   </React.StrictMode>,
 );

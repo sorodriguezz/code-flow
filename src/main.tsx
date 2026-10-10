@@ -2,6 +2,7 @@ import React, { useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+import { MotionLevel } from "./components/common/MotionLevel";
 import { bootReady } from "./lib/tauri/commands";
 // `./lib/monacoSetup` is deliberately NOT imported here, and that absence is the point.
 //
@@ -34,6 +35,11 @@ import { startContextMenuGuard } from "./lib/contextMenuGuard";
 // Keeps the title bar draggable underneath a modal's backdrop, which covers it and would otherwise
 // leave the window stuck in place for as long as a dialog is open.
 import { startOverlayDragRegion } from "./lib/overlayDragRegion";
+// Keeps Escape from taking the window out of macOS fullscreen: the webview hands any Escape the
+// app leaves unclaimed back to AppKit, which treats it as "leave fullscreen".
+import { startEscapeFullscreenGuard } from "./lib/escapeFullscreenGuard";
+// At the full motion level, everything that appears fades up into place — see `lib/enterAnimator`.
+import { startEnterAnimator } from "./lib/enterAnimator";
 // Uncaught errors and unhandled rejections into `codeflow.log` — until this they reached the
 // console and nowhere a user could send. See `lib/diagnostics.ts`.
 import { installErrorReporting } from "./lib/diagnostics";
@@ -51,6 +57,8 @@ startScrollFeedback();
 startExternalLinks();
 startContextMenuGuard();
 startOverlayDragRegion();
+startEscapeFullscreenGuard();
+startEnterAnimator();
 installErrorReporting();
 
 /**
@@ -78,8 +86,10 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
         work all survive it. Without either, React tears down the whole tree on any uncaught throw
         and leaves a blank window that can only be quit. */}
     <ErrorBoundary fatal>
-      <App />
-      <BootReady />
+      <MotionLevel>
+        <App />
+        <BootReady />
+      </MotionLevel>
     </ErrorBoundary>
   </React.StrictMode>,
 );

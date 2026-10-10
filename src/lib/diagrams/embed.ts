@@ -1,3 +1,5 @@
+import { motionOff } from "../motion";
+
 /**
  * The draw.io embed protocol, as this app speaks it.
  *
@@ -570,7 +572,7 @@ function flowingStroke(): { stroke: string; defs: string } {
   const root = getComputedStyle(document.documentElement);
   const hue = (name: string, fallback: string) => root.getPropertyValue(name).trim() || fallback;
   const [a, b, c] = [hue("--cf-ai-a", "#8b5cf6"), hue("--cf-ai-b", "#6366f1"), hue("--cf-ai-c", "#06b6d4")];
-  const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  const still = motionOff();
   const begin = -((performance.now() % AI_FLOW_MS) / 1000);
   const motion = still
     ? ""

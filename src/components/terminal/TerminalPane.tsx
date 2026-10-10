@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import "@xterm/xterm/css/xterm.css";
 import { Check, ClipboardPaste, Copy, TriangleAlert, X } from "lucide-react";
 import { resizeTerminal, writeTerminal } from "../../lib/tauri/commands";
+import { edgeMoving, whenEdgeSettles } from "../../lib/useEdgeSlide";
 import { registerTerminalSink } from "../../state/terminalStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useGlassStore } from "../../state/glassStore";
@@ -609,6 +610,12 @@ export function TerminalPane({
 
   const refit = () => {
     if (!visible) return;
+    // A panel beside the dock opening by its real width resizes this box on every frame for a
+    // moment; the shell hears about the width it lands on, once — see `useEdgeSlide`.
+    if (edgeMoving()) {
+      whenEdgeSettles(refit);
+      return;
+    }
     const term = termRef.current;
     const fitAddon = fitRef.current;
     if (term && fitAddon) fitAndReport(term, fitAddon);

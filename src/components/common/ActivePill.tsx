@@ -1,9 +1,25 @@
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotionConfig, type Transition } from "framer-motion";
+import { useMotionLevel } from "../../lib/motion";
 
 /** One spring for every selection indicator in the app, so they all move at the same speed — and for
  *  whatever moves *with* one: a pill riding inside a block that slides on another curve is pulled
  *  off its own path by the difference (the projects panel, where the rows slide on this too). */
 export const SLIDE = { type: "spring", stiffness: 520, damping: 40, mass: 0.7 } as const;
+
+/** The same spring at the full motion level: looser, so an indicator overshoots its new place by a
+ *  hair and settles — the app's most-repeated motion is where "very animated" shows first. */
+const SLIDE_FULL = { type: "spring", stiffness: 400, damping: 22, mass: 0.8 } as const;
+
+const INSTANT = { duration: 0 } as const;
+
+/** `SLIDE` at the motion level in force — still when nothing is to move. Use this rather than
+ *  `SLIDE` itself wherever the motion is the user's to see. */
+export function useSlide(): Transition {
+  const level = useMotionLevel();
+  const reduce = useReducedMotionConfig();
+  if (reduce || level === "off") return INSTANT;
+  return level === "full" ? SLIDE_FULL : SLIDE;
+}
 
 /**
  * The fill behind whichever item in a group is selected — shared between the group's buttons by
@@ -48,8 +64,7 @@ export function ActivePill({
    */
   mark?: boolean;
 }) {
-  const reduceMotion = useReducedMotion();
-  const transition = reduceMotion ? { duration: 0 } : SLIDE;
+  const transition = useSlide();
   return (
     <>
       <motion.span
@@ -85,13 +100,13 @@ export function ActivePill({
  * the tab must be `relative`.
  */
 export function ActiveUnderline({ layoutId }: { layoutId: string }) {
-  const reduceMotion = useReducedMotion();
+  const transition = useSlide();
   return (
     <motion.span
       layoutId={layoutId}
       aria-hidden
       className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-[var(--cf-accent-fill)]"
-      transition={reduceMotion ? { duration: 0 } : SLIDE}
+      transition={transition}
     />
   );
 }
@@ -106,14 +121,14 @@ export function ActiveUnderline({ layoutId }: { layoutId: string }) {
  * and the parent must be `relative`. `className` places it — its edge offset and vertical inset.
  */
 export function ActiveMarker({ layoutId, color, className }: { layoutId: string; color: string; className: string }) {
-  const reduceMotion = useReducedMotion();
+  const transition = useSlide();
   return (
     <motion.span
       layoutId={layoutId}
       aria-hidden
       className={`pointer-events-none absolute w-1 rounded-r-full ${className}`}
       style={{ background: color }}
-      transition={reduceMotion ? { duration: 0 } : SLIDE}
+      transition={transition}
     />
   );
 }

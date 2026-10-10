@@ -106,3 +106,42 @@ export function PaletteSkeleton() {
     />
   );
 }
+
+/**
+ * The bottom dock's body — its list and its pane — while what it holds is being put on screen.
+ *
+ * The dock's first opening builds every terminal it holds (an xterm and a GPU renderer each) and
+ * that is real work: done in the same frame as the opening, the click waited on it and the dock
+ * arrived late and all at once (user report, 2026-10-10: "como que esperan que algo cargue"). Now
+ * the dock opens straight away with this in it, and the contents land a frame later. The list keeps
+ * the width the real list will have, so nothing moves when they do.
+ */
+export function DockBodySkeleton({ listWidth }: { listWidth: number }) {
+  return (
+    <div className="flex min-h-0 flex-1" aria-busy>
+      <div className="flex shrink-0 flex-col gap-2 border-r border-[var(--cf-border)] p-3" style={{ width: listWidth }}>
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Skeleton key={i} className="h-4" style={{ width: `${55 + ((i * 19) % 35)}%` }} />
+        ))}
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-2 p-3">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <Skeleton key={i} className="h-3.5" style={{ width: `${35 + ((i * 29) % 45)}%` }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** The whole dock, for the frame or two its code chunk may take the very first time — the sheet at
+ *  the dock's own height, its title row, and `DockBodySkeleton` under it. */
+export function DockSkeleton({ height, maximized, listWidth }: { height: number; maximized: boolean; listWidth: number }) {
+  return (
+    <div style={maximized ? { flex: "100 1 0%" } : { height }} className="cf-sheet cf-panel-in flex min-h-0 flex-col">
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
+        <Skeleton className="h-3.5 w-36" />
+      </div>
+      <DockBodySkeleton listWidth={listWidth} />
+    </div>
+  );
+}

@@ -56,7 +56,7 @@ import { fieldClass } from "../common/recipes";
 import { EnvironmentPanel, type CheckedRequirement, type InstallRequest } from "./EnvironmentPanel";
 import { Field } from "./Field";
 import { RunView, type RunStatus } from "./RunView";
-import { SpringFields, initialSpring, type SpringState } from "./SpringFields";
+import { SpringFields, SpringFieldsSkeleton, initialSpring, type SpringState } from "./SpringFields";
 import { TemplateList } from "./TemplateList";
 import { TemplateLogo } from "./TemplateLogo";
 import { TemplateOptions } from "./TemplateOptions";
@@ -787,6 +787,8 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                           onChange={(line) => setLineById((all) => ({ ...all, [template.id]: line }))}
                           ariaLabel={t("scaffold.version")}
                           disabled={versionLoad?.status !== "ready" || lines.length === 0}
+                          // Unasked counts as loading: the effect above asks on the same render.
+                          loading={!versionLoad || versionLoad.status === "loading"}
                           placeholder={versionLoad?.status === "error" ? t("scaffold.latest") : t("scaffold.loading")}
                           options={versionOptions}
                         />
@@ -839,12 +841,12 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                           onChange={(patch) => setSpring((current) => (current ? { ...current, ...patch } : current))}
                           packageProblem={packageProblem}
                         />
-                      ) : (
+                      ) : springLoad?.status === "error" ? (
                         <Field label="start.spring.io">
-                          <span className={`text-[12px] ${springLoad?.status === "error" ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-muted)]"}`}>
-                            {springLoad?.status === "error" ? springLoad.error : t("scaffold.loading")}
-                          </span>
+                          <span className="text-[12px] text-[var(--cf-danger)]">{springLoad.error}</span>
                         </Field>
+                      ) : (
+                        <SpringFieldsSkeleton />
                       )
                     ) : (
                       <TemplateOptions

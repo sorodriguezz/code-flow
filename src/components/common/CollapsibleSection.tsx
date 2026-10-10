@@ -1,11 +1,13 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, type LucideIcon } from "lucide-react";
+import { useSwapFade } from "../../lib/useSwapFade";
 
 export function CollapsibleSection({
   icon: Icon,
   title,
   action,
   defaultOpen = false,
+  open: controlledOpen,
   onOpenChange,
   dense = false,
   children,
@@ -19,6 +21,13 @@ export function CollapsibleSection({
   // current `open`) and unfold the section as part of the same click.
   action?: ReactNode | ((ctx: { open: boolean; expand: () => void }) => ReactNode);
   defaultOpen?: boolean;
+  /**
+   * Controlled: the section shows what this says, and a click only reports through
+   * `onOpenChange`. For a fold that outlives the component — the projects panel's sections remember
+   * what the user folded (see `sidebarFoldStore`). Left out, the section keeps its own, starting
+   * from `defaultOpen`.
+   */
+  open?: boolean;
   /**
    * Told every time the section folds or unfolds, `expand()` from `action` included.
    *
@@ -43,14 +52,19 @@ export function CollapsibleSection({
   dense?: boolean;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [ownOpen, setOwnOpen] = useState(defaultOpen);
+  const open = controlledOpen ?? ownOpen;
+  // Unfolding fades the contents in (and at the full motion level, lifts them) — not on the first
+  // render, where the section is arriving with whatever it sits in. See `useSwapFade`.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useSwapFade(bodyRef, open);
 
   // Silent when nothing moved: `expand()` is called by header buttons that don't know or care
   // whether the section was already unfolded, and reporting those as openings would make the
   // callback a click counter rather than a state change. Consumers get to be non-idempotent.
   const change = (next: boolean) => {
     if (next === open) return;
-    setOpen(next);
+    if (controlledOpen === undefined) setOwnOpen(next);
     onOpenChange?.(next);
   };
 
@@ -75,7 +89,7 @@ export function CollapsibleSection({
         </button>
         {typeof action === "function" ? action({ open, expand: () => change(true) }) : action}
       </div>
-      {open && children}
+      <div ref={bodyRef}>{open && children}</div>
     </div>
   );
 }

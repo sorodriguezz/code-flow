@@ -2359,6 +2359,31 @@ textarea,
   }
 }
 
+/* A change of language at the full motion level (`withLanguageTransition`): a cross-fade, not the
+   theme's curtain — the words change in place, nothing arrives from an edge. */
+:root[data-vt="crossfade"]::view-transition-old(root) {
+  animation: cf-vt-fade-out 0.3s ease both;
+}
+@keyframes cf-vt-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* The full motion level's change of colour with something acrylic on screen (`recolor` in
+   `lib/themeTransition.ts`): every colour crosses over in the live document, so the blur behind
+   Settings stays live instead of being flattened by a photograph. Once per change, a third of a
+   second. */
+:root.cf-recolor *,
+:root.cf-recolor *::before,
+:root.cf-recolor *::after {
+  transition-property:
+    color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, box-shadow !important;
+  transition-duration: 0.32s !important;
+  transition-timing-function: ease !important;
+  transition-delay: 0s !important;
+}
+
 @keyframes cf-theme-wipe {
   /* inset(top right bottom left) — the old snapshot starts unclipped, covering
      the window, and its left edge is then pushed across to the right until
@@ -3588,13 +3613,223 @@ body.cf-dragging * {
 .cf-panel-in {
   animation: cf-panel-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
+
+/* Every dialog arriving, without touching one of them (user, 2026-10-10: panels "llegan y aparecen"
+   too hard; smooth, but light on the machine). Found by anatomy, as the see-through rules below do:
+   a dialog's panel is the one surface with the modal shadow, its backdrop a full-window `bg-black/…`.
+
+   Compositor-only where it can be. The panel fades and settles from 98% — opacity and the `scale`
+   property, not `transform`, which would replace a centring translate for the length of the
+   animation. The backdrop is the one exception: it is the panel's parent, and an opacity on it
+   would fade the panel twice and, in glass mode, cut the panel's acrylic off from the window behind
+   it until the fade ended (an ancestor under 1 opacity is a backdrop root) — so it fades its own
+   colour in instead, one flat fill repainted for a few frames. The Settings scrim is a sibling of
+   its panel, not a parent, so it can simply fade.
+
+   `:where()` keeps these at zero specificity: a dialog that animates on its own (the palettes'
+   `cf-fade-in`, the tour card) keeps doing so. Nothing runs at rest — a keyframe animation costs
+   only while it plays, and it plays once, on arrival. */
+@keyframes cf-modal-in {
+  from {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+@keyframes cf-scrim-in {
+  from {
+    background-color: transparent;
+  }
+}
+/* The anatomy rules sit in the components layer: below Tailwind's utilities, and below every
+   unlayered class of this file — an element that animates on its own (`animate-pulse`, `cf-fade-in`)
+   keeps its own animation whatever its anatomy says. */
+@layer components {
+  :where([class~="shadow-[var(--cf-shadow-modal)]"]) {
+    animation: cf-modal-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+@layer components {
+  :where(.fixed.inset-0[class*="bg-black/"]) {
+    animation: cf-scrim-in 0.18s ease-out;
+  }
+}
+/* Its tint fades in; its blur is there from the first frame. Not its opacity: WebKit does not draw
+   an element's backdrop blur while its opacity is animating, so the acrylic used to arrive only once
+   the fade had ended — a beat after the panel (user report, 2026-10-10). */
+.cf-settings-scrim {
+  animation: cf-scrim-in 0.18s ease-out;
+}
+
+/* See-through, a dialog's panel is acrylic itself, and for the same reason as the scrim it must not
+   fade: it settles from 98% at full strength, its blur live from the start. */
+@keyframes cf-modal-settle {
+  from {
+    scale: 0.98;
+  }
+}
+@layer components {
+  :where(:root[data-glass] [class~="shadow-[var(--cf-shadow-modal)]"]) {
+    animation: cf-modal-settle 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .cf-panel-in,
   .cf-fade-in,
   .cf-skeleton,
-  .cf-bounce-dot {
+  .cf-bounce-dot,
+  .cf-settings-scrim,
+  :where([class~="shadow-[var(--cf-shadow-modal)]"]),
+  :where(.fixed.inset-0[class*="bg-black/"]) {
     animation: none;
   }
+}
+
+/* Motion levels — Apariencia › Modo y color › Animaciones (`motionStore`), stamped on the root as
+   `data-motion`. Everything above is the medium level, the default, and what a root with no stamp
+   gets.
+
+   Off: whatever moves only to look good arrives finished. A 1 ms run rather than `none`, so an
+   animation that holds its last frame still lands on it and `animationend` still fires. What
+   reports progress keeps moving — a spinner, and the hold ring and bar, which carry their own
+   durations inline and count down a hold the user is still pressing. */
+:root[data-motion="off"] *:not(.animate-spin, .cf-hold-ring, .cf-hold-bar),
+:root[data-motion="off"] *:not(.animate-spin, .cf-hold-ring, .cf-hold-bar)::before,
+:root[data-motion="off"] *:not(.animate-spin, .cf-hold-ring, .cf-hold-bar)::after {
+  animation-duration: 1ms !important;
+  animation-delay: 0s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+}
+
+/* Full: the same moments with travel and more time — for a machine with room to spare. Still only
+   opacity and the individual `translate`/`scale` properties, never `transform`, which would replace
+   an element's own positioning while it played. Panels rise as they fade; dialogs pop, overshooting
+   a hair; menus and lists unfold from their top edge. `:where()` wherever the medium rule was one,
+   so whatever animates on its own still wins. */
+@keyframes cf-panel-in-full {
+  from {
+    opacity: 0;
+    translate: 0 10px;
+  }
+}
+@keyframes cf-modal-in-full {
+  from {
+    opacity: 0;
+    scale: 0.92;
+    translate: 0 14px;
+  }
+  55% {
+    opacity: 1;
+  }
+}
+@keyframes cf-pop-in {
+  from {
+    opacity: 0;
+    scale: 0.96;
+    translate: 0 -4px;
+  }
+}
+:root[data-motion="full"] .cf-panel-in {
+  animation: cf-panel-in-full 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+}
+:root[data-motion="full"] .cf-settings-scrim {
+  animation-duration: 0.32s;
+}
+@layer components {
+  :where(:root[data-motion="full"] [class~="shadow-[var(--cf-shadow-modal)]"]) {
+    animation: cf-modal-in-full 0.42s cubic-bezier(0.34, 1.36, 0.64, 1);
+  }
+}
+/* See-through and full: the pop without the fade, for the acrylic's sake (`cf-modal-settle`). */
+@keyframes cf-modal-settle-full {
+  from {
+    scale: 0.92;
+    translate: 0 14px;
+  }
+}
+@layer components {
+  :where(:root[data-glass][data-motion="full"] [class~="shadow-[var(--cf-shadow-modal)]"]) {
+    animation: cf-modal-settle-full 0.42s cubic-bezier(0.34, 1.36, 0.64, 1);
+  }
+}
+@layer components {
+  :where(:root[data-motion="full"] .fixed.inset-0[class*="bg-black/"]) {
+    animation: cf-scrim-in 0.32s ease-out;
+  }
+}
+@layer components {
+  :where(:root[data-motion="full"] :is([role="menu"], [role="listbox"])) {
+    animation: cf-pop-in 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+    transform-origin: top center;
+  }
+}
+
+/* Full, across the rest of the app — not only what arrives:
+
+   - Every transition Tailwind times by default (`transition-colors`, `transition-opacity`… with no
+     `duration-*` of their own: hovers, selections, toggles) runs longer and on the arrival curve.
+   - Floating panels (the popover anatomy, as the see-through rules name it) unfold like menus.
+   - Every button built from the shared recipes (`cf-press`, `Button.tsx`) gives under the pointer.
+   - The app's own entrance utilities — `cf-fade-in` (popovers, palettes, inspectors), `cf-rise`
+     (cards in lists), the tooltip — travel further and take longer.
+   - Elsewhere, from script: the selection pills' spring loosens (`useSlide`), folded sections and
+     swapped panes rise (`useSwapFade`), the side panels slide longer (`useEdgeSlide`). */
+:root[data-motion="full"] {
+  --default-transition-duration: 220ms;
+  --default-transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+@layer components {
+  :where(:root[data-motion="full"] [class~="shadow-[var(--cf-shadow)]"]) {
+    animation: cf-pop-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+    transform-origin: top center;
+  }
+}
+:root[data-motion="full"] .cf-press {
+  transition-property:
+    color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, box-shadow, opacity,
+    transform, translate, scale, rotate;
+}
+:root[data-motion="full"] .cf-press:active:not(:disabled) {
+  scale: 0.95;
+}
+/* Every other button gives a little too — in the components layer, so a button that times its own
+   transitions (a Tailwind `transition-*`) keeps them, and only presses without the ease. */
+@layer components {
+  :root[data-motion="full"] button {
+    transition-property:
+      color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, box-shadow, opacity,
+      transform, translate, scale, rotate;
+    transition-duration: 0.16s;
+    transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  :root[data-motion="full"] button:not(:disabled):active {
+    scale: 0.97;
+  }
+}
+@keyframes cf-fade-in-full {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+    scale: 0.985;
+  }
+}
+:root[data-motion="full"] .cf-fade-in {
+  animation: cf-fade-in-full 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes cf-rise-full {
+  from {
+    opacity: 0;
+    translate: 0 12px;
+  }
+}
+:root[data-motion="full"] .cf-rise {
+  animation-name: cf-rise-full;
+  animation-duration: 0.42s;
+}
+:root[data-motion="full"] .cf-tip {
+  animation-duration: 0.2s;
 }
 
 /* Key caps, for shortcut hints in menus, tooltips and the palette. */

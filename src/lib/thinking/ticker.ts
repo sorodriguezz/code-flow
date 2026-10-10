@@ -1,4 +1,5 @@
 import type { ThinkingActivity } from "./activity";
+import { motionOff } from "../motion";
 
 /**
  * Something that draws a thinking mark onto its own canvas.
@@ -51,8 +52,9 @@ let last = 0;
 let observer: IntersectionObserver | null = null;
 let listening = false;
 
+/** The app's motion level at `off` — which the system's reduce-motion setting forces. */
 export function prefersReducedMotion(): boolean {
-  return typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  return typeof window !== "undefined" && motionOff();
 }
 
 export function register(el: Element, painter: Painter): () => void {

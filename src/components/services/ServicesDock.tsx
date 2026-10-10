@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CirclePlay, Container, Maximize2, Minimize2, Pencil, Plus, SplitSquareHorizontal, TerminalSquare, X } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
+import { DockBodySkeleton } from "../common/ViewSkeleton";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { ProfileMenu } from "../terminal/ProfileMenu";
@@ -21,6 +22,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { isMainWindow } from "../../lib/windowIdentity";
 import { folderName, relativeInside } from "../../lib/folderPath";
+import { useSwapFade } from "../../lib/useSwapFade";
 import type { ServiceRow } from "../../types/services";
 
 const MIN_HEIGHT = 140;
@@ -95,6 +97,16 @@ export function ServicesDock() {
   const dockView = useTerminalStore((s) => s.dockView);
   const hidePanel = useTerminalStore((s) => s.hidePanel);
   const maximized = useTerminalStore((s) => s.dockMaximized);
+  /**
+   * Whether the dock is on screen. It stays mounted once opened and closes by hiding: opening it
+   * used to build every terminal it holds — an xterm and a GPU renderer each, every project's — in
+   * the frame of the click, so the dock arrived late and all at once (user report, 2026-10-10:
+   * "como que esperan que algo cargue antes de abrirse"). A hidden `TerminalPane` already lets its
+   * renderer go and stops measuring (`visible`), so a closed dock costs little; what keeps working
+   * in the background — the containers' polling, the ports, a service's console — is unmounted
+   * while it is closed and is cheap to bring back. See `App`, which keeps it mounted.
+   */
+  const open = useTerminalStore((s) => s.panelOpen);
   const toggleMaximized = useTerminalStore((s) => s.toggleDockMaximized);
   const height = useLayoutStore((s) => s.sizes.terminalPanelHeight);
   const servicesListWidth = useLayoutStore((s) => s.sizes.servicesListWidth);
@@ -110,11 +122,33 @@ export function ServicesDock() {
   const showServices = isMainWindow();
   /** The panel on screen — always the terminals in a satellite, which has nothing else. */
   const view: DockView = showServices ? dockView : "terminal";
+  /** What the body renders: the panel asked for while the dock is open, only the terminals (kept,
+   *  hidden) while it is closed. */
+  const shown: DockView = open ? view : "terminal";
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useSwapFade(bodyRef, view);
+  /**
+   * The body's contents wait one painted frame after the dock first opens, with the dock's shape in
+   * their place (`DockBodySkeleton`): the opening is drawn — and animates — before the terminals are
+   * built, instead of after. Once, since the dock stays mounted from then on.
+   */
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (!open || ready) return;
+    let timer = 0;
+    const frame = requestAnimationFrame(() => {
+      timer = window.setTimeout(() => setReady(true), 0);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+    };
+  }, [open, ready]);
   /** The containers' list carries a runtime, its sections and rows three levels deep: its own width. */
   const listKeyName = view === "containers" ? "containersListWidth" : "servicesListWidth";
   const listWidth = view === "containers" ? containersListWidth : servicesListWidth;
   // The engines are read only while their panel is on screen.
-  useContainersPulse(view === "containers");
+  useContainersPulse(shown === "containers");
 
   const [selection, setSelection] = useState<ServiceSelection | null>(null);
   /** The service whose console the pane shows, when that is what is picked. */
@@ -145,12 +179,14 @@ export function ServicesDock() {
    */
   const autoOpened = useRef(new Set<string>());
   useEffect(() => {
-    if (view !== "terminal" || !project || autoOpened.current.has(project.id)) return;
+    // Open, too: the dock stays mounted while closed, and a project switched to then is not a shell
+    // asked for — `openNew` would open the dock to show it.
+    if (!open || view !== "terminal" || !project || autoOpened.current.has(project.id)) return;
     if ((activeProj?.tabs.length ?? 0) > 0) return;
     autoOpened.current.add(project.id);
     void openNew(project.id, project.local_path).catch((e: unknown) => pushErrorToast(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProjectId, view]);
+  }, [activeProjectId, view, open]);
 
   /**
    * A shell in a folder picked from the disk — the subfolder three levels down that `+` (the
@@ -182,7 +218,7 @@ export function ServicesDock() {
     proj.tabs.map((tab) => ({
       projectId,
       tab,
-      visible: view === "terminal" && projectId === activeProjectId && visibleIds.includes(tab.id),
+      visible: open && view === "terminal" && projectId === activeProjectId && visibleIds.includes(tab.id),
     })),
   );
 
@@ -229,7 +265,8 @@ export function ServicesDock() {
       data-tour="terminal-dock"
       // Shrinkable, and `min-h-0` with it: at `shrink-0` a panel taller than the room left in the
       // column overflows under the status bar, which paints on top — taking the prompt with it.
-      className="cf-sheet cf-panel-in flex min-h-0 flex-col"
+      // Hidden rather than unmounted when closed — see `open`. Shown again, `cf-panel-in` replays.
+      className={`cf-sheet cf-panel-in min-h-0 flex-col ${open ? "flex" : "hidden"}`}
     >
       {/* No handle while maximized: dragging a height the dock is not using would do nothing. */}
       {!maximized && (
@@ -318,16 +355,19 @@ export function ServicesDock() {
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-1">
+      {/* Fades when the dock changes between Terminal, Services and Containers — see `useSwapFade`. */}
+      <div ref={bodyRef} className="flex min-h-0 flex-1">
+        {ready ? (
+          <>
         {/* The list. Vertical rather than the strip of tabs this panel used to have, because a
             service needs a status dot, a port and a group above it — none of which fit on a tab. */}
         <div
           className="flex min-h-0 shrink-0 flex-col border-r border-[var(--cf-border)]"
           style={{ width: listWidth }}
         >
-          {view === "containers" ? (
+          {shown === "containers" ? (
             <ContainersList />
-          ) : view === "services" ? (
+          ) : shown === "services" ? (
             <>
               {/* Detect, new group, new service: small, at the top of the column they act on — not in
                   the panel's title row, where they sat over the console and read as its controls.
@@ -420,9 +460,9 @@ export function ServicesDock() {
         {/* The pane area. Every terminal stays mounted here whichever panel is up; with the
             services on screen, a service's console or the ports mount on top of them. */}
         <div className="relative flex min-h-0 min-w-0 flex-1">
-          {view === "containers" ? (
+          {shown === "containers" ? (
             <ContainersPane />
-          ) : view === "services" ? (
+          ) : shown === "services" ? (
             selection?.kind === "ports" ? (
               <PortsPanel onOpenService={setSelectedId} />
             ) : selectedService ? (
@@ -459,6 +499,10 @@ export function ServicesDock() {
             </div>
           ))}
         </div>
+          </>
+        ) : (
+          <DockBodySkeleton listWidth={listWidth} />
+        )}
       </div>
 
       {editing && workspaceId && (

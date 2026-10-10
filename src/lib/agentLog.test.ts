@@ -69,3 +69,26 @@ describe("sub-agents", () => {
     expect(formatAgentLogLine(DONE)).toMatch(/^· /);
   });
 });
+
+describe("CodeFlow's own engine", () => {
+  const line = (event: Record<string, unknown>) => formatAgentLogLine(JSON.stringify({ type: "codeflow", ...event }));
+
+  it("draws its tools under the names the run card already reads", () => {
+    expect(line({ event: "tool", tool: "read_file", arg: "src/cart.js", ok: true })).toBe("⏵ Read: src/cart.js");
+    expect(line({ event: "tool", tool: "edit_file", arg: "src/cart.js", ok: true })).toBe("⏵ Edit: src/cart.js");
+    expect(line({ event: "tool", tool: "search", arg: "total", ok: true })).toBe("⏵ Grep: total");
+    expect(line({ event: "tool", tool: "run_command", arg: "npm test", ok: true })).toBe("⏵ Bash: npm test");
+  });
+
+  it("keeps a failed call's reason off the path, on a line of its own", () => {
+    expect(line({ event: "tool", tool: "edit_file", arg: "a.ts", ok: false, detail: "old_text was not found" })).toBe(
+      "⏵ Edit: a.ts\n· old_text was not found",
+    );
+  });
+
+  it("shows the model as the banner and its words as text", () => {
+    expect(line({ event: "start", model: "qwen2.5-coder:7b" })).toBe("· qwen2.5-coder:7b");
+    expect(line({ event: "text", text: "Voy a leer el archivo." })).toBe("Voy a leer el archivo.");
+    expect(line({ event: "unknown" })).toBeNull();
+  });
+});

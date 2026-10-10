@@ -140,6 +140,46 @@ export function repeatsStatus(previous: string | undefined, text: string): boole
   return text.startsWith(STATUS_MARK) && previous === text;
 }
 
+/**
+ * The steps of CodeFlow's own engine (`local_agent` in Rust), drawn in the vocabulary the run card
+ * already reads: its tools under the names Claude Code gives the same actions, so a step's phase
+ * (`runSteps.phaseOfTool`) and the "files touched" chips work unchanged.
+ */
+const CODEFLOW_TOOLS: Record<string, string> = {
+  read_file: "Read",
+  list_files: "LS",
+  find_files: "Glob",
+  search: "Grep",
+  edit_file: "Edit",
+  write_file: "Write",
+  run_command: "Bash",
+};
+
+function codeflowLine(event: Record<string, unknown>): string | null {
+  switch (event.event) {
+    case "start":
+      // The model, like Claude's `init` line: the first spaceless note is the banner.
+      return typeof event.model === "string" ? `${STATUS_MARK}${event.model}` : null;
+    case "tool": {
+      const name = typeof event.tool === "string" ? event.tool : "";
+      const label = CODEFLOW_TOOLS[name] ?? name;
+      const arg = typeof event.arg === "string" ? event.arg.trim() : "";
+      const line = arg ? `⏵ ${label}: ${truncate(arg)}` : `⏵ ${label}`;
+      // A failed call says why on the next line, so the arg stays a clean path for the chips.
+      if (event.ok === false && typeof event.detail === "string" && event.detail.trim()) {
+        return `${line}\n${STATUS_MARK}${truncate(event.detail)}`;
+      }
+      return line;
+    }
+    case "text":
+      return typeof event.text === "string" && event.text.trim() ? truncate(event.text) : null;
+    case "note":
+      return typeof event.text === "string" ? `${STATUS_MARK}${event.text}` : null;
+    default:
+      return null;
+  }
+}
+
 export function formatAgentLogLine(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed.startsWith("{")) return raw;
@@ -165,6 +205,8 @@ export function formatAgentLogLine(raw: string): string | null {
     }
     case "system":
       return systemLine(event);
+    case "codeflow":
+      return codeflowLine(event);
     // The tool results the model reads back, and the final verdict, which the caller renders as
     // the actual answer a beat later.
     case "user":

@@ -1216,6 +1216,12 @@ pub trait AiEngine: Send + Sync {
         None
     }
 
+    /// Whether this engine runs inside the app instead of as a CLI — [`run`] hands it to
+    /// [`crate::local_agent::run`] and never builds a command. Only the «CodeFlow» provider does.
+    fn in_process(&self) -> bool {
+        false
+    }
+
     /// Whether this engine can run an agentic tool loop (read/edit/write files, MCP).
     ///
     /// Every engine the app ships answers `true` today — a local model reached through
@@ -1684,6 +1690,7 @@ pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
         // rows the migration cannot — an agent or chain carrying the old id — and sends them to
         // the engine that can still talk to that endpoint.
         "cline" | "ollama" | "local" | "openai" => Box::new(crate::cline::ClineEngine),
+        crate::local_agent::PROVIDER_ID => Box::new(crate::local_agent::CodeFlowEngine),
         _ => Box::new(crate::claude::ClaudeEngine),
     }
 }
@@ -1754,6 +1761,9 @@ impl AiEngine for AccountEngine {
     }
     fn fetch_models(&self) -> Option<ModelListing> {
         self.with(|e| e.fetch_models())
+    }
+    fn in_process(&self) -> bool {
+        self.inner.in_process()
     }
     fn usage_probe_args(&self, session_id: &str) -> Option<Vec<String>> {
         self.with(|e| e.usage_probe_args(session_id))
@@ -1910,6 +1920,13 @@ fn apply_path(cmd: &mut Command, dirs: &[std::path::PathBuf]) {
     if let Ok(joined) = std::env::join_paths(dirs) {
         cmd.env("PATH", joined);
     }
+}
+
+/// The same `PATH` the CLI engines get, for a command an in-process engine runs on a model's behalf
+/// (`local_agent`'s `run_command`): a GUI app's own `PATH` lacks the user's installs, and a build
+/// that finds `npm` in a terminal must find it here too.
+pub(crate) fn apply_command_path(cmd: &mut Command) {
+    apply_path(cmd, &search_dirs());
 }
 
 /// Non-Windows: nothing to resolve — the child's augmented `PATH` finds the binary and Unix has no
@@ -2533,6 +2550,14 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
         ai_runs::emit_engine(ctx, engine.id(), engine.label(), inv.model, run_idle_limit(engine));
     }
 
+    // The engine that is part of the app: no command, no pipes, no watchdog — its requests carry their
+    // own stall limits — but the same banner above, the same Stop and the same usage row.
+    if engine.in_process() {
+        let outcome = crate::local_agent::run(&inv, &ctx, &mut cancel).await;
+        record_usage(engine, &inv, &outcome, None);
+        return outcome;
+    }
+
     // One attempt, and a second only for the engines that ask for it — see
     // [`AiEngine::retry_once_on`]. Nothing else is changed between the two: the point is a failure
     // that belonged to the model rather than to the request, and a retry that altered the request
@@ -2924,6 +2949,10 @@ pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<Stri
 /// is cached too (as `None`), so a missing/older binary isn't re-spawned on every message.
 pub async fn engine_version(binary: &str) -> Option<String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    // An engine with no binary (CodeFlow's own, which runs in this process) has no banner to read.
+    if binary.trim().is_empty() {
+        return None;
+    }
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(hit) = cache.lock().ok().and_then(|c| c.get(binary).cloned()) {
         return hit;

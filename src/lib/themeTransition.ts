@@ -1,4 +1,5 @@
 import { flushSync } from "react-dom";
+import { EASE_OUT, motionLevel, motionOff } from "./motion";
 
 /**
  * A change of colour across the whole window — light/dark, and the accent — as a curtain rather
@@ -33,12 +34,53 @@ type TransitionCapableDocument = Document & {
   startViewTransition?: (callback: () => void) => ViewTransitionLike;
 };
 
+/** The app's motion level, which the system's reduce-motion setting forces to `off`. */
 function prefersReducedMotion(): boolean {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  return motionOff();
 }
 
 /** The wipe on screen right now, or `null` between them. See [`afterThemeTransition`]. */
 let playing: Promise<void> | null = null;
+
+/**
+ * Whether something on screen is drawn with a live backdrop blur — Settings' acrylic scrim, or a
+ * see-through window's frosted panes.
+ *
+ * A View Transition plays photographs of the window, and the photographs WebKit takes have no
+ * backdrop in them: under the wipe the acrylic behind Settings was simply gone, and came back when
+ * the wipe ended (user report, 2026-10-10: "el acrílico … se sale y vuelve"). With one of these on
+ * screen there is no wipe — see `recolor`.
+ */
+function acrylicOnScreen(): boolean {
+  return document.documentElement.hasAttribute("data-glass") || document.querySelector(".cf-settings-scrim") !== null;
+}
+
+/** How long the colours take to cross over in place. Matches `.cf-recolor` in `index.css`. */
+const RECOLOR_MS = 320;
+let recolorTimer = 0;
+
+/**
+ * The full motion level's change of colour when a wipe cannot be used: the colours cross over in the
+ * live document — every element's, for a third of a second — so whatever blurs keeps blurring.
+ * Heavier than the wipe, which only moves a photograph; that is what the full level is for. At the
+ * medium level the change is instant instead.
+ */
+function recolor(apply: () => void): void {
+  const root = document.documentElement;
+  root.classList.add("cf-recolor");
+  let finish = () => {};
+  const crossing = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  playing = crossing;
+  apply();
+  window.clearTimeout(recolorTimer);
+  recolorTimer = window.setTimeout(() => {
+    root.classList.remove("cf-recolor");
+    if (playing === crossing) playing = null;
+    finish();
+  }, RECOLOR_MS + 80);
+}
 
 /**
  * Runs `apply` — the writes that actually change the theme — inside a view transition when the
@@ -54,8 +96,13 @@ let playing: Promise<void> | null = null;
 export function withThemeTransition(apply: () => void): void {
   const doc = document as TransitionCapableDocument;
 
-  if (typeof doc.startViewTransition !== "function" || prefersReducedMotion()) {
+  if (prefersReducedMotion()) {
     apply();
+    return;
+  }
+  if (typeof doc.startViewTransition !== "function" || acrylicOnScreen()) {
+    if (motionLevel() === "full") recolor(apply);
+    else apply();
     return;
   }
 
@@ -130,4 +177,54 @@ export function afterThemeTransition(task: () => void): () => void {
   return () => {
     cancelled = true;
   };
+}
+
+/**
+ * A change of language at the full motion level — the words fade over instead of being swapped
+ * between two frames (user, 2026-10-10: "cambia de repente"). Instant at the other levels.
+ *
+ * A cross-fade of the whole window where one can be photographed; where something acrylic is on
+ * screen (Settings, which is where the language is chosen), the open dialog — or the window's
+ * sheets — dims, takes the new words, and comes back: each fades its *own* opacity, which leaves
+ * the blur behind it live. See `acrylicOnScreen`.
+ */
+export function withLanguageTransition(apply: () => void): void {
+  if (motionLevel() !== "full") {
+    apply();
+    return;
+  }
+  const doc = document as TransitionCapableDocument;
+  if (!acrylicOnScreen() && typeof doc.startViewTransition === "function") {
+    const root = document.documentElement;
+    // `index.css` swaps the theme's wipe for a cross-fade while this is set.
+    root.dataset.vt = "crossfade";
+    const clear = () => {
+      if (root.dataset.vt === "crossfade") delete root.dataset.vt;
+    };
+    try {
+      const transition = doc.startViewTransition(() => {
+        flushSync(apply);
+      });
+      if (transition.finished) void Promise.resolve(transition.finished).then(clear, clear);
+      else clear();
+    } catch {
+      clear();
+      apply();
+    }
+    return;
+  }
+  const dialogs = Array.from(document.querySelectorAll<HTMLElement>('[aria-modal="true"]'));
+  const targets = dialogs.length > 0 ? dialogs : Array.from(document.querySelectorAll<HTMLElement>(".cf-sheet, #cf-sidebar"));
+  const dim = targets.map((el) => el.animate([{ opacity: 1 }, { opacity: 0.15 }], { duration: 120, easing: "ease-in", fill: "forwards" }));
+  void Promise.all(dim.map((animation) => animation.finished)).then(
+    () => {
+      flushSync(apply);
+      targets.forEach((el, i) => {
+        // The way back starts before the dimmed frame is let go, so no frame shows either extreme.
+        el.animate([{ opacity: 0.15 }, { opacity: 1 }], { duration: 240, easing: EASE_OUT });
+        dim[i].cancel();
+      });
+    },
+    () => apply(),
+  );
 }

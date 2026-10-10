@@ -1,4 +1,4 @@
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotionConfig } from "framer-motion";
 import { ArrowUp, Loader2, RotateCw, TriangleAlert, X } from "lucide-react";
 import { useUpdateStore } from "../../state/updateStore";
 import { useT } from "../../state/languageStore";
@@ -20,7 +20,7 @@ import { buttonClass } from "../common/Button";
  */
 export function UpdateAlert() {
   const t = useT();
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = useReducedMotionConfig();
   const status = useUpdateStore((s) => s.status);
   const update = useUpdateStore((s) => s.update);
   const progress = useUpdateStore((s) => s.progress);

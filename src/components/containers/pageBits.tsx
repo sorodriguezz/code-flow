@@ -141,7 +141,8 @@ export function Drawer({
         e.stopPropagation();
         onClose();
       }}
-      className="flex min-h-0 w-[45%] min-w-[300px] max-w-[760px] shrink-0 flex-col border-l border-[var(--cf-border)] bg-[var(--cf-surface)]"
+      // Fades in on arrival, and again for each row it is opened on (it is keyed by the row).
+      className="cf-panel-in flex min-h-0 w-[45%] min-w-[300px] max-w-[760px] shrink-0 flex-col border-l border-[var(--cf-border)] bg-[var(--cf-surface)]"
     >
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-3 pr-2">
         <h4 className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold text-[var(--cf-text)]" title={title}>

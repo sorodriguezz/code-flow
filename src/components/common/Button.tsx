@@ -18,8 +18,10 @@ import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "danger-ghost";
 export type ButtonSize = "sm" | "md" | "lg";
 
+// `cf-press`: the press feedback the full motion level gives every button built here — see
+// "Motion levels" in `index.css`. Inert at the other levels.
 const BASE =
-  "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-[background-color,color,box-shadow] duration-100 disabled:pointer-events-none disabled:opacity-45";
+  "cf-press inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-[background-color,color,box-shadow] duration-100 disabled:pointer-events-none disabled:opacity-45";
 
 const SIZES: Record<ButtonSize, string> = {
   sm: "h-6 px-2 text-[12px]",
@@ -67,7 +69,7 @@ export function iconButtonClass({
   active = false,
   className = "",
 }: { size?: IconButtonSize; active?: boolean; className?: string } = {}): string {
-  return `inline-flex shrink-0 items-center justify-center rounded-md transition-colors duration-100 disabled:pointer-events-none disabled:opacity-40 ${
+  return `cf-press inline-flex shrink-0 items-center justify-center rounded-md transition-colors duration-100 disabled:pointer-events-none disabled:opacity-40 ${
     ICON_SIZES[size]
   } ${
     active

@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, type LucideIcon } from "lucide-react";
+import { Check, ChevronDown, Loader2, type LucideIcon } from "lucide-react";
 
 export interface SelectOption {
   value: string;
@@ -87,6 +87,7 @@ export function Select({
   onChange,
   options,
   disabled = false,
+  loading = false,
   placeholder,
   size = "md",
   className = "",
@@ -97,6 +98,12 @@ export function Select({
   onChange: (value: string) => void;
   options: SelectItems;
   disabled?: boolean;
+  /**
+   * The options are still on their way — a registry or a remote service is being asked. Shuts the
+   * select like `disabled`, but at full strength and with a spinner where the chevron goes: a faded
+   * control reads as "not for you", and a select that will fill in a second from now is not that.
+   */
+  loading?: boolean;
   placeholder?: string;
   size?: keyof typeof SIZE;
   className?: string;
@@ -316,7 +323,8 @@ export function Select({
       <button
         type="button"
         ref={triggerRef}
-        disabled={disabled}
+        disabled={disabled || loading}
+        aria-busy={loading || undefined}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
@@ -327,9 +335,9 @@ export function Select({
         onClick={() => (open ? setOpen(false) : openMenu())}
         onKeyDown={onKeyDown}
         style={style}
-        className={`flex w-full items-center justify-between gap-2 rounded-md border bg-[var(--cf-field)] text-left text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 disabled:cursor-not-allowed disabled:opacity-50 ${
-          SIZE[size]
-        } ${
+        className={`flex w-full items-center justify-between gap-2 rounded-md border bg-[var(--cf-field)] text-left text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 ${
+          loading ? "cursor-progress" : "disabled:cursor-not-allowed disabled:opacity-50"
+        } ${SIZE[size]} ${
           open
             ? "border-[var(--cf-accent)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
             : "border-[var(--cf-field-border)] hover:border-[var(--cf-border-strong)] focus-visible:border-[var(--cf-accent)] focus-visible:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
@@ -342,10 +350,14 @@ export function Select({
           {SelectedIcon && <SelectedIcon size={13} className="shrink-0 opacity-70" />}
           <span className="truncate">{label}</span>
         </span>
-        <ChevronDown
-          size={14}
-          className={`shrink-0 text-[var(--cf-text-faint)] transition-transform ${open ? "rotate-180" : ""}`}
-        />
+        {loading ? (
+          <Loader2 size={13} className="shrink-0 animate-spin text-[var(--cf-text-muted)]" />
+        ) : (
+          <ChevronDown
+            size={14}
+            className={`shrink-0 text-[var(--cf-text-faint)] transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        )}
       </button>
 
       {open &&

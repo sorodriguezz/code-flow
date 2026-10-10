@@ -7,6 +7,7 @@ import {
   isThinkingDesign,
   storedThinkingDesign,
   thinkingFinishMs,
+  thinkingSpeaksItself,
   THINKING_DESIGNS,
 } from "../../lib/thinkingDesigns";
 import { translations } from "../../lib/i18n/translations";
@@ -126,21 +127,33 @@ describe("ThinkingOrb", () => {
 });
 
 describe("the thinking designs", () => {
-  it("are sixteen, the sphere first and by default", () => {
+  it("are twenty, the sphere first and by default", () => {
     const ids = THINKING_DESIGNS.map((design) => design.id);
-    expect(ids).toHaveLength(16);
+    expect(ids).toHaveLength(20);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids[0]).toBe("sphere");
     expect(DEFAULT_THINKING_DESIGN).toBe("sphere");
   });
 
   it("give the avatar time for the finishes built around one, and a brief resolve to the rest", () => {
-    for (const id of ["orb", "network", "wave", "liquid", "crystal", "cat", "pixels", "ghost", "crab", "moon", "atom"] as const) {
+    const finishing = [
+      "orb", "network", "wave", "liquid", "crystal", "cat", "pixels", "ghost",
+      "crab", "moon", "atom", "spark", "cloud", "bulb", "alien",
+    ] as const;
+    for (const id of finishing) {
       expect(thinkingFinishMs(id), id).toBeGreaterThanOrEqual(1400);
       // Within the window in which a landed turn still counts as just landed (`AssistantAvatar`).
       expect(thinkingFinishMs(id), id).toBeLessThan(4000);
     }
     expect(thinkingFinishMs("sphere")).toBe(900);
+  });
+
+  it("draw speaking from the voice where they can, and are handed writing's look elsewhere", () => {
+    const voiced = THINKING_DESIGNS.filter((design) => thinkingSpeaksItself(design.id)).map((design) => design.id);
+    // The shader and the waves, and the four mascots with a lip-synced mouth.
+    expect(voiced).toEqual(["orb", "wave", "spark", "cloud", "bulb", "alien"]);
+    // Only a painter can read the voice frame by frame; a CSS design has no voice of its own.
+    for (const id of voiced) expect(THINKING_DESIGNS.find((design) => design.id === id)?.kind, id).toBe("canvas");
   });
 
   it("are named in both languages", () => {

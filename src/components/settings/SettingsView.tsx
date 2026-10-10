@@ -29,6 +29,7 @@ import { EditorSettings } from "./EditorSettings";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import { isTopLayer, useFocusTrap } from "../../lib/useFocusTrap";
+import { useSwapFade } from "../../lib/useSwapFade";
 import { scrollEdgeMask, useScrollEdges } from "../../lib/useScrollEdges";
 import { useSettingsFrame } from "../../lib/useSettingsFrame";
 import {
@@ -39,6 +40,7 @@ import {
   type SettingsHit,
 } from "../../lib/settingsCatalog";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { scrollBehavior } from "../../lib/motion";
 
 const NAV_MIN = 160;
 const NAV_COLLAPSED = 50;
@@ -356,6 +358,9 @@ export function SettingsView() {
   const [cursor, setCursor] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const navScrollRef = useRef<HTMLDivElement>(null);
+  /** What the open section draws, faded in on a switch — see `useSwapFade`. */
+  const sectionRef = useRef<HTMLDivElement>(null);
+  useSwapFade(sectionRef, section);
   // Whether the rail has sections out of view, above or below — see the cues around its scroller.
   const navEdges = useScrollEdges(navScrollRef, open);
 
@@ -396,8 +401,7 @@ export function SettingsView() {
   const pageNav = (direction: 1 | -1) => {
     const el = navScrollRef.current;
     if (!el) return;
-    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    el.scrollBy({ top: direction * el.clientHeight * 0.7, behavior: still ? "auto" : "smooth" });
+    el.scrollBy({ top: direction * el.clientHeight * 0.7, behavior: scrollBehavior() });
   };
 
   const pick = (hit: SettingsHit) => {
@@ -463,8 +467,10 @@ export function SettingsView() {
         // The modal shape every dialog in the app shares: 14px corners and the modal shadow.
         className="flex flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)]"
       >
-        <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--cf-border)] pl-4 pr-3">
-          <h2 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--cf-text)]">
+        {/* Three columns, the outer two equal: the search sits in the middle of the header whatever
+            the title and the way out measure (user, 2026-10-10: "déjalo arriba en medio"). */}
+        <div className="grid h-12 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-3 border-b border-[var(--cf-border)] pl-4 pr-3">
+          <h2 className="min-w-0 truncate text-[14px] font-semibold text-[var(--cf-text)]">
             {t("statusbar.settings")}
           </h2>
           {/* The search box, in the header rather than atop the nav.
@@ -479,7 +485,7 @@ export function SettingsView() {
               is always one click away. `data-no-initial-focus`: the dialog's first focus still goes
               to the close button — a field focused on every opening would wear its ring every
               time, in a header meant to stay quiet. */}
-          <div className="relative w-[240px] min-w-0 shrink">
+          <div className="relative w-[240px] min-w-0">
             <Search
               size={13}
               className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
@@ -530,6 +536,7 @@ export function SettingsView() {
               looked like one more control (user report, 2026-10-09); "esc ×" says exit, and says how.
               26px tall, the search field's height, so the header keeps one line. The key is on the
               pill now, so the tooltip only names it. */}
+          <div className="flex justify-end">
           <Tooltip label={t("common.close")} side="bottom">
             <button
               type="button"
@@ -542,6 +549,7 @@ export function SettingsView() {
               <X size={13} />
             </button>
           </Tooltip>
+          </div>
         </div>
 
         <div className="relative flex min-h-0 flex-1">
@@ -709,7 +717,7 @@ export function SettingsView() {
           >
             {/* `h-full` for the sections that scroll their own pane: they pin a header and a rail
                 and let only the pane beside it move, which needs a definite height to divide up. */}
-            <div className={`w-full ${SELF_SCROLLING_SECTIONS.has(section) ? "h-full" : ""}`}>
+            <div ref={sectionRef} className={`w-full ${SELF_SCROLLING_SECTIONS.has(section) ? "h-full" : ""}`}>
               {section === "general" && <GeneralSettings />}
               {section === "appearance" && <ThemeSettings />}
               {section === "keybindings" && <ShortcutsSettings />}

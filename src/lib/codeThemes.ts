@@ -1091,17 +1091,20 @@ export const LIGHT_THEMES: CodeTheme[] = [
     id: "dark-magic-light",
     name: "Dark Magic Light",
     mode: "light",
-    // Lavender in two strengths: the editor pale, and the side bar, panel, menus and widgets deeper.
+    // Tinted the way Pink Candy Light is, not as published (user, 2026-10-10: "está muy fuerte el
+    // violeta, la gracia es que quede como el pink"). The published lavender — #eaeaff under the
+    // editor, #c6c6ff under the side bar, panel and menus, #a0a0fb hairlines — washed the whole
+    // window violet. Now the theme's periwinkle (#6b6bff) laid onto white at 4%, 7%, 10% and 25%,
+    // the same four strengths as Pink Candy's pink. `monacoSetup` paints the selection from `border`.
     ui: {
-      bg: "#eaeaff",
-      surface: "#c6c6ff",
-      surfaceRaised: "#c6c6ff",
-      // The title bar's and the inactive tabs' violet. The theme's own hairlines are near-black
-      // (#0f0f17), and `monacoSetup` paints the selection from this value.
-      border: "#a0a0fb",
+      bg: "#f9f9ff",
+      surface: "#f5f5ff",
+      surfaceRaised: "#f0f0ff",
+      border: "#dadaff",
       text: "#3e3f54",
-      // The side bar's ink (`#000a9fdd`) laid onto the side bar: the theme writes its labels in blue.
-      textMuted: "#1a23ac",
+      // A muted indigo rather than the published side bar's blue ink (#1a23ac), which shouted every
+      // label in the app once it stood on near-white: 6:1 here, still the theme's hue.
+      textMuted: "#5d5e86",
     },
     tokens: {
       // `#23262c62`, laid onto the editor.

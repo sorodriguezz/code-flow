@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactElement } from "react";
-import { thinkingDesignKind, type ThinkingDesign } from "../../lib/thinkingDesigns";
+import { thinkingDesignKind, thinkingSpeaksItself, type ThinkingDesign } from "../../lib/thinkingDesigns";
 import { phaseGroup, thinkingState, type ThinkingActivity } from "../../lib/thinking/activity";
 import { ORB_PX, register, prefersReducedMotion, type OrbSize, type Painter } from "../../lib/thinking/ticker";
 import { createSphere } from "../../lib/thinking/sphere";
@@ -14,6 +14,10 @@ import { createGhost } from "../../lib/thinking/ghost";
 import { createCrab } from "../../lib/thinking/crab";
 import { createMoon } from "../../lib/thinking/moon";
 import { createAtom } from "../../lib/thinking/atom";
+import { createSpark } from "../../lib/thinking/spark";
+import { createCloud } from "../../lib/thinking/cloud";
+import { createBulb } from "../../lib/thinking/bulb";
+import { createAlien } from "../../lib/thinking/alien";
 import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
 import { voiceLevel } from "../../lib/thinking/voice";
 
@@ -22,7 +26,7 @@ import { voiceLevel } from "../../lib/thinking/voice";
  * a story generation, a review stage, a wiki write. Never a generic loading spinner: work that
  * runs no model wears `LoaderCircle` instead.
  *
- * It has sixteen looks (`lib/thinkingDesigns`), chosen once in Settings and followed by every orb
+ * It has twenty looks (`lib/thinkingDesigns`), chosen once in Settings and followed by every orb
  * in every window. `design` pins one look regardless of the setting — for the picker that previews
  * all of them.
  *
@@ -97,10 +101,11 @@ const PAINTERS: Partial<Record<ThinkingDesign, (canvas: HTMLCanvasElement, px: n
   crab: createCrab,
   moon: createMoon,
   atom: createAtom,
+  spark: createSpark,
+  cloud: createCloud,
+  bulb: createBulb,
+  alien: createAlien,
 };
-
-/** The canvas designs that draw speaking from the voice itself (`lib/thinking/voice`). */
-const VOICE_AWARE = new Set<ThinkingDesign>(["orb", "wave"]);
 
 function OrbCanvas({ design, px, activity }: { design: ThinkingDesign; px: number; activity?: ThinkingActivity }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -124,9 +129,11 @@ function OrbCanvas({ design, px, activity }: { design: ThinkingDesign; px: numbe
   }, [design, px]);
 
   // Primitives, so a caller passing a fresh object each render does not re-run this. Speaking is
-  // drawn as writing by the designs that have no voice of their own; the two that do (the orb's
-  // shader, the waves) take the phase and the voice's loudness themselves.
-  const phase = activity?.phase === "speak" && !VOICE_AWARE.has(design) ? "write" : activity?.phase;
+  // drawn as writing by the designs that have no voice of their own; the ones that do (the orb's
+  // shader, the waves, and the four mascots — Chispa, Nube, Bombilla, Marciano — each with a
+  // lip-synced mouth) take the phase and the voice's loudness themselves (`voice` in
+  // `lib/thinkingDesigns`).
+  const phase = activity?.phase === "speak" && !thinkingSpeaksItself(design) ? "write" : activity?.phase;
   const quiet = activity?.quiet;
   const done = activity?.done;
   const failed = activity?.failed;

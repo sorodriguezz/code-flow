@@ -7,9 +7,10 @@ import { useLayoutEffect, useState, type CSSProperties } from "react";
  * también el recuadro del chat"): the box that holds both, the app rail between them included. It
  * follows them as the window, the sidebar, the dock or the AI panel resize them.
  *
- * The chat's sheet runs the full height of the row, so with the terminal dock open that box reaches
- * past the central sheet and covers the dock too — a rectangle cannot hold the whole chat and leave
- * the dock out.
+ * The terminal dock's sheet too, while it is open: it shares the central sheet's column, and with
+ * the central sheet alone the settings stopped at the dock's top edge and sat cut off over the upper
+ * half of the window, the dock blurred under the scrim below it (user report, 2026-10-10). The chat's
+ * sheet runs the full height of the row anyway, so with both open the box was already that tall.
  *
  * A space too small to hold the settings comfortably (a narrow window, a tall terminal dock) or no
  * sheet at all (a satellite window) gives the whole window instead, less a margin — so the panel
@@ -39,12 +40,20 @@ function union(a: Box, b: Box): Box {
 }
 
 /**
- * The frame for a sheet `rect` (or none) and the AI panel's sheet `panel` (when it is open) in a
- * `viewport` — pure, so it can be tested. The panel only ever widens a sheet that exists: a window
- * without the central sheet has no place for the settings but the whole window.
+ * The frame for a sheet `rect` (or none), the AI panel's sheet `panel` and the terminal dock's
+ * `dock` (each when it is open) in a `viewport` — pure, so it can be tested. The other two only ever
+ * grow a sheet that exists: a window without the central sheet has no place for the settings but
+ * the whole window.
  */
-export function settingsFrame(rect: Box | null, viewport: { width: number; height: number }, panel: Box | null = null): Box {
-  const space = rect && panel ? union(rect, panel) : rect;
+export function settingsFrame(
+  rect: Box | null,
+  viewport: { width: number; height: number },
+  panel: Box | null = null,
+  dock: Box | null = null,
+): Box {
+  let space = rect;
+  if (space && panel) space = union(space, panel);
+  if (space && dock) space = union(space, dock);
   if (space && space.width >= SETTINGS_MIN.width && space.height >= SETTINGS_MIN.height) {
     return { top: space.top, left: space.left, width: space.width, height: space.height };
   }
@@ -55,12 +64,17 @@ export function settingsFrame(rect: Box | null, viewport: { width: number; heigh
 
 const SHEET = '[data-tour="main-content"]';
 const PANEL = '[data-tour="ai-panel"]';
+const DOCK = '[data-tour="terminal-dock"]';
 
 function measure(): Box {
   const find = (selector: string) => (typeof document === "undefined" ? null : document.querySelector<HTMLElement>(selector));
-  const rect = find(SHEET)?.getBoundingClientRect() ?? null;
-  const panel = find(PANEL)?.getBoundingClientRect() ?? null;
-  return settingsFrame(rect, { width: window.innerWidth, height: window.innerHeight }, panel);
+  // A box with no area is a sheet that is mounted but hidden — the dock, closed, stays in the DOM
+  // (`DockSlot`) — and must not stretch the frame to the corner of the window.
+  const box = (selector: string) => {
+    const rect = find(selector)?.getBoundingClientRect();
+    return rect && rect.width > 0 && rect.height > 0 ? rect : null;
+  };
+  return settingsFrame(box(SHEET), { width: window.innerWidth, height: window.innerHeight }, box(PANEL), box(DOCK));
 }
 
 export function useSettingsFrame(): CSSProperties {

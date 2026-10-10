@@ -4,6 +4,7 @@ import { getSetting, setSetting } from "../lib/tauri/commands";
 import { systemLocale } from "../lib/tauri/windows";
 import { loadLanguage, translations, type Language, type TranslationKey } from "../lib/i18n/translations";
 import { watchSettings } from "../lib/settingsSync";
+import { withLanguageTransition } from "../lib/themeTransition";
 
 const KEY = "app_language";
 
@@ -55,8 +56,11 @@ export const useLanguageStore = create<LanguageState>((set) => ({
 
   setLanguage: async (language) => {
     await loadLanguage(language);
-    set({ language });
-    markDocument(language);
+    // Faded over at the full motion level — see `withLanguageTransition`.
+    withLanguageTransition(() => {
+      set({ language });
+      markDocument(language);
+    });
     await setSetting(KEY, language);
   },
 }));

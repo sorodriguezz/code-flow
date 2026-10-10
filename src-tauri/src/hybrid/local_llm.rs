@@ -824,6 +824,9 @@ pub struct ConverseRequest<'a> {
     pub max_tokens: u32,
     pub temperature: f32,
     pub keep_alive: Option<&'a str>,
+    /// Ollama only, as in [`ChatRequest`]: `Some(false)` switches a thinking model's phase off.
+    /// Measured on qwen3:8b driving `crate::local_agent`: 338 s to fix a one-line bug with it on.
+    pub think: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -961,6 +964,9 @@ where
             }
             if let Some(keep_alive) = request.keep_alive {
                 body["keep_alive"] = json!(keep_alive);
+            }
+            if let Some(think) = request.think {
+                body["think"] = json!(think);
             }
             client.post(format!("{}/api/chat", endpoint.base_url)).json(&body)
         }

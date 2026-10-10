@@ -10,11 +10,13 @@ import { TitleTooltips } from "./components/common/TitleTooltips";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
 import { ViewSkeleton } from "./components/common/ViewSkeleton";
+import { DockSlot } from "./components/services/DockSlot";
 import { useAccentStore } from "./state/accentStore";
 import { useFileNestingStore } from "./state/fileNestingStore";
 import { useCsvStore } from "./state/csvStore";
 import { useThinkingDesignStore } from "./state/thinkingDesignStore";
 import { useGlassStore } from "./state/glassStore";
+import { useMotionStore } from "./state/motionStore";
 import { useLanguageOverrideStore } from "./state/languageOverrideStore";
 import { useIconRulesStore } from "./state/iconRulesStore";
 import { useLanguageStore, useT } from "./state/languageStore";
@@ -143,6 +145,7 @@ function useSatelliteBoot(): boolean {
         useCsvStore.getState().init(),
         useThinkingDesignStore.getState().init(),
         useGlassStore.getState().init(),
+        useMotionStore.getState().init(),
         useLanguageOverrideStore.getState().init(),
         // The satellite draws its own title bar too, so the maximize button needs the same
         // rectangle tracking the main window's does.
@@ -275,7 +278,6 @@ function RepoWindow({ projectId }: { projectId: string }) {
   );
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
-  const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
   const [tab, setTab] = useState<MainView>("graph");
   const t = useT();
   // Fetch, pull and push, and only those three — see `useRemoteActionShortcuts`. They are the
@@ -392,11 +394,10 @@ function RepoWindow({ projectId }: { projectId: string }) {
       <div className="cf-sheet cf-ambient-bg min-h-[120px] flex-1">
         <RepoTabs tab={tab} />
       </div>
-      {terminalPanelOpen && (
-        <Suspense key="terminal-dock" fallback={null}>
-          <ServicesDock />
-        </Suspense>
-      )}
+      {/* Kept mounted once opened, as in the main window — see `DockSlot`. */}
+      <DockSlot>
+        <ServicesDock />
+      </DockSlot>
     </div>
   );
 }
@@ -410,7 +411,7 @@ function RepoTabs({ tab }: { tab: MainView }) {
   return (
     <>
       {REPO_TABS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
-        <div key={id} className={tab === id ? "h-full" : "hidden"}>
+        <div key={id} className={tab === id ? "h-full cf-panel-in" : "hidden"}>
           <ErrorBoundary resetKey={id}>
             <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
           </ErrorBoundary>

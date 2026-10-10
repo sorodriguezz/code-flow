@@ -67,6 +67,9 @@ export interface AiProviderOption {
    *  engine's Rust module (only `claude.rs` sets one), so the routing mirror in `aiProviderStore`,
    *  and every chip that reads it, names the model the run actually goes to. */
   commitMessageModel?: string;
+  /** Part of the app rather than a CLI to install: no binary path, no setup command — it is ready
+   * when Settings › AI engines › Local model is, and its row in Providers says so and links there. */
+  builtIn?: boolean;
   /** Where to go to get this provider working. Shown in its Settings row, and surfaced up front
    * when the provider isn't detected — so "Not found" always comes with a way out. */
   setup?: {
@@ -205,6 +208,22 @@ export const AI_PROVIDERS: AiProviderOption[] = [
       command: "npm install -g cline",
       postCommand: "cline auth ollama",
     },
+  },
+  // CodeFlow itself: the «Local model» pane's model (the integrated engine, Ollama or an
+  // OpenAI-compatible server), driven by the agent loop in `src-tauri/src/local_agent`. Nothing to
+  // install, nothing to pay, nothing leaves the machine. It streams in text mode and enforces
+  // read-only by never offering a write tool; it has no session to resume, so the chats re-send the
+  // conversation like they do for Cline.
+  {
+    id: "codeflow",
+    label: "CodeFlow",
+    icon: Cpu,
+    available: true,
+    builtIn: true,
+    streamsTokens: true,
+    resumesSessions: false,
+    headlessSlashCommands: false,
+    acceptsImages: false,
   },
 ];
 

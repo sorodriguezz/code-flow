@@ -106,8 +106,9 @@ export function AiPanel() {
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
 
   return (
-    // A sheet beside the rail. It appears at its width and its contents fade in: the width tween it
-    // used to open with relaid out the whole window on every frame.
+    // A sheet beside the rail. It slides in with the rail over the view and is laid out once it lands
+    // (`AiEdge` in `App.tsx`): the width tween it used to open with relaid out the whole window on
+    // every frame.
     // `pt-px`: room for the sheet's outside ring under this wrapper's `overflow-hidden` — the work
     // column's reason, in `App.tsx`. Flush, the panel's top edge was clipped away.
     //
@@ -118,7 +119,7 @@ export function AiPanel() {
     // (`pl-1.5`) is gone too: the rail already keeps its own room either side, and the extra 6px
     // left more space between the rail and the chat than between the view and the rail (user
     // report, 2026-10-08: "deja en común el más pequeño").
-    <div className="cf-panel-in flex shrink-0 overflow-hidden pr-1.5 pb-1.5 pt-px">
+    <div className="flex shrink-0 overflow-hidden pr-1.5 pb-1.5 pt-px">
       <ResizeHandle
         axis="x"
         value={width}

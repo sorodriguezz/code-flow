@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotionConfig } from "framer-motion";
 import { ArrowRight, Bell, Trash2, Volume2, VolumeX, X } from "lucide-react";
 import { iconButtonClass } from "../common/Button";
 import { ToneBadge } from "../common/MorphToast";
@@ -131,7 +131,7 @@ export function NotificationBell() {
 
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = useReducedMotionConfig();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ bottom: number; right: number; maxHeight: number } | null>(null);
 

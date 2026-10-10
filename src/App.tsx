@@ -1,4 +1,4 @@
-import { Suspense, lazy, memo, useEffect, useState, type ReactElement } from "react";
+import { Suspense, lazy, memo, useEffect, useRef, useState, type ReactElement } from "react";
 import { FolderGit2, GitBranchPlus, Loader2, Trash2, Unlink } from "lucide-react";
 import { useT } from "./state/languageStore";
 import { TitleBar } from "./components/layout/TitleBar";
@@ -13,6 +13,8 @@ import { AddDependencyModal } from "./components/editor/AddDependencyModal";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
 import { AiPanel } from "./components/ai/AiPanel";
+import { DockSlot } from "./components/services/DockSlot";
+import { beginEdgeResize, slideTiming, useEdgeSlide, type EdgeSlide } from "./lib/useEdgeSlide";
 import { SwitcherLock } from "./components/layout/SwitcherLock";
 import { UpdateNotesModal } from "./components/layout/UpdateNotesModal";
 import { RequirementsModal } from "./components/layout/RequirementsModal";
@@ -60,6 +62,7 @@ import { useFileNestingStore } from "./state/fileNestingStore";
 import { useCsvStore } from "./state/csvStore";
 import { useThinkingDesignStore } from "./state/thinkingDesignStore";
 import { useGlassStore } from "./state/glassStore";
+import { useMotionStore } from "./state/motionStore";
 import { useLanguageOverrideStore } from "./state/languageOverrideStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
@@ -482,6 +485,10 @@ function MainContent() {
   // WebSocket/MQTT connections and unsaved request drafts, all of which would otherwise be
   // torn down every time you tabbed away. Views never opened yet aren't mounted at all.
   //
+  // `cf-panel-in` on the shown one: leaving `display: none` restarts a CSS animation, so the view
+  // fades in on every switch with no state, no effect and no re-render to drive it — opacity only, so
+  // the compositor does the whole thing and the geometry the tour measures never moves.
+  //
   // The `<Suspense>` is *per view*, inside the per-view `<div>`, and must stay that way: one
   // boundary hoisted up here would cover every mounted view at once, so the first open of any
   // lazy view would replace all of them with a fallback — unmounting exactly the sessions and
@@ -495,7 +502,7 @@ function MainContent() {
           sidebar, the tab bar, the status bar — keeps working, so there is somewhere to walk to. */}
       {project &&
         PROJECT_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
-          <div key={id} className={activeView === id ? "h-full" : "hidden"}>
+          <div key={id} className={activeView === id ? "h-full cf-panel-in" : "hidden"}>
             <ErrorBoundary resetKey={id}>
               <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
             </ErrorBoundary>
@@ -503,7 +510,7 @@ function MainContent() {
         ))}
       {workspaceId !== null &&
         WORKSPACE_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
-          <div key={id} className={activeView === id ? "h-full" : "hidden"}>
+          <div key={id} className={activeView === id ? "h-full cf-panel-in" : "hidden"}>
             <ErrorBoundary resetKey={id}>
               <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
             </ErrorBoundary>
@@ -528,6 +535,36 @@ const ShellMainContent = memo(MainContent);
 const ShellAppRail = memo(AppRail);
 const ShellStatusBar = memo(StatusBar);
 
+/**
+ * The AI panel's way in and out: it grows by its real width, in the flow, and the work column gives
+ * way to it frame by frame — so what the view centres or pins to its right edge travels with the
+ * edge (user report, 2026-10-10: the editor's changes strip and its centred hint "se cortan" when the
+ * panel slid over the view and the layout caught up once it landed). Its sheet keeps its own width
+ * throughout, so its contents are uncovered, never reflowed; a terminal in the dock waits for the
+ * width it lands on (`edgeMoving`). See `useEdgeSlide`.
+ */
+function slideAiPanel(edge: HTMLElement | null, opening: boolean): EdgeSlide | null {
+  const panel = edge?.lastElementChild;
+  if (!edge || !panel || edge.childElementCount < 2) return null;
+  const width = panel.getBoundingClientRect().width;
+  const [from, to] = opening ? [0, width] : [width, 0];
+  const settle = beginEdgeResize();
+  return { animations: [panel.animate([{ width: `${from}px` }, { width: `${to}px` }], slideTiming())], settle };
+}
+
+/** The window's right edge: the app rail, and the AI panel beside it while it is open. */
+function AiEdge() {
+  const open = useUiStore((s) => s.aiPanelOpen);
+  const edgeRef = useRef<HTMLDivElement>(null);
+  const phase = useEdgeSlide(open, (opening) => slideAiPanel(edgeRef.current, opening));
+  return (
+    <div ref={edgeRef} className="flex shrink-0">
+      <ShellAppRail />
+      {phase !== "closed" && <AiPanel key="ai-panel" />}
+    </div>
+  );
+}
+
 export default function App() {
   const initTheme = useThemeStore((s) => s.init);
   const initLayout = useLayoutStore((s) => s.init);
@@ -549,8 +586,6 @@ export default function App() {
   // one view, so opening the database side from the rail is an arrival that `activeView` alone
   // cannot see.
   const apiWorkspace = useUiStore((s) => s.apiWorkspace);
-  const aiPanelOpen = useUiStore((s) => s.aiPanelOpen);
-  const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
   const commandPaletteOpen = useUiStore((s) => s.commandPaletteOpen);
   const commandPaletteScope = useUiStore((s) => s.commandPaletteScope);
   const closeCommandPalette = useUiStore((s) => s.closeCommandPalette);
@@ -626,6 +661,8 @@ export default function App() {
         // see-through was already stamped before its first paint (`glass.rs`) — this is the re-read
         // that keeps it right from here on.
         useGlassStore.getState().init(),
+        // How much the app moves. With the look, before the first panel has anything to animate.
+        useMotionStore.getState().init(),
         useLanguageOverrideStore.getState().init(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
@@ -1198,24 +1235,18 @@ export default function App() {
           </div>
           {/* The dock appears and goes; it no longer grows from zero height. Animating a height
               re-laid the whole column out on every frame — the view above it included — which is
-              the most expensive thing a toggle can ask of the page. The fallback is `null` rather
-              than a placeholder on purpose: a shimmering bar at full height would be the only way
-              to make the chunk load visible. In practice it is never reached: this chunk is in
-              `WARM_CHUNKS` and is fetched on the first idle callback after boot. */}
-          {terminalPanelOpen && (
-            <Suspense key="terminal-dock" fallback={null}>
-              <ServicesDock />
-            </Suspense>
-          )}
+              the most expensive thing a toggle can ask of the page. Mounted once and then hidden
+              rather than unmounted, so opening it again is instant — see `DockSlot`. Its chunk is
+              in `WARM_CHUNKS`, fetched on the first idle callback after boot. */}
+          <DockSlot>
+            <ServicesDock />
+          </DockSlot>
         </div>
         {/* Between the view and the chat, and a sibling of both: the workspace's apps are a column
-            of the window, so opening or closing the AI panel slides past the rail rather than
-            moving it, and the terminal dock — which lives *inside* the column above — rises
-            without pushing it around either. */}
-        <ShellAppRail />
-        {/* Mounted when open, with an opacity fade of its own (`cf-panel-in`) and no width tween —
-            the same reasoning as the dock's. */}
-        {aiPanelOpen && <AiPanel key="ai-panel" />}
+            of the window, and the terminal dock — which lives *inside* the column above — rises
+            without pushing it around. The rail and the AI panel slide in and out together; see
+            `AiEdge`. */}
+        <AiEdge />
       </div>
       {/* The update notice hangs off the top edge of the status bar, so it's anchored to the bar
           itself instead of to a viewport offset that would have to be kept in sync by hand. */}

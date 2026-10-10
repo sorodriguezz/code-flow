@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "framer-motion";
-import { ActiveMarker, ActivePill, SLIDE } from "../common/ActivePill";
+import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
+import { ActiveMarker, ActivePill, useSlide } from "../common/ActivePill";
 import {
   Archive,
   ArrowUpRight,
@@ -114,6 +114,8 @@ import { buttonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 import { isValidRemoteName, looksLikeGitUrl } from "../../lib/gitErrors";
 import { ReturnBurst, useWindowReturn } from "./ReturnBurst";
+import { beginEdgeResize, slideTiming, useEdgeSlide, type EdgeSlide } from "../../lib/useEdgeSlide";
+import { useSectionFold } from "../../state/sidebarFoldStore";
 
 // The hover-revealed actions on a project row: the same square chip the "clone"/"add repository"
 // buttons above the list wear, so every icon-only control in the sidebar answers the pointer the
@@ -169,6 +171,27 @@ const SIDEBAR_MAX = 440;
  * fixed-height dialog and cannot realistically overflow. This panel keeps its bar and budgets for
  * it — a project list has no bound — which is what `px-0.5` below is paying for. */
 const SIDEBAR_COLLAPSED = 56;
+
+/**
+ * The fold's slide (see `useEdgeSlide`): the full panel comes out from behind the rail of chips while
+ * the work column beside it moves over by the same distance, so the panel's edge and the view's
+ * travel together and nothing is laid out until the panel lands. The column clips what it carries
+ * past its far side for that long. On the way open the panel's contents fade up early, on the way
+ * shut they go late, so the chips are never swapped for a half-faded copy of themselves.
+ */
+/**
+ * The fold, by the panel's real width: the view beside it is laid out on every frame and moves with
+ * the edge — what it centres or pins to its far side included — instead of being carried over and
+ * settling once the fold has landed (user report, 2026-10-10). The contents keep the unfolded width
+ * and are uncovered by the edge, never reflowed; a terminal in the dock waits for the width it lands
+ * on (`edgeMoving`). See `useEdgeSlide`.
+ */
+function slideSidebar(aside: HTMLElement | null, width: number, opening: boolean): EdgeSlide | null {
+  if (!aside || width <= SIDEBAR_COLLAPSED) return null;
+  const [from, to] = opening ? [SIDEBAR_COLLAPSED, width] : [width, SIDEBAR_COLLAPSED];
+  const settle = beginEdgeResize();
+  return { animations: [aside.animate([{ width: `${from}px` }, { width: `${to}px` }], slideTiming())], settle };
+}
 
 /** `defaultOpen` is the open one and only the open one: it's the group with work still in it, and
  * the reason the others fold is that merged and closed grow without bound (see `openGroups`). */
@@ -488,6 +511,7 @@ function CollapsedProjectChip({
 }
 
 function StashesSection() {
+  const fold = useSectionFold("stashes");
   const stashes = useRepoStore((s) => s.stashes);
   const stashSave = useRepoStore((s) => s.stashSave);
   const stashApply = useRepoStore((s) => s.stashApply);
@@ -515,6 +539,7 @@ function StashesSection() {
 
   return (
     <CollapsibleSection
+      {...fold}
       icon={Archive}
       title={`${t("sidebar.stashes")} (${stashes.length})`}
       action={({ open, expand }) => (
@@ -655,6 +680,7 @@ function StashesSection() {
 }
 
 function RemoteBranchesSection({ branches }: { branches: BranchInfo[] }) {
+  const fold = useSectionFold("remoteBranches");
   const checkoutRemoteBranch = useRepoStore((s) => s.checkoutRemoteBranch);
   const checkoutDetached = useRepoStore((s) => s.checkoutDetached);
   const checkingOutBranch = useRepoStore((s) => s.checkingOutBranch);
@@ -668,7 +694,7 @@ function RemoteBranchesSection({ branches }: { branches: BranchInfo[] }) {
   if (remoteBranches.length === 0) return null;
 
   return (
-    <CollapsibleSection icon={Cloud} title={`${t("sidebar.remoteBranches")} (${remoteBranches.length})`}>
+    <CollapsibleSection {...fold} icon={Cloud} title={`${t("sidebar.remoteBranches")} (${remoteBranches.length})`}>
       <div className="space-y-0.5">
         {remoteBranches.slice(0, remoteWindow.shown).map((b, at) => {
           const isCheckingOut = checkingOutBranch === b.name;
@@ -887,6 +913,7 @@ function AddRemoteModal({ onClose }: { onClose: () => void }) {
 }
 
 function RemoteUrlSection() {
+  const fold = useSectionFold("remoteUrl");
   const remotes = useRepoStore((s) => s.remotes);
   const removeRemote = useRepoStore((s) => s.removeRemote);
   const [editing, setEditing] = useState<string | null>(null);
@@ -900,6 +927,7 @@ function RemoteUrlSection() {
   return (
     <>
       <CollapsibleSection
+        {...fold}
         icon={Cloud}
         title={t("sidebar.remoteUrl")}
         action={({ expand }) => (
@@ -987,6 +1015,7 @@ interface HostingState {
 }
 
 function PullRequestsSection({ project }: { project: Project }) {
+  const fold = useSectionFold("pullRequests");
   const t = useT();
   const prs = usePrStore((s) => s.prsByProject[project.id] ?? EMPTY_PRS);
   const loading = usePrStore((s) => s.loadingProjectId === project.id);
@@ -1041,8 +1070,12 @@ function PullRequestsSection({ project }: { project: Project }) {
    *
    * Folding the section isn't enough on its own: `CollapsibleSection` only stops rendering its
    * children, and every one of those calls is started by an effect *here*, in a component that
-   * stays mounted regardless. So the fold is now the gate — nothing runs until the user unfolds
-   * the section, and unfolding it is what starts the work.
+   * stays mounted regardless. So the fold is now the gate — nothing runs while the section is
+   * folded, and unfolding it is what starts the work.
+   *
+   * Open by default since 2026-10-10, like every section in this panel, and the fold is remembered
+   * (`sidebarFoldStore`): the user who folds this once keeps the trade below on every repository
+   * after it; the one who leaves it open gets the list as each repository opens.
    *
    * What that costs, stated plainly because nothing else in the app covers it: a pull request
    * opened on the host while you weren't looking is now announced by nothing until you unfold
@@ -1051,11 +1084,10 @@ function PullRequestsSection({ project }: { project: Project }) {
    * neither goes and asks the host what is new. That is the trade this section was folded to make.
    */
   const [activated, setActivated] = useState(false);
-  /** One-way: folding it again doesn't un-fetch what has already been fetched, and re-opening it
-   * should show that rather than start over. */
-  const onOpenChange = (open: boolean) => {
-    if (open) setActivated(true);
-  };
+  // One-way: folding it again doesn't un-fetch what has already been fetched, and re-opening it
+  // should show that rather than start over. Set during render, not in an effect: open on arrival
+  // is now the usual case, and an effect would start the fetch a frame late on every repository.
+  if (fold.open && !activated) setActivated(true);
 
   const initiallyLinked = Boolean(
     (project.ado_org && project.ado_project && project.ado_repo_id) ||
@@ -1242,7 +1274,7 @@ function PullRequestsSection({ project }: { project: Project }) {
       <CollapsibleSection
         icon={GitPullRequest}
         title={t("sidebar.pullRequests")}
-        onOpenChange={onOpenChange}
+        {...fold}
         action={initiallyLinked ? headerAction : undefined}
       >
         <SkeletonRows count={2} className="p-0" />
@@ -1263,7 +1295,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   if (linkState.status === "needsToken") {
     const provider = linkState.provider;
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} onOpenChange={onOpenChange}>
+      <CollapsibleSection {...fold} icon={GitPullRequest} title={t("sidebar.pullRequests")}>
         <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">
           {provider === "github"
             ? t("sidebar.needsGithubToken")
@@ -1288,7 +1320,7 @@ function PullRequestsSection({ project }: { project: Project }) {
     hosting.bitbucket.length === 0
   ) {
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} onOpenChange={onOpenChange}>
+      <CollapsibleSection {...fold} icon={GitPullRequest} title={t("sidebar.pullRequests")}>
         <div className="space-y-0.5">
           {PR_SECTIONS.map((section) => (
             <div
@@ -1307,7 +1339,7 @@ function PullRequestsSection({ project }: { project: Project }) {
 
   if (linkState.status === "notDetected") {
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} onOpenChange={onOpenChange}>
+      <CollapsibleSection {...fold} icon={GitPullRequest} title={t("sidebar.pullRequests")}>
         {hosting.github.length > 0 && (
           <button
             onClick={() => setShowConnect("github")}
@@ -1384,11 +1416,11 @@ function PullRequestsSection({ project }: { project: Project }) {
     <CollapsibleSection
       icon={GitPullRequest}
       title={t("sidebar.pullRequests")}
-      // Folded on arrival — see `activated`. Unfolding it is what fetches the list, so the "open"
-      // group inside starts unfolded in turn: the click that asks for pull requests should land on
-      // the ones waiting on you, not on another chevron. The other status groups stay folded, which
-      // is what keeps this from filling the panel.
-      onOpenChange={onOpenChange}
+      // Unfolding it is what fetches the list — see `activated` — so the "open" group inside starts
+      // unfolded in turn: asking for pull requests should land on the ones waiting on you, not on
+      // another chevron. The other status groups stay folded, which is what keeps this from filling
+      // the panel.
+      {...fold}
       action={headerAction}
     >
       {loadError ? (
@@ -1530,6 +1562,7 @@ function ProjectRow({
   at: number;
   reorder: HoldReorder;
 }) {
+  const localBranchesFold = useSectionFold("localBranches");
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const removeProject = useWorkspaceStore((s) => s.removeProject);
@@ -1597,7 +1630,8 @@ function ProjectRow({
   const localBranches = branches.filter((b) => !b.is_remote);
   const localWindow = useIncremental(localBranches.length, repoPath);
 
-  const reduceMotion = useReducedMotion();
+  // The rows' spring, the selection pill's, at the motion level in force — see `useSlide`.
+  const slide = useSlide();
 
   const select = () => {
     if (detachedTo) {
@@ -1659,7 +1693,7 @@ function ProjectRow({
     // The row and its tree move as one block when a tree above them opens or closes: a transform from
     // where the block was to where it lands (`layout="position"`), never a height — see the tree's
     // note below. `relative` holds the tree this row is leaving while it closes.
-    <motion.div layout="position" transition={reduceMotion ? { duration: 0 } : SLIDE} className="relative">
+    <motion.div layout="position" transition={slide} className="relative">
       {/* The click target is the whole row, not just its label. The row is a strip of controls, so
           selecting the project lives on the container rather than on the name alone — which left
           the padding around the text, and the gaps between the chips, hovering as if clickable and
@@ -1966,13 +2000,14 @@ function ProjectRow({
             exit={{ clipPath: [TREE_SHOWN, TREE_HIDDEN], opacity: 0 }}
             // The rows' own spring (and the selection pill's): the clip's edge and the top of the row
             // under it have to be at the same place on every frame.
-            transition={reduceMotion ? { duration: 0 } : SLIDE}
+            transition={slide}
           >
       {projectLoading && <TreeSkeleton />}
 
       {!projectLoading && (
         <div className="ml-6 mt-1 space-y-3 border-l border-[var(--cf-border)] pl-3">
           <CollapsibleSection
+            {...localBranchesFold}
             icon={GitBranch}
             title={`${t("sidebar.localBranches")} (${localBranches.length})`}
             action={({ expand }) => (
@@ -2367,7 +2402,15 @@ export function Sidebar() {
   // Folded, the panel narrows to a rail of project chips rather than disappearing — which is what
   // it used to do, and what stopped being possible the moment the control that unfolds it moved
   // into the panel itself (onto its seam then, into `SidebarFoot` now). See `SIDEBAR_COLLAPSED`.
-  const railWidth = collapsed ? SIDEBAR_COLLAPSED : sidebarWidth;
+  //
+  // The fold slides by the panel's width (`slideSidebar`): the width in the flow is the one asked
+  // for and the animation carries the panel there; the full contents stay on screen for the whole
+  // slide either way, and the chips only come in once a fold has landed.
+  const asideRef = useRef<HTMLElement>(null);
+  const phase = useEdgeSlide(!collapsed, (opening) => slideSidebar(asideRef.current, sidebarWidth, opening));
+  const folded = collapsed;
+  const chips = phase === "closed";
+  const railWidth = folded ? SIDEBAR_COLLAPSED : sidebarWidth;
 
 
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
@@ -2565,6 +2608,7 @@ export function Sidebar() {
         // class rather than `cf-fold-zone`, which Settings' nav wears for its own toggle: the bar
         // is no sibling of either, so `index.css` reaches it through the frame with `:has()`, and a
         // shared class would have lit this button from that nav. See `index.css`.
+        ref={asideRef}
         className="cf-sidebar-zone flex shrink-0 flex-col overflow-hidden"
       >
         {/* Laid out at the width the panel is *heading for* rather than the width it currently is.
@@ -2573,13 +2617,13 @@ export function Sidebar() {
             way open, every project row spent the first frames laid out at 50px, wrapping its name
             and its hover actions onto three lines before snapping back. The AI panel gets this for
             free by unmounting; a panel that folds to a rail instead of vanishing has to say it. */}
-        <div style={{ width: railWidth }} className="flex min-h-0 flex-1 flex-col">
+        <div style={{ width: chips ? SIDEBAR_COLLAPSED : sidebarWidth }} className="flex min-h-0 flex-1 flex-col">
           {/* Above the first repository, and outside the scroller below it. Outside because the
               switcher names what that list *is* — a heading that scrolled away with the rows it
               heads would leave the panel unlabelled exactly when it is longest. Its menu escapes
               the panel by being portalled; see `WorkspaceSwitcher`. */}
-          <div className={`flex shrink-0 pt-3 ${collapsed ? "justify-center px-2" : "px-3"}`}>
-            <WorkspaceSwitcher collapsed={collapsed} />
+          <div className={`flex shrink-0 pt-3 ${chips ? "justify-center px-2" : "px-3"}`}>
+            <WorkspaceSwitcher collapsed={chips} />
           </div>
           {/* Folded: a short centred rule with real room under it, not a full-width one with 8px.
               Both halves of that matter. Edge to edge across a 50px rail, the line reads as a
@@ -2591,13 +2635,13 @@ export function Sidebar() {
               Nothing else in the rail has a ring, which is why only the first one looked wrong. */}
           <div
             className={
-              collapsed
+              chips
                 ? "mx-auto my-2 h-px w-5 shrink-0 bg-[var(--cf-border)]"
                 : "mx-3 my-2 h-px shrink-0 bg-[var(--cf-border)]"
             }
           />
 
-          {collapsed ? (
+          {chips ? (
             // Padding on all four sides, and it is not spacing — it is clearance for a box-shadow.
             // The active chip is marked with `ring-2 ring-offset-2`, which Tailwind implements as
             // two stacked box-shadows standing 4px outside the chip's own box. Box-shadows don't
@@ -2607,7 +2651,7 @@ export function Sidebar() {
             // exactly like the chip sliding under whatever is above it. `px-0.5` rather than `px-1`
             // so the ring still closes once enough projects bring the scrollbar in and take 10px of
             // the 50px with it.
-            <div className="min-h-0 flex-1 overflow-y-auto px-0.5 pb-3 pt-1">
+            <div className="cf-panel-in min-h-0 flex-1 overflow-y-auto px-0.5 pb-3 pt-1">
               <CollapsedProjects projects={projects} onAdd={handleAddProject} />
             </div>
           ) : (
@@ -2676,7 +2720,7 @@ export function Sidebar() {
             </motion.div>
           )}
 
-          <SidebarFoot collapsed={collapsed} />
+          <SidebarFoot collapsed={chips} />
         </div>
 
         {folderScan && (
@@ -2701,7 +2745,7 @@ export function Sidebar() {
       {/* Folded, there is nothing to drag: the panel is exactly one chip wide by definition, and a
           live handle there would let someone drag it to a width the names are still hidden at. The
           stored width is untouched, so unfolding returns to it. */}
-      {collapsed ? (
+      {folded ? (
         // One pixel of nothing where the handle stands unfolded, so the sheet keeps the same
         // distance from the panel in both states. It lent the fold button its hover reach until the
         // button left the seam (2026-09-26); now it is only the spacing.

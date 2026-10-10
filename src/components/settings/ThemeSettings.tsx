@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Laptop, Moon, Sun } from "lucide-react";
 import { useThemeStore } from "../../state/themeStore";
 import { useGlassStore } from "../../state/glassStore";
+import { useMotionStore, type MotionLevel } from "../../state/motionStore";
 import { findTheme, themesFor, type CodeThemeUi } from "../../lib/codeThemes";
 import { usePlatform } from "../../lib/platform";
 import { ACCENT_OPTIONS, useAccentStore } from "../../state/accentStore";
@@ -188,6 +189,26 @@ function AccentPicker() {
  * and saves on release, which is when the other windows follow: a setting write per pixel would be
  * announced to all of them. Same shape as the notification volume.
  */
+/** How much the app moves — see `motionStore`. Applies on the spot, so the next panel opened says it. */
+function MotionControl() {
+  const t = useT();
+  const level = useMotionStore((s) => s.level);
+  const setLevel = useMotionStore((s) => s.setLevel);
+  return (
+    <Segmented
+      ariaLabel={t("settings.motion")}
+      layoutId="cf-motion-level"
+      value={level}
+      onChange={(value) => void setLevel(value as MotionLevel)}
+      options={[
+        { value: "off", label: t("settings.motionOff") },
+        { value: "medium", label: t("settings.motionMedium") },
+        { value: "full", label: t("settings.motionFull") },
+      ]}
+    />
+  );
+}
+
 function TransparencyControl() {
   const t = useT();
   const enabled = useGlassStore((s) => s.enabled);
@@ -361,6 +382,10 @@ export function ThemeSettings() {
                   <TransparencyControl />
                 </PaneBlock>
               )}
+
+              <PaneBlock title={t("settings.motion")} hint={t("settings.motionHint")}>
+                <MotionControl />
+              </PaneBlock>
             </>
           )}
 

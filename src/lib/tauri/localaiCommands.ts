@@ -82,8 +82,15 @@ export const localAiStopEngine = () => invoke<void>("localai_stop_engine");
  * downloaded, the engine is still warming up, a newer keystroke superseded this one. Only a real
  * fault rejects, and even then the provider swallows it: a keystroke must never raise a toast.
  */
-export const localAiComplete = (request: { request_id: string; prefix: string; suffix: string }) =>
-  invoke<string | null>("localai_complete", { request });
+export const localAiComplete = (request: {
+  request_id: string;
+  prefix: string;
+  suffix: string;
+  /** Several lines (an empty block) rather than the rest of the caret's line. */
+  multiline: boolean;
+  /** The caret line's indentation in characters; block mode stops below it. */
+  indent: number;
+}) => invoke<string | null>("localai_complete", { request });
 
 export const localAiCancelCompletion = (requestId: string) =>
   invoke<void>("localai_cancel_completion", { requestId });

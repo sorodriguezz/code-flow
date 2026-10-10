@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useReducedMotion } from "framer-motion";
+import { useReducedMotionConfig } from "framer-motion";
 import { Briefcase, FolderGit2 } from "lucide-react";
 import { monogram, monogramStyle } from "../../lib/monogram";
 import { openable } from "../../lib/shortcuts";
@@ -109,7 +109,7 @@ function repoLock(): { items: LockItem[]; at: number } {
  */
 export function SwitcherLock({ repos = true }: { repos?: boolean }) {
   const t = useT();
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = useReducedMotionConfig();
   useEffect(() => {
     void useSwitcherLockStore.getState().init();
   }, []);

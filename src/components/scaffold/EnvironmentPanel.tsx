@@ -244,6 +244,7 @@ function InstallPanel({
               value={chosen?.line ?? ""}
               onChange={setLine}
               ariaLabel={t("scaffold.env.version")}
+              loading={versions?.status === "loading"}
               placeholder={versions?.status === "loading" ? t("scaffold.loading") : t("scaffold.latest")}
               options={lines.map((l) => ({
                 value: l.line,

@@ -1,9 +1,11 @@
 import { useMemo } from "react";
+import { Loader2 } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import type { SpringMeta } from "../../lib/scaffold/api";
 import { springRangeIncludes } from "../../lib/scaffold/spring";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
+import { Skeleton } from "../common/Skeleton";
 import { fieldClass } from "../common/recipes";
 import { DependencyPicker, type PickerItem } from "./DependencyPicker";
 import { Field } from "./Field";
@@ -156,5 +158,39 @@ export function SpringFields({
         />
       </Field>
     </>
+  );
+}
+
+/**
+ * The form's shape while start.spring.io is still answering — every row, with its label and a bar
+ * where its control will be.
+ *
+ * Everything in this form comes from that metadata, so until it lands there is nothing of it to
+ * draw, and a line of grey "Loading…" under the location field read as a form with nothing more to
+ * ask (user, 2026-10-10: it "takes a while to appear"). Same rows, same widths, so the real form
+ * replaces this in place instead of pushing the environment check down when it arrives.
+ */
+export function SpringFieldsSkeleton() {
+  const t = useT();
+  const bar = (width: string, height = "h-6") => <Skeleton className={height} style={{ width }} />;
+  return (
+    <div aria-busy className="space-y-2.5">
+      <Field label="start.spring.io">
+        <span className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
+          <Loader2 size={12} className="animate-spin" />
+          {t("scaffold.loading")}
+        </span>
+      </Field>
+      <Field label={t("scaffold.spring.build")}>{bar("260px")}</Field>
+      <Field label={t("scaffold.opt.language")}>{bar("180px")}</Field>
+      <Field label="Spring Boot">{bar("200px")}</Field>
+      <Field label="Java">{bar("150px")}</Field>
+      <Field label={t("scaffold.spring.packaging")}>{bar("110px")}</Field>
+      <Field label={t("scaffold.spring.group")}>{bar("100%", "h-[26px]")}</Field>
+      <Field label={t("scaffold.spring.package")}>{bar("100%", "h-[26px]")}</Field>
+      <Field label={t("scaffold.spring.dependencies")} align="start">
+        {bar("100%", "h-24")}
+      </Field>
+    </div>
   );
 }

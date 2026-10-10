@@ -11,6 +11,7 @@ import { lineClasses } from "../../lib/diffText";
 import { InlineContent } from "./DiffInline";
 import { StagingDiff, type DiffStaging } from "./StagingDiff";
 import { fileStatusChipStyle, fileStatusLabelKey } from "../../lib/fileStatus";
+import { scrollBehavior } from "../../lib/motion";
 
 /**
  * The split view's editor pane, and the only part of this file that needs Monaco.
@@ -159,7 +160,7 @@ function ChangeMap({
     if (!el) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
-    el.scrollTo({ top: ratio * el.scrollHeight, behavior: "smooth" });
+    el.scrollTo({ top: ratio * el.scrollHeight, behavior: scrollBehavior() });
   };
 
   return (

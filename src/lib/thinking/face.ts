@@ -53,6 +53,14 @@ export function strokeEye(
   ctx.restore();
 }
 
+/** How loud a syllable is, 0–1, for the voice at `level` (`voiceLevel`): 0 under a murmur — so a
+ *  mouth shuts between words, and the preview's stand-in voice, which never drops below 0.3, still
+ *  closes it — and 1 on the loud ones. Lip-sync, and every cue that moves with the voice, for the
+ *  characters that read it themselves. */
+export function lipSync(level: number): number {
+  return Math.max(0, Math.min(1, (level - 0.28) / 0.6));
+}
+
 /** A filled heart centred near (x, y), `r` about its half-width. */
 export function fillHeart(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
   ctx.beginPath();

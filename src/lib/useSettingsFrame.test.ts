@@ -33,3 +33,23 @@ describe("the settings frame", () => {
     expect(settingsFrame(null, { width: 390, height: 800 })).toEqual({ top: 0, left: 0, width: 390, height: 800 });
   });
 });
+
+describe("the settings frame with the terminal dock open", () => {
+  const viewport = { width: 1600, height: 1000 };
+  const sheet = { top: 40, left: 260, width: 1280, height: 560 };
+  const dock = { top: 606, left: 260, width: 1280, height: 374 };
+
+  it("covers the dock under the central sheet as well", () => {
+    expect(settingsFrame(sheet, viewport, null, dock)).toEqual({ top: 40, left: 260, width: 1280, height: 940 });
+  });
+
+  it("holds the sheet, the chat and the dock together", () => {
+    const panel = { top: 40, left: 1220, width: 360, height: 940 };
+    expect(settingsFrame({ ...sheet, width: 900 }, viewport, panel, { ...dock, width: 900 })).toEqual({
+      top: 40,
+      left: 260,
+      width: 1320,
+      height: 940,
+    });
+  });
+});

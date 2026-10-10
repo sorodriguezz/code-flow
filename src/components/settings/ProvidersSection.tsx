@@ -21,6 +21,7 @@ import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useToastStore } from "../../state/toastStore";
+import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { buttonClass } from "../common/Button";
@@ -145,7 +146,7 @@ function SetupHelp({ provider }: { provider: AiProviderOption }) {
 
 /** Availability badge: green when the CLI/endpoint answered, amber when it didn't. Blank while the
  * first check is still running, so nothing flashes "not found" before it's actually known. */
-function StatusBadge({ providerId }: { providerId: string }) {
+function StatusBadge({ providerId, builtIn = false }: { providerId: string; builtIn?: boolean }) {
   const t = useT();
   const status = useProviderStatusStore((s) => s.byProvider[providerId]);
   const checking = useProviderStatusStore((s) => s.checking);
@@ -161,8 +162,69 @@ function StatusBadge({ providerId }: { providerId: string }) {
   ) : (
     <span className={chipClass("warn")}>
       <CircleAlert size={11} />
-      {t("settings.providerMissing")}
+      {/* Nothing is "not found" for the provider that is part of the app — its model is not ready. */}
+      {t(builtIn ? "codeflow.notReady" : "settings.providerMissing")}
     </span>
+  );
+}
+
+/** What a reason code from `local_agent::status` means, for the reader. */
+const BUILT_IN_REASONS: Record<string, TranslationKey> = {
+  "not-downloaded": "codeflow.notDownloaded",
+  "engine-missing": "codeflow.engineMissing",
+  "no-models": "codeflow.noModels",
+};
+
+/** A model id's size in billions of parameters, when its name says (`qwen2.5-coder:7b`,
+ * `qwen2.5-coder-14b-instruct`, `qwen3-coder-30b-a3b`): the first `<n>b` wins, which is the total
+ * for a mixture-of-experts name too. */
+export function modelBillions(model: string): number | null {
+  const match = /(\d+(?:\.\d+)?)b(?![a-z])/i.exec(model);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * The top of CodeFlow's own row: whether the «Local model» pane has something it can run, and what.
+ * Where a CLI's row says how to install it, this one says where its model is chosen — and, for a
+ * small model, what to expect of it as an agent, because the provider will happily take agent work
+ * a 7B mostly gets wrong.
+ */
+function BuiltInStatus({ available, detail }: { available: boolean | undefined; detail: string }) {
+  const t = useT();
+  const openLocalModel = (
+    <button
+      onClick={() => useUiStore.getState().openSettingsAt("claude", "localModel")}
+      className={buttonClass({ variant: "secondary", size: "sm" })}
+    >
+      {t("codeflow.openLocalModel")}
+    </button>
+  );
+  if (available === undefined) return null;
+  if (!available) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-[color-mix(in_oklab,var(--cf-warning)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-2">
+        <span className="min-w-0 flex-1 text-[12px] leading-snug text-[var(--cf-text)]">
+          {t(BUILT_IN_REASONS[detail] ?? "codeflow.unreachable")}
+        </span>
+        {openLocalModel}
+      </div>
+    );
+  }
+  const billions = modelBillions(detail);
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--cf-border)] px-2.5 py-2">
+        <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
+          {t("codeflow.ready", { model: detail })}
+        </span>
+        {openLocalModel}
+      </div>
+      {billions !== null && billions < 10 && (
+        <p className="rounded-md border border-[color-mix(in_oklab,var(--cf-warning)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_8%,transparent)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
+          {t("codeflow.smallModel", { model: detail })}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -287,7 +349,13 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
   };
 
   const options = modelOptionsFor(provider.id, dynamicModels);
-  const modelLabel = resolvedModel ? modelDisplayLabel(provider.id, resolvedModel, t) : t("settings.modelDefault");
+  const defaultModelLabel = provider.builtIn ? t("codeflow.modelDefault") : t("settings.modelDefault");
+  // CodeFlow's default is a real model the status already named — say which, not "default".
+  const modelLabel = resolvedModel
+    ? modelDisplayLabel(provider.id, resolvedModel, t)
+    : provider.builtIn && status?.available
+      ? status.detail
+      : defaultModelLabel;
   const inputClass = fieldClass({ className: "w-full flex-1 font-mono" });
 
   return (
@@ -310,7 +378,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
               purpose: a logo whose colour is muted grey is a logo nobody recognises. */}
           <ProviderGlyph providerId={provider.id} size={14} />
           <span className="shrink-0 text-[13px] font-medium">{label}</span>
-          <StatusBadge providerId={provider.id} />
+          <StatusBadge providerId={provider.id} builtIn={provider.builtIn} />
           {loaded && <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-muted)]">{modelLabel}</span>}
         </button>
 
@@ -335,7 +403,9 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
             </>
           ) : (
             <>
-              {status && !status.available && (
+              {provider.builtIn && <BuiltInStatus available={status?.available} detail={status?.detail ?? ""} />}
+
+              {!provider.builtIn && status && !status.available && (
                 <p className="rounded-md border border-[color-mix(in_oklab,var(--cf-warning)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-2 text-[12px] leading-snug text-[var(--cf-text)]">
                   {t("settings.providerMissingBinary", { binary: status.binary })}
                 </p>
@@ -351,6 +421,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                   below the config once it is, where it's reference rather than a to-do. */}
               {status && !status.available && <SetupHelp provider={provider} />}
 
+              {!provider.builtIn && (
               <Field label={t("settings.binaryLabel")} hint={t("settings.binaryHint")}>
                 <div className="flex items-center gap-1.5">
                   <input
@@ -369,6 +440,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                   </button>
                 </div>
               </Field>
+              )}
 
               <Field
                 label={t("settings.baseModel")}
@@ -391,7 +463,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                   options={options}
                   choice={choice}
                   custom={custom}
-                  defaultLabel={t("settings.modelDefault")}
+                  defaultLabel={defaultModelLabel}
                   customHint={customModelHint(provider.id, t)}
                   customPlaceholder={customModelPlaceholder(provider.id, t("settings.modelIdPlaceholder"))}
                   onChoice={(v) => {
@@ -409,10 +481,30 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
               {/* Only Claude Code's CLI takes an allow-list. For the other agentic CLIs the
                   setting would be inert, so they get an explanation of what actually governs
                   their access instead of a control that does nothing. */}
-              {agentic && !provider.usesToolAllowlist && (
+              {agentic && !provider.usesToolAllowlist && !provider.builtIn && (
                 <p className="rounded-md border border-[var(--cf-border)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
                   {t("settings.toolsSandboxNote")}
                 </p>
+              )}
+
+              {/* CodeFlow's tools are its own (`local_agent::tools`): reading, searching and — in a
+                  run that may edit — editing are decided per operation, so the one choice left to
+                  the user is whether it may also run commands. Stored as `run_command` in the same
+                  allow-list setting the CLIs use, which is what `local_agent::Mode` reads. */}
+              {provider.builtIn && (
+                <label className="flex cursor-pointer items-start gap-2 rounded-md border border-[var(--cf-border)] px-2.5 py-2 hover:bg-[var(--cf-hover)]">
+                  <Checkbox
+                    checked={tools.includes("run_command")}
+                    onChange={() =>
+                      void saveTools(tools.includes("run_command") ? tools.filter((x) => x !== "run_command") : [...tools, "run_command"])
+                    }
+                    className="mt-0.5"
+                  />
+                  <span>
+                    <span className="block text-[13px] font-medium">{t("codeflow.allowCommands")}</span>
+                    <span className="block text-[11px] text-[var(--cf-text-muted)]">{t("codeflow.allowCommandsHint")}</span>
+                  </span>
+                </label>
               )}
 
               {agentic && provider.usesToolAllowlist && (
