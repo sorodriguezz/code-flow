@@ -1,7 +1,7 @@
 import "@xyflow/react/dist/style.css";
 import "./codemap.css";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -95,12 +95,25 @@ type Panel =
 
 interface MapNodeData extends Record<string, unknown> {
   node: MapNode;
-  selected: boolean;
-  dimmed: boolean;
   /** The global view: the node's region colour, and its folder shown above its name. */
   color?: string;
   global?: boolean;
 }
+
+/**
+ * What is lit, read by each node rather than carried in its `data`. React Flow 12 drops a node's
+ * measured size whenever it is handed a new node object, and hides it until measured again — so a
+ * highlight in `data` re-created every node on each hover, and the whole map blinked out and back
+ * as the pointer moved (user report, 2026-10-10). The nodes now change only with the graph.
+ */
+interface Spotlight {
+  selected: string | null;
+  /** Whose lines are lit: the hovered node, else the selected one. */
+  spotlit: string | null;
+  /** The spotlit node's neighbours, which stay bright. */
+  linked: Set<string>;
+}
+const SpotlightContext = createContext<Spotlight>({ selected: null, spotlit: null, linked: new Set() });
 
 type CanvasNode = Node<MapNodeData, "map">;
 
@@ -110,7 +123,10 @@ function formatCount(n: number): string {
 
 const MapNodeView = memo(function MapNodeView({ data }: NodeProps<CanvasNode>) {
   const t = useT();
-  const { node, selected, dimmed, color, global } = data;
+  const { node, color, global } = data;
+  const spot = useContext(SpotlightContext);
+  const selected = spot.selected === node.id;
+  const dimmed = !!spot.spotlit && spot.spotlit !== node.id && !spot.linked.has(node.id);
   const Icon = node.folder ? Folder : FileCode2;
   const parent = node.id.includes("/") ? node.id.slice(0, node.id.length - node.label.length - 1) : "";
   return (
@@ -167,6 +183,15 @@ function CodeMap() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  /** The node under the pointer. Its lines light up while it is there — on a map this dense, reading
+   *  them should not cost a click (user's ask, 2026-10-10) — and the selection's come back after. */
+  const [hovered, setHovered] = useState<string | null>(null);
+  /** A leave waits a moment before it un-lights: crossing the gap between two cards would otherwise
+   *  flash the whole map bright for a frame. */
+  const leaving = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(leaving.current), []);
+  /** Whose lines are lit and whose neighbours stay bright: the hovered node, else the selected one. */
+  const spotlit = hovered ?? selected;
   const [panel, setPanel] = useState<Panel>({ kind: "home" });
   const [query, setQuery] = useState("");
   const flow = useReactFlow();
@@ -216,17 +241,19 @@ function CodeMap() {
 
   useEffect(() => {
     if (graph) requestAnimationFrame(() => flow.fitView({ padding: 0.2, maxZoom: 1, duration: 0 }));
+    // A new graph replaces the nodes under the pointer without a mouse-leave for the old one.
+    setHovered(null);
   }, [graph, flow]);
 
   const linked = useMemo(() => {
     const set = new Set<string>();
-    if (!graph || !selected) return set;
+    if (!graph || !spotlit) return set;
     for (const edge of graph.edges) {
-      if (edge.from === selected) set.add(edge.to);
-      if (edge.to === selected) set.add(edge.from);
+      if (edge.from === spotlit) set.add(edge.to);
+      if (edge.to === spotlit) set.add(edge.from);
     }
     return set;
-  }, [graph, selected]);
+  }, [graph, spotlit]);
 
   // The global view is already sized by the backend to what a canvas can hold; the folder view caps
   // what it draws itself.
@@ -236,45 +263,51 @@ function CodeMap() {
   );
   const colors = useMemo(() => (mode === "global" && graph ? groupColors(graph.nodes) : new Map<string, string>()), [graph, mode]);
 
-  const nodes: CanvasNode[] = useMemo(() => {
-    if (!graph) return [];
+  // The layout on its own, so a hover — which only changes what is lit — does not lay the map out again.
+  const positions = useMemo(() => {
+    if (!graph) return new Map<string, { x: number; y: number }>();
     const ids = new Set(split.shown.map((n) => n.id));
-    const at = layoutMap(
+    return layoutMap(
       split.shown,
       graph.edges.filter((e) => ids.has(e.from) && ids.has(e.to)),
       mode === "global" ? { maxRows: 18, maxColumns: 6, rootFirst: true } : {},
     );
+  }, [graph, split, mode]);
+
+  const nodes: CanvasNode[] = useMemo(() => {
+    if (!graph) return [];
     return split.shown.map((node) => ({
       id: node.id,
       type: "map",
-      position: at.get(node.id) ?? { x: 0, y: 0 },
+      position: positions.get(node.id) ?? { x: 0, y: 0 },
       data: {
         node,
-        selected: node.id === selected,
-        dimmed: !!selected && node.id !== selected && !linked.has(node.id),
         color: colors.get(node.group),
         global: mode === "global",
       },
       draggable: false,
       connectable: false,
     }));
-  }, [graph, split, selected, linked, colors, mode]);
+  }, [graph, split, positions, colors, mode]);
+  const spotlight = useMemo<Spotlight>(() => ({ selected, spotlit, linked }), [selected, spotlit, linked]);
 
   const edges: Edge[] = useMemo(() => {
     if (!graph) return [];
     const ids = new Set(split.shown.map((n) => n.id));
     return graph.edges.filter((e) => ids.has(e.from) && ids.has(e.to)).map((edge) => {
-      const lit = !!selected && (edge.from === selected || edge.to === selected);
+      const lit = !!spotlit && (edge.from === spotlit || edge.to === spotlit);
       return {
         id: `${edge.from}→${edge.to}`,
         source: edge.from,
         target: edge.to,
         selectable: false,
-        className: lit ? "cf-map-edge--lit" : selected ? "cf-map-edge--dim" : undefined,
+        className: lit ? "cf-map-edge--lit" : spotlit ? "cf-map-edge--dim" : undefined,
+        // Lit lines over the rest, or the bundle they cross hides them.
+        zIndex: lit ? 1 : 0,
         style: { strokeWidth: Math.min(4, 1 + Math.log2(edge.weight)) },
       };
     });
-  }, [graph, split, selected]);
+  }, [graph, split, spotlit]);
 
   // Double click: a folder opens one level down (by folder, from the global view too); a file opens
   // in the editor — a single click already shows what it declares in the panel.
@@ -375,34 +408,44 @@ function CodeMap() {
           ) : graph.nodes.length === 0 ? (
             <p className="p-4 text-[12.5px] text-[var(--cf-text-muted)]">{t("codemap.empty")}</p>
           ) : (
-            <ReactFlow<CanvasNode, Edge>
-              className="cf-map-canvas"
-              nodes={nodes}
-              edges={edges}
-              nodeTypes={NODE_TYPES}
-              nodesDraggable={false}
-              nodesConnectable={false}
-              elementsSelectable={false}
-              onNodeClick={(_, node) => {
-                setSelected(node.id === selected ? null : node.id);
-                if (!node.data.node.folder) setPanel({ kind: "file", path: node.id });
-              }}
-              onNodeDoubleClick={(_, node) => open(node.data.node)}
-              onPaneClick={() => setSelected(null)}
-              fitView
-              fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
-              minZoom={0.15}
-              maxZoom={2}
-              zoomOnDoubleClick={false}
-              deleteKeyCode={null}
-              panActivationKeyCode={null}
-              selectionKeyCode={null}
-              multiSelectionKeyCode={null}
-              zoomActivationKeyCode={null}
-              proOptions={{ hideAttribution: true }}
-            >
-              <Background variant={BackgroundVariant.Dots} gap={20} size={1.3} />
-            </ReactFlow>
+            <SpotlightContext.Provider value={spotlight}>
+              <ReactFlow<CanvasNode, Edge>
+                className="cf-map-canvas"
+                nodes={nodes}
+                edges={edges}
+                nodeTypes={NODE_TYPES}
+                nodesDraggable={false}
+                nodesConnectable={false}
+                elementsSelectable={false}
+                onNodeClick={(_, node) => {
+                  setSelected(node.id === selected ? null : node.id);
+                  if (!node.data.node.folder) setPanel({ kind: "file", path: node.id });
+                }}
+                onNodeDoubleClick={(_, node) => open(node.data.node)}
+                onNodeMouseEnter={(_, node) => {
+                  window.clearTimeout(leaving.current);
+                  setHovered(node.id);
+                }}
+                onNodeMouseLeave={() => {
+                  window.clearTimeout(leaving.current);
+                  leaving.current = window.setTimeout(() => setHovered(null), 80);
+                }}
+                onPaneClick={() => setSelected(null)}
+                fitView
+                fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
+                minZoom={0.15}
+                maxZoom={2}
+                zoomOnDoubleClick={false}
+                deleteKeyCode={null}
+                panActivationKeyCode={null}
+                selectionKeyCode={null}
+                multiSelectionKeyCode={null}
+                zoomActivationKeyCode={null}
+                proOptions={{ hideAttribution: true }}
+              >
+                <Background variant={BackgroundVariant.Dots} gap={20} size={1.3} />
+              </ReactFlow>
+            </SpotlightContext.Provider>
           )}
           {build && graph && (
             <div className="pointer-events-none absolute bottom-2 left-3 flex flex-col gap-1">
