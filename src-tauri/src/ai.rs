@@ -2546,20 +2546,25 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
         inv.skills_note = skills_note(cwd, engine.native_skills_dir());
     }
     // The repository map for the CLIs that take an app-declared MCP server per run (`--mcp-config`,
-    // `-c mcp_servers…`, `OPENCODE_CONFIG_CONTENT`): a token bound to this repository, revoked when
-    // `_map_grant` drops at the end of the run. Not for a run the caller already gave a server of that
-    // name.
-    // Antigravity takes MCP servers only from files: a workspace plugin, for the run's length. Only
-    // for a run that skips agy's permission prompts (one that may write): a read-only run cannot
-    // answer the "mcp" permission headlessly, agy denies the call, and on a live run the model then
-    // gave up with an empty reply — worse than no map. Allow-rules live in the user's own settings,
-    // which this never writes.
-    let _agy_map_grant = match inv.cwd {
-        Some(cwd) if engine.id() == "gemini" && inv.auto_approve_edits && !inv.read_only => crate::codemap::mcp::for_agy(cwd),
+    // `-c mcp_servers…`, `OPENCODE_CONFIG_CONTENT`, `CLINE_MCP_SETTINGS_PATH`): a token bound to this
+    // repository, revoked when `_map_grant` drops at the end of the run. Not for a run the caller
+    // already gave a server of that name.
+    // Antigravity and Grok take MCP servers only from files: a workspace plugin, the project's
+    // `.grok/config.toml`, for the run's length. Only for a run that skips the CLI's permission
+    // prompts (one that may write): a read-only agy run cannot answer the "mcp" permission
+    // headlessly, agy denies the call, and on a live run the model then gave up with an empty reply —
+    // worse than no map; a read-only Grok run denies every MCP tool (`grok.rs`). Allow-rules live in
+    // the user's own settings, which this never writes.
+    let _file_map_grant = match inv.cwd {
+        Some(cwd) if inv.auto_approve_edits && !inv.read_only => match engine.id() {
+            "gemini" => crate::codemap::mcp::for_agy(cwd),
+            "grok" => crate::codemap::mcp::for_grok(cwd),
+            _ => None,
+        },
         _ => None,
     };
     let _map_grant = match inv.cwd {
-        Some(cwd) if matches!(engine.id(), "claude" | "codex" | "opencode") && !inv.app_mcp.iter().any(|s| s.name == crate::codemap::mcp::SERVER_NAME) => {
+        Some(cwd) if matches!(engine.id(), "claude" | "codex" | "opencode" | "cline") && !inv.app_mcp.iter().any(|s| s.name == crate::codemap::mcp::SERVER_NAME) => {
             crate::codemap::mcp::for_repository(cwd).map(|(server, grant)| {
                 inv.app_mcp.push(server);
                 grant

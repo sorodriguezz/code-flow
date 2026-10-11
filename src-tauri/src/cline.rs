@@ -166,6 +166,25 @@ impl AiEngine for ClineEngine {
         if !model.is_empty() {
             cmd.arg("--model").arg(model);
         }
+        // The app's servers — the repository map, which `ai::run` hands a run in a repository —
+        // through the one channel this CLI has for them: its MCP settings file. Pointed elsewhere by
+        // `CLINE_MCP_SETTINGS_PATH` (its SDK's `resolveMcpSettingsPath`), at a private copy of the
+        // user's own with the map added ([`mcp_settings`]). Environment, never a flag: a Cline that
+        // does not know the variable ignores it and runs as before, where an unknown flag would be
+        // refused outright (see the module docs).
+        //
+        // **`CLINE_SESSION_BACKEND_MODE=local` with it.** Left on `auto`, the CLI hands the session
+        // to a background hub when one is running and *starts* one when not (`createRuntimeHost` in
+        // its core): a hub keeps the environment of whoever started it, so this run's settings path —
+        // a file deleted when the run ends — would become the MCP config of every later session the
+        // user opens, terminal ones included. A local session reads this process's environment and
+        // ends with it, as `--auto-approve` runs in yolo mode already do.
+        if let Some(settings) = mcp_settings(inv) {
+            if let Some(path) = inv.prompt_files.write("cline-mcp", "json", &settings) {
+                cmd.env("CLINE_MCP_SETTINGS_PATH", path);
+                cmd.env("CLINE_SESSION_BACKEND_MODE", "local");
+            }
+        }
         // The prompt is positional and goes last, after every flag — the order a live run was
         // verified with. Exactly one argument: a second one is read as a mistyped subcommand.
         cmd.arg(prompt_argument(inv, &brief(inv)));
@@ -219,6 +238,82 @@ impl AiEngine for ClineEngine {
     fn fetch_models(&self) -> Option<ModelListing> {
         Some(Box::pin(list_models()))
     }
+}
+
+/// Where Cline reads the user's MCP servers from, resolved as its SDK does (`resolveMcpSettingsPath`
+/// and `resolveClineDataDir` in `storage/paths.ts`): `CLINE_MCP_SETTINGS_PATH`, else
+/// `settings/cline_mcp_settings.json` under `CLINE_DATA_DIR`, else under `data/` in `CLINE_DIR`,
+/// else in `~/.cline`.
+fn user_mcp_settings_path() -> Option<std::path::PathBuf> {
+    let var = |name: &str| std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    if let Some(path) = var("CLINE_MCP_SETTINGS_PATH") {
+        return Some(path.into());
+    }
+    let data = match var("CLINE_DATA_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => var("CLINE_DIR").map(std::path::PathBuf::from).or_else(|| dirs::home_dir().map(|home| home.join(".cline")))?.join("data"),
+    };
+    Some(data.join("settings").join("cline_mcp_settings.json"))
+}
+
+/// The MCP settings a run with the app's servers is pointed at, or `None` to leave Cline on the
+/// user's own file — no app server to add, or a file this should not stand in for (see
+/// [`merged_mcp_settings`]). A file that is not there is an empty one; one that cannot be read is
+/// not, and the run keeps the user's servers rather than gaining the map.
+fn mcp_settings(inv: &AiInvocation) -> Option<String> {
+    // The map and nothing else: `mcp_registry::supports` offers Cline none of the servers declared
+    // in CodeFlow, and a flow's node hands over its pick without asking it.
+    let servers: Vec<_> = crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only)
+        .into_iter()
+        .filter(|server| server.name == crate::codemap::mcp::SERVER_NAME)
+        .collect();
+    // Before reading anything: most runs have no app server at all.
+    if !servers.iter().any(|server| server.transport == "http") {
+        return None;
+    }
+    let user = match user_mcp_settings_path().map(std::fs::read_to_string) {
+        Some(Ok(text)) => Some(text),
+        Some(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => return None,
+        _ => None,
+    };
+    merged_mcp_settings(user.as_deref(), &servers)
+}
+
+/// The user's settings (`user`, the file's text) with each remote server of `servers` added as
+/// Streamable HTTP — the shape Cline's config loader takes (`type: "streamableHttp"`, `url`,
+/// `headers`). Everything of the user's is carried over as it was written.
+///
+/// `None` — the run goes without the map — when the file is not a settings object Cline would read,
+/// or when one of its servers is signed in through OAuth: Cline keeps that sign-in in this very file
+/// and writes a refreshed token back to it, so a copy would take the write and leave the user's
+/// file holding a token the provider may already have retired.
+fn merged_mcp_settings(user: Option<&str>, servers: &[crate::mcp_registry::LiveServer]) -> Option<String> {
+    let remote: Vec<_> = servers.iter().filter(|server| server.transport == "http").collect();
+    if remote.is_empty() {
+        return None;
+    }
+    let mut settings = match user {
+        Some(text) if !text.trim().is_empty() => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) if value.is_object() => value,
+            _ => return None,
+        },
+        _ => serde_json::json!({}),
+    };
+    match settings.get("mcpServers") {
+        None => settings["mcpServers"] = serde_json::json!({}),
+        Some(serde_json::Value::Object(existing)) => {
+            if existing.values().any(|server| server.get("oauth").is_some_and(|oauth| !oauth.is_null())) {
+                return None;
+            }
+        }
+        Some(_) => return None,
+    }
+    for server in remote {
+        let headers: serde_json::Map<String, serde_json::Value> =
+            server.headers.iter().map(|(name, value)| (name.clone(), value.clone().into())).collect();
+        settings["mcpServers"][server.name.as_str()] = serde_json::json!({ "type": "streamableHttp", "url": server.url, "headers": headers });
+    }
+    Some(settings.to_string())
 }
 
 /// Splits a stored model id into the provider and the model Cline should be given.
@@ -897,6 +992,84 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    fn map_server() -> crate::mcp_registry::LiveServer {
+        crate::mcp_registry::LiveServer {
+            name: crate::codemap::mcp::SERVER_NAME.to_string(),
+            transport: "http".to_string(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: "http://127.0.0.1:47811/mcp/code".to_string(),
+            headers: vec![("Authorization".to_string(), "Bearer t0k".to_string())],
+        }
+    }
+
+    /// The user's servers are carried over exactly as written, and the map is added in the shape
+    /// Cline's config loader takes for a remote server.
+    #[test]
+    fn the_map_is_added_to_the_users_own_settings() {
+        let user = r#"{"mcpServers":{"files":{"command":"npx","args":["-y","@mcp/fs"],"disabled":true,"timeout":90}},"extra":1}"#;
+        let merged: serde_json::Value = serde_json::from_str(&merged_mcp_settings(Some(user), &[map_server()]).unwrap()).unwrap();
+        assert_eq!(merged["mcpServers"]["files"], serde_json::json!({"command":"npx","args":["-y","@mcp/fs"],"disabled":true,"timeout":90}));
+        assert_eq!(merged["extra"], 1);
+        let map = &merged["mcpServers"][crate::codemap::mcp::SERVER_NAME];
+        assert_eq!(map["type"], "streamableHttp");
+        assert_eq!(map["url"], "http://127.0.0.1:47811/mcp/code");
+        assert_eq!(map["headers"]["Authorization"], "Bearer t0k");
+        // No file of the user's, or an empty one: just the map.
+        for user in [None, Some(""), Some("{}")] {
+            let merged: serde_json::Value = serde_json::from_str(&merged_mcp_settings(user, &[map_server()]).unwrap()).unwrap();
+            assert_eq!(merged["mcpServers"].as_object().unwrap().len(), 1, "{user:?}");
+        }
+    }
+
+    /// A file Cline would not read as settings, and one holding an OAuth sign-in (which Cline
+    /// refreshes in place), are not stood in for.
+    #[test]
+    fn a_settings_file_this_should_not_copy_keeps_the_run_on_the_users_own() {
+        let oauth = r#"{"mcpServers":{"linear":{"type":"streamableHttp","url":"https://mcp.linear.app/mcp","oauth":{"tokens":{"refresh_token":"r"}}}}}"#;
+        for user in ["not json", "[]", r#"{"mcpServers":[]}"#, oauth] {
+            assert!(merged_mcp_settings(Some(user), &[map_server()]).is_none(), "{user}");
+        }
+        // An `oauth` left null is no sign-in.
+        let signed_out = r#"{"mcpServers":{"linear":{"type":"streamableHttp","url":"https://mcp.linear.app/mcp","oauth":null}}}"#;
+        assert!(merged_mcp_settings(Some(signed_out), &[map_server()]).is_some());
+        assert!(merged_mcp_settings(None, &[]).is_none(), "nothing to add");
+    }
+
+    /// A run handed the map is pointed at the private copy — and kept off the background hub, which
+    /// would otherwise keep this run's path as its own after the file is gone. A read-only run gets
+    /// the map too: it is the one server such a run may load (`codemap::mcp::loadable`).
+    #[test]
+    fn a_run_with_the_map_points_cline_at_its_own_settings_and_runs_locally() {
+        for read_only in [false, true] {
+            let mut inv = AiInvocation::new("¿Dónde se declara applyDiscount?", "");
+            inv.cwd = Some("/repo");
+            inv.read_only = read_only;
+            inv.app_mcp = vec![map_server()];
+            if mcp_settings(&inv).is_none() {
+                // This machine's own Cline settings hold an OAuth sign-in or cannot be read: the
+                // case the test above covers, and nothing to check here.
+                return;
+            }
+            let cmd = ClineEngine.build_command("cline", &inv);
+            let envs: std::collections::HashMap<String, String> = cmd
+                .as_std()
+                .get_envs()
+                .filter_map(|(key, value)| Some((key.to_string_lossy().into_owned(), value?.to_string_lossy().into_owned())))
+                .collect();
+            assert_eq!(envs.get("CLINE_SESSION_BACKEND_MODE").map(String::as_str), Some("local"));
+            let path = envs.get("CLINE_MCP_SETTINGS_PATH").expect("the settings path");
+            let written = std::fs::read_to_string(path).unwrap();
+            assert!(written.contains(crate::codemap::mcp::SERVER_NAME), "{written}");
+            drop(inv);
+            assert!(!std::path::Path::new(path).exists(), "deleted with the invocation");
+        }
+        let plain = AiInvocation::new("hola", "");
+        let cmd = ClineEngine.build_command("cline", &plain);
+        assert!(!cmd.as_std().get_envs().any(|(key, _)| key == "CLINE_MCP_SETTINGS_PATH"), "no app server, the user's own file");
     }
 
     /// A review has a repository and must not change it: plan mode, pointed at that repository.

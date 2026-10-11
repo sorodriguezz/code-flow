@@ -178,9 +178,15 @@ function CodeMap() {
   const root = project?.local_path ?? null;
   const [focus, setFocus] = useState("");
   const [mode, setModeState] = useState<Mode>("global");
-  const [graph, setGraph] = useState<MapGraph | null>(null);
-  const [build, setBuild] = useState<MapBuild | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /** The last map that arrived, and the repository it is of. Read through `root` below, so the
+   *  render that switches repositories already shows the loading state: the previous repository's
+   *  map used to stay on screen until the new one arrived (user report, 2026-10-11). Within one
+   *  repository the old map stays while a new one loads, under the toolbar's spinner. */
+  const [shown, setShown] = useState<{ root: string; graph: MapGraph; build: MapBuild } | null>(null);
+  const [failure, setFailure] = useState<{ root: string; message: string } | null>(null);
+  const graph = shown?.root === root ? shown.graph : null;
+  const build = shown?.root === root ? shown.build : null;
+  const error = failure?.root === root ? failure.message : null;
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   /** The node under the pointer. Its lines light up while it is there — on a map this dense, reading
@@ -220,14 +226,13 @@ function CodeMap() {
       (view === "global" ? codemapGlobal(root) : codemapGraph(root, target))
         .then(({ graph, build }) => {
           if (ticket !== requested.current) return;
-          setGraph(graph);
-          setBuild(build);
-          setError(null);
+          setShown({ root, graph, build });
+          setFailure(null);
           if (view === "global") return;
           FOCUS.set(root, graph.focus);
           if (graph.focus !== target) setFocus(graph.focus);
         })
-        .catch((e) => ticket === requested.current && setError(String(e)))
+        .catch((e) => ticket === requested.current && setFailure({ root, message: String(e) }))
         .finally(() => ticket === requested.current && setLoading(false));
     },
     [root],
@@ -625,20 +630,25 @@ interface Async<T> {
   loading: boolean;
 }
 
+const PENDING: Async<never> = { data: null, error: null, loading: true };
+
+/** `run`'s result for these `deps`. The answer is kept with the deps it was for, so the render where
+ *  they change — another repository, another file — is already loading rather than the previous
+ *  answer for one frame until the effect clears it. */
 function useAsync<T>(run: () => Promise<T>, deps: unknown[]): Async<T> {
-  const [state, setState] = useState<Async<T>>({ data: null, error: null, loading: true });
+  const key = JSON.stringify(deps);
+  const [state, setState] = useState<Async<T> & { key: string | null }>({ ...PENDING, key: null });
   useEffect(() => {
     let live = true;
-    setState({ data: null, error: null, loading: true });
     run()
-      .then((data) => live && setState({ data, error: null, loading: false }))
-      .catch((e) => live && setState({ data: null, error: String(e), loading: false }));
+      .then((data) => live && setState({ data, error: null, loading: false, key }))
+      .catch((e) => live && setState({ data: null, error: String(e), loading: false, key }));
     return () => {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
-  return state;
+  return state.key === key ? state : PENDING;
 }
 
 function Loading() {

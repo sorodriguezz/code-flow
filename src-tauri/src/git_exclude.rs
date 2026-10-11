@@ -157,6 +157,35 @@ pub fn replace(repo: &Path, old: &str, new: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Takes the line `pattern` out of the working copy's `info/exclude` — for a file the app keeps in
+/// a repository only while a run lasts, whose path the user may one day want for a file of their
+/// own (Grok's `.grok/config.toml`, see `codemap::mcp`). Only the exact line goes, and only a
+/// caller whose [`exclude`] wrote it should ask. Returns whether the file changed.
+pub fn unexclude(repo: &Path, pattern: &str) -> std::io::Result<bool> {
+    let _serialised = WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pattern = pattern.trim();
+    let Some(common) = common_git_dir(repo) else { return Ok(false) };
+    if pattern.is_empty() {
+        return Ok(false);
+    }
+    let file = common.join("info").join("exclude");
+    let current = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if !current.lines().any(|line| line.trim() == pattern) {
+        return Ok(false);
+    }
+    let kept: Vec<&str> = current.lines().filter(|line| line.trim() != pattern).collect();
+    let mut text = kept.join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    std::fs::write(&file, text)?;
+    Ok(true)
+}
+
 /// Serialises every read-check-rewrite of an exclude file: two agent turns syncing skills into one
 /// repository at once — they run side by side now — would each read the file without the other's
 /// line, and the second write would drop the first's. One process-wide lock; the file is tiny and
@@ -321,6 +350,19 @@ mod tests {
         std::fs::remove_dir_all(repo.join(".git").join("info")).ok();
         assert!(exclude(&repo, "/.codeflow/").unwrap());
         assert!(repo.join(".git").join("info").join("exclude").exists());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Only the exact line goes: a wider pattern the user wrote, and every other line, stay.
+    #[test]
+    fn unexclude_takes_out_only_the_exact_line() {
+        let repo = repo_with_a_commit();
+        let file = repo.join(".git").join("info").join("exclude");
+        std::fs::write(&file, "# mine\n/.grok/\n").unwrap();
+        assert!(exclude(&repo, "/.grok/config.toml").unwrap());
+        assert!(unexclude(&repo, "/.grok/config.toml").unwrap());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\n/.grok/\n");
+        assert!(!unexclude(&repo, "/.grok/config.toml").unwrap(), "nothing left to take out");
         std::fs::remove_dir_all(&repo).ok();
     }
 }

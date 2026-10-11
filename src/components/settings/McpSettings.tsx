@@ -98,13 +98,14 @@ function pairs(text: string, separator: "=" | ":"): Record<string, string> {
  * any engine starts it.
  */
 /** `bare`: inside «Herramientas de IA», whose rail names the pane — the hint stays, the heading goes. */
-/** The setting that keeps the repository map out of the CLI agents' runs; anything but "false" is on. */
+/** The setting that keeps the repository map out of every agent's runs; anything but "false" is on. */
 const CODEMAP_MCP_KEY = "codemap_mcp";
 
 /**
- * Whether the CLI agents (Claude Code, Codex, opencode, and Gemini where it can) get CodeFlow's own
- * server — the repository map (`codemap::mcp`) — on every run in a repository. Not a row of the
- * list below: it is not the user's server, has no command, and is not per workspace.
+ * Whether the agents get CodeFlow's own server — the repository map (`codemap::mcp`) — on every run
+ * in a repository: Claude Code, Codex, opencode and Cline per run, Gemini and Grok where they can,
+ * and the local models' in-process agent as built-in tools. Not a row of the list below: it is not
+ * the user's server, has no command, and is not per workspace.
  */
 function CodemapServerToggle() {
   const t = useT();

@@ -537,6 +537,8 @@ async fn agent(
 ) -> Result<AiRun, String> {
     let root = inv.cwd.unwrap_or_default();
     let toolbox = tools::Toolbox::new(root, grants)?;
+    // The same switch that keeps the map from the CLI agents (Settings › Herramientas de IA › MCP).
+    let toolbox = if crate::codemap::mcp::enabled() { toolbox } else { toolbox.without_map() };
     #[cfg(test)]
     let toolbox = if std::env::var("CODEFLOW_LIVE_NO_MAP").is_ok() { toolbox.without_map() } else { toolbox };
     let schemas = toolbox.schemas();

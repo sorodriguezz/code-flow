@@ -61,7 +61,8 @@ pub struct Toolbox {
     /// a file rewrites it from imagination. Seen live: a 7B replaced a README it had never opened.
     read: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Whether the repository map's tools are offered (`find_symbol`, `find_usages`, `outline`).
-    /// Off only to measure what the map is worth (the live test's `CODEFLOW_LIVE_NO_MAP`).
+    /// Off when the user switched the map off for every agent (`codemap::mcp::enabled`), and to
+    /// measure what the map is worth (the live test's `CODEFLOW_LIVE_NO_MAP`).
     map: bool,
     /// Declarations this run renamed or removed — checked again before it may finish
     /// ([`Toolbox::dangling`]).
@@ -105,8 +106,8 @@ impl Toolbox {
         })
     }
 
-    /// The same toolbox without the repository map — the baseline the map is measured against.
-    #[cfg(test)]
+    /// The same toolbox without the repository map: the plain file list before the first step, and
+    /// no `find_symbol` / `find_usages` / `outline`.
     pub fn without_map(mut self) -> Self {
         self.map = false;
         self

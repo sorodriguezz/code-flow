@@ -1,5 +1,7 @@
-//! The repository map as MCP tools for the CLI agents CodeFlow runs — Claude Code and Codex get
-//! `find_symbol`, `find_usages`, `file_outline` and `project_map` beside their own Grep and Read.
+//! The repository map as MCP tools for the CLI agents CodeFlow runs — Claude Code, Codex, opencode
+//! and Cline are handed the server per run, agy and Grok find it in a file written for the run (see
+//! [`FileClient`]) — `find_symbol`, `find_usages`, `file_outline` and `project_map` beside their own
+//! Grep and Read. The local agent answers the same queries in-process (`local_agent::tools`).
 //!
 //! **Streamable HTTP at `/mcp/code` on the webhook port**, the same server and the same plain-JSON
 //! answers as the Flujos tools (`flows::mcp`), so nothing is spawned per run and nothing is
@@ -63,83 +65,205 @@ pub fn for_run(root: &str) -> Option<(LiveServer, Grant)> {
     Some((server, Grant { token }))
 }
 
-/// Where an Antigravity (`agy`) run finds the map: a workspace plugin, the one place besides the
-/// user's global config that agy reads MCP servers from.
-const AGY_PLUGIN: &str = ".agents/plugins/codeflow-map";
-
-/// Repositories with a live agy plugin: how many runs hold it, and the token in its URL.
-static AGY_RUNS: LazyLock<Mutex<HashMap<std::path::PathBuf, (usize, String)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// An agy run's access to the map. The plugin folder goes when the last run in its repository ends.
-pub struct AgyGrant {
-    root: std::path::PathBuf,
+/// Whether the map is on (Settings › Herramientas de IA › MCP) — one switch for every agent: the
+/// CLIs handed this server and the local agent, which answers the same queries in-process
+/// (`local_agent::tools`). Anything but "false" is on, a setting nobody wrote included.
+pub fn enabled() -> bool {
+    crate::ai_usage::setting("codemap_mcp").as_deref() != Some("false")
 }
 
-impl Drop for AgyGrant {
-    fn drop(&mut self) {
-        let Ok(mut runs) = AGY_RUNS.lock() else { return };
-        let Some(entry) = runs.get_mut(&self.root) else { return };
-        entry.0 = entry.0.saturating_sub(1);
-        if entry.0 > 0 {
-            return;
+/// The working tree `cwd` is the root of, canonical — `None` for a subfolder of one or a folder
+/// outside git. The map is a repository's, so only a run at a repository's root is given it.
+fn repository_root(cwd: &str) -> Option<std::path::PathBuf> {
+    let root = std::path::Path::new(cwd).canonicalize().ok()?;
+    let repo = git2::Repository::open(&root).ok()?;
+    (repo.workdir()?.canonicalize().ok()? == root).then_some(root)
+}
+
+/// The CLIs that take an MCP server only from a file — never from their command line or their
+/// environment — and so get the map as a file in the repository for the run's length: git-excluded
+/// while it exists, removed (exclusion and all) when the last run holding it ends. The user's own
+/// global config is theirs and is never written.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum FileClient {
+    /// Antigravity CLI 1.2 reads MCP servers from `~/.gemini/config/mcp_config.json` or a plugin's
+    /// `mcp_config.json`, and its Streamable HTTP transport has a `url` and nothing else, no
+    /// headers. A plugin under the repository's own `.agents/` is discovered for that workspace.
+    Agy,
+    /// Grok Build reads `[mcp_servers]` from `~/.grok/config.toml` and from a `.grok/config.toml` in
+    /// the working directory and each folder up to the git root (its MCP guide); its `GROK_CONFIG`
+    /// overlay is confined to soft settings and cannot "add a discovery source" (its configuration
+    /// guide). So the project file — and only where the repository has none of its own.
+    Grok,
+}
+
+/// The first line of a `.grok/config.toml` this app wrote — the same one `chat_cmd::write_grok_mcp`
+/// writes in a repo-less chat's folder. A file without it is the user's.
+const GROK_MARKER: &str = "# Managed by CodeFlow";
+
+impl FileClient {
+    /// What a run writes, relative to the repository root: a folder for agy, a file for Grok.
+    fn path(self) -> &'static str {
+        match self {
+            FileClient::Agy => ".agents/plugins/codeflow-map",
+            FileClient::Grok => ".grok/config.toml",
         }
-        let (_, token) = runs.remove(&self.root).unwrap_or_default();
-        if let Ok(mut tokens) = RUNS.lock() {
-            tokens.remove(&token);
+    }
+
+    fn exclude_line(self) -> String {
+        match self {
+            FileClient::Agy => format!("/{}/", self.path()),
+            FileClient::Grok => format!("/{}", self.path()),
         }
-        let plugin = self.root.join(AGY_PLUGIN);
-        let _ = std::fs::remove_dir_all(&plugin);
-        // The folders above it only if this made them and nothing else lives there.
-        if let Some(plugins) = plugin.parent() {
-            let _ = std::fs::remove_dir(plugins);
-            if let Some(agents) = plugins.parent() {
-                let _ = std::fs::remove_dir(agents);
+    }
+
+    /// Whether the place is free for this app's file: always for agy's plugin, whose folder is
+    /// named after this app; for Grok only when there is no `.grok/config.toml` or it is ours.
+    fn free(self, root: &std::path::Path) -> bool {
+        match self {
+            FileClient::Agy => true,
+            FileClient::Grok => match std::fs::read_to_string(root.join(self.path())) {
+                Ok(text) => text.starts_with(GROK_MARKER),
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            },
+        }
+    }
+
+    fn write(self, root: &std::path::Path, url: &str) -> Option<()> {
+        match self {
+            FileClient::Agy => {
+                let plugin = root.join(self.path());
+                std::fs::create_dir_all(&plugin).ok()?;
+                let manifest = json!({
+                    "name": "codeflow-map",
+                    "description": "CodeFlow's map of this repository, for this run: where each symbol is declared and which files use it. Written by CodeFlow and removed when the run ends.",
+                });
+                let config = json!({ "mcpServers": { SERVER_NAME: { "url": url } } });
+                std::fs::write(plugin.join("plugin.json"), serde_json::to_string_pretty(&manifest).ok()?).ok()?;
+                std::fs::write(plugin.join("mcp_config.json"), serde_json::to_string_pretty(&config).ok()?).ok()
+            }
+            FileClient::Grok => {
+                std::fs::create_dir_all(root.join(".grok")).ok()?;
+                // `url` and `enabled`, the keys `mcp_registry::grok_config` already hands Grok; a
+                // JSON string is a TOML basic string.
+                let text = format!(
+                    "{GROK_MARKER}: CodeFlow's map of this repository for the runs working here now. Removed when the last of them ends.\n\n[mcp_servers.{SERVER_NAME}]\nurl = {}\nenabled = true\n",
+                    serde_json::to_string(url).ok()?
+                );
+                std::fs::write(root.join(self.path()), text).ok()
             }
         }
     }
+
+    /// Removes what [`FileClient::write`] wrote, and the folders above it when nothing else lives
+    /// there. Grok's file only while it is still ours.
+    fn remove(self, root: &std::path::Path) {
+        let path = root.join(self.path());
+        match self {
+            FileClient::Agy => {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            FileClient::Grok => {
+                if std::fs::read_to_string(&path).is_ok_and(|text| text.starts_with(GROK_MARKER)) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        let mut dir = path.parent();
+        while let Some(folder) = dir.filter(|folder| *folder != root) {
+            if std::fs::remove_dir(folder).is_err() {
+                break;
+            }
+            dir = folder.parent();
+        }
+    }
 }
 
-/// The map for an agy run in `cwd`: a git-excluded workspace plugin whose MCP config points at this
-/// server, the token in the URL.
-///
-/// agy (Antigravity CLI 1.2) takes no MCP server on its command line — only from
-/// `~/.gemini/config/mcp_config.json` or a plugin's `mcp_config.json` — and its Streamable HTTP
-/// transport has a `url` and nothing else, no headers. The user's global file is theirs and is
-/// never written; a plugin under the repository's own `.agents/` is discovered for that workspace
-/// alone, kept out of git through `info/exclude`, and removed when the run ends.
-pub fn for_agy(cwd: &str) -> Option<AgyGrant> {
-    if crate::ai_usage::setting("codemap_mcp").as_deref() == Some("false") {
+/// A repository's live map file for one client: how many runs hold it, the token in its URL, and
+/// whether its `info/exclude` line is this app's to take out again.
+struct FileRun {
+    holders: usize,
+    token: String,
+    excluded: bool,
+}
+
+static FILE_RUNS: LazyLock<Mutex<HashMap<(FileClient, std::path::PathBuf), FileRun>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A file-configured run's access to the map. The file goes when the last run in its repository ends.
+pub struct FileGrant {
+    client: FileClient,
+    root: std::path::PathBuf,
+}
+
+impl Drop for FileGrant {
+    fn drop(&mut self) {
+        let Ok(mut runs) = FILE_RUNS.lock() else { return };
+        let key = (self.client, self.root.clone());
+        let Some(entry) = runs.get_mut(&key) else { return };
+        entry.holders = entry.holders.saturating_sub(1);
+        if entry.holders > 0 {
+            return;
+        }
+        let Some(run) = runs.remove(&key) else { return };
+        if let Ok(mut tokens) = RUNS.lock() {
+            tokens.remove(&run.token);
+        }
+        // Under the lock, so a run starting in this repository now finds the place free again.
+        self.client.remove(&self.root);
+        if run.excluded {
+            let _ = crate::git_exclude::unexclude(&self.root, &self.client.exclude_line());
+        }
+    }
+}
+
+/// The map for an agy run in `cwd`, as a workspace plugin — see [`FileClient::Agy`].
+pub fn for_agy(cwd: &str) -> Option<FileGrant> {
+    for_file_client(FileClient::Agy, cwd)
+}
+
+/// The map for a Grok run in `cwd`, as the project's `.grok/config.toml` — see [`FileClient::Grok`].
+/// `None` when the repository has a `.grok/config.toml` of its own.
+pub fn for_grok(cwd: &str) -> Option<FileGrant> {
+    for_file_client(FileClient::Grok, cwd)
+}
+
+fn for_file_client(client: FileClient, cwd: &str) -> Option<FileGrant> {
+    if !enabled() {
         return None;
     }
-    let root = std::path::Path::new(cwd).canonicalize().ok()?;
-    let repo = git2::Repository::open(&root).ok()?;
-    if repo.workdir()?.canonicalize().ok()? != root {
-        return None;
-    }
+    let root = repository_root(cwd)?;
     let app = crate::ai_usage::app()?;
     crate::flows::triggers::webhook::ensure_server(app).ok()?;
-    let port = crate::flows::triggers::webhook::port();
-    install_agy_plugin(&root, port)
+    install(client, &root, crate::flows::triggers::webhook::port())
 }
 
-fn install_agy_plugin(root: &std::path::Path, port: u16) -> Option<AgyGrant> {
-    let mut runs = AGY_RUNS.lock().ok()?;
-    let entry = runs.entry(root.to_path_buf()).or_insert_with(|| (0, format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())));
-    entry.0 += 1;
-    let token = entry.1.clone();
-    drop(runs);
-    RUNS.lock().ok()?.insert(token.clone(), root.to_string_lossy().to_string());
-    let grant = AgyGrant { root: root.to_path_buf() };
-    let plugin = root.join(AGY_PLUGIN);
-    std::fs::create_dir_all(&plugin).ok()?;
-    let manifest = json!({
-        "name": "codeflow-map",
-        "description": "CodeFlow's map of this repository, for this run: where each symbol is declared and which files use it. Written by CodeFlow and removed when the run ends.",
+/// Writes `client`'s file in `root`, or joins the runs already holding it. The token rides in the
+/// URL (`/mcp/code/<token>`): agy's transport sends no headers, and a URL is the one key every Grok
+/// config reader takes. A model that reads the file learns a token good for the map of the
+/// repository it is already working in, from this machine, until the last run here ends.
+fn install(client: FileClient, root: &std::path::Path, port: u16) -> Option<FileGrant> {
+    let mut runs = FILE_RUNS.lock().ok()?;
+    let key = (client, root.to_path_buf());
+    if !runs.contains_key(&key) && !client.free(root) {
+        return None;
+    }
+    let entry = runs.entry(key.clone()).or_insert_with(|| FileRun {
+        holders: 0,
+        token: format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()),
+        excluded: false,
     });
-    let config = json!({ "mcpServers": { SERVER_NAME: { "url": format!("http://127.0.0.1:{port}{PATH}/{token}") } } });
-    std::fs::write(plugin.join("plugin.json"), serde_json::to_string_pretty(&manifest).ok()?).ok()?;
-    std::fs::write(plugin.join("mcp_config.json"), serde_json::to_string_pretty(&config).ok()?).ok()?;
-    let _ = crate::git_exclude::exclude(root, &format!("/{AGY_PLUGIN}/"));
+    entry.holders += 1;
+    let token = entry.token.clone();
+    drop(runs);
+    // From here every way out releases this run's hold.
+    let grant = FileGrant { client, root: root.to_path_buf() };
+    RUNS.lock().ok()?.insert(token.clone(), root.to_string_lossy().to_string());
+    client.write(root, &format!("http://127.0.0.1:{port}{PATH}/{token}"))?;
+    if crate::git_exclude::exclude(root, &client.exclude_line()).unwrap_or(false) {
+        if let Some(entry) = FILE_RUNS.lock().ok()?.get_mut(&key) {
+            entry.excluded = true;
+        }
+    }
     Some(grant)
 }
 
@@ -157,16 +281,10 @@ pub fn loadable(servers: &[LiveServer], read_only: bool) -> Vec<LiveServer> {
 /// The server for a CLI run in `cwd`, when that is a repository's working tree and the user has
 /// not switched it off (Settings › Herramientas de IA › MCP). The grant must outlive the run.
 pub fn for_repository(cwd: &str) -> Option<(LiveServer, Grant)> {
-    if crate::ai_usage::setting("codemap_mcp").as_deref() == Some("false") {
+    if !enabled() {
         return None;
     }
-    let root = std::path::Path::new(cwd).canonicalize().ok()?;
-    let repo = git2::Repository::open(&root).ok()?;
-    let workdir = repo.workdir()?.canonicalize().ok()?;
-    if workdir != root {
-        return None;
-    }
-    for_run(&root.to_string_lossy())
+    for_run(&repository_root(cwd)?.to_string_lossy())
 }
 
 fn respond(status: StatusCode, value: Option<Value>) -> Response {
@@ -415,23 +533,85 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_agy_plugin_lives_as_long_as_its_last_run_and_stays_out_of_git() {
-        let dir = std::env::temp_dir().join(format!("codeflow-agy-plugin-{}", uuid::Uuid::new_v4()));
+    fn scratch_repo(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("codeflow-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         git2::Repository::init(&dir).unwrap();
-        let root = dir.canonicalize().unwrap();
-        let first = install_agy_plugin(&root, 47811).unwrap();
-        let second = install_agy_plugin(&root, 47811).unwrap();
-        let config = std::fs::read_to_string(root.join(AGY_PLUGIN).join("mcp_config.json")).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    fn excluded(root: &std::path::Path) -> String {
+        std::fs::read_to_string(root.join(".git/info/exclude")).unwrap_or_default()
+    }
+
+    #[test]
+    fn an_agy_plugin_lives_as_long_as_its_last_run_and_stays_out_of_git() {
+        let root = scratch_repo("agy-plugin");
+        let plugin = root.join(FileClient::Agy.path());
+        let first = install(FileClient::Agy, &root, 47811).unwrap();
+        let second = install(FileClient::Agy, &root, 47811).unwrap();
+        let config = std::fs::read_to_string(plugin.join("mcp_config.json")).unwrap();
         assert!(config.contains("http://127.0.0.1:47811/mcp/code/"), "{config}");
-        let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
-        assert!(exclude.contains("/.agents/plugins/codeflow-map/"), "{exclude}");
+        assert!(excluded(&root).contains("/.agents/plugins/codeflow-map/"));
         drop(first);
-        assert!(root.join(AGY_PLUGIN).exists(), "another run still holds it");
+        assert!(plugin.exists(), "another run still holds it");
         drop(second);
         assert!(!root.join(".agents").exists(), "gone, with the folders it made");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!excluded(&root).contains("codeflow-map"), "and its exclude line with it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The project file Grok reads its servers from, the token in the URL: shared by the runs in the
+    /// repository, gone with the last of them — and with it the `.grok` folder it made and the
+    /// exclude line, since `.grok/config.toml` is a path the user may later want for their own.
+    #[test]
+    fn a_grok_project_config_lives_as_long_as_its_last_run_and_stays_out_of_git() {
+        let root = scratch_repo("grok-config");
+        let file = root.join(".grok/config.toml");
+        let first = install(FileClient::Grok, &root, 47811).unwrap();
+        let second = install(FileClient::Grok, &root, 47811).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with(GROK_MARKER), "{text}");
+        assert!(text.contains(&format!("\n[mcp_servers.{SERVER_NAME}]\n")), "{text}");
+        let url = text.lines().find_map(|l| l.strip_prefix("url = \"")).and_then(|rest| rest.strip_suffix('"')).unwrap();
+        assert!(url.starts_with("http://127.0.0.1:47811/mcp/code/"), "{url}");
+        let token = url.rsplit('/').next().unwrap();
+        assert_eq!(RUNS.lock().unwrap().get(token).map(String::as_str), Some(root.to_string_lossy().as_ref()));
+        assert!(excluded(&root).lines().any(|l| l == "/.grok/config.toml"));
+        drop(first);
+        assert!(file.exists(), "another run still holds it");
+        drop(second);
+        assert!(!root.join(".grok").exists(), "gone, with the folder it made");
+        assert!(!excluded(&root).contains(".grok"), "{}", excluded(&root));
+        assert!(RUNS.lock().unwrap().get(token).is_none(), "the token went with the last run");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `.grok/config.toml` the repository already has is the user's: never written, never
+    /// removed, and the run goes without the map.
+    #[test]
+    fn a_grok_config_of_the_users_own_is_left_alone() {
+        let root = scratch_repo("grok-own");
+        std::fs::create_dir_all(root.join(".grok")).unwrap();
+        let mine = "[mcp_servers.linear]\nurl = \"https://mcp.linear.app/mcp\"\n";
+        std::fs::write(root.join(".grok/config.toml"), mine).unwrap();
+        assert!(install(FileClient::Grok, &root, 47811).is_none());
+        assert_eq!(std::fs::read_to_string(root.join(".grok/config.toml")).unwrap(), mine);
+        assert!(!excluded(&root).contains(".grok"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One a crashed run left behind is still ours: taken over, and cleaned up this time.
+    #[test]
+    fn a_grok_config_left_by_an_earlier_run_is_taken_over() {
+        let root = scratch_repo("grok-stale");
+        std::fs::create_dir_all(root.join(".grok")).unwrap();
+        std::fs::write(root.join(".grok/config.toml"), format!("{GROK_MARKER}: old\n")).unwrap();
+        let grant = install(FileClient::Grok, &root, 47811).unwrap();
+        assert!(std::fs::read_to_string(root.join(".grok/config.toml")).unwrap().contains("/mcp/code/"));
+        drop(grant);
+        assert!(!root.join(".grok").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -459,15 +639,23 @@ mod tests {
 /// server does, builds each engine's command with the app's own builder (`build_command` with the
 /// server in `app_mcp`, as `ai::run` hands it over), and asserts the CLI loaded the server and
 /// called a map tool:
-/// `CODEMAP_LIVE_CLI=claude|codex|both|opencode|agy cargo test --lib codemap::mcp::live -- --ignored --nocapture --test-threads=1`
+/// `CODEMAP_LIVE_CLI=claude|codex|both|opencode|agy|grok|cline cargo test --lib codemap::mcp::live -- --ignored --nocapture --test-threads=1`
 #[cfg(test)]
 mod live {
     use super::*;
     use crate::ai::{AiEngine, AiInvocation};
 
+    /// `tools/call` requests the test server has answered — proof a client called the map, for the
+    /// CLIs whose output does not list their tool calls (Grok's `json`).
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     async fn serve() -> u16 {
         async fn route(method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Bytes) -> Response {
-            handle(&method, uri.path(), &headers, &body, false).await
+            let response = handle(&method, uri.path(), &headers, &body, false).await;
+            if response.status() == StatusCode::OK && String::from_utf8_lossy(&body).contains("\"tools/call\"") {
+                CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            response
         }
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -604,7 +792,7 @@ mod live {
         let port = serve().await;
         let model = std::env::var("CODEMAP_LIVE_AGY_MODEL").unwrap_or_else(|_| "gemini-3.8-flash-low".to_string());
         for read_only in [false] {
-            let grant = install_agy_plugin(&dir, port).expect("plugin written");
+            let grant = install(FileClient::Agy, &dir, port).expect("plugin written");
             let mut inv = AiInvocation::new(PROMPT, "");
             inv.model = &model;
             inv.cwd = Some(&root);
@@ -620,7 +808,7 @@ mod live {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let mentions: Vec<&str> = stdout.lines().filter(|l| l.contains("codeflow_map") || l.contains("find_symbol") || l.contains("find_usages")).collect();
             eprintln!("\n[agy read_only={read_only}] map lines: {mentions:#?}\n  last lines:\n{}\n  stderr: {}", stdout.lines().rev().take(4).collect::<Vec<_>>().join("\n"), String::from_utf8_lossy(&output.stderr).lines().rev().take(8).collect::<Vec<_>>().join("\n"));
-            assert!(!dir.join(AGY_PLUGIN).exists(), "the plugin went with the run");
+            assert!(!dir.join(FileClient::Agy.path()).exists(), "the plugin went with the run");
             let called = stdout.lines().any(|l| l.contains("\"call_mcp_tool\"") && l.contains("\"state\":\"DONE\"") && l.contains("codeflow_map"));
             assert!(called, "no map tool call completed");
             let answer = stdout
@@ -630,6 +818,70 @@ mod live {
                 .and_then(|v| v["result"]["response"].as_str().map(str::to_string))
                 .unwrap_or_default();
             assert!(answer.contains("pricing.js"), "{answer}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Grok finds the map in the project's `.grok/config.toml`, as `ai::run` writes it — only for a
+    /// run with `--always-approve`, the one kind that may call an MCP tool headlessly (a read-only run
+    /// passes `--deny MCPTool`). Its `json` output lists no tool calls, so the test server counts them.
+    #[tokio::test]
+    #[ignore]
+    async fn grok_loads_the_map_and_calls_it() {
+        if !wanted("grok") {
+            return;
+        }
+        let dir = repo();
+        let root = dir.to_string_lossy().to_string();
+        let port = serve().await;
+        let model = std::env::var("CODEMAP_LIVE_GROK_MODEL").unwrap_or_default();
+        let before = CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        let grant = install(FileClient::Grok, &dir, port).expect("config written");
+        let mut inv = AiInvocation::new(PROMPT, "");
+        inv.model = &model;
+        inv.cwd = Some(&root);
+        inv.auto_approve_edits = true;
+        let mut cmd = crate::grok::GrokEngine.build_command(&crate::ai::resolved_program("grok"), &inv);
+        crate::ai::apply_command_path(&mut cmd);
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+        eprintln!("$ grok {}", cmd.as_std().get_args().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>().join(" "));
+        let output = tokio::time::timeout(std::time::Duration::from_secs(240), cmd.output()).await.expect("under 4 minutes").expect("grok ran");
+        drop(inv);
+        drop(grant);
+        let calls = CALLS.load(std::sync::atomic::Ordering::SeqCst) - before;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let answer = serde_json::from_str::<Value>(stdout.trim()).ok().and_then(|v| v["text"].as_str().map(str::to_string)).unwrap_or_default();
+        eprintln!("\n[grok] map calls: {calls}\n  answer: {answer}\n  stderr: {}", String::from_utf8_lossy(&output.stderr).lines().rev().take(8).collect::<Vec<_>>().join("\n"));
+        assert!(!dir.join(".grok").exists(), "the config went with the run");
+        assert!(calls > 0, "no map tool was called\nstdout: {stdout}");
+        assert!(answer.contains("pricing.js"), "{answer}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cline takes the server through `CLINE_MCP_SETTINGS_PATH` (a copy of the user's settings plus
+    /// the map, see `cline.rs`), on the model `CODEMAP_LIVE_CLINE_MODEL` names (`provider/model`) or
+    /// the one Cline is configured with. Asserted for a run that may write; a read-only run (plan
+    /// mode) is measured and reported, not asserted — whether plan mode offers MCP tools is Cline's.
+    #[tokio::test]
+    #[ignore]
+    async fn cline_loads_the_map_and_calls_it() {
+        if !wanted("cline") {
+            return;
+        }
+        let dir = repo();
+        let root = dir.to_string_lossy().to_string();
+        let port = serve().await;
+        let model = std::env::var("CODEMAP_LIVE_CLINE_MODEL").unwrap_or_default();
+        for read_only in [false, true] {
+            let before = CALLS.load(std::sync::atomic::Ordering::SeqCst);
+            let out = run(&crate::cline::ClineEngine, "cline", &model, &root, port, read_only).await;
+            let calls = CALLS.load(std::sync::atomic::Ordering::SeqCst) - before;
+            let answer = crate::cline::ClineEngine.interpret(true, "exit status: 0", &out.stdout, &out.stderr).map(|run| run.text).unwrap_or_else(|e| e);
+            eprintln!("\n[cline read_only={read_only}] map calls: {calls}\n  answer: {answer}\n  stderr: {}", out.stderr.lines().rev().take(8).collect::<Vec<_>>().join("\n"));
+            if !read_only {
+                assert!(calls > 0, "no map tool was called\nstdout: {}", out.stdout);
+                assert!(answer.contains("pricing.js"), "{answer}");
+            }
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
