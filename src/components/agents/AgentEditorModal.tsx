@@ -9,6 +9,7 @@ import { upsertWorkspaceAgent } from "../../lib/tauri/commands";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { useAgentsStore } from "../../state/agentsStore";
+import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useAccountName, useAiAccountsStore, useProviderAccounts } from "../../state/aiAccountsStore";
 import { SYSTEM_ACCOUNT, resolveAccount, validPreference } from "../../lib/aiAccounts";
@@ -69,6 +70,13 @@ export function AgentEditorModal({
   useEffect(() => {
     void ensureAccounts();
   }, [ensureAccounts]);
+
+  // Engines not found on this machine are not offered — the agent's own stays, whatever it is.
+  const statuses = useProviderStatusStore((s) => s.byProvider);
+  const checkProviders = useProviderStatusStore((s) => s.checkAll);
+  useEffect(() => {
+    if (Object.keys(useProviderStatusStore.getState().byProvider).length === 0) void checkProviders();
+  }, [checkProviders]);
 
   const options = useMemo(
     () => (provider ? modelOptionsFor(provider, modelsByProvider[provider]) : []),
@@ -176,7 +184,7 @@ export function AgentEditorModal({
               }}
               options={[
                 { value: "", label: t("settings.sddAgentProviderDefault") },
-                ...AI_PROVIDERS.filter((p) => p.available).map((p) => ({
+                ...AI_PROVIDERS.filter((p) => p.available && (p.id === provider || isProviderReady(statuses, p.id))).map((p) => ({
                   value: p.id,
                   label: p.label ?? (p.labelKey ? t(p.labelKey) : p.id),
                   leading: <ProviderGlyph providerId={p.id} size={13} />,

@@ -102,9 +102,9 @@ function pairs(text: string, separator: "=" | ":"): Record<string, string> {
 const CODEMAP_MCP_KEY = "codemap_mcp";
 
 /**
- * Whether Claude Code and Codex get CodeFlow's own server — the repository map (`codemap::mcp`) —
- * on every run in a repository. Not a row of the list below: it is not the user's server, has no
- * command, and is not per workspace.
+ * Whether the CLI agents (Claude Code, Codex, opencode, and Gemini where it can) get CodeFlow's own
+ * server — the repository map (`codemap::mcp`) — on every run in a repository. Not a row of the
+ * list below: it is not the user's server, has no command, and is not per workspace.
  */
 function CodemapServerToggle() {
   const t = useT();

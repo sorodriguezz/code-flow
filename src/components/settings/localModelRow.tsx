@@ -108,13 +108,17 @@ export function ModelDownloadRow({
             {badge}
           </div>
           {/* The model's own description, the size it costs, the memory it wants and its licence.
-              All four are things somebody decides on before spending twenty minutes downloading. */}
+              All four are things somebody decides on before spending twenty minutes downloading.
+              The two sizes say which is which: side by side as bare "4.4 GB · 8 GB" nobody could
+              tell the download from the memory (user report, 2026-10-10). */}
           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[var(--cf-text-muted)]">
             {note ?? <span>{t(TIER_KEY[model.tier])}</span>}
             <span aria-hidden>·</span>
             <span className="font-mono">{model.params}</span>
             <span aria-hidden>·</span>
-            <span>{formatBytes(model.size_bytes)}</span>
+            <span>
+              {t(model.installed ? "localai.sizeOnDisk" : "localai.sizeDownload", { size: formatBytes(model.size_bytes) })}
+            </span>
             <span aria-hidden>·</span>
             <span>{t("localai.needsRam", { gb: String(model.min_ram_gb) })}</span>
             <span aria-hidden>·</span>

@@ -457,9 +457,13 @@ function MainContent() {
   }, [activeView, pipelinesOpen]);
   // The Revisor switched off in Settings while its tab was open — or reached by a shortcut or a
   // notification after it was. Back to the graph rather than a screen with no tab lit.
+  //
+  // Straight onto the store, not through `setActiveView`: that action also closes Settings, and the
+  // usual way here is the switch in Settings › Revisor, which must stay open while the tab behind it
+  // goes (user report, 2026-10-10).
   const reviewerEnabled = usePreferencesStore((s) => s.reviewerEnabled);
   useEffect(() => {
-    if (activeView === "reviewer" && !reviewerEnabled) useUiStore.getState().setActiveView("graph");
+    if (activeView === "reviewer" && !reviewerEnabled) useUiStore.setState({ activeView: "graph" });
   }, [activeView, reviewerEnabled]);
 
   const workspaceViewOpen =

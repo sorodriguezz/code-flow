@@ -15,6 +15,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import type { ChainTemplate, WorkspaceAgent } from "../../types/domain";
 import { useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
+import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 
@@ -112,7 +113,11 @@ export function EnginesField({ value, onChange }: { value: unknown; onChange: (n
   const rows = asRows(value).map(engineOf);
   const write = (next: FlowEngineChoice[]) => onChange(next);
   const seen = new Set<string>();
-  const unused = CLI_IDS.find((id) => !rows.some((row) => row.provider === id) && AI_PROVIDERS.some((p) => p.id === id && p.available));
+  // The next engine "add" offers: one not in the list yet and found on this machine.
+  const statuses = useProviderStatusStore((s) => s.byProvider);
+  const unused = CLI_IDS.find(
+    (id) => !rows.some((row) => row.provider === id) && AI_PROVIDERS.some((p) => p.id === id && p.available) && isProviderReady(statuses, id),
+  );
   return (
     <div className="flex flex-col gap-1.5">
       {rows.map((engine, index) => {

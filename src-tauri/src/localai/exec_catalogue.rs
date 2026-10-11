@@ -10,7 +10,10 @@
 //!
 //! 2. **A licence this app can point at**, the same rule as the completion catalogue and enforced
 //!    by the same kind of test. Qwen2.5-Coder-3B is `qwen-research` (non-commercial) and is absent
-//!    for that reason; the 7B/14B/32B and Qwen3-Coder-30B-A3B are Apache-2.0.
+//!    for that reason; the 7B/14B/32B, Qwen3-Coder-30B-A3B and Qwen3-4B-Instruct-2507 are
+//!    Apache-2.0, and Phi-4-mini-instruct is MIT. The last two fill the 3B hole for machines the
+//!    7B is too much for (user's ask, 2026-10-10) — general instruct models rather than coder
+//!    ones, which at that size is what a licence this app can offer leaves.
 //!
 //! 3. **One file per model.** The official Qwen repositories publish several quantisations split
 //!    into `-0000N-of-0000M` parts *and* a joined copy of the same weights. The joined file is the
@@ -18,9 +21,9 @@
 //!    split GGUF would need all of its parts present before llama.cpp can open any of them.
 //!
 //! `size_bytes` and `sha256` were read from `https://huggingface.co/api/models/{repo}/tree/main`
-//! (`lfs.size` / `lfs.oid`) on 2026-10-01, and the architecture numbers behind
-//! [`ExecModelSpec::kv_bytes_per_token`] from each model's own `config.json` — none of it was copied
-//! from a model card.
+//! (`lfs.size` / `lfs.oid`) on 2026-10-01 (the two small ones on 2026-10-10), and the architecture
+//! numbers behind [`ExecModelSpec::kv_bytes_per_token`] from each model's own `config.json` — none
+//! of it was copied from a model card.
 
 use super::catalogue::{ModelSpec, Tier};
 
@@ -51,6 +54,47 @@ pub struct ExecModelSpec {
 /// Everything on offer, smallest first — the first row a hesitant user reads is the one that
 /// certainly runs on their machine.
 pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
+    ExecModelSpec {
+        spec: ModelSpec {
+            id: "phi-4-mini-instruct",
+            label: "Phi-4-mini Instruct",
+            tier: Tier::Light,
+            repo: "unsloth/Phi-4-mini-instruct-GGUF",
+            file: "Phi-4-mini-instruct-Q4_K_M.gguf",
+            size_bytes: 2_491_874_272,
+            sha256: "88c00229914083cd112853aab84ed51b87bdf6b9ce42f532d8c85c7c63b1730a",
+            params: "3.8B · Q4_K_M",
+            min_ram_gb: 6,
+            licence: "MIT",
+        },
+        // 4k trained, stretched to 128k with LongRoPE (`rope_scaling` in its config.json).
+        max_ctx: 131_072,
+        // 32 layers · 8 KV heads · head_dim 128 (3072 / 24). More per token than the 7B's 56 KiB:
+        // a small model is not a small context.
+        kv_bytes_per_token: 2 * 32 * 8 * 128 * 2,
+        params_b: 3.8,
+        active_params_b: 3.8,
+    },
+    ExecModelSpec {
+        spec: ModelSpec {
+            id: "qwen3-4b-instruct-2507",
+            label: "Qwen3 4B Instruct",
+            tier: Tier::Light,
+            // Qwen publishes no GGUF of the 2507 instruct; unsloth's, like the 30B-A3B's below.
+            repo: "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+            file: "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+            size_bytes: 2_497_281_120,
+            sha256: "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+            params: "4.0B · Q4_K_M",
+            min_ram_gb: 6,
+            licence: "Apache-2.0",
+        },
+        max_ctx: 262_144,
+        // 36 layers · 8 KV heads · head_dim 128 (its config.json states it).
+        kv_bytes_per_token: 2 * 36 * 8 * 128 * 2,
+        params_b: 4.0,
+        active_params_b: 4.0,
+    },
     ExecModelSpec {
         spec: ModelSpec {
             id: "qwen2.5-coder-7b-instruct",
@@ -161,6 +205,9 @@ pub struct OllamaTag {
 }
 
 pub const OLLAMA_TAGS: &[OllamaTag] = &[
+    // Read on 2026-10-10, like the two GGUFs they stand for.
+    OllamaTag { tag: "phi4-mini:3.8b", catalogue_id: "phi-4-mini-instruct", size_bytes: 2_491_876_363 },
+    OllamaTag { tag: "qwen3:4b-instruct", catalogue_id: "qwen3-4b-instruct-2507", size_bytes: 2_497_293_316 },
     OllamaTag { tag: "qwen2.5-coder:7b", catalogue_id: "qwen2.5-coder-7b-instruct", size_bytes: 4_683_087_074 },
     OllamaTag { tag: "qwen2.5-coder:14b", catalogue_id: "qwen2.5-coder-14b-instruct", size_bytes: 8_988_123_810 },
     OllamaTag { tag: "qwen3-coder:30b", catalogue_id: "qwen3-coder-30b-a3b-instruct", size_bytes: 18_556_700_222 },
@@ -251,5 +298,8 @@ mod tests {
         // (28 layers, 4 KV heads, 3584/28): 56 KiB a token.
         assert_eq!(find("qwen2.5-coder-7b-instruct").unwrap().kv_bytes_per_token, 57_344);
         assert_eq!(find("qwen2.5-coder-32b-instruct").unwrap().kv_bytes_per_token, 262_144);
+        // The small two hold more context per token than the 7B — 128 and 144 KiB.
+        assert_eq!(find("phi-4-mini-instruct").unwrap().kv_bytes_per_token, 131_072);
+        assert_eq!(find("qwen3-4b-instruct-2507").unwrap().kv_bytes_per_token, 147_456);
     }
 }

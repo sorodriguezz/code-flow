@@ -261,10 +261,13 @@ function BudgetLine({ state }: { state: LocalExecState }) {
   const t = useT();
   const { budget } = state;
   const share = (n: number) => `${(n / budget.ctx) * 100}%`;
+  // In the order the line below reads: what the task gets from the left edge, then the answer's
+  // reserve. The template's slack (`budget::TEMPLATE_SLACK`, 512 tokens) is the bare track left at
+  // the end — drawn first, it was an unlabelled sliver that pushed the bar off the edge (user
+  // report, 2026-10-10).
   return (
     <div className="flex flex-col gap-1.5 pt-[5px]">
       <div className="flex h-2 w-full max-w-[420px] overflow-hidden rounded-full bg-[var(--cf-sunken)]">
-        <div className="bg-[var(--cf-border-strong)]" style={{ width: share(budget.ctx - budget.input - budget.output) }} />
         <div className="bg-[var(--cf-accent-fill)]" style={{ width: share(budget.input) }} />
         <div className="bg-[var(--cf-text-muted)] opacity-40" style={{ width: share(budget.output) }} />
       </div>
@@ -364,7 +367,7 @@ function OllamaPulls({ state }: { state: LocalExecState }) {
                     </div>
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-[var(--cf-text-muted)]">
                       <RowVerdict fit={row.fit} tps={row.write_tps} pace={row.pace} machine={state.machine} />
-                      <span>{formatBytes(row.size_bytes)}</span>
+                      <span>{t("localai.sizeDownload", { size: formatBytes(row.size_bytes) })}</span>
                     </div>
                   </div>
                   {busy ? (
@@ -539,12 +542,16 @@ export function LocalModelSettings() {
     }
   })();
 
-  // Only a server switch dims the pane: what is below the switch is still the other server's until
-  // its answer lands. Every other click is drawn at once and re-read underneath.
+  // A server switch waits for that server's answer — seconds when nothing listens on its port, on
+  // Windows. Until it lands, what the pane holds is the other server's: its models, its memory, its
+  // error. Dimmed, that read as the new server's (user report, 2026-10-10), so it is not drawn at
+  // all: the switch moves at once, says what it is waiting for, and the rows wait as skeletons.
+  // Every other click is drawn at once and re-read underneath.
   const switching = pendingBackend !== null && pendingBackend !== state.backend;
+  const switchingTo = backendOptions.find((option) => option.value === pendingBackend)?.label ?? "";
 
   return (
-    <div className={`flex flex-col transition-opacity ${switching ? "opacity-60" : ""}`}>
+    <div className="flex flex-col">
       <Row label={t("localexec.server")}>
         <div className="flex flex-col gap-2">
           {/* `self-start`: a column stretches its children, and the track drew an empty strip to the
@@ -559,242 +566,264 @@ export function LocalModelSettings() {
             ariaLabel={t("localexec.server")}
             className="self-start"
           />
-          {state.backend !== "bundled" && <UrlField backend={state.backend} url={state.url} />}
-          {state.backend !== "bundled" &&
-            (state.reachable ? (
-              <Status tone="success">
-                {state.server_version
-                  ? t("localexec.connectedVersion", { version: state.server_version })
-                  : t("localexec.connected")}
-              </Status>
-            ) : (
-              <span title={state.error ?? undefined}>
-                <Status tone="warning" wrap>
-                  {localErrorText(state, t, { url: state.url, model: modelLabelOf(state) }) ?? t("localexec.notAnswering")}
-                </Status>
-              </span>
-            ))}
-          {/* Under the error it answers, not at the foot of the pane where nobody scrolls to. */}
-          {state.backend !== "bundled" && !state.reachable && detectedNames.length === 0 && (
-            <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("localexec.noServer")}</span>
-          )}
-          {state.backend !== "bundled" && state.remote && <Note tone="warning">{t("localexec.remote", { host })}</Note>}
-          {!state.backend_chosen && detectedNames.length > 0 && (
-            <span className="text-[11px] text-[var(--cf-text-muted)]">
-              {t("localexec.detected", { list: detectedNames.join(", ") })}
+          {switching ? (
+            <span role="status" className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+              <Loader2 size={12} className="shrink-0 animate-spin" />
+              {pendingBackend === "bundled" ? t("localexec.switchingBundled") : t("localexec.switching", { server: switchingTo })}
             </span>
-          )}
-          {state.backend === "bundled" && !state.engine_available && (
-            <Note tone="warning">{t("localai.engineMissing")}</Note>
+          ) : (
+            <>
+              {state.backend !== "bundled" && <UrlField backend={state.backend} url={state.url} />}
+              {state.backend !== "bundled" &&
+                (state.reachable ? (
+                  <Status tone="success">
+                    {state.server_version
+                      ? t("localexec.connectedVersion", { version: state.server_version })
+                      : t("localexec.connected")}
+                  </Status>
+                ) : (
+                  <span title={state.error ?? undefined}>
+                    <Status tone="warning" wrap>
+                      {localErrorText(state, t, { url: state.url, model: modelLabelOf(state) }) ?? t("localexec.notAnswering")}
+                    </Status>
+                  </span>
+                ))}
+              {/* Under the error it answers, not at the foot of the pane where nobody scrolls to. */}
+              {state.backend !== "bundled" && !state.reachable && detectedNames.length === 0 && (
+                <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("localexec.noServer")}</span>
+              )}
+              {state.backend !== "bundled" && state.remote && <Note tone="warning">{t("localexec.remote", { host })}</Note>}
+              {!state.backend_chosen && detectedNames.length > 0 && (
+                <span className="text-[11px] text-[var(--cf-text-muted)]">
+                  {t("localexec.detected", { list: detectedNames.join(", ") })}
+                </span>
+              )}
+              {state.backend === "bundled" && !state.engine_available && (
+                <Note tone="warning">{t("localai.engineMissing")}</Note>
+              )}
+            </>
           )}
         </div>
       </Row>
 
-      {state.backend === "openai" && (
-        <Row label={t("localexec.apiKey")}>
-          <KeyField hasKey={state.has_key} />
-        </Row>
+      {switching && (
+        <div aria-hidden className="flex flex-col gap-1 pt-3">
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-8 w-full" />
+          <Skeleton className="h-8 w-full" />
+          <Skeleton className="h-8 w-full" />
+        </div>
       )}
 
-      <Row label={t("localexec.model")} stacked>
-        {state.backend === "bundled" ? (
-          <div className="flex flex-col gap-2">
-            <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
-              {state.models.map((model) => (
-                <ModelDownloadRow
-                  key={model.id}
-                  model={{
-                    id: model.id,
-                    label: model.label,
-                    tier: model.tier ?? "light",
-                    params: model.params ?? "",
-                    licence: model.licence ?? "",
-                    size_bytes: model.size_bytes ?? 0,
-                    min_ram_gb: model.min_ram_gb ?? 0,
-                    installed: model.installed === true,
-                    partial_bytes: model.partial_bytes,
-                  }}
-                  active={model.id === state.model && model.installed === true}
-                  badge={
-                    model.recommended ? (
-                      <span className={chipClass("ok")}>{t("localexec.forThisMachine")}</span>
-                    ) : undefined
-                  }
-                  note={
-                    model.fit && model.fit !== "unknown" ? (
-                      <RowVerdict fit={model.fit} tps={model.write_tps} pace={model.pace} machine={state.machine} />
-                    ) : undefined
-                  }
-                  progress={progress[model.id]}
-                  onDownload={() => void download(model.id)}
-                  onCancel={() => void cancelDownload(model.id)}
-                  onUse={() => void set(LOCAL_EXEC_KEYS.modelBundled, model.id)}
-                  onDelete={() => {
-                    void ask({
-                      message: t("localai.deleteConfirm", {
-                        model: model.label,
-                        size: formatBytes(model.size_bytes ?? 0),
-                      }),
-                      confirmLabel: t("localai.delete"),
-                      danger: true,
-                    }).then((ok) => {
-                      if (ok) void remove(model.id);
-                    });
-                  }}
-                />
-              ))}
-            </div>
-            <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--cf-text-muted)]">
-              <HardDrive size={12} />
-              {t("localai.diskUsed", { size: formatBytes(state.disk_used) })}
-              {state.disk_used > 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    void revealInFileManager(state.models_dir).catch((error) => pushErrorToast(String(error)));
-                  }}
-                  title={state.models_dir}
-                  className={buttonClass({ variant: "ghost", size: "sm" })}
-                >
-                  <FolderOpen size={13} />
-                  {t("localai.showInFolder")}
-                </button>
-              )}
-              {engineRunning && (
-                <button type="button" onClick={() => void stopEngine()} className={buttonClass({ variant: "ghost", size: "sm" })}>
-                  {state.engine.kind === "starting" ? <Loader2 size={13} className="animate-spin" /> : <CircleStop size={13} />}
-                  {state.engine.kind === "starting" ? t("localai.warmingUp") : t("localexec.stopEngine")}
-                </button>
-              )}
-            </div>
-            {state.engine.kind === "failed" && <Note tone="warning">{state.engine.message}</Note>}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            <div className="max-w-[360px]">
-              <Select
-                size="sm"
-                value={state.model ?? ""}
-                placeholder={t("localexec.noModels")}
-                ariaLabel={t("localexec.model")}
-                disabled={state.models.length === 0}
-                onChange={(value) => void set(modelKeyFor(state.backend), value)}
-                options={state.models.map((model) => ({
-                  value: model.id,
-                  label: [model.id, model.params, model.size_bytes ? formatBytes(model.size_bytes) : null]
-                    .filter(Boolean)
-                    .join(" · "),
-                }))}
-              />
-            </div>
-            {state.backend === "ollama" && state.reachable && <OllamaPulls state={state} />}
-          </div>
-        )}
-      </Row>
-
-      <Row label={t("localexec.context")}>
-        {state.details.ctx_fixed_by_server ? (
-          <span className="block pt-[5px] text-[12px] text-[var(--cf-text)]">
-            {t("localexec.contextFixed", { ctx: tokensLabel(state.ctx) })}
-          </span>
-        ) : (
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="w-[110px]">
-              <Select
-                size="sm"
-                value={String(state.ctx)}
-                ariaLabel={t("localexec.context")}
-                onChange={(value) => void set(LOCAL_EXEC_KEYS.ctx, value)}
-                options={state.ctx_options.map((ctx) => ({ value: String(ctx), label: tokensLabel(ctx) }))}
-              />
-            </div>
-            {state.details.max_ctx && (
-              <span className="text-[11px] text-[var(--cf-text-muted)]">
-                {t("localexec.contextMax", { ctx: tokensLabel(state.details.max_ctx) })}
-              </span>
-            )}
-            {state.ctx_chosen && (
-              <button
-                type="button"
-                onClick={() => void set(LOCAL_EXEC_KEYS.ctx, "")}
-                className={buttonClass({ variant: "ghost", size: "sm" })}
-              >
-                {t("localexec.contextAuto")}
-              </button>
-            )}
-          </div>
-        )}
-      </Row>
-
-      <Row label={t("localexec.memory")}>
-        <MemoryLine state={state} />
-      </Row>
-
-      <Row label={t("localexec.perTask")} hint={t("localexec.perTaskHint")}>
-        <BudgetLine state={state} />
-      </Row>
-
-      <Row label={t("localexec.speed")}>
-        <ProbeLine state={state} />
-      </Row>
-
-      <Row label={t("localexec.delegate")} hint={t("localexec.delegateHint")}>
-        <div className="flex flex-wrap items-center gap-2">
-          <Segmented
-            options={[
-              { value: "easy" as LocalDelegate, label: t("localexec.delegateEasy") },
-              { value: "medium" as LocalDelegate, label: t("localexec.delegateMedium") },
-              { value: "all" as LocalDelegate, label: t("localexec.delegateAll") },
-            ]}
-            value={state.delegate}
-            onChange={(value) => void set(LOCAL_EXEC_KEYS.delegate, value === state.delegate_suggested ? "" : value)}
-            layoutId="cf-local-exec-delegate"
-            size="sm"
-            ariaLabel={t("localexec.delegate")}
-          />
-          {state.delegate === state.delegate_suggested && (
-            <span className="text-[11px] text-[var(--cf-text-muted)]">{t("localexec.suggested")}</span>
+      {!switching && (
+        <>
+          {state.backend === "openai" && (
+            <Row label={t("localexec.apiKey")}>
+              <KeyField hasKey={state.has_key} />
+            </Row>
           )}
-        </div>
-      </Row>
 
-      <Row label={t("localexec.onFail")}>
-        <div className="w-[240px]">
-          <Select
-            size="sm"
-            value={state.on_fail}
-            ariaLabel={t("localexec.onFail")}
-            onChange={(value) => void set(LOCAL_EXEC_KEYS.onFail, value)}
-            options={[
-              { value: "review", label: t("localexec.onFailReview") },
-              { value: "skip", label: t("localexec.onFailSkip") },
-            ]}
-          />
-        </div>
-      </Row>
+          <Row label={t("localexec.model")} stacked>
+            {state.backend === "bundled" ? (
+              <div className="flex flex-col gap-2">
+                <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
+                  {state.models.map((model) => (
+                    <ModelDownloadRow
+                      key={model.id}
+                      model={{
+                        id: model.id,
+                        label: model.label,
+                        tier: model.tier ?? "light",
+                        params: model.params ?? "",
+                        licence: model.licence ?? "",
+                        size_bytes: model.size_bytes ?? 0,
+                        min_ram_gb: model.min_ram_gb ?? 0,
+                        installed: model.installed === true,
+                        partial_bytes: model.partial_bytes,
+                      }}
+                      active={model.id === state.model && model.installed === true}
+                      badge={
+                        model.recommended ? (
+                          <span className={chipClass("ok")}>{t("localexec.forThisMachine")}</span>
+                        ) : undefined
+                      }
+                      note={
+                        model.fit && model.fit !== "unknown" ? (
+                          <RowVerdict fit={model.fit} tps={model.write_tps} pace={model.pace} machine={state.machine} />
+                        ) : undefined
+                      }
+                      progress={progress[model.id]}
+                      onDownload={() => void download(model.id)}
+                      onCancel={() => void cancelDownload(model.id)}
+                      onUse={() => void set(LOCAL_EXEC_KEYS.modelBundled, model.id)}
+                      onDelete={() => {
+                        void ask({
+                          message: t("localai.deleteConfirm", {
+                            model: model.label,
+                            size: formatBytes(model.size_bytes ?? 0),
+                          }),
+                          confirmLabel: t("localai.delete"),
+                          danger: true,
+                        }).then((ok) => {
+                          if (ok) void remove(model.id);
+                        });
+                      }}
+                    />
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--cf-text-muted)]">
+                  <HardDrive size={12} />
+                  {t("localai.diskUsed", { size: formatBytes(state.disk_used) })}
+                  {state.disk_used > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void revealInFileManager(state.models_dir).catch((error) => pushErrorToast(String(error)));
+                      }}
+                      title={state.models_dir}
+                      className={buttonClass({ variant: "ghost", size: "sm" })}
+                    >
+                      <FolderOpen size={13} />
+                      {t("localai.showInFolder")}
+                    </button>
+                  )}
+                  {engineRunning && (
+                    <button type="button" onClick={() => void stopEngine()} className={buttonClass({ variant: "ghost", size: "sm" })}>
+                      {state.engine.kind === "starting" ? <Loader2 size={13} className="animate-spin" /> : <CircleStop size={13} />}
+                      {state.engine.kind === "starting" ? t("localai.warmingUp") : t("localexec.stopEngine")}
+                    </button>
+                  )}
+                </div>
+                {state.engine.kind === "failed" && <Note tone="warning">{state.engine.message}</Note>}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <div className="max-w-[360px]">
+                  <Select
+                    size="sm"
+                    value={state.model ?? ""}
+                    placeholder={t("localexec.noModels")}
+                    ariaLabel={t("localexec.model")}
+                    disabled={state.models.length === 0}
+                    onChange={(value) => void set(modelKeyFor(state.backend), value)}
+                    options={state.models.map((model) => ({
+                      value: model.id,
+                      label: [model.id, model.params, model.size_bytes ? formatBytes(model.size_bytes) : null]
+                        .filter(Boolean)
+                        .join(" · "),
+                    }))}
+                  />
+                </div>
+                {state.backend === "ollama" && state.reachable && <OllamaPulls state={state} />}
+              </div>
+            )}
+          </Row>
 
-      <Row label={t("localexec.review")}>
-        <div className="w-[240px]">
-          <Select
-            size="sm"
-            value={state.review_mode}
-            ariaLabel={t("localexec.review")}
-            onChange={(value) => void set(LOCAL_EXEC_KEYS.reviewMode, value)}
-            options={[
-              { value: "local", label: t("localexec.reviewLocal") },
-              { value: "fix", label: t("localexec.reviewFix") },
-              { value: "report", label: t("localexec.reviewReport") },
-            ]}
-          />
-        </div>
-      </Row>
+          <Row label={t("localexec.context")}>
+            {state.details.ctx_fixed_by_server ? (
+              <span className="block pt-[5px] text-[12px] text-[var(--cf-text)]">
+                {t("localexec.contextFixed", { ctx: tokensLabel(state.ctx) })}
+              </span>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="w-[110px]">
+                  <Select
+                    size="sm"
+                    value={String(state.ctx)}
+                    ariaLabel={t("localexec.context")}
+                    onChange={(value) => void set(LOCAL_EXEC_KEYS.ctx, value)}
+                    options={state.ctx_options.map((ctx) => ({ value: String(ctx), label: tokensLabel(ctx) }))}
+                  />
+                </div>
+                {state.details.max_ctx && (
+                  <span className="text-[11px] text-[var(--cf-text-muted)]">
+                    {t("localexec.contextMax", { ctx: tokensLabel(state.details.max_ctx) })}
+                  </span>
+                )}
+                {state.ctx_chosen && (
+                  <button
+                    type="button"
+                    onClick={() => void set(LOCAL_EXEC_KEYS.ctx, "")}
+                    className={buttonClass({ variant: "ghost", size: "sm" })}
+                  >
+                    {t("localexec.contextAuto")}
+                  </button>
+                )}
+              </div>
+            )}
+          </Row>
 
-      <Row label={t("localexec.memoryAfter")}>
-        <label className="flex cursor-pointer items-center gap-2 pt-[3px]">
-          <Checkbox checked={state.unload} onChange={(next) => void set(LOCAL_EXEC_KEYS.unload, next ? "1" : "0")} />
-          <span className="text-[12px] text-[var(--cf-text)]">{t("localexec.unload")}</span>
-        </label>
-      </Row>
+          <Row label={t("localexec.memory")}>
+            <MemoryLine state={state} />
+          </Row>
+
+          <Row label={t("localexec.perTask")} hint={t("localexec.perTaskHint")}>
+            <BudgetLine state={state} />
+          </Row>
+
+          <Row label={t("localexec.speed")}>
+            <ProbeLine state={state} />
+          </Row>
+
+          <Row label={t("localexec.delegate")} hint={t("localexec.delegateHint")}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Segmented
+                options={[
+                  { value: "easy" as LocalDelegate, label: t("localexec.delegateEasy") },
+                  { value: "medium" as LocalDelegate, label: t("localexec.delegateMedium") },
+                  { value: "all" as LocalDelegate, label: t("localexec.delegateAll") },
+                ]}
+                value={state.delegate}
+                onChange={(value) => void set(LOCAL_EXEC_KEYS.delegate, value === state.delegate_suggested ? "" : value)}
+                layoutId="cf-local-exec-delegate"
+                size="sm"
+                ariaLabel={t("localexec.delegate")}
+              />
+              {state.delegate === state.delegate_suggested && (
+                <span className="text-[11px] text-[var(--cf-text-muted)]">{t("localexec.suggested")}</span>
+              )}
+            </div>
+          </Row>
+
+          <Row label={t("localexec.onFail")}>
+            <div className="w-[240px]">
+              <Select
+                size="sm"
+                value={state.on_fail}
+                ariaLabel={t("localexec.onFail")}
+                onChange={(value) => void set(LOCAL_EXEC_KEYS.onFail, value)}
+                options={[
+                  { value: "review", label: t("localexec.onFailReview") },
+                  { value: "skip", label: t("localexec.onFailSkip") },
+                ]}
+              />
+            </div>
+          </Row>
+
+          <Row label={t("localexec.review")}>
+            <div className="w-[240px]">
+              <Select
+                size="sm"
+                value={state.review_mode}
+                ariaLabel={t("localexec.review")}
+                onChange={(value) => void set(LOCAL_EXEC_KEYS.reviewMode, value)}
+                options={[
+                  { value: "local", label: t("localexec.reviewLocal") },
+                  { value: "fix", label: t("localexec.reviewFix") },
+                  { value: "report", label: t("localexec.reviewReport") },
+                ]}
+              />
+            </div>
+          </Row>
+
+          <Row label={t("localexec.memoryAfter")}>
+            <label className="flex cursor-pointer items-center gap-2 pt-[3px]">
+              <Checkbox checked={state.unload} onChange={(next) => void set(LOCAL_EXEC_KEYS.unload, next ? "1" : "0")} />
+              <span className="text-[12px] text-[var(--cf-text)]">{t("localexec.unload")}</span>
+            </label>
+          </Row>
+        </>
+      )}
 
     </div>
   );

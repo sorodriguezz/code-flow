@@ -40,6 +40,38 @@ describe("layoutMap", () => {
     expect(xs).toEqual(new Set([0, COLUMN]));
   });
 
+  it("with rootFirst, lists the root like the explorer and ranks only what is below it", () => {
+    const at = layoutMap(
+      [
+        node("test", 0),
+        node("src", 1),
+        node("bench", 0),
+        node("vitest.config.ts", 0, false),
+        node("README.md", 0, false),
+        node("src/core", 2),
+        node("src/common", 3),
+      ],
+      [
+        { from: "test", to: "src" },
+        { from: "src", to: "src/core" },
+        { from: "src/core", to: "src/common" },
+      ],
+      { rootFirst: true },
+    );
+    const root = ["bench", "src", "test", "README.md", "vitest.config.ts"];
+    for (const id of root) expect(at.get(id)!.x).toBe(0);
+    const ys = root.map((id) => at.get(id)!.y);
+    expect(ys).toEqual([...ys].sort((a, b) => a - b));
+    expect(at.get("src/core")!.x).toBe(COLUMN);
+    expect(at.get("src/common")!.x).toBe(2 * COLUMN);
+  });
+
+  it("with rootFirst, still ranks a project that is all root", () => {
+    const at = layoutMap([node("app.py"), node("lib.py")], [{ from: "app.py", to: "lib.py" }], { rootFirst: true });
+    expect(at.get("app.py")!.x).toBe(0);
+    expect(at.get("lib.py")!.x).toBe(COLUMN);
+  });
+
   it("folds a deep chain into a few columns, keeping its direction", () => {
     const chain = Array.from({ length: 12 }, (_, i) => node(`s${i}`));
     const edges = chain.slice(1).map((n, i) => ({ from: chain[i].id, to: n.id }));

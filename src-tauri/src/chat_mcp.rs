@@ -205,7 +205,14 @@ pub fn plan(
 /// — before any has — the user-level ones in `.claude.json`, status unknown.
 pub fn claude_servers(env: &crate::ai_accounts::AccountEnv) -> Vec<(String, String)> {
     if let Some(reported) = crate::claude::install_report(&env.key()).and_then(|report| report.mcp_servers) {
-        return reported.into_iter().map(|server| (server.name, server.status)).collect();
+        // The repository map is the app's own server, never one of the user's. Reports recorded
+        // before `record_install_report` left the app's servers out still list it, and read here it
+        // was blocked on the very turn that would have rewritten the report.
+        return reported
+            .into_iter()
+            .filter(|server| server.name != crate::codemap::mcp::SERVER_NAME)
+            .map(|server| (server.name, server.status))
+            .collect();
     }
     let file = match env.var("CLAUDE_CONFIG_DIR") {
         Some(dir) => std::path::PathBuf::from(dir).join(".claude.json"),

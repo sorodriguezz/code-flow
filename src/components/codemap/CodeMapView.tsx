@@ -242,7 +242,7 @@ function CodeMap() {
     const at = layoutMap(
       split.shown,
       graph.edges.filter((e) => ids.has(e.from) && ids.has(e.to)),
-      mode === "global" ? { maxRows: 18, maxColumns: 6 } : {},
+      mode === "global" ? { maxRows: 18, maxColumns: 6, rootFirst: true } : {},
     );
     return split.shown.map((node) => ({
       id: node.id,

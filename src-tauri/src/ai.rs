@@ -1929,6 +1929,13 @@ pub(crate) fn apply_command_path(cmd: &mut Command) {
     apply_path(cmd, &search_dirs());
 }
 
+/// The program [`spawn_once`] starts for `binary` — for the live tests, which build an engine's
+/// command themselves and must find `opencode.cmd` the way a run does.
+#[cfg(test)]
+pub(crate) fn resolved_program(binary: &str) -> String {
+    resolve_binary(binary, &search_dirs())
+}
+
 /// Non-Windows: nothing to resolve — the child's augmented `PATH` finds the binary and Unix has no
 /// executable-extension quirk.
 #[cfg(not(target_os = "windows"))]
@@ -2538,9 +2545,10 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     if let Some(cwd) = inv.cwd {
         inv.skills_note = skills_note(cwd, engine.native_skills_dir());
     }
-    // The repository map for the two CLIs that take an app-declared MCP server per run (`--mcp-config`,
-    // `-c mcp_servers…`): a token bound to this repository, revoked when `_map_grant` drops at the end
-    // of the run. Not for a run the caller already gave a server of that name.
+    // The repository map for the CLIs that take an app-declared MCP server per run (`--mcp-config`,
+    // `-c mcp_servers…`, `OPENCODE_CONFIG_CONTENT`): a token bound to this repository, revoked when
+    // `_map_grant` drops at the end of the run. Not for a run the caller already gave a server of that
+    // name.
     // Antigravity takes MCP servers only from files: a workspace plugin, for the run's length. Only
     // for a run that skips agy's permission prompts (one that may write): a read-only run cannot
     // answer the "mcp" permission headlessly, agy denies the call, and on a live run the model then
@@ -2551,7 +2559,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
         _ => None,
     };
     let _map_grant = match inv.cwd {
-        Some(cwd) if matches!(engine.id(), "claude" | "codex") && !inv.app_mcp.iter().any(|s| s.name == crate::codemap::mcp::SERVER_NAME) => {
+        Some(cwd) if matches!(engine.id(), "claude" | "codex" | "opencode") && !inv.app_mcp.iter().any(|s| s.name == crate::codemap::mcp::SERVER_NAME) => {
             crate::codemap::mcp::for_repository(cwd).map(|(server, grant)| {
                 inv.app_mcp.push(server);
                 grant

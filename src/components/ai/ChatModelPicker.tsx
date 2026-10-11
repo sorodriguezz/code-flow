@@ -6,7 +6,7 @@ import { ProviderGlyph } from "./ProviderGlyph";
 import { modelOptionsFor } from "../settings/modelPicker";
 import { MODELS_MAX_AGE_MS, useAiModelsStore } from "../../state/aiModelsStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
-import { useProviderStatusStore } from "../../state/providerStatusStore";
+import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
@@ -158,7 +158,11 @@ export function ChatModelPicker({
   const splitRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const selectable = AI_PROVIDERS.filter((p) => p.available);
+  // Only engines this machine can run: one Settings › Motores de IA found no binary for (or, for
+  // CodeFlow's own, no model ready) is not a choice, and listed as "No encontrado" it crowded the
+  // menu with what cannot be picked (user's ask, 2026-10-10). The one in use stays, so the menu
+  // never loses the current choice. Unchecked counts as usable — see `isProviderReady`.
+  const selectable = AI_PROVIDERS.filter((p) => p.available && (p.id === providerId || isProviderReady(statuses, p.id)));
   // What the engine reported for the last turn beats the stored setting: with no model configured
   // the CLI picks its own, so only the reply knows which.
   const shownModel = liveModel ?? configuredModel;

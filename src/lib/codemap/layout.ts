@@ -6,6 +6,12 @@
  * Layered by longest path over the import graph with its cycles broken (a back edge found by
  * depth-first search is ignored for ranking; it is still drawn). Within a column, nodes keep a stable
  * order: folders before files, then the most-imported first. Pure, so it is tested without a canvas.
+ *
+ * With `rootFirst` (the whole-project view) the repository's root comes first instead: its folders
+ * and files in the first column, in the explorer's order, and only what lies below them ranked by
+ * dependency. Ranked, `test` landed left of `src` — it imports it — while the explorer beside the
+ * map lists `src` first (user report, 2026-10-10). A project with nothing below its root keeps the
+ * ranking, which is then the only order that says anything.
  */
 
 export interface LayoutNode {
@@ -28,11 +34,45 @@ export const MAX_ROWS = 14;
  *  out one per column fit the canvas only at a zoom where nothing can be read. */
 export const MAX_COLUMNS = 5;
 
+/** Folders first, then by name ignoring case — what `fsops::list_dir` sorts the explorer by. */
+function explorerOrder(a: LayoutNode, b: LayoutNode): number {
+  const x = a.id.toLowerCase();
+  const y = b.id.toLowerCase();
+  return Number(b.folder) - Number(a.folder) || (x < y ? -1 : x > y ? 1 : 0);
+}
+
+/** `list` top to bottom from `column`, a new column every `maxRows`; the next free column. */
+function place(list: LayoutNode[], column: number, maxRows: number, positions: Map<string, { x: number; y: number }>): number {
+  for (let start = 0; start < list.length; start += maxRows) {
+    const chunk = list.slice(start, start + maxRows);
+    const top = -((chunk.length - 1) * ROW) / 2;
+    chunk.forEach((node, i) => positions.set(node.id, { x: column * COLUMN, y: top + i * ROW }));
+    column += 1;
+  }
+  return column;
+}
+
 export function layoutMap(
   nodes: LayoutNode[],
   edges: LayoutEdge[],
-  { maxRows = MAX_ROWS, maxColumns = MAX_COLUMNS }: { maxRows?: number; maxColumns?: number } = {},
+  {
+    maxRows = MAX_ROWS,
+    maxColumns = MAX_COLUMNS,
+    rootFirst = false,
+  }: { maxRows?: number; maxColumns?: number; rootFirst?: boolean } = {},
 ): Map<string, { x: number; y: number }> {
+  if (rootFirst) {
+    const root = nodes.filter((n) => !n.id.includes("/"));
+    if (root.length > 0 && root.length < nodes.length) {
+      const positions = new Map<string, { x: number; y: number }>();
+      const after = place([...root].sort(explorerOrder), 0, maxRows, positions);
+      const below = nodes.filter((n) => n.id.includes("/"));
+      const ranked = layoutMap(below, edges, { maxRows, maxColumns: Math.max(1, maxColumns - after) });
+      for (const [id, at] of ranked) positions.set(id, { x: at.x + after * COLUMN, y: at.y });
+      return positions;
+    }
+  }
+
   const ids = new Set(nodes.map((n) => n.id));
   const out = new Map<string, string[]>();
   for (const node of nodes) out.set(node.id, []);
@@ -101,12 +141,7 @@ export function layoutMap(
     const list = byRank
       .get(r)!
       .sort((a, b) => Number(b.folder) - Number(a.folder) || b.importedBy - a.importedBy || a.label.localeCompare(b.label));
-    for (let start = 0; start < list.length; start += maxRows) {
-      const chunk = list.slice(start, start + maxRows);
-      const top = -((chunk.length - 1) * ROW) / 2;
-      chunk.forEach((node, i) => positions.set(node.id, { x: column * COLUMN, y: top + i * ROW }));
-      column += 1;
-    }
+    column = place(list, column, maxRows, positions);
   }
   return positions;
 }

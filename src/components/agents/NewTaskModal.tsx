@@ -479,7 +479,7 @@ export function NewTaskModal({
             placeholder={t("agents.pickAgent")}
             ariaLabel={t("agents.agent")}
             onChange={setAgentId}
-            options={runnable.map((a) => ({
+            options={runnable.filter((a) => a.id === agentId || isProviderReady(statuses, a.provider)).map((a) => ({
               value: a.id,
               label: `${a.name || t("settings.sddNewAgent")} — ${providerDisplayLabel(a.provider, t)} · ${modelDisplayLabel(
                 a.provider,
@@ -487,7 +487,6 @@ export function NewTaskModal({
                 t,
               )}`,
               leading: <ProviderGlyph providerId={a.provider} size={13} />,
-              disabled: !isProviderReady(statuses, a.provider),
             }))}
           />
         </Field>

@@ -109,7 +109,8 @@ fn espeak() -> Option<&'static str> {
 }
 
 /// `say -v '?'`: `Name    lang    # sample`, where a name may itself hold spaces and parentheses
-/// («Eddy (Español (México))»).
+/// («Eddy (Español (México))»). Read only on macOS; compiled elsewhere for its test alone.
+#[cfg(any(target_os = "macos", test))]
 pub fn parse_say_voices(listing: &str) -> Vec<SystemVoice> {
     listing
         .lines()

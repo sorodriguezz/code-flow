@@ -142,6 +142,14 @@ impl AiEngine for OpenCodeEngine {
         if let Some(dir) = inv.cwd {
             cmd.arg("--dir").arg(dir);
         }
+        // The app's servers for this run — the repository map — as inline config, which opencode
+        // merges over the user's own files (`OPENCODE_CONFIG_CONTENT`, read in its config loader on
+        // 1.18.31). In the environment, never on the command line, as `claude.rs` does with its
+        // `${VAR}`s. Verified on 1.18.31: `opencode mcp list` connects to it, and a run without
+        // `--dangerously-skip-permissions` calls its tools (`codeflow_map_find_symbol`) unasked.
+        if let Some(config) = app_mcp_config(inv) {
+            cmd.env("OPENCODE_CONFIG_CONTENT", config);
+        }
         // Multi-turn chat: resume *this conversation's* session by id, not whichever session the
         // CLI happens to consider most recent (see the module docs on `--continue`).
         if let Some(id) = inv.resume_session_id {
@@ -298,6 +306,39 @@ struct ExportCache {
 /// Deleted when the run ends — see `crate::ai_prompt_files`.
 fn write_payload_file(inv: &AiInvocation, content: &str) -> Option<std::path::PathBuf> {
     inv.prompt_files.write("opencode", "txt", content)
+}
+
+/// The `OPENCODE_CONFIG_CONTENT` that hands this run the app's servers, or `None` when there are
+/// none. Remote servers only: the one that reaches this engine is the repository map
+/// (`mcp_registry::supports` offers it none of the user's). `oauth: false`, because the map's 401 to
+/// a stale token is not an invitation to sign in.
+///
+/// A value the user set themselves is kept and the servers are added to it. One that is not a JSON
+/// object (opencode also takes comments in it) is left alone, and the run goes without the map
+/// rather than without the user's config.
+fn app_mcp_config(inv: &AiInvocation) -> Option<String> {
+    let servers = crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only);
+    let remote: Vec<_> = servers.iter().filter(|server| server.transport == "http").collect();
+    if remote.is_empty() {
+        return None;
+    }
+    let mut config = match std::env::var("OPENCODE_CONFIG_CONTENT") {
+        Ok(text) if !text.trim().is_empty() => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) if value.is_object() => value,
+            _ => return None,
+        },
+        _ => serde_json::json!({}),
+    };
+    if !config["mcp"].is_object() {
+        config["mcp"] = serde_json::json!({});
+    }
+    for server in remote {
+        let headers: serde_json::Map<String, serde_json::Value> =
+            server.headers.iter().map(|(name, value)| (name.clone(), value.clone().into())).collect();
+        config["mcp"][server.name.as_str()] =
+            serde_json::json!({ "type": "remote", "url": server.url, "headers": headers, "enabled": true, "oauth": false });
+    }
+    Some(config.to_string())
 }
 
 /// One line of `opencode run --format json`. Every event is `{type, timestamp, sessionID, ...data}`,
@@ -517,6 +558,40 @@ mod tests {
     fn a_session_with_no_assistant_turn_reports_nothing() {
         let empty = r#"{"info":{},"messages":[{"info":{"role":"user"}}]}"#;
         assert!(parse_export(empty).is_none());
+    }
+
+    /// The repository map reaches opencode as inline config in its environment — its token never on
+    /// the command line — and a run without app servers sets nothing.
+    #[test]
+    fn the_map_travels_in_opencode_config_content() {
+        let config_of = |cmd: &Command| {
+            cmd.as_std()
+                .get_envs()
+                .find(|(name, _)| *name == "OPENCODE_CONFIG_CONTENT")
+                .and_then(|(_, value)| value.map(|v| v.to_string_lossy().to_string()))
+        };
+        let mut inv = AiInvocation::new("¿quién usa applyDiscount?", "");
+        inv.cwd = Some("/repo");
+        assert!(config_of(&OpenCodeEngine.build_command("opencode", &inv)).is_none());
+
+        inv.read_only = true;
+        inv.app_mcp = vec![crate::mcp_registry::LiveServer {
+            name: crate::codemap::mcp::SERVER_NAME.into(),
+            transport: "http".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: "http://127.0.0.1:47811/mcp/code".into(),
+            headers: vec![("Authorization".into(), "Bearer secret-token".into())],
+        }];
+        let cmd = OpenCodeEngine.build_command("opencode", &inv);
+        let config: serde_json::Value = serde_json::from_str(&config_of(&cmd).expect("the map's config")).unwrap();
+        let server = &config["mcp"]["codeflow_map"];
+        assert_eq!(server["type"], "remote");
+        assert_eq!(server["url"], "http://127.0.0.1:47811/mcp/code");
+        assert_eq!(server["headers"]["Authorization"], "Bearer secret-token");
+        let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        assert!(!args.iter().any(|a| a.contains("secret-token")), "{args:?}");
     }
 
     /// The probe is only worth spawning when there is a session to ask about.

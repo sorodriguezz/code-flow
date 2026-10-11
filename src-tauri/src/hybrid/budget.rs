@@ -95,11 +95,13 @@ impl Delegate {
 }
 
 /// The delegation a model of this size is suggested. Bigger models get harder work: a 30B handles
-/// what a planner rates "hard" often enough to be worth trying first; a 7B does not.
+/// what a planner rates "hard" often enough to be worth trying first; a 7B does not. Below 5B
+/// (Phi-4-mini's 3.8B, Qwen3's 4.0B) only the easy tasks: a failed one costs a review round on
+/// the subscription, which is what delegating was meant to save.
 pub fn suggest_delegate(params_b: Option<f32>) -> Delegate {
     match params_b {
         Some(b) if b >= 30.0 => Delegate::All,
-        Some(b) if b < 4.0 => Delegate::Easy,
+        Some(b) if b < 5.0 => Delegate::Easy,
         _ => Delegate::Medium,
     }
 }
@@ -385,6 +387,8 @@ mod tests {
         assert!(Delegate::All.admits("hard"));
         assert!(!Delegate::Easy.admits("medium"));
         assert_eq!(suggest_delegate(Some(7.6)), Delegate::Medium);
+        assert_eq!(suggest_delegate(Some(4.0)), Delegate::Easy);
+        assert_eq!(suggest_delegate(Some(3.8)), Delegate::Easy);
         assert_eq!(suggest_delegate(Some(32.8)), Delegate::All);
         assert_eq!(suggest_delegate(None), Delegate::Medium);
     }

@@ -202,16 +202,18 @@ export function StoryRealizerModal({
     }
   };
 
-  const agentOptions = runnable.map((a) => ({
-    value: a.id,
-    label: `${a.name || t("settings.sddNewAgent")} — ${providerDisplayLabel(a.provider, t)} · ${modelDisplayLabel(
-      a.provider,
-      a.model,
-      t,
-    )}`,
-    leading: <ProviderGlyph providerId={a.provider} size={13} />,
-    disabled: !isProviderReady(statuses, a.provider),
-  }));
+  // Agents whose engine is missing here are left out, as in every picker — the two chosen stay.
+  const agentOptions = runnable
+    .filter((a) => a.id === analystId || a.id === implementerId || isProviderReady(statuses, a.provider))
+    .map((a) => ({
+      value: a.id,
+      label: `${a.name || t("settings.sddNewAgent")} — ${providerDisplayLabel(a.provider, t)} · ${modelDisplayLabel(
+        a.provider,
+        a.model,
+        t,
+      )}`,
+      leading: <ProviderGlyph providerId={a.provider} size={13} />,
+    }));
 
   return (
     <ApiModal

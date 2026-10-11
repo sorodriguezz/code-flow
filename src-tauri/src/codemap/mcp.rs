@@ -459,7 +459,7 @@ mod tests {
 /// server does, builds each engine's command with the app's own builder (`build_command` with the
 /// server in `app_mcp`, as `ai::run` hands it over), and asserts the CLI loaded the server and
 /// called a map tool:
-/// `CODEMAP_LIVE_CLI=claude|codex|both cargo test --lib codemap::mcp::live -- --ignored --nocapture --test-threads=1`
+/// `CODEMAP_LIVE_CLI=claude|codex|both|opencode|agy cargo test --lib codemap::mcp::live -- --ignored --nocapture --test-threads=1`
 #[cfg(test)]
 mod live {
     use super::*;
@@ -525,7 +525,7 @@ mod live {
             inv.allowed_tools = Box::leak(Box::new(engine.read_only_tools()));
         }
         inv.app_mcp = vec![server];
-        let mut cmd = engine.build_command(binary, &inv);
+        let mut cmd = engine.build_command(&crate::ai::resolved_program(binary), &inv);
         crate::ai::apply_command_path(&mut cmd);
         cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
         eprintln!("$ {binary} {}", cmd.as_std().get_args().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>().join(" "));
@@ -630,6 +630,35 @@ mod live {
                 .and_then(|v| v["result"]["response"].as_str().map(str::to_string))
                 .unwrap_or_default();
             assert!(answer.contains("pricing.js"), "{answer}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// opencode takes the server as `OPENCODE_CONFIG_CONTENT`, both ways: a run that may write and a
+    /// read-only one, which gets no `--dangerously-skip-permissions` and still calls the map unasked.
+    /// On a free model by default (`opencode/big-pickle`), so it spends nothing.
+    #[tokio::test]
+    #[ignore]
+    async fn opencode_loads_the_map_and_calls_it() {
+        if !wanted("opencode") {
+            return;
+        }
+        let dir = repo();
+        let root = dir.to_string_lossy().to_string();
+        let port = serve().await;
+        let model = std::env::var("CODEMAP_LIVE_OPENCODE_MODEL").unwrap_or_else(|_| "opencode/big-pickle".to_string());
+        for read_only in [false, true] {
+            let out = run(&crate::opencode::OpenCodeEngine, "opencode", &model, &root, port, read_only).await;
+            let events: Vec<Value> = out.stdout.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect();
+            let calls: Vec<String> = events
+                .iter()
+                .filter(|v| v["type"] == "tool_use")
+                .map(|v| format!("{} {}", v["part"]["tool"].as_str().unwrap_or("?"), v["part"]["state"]["status"].as_str().unwrap_or("?")))
+                .collect();
+            let answer: String = events.iter().filter(|v| v["type"] == "text").filter_map(|v| v["part"]["text"].as_str()).collect::<Vec<_>>().join("\n");
+            eprintln!("\n[opencode read_only={read_only}] calls: {calls:#?}\n  answer: {answer}\n  stderr: {}", out.stderr.lines().rev().take(8).collect::<Vec<_>>().join("\n"));
+            assert!(calls.iter().any(|c| c.starts_with("codeflow_map_") && c.ends_with("completed")), "no map tool call completed: {calls:?}");
+            assert!(answer.contains("src/lib/pricing.js"), "{answer}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

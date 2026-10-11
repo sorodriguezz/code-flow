@@ -486,6 +486,11 @@ pub struct McpServerState {
     pub name: String,
     #[serde(default)]
     pub status: String,
+    /// Where the CLI got it: `plugin`, `claudeai`, the user's config — or `dynamic`, a server this
+    /// app handed the run with `--mcp-config` (the repository map, the servers declared in CodeFlow).
+    /// Read to leave those out of the report, never stored.
+    #[serde(default, skip_serializing)]
+    pub source: String,
 }
 
 /// An installed plugin as the `init` event names it: where its skills and commands live on disk.
@@ -571,8 +576,12 @@ fn record_install_report(account_key: &str, init: InitEvent) {
     // `--strict-mcp-config`) loaded no servers by design; only one with the ordinary writers in hand
     // speaks for what the user has configured.
     let full_run = init.tools.iter().any(|tool| tool == "Edit" || tool == "Bash" || tool == "Write");
+    // Not the servers this app passed the run itself (`dynamic`): they are not the user's, and listed
+    // here they read as a server the user never pre-approved — so the next turn's plan kept them out
+    // with `--disallowedTools`, and the repository map lost its tools from a conversation's second
+    // turn on (user report, 2026-10-10: "codeflow_map ya no está disponible en esta sesión").
     if full_run {
-        entry.mcp_servers = Some(init.mcp_servers);
+        entry.mcp_servers = Some(init.mcp_servers.into_iter().filter(|server| server.source != "dynamic").collect());
     }
     entry.reported_at = chrono::Utc::now().to_rfc3339();
     if let Ok(text) = serde_json::to_string(&*reports) {
@@ -1443,6 +1452,17 @@ mod tests {
         assert_eq!(parse_init(stdout).unwrap().slash_commands, vec!["compact", "model", "deep-research"]);
         // …and the same buffer still yields the rate limit, since both scans are independent.
         assert!(parse_rate_limit(stdout).is_some());
+    }
+
+    /// The servers the app hands a run (`--mcp-config`, reported as `dynamic`) are not the user's:
+    /// filed as theirs, the next turn's plan blocked the repository map it was itself passing.
+    #[test]
+    fn the_app_s_own_servers_stay_out_of_the_install_report() {
+        let account = format!("test-dynamic-{}", uuid::Uuid::new_v4().simple());
+        let stdout = r#"{"type":"system","subtype":"init","tools":["Edit","Read"],"mcp_servers":[{"name":"github","status":"connected","source":"user"},{"name":"codeflow_map","status":"connected","source":"dynamic"},{"name":"claude.ai Gmail","status":"pending","source":"claudeai"}]}"#;
+        record_install_from_run(&account, None, stdout);
+        let names: Vec<String> = install_report(&account).unwrap().mcp_servers.unwrap().into_iter().map(|server| server.name).collect();
+        assert_eq!(names, vec!["github", "claude.ai Gmail"]);
     }
 
     /// An older CLI, or a run that died before it printed its banner. The menu then shows the
