@@ -1,6 +1,6 @@
-import { PencilLine, Table2, Workflow, type LucideIcon } from "lucide-react";
+import { Network, PencilLine, Table2, Workflow, type LucideIcon } from "lucide-react";
 import { iconButtonClass } from "../common/Button";
-import { FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
+import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
 import type { DiagramFormat } from "../../types/diagrams";
 
 /**
@@ -56,6 +56,7 @@ export const PANE_HEAD =
 export function formatGlyph(format: DiagramFormat): LucideIcon {
   if (format === FORMAT_DBML) return Table2;
   if (format === FORMAT_EXCALIDRAW) return PencilLine;
+  if (format === FORMAT_ARCHIFY) return Network;
   return Workflow;
 }
 

@@ -18,7 +18,7 @@ use crate::db::models::{
 };
 use crate::fsops;
 use crate::db::version_queries::{self, DocVersion};
-use crate::db::{diagram_queries, Db};
+use crate::db::{diagram_queries, queries, Db};
 
 use super::claude_cmd::AiTask;
 use crate::ai;
@@ -269,7 +269,8 @@ pub fn diagrams_pull_file(db: State<Db>, id: String) -> Result<DiagramSync, Stri
 /// Saves a diagram made in the app into one of the workspace's repositories, and ties it to the file.
 ///
 /// The file goes in `.codeflow/diagrams/`, named after the diagram, in its own dialect: `.drawio`,
-/// `.excalidraw` or `.dbml`. From then on the diagram is the same bridge a file opened from the
+/// `.excalidraw`, `.dbml`, or an archify diagram's `.<type>.json` (or `.html`, for a page archify
+/// already rendered). From then on the diagram is the same bridge a file opened from the
 /// editor is — every save writes the file, every open re-reads it — so the answer carries the
 /// version just written, which is what the next save is checked against.
 #[tauri::command]
@@ -292,7 +293,7 @@ pub fn diagrams_save_to_repo(
         std::path::Path::new(&project.local_path),
         crate::repo_files::DIAGRAMS_FOLDER,
         &row.title,
-        file_extension(&row.format),
+        file_extension(&row.format, &row.doc),
         "diagrama",
         |path| diagram_queries::origin_taken(&conn, &project_id, path).unwrap_or(true),
     );
@@ -302,14 +303,40 @@ pub fn diagrams_save_to_repo(
     Ok(DiagramSaved { meta, version: Some(version) })
 }
 
-/// The extension a diagram's dialect is saved under — the one draw.io, Excalidraw and every DBML
-/// tool open it by.
-fn file_extension(format: &str) -> &'static str {
+/// The extension a diagram's dialect is saved under — the one draw.io, Excalidraw, every DBML tool
+/// and archify open it by.
+///
+/// The one format whose extension depends on the document: an archify diagram holds either one of
+/// archify's five documents, which its CLI renders and the repository bridge reopens by
+/// `.<type>.json`, or a page archify already rendered (see `lib/diagrams/archify/ir.ts`).
+fn file_extension(format: &str, doc: &str) -> &'static str {
     match format {
         diagram_queries::FORMAT_DBML => "dbml",
         diagram_queries::FORMAT_EXCALIDRAW => "excalidraw",
+        diagram_queries::FORMAT_ARCHIFY if doc.trim_start().starts_with('{') => archify_json_extension(doc),
+        diagram_queries::FORMAT_ARCHIFY => "html",
         _ => "drawio",
     }
+}
+
+/// `<type>.json` for an archify document, from its own `diagram_type` — `architecture.json` when it
+/// names none, which is what the first documents written here were.
+fn archify_json_extension(doc: &str) -> &'static str {
+    let kind = serde_json::from_str::<serde_json::Value>(doc)
+        .ok()
+        .and_then(|value| value.get("diagram_type").and_then(|kind| kind.as_str().map(str::to_string)));
+    match kind.as_deref() {
+        Some("workflow") => "workflow.json",
+        Some("sequence") => "sequence.json",
+        Some("dataflow") => "dataflow.json",
+        Some("lifecycle") => "lifecycle.json",
+        _ => "architecture.json",
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn archify_extension_for_test(doc: &str) -> &'static str {
+    archify_json_extension(doc)
 }
 
 /// Cuts a diagram loose from its file, keeping the document. See `diagram_queries::unlink_file`.
@@ -603,6 +630,151 @@ pub async fn diagrams_draw_with_ai(
     .await
 }
 
+/// The Code Map's diagram: an engine reads the repository — read-only, enforced — and answers one of
+/// archify's five documents as JSON. `kind` is `architecture`, `workflow`, `sequence`, `dataflow` or
+/// `lifecycle`. See [`ai::archify_repository`].
+///
+/// Routed through the Diagrams engine and model (`AiTask::Diagram`), since the diagram lands there, and
+/// scoped to the repository's own workspace, not whichever one is on screen.
+#[tauri::command]
+pub async fn diagrams_archify_project(
+    app: AppHandle,
+    db: State<'_, Db>,
+    project_id: String,
+    kind: String,
+    instruction: String,
+    run_id: Option<String>,
+) -> Result<String, String> {
+    if !ai::ARCHIFY_KINDS.contains(&kind.as_str()) {
+        return Err(format!("Tipo de diagrama desconocido: {kind}"));
+    }
+    let (project, config) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let project = queries::get_project(&conn, &project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Repository not found".to_string())?;
+        let config = crate::commands::claude_cmd::load_ai_config_in(
+            &conn,
+            AiTask::Diagram,
+            Some(&project.workspace_id),
+        )?;
+        (project, config)
+    };
+    if !std::path::Path::new(&project.local_path).is_dir() {
+        return Err(format!("Repository folder not found: {}", project.local_path));
+    }
+
+    ai_runs::scoped(app, run_id, async {
+        ai::archify_repository(
+            &*config.engine,
+            &config.binary,
+            &config.model,
+            &project.name,
+            &project.local_path,
+            &kind,
+            &instruction,
+        )
+        .await
+    })
+    .await
+}
+
+/// Keeps what the diagram is *now* as a restore point, whatever was recorded a moment ago — asked for
+/// just before a model rewrites it, so "adjust" can always be undone. See `version_queries::keep_version`.
+#[tauri::command]
+pub fn diagrams_keep_version(db: State<Db>, id: String) -> Result<bool, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let Some(row) = diagram_queries::get_diagram(&conn, &id).map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+    version_queries::keep_version(&conn, "diagram", &id, &row.title, &row.doc, &crate::db::queries::now())
+        .map_err(|e| e.to_string())
+}
+
+/// Changes an archify diagram the way the user asked, with an engine that reads `project_id`'s
+/// repository (read-only, enforced) and answers the whole document again. See [`ai::archify_refine`].
+///
+/// The caller says which repository: [`diagrams_archify_repo_for`] guesses it from the diagram, and
+/// when that cannot, the user is asked — a diagram belongs to a workspace, not to one checkout.
+#[tauri::command]
+pub async fn diagrams_archify_refine(
+    app: AppHandle,
+    db: State<'_, Db>,
+    project_id: String,
+    document: String,
+    instruction: String,
+    run_id: Option<String>,
+) -> Result<String, String> {
+    let (project, config) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let project = queries::get_project(&conn, &project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Repository not found".to_string())?;
+        let config = crate::commands::claude_cmd::load_ai_config_in(&conn, AiTask::Diagram, Some(&project.workspace_id))?;
+        (project, config)
+    };
+    if !std::path::Path::new(&project.local_path).is_dir() {
+        return Err(format!("Repository folder not found: {}", project.local_path));
+    }
+    ai_runs::scoped(app, run_id, async {
+        ai::archify_refine(&*config.engine, &config.binary, &config.model, &project.name, &project.local_path, &document, &instruction).await
+    })
+    .await
+}
+
+/// A remote address reduced to what two spellings of it share: no scheme, no credentials, no `.git`,
+/// `host/owner/repo` in lower case — so `git@github.com:a/b.git` and `https://github.com/a/b` agree.
+fn normalize_remote(url: &str) -> String {
+    let mut rest = url.trim().to_lowercase();
+    if let Some(at) = rest.find("://") {
+        rest = rest[at + 3..].to_string();
+    }
+    if let Some(at) = rest.find('@') {
+        rest = rest[at + 1..].to_string();
+    }
+    rest = rest.replacen(':', "/", 1);
+    rest.trim_end_matches('/').trim_end_matches(".git").to_string()
+}
+
+/// The repository an archify diagram was read from: the project, among the diagram's workspace's, whose
+/// `origin` is the address pinned in the document's `meta.repository`. `None` when the diagram pinned
+/// none (no `origin` at the time, or one imported from a file) or no project here has it.
+#[tauri::command]
+pub fn diagrams_archify_repo_for(db: State<Db>, diagram_id: String) -> Result<Option<String>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let Some(row) = diagram_queries::get_diagram(&conn, &diagram_id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let pinned = serde_json::from_str::<serde_json::Value>(&row.doc)
+        .ok()
+        .and_then(|doc| doc.pointer("/meta/repository/url").and_then(|url| url.as_str().map(normalize_remote)));
+    let Some(pinned) = pinned else { return Ok(None) };
+    let projects = queries::list_projects(&conn, &row.workspace_id).map_err(|e| e.to_string())?;
+    Ok(projects
+        .into_iter()
+        .find(|p| p.remote_url.as_deref().is_some_and(|url| normalize_remote(url) == pinned))
+        .map(|p| p.id))
+}
+
+/// What a repository offers a diagram of `kind` to be about — see `archify_suggest`. Empty for an
+/// architecture, which needs no subject. Read off a blocking thread: it walks the working tree.
+#[tauri::command]
+pub async fn diagrams_archify_suggestions(
+    db: State<'_, Db>,
+    project_id: String,
+    kind: String,
+) -> Result<Vec<crate::archify_suggest::Suggestion>, String> {
+    let project = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_project(&conn, &project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Repository not found".to_string())?
+    };
+    tokio::task::spawn_blocking(move || crate::archify_suggest::suggestions(&project.local_path, &kind))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Asks an engine for sample rows for a DBML schema, as JSON.
 ///
 /// Sibling of [`diagrams_draw_with_ai`] and routed through the same config and run log, but the
@@ -763,5 +935,19 @@ mod tests {
             1,
             "a note's history is not this sweep's to take",
         );
+    }
+}
+
+#[cfg(test)]
+mod archify_remote_tests {
+    use super::normalize_remote;
+
+    #[test]
+    fn two_spellings_of_one_remote_agree() {
+        let a = normalize_remote("git@github.com:Example/App.git");
+        assert_eq!(a, "github.com/example/app");
+        assert_eq!(a, normalize_remote("https://github.com/example/app"));
+        assert_eq!(a, normalize_remote("https://user:token@github.com/example/app.git/"));
+        assert_ne!(a, normalize_remote("https://github.com/example/other"));
     }
 }

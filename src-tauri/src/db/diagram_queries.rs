@@ -47,6 +47,9 @@ pub(crate) const FORMAT_DBML: &str = "dbml";
 /// The whiteboard dialect: an Excalidraw scene, stored as its `.excalidraw` file. Mirrors
 /// `FORMAT_EXCALIDRAW` in `lib/diagrams/doc.ts`.
 pub(crate) const FORMAT_EXCALIDRAW: &str = "excalidraw";
+/// An architecture map in archify's format — its `architecture` IR as JSON, or a page archify
+/// rendered. Mirrors `FORMAT_ARCHIFY` in `lib/diagrams/doc.ts`.
+pub(crate) const FORMAT_ARCHIFY: &str = "archify";
 
 fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<DiagramFolderRow> {
     Ok(DiagramFolderRow {
@@ -140,8 +143,27 @@ fn derive(doc: &str, format: &str) -> i64 {
         }
         FORMAT_DBML => count_dbml(doc),
         FORMAT_EXCALIDRAW => count_excalidraw(doc),
+        FORMAT_ARCHIFY => count_archify(doc),
         _ => 0,
     }
+}
+
+/// An archify diagram's entities and relations, whichever of its five types it is: components,
+/// steps, participants, nodes or states, plus the connections, edges, messages, flows or transitions
+/// between them. JSON like a whiteboard, so read the same way; a page archify already rendered is
+/// HTML, and counts zero rather than being parsed.
+fn count_archify(doc: &str) -> i64 {
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(doc) else {
+        return 0;
+    };
+    [
+        "components", "nodes", "participants", "states", "connections", "edges", "messages", "flows",
+        "transitions",
+    ]
+    .iter()
+    .filter_map(|key| document.get(*key).and_then(|value| value.as_array()))
+    .map(|list| list.len() as i64)
+    .sum()
 }
 
 /// The shapes on a whiteboard: every element still on it, minus the text that sits *inside*
@@ -911,6 +933,14 @@ mod tests {
         assert_eq!(derive(whiteboard, FORMAT_EXCALIDRAW), 2);
         // A scene that does not parse is a scene with nothing countable in it, not an error.
         assert_eq!(derive("{not json", FORMAT_EXCALIDRAW), 0);
+
+        let map = r#"{"components":[{"id":"a"},{"id":"b"},{"id":"c"}],"connections":[{"from":"a","to":"b"}]}"#;
+        assert_eq!(derive(map, FORMAT_ARCHIFY), 4);
+        let sequence = r#"{"diagram_type":"sequence","participants":[{"id":"a"},{"id":"b"}],"messages":[{"from":"a","to":"b"},{"from":"b","to":"a"},{"from":"a","to":"a"}]}"#;
+        assert_eq!(derive(sequence, FORMAT_ARCHIFY), 5);
+        let lifecycle = r#"{"diagram_type":"lifecycle","states":[{"id":"a"},{"id":"b"}],"transitions":[{"from":"a","to":"b"}]}"#;
+        assert_eq!(derive(lifecycle, FORMAT_ARCHIFY), 3);
+        assert_eq!(derive("<!doctype html><html></html>", FORMAT_ARCHIFY), 0);
 
         // A document in no dialect counts nothing rather than guessing — the gallery hides a
         // zero, and a wrong number is worse than none.

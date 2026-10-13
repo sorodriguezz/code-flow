@@ -116,6 +116,12 @@ pub fn record_version(
         }
     }
 
+    insert(conn, kind, doc_id, title, content, now)?;
+    Ok(true)
+}
+
+/// Writes a snapshot and trims the list to `MAX_VERSIONS`.
+fn insert(conn: &Connection, kind: &str, doc_id: &str, title: &str, content: &str, now: &str) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO doc_versions (id, kind, doc_id, title, content, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -131,7 +137,37 @@ pub fn record_version(
          )",
         params![kind, doc_id, MAX_VERSIONS],
     )?;
+    Ok(())
+}
 
+/// A restore point that is kept *now*, whatever was recorded a moment ago.
+///
+/// For the one write the user asked to be undoable — a diagram handed back changed by a model — where
+/// the throttle's "a version was taken two minutes ago" is the wrong answer: that one is of a
+/// different document. Still skipped when the document is empty or is exactly what the latest version
+/// already holds, since a second copy of it restores nothing the first does not.
+pub fn keep_version(
+    conn: &Connection,
+    kind: &str,
+    doc_id: &str,
+    title: &str,
+    content: &str,
+    now: &str,
+) -> rusqlite::Result<bool> {
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT content FROM doc_versions WHERE kind = ?1 AND doc_id = ?2 ORDER BY created_at DESC LIMIT 1",
+            params![kind, doc_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if latest.as_deref() == Some(content) {
+        return Ok(false);
+    }
+    insert(conn, kind, doc_id, title, content, now)?;
     Ok(true)
 }
 
@@ -216,6 +252,17 @@ mod tests {
         record_version(&conn, "note", "n1", "T", "one", &at(0)).unwrap();
         assert!(!record_version(&conn, "note", "n1", "T", "two", &at(1)).unwrap());
         assert!(record_version(&conn, "note", "n1", "T", "three", &at(3)).unwrap());
+        assert_eq!(list_versions(&conn, "note", "n1").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_kept_version_ignores_the_throttle_but_not_a_copy_of_the_latest() {
+        let conn = db();
+        record_version(&conn, "note", "n1", "T", "one", &at(0)).unwrap();
+        // One minute on, a change would wait; a kept version does not.
+        assert!(keep_version(&conn, "note", "n1", "T", "two", &at(1)).unwrap());
+        assert!(!keep_version(&conn, "note", "n1", "T", "two", &at(2)).unwrap());
+        assert!(!keep_version(&conn, "note", "n1", "T", "  ", &at(3)).unwrap());
         assert_eq!(list_versions(&conn, "note", "n1").unwrap().len(), 2);
     }
 

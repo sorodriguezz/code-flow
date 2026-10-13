@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  The frame an archify page is shown in, inside the Diagrams app.
+
+  Why a page of its own and not `srcdoc`: a `srcdoc` document inherits the policy of the page that
+  holds it, and the app's own (written into index.html at build time, see src/lib/csp.ts) refuses
+  inline scripts — every archify page is inline scripts. A page loaded by URL brings its own policy
+  instead, and this one allows inline code while still loading nothing and sending nothing.
+
+  It is framed with `sandbox="allow-scripts"`, so it runs in an opaque origin: no storage of the
+  app's, no IPC, no navigating the window. `ArchifyViewer` posts the document once this has loaded,
+  and it replaces itself with it — the policy below stays with the document through `document.open`.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<style>html,body{margin:0;height:100%;background:transparent}</style>
+</head>
+<body>
+<script>
+addEventListener("message", function (event) {
+  var message = event.data;
+  if (event.source !== parent || !message || message.type !== "codeflow:archify-render") return;
+  if (typeof message.html !== "string") return;
+  document.open();
+  document.write(message.html);
+  document.close();
+});
+</script>
+</body>
+</html>

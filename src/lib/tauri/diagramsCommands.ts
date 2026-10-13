@@ -281,6 +281,53 @@ export const diagramsDrawWithAi = (args: {
 }) => invoke<string>("diagrams_draw_with_ai", args);
 
 /**
+ * Has an engine read a repository — read-only, enforced by its CLI — and answer one of archify's
+ * five documents about it, as JSON: `architecture`, `workflow`, `sequence`, `dataflow` or
+ * `lifecycle`. Sources are already checked against the working tree and pinned to `HEAD` when the
+ * backend could; the frontend still validates the shape (`parseArchify`).
+ */
+export type ArchifyKind = "architecture" | "workflow" | "sequence" | "dataflow" | "lifecycle";
+export const diagramsArchifyProject = (args: {
+  projectId: string;
+  kind: ArchifyKind;
+  instruction: string;
+  runId: string;
+}) => invoke<string>("diagrams_archify_project", args);
+
+/** One thing a repository offers a diagram to be about: a route, a status type, a process, an entity. */
+export interface ArchifySuggestion {
+  /** What the chip says. */
+  label: string;
+  /** Where it was found. */
+  hint: string;
+  /** What is handed to the engine as the subject. */
+  value: string;
+}
+
+/**
+ * What the repository offers a diagram of `kind` to be about, read off its working tree — HTTP routes
+ * for a sequence, status types for a lifecycle, processes for a workflow, entities for a dataflow.
+ * Empty for an architecture, which needs none.
+ */
+export const diagramsArchifySuggestions = (args: { projectId: string; kind: ArchifyKind }) =>
+  invoke<ArchifySuggestion[]>("diagrams_archify_suggestions", args);
+
+/**
+ * Changes an archify diagram the way the user asked. The engine reads `projectId`'s repository again
+ * (read-only) and answers the whole document; the caller validates it and writes it back.
+ */
+export const diagramsArchifyRefine = (args: {
+  projectId: string;
+  document: string;
+  instruction: string;
+  runId: string;
+}) => invoke<string>("diagrams_archify_refine", args);
+
+/** The repository an archify diagram was read from — by the address it pinned — or `null`. */
+export const diagramsArchifyRepoFor = (diagramId: string) =>
+  invoke<string | null>("diagrams_archify_repo_for", { diagramId });
+
+/**
  * Asks an engine for sample rows for a schema, as JSON.
  *
  * The reply is *probably* JSON and is checked before anything is written: `parseAiRows` refuses a
@@ -316,3 +363,6 @@ export const diagramsFillRowsWithAi = (args: {
 /** Reads a `.drawio` or `.dbml` file the user picked in a dialog. Capped and text-only in Rust. */
 export const diagramsReadImport = (path: string) =>
   invoke<string>("diagrams_read_import", { path });
+
+/** Keeps the diagram as it is now as a restore point, even if one was taken a moment ago. */
+export const diagramsKeepVersion = (id: string) => invoke<boolean>("diagrams_keep_version", { id });

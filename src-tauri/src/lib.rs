@@ -23,6 +23,7 @@ mod boot_guard;
 mod caveman;
 mod chain_memory;
 mod chat_mcp;
+mod archify_suggest;
 mod codemap;
 mod chat_title;
 mod git_exclude;
@@ -1674,6 +1675,11 @@ pub fn run() {
             commands::diagrams_cmd::diagrams_update_template,
             commands::diagrams_cmd::diagrams_delete_template,
             commands::diagrams_cmd::diagrams_draw_with_ai,
+            commands::diagrams_cmd::diagrams_archify_project,
+            commands::diagrams_cmd::diagrams_archify_suggestions,
+            commands::diagrams_cmd::diagrams_archify_refine,
+            commands::diagrams_cmd::diagrams_archify_repo_for,
+            commands::diagrams_cmd::diagrams_keep_version,
             commands::diagrams_cmd::diagrams_fill_rows_with_ai,
             commands::diagrams_cmd::diagrams_read_import,
             commands::debug_cmd::debug_start,

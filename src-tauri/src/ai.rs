@@ -1051,6 +1051,10 @@ pub mod task {
     pub const DIAGRAM_DRAW: &str = "diagram-draw";
     /// Sample rows invented for the DBML sandbox — see [`super::fill_rows`].
     pub const DIAGRAM_ROWS: &str = "diagram-rows";
+    /// A diagram read out of a repository — see [`super::archify_repository`]. Its own label rather
+    /// than [`DIAGRAM_DRAW`]'s: that one draws from a description, this one reads the working tree
+    /// with tools, and counting them together would hide which is spending.
+    pub const REPO_DIAGRAM: &str = "repo-diagram";
     /// Explaining a failed CI job. Its own label rather than [`ANALYZE`]'s: both are "read
     /// something and tell me what is wrong with it", and counting them together would hide which
     /// of the two is actually spending the budget — a pipeline analysis reads the repository with
@@ -4030,6 +4034,450 @@ pub async fn draw_diagram(
         return Ok(text.trim().to_string());
     }
     Ok(json_answer(&text).map(|json| json.into_owned()).unwrap_or(text).trim().to_string())
+}
+
+/// The diagram types archify has, and the ones a repository can be read into.
+pub const ARCHIFY_KINDS: [&str; 5] = ["architecture", "workflow", "sequence", "dataflow", "lifecycle"];
+
+/// What every archify prompt says, whichever the type: how to read, what to write, what never to.
+const ARCHIFY_COMMON: &str = r#"
+Eres un analista de software. Lee el repositorio (solo lectura) y descríbelo como un documento de archify (https://github.com/tt-a1i/archify), basado en evidencia del código.
+
+Responde únicamente con un objeto JSON válido, sin texto alrededor, con la forma que se indica abajo.
+
+Reglas comunes:
+- "id" empieza por una letra y solo usa letras, dígitos, "-" o "_", y es único. Todo lo que apunta a otro elemento usa esos ids.
+- Escribe las etiquetas en el idioma de la instrucción del usuario. Conserva tal cual nombres de código, rutas, comandos y protocolos.
+- Etiquetas cortas: "label" hasta 28 caracteres, "sublabel" hasta 40, la etiqueta de una relación hasta 24. El detalle largo va en "meta.subtitle" o en las tarjetas.
+- "type" de un elemento es exactamente uno de: frontend, backend, database, cloud, security, messagebus, external.
+- Cada elemento importante lleva de 1 a 3 "sources": rutas relativas al repositorio de archivos que hayas leído de verdad. Pon "line" y "end_line" solo si comprobaste esas líneas. Una fuente prueba solo el hecho visible en ese lugar.
+- "variant" de una relación: "emphasis" en el recorrido principal, "dashed" en lo asíncrono, opcional o en segundo plano, "security" en autenticación, permisos y secretos. Omítelo en el resto.
+- "cards": entre 2 y 4 tarjetas {"dot": cyan|emerald|violet|amber|rose|orange|slate, "title", "items": [hechos breves confirmados en el código]}.
+- No escribas posiciones ni tamaños ("pos", "size", "row", "layout", "viewBox", "y"): CodeFlow coloca todo. No añadas campos que no estén en la forma indicada.
+- No inventes servicios, llamadas ni responsabilidades que el código no confirme. Si falta evidencia, dilo en "meta.subtitle". Las relaciones describen lo que hayas confirmado.
+- El resultado debe servir para explorar y entender, no ser un inventario de archivos.
+"#;
+
+const ARCHIFY_ARCHITECTURE: &str = r#"
+TIPO: architecture — los componentes del sistema y quién habla con quién.
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {"title": "Nombre del sistema", "subtitle": "Qué hace y cuál es su recorrido principal"},
+  "components": [
+    {"id": "api-server", "type": "backend", "label": "Nombre corto", "sublabel": "tecnología o rol", "tag": "opcional, muy corto",
+     "sources": [{"path": "ruta/relativa.ext", "line": 12, "end_line": 48, "label": "qué demuestra"}]}
+  ],
+  "boundaries": [{"kind": "region", "label": "Nombre de la frontera", "wraps": ["api-server", "worker"]}],
+  "connections": [{"from": "web-app", "to": "api-server", "label": "HTTPS /api", "variant": "emphasis"}],
+  "cards": []
+}
+- "kind" de una frontera es "region" (capa, proceso, despliegue o módulo) o "security-group" (frontera de confianza o aislamiento). Una frontera dentro de otra se expresa con "wraps" contenido en el de la mayor.
+- Entre 6 y 14 componentes esenciales: el recorrido principal, las dependencias externas y las fronteras relevantes.
+"#;
+
+const ARCHIFY_WORKFLOW: &str = r#"
+TIPO: workflow — un proceso: pasos, quién los hace, ramas y reintentos.
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {"title": "Nombre del proceso", "subtitle": "Qué pasa de principio a fin"},
+  "lanes": [{"id": "cliente", "label": "Cliente"}, {"id": "api", "label": "API"}, {"id": "errores", "label": "Manejo de errores", "variant": "exception"}],
+  "phases": [{"id": "entrada", "label": "Entrada", "fromCol": 0, "toCol": 1}],
+  "mainPath": ["enviar", "validar", "confirmar"],
+  "nodes": [
+    {"id": "validar", "lane": "api", "col": 1, "type": "backend", "label": "Validar carrito", "sublabel": "esquema y stock",
+     "sources": [{"path": "ruta/relativa.ext", "line": 20}]}
+  ],
+  "edges": [{"from": "enviar", "to": "validar", "label": "POST /orders", "role": "main"}],
+  "cards": []
+}
+- "lanes" son quienes hacen los pasos (actor, servicio, equipo): entre 2 y 5. Los reintentos, las denegaciones y los fallos van en un carril con "variant": "exception".
+- "col" (0 a 5) es el orden lógico de los pasos: crece a lo largo del camino principal; pasos paralelos comparten "col". Cada nodo va en un "lane" y un "col".
+- "role" de un enlace: main (camino feliz), branch (alternativa), async (en segundo plano), return (vuelta atrás o reintento), error (fallo). "mainPath" lista los ids del camino feliz en orden.
+- Entre 6 y 16 nodos. Cada paso que cambia el resultado por una condición lo dice en la etiqueta del enlace que sale de él.
+"#;
+
+const ARCHIFY_SEQUENCE: &str = r#"
+TIPO: sequence — una petición a través de sus participantes, en orden.
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {"title": "POST /orders", "subtitle": "Qué hace esta llamada de principio a fin"},
+  "participants": [
+    {"id": "cliente", "type": "frontend", "label": "Cliente", "sublabel": "opcional",
+     "sources": [{"path": "ruta/relativa.ext", "line": 12}]}
+  ],
+  "messages": [
+    {"from": "cliente", "to": "api", "label": "POST /orders", "variant": "emphasis"},
+    {"from": "api", "to": "auth", "label": "verifica JWT", "variant": "security"},
+    {"from": "auth", "to": "api", "label": "claims", "variant": "return"},
+    {"from": "api", "to": "api", "label": "valida el cuerpo", "note": "solo si el stock alcanza"}
+  ],
+  "phases": [{"label": "Autenticación", "from": 1, "to": 2}],
+  "cards": []
+}
+- "participants" van de izquierda a derecha por orden de aparición: quien inicia primero, lo más profundo al final. Entre 3 y 8.
+- "messages" van en el orden en que ocurren: cada llamada y, cuando el código devuelve algo, su respuesta con "variant": "return". Una llamada de un participante a sí mismo es un mensaje con "from" igual a "to". Entre 6 y 24 mensajes.
+- "label" de un mensaje es lo que de verdad se llama: la ruta HTTP, la función, la consulta, el evento. Usa "variant": "dashed" para lo asíncrono (cola, evento, tarea en segundo plano).
+- "note" (opcional) en un mensaje recoge la condición que cambia el flujo (un permiso, un caché, un reintento).
+- "phases" (opcional, entre 2 y 4) agrupa mensajes consecutivos: "from" y "to" son posiciones en "messages", contando desde 0. Cada participante lleva "sources" donde se ve su parte del flujo.
+- Sigue una sola petición principal y sus ramas importantes, no todas las rutas posibles.
+"#;
+
+const ARCHIFY_DATAFLOW: &str = r#"
+TIPO: dataflow — de dónde viene la información, dónde se transforma o se guarda, y quién la usa.
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {"title": "Flujo de pedidos", "subtitle": "Por dónde pasan los datos"},
+  "stages": [{"label": "Fuentes"}, {"label": "Ingesta"}, {"label": "Transformación"}, {"label": "Servicio"}],
+  "nodes": [
+    {"id": "pedidos-db", "type": "database", "label": "Pedidos", "sublabel": "PostgreSQL", "stage": 0, "row": 0,
+     "sources": [{"path": "ruta/relativa.ext", "line": 5}]}
+  ],
+  "flows": [{"from": "pedidos-db", "to": "cdc", "label": "filas nuevas", "classification": "PII", "variant": "security"}],
+  "cards": []
+}
+- "stages" son columnas de izquierda a derecha (entre 3 y 5); "stage" (0, 1, ...) y "row" (0, 1, ...) colocan cada nodo: quien alimenta va a la izquierda del que consume.
+- "label" de un flujo es el dato que viaja (filas, eventos, archivos), no el protocolo. "classification" solo si el código lo deja claro (por ejemplo PII, secretos, público).
+- Entre 6 y 16 nodos: orígenes, cada lugar donde los datos se transforman o se guardan, y los consumidores.
+"#;
+
+const ARCHIFY_LIFECYCLE: &str = r#"
+TIPO: lifecycle — los estados por los que pasa algo y qué lo mueve de uno a otro.
+{
+  "schema_version": 2,
+  "diagram_type": "lifecycle",
+  "meta": {"title": "Ciclo de vida del pedido", "subtitle": "De creado a entregado"},
+  "lanes": [{"id": "main", "label": "Camino normal"}, {"id": "exit", "label": "Salidas"}],
+  "states": [
+    {"id": "creado", "type": "start", "label": "Creado", "sublabel": "opcional", "lane": "main", "col": 0, "step": "1",
+     "sources": [{"path": "ruta/relativa.ext", "line": 30}]}
+  ],
+  "transitions": [{"from": "creado", "to": "pagado", "label": "pago confirmado", "note": "opcional"}],
+  "cards": []
+}
+- "type" de un estado es exactamente uno de: start, active, waiting, decision, success, failure, neutral, external. Hay un "start"; los finales son "success" o "failure".
+- "lanes": "main" primero, con el camino normal; las salidas y los errores en otro carril. "col" (0 a 4) es la misma posición horizontal en todos los carriles: una salida va en la "col" del estado del que sale. Un fallo recuperable lleva una transición de vuelta.
+- "label" de una transición es el evento o la condición que la dispara. "step" (opcional) numera el camino normal.
+- Entre 5 y 12 estados, los que el código distingue de verdad (un enum, una máquina de estados, columnas de estado).
+"#;
+
+fn archify_prompt(kind: &str) -> Option<String> {
+    let shape = match kind {
+        "architecture" => ARCHIFY_ARCHITECTURE,
+        "workflow" => ARCHIFY_WORKFLOW,
+        "sequence" => ARCHIFY_SEQUENCE,
+        "dataflow" => ARCHIFY_DATAFLOW,
+        "lifecycle" => ARCHIFY_LIFECYCLE,
+        _ => return None,
+    };
+    Some(format!("{ARCHIFY_COMMON}{shape}"))
+}
+
+/// Reads a repository and answers a diagram of it as [archify](https://github.com/tt-a1i/archify)'s
+/// IR — the Code Map's «Diagrama» button. `kind` is one of [`ARCHIFY_KINDS`]. The frontend checks the
+/// shape (`lib/diagrams/archify/ir.ts`) and files the document in Diagrams.
+///
+/// **Read-only, enforced, or not at all.** The engine needs the working tree, and a diagram generator
+/// must not gain write access to the repository it is describing — so an engine whose CLI cannot
+/// enforce [`AiInvocation::read_only`] is refused rather than asked nicely.
+///
+/// **Its own task label**, not [`task::DIAGRAM_DRAW`]'s: this run reads a repository with tools and
+/// costs accordingly, and the local engine treats `DIAGRAM_DRAW` as text-only
+/// (`local_agent::TEXT_TASKS`) — which here would have it drawing from the orientation map alone.
+///
+/// The code map goes on stdin as orientation, never as evidence: the prompt asks for the files the
+/// engine read, and [`ground_archify_answer`] drops the ones that do not resolve and pins the rest
+/// to `HEAD`, which archify's own renderer requires before it will show them.
+pub async fn archify_repository(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    repo_name: &str,
+    cwd: &str,
+    kind: &str,
+    instruction: &str,
+) -> Result<String, String> {
+    let Some(system_prompt) = archify_prompt(kind) else {
+        return Err(format!("Tipo de diagrama desconocido: {kind}"));
+    };
+    if instruction.trim().is_empty() {
+        return Err("Describe qué quieres destacar en el diagrama".to_string());
+    }
+    if !engine.enforces_read_only() {
+        return Err(
+            "El motor elegido no puede limitar el análisis a solo lectura. Asigna a Diagramas un motor con modo de solo lectura.".to_string(),
+        );
+    }
+
+    const MAX_ARCHIFY_MAP_CHARS: usize = 14_000;
+    let root = cwd.to_string();
+    let map = tokio::task::spawn_blocking(move || crate::codemap::orientation(&root, MAX_ARCHIFY_MAP_CHARS))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    let mut stdin_payload = format!(
+        "REPOSITORIO: {repo_name}\nDIRECTORIO DE TRABAJO: {cwd}\nTIPO DE DIAGRAMA: {kind}\n\n\
+         INSTRUCCIÓN DEL USUARIO:\n{}\n\n\
+         El repositorio está disponible en el directorio de trabajo. Lee los archivos relevantes y \
+         confirma lo que incluyas antes de incluirlo. No escribas ni modifiques archivos.\n",
+        instruction.trim(),
+    );
+    if !map.trim().is_empty() {
+        stdin_payload.push_str(&format!(
+            "\nMAPA DE CÓDIGO DE CODEFLOW (orientación; verifica las afirmaciones en los archivos):\n{map}\n"
+        ));
+    }
+
+    archify_run(
+        engine,
+        binary,
+        model,
+        cwd,
+        &system_prompt,
+        "Lee el repositorio y devuelve el diagrama como JSON de archify, siguiendo la forma y las reglas del mensaje de sistema.",
+        &stdin_payload,
+    )
+    .await
+}
+
+/// What asking for a change to a diagram adds to the prompt of its type.
+const ARCHIFY_REFINE: &str = r#"
+AJUSTE DE UN DIAGRAMA EXISTENTE
+Recibes el diagrama actual (JSON) y el cambio que pide el usuario. Devuelve el documento COMPLETO ya actualizado, del mismo tipo y con la misma forma, y nada más.
+- Aplica solo lo que se pide. Conserva tal cual los ids, etiquetas, relaciones y fuentes de todo lo demás: no reordenes, no renombres, no «mejores» lo que no se mencionó.
+- Si se pide añadir algo, léelo antes en el repositorio y cita sus fuentes. Si no lo encuentras, no lo inventes: déjalo fuera y dilo en "meta.subtitle".
+- Si se pide quitar algo, quita también las relaciones que dejan de tener extremo, y las fases o grupos que queden vacíos.
+- Si se pide centrar el diagrama en una parte, quita lo que no forma parte de ella en vez de dejarlo atenuado.
+- Los campos de posición que traiga el documento ("pos", "y", "col", "row") son de CodeFlow y se recalculan: no los inventes para lo nuevo.
+"#;
+
+/// Changes a diagram the way the user asked — "add the payment step", "drop the cache", "follow only the
+/// error path" — and answers the whole document again. The engine gets the diagram as it stands and the
+/// repository to read, read-only like the run that made it, and its answer goes through the same checks:
+/// [`ground_archify_answer`] drops sources that do not resolve and pins what remains.
+///
+/// The type is the document's own: a refinement never turns a sequence into a workflow.
+pub async fn archify_refine(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    repo_name: &str,
+    cwd: &str,
+    document: &str,
+    instruction: &str,
+) -> Result<String, String> {
+    const MAX_DOCUMENT_CHARS: usize = 80_000;
+    if instruction.trim().is_empty() {
+        return Err("Describe qué quieres cambiar en el diagrama".to_string());
+    }
+    if document.len() > MAX_DOCUMENT_CHARS {
+        return Err("El diagrama es demasiado grande para ajustarlo".to_string());
+    }
+    let kind = serde_json::from_str::<serde_json::Value>(document)
+        .ok()
+        .and_then(|value| value.get("diagram_type").and_then(|kind| kind.as_str().map(str::to_string)))
+        .filter(|kind| ARCHIFY_KINDS.contains(&kind.as_str()))
+        .ok_or_else(|| "Este diagrama no se puede ajustar: no es un documento de archify".to_string())?;
+    let Some(shape) = archify_prompt(&kind) else {
+        return Err(format!("Tipo de diagrama desconocido: {kind}"));
+    };
+    if !engine.enforces_read_only() {
+        return Err(
+            "El motor elegido no puede limitar el análisis a solo lectura. Asigna a Diagramas un motor con modo de solo lectura.".to_string(),
+        );
+    }
+    let stdin_payload = format!(
+        "REPOSITORIO: {repo_name}\nDIRECTORIO DE TRABAJO: {cwd}\nTIPO DE DIAGRAMA: {kind}\n\n\
+         DIAGRAMA ACTUAL:\n{document}\n\n\
+         CAMBIO PEDIDO POR EL USUARIO:\n{}\n\n\
+         El repositorio está disponible en el directorio de trabajo. Lee lo que necesites para lo que se añada. \
+         No escribas ni modifiques archivos. Devuelve el documento completo actualizado.\n",
+        instruction.trim(),
+    );
+    archify_run(
+        engine,
+        binary,
+        model,
+        cwd,
+        &format!("{shape}{ARCHIFY_REFINE}"),
+        "Aplica el cambio pedido al diagrama y devuelve el documento completo actualizado como JSON de archify.",
+        &stdin_payload,
+    )
+    .await
+}
+
+/// The run both [`archify_repository`] and [`archify_refine`] end in: read-only, in the repository, on
+/// its own task label, the answer dug out of whatever it was wrapped in and then grounded.
+async fn archify_run(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    cwd: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    stdin_payload: &str,
+) -> Result<String, String> {
+    let read_only_tools = engine.read_only_tools();
+    let mut invocation = AiInvocation::new(user_prompt, stdin_payload);
+    invocation.system_prompt = Some(system_prompt);
+    invocation.model = model;
+    invocation.allowed_tools = &read_only_tools;
+    invocation.cwd = Some(cwd);
+    invocation.read_only = true;
+    invocation.task = task::REPO_DIAGRAM;
+
+    let run = run(engine, binary, invocation).await?;
+    let text = strip_code_fence(&run.text);
+    let answer = json_answer(&text).map(|json| json.into_owned()).unwrap_or(text).trim().to_string();
+    let root = cwd.to_string();
+    let fallback = answer.clone();
+    Ok(tokio::task::spawn_blocking(move || ground_archify_answer(&answer, &root))
+        .await
+        .unwrap_or(fallback))
+}
+
+/// Makes an engine's archify answer pass the check archify itself will run on it, here where the
+/// filesystem and the repository are.
+///
+/// - **Sources that do not resolve are dropped.** Each must be a relative path to a file inside the
+///   repository, and canonicalizing after the component check keeps a symlink from leading out of
+///   it. A line range past the end of its file loses the range rather than the file. A component
+///   left with none loses the key: archify's schema wants one to three sources, never zero.
+/// - **What remains is pinned.** archify verifies evidence against `meta.repository` — the origin's
+///   address and a full commit — and refuses sources without it, so [`archify_repository_pin`]
+///   writes that in. An engine's own `meta.repository` is never kept: it can only be a guess.
+///
+/// Anything that is not a JSON object is handed back untouched, for the frontend to report.
+fn ground_archify_answer(answer: &str, cwd: &str) -> String {
+    let Ok(root) = std::path::Path::new(cwd).canonicalize() else {
+        return answer.to_string();
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(answer) else {
+        return answer.to_string();
+    };
+    let Some(document) = value.as_object_mut() else {
+        return answer.to_string();
+    };
+    let mut cited = false;
+    // Each diagram type keeps its entities in its own collection; every one can carry sources.
+    for collection in ["components", "nodes", "participants", "states"] {
+        let Some(entities) = document.get_mut(collection).and_then(serde_json::Value::as_array_mut) else {
+            continue;
+        };
+        for entity in entities.iter_mut().filter_map(serde_json::Value::as_object_mut) {
+            let kept: Vec<serde_json::Value> = entity
+                .get("sources")
+                .and_then(serde_json::Value::as_array)
+                .map(|sources| sources.iter().filter_map(|source| grounded_source(&root, source)).take(3).collect())
+                .unwrap_or_default();
+            if kept.is_empty() {
+                entity.remove("sources");
+            } else {
+                cited = true;
+                entity.insert("sources".to_string(), serde_json::Value::Array(kept));
+            }
+        }
+    }
+    let meta = document.entry("meta").or_insert_with(|| serde_json::json!({}));
+    if let Some(meta) = meta.as_object_mut() {
+        meta.remove("repository");
+        if let Some(pin) = cited.then(|| archify_repository_pin(&root)).flatten() {
+            meta.insert("repository".to_string(), pin);
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| answer.to_string())
+}
+
+/// One `sources` entry, if it names a file in the repository — rebuilt from the fields archify
+/// knows, with its line range checked against the file. A bare string is taken as a path.
+fn grounded_source(root: &std::path::Path, source: &serde_json::Value) -> Option<serde_json::Value> {
+    let (path, line, end_line, label) = match source {
+        serde_json::Value::String(path) => (path.as_str(), None, None, None),
+        serde_json::Value::Object(source) => (
+            source.get("path")?.as_str()?,
+            source.get("line").and_then(serde_json::Value::as_u64),
+            source.get("end_line").and_then(serde_json::Value::as_u64),
+            source.get("label").and_then(serde_json::Value::as_str),
+        ),
+        _ => return None,
+    };
+    let path = path.trim().trim_start_matches("./");
+    let relative = std::path::Path::new(path);
+    if path.is_empty()
+        || path.len() > 240
+        || path.contains('\\')
+        || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let file = root.join(relative).canonicalize().ok().filter(|file| file.starts_with(root) && file.is_file())?;
+
+    let mut out = serde_json::Map::new();
+    out.insert("path".to_string(), serde_json::Value::String(path.to_string()));
+    if let (Some(line), Some(count)) = (line.filter(|line| *line >= 1), line_count(&file)) {
+        if line <= count {
+            out.insert("line".to_string(), line.into());
+            if let Some(end) = end_line.filter(|end| *end > line && *end <= count) {
+                out.insert("end_line".to_string(), end.into());
+            }
+        }
+    }
+    if let Some(label) = label.map(str::trim).filter(|label| !label.is_empty()) {
+        out.insert("label".to_string(), label.chars().take(48).collect::<String>().into());
+    }
+    Some(serde_json::Value::Object(out))
+}
+
+/// Lines in a text file — what a cited range is checked against. `None` for a file too large to be
+/// worth reading for that, which keeps its path and drops the range.
+fn line_count(file: &std::path::Path) -> Option<u64> {
+    const MAX_BYTES: u64 = 8 * 1024 * 1024;
+    if std::fs::metadata(file).ok()?.len() > MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(file).ok()?;
+    let breaks = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+    Some(if bytes.last().is_some_and(|byte| *byte != b'\n') { breaks + 1 } else { breaks })
+}
+
+/// archify's `meta.repository`: `origin`'s address and the full `HEAD` commit — or nothing, when the
+/// folder is not a repository's root, has no commit or no `origin`, or the address carries
+/// credentials (archify refuses those, and a file meant to be shared should not hold them either).
+///
+/// `web` — links to the file at that commit — only for a canonical GitHub or Gitee HTTPS address,
+/// the two forges archify links to. Any other address is `local-only`, which archify still verifies
+/// against `--repo-root`, just without links.
+fn archify_repository_pin(root: &std::path::Path) -> Option<serde_json::Value> {
+    let repository = git2::Repository::open(root).ok()?;
+    let revision = repository.head().ok()?.peel_to_commit().ok()?.id().to_string();
+    let remote = repository.find_remote("origin").ok()?;
+    let url = remote.url()?.trim().to_string();
+    let credentials = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .is_some_and(|rest| rest.split('/').next().is_some_and(|authority| authority.contains('@')));
+    if url.is_empty() || credentials {
+        return None;
+    }
+    let forge = [("github.com", "github"), ("gitee.com", "gitee")].into_iter().find_map(|(host, provider)| {
+        let rest = url.strip_prefix(&format!("https://{host}/"))?;
+        let mut parts = rest.trim_end_matches('/').trim_end_matches(".git").split('/');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty() => Some(provider),
+            _ => None,
+        }
+    });
+    Some(match forge {
+        Some(provider) => {
+            serde_json::json!({ "url": url, "revision": revision, "provider": provider, "link_mode": "web" })
+        }
+        None => serde_json::json!({ "url": url, "revision": revision, "link_mode": "local-only" }),
+    })
 }
 
 /// Asks an engine to write a flow — see `flows::builder`, which owns the prompt, the schema and the
@@ -7642,5 +8090,127 @@ mod tests {
         // every one of these CLIs has a file-reading tool. That is the universal channel.
         assert!(crate::claude::ClaudeEngine.attachment_args(&both).is_empty());
         assert!(crate::grok::GrokEngine.attachment_args(&both).is_empty());
+    }
+    /// A scratch repository with one committed file and the given `origin`, for the archify tests.
+    fn archify_scratch_repo(origin: Option<&str>) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("cf-archify-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n// two\n// three\n").unwrap();
+        let repository = git2::Repository::init(&root).unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(std::path::Path::new("src/main.rs")).unwrap();
+        index.write().unwrap();
+        let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        repository.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[]).unwrap();
+        if let Some(origin) = origin {
+            repository.remote("origin", origin).unwrap();
+        }
+        root
+    }
+
+    /// What the frontend files is what archify will verify: sources that do not resolve inside the
+    /// repository go, a range past the end of its file loses the range, a component left with none
+    /// loses the key, and an engine's own `meta.repository` is replaced by the real `HEAD`.
+    #[test]
+    fn an_archify_answer_keeps_only_sources_it_can_pin() {
+        let root = archify_scratch_repo(Some("https://github.com/example/app.git"));
+        let answer = serde_json::json!({
+            "meta": {"title": "App", "repository": {"url": "https://other.example/x", "revision": "0".repeat(40)}},
+            "components": [
+                {"id": "api", "sources": [
+                    {"path": "src/main.rs", "line": 2, "end_line": 99, "label": "entry point"},
+                    {"path": "../outside.rs"},
+                    {"path": "/etc/hosts"},
+                    {"path": "./src/../src/main.rs"},
+                    {"path": "src/missing.rs"},
+                    "src/main.rs"
+                ]},
+                {"id": "db", "sources": [{"path": "schema.sql"}]}
+            ]
+        })
+        .to_string();
+        let out: serde_json::Value =
+            serde_json::from_str(&ground_archify_answer(&answer, root.to_str().unwrap())).unwrap();
+
+        assert_eq!(
+            out["components"][0]["sources"],
+            serde_json::json!([{"path": "src/main.rs", "line": 2, "label": "entry point"}, {"path": "src/main.rs"}])
+        );
+        assert!(out["components"][1].get("sources").is_none());
+        let pin = &out["meta"]["repository"];
+        assert_eq!(pin["url"], "https://github.com/example/app.git");
+        assert_eq!(pin["provider"], "github");
+        assert_eq!(pin["link_mode"], "web");
+        let head = git2::Repository::open(&root).unwrap().head().unwrap().peel_to_commit().unwrap().id().to_string();
+        assert_eq!(pin["revision"], head);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// No pin rather than a wrong one: an address with credentials in it is not written into a file
+    /// meant to be shared, and any origin but a canonical GitHub/Gitee one is archify's `local-only`.
+    #[test]
+    fn an_archify_pin_is_local_only_or_absent_off_the_two_forges() {
+        let cited = r#"{"components":[{"id":"api","sources":["src/main.rs"]}]}"#;
+        let pin_for = |origin: Option<&str>| {
+            let root = archify_scratch_repo(origin);
+            let out: serde_json::Value =
+                serde_json::from_str(&ground_archify_answer(cited, root.to_str().unwrap())).unwrap();
+            std::fs::remove_dir_all(&root).ok();
+            out["meta"].get("repository").cloned()
+        };
+
+        let ssh = pin_for(Some("git@github.com:example/app.git")).expect("an ssh origin still pins");
+        assert_eq!(ssh["link_mode"], "local-only");
+        assert!(ssh.get("provider").is_none());
+        assert!(pin_for(Some("https://user:token@github.com/example/app.git")).is_none());
+        assert!(pin_for(None).is_none());
+
+        // Not a JSON object at all: handed back as it came, for the frontend to report.
+        assert_eq!(ground_archify_answer("not json", "."), "not json");
+    }
+    /// Every diagram type has a prompt, each one names its own shape, and none asks for coordinates —
+    /// which are CodeFlow's to place, and which would otherwise come back wrong.
+    #[test]
+    fn every_archify_kind_has_a_prompt_of_its_own() {
+        for kind in ARCHIFY_KINDS {
+            let prompt = archify_prompt(kind).expect(kind);
+            assert!(prompt.contains(&format!("\"diagram_type\": \"{kind}\"")), "{kind} names its type");
+            assert!(prompt.contains("solo lectura"), "{kind} is read-only");
+            assert!(prompt.contains("No escribas posiciones"), "{kind} asks for no coordinates");
+        }
+        assert!(archify_prompt("pie-chart").is_none());
+    }
+
+    /// Sources are checked in every collection archify keeps entities in, not only `components`.
+    #[test]
+    fn archify_sources_are_grounded_in_every_diagram_type() {
+        let root = archify_scratch_repo(Some("https://github.com/example/app.git"));
+        for (collection, extra) in [("nodes", "workflow"), ("participants", "sequence"), ("states", "lifecycle")] {
+            let answer = serde_json::json!({
+                "diagram_type": extra,
+                collection: [
+                    {"id": "a", "sources": [{"path": "src/main.rs", "line": 1}, {"path": "../outside"}, {"path": "nope.rs"}]},
+                    {"id": "b", "sources": [{"path": "missing.rs"}]}
+                ]
+            })
+            .to_string();
+            let out: serde_json::Value =
+                serde_json::from_str(&ground_archify_answer(&answer, root.to_str().unwrap())).unwrap();
+            assert_eq!(out[collection][0]["sources"], serde_json::json!([{"path": "src/main.rs", "line": 1}]), "{collection}");
+            assert!(out[collection][1].get("sources").is_none(), "{collection}");
+            assert_eq!(out["meta"]["repository"]["link_mode"], "web", "{collection}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A diagram saved into a repository takes the name archify gives its type.
+    #[test]
+    fn an_archify_file_is_named_after_its_type() {
+        use crate::commands::diagrams_cmd::archify_extension_for_test as ext;
+        assert_eq!(ext(r#"{"diagram_type":"sequence"}"#), "sequence.json");
+        assert_eq!(ext(r#"{"diagram_type":"lifecycle","states":[]}"#), "lifecycle.json");
+        assert_eq!(ext(r#"{"components":[]}"#), "architecture.json");
+        assert_eq!(ext("{not json"), "architecture.json");
     }
 }

@@ -1,4 +1,4 @@
-import { FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MXGRAPH } from "./diagrams/doc";
+import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MXGRAPH } from "./diagrams/doc";
 import { diagramsLinkFile } from "./tauri/diagramsCommands";
 import { focusSatellite } from "./tauri/windows";
 import { broadcast } from "./windowBus";
@@ -11,8 +11,8 @@ import { pushErrorToast } from "../state/toastStore";
 import type { DiagramFormat } from "../types/diagrams";
 
 /**
- * The bridge between a diagram file in a repository — `.dbml`, `.excalidraw` or `.drawio` — and the
- * Diagrams app.
+ * The bridge between a diagram file in a repository — `.dbml`, `.excalidraw`, `.drawio` or one of archify's
+ * `.<type>.json` — and the Diagrams app.
  *
  * # What "copy" means here, and what it does not
  *
@@ -52,6 +52,9 @@ const DIAGRAM_EXTENSIONS: [RegExp, DiagramFormat][] = [
   [/\.dbml$/i, FORMAT_DBML],
   [/\.excalidraw$/i, FORMAT_EXCALIDRAW],
   [/\.(drawio|dio)$/i, FORMAT_MXGRAPH],
+  // archify's own names for its documents — one per type. A bare `.json` is not claimed, for the
+  // reason a bare `.xml` is not: most of it in a repository is not a diagram.
+  [/\.(?:architecture|workflow|sequence|dataflow|lifecycle)\.json$/i, FORMAT_ARCHIFY],
 ];
 
 /** The name a diagram file takes as a diagram: the file's, without its directories or its extension. */
@@ -166,29 +169,37 @@ export async function openFileInDiagrams(args: {
     );
     return false;
   }
+  await showDiagramAnywhere(args.workspaceId, diagramId);
+  return true;
+}
 
+/**
+ * Puts a diagram on screen wherever the Diagrams app lives — its own satellite, this window, or the
+ * main window when this one has no rail. For a diagram that was just filed: a file opened from the
+ * editor above, or an architecture map the Code Map just had written.
+ */
+export async function showDiagramAnywhere(workspaceId: string, diagramId: string): Promise<void> {
   // The Diagrams app on its own desk wins, and keeps whatever it was editing: `openDiagram` there
   // flushes the outgoing draft before it swaps in this one.
   const detached = useWindowStore.getState().detachedLabel("app", "diagrams");
   if (detached && detached !== WINDOW.label) {
-    broadcast({ kind: "open-diagram", to: detached, workspaceId: args.workspaceId, diagramId });
+    broadcast({ kind: "open-diagram", to: detached, workspaceId, diagramId });
     await focusSatellite(detached).catch(() => {
       // A window that has gone since the list was pushed. The message is already out, and if it
       // really is gone nobody acts on it — the diagram is filed either way, which is the part that
       // had to happen.
     });
-    return true;
+    return;
   }
 
   if (isMainWindow() || detached === WINDOW.label) {
-    await showDiagramHere(args.workspaceId, diagramId);
-    return true;
+    await showDiagramHere(workspaceId, diagramId);
+    return;
   }
 
   // A repository window: no rail, so it cannot show the Diagrams app itself. The main window can,
   // and bringing it forward is what makes the press read as "it opened over there" rather than as
   // nothing having happened.
-  broadcast({ kind: "open-diagram", to: MAIN_LABEL, workspaceId: args.workspaceId, diagramId });
+  broadcast({ kind: "open-diagram", to: MAIN_LABEL, workspaceId, diagramId });
   broadcast({ kind: "focus-main" });
-  return true;
 }

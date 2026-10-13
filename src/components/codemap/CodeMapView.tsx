@@ -14,15 +14,28 @@ import {
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { ChevronRight, FileCode2, Folder, FolderTree, LoaderCircle, Network, RefreshCw, Search, Users, X } from "lucide-react";
+import { ArrowRightLeft, ChevronRight, FileCode2, Folder, FolderTree, LoaderCircle, Network, RefreshCw, Repeat, Search, Users, Waypoints, Workflow, X } from "lucide-react";
 import { Tooltip } from "../common/Tooltip";
 import { Segmented } from "../common/Segmented";
-import { iconButtonClass } from "../common/Button";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { AiSparkles } from "../common/AiGlyph";
+import { ThinkingOrb } from "../common/ThinkingOrb";
+import { ChatModelPicker } from "../ai/ChatModelPicker";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { ArchifyTopicDialog, type TopicKind } from "../diagrams/ArchifyTopicDialog";
 import { chipClass, fieldClass, rowClass, sectionLabelClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useAiRunStore, isCancellation, newRunId } from "../../state/aiRunStore";
+import { notify } from "../../state/notificationStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { layoutMap } from "../../lib/codemap/layout";
+import { parseArchify } from "../../lib/diagrams/archify/ir";
+import { storedDocument } from "../../lib/diagrams/archify/sourceFile";
+import { FORMAT_ARCHIFY } from "../../lib/diagrams/doc";
+import { serializeTags } from "../../lib/notes/tags";
+import { diagramsArchifyProject, diagramsCreateDiagram, type ArchifyKind } from "../../lib/tauri/diagramsCommands";
 import {
   codemapFind,
   codemapGlobal,
@@ -171,11 +184,28 @@ export function CodeMapView() {
   );
 }
 
+/** How an architecture-map run is named in the run store — and how this view finds its own. */
+const ARCHIFY_RUN_KIND = "codemap.archify.runKind" as const;
+
 function CodeMap() {
   const t = useT();
   const project = useWorkspaceStore((s) => s.activeProject());
   const onScreen = useUiStore((s) => s.activeView === "codemap");
   const root = project?.local_path ?? null;
+  /** The architecture map being written for this repository, if one is. Read from the run store
+   *  rather than kept here: the run outlives this view — leaving the tab, or switching repository
+   *  and back, must neither forget it nor allow a second one for the same repository. */
+  const archifyRun = useAiRunStore((s) => {
+    if (!project) return null;
+    for (const [runId, on] of Object.entries(s.active)) {
+      const about = s.aboutByRun[runId];
+      if (on && about?.kindKey === ARCHIFY_RUN_KIND && about.target?.projectId === project.id) return runId;
+    }
+    return null;
+  });
+  const [diagramMenuAt, setDiagramMenuAt] = useState<{ x: number; y: number } | null>(null);
+  /** The type being asked a subject for — the dialog is open while this is set. */
+  const [topicFor, setTopicFor] = useState<TopicKind | null>(null);
   const [focus, setFocus] = useState("");
   const [mode, setModeState] = useState<Mode>("global");
   /** The last map that arrived, and the repository it is of. Read through `root` below, so the
@@ -335,6 +365,99 @@ function CodeMap() {
 
   if (!project || !root) return null;
 
+  /**
+   * Has an engine read this repository and write one of archify's five diagrams of it, then files it
+   * in Diagrams (`FORMAT_ARCHIFY`) — see `ai::archify_repository` for the run and `lib/diagrams/archify`
+   * for the format.
+   *
+   * An architecture is one click: a map of the whole system is the question. The other four are about
+   * *something* — which API call, which process, which data, which entity — because a sequence of "the
+   * API" is a different diagram from the sequence of `POST /orders`; `topic` is that something, asked
+   * by `ArchifyTopicDialog` (which offers the repository's own routes, statuses and so on) and empty
+   * when the user left it to the engine, which then picks the repository's most important one. The
+   * repository and its workspace are captured before anything is awaited: the run belongs to them
+   * wherever the user goes while it reads.
+   */
+  const createDiagram = async (kind: ArchifyKind, topic = "") => {
+    if (archifyRun) return;
+    const target = { id: project.id, name: project.name, workspaceId: project.workspace_id };
+    let instruction = t(`codemap.archify.default.${kind}`);
+    if (topic.trim()) instruction = `${t("codemap.archify.focus")}: ${topic.trim()}. ${instruction}`;
+    const runId = newRunId("archify");
+    useAiRunStore.getState().start(runId, {
+      kindKey: ARCHIFY_RUN_KIND,
+      detail: target.name,
+      workspaceId: target.workspaceId,
+      target: { view: "codemap", projectId: target.id },
+    });
+    try {
+      const raw = await diagramsArchifyProject({ projectId: target.id, kind, instruction, runId });
+      const fallback = t(`codemap.archify.title.${kind}`, { project: target.name });
+      const parsed = parseArchify(raw, fallback);
+      if ("error" in parsed) throw new Error(t("codemap.archify.error"));
+      // An architecture is named after the repository; the others after what the engine traced, under
+      // the type — "API flow — POST /orders" says more than "API flow — my-repo".
+      const named = parsed.ir.meta.title;
+      const title =
+        kind === "architecture" || !named || named === fallback
+          ? fallback
+          : `${t(`codemap.archify.kind.${kind}`)} — ${named}`;
+      const ir = { ...parsed.ir, meta: { ...parsed.ir.meta, title } };
+      const row = await diagramsCreateDiagram(
+        target.workspaceId,
+        null,
+        title,
+        storedDocument(ir),
+        FORMAT_ARCHIFY,
+        serializeTags(["archify", ir.diagram_type]),
+      );
+      // A tree already holding this workspace is told about the new row whether or not the diagram is
+      // opened now; the notification below opens it by id, but the gallery lists what it has.
+      const { useDiagramsStore } = await import("../../state/diagramsStore");
+      if (useDiagramsStore.getState().workspaceId === target.workspaceId) await useDiagramsStore.getState().refresh();
+      notify({
+        source: "diagrams",
+        titleKey: "notifications.archifyCreated",
+        target: { view: "diagrams", select: { kind: "diagram", id: row.id } },
+        status: "success",
+        detail: title,
+        workspaceId: target.workspaceId,
+      });
+      // Still looking at this repository's map: the answer is what they were waiting for, so it
+      // opens. Anywhere else, the notification is the way to it — this does not pull anyone away.
+      const workspace = useWorkspaceStore.getState();
+      if (
+        workspace.activeWorkspaceId === target.workspaceId &&
+        workspace.activeProjectId === target.id &&
+        useUiStore.getState().activeView === "codemap"
+      ) {
+        const { showDiagramAnywhere } = await import("../../lib/dbmlBridge");
+        await showDiagramAnywhere(target.workspaceId, row.id);
+        pushSuccessToast(t("codemap.archify.created"));
+      }
+    } catch (error) {
+      if (!isCancellation(error)) pushErrorToast(String(error));
+    } finally {
+      useAiRunStore.getState().finish(runId);
+    }
+  };
+
+  /** The five kinds, as the menu under the button lists them. */
+  const diagramMenu = (): MenuItem[] =>
+    (
+      [
+        ["architecture", Network],
+        ["workflow", Workflow],
+        ["sequence", ArrowRightLeft],
+        ["dataflow", Waypoints],
+        ["lifecycle", Repeat],
+      ] as const
+    ).map(([kind, icon]) => ({
+      label: t(`codemap.archify.kind.${kind}`),
+      icon,
+      onClick: () => (kind === "architecture" ? void createDiagram(kind) : setTopicFor(kind)),
+    }));
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--cf-surface)]">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
@@ -399,6 +522,45 @@ function CodeMap() {
             <RefreshCw size={13} />
           </button>
         </Tooltip>
+        <ChatModelPicker
+          task="diagram"
+          variant="tag"
+          liveModel={null}
+          chatActive={false}
+          title={t("codemap.archify.modelHint")}
+        />
+        {archifyRun ? (
+          <>
+            <span className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
+              <ThinkingOrb size="sm" />
+              {t("codemap.archify.running")}
+            </span>
+            <Tooltip label={t("codemap.archify.stop")}>
+              <button
+                type="button"
+                onClick={() => void useAiRunStore.getState().cancel(archifyRun)}
+                className={iconButtonClass({ size: "sm" })}
+                aria-label={t("codemap.archify.stop")}
+              >
+                <X size={13} />
+              </button>
+            </Tooltip>
+          </>
+        ) : (
+          <Tooltip label={t("codemap.archify.hint")}>
+            <button
+              type="button"
+              onClick={(event) => {
+                const box = event.currentTarget.getBoundingClientRect();
+                setDiagramMenuAt({ x: box.left, y: box.bottom + 4 });
+              }}
+              className={buttonClass({ variant: "secondary", size: "sm" })}
+            >
+              <AiSparkles size={13} />
+              {t("codemap.archify.action")}
+            </button>
+          </Tooltip>
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1">
@@ -494,6 +656,21 @@ function CodeMap() {
           />
         </aside>
       </div>
+      {diagramMenuAt && (
+        <ContextMenu x={diagramMenuAt.x} y={diagramMenuAt.y} items={diagramMenu()} onClose={() => setDiagramMenuAt(null)} />
+      )}
+      {topicFor && (
+        <ArchifyTopicDialog
+          kind={topicFor}
+          projectId={project.id}
+          onClose={() => setTopicFor(null)}
+          onStart={(topic) => {
+            const kind = topicFor;
+            setTopicFor(null);
+            void createDiagram(kind, topic);
+          }}
+        />
+      )}
     </div>
   );
 }

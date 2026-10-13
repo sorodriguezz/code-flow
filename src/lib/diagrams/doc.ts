@@ -10,7 +10,8 @@ import type { DiagramFormat } from "../../types/diagrams";
  * There are two dialects. mxGraph XML, which the embedded draw.io reads and writes, and DBML — a
  * database schema as text, which `DbmlWorkbench` edits. Adding the second one changed this file and
  * added an editor, and nothing else: the store, the tree, the gallery, the backup and every query
- * still carry a string and a name for it.
+ * still carry a string and a name for it. The whiteboard and archify's architecture maps came in the
+ * same way since.
  */
 
 /** The dialect an embedded draw.io reads and writes. Mirrors `FORMAT_MXGRAPH` in Rust. */
@@ -27,6 +28,13 @@ export const FORMAT_DBML: DiagramFormat = "dbml";
  * `.excalidraw` file. Mirrors `FORMAT_EXCALIDRAW` in Rust. See `ExcalidrawEditor`.
  */
 export const FORMAT_EXCALIDRAW: DiagramFormat = "excalidraw";
+
+/**
+ * An architecture map in [archify](https://github.com/tt-a1i/archify)'s format: its `architecture`
+ * IR as JSON, or a page archify already rendered — see `archifyIr.ts`. Shown, not edited: written by
+ * an engine from the Code Map, or imported. Mirrors `FORMAT_ARCHIFY` in Rust.
+ */
+export const FORMAT_ARCHIFY: DiagramFormat = "archify";
 
 /** The format a new diagram is created in when nothing says otherwise — the drawing one. */
 export const DEFAULT_FORMAT = FORMAT_MXGRAPH;

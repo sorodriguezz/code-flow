@@ -57,7 +57,7 @@ import type { DiagramFormat } from "../../types/diagrams";
  */
 
 /** The formats that produce a picture, which is to say every one that is not a document. */
-export type ImageExportFormat = Exclude<ExportFormat, "drawio" | "dbml" | "excalidraw">;
+export type ImageExportFormat = Exclude<ExportFormat, "drawio" | "dbml" | "excalidraw" | "html" | "archify">;
 
 /** The choices the export dialog collects. */
 export interface ImageExportOptions {

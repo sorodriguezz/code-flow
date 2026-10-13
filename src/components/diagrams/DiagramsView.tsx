@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { ArrowLeft, FileWarning, GitBranch, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, Download, FileWarning, GitBranch, GitCompare, History, Undo2, Workflow, X } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -7,6 +7,8 @@ import { ViewSkeleton } from "../common/ViewSkeleton";
 import { DiagramExplorer } from "./DiagramExplorer";
 import { DiagramGallery } from "./DiagramGallery";
 import { DrawioFrame } from "./DrawioFrame";
+import { ArchifyViewer, currentArchifyExporter } from "./ArchifyViewer";
+import { ArchifyRefineControls } from "./ArchifyRefineControls";
 /**
  * The schema editor, behind a `lazy` boundary for the reason `NoteEditor` puts Monaco behind one:
  * it carries the code editor and four panels, and a workspace of drawings should not pay for it.
@@ -31,19 +33,26 @@ import { VersionHistoryModal } from "../common/VersionHistoryModal";
 import {
   diagramsClearVersions,
   diagramsDeleteVersion,
+  diagramsGetDiagram,
   diagramsListVersions,
   diagramsVersionContent,
 } from "../../lib/tauri/diagramsCommands";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CARD, ICON_BUTTON } from "./diagramsChrome";
 import { relativeTime } from "../notes/notesChrome";
-import { FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
+import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
+import { saveBytes } from "../../lib/diagrams/exportFile";
+import { archifyDocKind } from "../../lib/diagrams/archify/ir";
+import { presetNames, viewerLabels } from "../../lib/diagrams/archify/labels";
+import { renderArchifyPage } from "../../lib/diagrams/archify/render";
+import { archifyFileSuffix, archifySourceFile } from "../../lib/diagrams/archify/sourceFile";
+import { useThemeStore } from "../../state/themeStore";
 import { pointExcalidrawAtBundledFonts } from "../../lib/diagrams/excalidrawAssets";
 import { ensureDiagramsStoreLoaded, useDiagramsStore } from "../../state/diagramsStore";
 import type { ImageExportFormat } from "../../lib/diagrams/exportOptions";
 import { useLayoutStore } from "../../state/layoutStore";
 import { promptAction } from "../../state/promptStore";
-import { useToastStore } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast, useToastStore } from "../../state/toastStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -121,6 +130,7 @@ export function DiagramsView() {
   );
   const isSchema = openFormat === FORMAT_DBML;
   const isWhiteboard = openFormat === FORMAT_EXCALIDRAW;
+  const isArchify = openFormat === FORMAT_ARCHIFY;
 
   const sidebarWidth = useLayoutStore((s) => s.sizes.diagramsSidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
@@ -149,6 +159,9 @@ export function DiagramsView() {
   const activeTitle = useDiagramsStore(
     (s) => s.diagrams.find((entry) => entry.id === s.activeId)?.title ?? "",
   );
+  /** The other architecture an archify map is being held against, if a comparison is on. */
+  const [compare, setCompare] = useState<{ id: string; title: string; doc: string } | null>(null);
+  useEffect(() => setCompare(null), [activeId]);
 
   useEffect(() => {
     void ensureDiagramsStoreLoaded();
@@ -223,6 +236,106 @@ export function DiagramsView() {
         })),
         { label: t(`diagrams.exportAs.${own}`), onClick: () => requestExport({ format: own }) },
       ],
+    });
+  };
+
+  /**
+   * An archify diagram's way out: the page itself, its two pictures, and the file archify's own CLI
+   * renders. The pictures come from the viewer on screen (it is the one that has drawn them), so they
+   * are the diagram as it looks — and are absent for a page archify rendered, which cannot be asked.
+   *
+   * The draft is read on the click, like `saveAsTemplate` does, and the HTML the user saves is the
+   * page they are looking at except for one thing: its sources become links, which the sandboxed
+   * frame in here could not follow.
+   */
+  const openArchifyExportMenu = (at: { x: number; y: number }) => {
+    const draft = useDiagramsStore.getState().draft;
+    if (!draft) return;
+    const name = openTitle || t("diagrams.untitled");
+    const found = archifyDocKind(draft.doc, name);
+    const exporter = currentArchifyExporter();
+    const done = (saved: boolean) => saved && pushSuccessToast(t("diagrams.exported"));
+    const text = (body: string, format: "html" | "archify", file: string) =>
+      void saveBytes(new TextEncoder().encode(body), format, file).then(done).catch((e) => pushErrorToast(String(e)));
+    setExportMenu({
+      x: at.x,
+      y: at.y,
+      items: [
+        {
+          label: t("diagrams.exportAs.html"),
+          disabled: found.kind === "invalid",
+          onClick: () => {
+            const scheme = useThemeStore.getState().resolved;
+            const page = renderArchifyPage(draft.doc, {
+              title: name,
+              language,
+              theme: scheme,
+              labels: (mode) => viewerLabels(t, mode),
+              presetNames: presetNames(t),
+              linkSources: true,
+              embed: false,
+            });
+            if (page.kind !== "invalid") text(page.html, "html", name);
+          },
+        },
+        ...(found.kind === "document"
+          ? [
+              {
+                label: t("diagrams.exportAs.svg"),
+                disabled: !exporter,
+                onClick: () =>
+                  void exporter
+                    ?.svg()
+                    .then((svg) => saveBytes(new TextEncoder().encode(svg), "svg", name))
+                    .then(done)
+                    .catch((e) => pushErrorToast(String(e))),
+              },
+              {
+                label: t("diagrams.exportAs.png"),
+                disabled: !exporter,
+                onClick: () =>
+                  void exporter
+                    ?.png()
+                    .then((png) => saveBytes(png, "png", name))
+                    .then(done)
+                    .catch((e) => pushErrorToast(String(e))),
+              },
+              {
+                label: t("diagrams.exportAs.archify"),
+                separated: true,
+                onClick: () => text(archifySourceFile(draft.doc, found.ir), "archify", `${name}.${archifyFileSuffix(found.ir)}`),
+              },
+            ]
+          : []),
+      ],
+    });
+  };
+
+  /**
+   * "Compare with…": the other architecture maps of this workspace, to pick one from. Only for an
+   * architecture — that is what archify compares — and only when there is a second one to pick.
+   */
+  const openCompareMenu = (at: { x: number; y: number }) => {
+    const store = useDiagramsStore.getState();
+    const draft = store.draft;
+    const here = draft ? archifyDocKind(draft.doc, openTitle) : null;
+    if (!draft || here?.kind !== "document" || here.ir.diagram_type !== "architecture") return;
+    const others = store.diagrams.filter((d) => d.format === FORMAT_ARCHIFY && d.id !== draft.id);
+    const choose = async (id: string, title: string) => {
+      const row = await diagramsGetDiagram(id);
+      const found = row ? archifyDocKind(row.doc, title) : null;
+      if (!row || found?.kind !== "document" || found.ir.diagram_type !== "architecture") {
+        pushErrorToast(t("diagrams.compareNone"));
+        return;
+      }
+      setCompare({ id, title, doc: row.doc });
+    };
+    setExportMenu({
+      x: at.x,
+      y: at.y,
+      items: others.length
+        ? others.map((d) => ({ label: d.title || t("diagrams.untitled"), onClick: () => void choose(d.id, d.title) }))
+        : [{ label: t("diagrams.compareNone"), disabled: true, onClick: () => {} }],
     });
   };
 
@@ -331,6 +444,59 @@ export function DiagramsView() {
               {status && (
                 <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{status}</span>
               )}
+              {/* An archify map has no editor toolbar to carry the export button the other two
+                  formats put in theirs, so it lives here, at the end of the bar. */}
+              {isArchify && !compare && <ArchifyRefineControls diagramId={activeId} title={openTitle} />}
+              {isArchify && compare && (
+                <button
+                  type="button"
+                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)] px-2 py-1 text-[11px] font-medium text-[var(--cf-accent)]"
+                  title={t("diagrams.compareExit")}
+                  onClick={() => setCompare(null)}
+                >
+                  {t("diagrams.compareWith", { title: compare.title || t("diagrams.untitled") })}
+                  <X size={11} />
+                </button>
+              )}
+              {isArchify && !compare && (
+                <button
+                  type="button"
+                  className={ICON_BUTTON}
+                  title={t("diagrams.compare")}
+                  aria-label={t("diagrams.compare")}
+                  onClick={(event) => {
+                    const box = event.currentTarget.getBoundingClientRect();
+                    openCompareMenu({ x: box.left, y: box.bottom + 4 });
+                  }}
+                >
+                  <GitCompare size={14} />
+                </button>
+              )}
+              {isArchify && (
+                <button
+                  type="button"
+                  className={ICON_BUTTON}
+                  title={t("archify.history")}
+                  aria-label={t("archify.history")}
+                  onClick={() => setHistoryOpen(true)}
+                >
+                  <History size={14} />
+                </button>
+              )}
+              {isArchify && (
+                <button
+                  type="button"
+                  className={ICON_BUTTON}
+                  title={t("diagrams.export")}
+                  aria-label={t("diagrams.export")}
+                  onClick={(event) => {
+                    const box = event.currentTarget.getBoundingClientRect();
+                    openArchifyExportMenu({ x: box.left, y: box.bottom + 4 });
+                  }}
+                >
+                  <Download size={14} />
+                </button>
+              )}
             </header>
             {/* Keyed on the diagram, so switching from one to another rebuilds the frame rather
                 than reusing an editor that already holds the previous document. draw.io takes its
@@ -344,9 +510,17 @@ export function DiagramsView() {
                   callbacks and write through the same store; what differs is the dialect they
                   read — see `types/diagrams.ts`. The schema workbench carries its own toolbar, so
                   it needs no `onExport`; draw.io's and Excalidraw's open this view's menu from a
-                  button in their own toolbars. Anything not a schema or a whiteboard is a drawing:
+                  button in their own toolbars. An archify map is not edited here at all — it is
+                  shown, and its export button is in the bar above. Anything else is a drawing:
                   that was the only format before there were two. */}
-              {isSchema ? (
+              {isArchify ? (
+                <ArchifyViewer
+                  key={activeId}
+                  diagramId={activeId}
+                  title={openTitle || t("diagrams.untitled")}
+                  compareWith={compare?.doc ?? null}
+                />
+              ) : isSchema ? (
                 <Suspense fallback={<ViewSkeleton />}>
                   <DbmlWorkbench
                     key={activeId}
@@ -383,7 +557,7 @@ export function DiagramsView() {
                   chrome around it — would straddle a switch to the next; without `diagramId`, a
                   generation could only ever be applied to the diagram that happened to be open
                   when it came back. */}
-              {aiOpen && (
+              {aiOpen && !isArchify && (
                 <DiagramAiPanel
                   key={activeId}
                   diagramId={activeId}

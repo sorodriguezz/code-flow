@@ -1,10 +1,13 @@
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeFileBytes } from "../tauri/commands";
-import { FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MXGRAPH } from "./doc";
+import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MXGRAPH } from "./doc";
+import { archifyDocKind, isArchifyHtml } from "./archify/ir";
+import { convertMermaid, isMermaid } from "./archify/mermaid";
+import { translate } from "../../state/languageStore";
 import type { DiagramFormat } from "../../types/diagrams";
 
 /**
- * Getting a diagram out of the app, and a `.drawio` or `.dbml` file into it.
+ * Getting a diagram out of the app, and a `.drawio`, `.dbml`, `.excalidraw` or archify file into it.
  *
  * **Everything here goes through a file dialog the user drives.** A desktop app writing where it
  * likes is a desktop app people stop trusting, and the dialog is also what supplies the extension —
@@ -17,11 +20,13 @@ import type { DiagramFormat } from "../../types/diagrams";
 /**
  * What a diagram can be saved as.
  *
- * Two of these are documents rather than pictures, and each belongs to one editor: `.drawio` is the
- * mxGraph dialect and `.dbml` is the schema one. A diagram can only ever be offered the one its own
- * format is written in — see `DiagramsView`'s export menu, which is built per format.
+ * Everything past the three pictures is a document rather than a picture, and each belongs to one
+ * format: `.drawio` is the mxGraph dialect, `.dbml` the schema one, `.excalidraw` the whiteboard's,
+ * and an archify map leaves as its interactive page (`html`) or as the `.architecture.json` archify's
+ * own CLI renders (`archify`). A diagram is only ever offered the ones its own format is written in
+ * — see `DiagramsView`'s export menus, which are built per format.
  */
-export type ExportFormat = "png" | "svg" | "pdf" | "drawio" | "dbml" | "excalidraw";
+export type ExportFormat = "png" | "svg" | "pdf" | "drawio" | "dbml" | "excalidraw" | "html" | "archify";
 
 /** The dialog's filter and the extension, per format. */
 const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
@@ -31,6 +36,10 @@ const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
   drawio: { name: "draw.io", extensions: ["drawio", "xml"] },
   dbml: { name: "DBML", extensions: ["dbml"] },
   excalidraw: { name: "Excalidraw", extensions: ["excalidraw"] },
+  html: { name: "HTML", extensions: ["html"] },
+  // `json` rather than `architecture.json`: a save panel's type filter is one extension. The double
+  // one comes from the suggested name instead — see `DiagramsView.openArchifyExportMenu`.
+  archify: { name: "Archify", extensions: ["json"] },
 };
 
 /**
@@ -83,7 +92,10 @@ export async function saveBytes(
  * should not have to answer — they have a file, and which of the editors opens it is a fact about
  * the file rather than a choice. The extension decides it; see `formatOf`.
  */
-const IMPORT_FILTER = { name: "Diagram", extensions: ["drawio", "xml", "dbml", "excalidraw"] };
+const IMPORT_FILTER = {
+  name: "Diagram",
+  extensions: ["drawio", "xml", "dbml", "excalidraw", "json", "html", "htm", "mmd", "mermaid"],
+};
 
 /**
  * Which editor a picked file belongs to, from its extension.
@@ -95,7 +107,42 @@ const IMPORT_FILTER = { name: "Diagram", extensions: ["drawio", "xml", "dbml", "
 function formatOf(path: string): DiagramFormat {
   if (/\.dbml$/i.test(path)) return FORMAT_DBML;
   if (/\.excalidraw$/i.test(path)) return FORMAT_EXCALIDRAW;
+  if (/\.(json|html?|mmd|mermaid)$/i.test(path)) return FORMAT_ARCHIFY;
   return FORMAT_MXGRAPH;
+}
+
+/**
+ * The one exception to "the extension decides, and nothing is inspected": archify's files, and
+ * Mermaid's.
+ *
+ * `.json` and `.html` say nothing about what is inside — most of either kind is not a diagram — so
+ * here the extension only names the candidate, and the content has to back it up: a page archify
+ * rendered carries its `generator` stamp, and a document has to read as one of archify's five types.
+ * A Mermaid file is not stored as it is: it is converted (`archify/mermaid.ts`) into the archify
+ * document it stands for, which is what the viewer draws and what an export writes.
+ *
+ * Returns the text to store.
+ */
+function prepareArchify(path: string, doc: string): string {
+  if (/\.(mmd|mermaid)$/i.test(path)) {
+    if (!isMermaid(doc)) throw new Error(translate("archify.mermaidUnsupported"));
+    const converted = convertMermaid(doc);
+    if (!converted.ok) {
+      throw new Error(translate(converted.reason === "empty" ? "archify.mermaidEmpty" : "archify.mermaidUnsupported"));
+    }
+    return `${JSON.stringify(converted.doc, null, 2)}\n`;
+  }
+  if (/\.html?$/i.test(path)) {
+    if (!isArchifyHtml(doc)) throw new Error(translate("diagrams.importNotArchify"));
+    return doc;
+  }
+  const found = archifyDocKind(doc);
+  if (found.kind === "document") return doc;
+  throw new Error(
+    found.kind === "invalid" && found.error === "mode"
+      ? translate("archify.unknownMode", { mode: found.mode ?? "" })
+      : translate("diagrams.importNotArchify"),
+  );
 }
 
 /**
@@ -117,9 +164,15 @@ export async function openDiagramFile(): Promise<
   const picked = await open({ multiple: false, filters: [IMPORT_FILTER] });
   if (typeof picked !== "string") return null;
   const { diagramsReadImport } = await import("../tauri/diagramsCommands");
-  const doc = await diagramsReadImport(picked);
+  const read = await diagramsReadImport(picked);
+  const format = formatOf(picked);
+  const doc = format === FORMAT_ARCHIFY ? prepareArchify(picked, read) : read;
   const name = picked.split(/[\\/]/).pop() ?? "diagram";
-  return { name: name.replace(/\.(drawio|xml|dbml|excalidraw)$/i, ""), doc, format: formatOf(picked) };
+  return {
+    name: name.replace(/\.(drawio|xml|dbml|excalidraw|(?:architecture|workflow|sequence|dataflow|lifecycle)\.json|json|html?|mmd|mermaid)$/i, ""),
+    doc,
+    format,
+  };
 }
 
 /**
