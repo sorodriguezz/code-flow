@@ -295,6 +295,51 @@ pub(super) struct AppHost {
     /// The flow as this run executes it — written beside the run when it waits, so a restart can
     /// pick it up even if the flow was edited meanwhile.
     pub(super) spec: Arc<FlowSpec>,
+    /// What nodes asked to remember for the next run, in order, until this run is known to have ended well
+    /// (see `RunHost::state_stage`).
+    staged: Mutex<Staged>,
+    /// What nodes asked to have done once the run has ended well (`RunHost::after_success`).
+    deferred: Mutex<Vec<engine::HostFuture<'static, ()>>>,
+}
+
+/// What a run asked to remember for the next one (see `RunHost::state_stage`): the changes in order, for the moment the run
+/// ends well — and, beside them, what each key reads as with its changes applied, so a read does not replay all of them
+/// (a loop that stages once per batch would otherwise be asked to fold thousands of them on every read).
+#[derive(Default)]
+struct Staged {
+    updates: Vec<(String, engine::StateUpdate)>,
+    view: HashMap<String, Option<Value>>,
+}
+
+impl Staged {
+    /// Adds a change to `key`, given what it read as before (the view if it has one, else what was stored).
+    fn push(&mut self, key: &str, stored: Option<Value>, update: engine::StateUpdate) {
+        let current = self.view.get(key).cloned().unwrap_or(stored);
+        self.view.insert(key.to_string(), update(current));
+        self.updates.push((key.to_string(), update));
+    }
+}
+
+#[cfg(test)]
+mod staged_tests {
+    use super::*;
+
+    #[test]
+    fn staged_changes_read_as_applied_and_apply_to_what_is_stored_when_the_run_ends() {
+        let append: engine::StateUpdate = std::sync::Arc::new(|current| {
+            let mut list = current.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+            list.push(Value::from(list.len() as i64));
+            Some(Value::Array(list))
+        });
+        let mut staged = Staged::default();
+        staged.push("k", Some(json!(["a"])), append.clone());
+        staged.push("k", Some(json!(["a"])), append.clone());
+        assert_eq!(staged.view["k"], Some(json!(["a", 1, 2])), "reads as both applied, without replaying them");
+        // Another run added «b» meanwhile: at the end the same two changes land on that.
+        let stored_then = Some(json!(["a", "b"]));
+        let landed = staged.updates.iter().filter(|(key, _)| key == "k").fold(stored_then, |current, (_, update)| update(current));
+        assert_eq!(landed, Some(json!(["a", "b", 2, 3])));
+    }
 }
 
 /// A node inside a loop: its batches so far, kept whole so the inspector shows all of them.
@@ -399,6 +444,35 @@ impl AppHost {
         );
     }
 
+    /// Makes what the nodes staged part of the flow's memory — the run ended well. Each change is applied to
+    /// what is stored at this moment, read and written under one hold of the database.
+    fn commit_staged(&self) {
+        let updates = match self.staged.lock() {
+            Ok(mut staged) => {
+                staged.view.clear();
+                std::mem::take(&mut staged.updates)
+            }
+            Err(_) => return,
+        };
+        let now = engine::now_text();
+        for (key, update) in updates {
+            let _ = self.with_db(|conn| {
+                let next = update(queries::state_get(conn, &self.flow_id, &key)?);
+                match next {
+                    Some(value) => queries::state_set(conn, &self.flow_id, &key, &value, &now),
+                    None => queries::state_delete(conn, &self.flow_id, &key),
+                }
+            });
+        }
+    }
+
+    /// Forgets what the nodes staged — the run failed or was stopped.
+    fn discard_staged(&self) {
+        if let Ok(mut staged) = self.staged.lock() {
+            *staged = Staged::default();
+        }
+    }
+
     /// Writes what loops added to their nodes' records since the last write.
     fn flush_looped(&self) {
         let Ok(mut looped) = self.looped.lock() else { return };
@@ -463,7 +537,12 @@ impl RunHost for AppHost {
         let mut items_in = report.inputs.iter().map(Vec::len).sum::<usize>() as i64;
         let mut items_out: Vec<i64> = report.outputs.iter().map(|port| port.len() as i64).collect();
         let mut duration_ms = report.duration_ms;
-        if report.iteration == 0 {
+        // The first report of a node starts its record. A later one with iteration 0 is still the same
+        // record growing — the last report of a loop that ran in one batch (its «done»), or an inner loop's
+        // first batch on every pass of the loop around it — and replacing the record with it threw away what
+        // the earlier reports had kept.
+        let recorded_before = self.looped.lock().map(|looped| looped.contains_key(&report.node_id)).unwrap_or(false);
+        if report.iteration == 0 && !recorded_before {
             if let Err(error) = write_node_data(&self.run_id, &report.node_id, &data) {
                 self.log(&node.id, LogStream::Info, &format!("Could not keep this node's data: {error}"));
             }
@@ -569,7 +648,22 @@ impl RunHost for AppHost {
     }
 
     fn state_get(&self, key: &str) -> Result<Option<Value>, String> {
+        if let Some(view) = self.staged.lock().ok().and_then(|staged| staged.view.get(key).cloned()) {
+            return Ok(view);
+        }
         self.with_db(|conn| queries::state_get(conn, &self.flow_id, key))
+    }
+
+    fn after_success(&self, work: engine::HostFuture<'static, ()>) {
+        if let Ok(mut deferred) = self.deferred.lock() {
+            deferred.push(work);
+        }
+    }
+
+    fn state_stage(&self, key: &str, update: engine::StateUpdate) -> Result<(), String> {
+        let stored = self.with_db(|conn| queries::state_get(conn, &self.flow_id, key))?;
+        self.staged.lock().map_err(|e| e.to_string())?.push(key, stored, update);
+        Ok(())
     }
 
     fn state_set(&self, key: &str, value: Option<&Value>) -> Result<(), String> {
@@ -639,7 +733,7 @@ impl RunHost for AppHost {
         run_dir(&self.run_id).join("work")
     }
 
-    fn subflow(&self, flow_id: &str, items: Vec<Item>, wait: bool) -> engine::HostFuture<'_, Result<Vec<Item>, String>> {
+    fn subflow(&self, flow_id: &str, items: Vec<Item>, wait: bool, cancel: CancellationToken) -> engine::HostFuture<'_, Result<Vec<Item>, String>> {
         let flow_id = flow_id.to_string();
         Box::pin(async move {
             let (target, workspace_ok) = {
@@ -673,6 +767,7 @@ impl RunHost for AppHost {
             let mut request = StartRequest::fired(&entry, items, RunOrigin::Subflow);
             request.depth = self.depth + 1;
             request.wait = wait;
+            request.parent = wait.then_some(cancel);
             if request.depth > 5 {
                 return Err("Flows calling flows stop five levels deep".into());
             }
@@ -733,6 +828,10 @@ impl RunHost for AppHost {
         record_restore_point(&self.run_id, path);
     }
 
+    fn enforces_read_only(&self, engine: &engine::EngineChoice) -> bool {
+        super::ai_host::enforces_read_only(self, engine)
+    }
+
     fn db_connection(&self, connection_id: &str) -> Result<crate::datasource::DbConnectionConfig, String> {
         super::app_ops::db_connection(self, connection_id)
     }
@@ -749,6 +848,11 @@ impl RunHost for AppHost {
     fn oauth_token(&self, id: &str, meta: &Value) -> engine::HostFuture<'_, Result<String, String>> {
         let (id, meta) = (id.to_string(), meta.clone());
         Box::pin(async move { super::oauth::access_token(&id, &meta).await })
+    }
+
+    fn oauth_token_renewed(&self, id: &str, meta: &Value, refused: &str) -> engine::HostFuture<'_, Result<String, String>> {
+        let (id, meta, refused) = (id.to_string(), meta.clone(), refused.to_string());
+        Box::pin(async move { super::oauth::renewed_token(&id, &meta, &refused).await })
     }
 }
 
@@ -820,11 +924,15 @@ pub struct StartRequest {
     /// Outputs known from an earlier run, by node id — seeded instead of executed when the node is
     /// in the plan. A retry from where a run failed.
     pub reuse: HashMap<String, Ports>,
+    /// The caller's token, for a flow run *inside* another (a waiting subflow): the run stops with it.
+    pub parent: Option<CancellationToken>,
+    /// Where the input items of the reused nodes came from — see `Plan::seed_origins`.
+    pub reuse_origins: HashMap<String, Vec<Vec<run::Origin>>>,
 }
 
 impl StartRequest {
     pub fn manual(mode: RunMode, trigger: Option<String>) -> Self {
-        Self { mode, trigger, trigger_items: None, form_input: None, origin: RunOrigin::Manual, respond: None, depth: 0, wait: false, reuse: HashMap::new() }
+        Self { mode, trigger, trigger_items: None, form_input: None, origin: RunOrigin::Manual, respond: None, depth: 0, wait: false, reuse: HashMap::new(), parent: None, reuse_origins: HashMap::new() }
     }
 
     pub fn fired(trigger: &str, items: Vec<Item>, origin: RunOrigin) -> Self {
@@ -838,6 +946,8 @@ impl StartRequest {
             depth: 0,
             wait: false,
             reuse: HashMap::new(),
+            parent: None,
+            reuse_origins: HashMap::new(),
         }
     }
 }
@@ -869,20 +979,31 @@ pub fn retry(app: &AppHandle, run_id: &str, from_failed: bool) -> Result<FlowRun
         .ok_or("The run's input is no longer on record")?;
     let mut request = StartRequest::fired(&row.trigger_node, input, RunOrigin::Retry);
     if from_failed {
-        let in_loops: HashSet<String> = parsed
-            .nodes
-            .iter()
-            .filter(|n| n.type_id == crate::flows::catalog::LOOP_TYPE)
-            .flat_map(|n| run::downstream(&parsed, &n.id))
-            .collect();
+        // A loop's *body* is never reused: what its nodes kept is every batch's, run together. The loop
+        // itself is, once it finished — as what it handed on («done»), with nothing for the body: the
+        // body then gets no items and does not run again. (Leaving out the loop and all that follows
+        // it re-ran every request of the loop, and the email after it, to retry a failed email.)
+        let loop_ids: HashSet<String> =
+            parsed.nodes.iter().filter(|n| n.type_id == crate::flows::catalog::LOOP_TYPE).map(|n| n.id.clone()).collect();
+        let in_bodies: HashSet<String> = loop_ids.iter().flat_map(|id| spec::loop_body(&parsed, id)).collect();
         let current: HashSet<&str> = parsed.nodes.iter().map(|n| n.id.as_str()).collect();
         for node in nodes.iter().filter(|n| n.status == "success" || n.status == "reused") {
-            if node.node_id == row.trigger_node || in_loops.contains(&node.node_id) || !current.contains(node.node_id.as_str()) {
+            if node.node_id == row.trigger_node || in_bodies.contains(&node.node_id) || !current.contains(node.node_id.as_str()) {
                 continue;
             }
-            if let Some(data) = read_node_data(run_id, &node.node_id) {
-                request.reuse.insert(node.node_id.clone(), data.outputs);
+            let Some(data) = read_node_data(run_id, &node.node_id) else { continue };
+            if loop_ids.contains(&node.node_id) {
+                let done = data.outputs.get(1).cloned().unwrap_or_default();
+                // The record keeps a bounded number of items per port: a loop whose «done» list was cut
+                // short cannot stand in for the whole one, and runs again.
+                if node.items_out.get(1).copied() != Some(done.len() as i64) {
+                    continue;
+                }
+                request.reuse.insert(node.node_id.clone(), vec![Vec::new(), done]);
+                continue;
             }
+            request.reuse_origins.insert(node.node_id.clone(), data.origins.clone());
+            request.reuse.insert(node.node_id.clone(), data.outputs);
         }
     }
     start_with(app, &row.flow_id, request).map(|(row, _)| row)
@@ -960,7 +1081,7 @@ pub fn start_with(
     flow_id: &str,
     request: StartRequest,
 ) -> Result<(FlowRunRow, Option<tokio::sync::oneshot::Receiver<Finished>>), String> {
-    let StartRequest { mode, trigger, trigger_items, form_input, origin, respond, depth, wait, reuse } = request;
+    let StartRequest { mode, trigger, trigger_items, form_input, origin, respond, depth, wait, reuse, parent, reuse_origins } = request;
     let db = app.state::<Db>();
     let (flow, parsed, pins, vars, locale, previous, mode) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -1009,6 +1130,9 @@ pub fn start_with(
     // What an earlier run already produced, standing in for the nodes that produced it.
     for (id, outputs) in reuse {
         if plan.active.contains(&id) && !plan.seeds.contains_key(&id) {
+            if let Some(origins) = reuse_origins.get(&id) {
+                plan.seed_origins.insert(id.clone(), origins.clone());
+            }
             plan.seeds.insert(id, (outputs, false));
         }
     }
@@ -1063,7 +1187,7 @@ pub fn start_with(
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::insert_run(&conn, &row).map_err(|e| e.to_string())?;
     }
-    let done_rx = launch(app, Launch { row: row.clone(), parsed, plan, vars, locale, label: label.to_string(), origin, respond, depth, wait });
+    let done_rx = launch(app, Launch { row: row.clone(), parsed, plan, vars, locale, label: label.to_string(), origin, respond, depth, wait, parent });
     Ok((row, done_rx))
 }
 
@@ -1079,14 +1203,16 @@ pub(super) struct Launch {
     pub respond: Option<tokio::sync::oneshot::Sender<engine::Reply>>,
     pub depth: u32,
     pub wait: bool,
+    pub parent: Option<CancellationToken>,
 }
 
 /// Executes a run in the background and records how it ends; hands back a receiver for its end when
 /// `wait` asked for one.
 pub(super) fn launch(app: &AppHandle, launch: Launch) -> Option<tokio::sync::oneshot::Receiver<Finished>> {
-    let Launch { row, parsed, plan, vars, locale, label, origin, respond, depth, wait } = launch;
+    let Launch { row, parsed, plan, vars, locale, label, origin, respond, depth, wait, parent } = launch;
     let run_id = row.id.clone();
-    let cancel = CancellationToken::new();
+    // A flow run inside another and waited for stops with it; every other run is its own.
+    let cancel = parent.map_or_else(CancellationToken::new, |parent| parent.child_token());
     if let Ok(mut active) = ACTIVE.lock() {
         active.insert(
             run_id.clone(),
@@ -1107,6 +1233,8 @@ pub(super) fn launch(app: &AppHandle, launch: Launch) -> Option<tokio::sync::one
         secrets: Mutex::new(Vec::new()),
         looped: Mutex::new(HashMap::new()),
         spec: parsed.clone(),
+        staged: Mutex::new(Staged::default()),
+        deferred: Mutex::new(Vec::new()),
     });
     let timezone = parsed
         .settings
@@ -1150,6 +1278,17 @@ pub(super) fn launch(app: &AppHandle, launch: Launch) -> Option<tokio::sync::one
             })
         };
         let outcome = engine::execute(parsed, plan, context).await;
+        // What the nodes asked to remember for the next run counts only if this one ended well — and what they asked to have
+        // done then (a queue's messages deleted) is done now, or never.
+        let deferred = host.deferred.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default();
+        if outcome.status == engine::RunStatus::Success {
+            host.commit_staged();
+            for work in deferred {
+                work.await;
+            }
+        } else {
+            host.discard_staged();
+        }
         flusher.abort();
         host.flush();
         host.flush_looped();
@@ -1263,8 +1402,13 @@ pub fn recover(conn: &rusqlite::Connection) {
                 drop_restore_points(&name);
                 let _ = std::fs::remove_dir_all(entry.path());
             } else if uuid::Uuid::parse_str(&name).is_ok() {
-                // Scratch folders of runs that ended with the app.
-                let _ = std::fs::remove_dir_all(entry.path().join("work"));
+                // Scratch folders of runs that ended with the app — not of one parked at an approval or a
+                // wait, which will pick up after the restart and finds there the files its items point to
+                // (a generated image, a download).
+                let waiting = matches!(queries::get_run(conn, &name), Ok(Some(run)) if run.status == "waiting");
+                if !waiting {
+                    let _ = std::fs::remove_dir_all(entry.path().join("work"));
+                }
             }
         }
     }

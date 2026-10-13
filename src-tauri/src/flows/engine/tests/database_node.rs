@@ -280,3 +280,88 @@ async fn mongo_documents_by_their_object_id() {
     assert_eq!(again[0]["cliente"], "Ana", "an update sets, it does not replace");
     assert_eq!(ran.output("count", 0)[0]["count"], 2);
 }
+
+#[tokio::test]
+async fn a_query_value_goes_in_as_the_type_it_was_given() {
+    let (dir, connection) = temp_db("typed");
+    let spec = chain(vec![
+        node("start", "trigger.manual", json!({})),
+        node("setup", "data.sql", json!({"connection": connection, "queryText": "CREATE TABLE t (n, d, j)", "runFor": "once"})),
+        code("rows", r#"return [{n: "42", d: "2026-10-13T08:30:00Z", j: {a: 1}}];"#),
+        node(
+            "insert",
+            "data.sql",
+            json!({
+                "connection": connection,
+                "queryText": "INSERT INTO t (n, d, j) VALUES ($1, $2, $3)",
+                "queryParams": [
+                    {"value": "={{ $json.n }}", "type": "integer"},
+                    {"value": "={{ $json.d }}", "type": "date"},
+                    {"value": "={{ $json.j }}", "type": "json"},
+                ],
+            }),
+        ),
+        node(
+            "read",
+            "data.sql",
+            json!({"connection": connection, "queryText": "SELECT typeof(n) AS kind, n, d, json_extract(j, '$.a') AS a FROM t", "runFor": "once"}),
+        ),
+    ]);
+    let ran = run(spec).await;
+    succeeded(&ran);
+    let row = &ran.output("read", 0)[0];
+    assert_eq!(row["kind"], "integer", "«42» went in as a number, not as the text '42': {row}");
+    assert_eq!(row["d"], "2026-10-13");
+    // Read back through SQLite's JSON functions: the document went in as JSON, not as some other text.
+    assert_eq!(row["a"].to_string().trim_matches('"'), "1", "{row}");
+
+    // A value that is not what its type says stops the node, naming which.
+    let wrong = chain(vec![
+        node("start", "trigger.manual", json!({})),
+        node("insert", "data.sql", json!({"connection": connection, "queryText": "INSERT INTO t (n) VALUES ($1)", "queryParams": [{"value": "4x", "type": "integer"}], "runFor": "once"})),
+    ]);
+    let ran = run(wrong).await;
+    assert_eq!(ran.outcome.status, RunStatus::Error);
+    assert!(ran.outcome.error.as_deref().unwrap_or("").contains("$1 (integer)"), "{:?}", ran.outcome.error);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_upsert_asks_for_its_rows_a_batch_at_a_time() {
+    let (dir, connection) = temp_db("bulk");
+    // 250 rows, of which the even ids are already there: two lookups of 200 and 50, not 250 of one.
+    let spec = chain(vec![
+        node("start", "trigger.manual", json!({})),
+        setup(&connection),
+        code("seed", "return Array.from({length: 125}, (_, i) => ({id: (i + 1) * 2, cliente: 'viejo', total: 0}));"),
+        db("insert", &connection, json!({"dbOp": "dbInsert", "dbTable": "pedidos"})),
+        code("batch", "return Array.from({length: 250}, (_, i) => ({id: i + 1, cliente: 'nuevo', total: i + 1}));"),
+        db("upsert", &connection, json!({"dbOp": "dbUpsert", "dbTable": "pedidos"})),
+        db("all", &connection, json!({"dbOp": "dbRead", "dbTable": "pedidos", "maxRows": 0, "runFor": "once"})),
+    ]);
+    let ran = run(spec).await;
+    succeeded(&ran);
+    let logs = logs_of(&ran, "upsert");
+    assert!(logs.iter().any(|line| line.contains("250 key(s) looked up in 2 query(ies)")), "{logs:?}");
+    assert!(logs.iter().any(|line| line.contains("125 inserted, 125 updated")), "{logs:?}");
+    let all = ran.output("all", 0);
+    assert_eq!(all.len(), 250);
+    assert!(all.iter().all(|row| row["cliente"] == "nuevo"));
+
+    // Two key columns: found by both.
+    let spec = chain(vec![
+        node("start", "trigger.manual", json!({})),
+        node("setup", "data.sql", json!({"connection": connection, "queryText": "CREATE TABLE stock (bodega TEXT, sku TEXT, cantidad INTEGER)", "runFor": "once"})),
+        code("seed", "return [{bodega: 'A', sku: 'x', cantidad: 1}];"),
+        db("insert", &connection, json!({"dbOp": "dbInsert", "dbTable": "stock"})),
+        code("batch", "return [{bodega: 'A', sku: 'x', cantidad: 5}, {bodega: 'B', sku: 'x', cantidad: 7}];"),
+        db("upsert", &connection, json!({"dbOp": "dbUpsert", "dbTable": "stock", "dbKeys": ["bodega", "sku"]})),
+        db("all", &connection, json!({"dbOp": "dbRead", "dbTable": "stock", "dbSort": [{"field": "bodega", "order": "asc"}], "runFor": "once"})),
+    ]);
+    let ran = run(spec).await;
+    succeeded(&ran);
+    assert!(logs_of(&ran, "upsert").iter().any(|line| line.contains("1 inserted, 1 updated")), "{:?}", logs_of(&ran, "upsert"));
+    let quantities: Vec<i64> = ran.output("all", 0).iter().map(|row| row["cantidad"].as_i64().unwrap()).collect();
+    assert_eq!(quantities, vec![5, 7]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

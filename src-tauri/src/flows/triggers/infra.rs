@@ -38,7 +38,7 @@ fn strings(params: &Value, name: &str) -> Vec<String> {
 }
 
 fn fire(app: &AppHandle, flow_id: &str, node_id: &str, view: &Arc<Mutex<TriggerView>>, item: Value) {
-    if let Err(error) = super::fire(app, flow_id, node_id, vec![Item::new(item)]) {
+    if let Err(error) = super::fire_event(app, flow_id, node_id, vec![Item::new(item)]) {
         super::note_problem(view, Some(error));
     }
 }

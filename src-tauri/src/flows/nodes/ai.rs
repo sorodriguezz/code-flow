@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
-use super::{flag, number, strings, text, NodeCtx, NodeError};
+use super::{failed_item, flag, number, strings, text, with_failures, NodeCtx, NodeError};
 use crate::ai::AiFailureKind;
 use crate::flows::engine::{AgentRequest, EngineChoice, LocalCall, LogStream};
 use crate::flows::run::{Item, Ports};
@@ -82,8 +82,9 @@ static CALLS: LazyLock<Mutex<HashMap<String, VecDeque<Instant>>>> = LazyLock::ne
 
 const HOUR: Duration = Duration::from_secs(3600);
 
-/// Counts one call against the flow's cap, or refuses it.
-fn take_slot(ctx: &NodeCtx) -> Result<(), NodeError> {
+/// Counts one call against the flow's cap, or refuses it. Every call that spends something — a
+/// subscription's plan, or an API key's money — goes through here, whichever node makes it.
+pub(super) fn take_slot(ctx: &NodeCtx) -> Result<(), NodeError> {
     let cap = ctx.run.ai_per_hour;
     if cap == 0 {
         return Ok(());
@@ -101,6 +102,30 @@ fn take_slot(ctx: &NodeCtx) -> Result<(), NodeError> {
         )));
     }
     list.push_back(Instant::now());
+    Ok(())
+}
+
+/// Refuses, before anything is sent, a batch the flow's hourly cap cannot cover: N items are at least N
+/// calls, and finding out at the 61st that the cap was 60 throws away 60 answers already paid for. It
+/// looks at the room left; the calls themselves are counted one by one, as they are made
+/// ([`take_slot`]).
+pub(super) fn ensure_room(ctx: &NodeCtx, calls: usize) -> Result<(), NodeError> {
+    let cap = ctx.run.ai_per_hour;
+    if cap == 0 || calls == 0 {
+        return Ok(());
+    }
+    let mut made = CALLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let list = made.entry(ctx.run.flow_id.clone()).or_default();
+    while list.front().is_some_and(|at| at.elapsed() >= HOUR) {
+        list.pop_front();
+    }
+    let left = (cap as usize).saturating_sub(list.len());
+    if calls > left {
+        return Err(NodeError::failed(format!(
+            "This needs at least {calls} AI calls and the flow may make {left} more this hour (cap {cap}) — nothing was sent. \
+             Raise it in Flow settings › AI calls an hour, or run it on fewer items"
+        )));
+    }
     Ok(())
 }
 
@@ -303,6 +328,33 @@ fn reason_word(kind: AiFailureKind) -> &'static str {
 /// Asks the first engine that can answer, falling back down the list; returns the reply and which
 /// engine gave it.
 async fn ask(ctx: &NodeCtx, engines: &[EngineChoice], question: &Ask) -> Result<(Reply, usize), NodeError> {
+    // A retry of the node (after the model failed on item 61) does not ask again what it was already
+    // answered for items 1 to 60.
+    let key = question_key(question);
+    let (position, earlier) = ctx.recall::<(Reply, usize)>(key);
+    if let Some(answered) = earlier {
+        ctx.log(LogStream::Info, "Reusing the answer an earlier attempt got for this item");
+        return Ok(answered);
+    }
+    let answered = ask_fresh(ctx, engines, question).await?;
+    ctx.keep(position, key, answered.clone());
+    Ok(answered)
+}
+
+/// What identifies a question across attempts. Not the working folder: a scratch one is new each time.
+fn question_key(question: &Ask) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    question.prompt.hash(&mut hasher);
+    question.data.hash(&mut hasher);
+    question.system.hash(&mut hasher);
+    question.can_edit.hash(&mut hasher);
+    question.schema.as_ref().map(Value::to_string).hash(&mut hasher);
+    question.mcp.hash(&mut hasher);
+    hasher.finish()
+}
+
+async fn ask_fresh(ctx: &NodeCtx, engines: &[EngineChoice], question: &Ask) -> Result<(Reply, usize), NodeError> {
     let mut last = String::from("No engine to ask");
     for (index, engine) in engines.iter().enumerate() {
         if ctx.cancel.is_cancelled() {
@@ -311,7 +363,23 @@ async fn ask(ctx: &NodeCtx, engines: &[EngineChoice], question: &Ask) -> Result<
         take_slot(ctx)?;
         warn_if_nearly_spent(ctx, engine);
         // A session belongs to the engine (and account) that opened it.
-        let attempt = if index == 0 { question.clone() } else { Ask { session: None, ..question.clone() } };
+        let attempt = if index == 0 {
+            question.clone()
+        } else if question.can_edit {
+            // The engine before this one may have been through half the work before it failed: the working
+            // copy is not the one the task was written for.
+            Ask {
+                session: None,
+                prompt: format!(
+                    "{}\n\nNota: un intento anterior de esta tarea falló a medias y pudo dejar cambios ya hechos en la carpeta de trabajo. \
+                     Mira primero su estado actual (git status / git diff) y continúa desde ahí; no repitas ni deshagas lo que ya está hecho.",
+                    question.prompt
+                ),
+                ..question.clone()
+            }
+        } else {
+            Ask { session: None, ..question.clone() }
+        };
         let error = match ask_once(ctx, engine, &attempt).await {
             Ok(reply) => return Ok((reply, index)),
             Err(error) => error,
@@ -343,14 +411,22 @@ async fn ask(ctx: &NodeCtx, engines: &[EngineChoice], question: &Ask) -> Result<
         }
         if failure.kind == AiFailureKind::Quota {
             if let Some(at) = reopens_at(ctx, engine, &failure) {
-                let wait = (at - chrono::Utc::now()).to_std().unwrap_or_default() + REOPEN_MARGIN;
                 ctx.log(
                     LogStream::Info,
                     &format!("{} is out of quota — the run waits until {} and asks again", engine_label(engine), local_time(ctx, at)),
                 );
-                tokio::select! {
-                    _ = tokio::time::sleep(wait) => {}
-                    _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
+                // By the wall clock, a half minute at a time: a sleep of «five hours» runs on a clock that
+                // stops while the machine sleeps, and the run would wake hours after the plan reopened.
+                let reopens = at + chrono::Duration::from_std(REOPEN_MARGIN).unwrap_or_default();
+                loop {
+                    let left = (reopens - chrono::Utc::now()).to_std().unwrap_or_default();
+                    if left.is_zero() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(left.min(Duration::from_secs(30))) => {}
+                        _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
+                    }
                 }
                 take_slot(ctx)?;
                 return ask_once(ctx, engine, &attempt).await.map(|reply| (reply, index)).map_err(failure_of);
@@ -383,7 +459,7 @@ fn problems_of(text: &str, schema: &Value) -> (Option<Value>, Vec<String>) {
     match schema::answer_object(text) {
         None => (None, vec!["the answer is not a JSON object".to_string()]),
         Some(mut value) => {
-            schema::prune(&mut value, schema);
+            schema::settle(&mut value, schema);
             let problems = schema::validate(&value, schema);
             (Some(value), problems)
         }
@@ -416,12 +492,16 @@ async fn conform(
     let retry = Ask {
         prompt: format!(
             "{}\n\nTu respuesta anterior no cumplió el esquema:\n- {}\n\nRespuesta anterior:\n{}\n\n\
-             Responde de nuevo SOLO con el objeto JSON corregido.",
+             Responde de nuevo SOLO con el objeto JSON corregido. No modifiques ningún archivo: solo da la respuesta.",
             question.prompt,
             problems.join("\n- "),
             previous
         ),
         session: None,
+        // Reformatting an answer is not a second go at the task: an agent that already edited the working
+        // copy must not edit it again to fix a bracket.
+        can_edit: false,
+        mcp: Vec::new(),
         ..question.clone()
     };
     take_slot(ctx)?;
@@ -550,23 +630,38 @@ fn stored_session(ctx: &NodeCtx, key: &str, engine: &EngineChoice) -> Option<Str
     same.then(|| stored.get("session").and_then(Value::as_str).map(str::to_string)).flatten()
 }
 
+/// A restore point for the repository at `root`, before a node works in it: one it may write to, or —
+/// on an engine whose «read only» is a request and not a limit (agy, opencode, Cline) — one it may not,
+/// since there nothing but the model's good manners stands between a diff that says «delete src/» and
+/// the working copy.
+fn protect_repo(ctx: &NodeCtx, engines: &[EngineChoice], root: &str, can_edit: bool) -> Result<(), NodeError> {
+    let unenforced = !can_edit && engines.iter().any(|engine| !ctx.run.host.enforces_read_only(engine));
+    if !can_edit && !unenforced {
+        return Ok(());
+    }
+    if unenforced {
+        ctx.log(LogStream::Info, "This engine only asks to stay read-only — a restore point is taken of the repository first");
+    }
+    crate::git::checkpoint::create_flow_baseline(root, &ctx.run.run_id).map_err(|e| NodeError::failed(format!("Could not take a restore point in {root}: {e}")))?;
+    ctx.run.host.edits_recorded(root);
+    Ok(())
+}
+
 async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let engines = engines(&ctx.params);
     let schema = output_schema(&ctx.params)?;
     let can_edit = ctx.param_str("access") == "edit";
     let (cwd, repo) = work_folder(ctx)?;
-    if can_edit {
-        if let Some(root) = &repo {
-            crate::git::checkpoint::create_flow_baseline(root, &ctx.run.run_id)
-                .map_err(|e| NodeError::failed(format!("Could not take a restore point in {root}: {e}")))?;
-            ctx.run.host.edits_recorded(root);
-        }
+    if let Some(root) = &repo {
+        protect_repo(ctx, &engines, root, can_edit)?;
     }
     let keep_session = ctx.param_str("session") == "continue";
     let mcp = if can_edit { strings(&ctx.params, "mcp") } else { Vec::new() };
     let resolved = if ctx.param_str("runFor") == "once" { vec![ctx.resolve_once().await?] } else { ctx.resolve_each().await? };
+    ensure_room(ctx, resolved.len())?;
 
     let mut out = Vec::with_capacity(resolved.len());
+    let mut failed: Vec<Item> = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
         let prompt = text(params, "prompt");
         if prompt.trim().is_empty() {
@@ -594,14 +689,18 @@ async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             effort: effort_of(ctx),
         };
         let started = Instant::now();
-        let (reply, used) = ask(ctx, &engines, &question).await?;
-        let (reply, data) = match schema {
-            Some(_) => {
-                let (reply, object) = conform(ctx, &engines, &question, reply, used).await?;
-                (reply, Some(object))
+        let answered = async {
+            let (reply, used) = ask(ctx, &engines, &question).await?;
+            match &schema {
+                Some(_) => {
+                    let (reply, object) = conform(ctx, &engines, &question, reply, used).await?;
+                    Ok::<_, NodeError>((reply, used, Some(object)))
+                }
+                None => Ok((reply, used, None)),
             }
-            None => (reply, None),
-        };
+        }
+        .await;
+        let (reply, used, data) = or_next!(ctx, index, failed, answered);
         if keep_session && used == 0 {
             if let Some(id) = &reply.session {
                 let stored = json!({ "provider": engines[0].provider, "account": engines[0].account, "session": id });
@@ -627,7 +726,7 @@ async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         }
         out.push(output_item(ctx, index, Value::Object(json)));
     }
-    Ok(vec![out])
+    Ok(with_failures(ctx, vec![out], failed, 0))
 }
 
 // -------------------------------------------------------------------------------- the local model
@@ -698,6 +797,7 @@ async fn local(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let max_calls = super::tools::max_calls(&ctx.params);
     let resolved = if ctx.param_str("runFor") == "once" { vec![ctx.resolve_once().await?] } else { ctx.resolve_each().await? };
     let mut out = Vec::with_capacity(resolved.len());
+    let mut failed: Vec<Item> = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
         let prompt = text(params, "prompt");
         if prompt.trim().is_empty() {
@@ -707,6 +807,7 @@ async fn local(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         if let Some(schema) = &schema {
             full.push_str(&schema_instruction(schema));
         }
+        let max_tokens = number(params, "maxTokens").unwrap_or(1_024.0).clamp(16.0, 131_072.0) as u32;
         let call = LocalCall {
             server: text(params, "server"),
             url: text(params, "url"),
@@ -724,16 +825,30 @@ async fn local(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let started = Instant::now();
         let memory = super::tools::memory_key(ctx, params);
         let history = memory.as_deref().map(|key| super::tools::recall(ctx, key)).unwrap_or_default();
-        let mut called = Vec::new();
-        let mut answer = if tools.is_empty() && history.is_empty() {
-            take_slot(ctx)?;
-            ctx.run.host.local_ai(call.clone(), ctx.cancel.clone()).await.map_err(failure_of)?
-        } else {
-            let messages = super::tools::opening("openai", &history, &full);
-            let (answer, log) = local_converse(ctx, &call, messages, &tools, max_calls).await?;
-            called = log;
-            answer
-        };
+        let first = async {
+            if tools.is_empty() && history.is_empty() {
+                take_slot(ctx)?;
+                let answer = ctx.run.host.local_ai(call.clone(), ctx.cancel.clone()).await.map_err(failure_of)?;
+                Ok::<_, NodeError>((answer, Vec::new()))
+            } else {
+                let messages = super::tools::opening("openai", &history, &full);
+                local_converse(ctx, &call, messages, &tools, max_calls).await
+            }
+        }
+        .await;
+        let (mut answer, called) = or_next!(ctx, index, failed, first);
+        // A schema answer cut at the token limit is not an answer: its brackets were closed for it, and a
+        // summary that stopped mid-sentence would pass for a whole one.
+        if schema.is_some() && answer.cut {
+            or_next!(
+                ctx,
+                index,
+                failed,
+                Err::<(), _>(NodeError::failed(format!(
+                    "The answer reached the token limit ({max_tokens}) and was cut, so its JSON is incomplete — raise «Max tokens»"
+                )))
+            );
+        }
         let mut data = None;
         if let Some(schema) = &schema {
             let (object, problems) = problems_of(&answer.text, schema);
@@ -790,7 +905,7 @@ async fn local(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         json.insert("durationMs".into(), json!(started.elapsed().as_millis() as u64));
         out.push(output_item(ctx, index, Value::Object(json)));
     }
-    Ok(vec![out])
+    Ok(with_failures(ctx, vec![out], failed, 0))
 }
 
 // ------------------------------------------------------------------------------------ the shortcuts
@@ -822,18 +937,17 @@ fn extra(instructions: &str) -> String {
     }
 }
 
-/// `[{ name, description }]`, skipping unnamed rows.
+/// `[{ name, description }]`, skipping unnamed rows and repeats (the first of a name stands) — the same
+/// list `catalog::category_names` gives the canvas its ports from.
 fn categories(params: &Value) -> Vec<(String, String)> {
-    params
-        .get("categories")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|row| {
-            let name = text(row, "name").trim().to_string();
-            (!name.is_empty()).then(|| (name, text(row, "description").trim().to_string()))
-        })
-        .collect()
+    let mut listed: Vec<(String, String)> = Vec::new();
+    for row in params.get("categories").and_then(Value::as_array).into_iter().flatten() {
+        let name = text(row, "name").trim().to_string();
+        if !name.is_empty() && !listed.iter().any(|(known, _)| *known == name) {
+            listed.push((name, text(row, "description").trim().to_string()));
+        }
+    }
+    listed
 }
 
 pub const OTHER_CATEGORY: &str = "other";
@@ -842,6 +956,13 @@ async fn classify(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let listed = categories(&ctx.params);
     if listed.is_empty() {
         return Err(NodeError::failed("List the categories to choose from"));
+    }
+    if crate::flows::catalog::routes_by_category(&ctx.params) && listed.len() > crate::flows::catalog::MAX_ROUTES as usize {
+        return Err(NodeError::failed(format!(
+            "Routing by category takes at most {} categories — this one lists {}; a category past the last port would have nowhere to go",
+            crate::flows::catalog::MAX_ROUTES,
+            listed.len()
+        )));
     }
     let multiple = flag(&ctx.params, "multiple");
     let allow_other = flag(&ctx.params, "allowOther");
@@ -853,7 +974,7 @@ async fn classify(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let schema = if multiple {
         json!({
             "type": "object",
-            "properties": { "categories": { "type": "array", "items": label }, "reason": { "type": "string" } },
+            "properties": { "categories": { "type": "array", "items": label, "minItems": 1 }, "reason": { "type": "string" } },
             "required": ["categories", "reason"],
             "additionalProperties": false,
         })
@@ -871,6 +992,7 @@ async fn classify(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         .collect::<Vec<_>>()
         .join("\n");
     let resolved = ctx.resolve_each().await?;
+    ensure_room(ctx, resolved.len())?;
     let items = ctx.items();
     let mut out = Vec::with_capacity(resolved.len());
     // Routed by category: one port per category in the listed order, then "other" when it is
@@ -878,6 +1000,7 @@ async fn classify(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let branch = crate::flows::catalog::routes_by_category(&ctx.params);
     let port_count = crate::flows::catalog::output_count("ai.classify", &ctx.params) as usize;
     let mut ports: Ports = if branch { vec![Vec::new(); port_count] } else { Vec::new() };
+    let mut failed: Vec<Item> = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
         let subject = text(params, "text");
         if subject.trim().is_empty() {
@@ -894,7 +1017,7 @@ async fn classify(ctx: &NodeCtx) -> Result<Ports, NodeError> {
              En «reason» explica la elección en una frase.{}",
             extra(&text(params, "instructions"))
         );
-        let (_, object) = ask_text(ctx, prompt, subject, Some(schema.clone())).await?;
+        let (_, object) = or_next!(ctx, index, failed, ask_text(ctx, prompt, subject, Some(schema.clone())).await);
         let object = object.unwrap_or_default();
         let answer = if multiple { object.get("categories").cloned() } else { object.get("category").cloned() }.unwrap_or(Value::Null);
         let target = ctx.param_str("target");
@@ -918,22 +1041,28 @@ async fn classify(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 }
             }
             if !sent {
-                if let Some(other) = other {
-                    ports[other].push(item);
+                match other {
+                    Some(other) => ports[other].push(item),
+                    // Nothing it chose has a port, and there is no «other»: the item is told about, not dropped.
+                    None => failed.push(failed_item(ctx, index, &NodeError::failed("The model chose none of the categories"))),
                 }
             }
         } else {
             out.push(item);
         }
     }
-    Ok(if branch { ports } else { vec![out] })
+    // A category port is not where an error belongs: with an «other» port they go there, else to the first.
+    let home = if branch && allow_other { port_count - 1 } else { 0 };
+    Ok(with_failures(ctx, if branch { ports } else { vec![out] }, failed, home))
 }
 
 async fn extract(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let schema = schema::from_fields(ctx.params.get("schemaFields").unwrap_or(&Value::Null)).map_err(NodeError::Failed)?;
     let resolved = ctx.resolve_each().await?;
+    ensure_room(ctx, resolved.len())?;
     let items = ctx.items();
     let mut out = Vec::with_capacity(resolved.len());
+    let mut failed: Vec<Item> = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
         let subject = text(params, "text");
         if subject.trim().is_empty() {
@@ -944,10 +1073,10 @@ async fn extract(ctx: &NodeCtx) -> Result<Ports, NodeError> {
              si un dato no aparece, déjalo en null (o vacío si el campo no admite null); no lo inventes.{}",
             extra(&text(params, "instructions"))
         );
-        let (_, object) = ask_text(ctx, prompt, subject, Some(schema.clone())).await?;
+        let (_, object) = or_next!(ctx, index, failed, ask_text(ctx, prompt, subject, Some(schema.clone())).await);
         out.push(output_item(ctx, index, with_answer(items.get(index).copied(), &ctx.param_str("target"), object.unwrap_or_default())));
     }
-    Ok(vec![out])
+    Ok(with_failures(ctx, vec![out], failed, 0))
 }
 
 /// «Ver una imagen»: the file handed to whichever engine the node names (`nodes::vision`). A CLI
@@ -1019,7 +1148,9 @@ async fn vision(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 (json!(seen.text), seen.meta)
             }
             _ => {
-                // The engine's own read tool opens the file — copied in, so the folder stays the run's.
+                // The engine's own read tool opens the file — copied in, so the folder stays the run's. Only an
+                // image or a PDF of a sane size: the path may come from an item.
+                super::vision::check(&path)?;
                 let folder = scratch(ctx)?;
                 let name = format!("{index}-{}", super::google::safe_name(&path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "imagen".into())));
                 std::fs::copy(&path, Path::new(&folder).join(&name)).map_err(|e| NodeError::failed(format!("Could not hand {} to the model: {e}", path.display())))?;
@@ -1043,7 +1174,8 @@ async fn vision(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         };
         let mut json = with_answer(items.get(index).copied(), &target, answer);
         if let Value::Object(map) = &mut json {
-            map.entry("ai").or_insert(Value::Object(meta));
+            // This node's own call: a chain (vision, then summarize) shows the last one's, not the first's.
+            map.insert("ai".into(), Value::Object(meta));
         }
         out.push(output_item(ctx, index, json));
     }
@@ -1052,8 +1184,10 @@ async fn vision(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 async fn summarize(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
+    ensure_room(ctx, resolved.len())?;
     let items = ctx.items();
     let mut out = Vec::with_capacity(resolved.len());
+    let mut failed: Vec<Item> = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
         let subject = text(params, "text");
         if subject.trim().is_empty() {
@@ -1080,16 +1214,17 @@ async fn summarize(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             extra(&text(params, "instructions"))
         );
         let started = Instant::now();
-        let (reply, _) = ask_text(ctx, prompt, subject, None).await?;
+        let (reply, _) = or_next!(ctx, index, failed, ask_text(ctx, prompt, subject, None).await);
         let mut json = with_answer(items.get(index).copied(), &or(&ctx.param_str("target"), "summary"), json!(reply.text.trim()));
         if let Value::Object(map) = &mut json {
             let mut meta = Map::new();
             reply.stamp(&mut meta, started);
-            map.entry("ai").or_insert(Value::Object(meta));
+            // This node's own call: a chain (vision, then summarize) shows the last one's, not the first's.
+            map.insert("ai".into(), Value::Object(meta));
         }
         out.push(output_item(ctx, index, json));
     }
-    Ok(vec![out])
+    Ok(with_failures(ctx, vec![out], failed, 0))
 }
 
 fn or(value: &str, fallback: &str) -> String {
@@ -1196,12 +1331,20 @@ pub fn review_findings(review: &str) -> Vec<Value> {
 async fn review(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let per_item = ctx.param_str("diffSource") == "diffText";
     let resolved = if per_item { ctx.resolve_each().await? } else { vec![ctx.resolve_once().await?] };
+    ensure_room(ctx, resolved.len())?;
     let engines = engines(&ctx.params);
     let template = ctx.run.host.ai_template("review");
     let base_prompt = if template.trim().is_empty() { crate::ai::DEFAULT_ANALYZE_TEMPLATE.to_string() } else { template };
     let mut out = Vec::with_capacity(resolved.len());
+    let mut failed: Vec<Item> = Vec::new();
+    let mut protected: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (index, params) in resolved.iter().enumerate() {
         let (diff, root) = diff_of(ctx, params, "working")?;
+        if let Some(root) = &root {
+            if protected.insert(root.clone()) {
+                protect_repo(ctx, &engines, root, false)?;
+            }
+        }
         if diff.trim().is_empty() {
             ctx.log(LogStream::Info, "Nothing to review: the diff is empty");
             out.push(output_item(ctx, index, json!({ "review": "", "findings": [], "findingCount": 0, "empty": true })));
@@ -1214,7 +1357,7 @@ async fn review(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         };
         let question = Ask { prompt, data: format!("DIFF:\n{}", cut(&diff, MAX_DIFF_CHARS)), cwd: Some(cwd), ..Default::default() };
         let started = Instant::now();
-        let (reply, _) = ask(ctx, &engines, &question).await?;
+        let (reply, _) = or_next!(ctx, index, failed, ask(ctx, &engines, &question).await);
         let findings = review_findings(&reply.text);
         let mut json = Map::new();
         json.insert("review".into(), json!(reply.text.trim()));
@@ -1227,7 +1370,7 @@ async fn review(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         reply.stamp(&mut json, started);
         out.push(output_item(ctx, index, Value::Object(json)));
     }
-    Ok(vec![out])
+    Ok(with_failures(ctx, vec![out], failed, 0))
 }
 
 /// CodeFlow's own PR analyzer — the one behind the pull request panel, not [`review`] above (one
@@ -1352,6 +1495,7 @@ async fn pr_fix(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         return Err(NodeError::failed("Resolver con IA edits files, so it runs on a CLI engine, not on the local model"));
     }
     let mut out = Vec::new();
+    let mut protected: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (index, params) in resolved.iter().enumerate() {
         let project = text(params, "project").trim().to_string();
         if project.is_empty() {
@@ -1359,6 +1503,12 @@ async fn pr_fix(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         }
         if text(params, "prId").trim().is_empty() {
             return Err(NodeError::failed("Say which pull request — its number"));
+        }
+        // An agent edits this repository: the run takes its restore point first, as any editing node does,
+        // so "undo this run's edits" covers a fix that went wrong and not only the panel's own checkpoint.
+        if protected.insert(project.clone()) {
+            let root = ctx.run.host.project_path(&project).map_err(NodeError::Failed)?;
+            protect_repo(ctx, std::slice::from_ref(&engine), &root, true)?;
         }
         let pr = params.get("prId").cloned().unwrap_or(Value::Null);
         let threads = text(params, "fixSource") == "fixThreads";
@@ -1432,11 +1582,13 @@ async fn pr_reply(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 /// be read or carried on by hand. One turn per item; each counts against the hourly cap.
 async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
+    ensure_room(ctx, resolved.len())?;
     let engine = engine_of(ctx.params.get("engine"));
     if engine.is_local() {
         return Err(NodeError::failed("The Chat runs on a CLI engine, not on the local model"));
     }
     let mut out = Vec::with_capacity(resolved.len());
+    let mut failed: Vec<Item> = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
         let message = text(params, "message");
         if message.trim().is_empty() {
@@ -1457,16 +1609,17 @@ async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             "provider": engine.provider,
             "model": engine.model,
         });
-        let answer = ctx.run.host.app_call("chat.send", args, ctx.cancel.clone()).await.map_err(|error| {
+        let sent = ctx.run.host.app_call("chat.send", args, ctx.cancel.clone()).await.map_err(|error| {
             if is_cancel(&error) {
                 NodeError::Cancelled
             } else {
                 NodeError::Failed(error)
             }
-        })?;
+        });
+        let answer = or_next!(ctx, index, failed, sent);
         out.push(output_item(ctx, index, answer));
     }
-    Ok(vec![out])
+    Ok(with_failures(ctx, vec![out], failed, 0))
 }
 
 fn branch_of(root: &str) -> String {

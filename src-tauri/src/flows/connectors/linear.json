@@ -59,12 +59,13 @@
       "id": "searchIssues",
       "name": { "es": "Buscar issues por título", "en": "Search issues by title" },
       "method": "POST",
+      "paginate": { "style": "cursor", "next": "data.issues.pageInfo.endCursor", "more": "data.issues.pageInfo.hasNextPage", "param": "variables.after", "in": "body" },
       "fields": [
         { "name": "text", "label": { "es": "Texto", "en": "Text" }, "required": true },
         { "name": "first", "label": { "es": "Cuántos", "en": "How many" }, "placeholder": "25", "json": true }
       ],
       "body": {
-        "query": "query($text: String!, $first: Int) { issues(filter: { title: { containsIgnoreCase: $text } }, first: $first) { nodes { id identifier title url priority state { name } assignee { name } } } }",
+        "query": "query($text: String!, $first: Int, $after: String) { issues(filter: { title: { containsIgnoreCase: $text } }, first: $first, after: $after) { nodes { id identifier title url priority state { name } assignee { name } } pageInfo { hasNextPage endCursor } } }",
         "variables": { "text": "{{text}}", "first": "{{first}}" }
       },
       "result": "data.issues.nodes"

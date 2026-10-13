@@ -10,13 +10,12 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_util::sync::CancellationToken;
 
 use super::TriggerView;
 use crate::api::NetworkOptions;
-use crate::db::{flow_run_queries, Db};
 use crate::flows::run::Item;
 
 /// What a credential adds to a connection: headers, query pairs, or a broker's user and password.
@@ -28,17 +27,14 @@ struct Signed {
     password: String,
 }
 
-fn sign(app: &AppHandle, credential_id: &str) -> Result<Signed, String> {
+fn sign(app: &AppHandle, flow_id: &str, credential_id: &str) -> Result<Signed, String> {
     let mut signed = Signed::default();
     if credential_id.trim().is_empty() {
         return Ok(signed);
     }
-    let row = {
-        let db = app.state::<Db>();
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        flow_run_queries::get_credential(&conn, credential_id).map_err(|e| e.to_string())?.ok_or("The credential no longer exists")?
-    };
-    let secret = crate::secrets::get_secret(&crate::secrets::flow_credential_key(credential_id))?.ok_or("The credential has no secret stored")?;
+    // Signed with what this flow may use: a flow brought in from elsewhere names the address it connects to and the credential
+    // by id, and that pair must not send another workspace's secret to a server of the flow's choosing.
+    let (row, secret) = super::credential_row(app, flow_id, credential_id, &["bearer", "basic", "header", "query"])?;
     let meta = |key: &str| row.meta.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
     match row.kind.as_str() {
         "bearer" => signed.headers.push(("Authorization".into(), format!("Bearer {secret}"))),
@@ -75,6 +71,9 @@ fn payload(text: &str) -> Value {
     serde_json::from_str::<Value>(text).unwrap_or_else(|_| Value::String(text.to_string()))
 }
 
+/// How often a WebSocket listener pings the server to know the line is alive.
+const WS_PING: Duration = Duration::from_secs(30);
+
 /// A trigger is listening for as long as it is armed; this stands in for "no end".
 const FOREVER: Duration = Duration::from_secs(365 * 24 * 3600);
 
@@ -107,7 +106,7 @@ pub fn spawn(
                 let (app, flow_id, node_id, view) = (app.clone(), flow_id.clone(), node_id.clone(), view.clone());
                 Arc::new(move |message: Value| {
                     super::note_problem(&view, None);
-                    if let Err(error) = super::fire(&app, &flow_id, &node_id, vec![Item::new(message)]) {
+                    if let Err(error) = super::fire_event(&app, &flow_id, &node_id, vec![Item::new(message)]) {
                         super::note_problem(&view, Some(error));
                     }
                 })
@@ -116,7 +115,7 @@ pub fn spawn(
                 let view = view.clone();
                 Arc::new(move || super::note_problem(&view, None))
             };
-            let outcome = match sign(&app, &text(&params, "credential")) {
+            let outcome = match sign(&app, &flow_id, &text(&params, "credential")) {
                 Err(error) => Err(error),
                 Ok(signed) => match transport.as_str() {
                     "mqtt" => listen_mqtt(&params, &signed, fire, opened, cancel.clone()).await,
@@ -168,14 +167,27 @@ async fn listen_ws(params: &Value, signed: &Signed, fire: Sink, opened: Opened, 
     if !hello.is_empty() {
         writer.send(Message::text(hello)).await.map_err(|e| e.to_string())?;
     }
+    // A connection a router dropped without a word stays "open" for ever: ping now and then, and take a silence
+    // longer than three pings as the end of it, so the reconnect below happens.
+    let mut ping = tokio::time::interval(WS_PING);
+    ping.tick().await;
+    let mut heard = Instant::now();
     loop {
         let frame = tokio::select! {
             frame = reader.next() => frame,
+            _ = ping.tick() => {
+                if heard.elapsed() > WS_PING * 3 {
+                    return Err(format!("Nothing heard for {} s — reconnecting", heard.elapsed().as_secs()));
+                }
+                writer.send(Message::Ping(Default::default())).await.map_err(|e| e.to_string())?;
+                continue;
+            }
             _ = cancel.cancelled() => {
                 let _ = writer.send(Message::Close(None)).await;
                 return Ok(());
             }
         };
+        heard = Instant::now();
         match frame {
             Some(Ok(Message::Text(text))) => fire(json!({"data": payload(text.as_str()), "at": chrono::Utc::now().to_rfc3339()})),
             Some(Ok(Message::Binary(bytes))) => {
@@ -191,7 +203,13 @@ async fn listen_ws(params: &Value, signed: &Signed, fire: Sink, opened: Opened, 
 
 async fn listen_sse(params: &Value, signed: &Signed, fire: Sink, opened: Opened, cancel: CancellationToken) -> Result<(), String> {
     let url = with_query(&text(params, "url"), &signed.query)?;
-    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).build().map_err(|e| e.to_string())?;
+    // A stream may be quiet for as long as it likes, so no read timeout; but the operating system is asked to probe the
+    // connection, which is what ends one a router dropped silently (and makes the reconnect happen).
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let mut request = client.get(&url).header("Accept", "text/event-stream");
     for (name, value) in &signed.headers {
         request = request.header(name.as_str(), value.as_str());

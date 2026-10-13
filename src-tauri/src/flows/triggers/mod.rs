@@ -20,6 +20,7 @@
 //! [`run_finished`] when another flow fails, the second by an Execute flow node.
 
 mod bots;
+mod carry;
 mod desk;
 mod github;
 mod inbox;
@@ -114,8 +115,10 @@ struct Armed {
     /// Error triggers: which flows' failures they answer (`None` = every flow of the workspace).
     error_watch: Vec<(String, Option<Vec<String>>)>,
     hotkeys: Vec<String>,
-    /// The fire held behind a running one: node, items, and how deep in a chain it was raised.
-    queued: Option<(String, Vec<Item>, u32)>,
+    /// The fires held behind a running one, oldest first: node, items, and how deep in a chain it was
+    /// raised. A node has one entry — its fires while the flow is busy are gathered into it, so a
+    /// burst runs as one run when the current one ends instead of the last fire replacing the rest.
+    queued: Vec<(String, Vec<Item>, u32)>,
     /// "Evento de CodeFlow" triggers on something the app raises (`app_event`): node, event, params.
     app_events: Vec<(String, String, Value)>,
     /// «Otro flujo terminó»: node, the outcome it waits for, which flows (`None` = every one).
@@ -524,6 +527,19 @@ pub fn start(app: &AppHandle) {
         for id in &ids {
             if let Err(error) = arm(&app, id) {
                 crate::applog::warn(&format!("flows: could not arm {id} at startup — {error}"));
+                // The flow stays «active» in the list while nothing listens for it: say why, once the window can show it.
+                // (An untrusted one is expected to wait for its review — it has its own mark.)
+                if error != "untrusted" {
+                    let name = app
+                        .state::<Db>()
+                        .0
+                        .lock()
+                        .ok()
+                        .and_then(|conn| flow_queries::get_flow(&conn, id).ok().flatten())
+                        .map(|row| row.meta.name)
+                        .unwrap_or_default();
+                    let _ = app.emit("flows:arm-failed", json!({"flowId": id, "name": name, "error": error}));
+                }
             }
         }
         let starters: Vec<(String, String)> = HUB
@@ -604,6 +620,32 @@ pub fn validate(app: &AppHandle, flow_id: &str, spec: &FlowSpec) -> Result<(), S
         return Err("no-automatic-trigger".into());
     }
     let zone = spec.settings.get("timezone").and_then(Value::as_str).map(str::to_string);
+    // Two nodes of this flow on one address: the second registration would silently replace the first, and a duplicated
+    // trigger node (copy, paste, and the path left as it was) would leave the original dead.
+    let mut hooks: Vec<(String, String, &str)> = Vec::new();
+    let mut forms: Vec<(String, &str)> = Vec::new();
+    for node in triggers.iter() {
+        let params = trigger_params(node);
+        match node.type_id.as_str() {
+            "trigger.webhook" => {
+                if let Ok((method, path)) = webhook::address_of(flow_id, node, &params) {
+                    if let Some((_, _, other)) = hooks.iter().find(|(m, p, _)| *p == path && (*m == method || m == "ANY" || method == "ANY")) {
+                        return Err(format!("\"{}\" and \"{other}\" both listen on /hooks/{path} — give one of them another path", node.name));
+                    }
+                    hooks.push((method, path, node.name.as_str()));
+                }
+            }
+            "trigger.form" => {
+                if let Ok(path) = webhook::form_address_of(node, &params) {
+                    if let Some((_, other)) = forms.iter().find(|(p, _)| *p == path) {
+                        return Err(format!("\"{}\" and \"{other}\" both serve /forms/{path} — give one of them another path", node.name));
+                    }
+                    forms.push((path, node.name.as_str()));
+                }
+            }
+            _ => {}
+        }
+    }
     for node in triggers {
         let params = trigger_params(node);
         let fail = |message: String| format!("\"{}\": {message}", node.name);
@@ -1061,7 +1103,7 @@ pub fn arm(app: &AppHandle, flow_id: &str) -> Result<(), String> {
                 triggers,
                 error_watch,
                 hotkeys,
-                queued: carried.as_ref().and_then(|(_, queued)| queued.clone()).filter(|(node, _, _)| still_triggers(&parsed, node)),
+                queued: carried.as_ref().map(|(_, queued)| queued.iter().filter(|(node, _, _)| still_triggers(&parsed, node)).cloned().collect()).unwrap_or_default(),
                 app_events,
                 done_watch,
                 settle: Duration::from_secs_f64(parsed.settings.get("settleSec").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 3_600.0)),
@@ -1226,10 +1268,22 @@ pub fn fire(app: &AppHandle, flow_id: &str, node_id: &str, items: Vec<Item>) -> 
     fire_at(app, flow_id, node_id, items, 0)
 }
 
+/// `fire`, for an *event* that the source will not raise again — a new pull request, a row, a mail, a
+/// feed entry, a file, a message. Where `fire` lets the overlap policy skip a fire made while the flow
+/// is running (right for a timer: the next tick comes), this one never loses the event: it is held
+/// behind the running one and starts with whatever else arrived meanwhile, in one run.
+pub fn fire_event(app: &AppHandle, flow_id: &str, node_id: &str, items: Vec<Item>) -> Result<Fired, String> {
+    fire_at_with(app, flow_id, node_id, items, 0, true)
+}
+
 /// `fire`, for a fire raised by another flow's run `depth` levels down a chain.
 fn fire_at(app: &AppHandle, flow_id: &str, node_id: &str, items: Vec<Item>, depth: u32) -> Result<Fired, String> {
+    fire_at_with(app, flow_id, node_id, items, depth, false)
+}
+
+fn fire_at_with(app: &AppHandle, flow_id: &str, node_id: &str, items: Vec<Item>, depth: u32, lossless: bool) -> Result<Fired, String> {
     let gathered = {
-        let Ok(mut hub) = HUB.lock() else { return fire_with_at(app, flow_id, node_id, items, None, false, depth) };
+        let Ok(mut hub) = HUB.lock() else { return fire_with_at(app, flow_id, node_id, items, None, false, depth, lossless) };
         match hub.get_mut(flow_id).filter(|armed| !armed.settle.is_zero()) {
             None => None,
             Some(armed) => {
@@ -1244,12 +1298,14 @@ fn fire_at(app: &AppHandle, flow_id: &str, node_id: &str, items: Vec<Item>, dept
         }
     };
     let Some((settle, generation, full)) = gathered else {
-        return fire_with_at(app, flow_id, node_id, items, None, false, depth);
+        return fire_with_at(app, flow_id, node_id, items, None, false, depth, lossless);
     };
     let release = |app: &AppHandle, flow_id: &str, node_id: &str| {
         let batch = HUB.lock().ok().and_then(|mut hub| hub.get_mut(flow_id).and_then(|armed| armed.settling.remove(node_id))).map(|(items, _, depth)| (items, depth));
         if let Some((batch, depth)) = batch.filter(|(b, _)| !b.is_empty()) {
-            if let Err(error) = fire_with_at(app, flow_id, node_id, batch, None, false, depth) {
+            // Gathered because the flow asked for calm: the batch is released whole and is never the
+            // one a busy flow drops.
+            if let Err(error) = fire_with_at(app, flow_id, node_id, batch, None, false, depth, true) {
                 crate::applog::warn(&format!("flows: a gathered run of {flow_id} did not start — {error}"));
             }
         }
@@ -1279,9 +1335,62 @@ pub fn fire_with(
     respond: Option<tokio::sync::oneshot::Sender<super::engine::Reply>>,
     wait: bool,
 ) -> Result<Fired, String> {
-    fire_with_at(app, flow_id, node_id, items, respond, wait, 0)
+    fire_with_at(app, flow_id, node_id, items, respond, wait, 0, false)
 }
 
+static FIRE_GATE: Mutex<()> = Mutex::new(());
+
+/// The most items a flow holds behind a running run. Past it the oldest go, with a note in the log:
+/// a backlog that cannot be worked off would only grow.
+const BACKLOG_MAX_ITEMS: usize = 2_000;
+
+/// Gathers `items` into the held fires of `queue`: one entry per node, oldest first, the node's newer
+/// fires added to its entry. Returns how many of the oldest items had to go to stay within
+/// [`BACKLOG_MAX_ITEMS`].
+fn gather_into(queue: &mut Vec<(String, Vec<Item>, u32)>, node_id: &str, items: Vec<Item>, depth: u32) -> usize {
+    match queue.iter_mut().find(|(node, _, _)| node == node_id) {
+        Some((_, held, held_depth)) => {
+            held.extend(items);
+            *held_depth = (*held_depth).max(depth);
+        }
+        None => queue.push((node_id.to_string(), items, depth)),
+    }
+    let total: usize = queue.iter().map(|(_, held, _)| held.len()).sum();
+    if total <= BACKLOG_MAX_ITEMS {
+        return 0;
+    }
+    let dropped = total - BACKLOG_MAX_ITEMS;
+    let mut excess = dropped;
+    for (_, held, _) in queue.iter_mut() {
+        let cut = excess.min(held.len());
+        held.drain(..cut);
+        excess -= cut;
+        if excess == 0 {
+            break;
+        }
+    }
+    queue.retain(|(_, held, _)| !held.is_empty());
+    dropped
+}
+
+/// Holds `items` behind the running run of `flow_id`, gathered with what the node already has there.
+fn hold_behind(flow_id: &str, node_id: &str, items: Vec<Item>, depth: u32) {
+    let Ok(mut hub) = HUB.lock() else { return };
+    let Some(armed) = hub.get_mut(flow_id) else { return };
+    let dropped = gather_into(&mut armed.queued, node_id, items, depth);
+    if dropped > 0 {
+        crate::applog::warn(&format!("flows: {flow_id} fell behind; the {dropped} oldest events were dropped to keep {BACKLOG_MAX_ITEMS}"));
+    }
+}
+
+/// `fire_with` for a message a broker hands over and expects an answer for: never skipped because the
+/// flow is busy — without `wait` it is held behind the running run (the broker may then drop it, the
+/// hub has it); with `wait` the caller is told it was refused and keeps the message.
+pub fn fire_message(app: &AppHandle, flow_id: &str, node_id: &str, items: Vec<Item>, wait: bool) -> Result<Fired, String> {
+    fire_with_at(app, flow_id, node_id, items, None, wait, 0, true)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn fire_with_at(
     app: &AppHandle,
     flow_id: &str,
@@ -1290,20 +1399,21 @@ fn fire_with_at(
     respond: Option<tokio::sync::oneshot::Sender<super::engine::Reply>>,
     wait: bool,
     depth: u32,
+    lossless: bool,
 ) -> Result<Fired, String> {
+    // «Is it running?» and «start it» are one step: two fires a millisecond apart (a webhook sent twice, two
+    // events of one look) must not both read «not running» and start two runs under a policy that allows one.
+    // Nothing in the step waits, so a plain lock does.
+    let _one_at_a_time = FIRE_GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let overlap = HUB.lock().ok().and_then(|hub| hub.get(flow_id).map(|armed| armed.overlap)).unwrap_or(Overlap::Skip);
     let busy = runs::active_ids(None).iter().any(|(_, flow)| flow == flow_id);
     if busy && overlap != Overlap::Parallel {
         // Someone waiting on the answer (a chat turn, a webhook holding its response) is never
         // queued: the queue keeps one fire and starts it later with nobody left to hear it, so the
         // caller is told the flow is busy instead.
-        let queued = overlap == Overlap::Queue && respond.is_none() && !wait;
+        let queued = (overlap == Overlap::Queue || lossless) && respond.is_none() && !wait;
         if queued {
-            if let Ok(mut hub) = HUB.lock() {
-                if let Some(armed) = hub.get_mut(flow_id) {
-                    armed.queued = Some((node_id.to_string(), items, depth));
-                }
-            }
+            hold_behind(flow_id, node_id, items, depth);
             note_fire(flow_id, node_id, "queued");
         } else {
             note_fire(flow_id, node_id, "skipped");
@@ -1323,9 +1433,12 @@ fn fire_with_at(
 
 /// A run ended: start the one queued behind it, and tell the error triggers about a failure.
 pub fn run_finished(app: &AppHandle, row: &FlowRunRow, origin: RunOrigin, depth: u32, last_output: &[Item]) {
-    let queued = HUB.lock().ok().and_then(|mut hub| hub.get_mut(&row.flow_id).and_then(|armed| armed.queued.take()));
+    // The oldest held fire starts now, with everything its node gathered; the others wait for its end
+    // in their turn (`run_finished` comes again). Lossless: if something else started a run in between,
+    // it goes back behind that one.
+    let queued = HUB.lock().ok().and_then(|mut hub| hub.get_mut(&row.flow_id).and_then(|armed| (!armed.queued.is_empty()).then(|| armed.queued.remove(0))));
     if let Some((node, items, queued_depth)) = queued {
-        let _ = fire_at(app, &row.flow_id, &node, items, queued_depth);
+        let _ = fire_at_with(app, &row.flow_id, &node, items, queued_depth, true);
     }
     // A test («Pruebas») is a rehearsal: its end — a failure it expects included — must not page
     // whoever the error flows page, nor start the flows that wait on this one.
@@ -1583,6 +1696,37 @@ pub fn rebind_hotkeys(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn items(n: usize) -> Vec<Item> {
+        (0..n).map(|i| Item::new(json!({"n": i}))).collect()
+    }
+
+    #[test]
+    fn events_that_arrive_while_a_run_is_going_wait_together_and_none_is_lost() {
+        let mut queue = Vec::new();
+        // A look found three new pull requests while the flow was still on the first: they are held, in order.
+        assert_eq!(gather_into(&mut queue, "pr", items(2), 0), 0);
+        assert_eq!(gather_into(&mut queue, "pr", items(1), 1), 0);
+        assert_eq!(gather_into(&mut queue, "mail", items(1), 0), 0);
+        assert_eq!(queue.len(), 2, "one entry per trigger node");
+        let (node, held, depth) = &queue[0];
+        assert_eq!((node.as_str(), held.len(), *depth), ("pr", 3, 1));
+    }
+
+    #[test]
+    fn a_backlog_that_cannot_be_worked_off_drops_the_oldest_and_says_so() {
+        let mut queue = Vec::new();
+        gather_into(&mut queue, "feed", items(BACKLOG_MAX_ITEMS - 1), 0);
+        gather_into(&mut queue, "mail", items(1), 0);
+        let dropped = gather_into(&mut queue, "feed", items(5), 0);
+        assert_eq!(dropped, 5);
+        let total: usize = queue.iter().map(|(_, held, _)| held.len()).sum();
+        assert_eq!(total, BACKLOG_MAX_ITEMS);
+        // The oldest of the first node went; the newest stayed.
+        let feed = &queue.iter().find(|(node, _, _)| node == "feed").unwrap().1;
+        assert_eq!(feed.last().unwrap().json, json!({"n": 4}));
+        assert_eq!(feed.first().unwrap().json, json!({"n": 5}));
+    }
 
     #[test]
     fn a_file_pattern_reads_like_the_menu_s() {

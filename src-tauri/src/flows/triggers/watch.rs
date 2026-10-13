@@ -53,6 +53,17 @@ fn wanted(params: &Value) -> Vec<Change> {
         .unwrap_or_else(|| vec![Change::Created])
 }
 
+/// What happened to a path once it has been quiet: a rename reports the name it left and the name it took
+/// alike, so the one that no longer exists is a deletion, not a creation; and a file removed and put back
+/// (an editor saving atomically) is a change, not a deletion.
+fn settled(change: Change, exists: bool) -> Change {
+    match (change, exists) {
+        (Change::Created | Change::Modified, false) => Change::Deleted,
+        (Change::Deleted, true) => Change::Modified,
+        (other, _) => other,
+    }
+}
+
 fn item_for(path: &Path, change: Change) -> Value {
     let meta = std::fs::metadata(path).ok();
     json!({
@@ -135,6 +146,7 @@ pub fn spawn(
                 .collect();
             for (path, change) in ripe {
                 pending.remove(&path);
+                let change = settled(change, path.exists());
                 if !wanted.contains(&change) || path.is_dir() {
                     continue;
                 }
@@ -144,11 +156,25 @@ pub fn spawn(
                         continue;
                     }
                 }
-                if let Err(error) = super::fire(&app, &flow_id, &node_id, vec![Item::new(item_for(&path, change))]) {
+                if let Err(error) = super::fire_event(&app, &flow_id, &node_id, vec![Item::new(item_for(&path, change))]) {
                     super::note_problem(&view, Some(error));
                 }
             }
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_a_path_did_is_judged_by_whether_it_is_still_there() {
+        assert_eq!(settled(Change::Created, true), Change::Created);
+        assert_eq!(settled(Change::Created, false), Change::Deleted, "the old name of a rename");
+        assert_eq!(settled(Change::Modified, false), Change::Deleted);
+        assert_eq!(settled(Change::Deleted, true), Change::Modified, "removed and put back");
+        assert_eq!(settled(Change::Deleted, false), Change::Deleted);
+    }
 }

@@ -9,6 +9,24 @@
 //! expression in a node's parameters once per input item (one JavaScript round trip for all of
 //! them), and skips the trip altogether when nothing in the parameters is an expression.
 
+#[macro_export]
+#[doc(hidden)]
+/// `work`'s value, or — when a model call failed on this item and the node goes on after errors — the
+/// item recorded as failed and the next one taken. A cancellation, and every failure of a node set to
+/// stop, still ends the node.
+macro_rules! or_next {
+    ($ctx:expr, $index:expr, $failed:expr, $work:expr) => {
+        match $work {
+            Ok(value) => value,
+            Err(error) if error != NodeError::Cancelled && $crate::flows::nodes::carry_on($ctx) => {
+                $failed.push($crate::flows::nodes::failed_item($ctx, $index, &error));
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+}
+
 mod ai;
 mod app;
 pub(crate) mod binary;
@@ -56,7 +74,7 @@ use super::catalog::{self, Family};
 use super::engine::{Credential, LogStream, RunContext};
 use super::expr::{has_expression, ExprWorker, JsError};
 use super::params;
-use super::run::{Item, Ports};
+use super::run::{Item, NodeSettings, OnError, Ports};
 use super::spec::FlowNode;
 
 pub use process::shutdown as shutdown_processes;
@@ -69,6 +87,45 @@ pub use llm::list_models;
 
 pub fn expand_path(path: &str) -> std::path::PathBuf {
     files::expand(path)
+}
+
+// ------------------------------------------------------------------------------- one item failing
+
+/// Whether the node is set to go on after an error (`continue` or `errorOutput`) rather than stop the run.
+pub(crate) fn carry_on(ctx: &NodeCtx) -> bool {
+    NodeSettings::read(&ctx.node.settings).on_error != OnError::Stop
+}
+
+/// An item whose model call failed, as the node hands it on: what it came in with, and what went wrong.
+pub(crate) fn failed_item(ctx: &NodeCtx, index: usize, error: &NodeError) -> Item {
+    let mut json = match ctx.items().get(index) {
+        Some(item) if item.json.is_object() => item.json.clone(),
+        Some(item) => json!({ "value": item.json }),
+        None => json!({}),
+    };
+    json["error"] = json!(error.to_string());
+    Item::paired(json, index)
+}
+
+/// The ports a per-item node answers with, once its failed items are known. With the node set to
+/// «send errors to their own output» they go there; with «continue» they travel with the rest, on
+/// `home`, each carrying its `error`. Either way the answers the other items got are kept — one item the
+/// model could not answer no longer takes the whole batch with it.
+pub(crate) fn with_failures(ctx: &NodeCtx, mut ports: Ports, failed: Vec<Item>, home: usize) -> Ports {
+    if failed.is_empty() {
+        return ports;
+    }
+    ctx.log(LogStream::Stderr, &format!("{} item(s) could not be answered and went on with an `error`", failed.len()));
+    let wanted = crate::flows::run::output_count(&ctx.node) as usize;
+    if ports.len() < wanted {
+        ports.resize(wanted, Vec::new());
+    }
+    if crate::flows::run::has_error_output(&ctx.node) && wanted > 0 {
+        ports[wanted - 1].extend(failed);
+    } else if let Some(port) = ports.get_mut(home) {
+        port.extend(failed);
+    }
+    ports
 }
 
 /// How long one expression job may take. Expressions are meant to be one-liners; a Code node gets
@@ -122,6 +179,17 @@ impl From<JsError> for NodeError {
     }
 }
 
+/// How a run treats what the flow remembers between runs — see [`NodeCtx::memory_use`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryUse {
+    /// Reads it, and adds what it sees once the run ends well.
+    Keep,
+    /// Reads it, leaves it as it was.
+    Read,
+    /// Starts from nothing and leaves it as it was.
+    Ignore,
+}
+
 /// One node, about to run.
 pub struct NodeCtx {
     pub node: FlowNode,
@@ -135,12 +203,100 @@ pub struct NodeCtx {
     pub cancel: CancellationToken,
     /// The attempt's own time limit, if the node has one — a Code node uses it as its deadline.
     pub timeout: Option<Duration>,
+    /// How many items have had their effect so far — a message sent, a record written. Kept across
+    /// attempts: see [`NodeCtx::mark_sent`].
+    sent: std::sync::atomic::AtomicUsize,
+    /// What the attempts of this node have been answered, by the position each question had — see
+    /// [`NodeCtx::recall`].
+    memo: std::sync::Mutex<Memo>,
+}
+
+/// The answers one attempt got and the previous attempt's, side by side.
+#[derive(Default)]
+struct Memo {
+    previous: Vec<Option<(u64, Box<dyn std::any::Any + Send>)>>,
+    current: Vec<Option<(u64, Box<dyn std::any::Any + Send>)>>,
+    cursor: usize,
 }
 
 impl NodeCtx {
     pub fn new(node: FlowNode, inputs: Ports, js: Arc<ExprWorker>, run: Arc<RunContext>, cancel: CancellationToken) -> Self {
         let params = params::with_defaults(&node.type_id, &node.params);
-        Self { node, params, inputs, js, run, cancel, timeout: None }
+        Self { node, params, inputs, js, run, cancel, timeout: None, sent: std::sync::atomic::AtomicUsize::new(0), memo: Default::default() }
+    }
+
+    /// Starts an attempt: what the last one kept is what this one may reuse.
+    pub fn begin_attempt(&self) {
+        if let Ok(mut memo) = self.memo.lock() {
+            memo.previous = std::mem::take(&mut memo.current);
+            memo.cursor = 0;
+        }
+    }
+
+    /// For a node that asks for something costly one item after another (a model, an API that bills): the
+    /// answer the *previous attempt* got to the same question at the same position, so a retry after a
+    /// failure at item 61 asks for item 61 and what follows — not for the sixty it already paid for.
+    /// Returns the question's position, to hand to [`NodeCtx::keep`] when it is answered, and the earlier
+    /// answer if there is one. `key` identifies the question; a different one at that position is no match.
+    pub fn recall<T: Clone + 'static>(&self, key: u64) -> (usize, Option<T>)
+    where
+        T: Send,
+    {
+        let Ok(mut memo) = self.memo.lock() else { return (usize::MAX, None) };
+        let position = memo.cursor;
+        memo.cursor += 1;
+        let found = memo
+            .previous
+            .get(position)
+            .and_then(|slot| slot.as_ref())
+            .filter(|(earlier, _)| *earlier == key)
+            .and_then(|(_, value)| value.downcast_ref::<T>())
+            .cloned();
+        if let Some(value) = &found {
+            if memo.current.len() <= position {
+                memo.current.resize_with(position + 1, || None);
+            }
+            memo.current[position] = Some((key, Box::new(value.clone())));
+        }
+        (position, found)
+    }
+
+    /// Keeps an answer for the next attempt — see [`NodeCtx::recall`].
+    pub fn keep<T: Send + 'static>(&self, position: usize, key: u64, value: T) {
+        if position == usize::MAX {
+            return;
+        }
+        if let Ok(mut memo) = self.memo.lock() {
+            if memo.current.len() <= position {
+                memo.current.resize_with(position + 1, || None);
+            }
+            memo.current[position] = Some((key, Box::new(value)));
+        }
+    }
+
+    /// Says an item's effect has happened: its message went out, its record was written. A node that
+    /// then fails on a later item is not tried again by the retry setting — a retry starts from the first
+    /// item, and what was already sent would be sent twice (a second charge, a second SMS).
+    pub fn mark_sent(&self) {
+        self.sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How many items have had their effect — see [`NodeCtx::mark_sent`].
+    pub fn sent_count(&self) -> usize {
+        self.sent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// What a node that remembers between runs (a dedupe across runs, «only what changed») does with its memory
+    /// in this one. A run somebody started to look at the flow must not use up what the real runs will be
+    /// asked about: a test that records «seen» makes the first real event look like a repeat.
+    pub fn memory_use(&self) -> MemoryUse {
+        match self.run.mode.as_str() {
+            "trigger" | "subflow" | "error" => MemoryUse::Keep,
+            // Replaying a run, or a test: the events are the ones the memory already saw, and nothing is learnt.
+            "retry" | "test" => MemoryUse::Ignore,
+            // manual, partial, step: shows what a real run would do now, and leaves the memory as it was.
+            _ => MemoryUse::Read,
+        }
     }
 
     /// A credential as a node sends it: an `oauth2` one comes back as a `bearer` holding a fresh
@@ -156,6 +312,24 @@ impl NodeCtx {
         };
         self.run.host.secret_used(&token);
         Ok(Credential { kind: "bearer".into(), meta: credential.meta, secret: token })
+    }
+
+    /// The credential again after a service refused its access token (a 401): an `oauth2` one with a renewed token, so the
+    /// call can be made once more. `None` for every other kind — a pasted token that is refused stays refused.
+    pub async fn renewed_credential(&self, id: &str, refused: &str) -> Result<Option<Credential>, NodeError> {
+        let credential = self.run.host.credential(id).map_err(NodeError::Failed)?;
+        if credential.kind != "oauth2" {
+            return Ok(None);
+        }
+        let token = tokio::select! {
+            token = self.run.host.oauth_token_renewed(id, &credential.meta, refused) => token.map_err(NodeError::Failed)?,
+            _ = self.cancel.cancelled() => return Err(NodeError::Cancelled),
+        };
+        if token == refused {
+            return Ok(None);
+        }
+        self.run.host.secret_used(&token);
+        Ok(Some(Credential { kind: "bearer".into(), meta: credential.meta, secret: token }))
     }
 
     /// Every input item, all ports in order — the list `paired` indexes into.
@@ -292,6 +466,17 @@ pub fn strings(params: &Value, name: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A program's arguments, as written: not trimmed and not stripped of blanks — `sed -i '' s/a/b/ f` needs
+/// its empty argument, `awk -F ' '` its space — except the empty rows at the end, an unfinished row in
+/// the editor and not an argument.
+pub fn arguments(params: &Value, name: &str) -> Vec<String> {
+    let mut list: Vec<String> = params.get(name).and_then(Value::as_array).map(|list| list.iter().map(super::value::to_text).collect()).unwrap_or_default();
+    while list.last().is_some_and(String::is_empty) {
+        list.pop();
+    }
+    list
 }
 
 /// Runs one node. Ports in the result follow the catalogue (the error port is the engine's).

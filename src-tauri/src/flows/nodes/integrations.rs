@@ -591,6 +591,16 @@ async fn say(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 // ------------------------------------------------------------------------------------------- vault
 
+fn register_secrets(host: &dyn crate::flows::engine::RunHost, value: &Value) {
+    match value {
+        Value::String(text) => host.secret_used(text),
+        Value::Number(number) => host.secret_used(&number.to_string()),
+        Value::Array(list) => list.iter().for_each(|entry| register_secrets(host, entry)),
+        Value::Object(map) => map.values().for_each(|entry| register_secrets(host, entry)),
+        _ => {}
+    }
+}
+
 async fn vault(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let item = ctx.param_str("item");
     if item.trim().is_empty() {
@@ -604,13 +614,9 @@ async fn vault(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let answer = call(ctx, "vault.read", json!({"itemId": item.trim(), "field": ctx.param_str("itemField")})).await?;
         answer.get("value").cloned().unwrap_or(Value::Null)
     };
-    if let Some(code) = value.get("code").and_then(Value::as_str) {
-        ctx.run.host.secret_used(code);
-    }
-    if let Value::String(secret) = &value {
-        // Kept out of everything this run stores — its data files and its log.
-        ctx.run.host.secret_used(secret);
-    }
+    // Kept out of everything this run stores — its data files and its log: every text and number in it, whatever the shape
+    // (a card number is a number; an item with no «password» comes back whole, as an object).
+    register_secrets(&*ctx.run.host, &value);
     let target = {
         let written = ctx.param_str("target");
         if written.trim().is_empty() { "secret".to_string() } else { written.trim().to_string() }

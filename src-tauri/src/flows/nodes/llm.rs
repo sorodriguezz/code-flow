@@ -41,10 +41,14 @@ pub(super) fn client() -> Result<reqwest::Client, NodeError> {
     reqwest::Client::builder().timeout(Duration::from_secs(300)).build().map_err(|e| NodeError::failed(e.to_string()))
 }
 
-/// Where a provider's API is, unless the node names another address.
+/// Where a provider's API is. Only a server of the user's own — an OpenAI-compatible one, Ollama — takes
+/// the address the node names: for the hosted providers it is theirs to give, and the form shows no
+/// address field for them. A node keeps the value of a field that is no longer shown (switching
+/// «compatible» to OpenAI leaves the old address in it), and honouring it would send the OpenAI key to
+/// whatever the node used to point at.
 pub fn base_of(provider: &str, written: &str) -> Result<String, String> {
     let written = written.trim().trim_end_matches('/');
-    if !written.is_empty() {
+    if !written.is_empty() && matches!(provider, "compatible" | "ollama") {
         return Ok(written.to_string());
     }
     Ok(match provider {
@@ -197,14 +201,35 @@ pub(super) fn chat_url(provider: &str, base: &str, model: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 async fn complete(ctx: &NodeCtx, provider: &str, base: &str, key: Option<&str>, model: &str, system: &str, prompt: &str, schema: Option<&Value>, temperature: f64, max_tokens: u32) -> Result<Answer, NodeError> {
+    // A retry of the node does not pay again for what an earlier attempt was already answered.
+    let key_of = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (provider, model, system, prompt, schema.map(Value::to_string)).hash(&mut hasher);
+        hasher.finish()
+    };
+    let (position, earlier) = ctx.recall::<Answer>(key_of);
+    if let Some(answered) = earlier {
+        ctx.log(LogStream::Info, "Reusing the answer an earlier attempt got for this item");
+        return Ok(answered);
+    }
+    let answered = complete_fresh(ctx, provider, base, key, model, system, prompt, schema, temperature, max_tokens).await?;
+    ctx.keep(position, key_of, answered.clone());
+    Ok(answered)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_fresh(ctx: &NodeCtx, provider: &str, base: &str, key: Option<&str>, model: &str, system: &str, prompt: &str, schema: Option<&Value>, temperature: f64, max_tokens: u32) -> Result<Answer, NodeError> {
     let http = client()?;
     let url = chat_url(provider, base, model);
     let body = chat_body(provider, model, system, prompt, schema, Some(temperature), max_tokens);
+    super::ai::take_slot(ctx)?;
     let first = send(ctx, provider, signed(http.post(&url).json(&body), provider, key)).await;
     let answer = match first {
         // Reasoning models take only their default temperature: asked again without one.
         Err(NodeError::Failed(error)) if error.contains("temperature") => {
             let body = chat_body(provider, model, system, prompt, schema, None, max_tokens);
+            super::ai::take_slot(ctx)?;
             send(ctx, provider, signed(http.post(&url).json(&body), provider, key)).await?
         }
         other => other?,
@@ -232,7 +257,7 @@ fn conforming(text: &str, schema: &Value) -> Result<Value, Vec<String>> {
     match schema::answer_object(text) {
         None => Err(vec!["the answer is not a JSON object".to_string()]),
         Some(mut value) => {
-            schema::prune(&mut value, schema);
+            schema::settle(&mut value, schema);
             let problems = schema::validate(&value, schema);
             if problems.is_empty() { Ok(value) } else { Err(problems) }
         }
@@ -324,6 +349,7 @@ async fn converse(
     loop {
         let no_more = calls_made >= max_calls;
         let body = conversation_body(provider, model, system, &messages, tools, no_more, schema, temperature, max_tokens);
+        super::ai::take_slot(ctx)?;
         let answer = match send(ctx, provider, signed(http.post(&url).json(&body), provider, key)).await {
             // Reasoning models take only their default temperature: asked again without one.
             Err(NodeError::Failed(error)) if error.contains("temperature") && temperature.is_some() => {
@@ -369,7 +395,9 @@ async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let tools = super::tools::flow_tools(ctx, &ctx.params).await?;
     let max_calls = super::tools::max_calls(&ctx.params);
     let resolved = if ctx.param_str("runFor") == "once" { vec![ctx.resolve_once().await?] } else { ctx.resolve_each().await? };
+    super::ai::ensure_room(ctx, resolved.len())?;
     let mut out = Vec::with_capacity(resolved.len());
+    let mut failed: Vec<Item> = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
         let base = base_of(&provider, &text(params, "baseUrl")).map_err(NodeError::Failed)?;
         let model = text(params, "apiModel");
@@ -390,16 +418,30 @@ async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let started = Instant::now();
         let memory = super::tools::memory_key(ctx, params);
         let history = memory.as_deref().map(|key| super::tools::recall(ctx, key)).unwrap_or_default();
-        let mut called = Vec::new();
-        let mut answer = if tools.is_empty() && history.is_empty() {
-            complete(ctx, &provider, &base, key.as_deref(), &model, &system, &full, schema.as_ref(), temperature, max_tokens).await?
-        } else {
-            let messages = super::tools::opening(&provider, &history, &full);
-            let (answer, log) =
-                converse(ctx, &provider, &base, key.as_deref(), &model, &system, messages, &tools, max_calls, schema.as_ref(), temperature, max_tokens).await?;
-            called = log;
-            answer
-        };
+        let first = async {
+            if tools.is_empty() && history.is_empty() {
+                let answer = complete(ctx, &provider, &base, key.as_deref(), &model, &system, &full, schema.as_ref(), temperature, max_tokens).await?;
+                Ok::<_, NodeError>((answer, Vec::new()))
+            } else {
+                let messages = super::tools::opening(&provider, &history, &full);
+                converse(ctx, &provider, &base, key.as_deref(), &model, &system, messages, &tools, max_calls, schema.as_ref(), temperature, max_tokens).await
+            }
+        }
+        .await;
+        let (mut answer, called) = or_next!(ctx, index, failed, first);
+        // A schema answer cut at the token limit is not an answer: its brackets were closed for it, and a
+        // summary that stopped mid-sentence would pass for a whole one.
+        if schema.is_some() && answer.cut {
+            or_next!(
+                ctx,
+                index,
+                failed,
+                Err::<(), _>(NodeError::failed(format!(
+                    "The answer reached the token limit ({max_tokens}) and was cut, so its JSON is incomplete — raise «Max tokens»"
+                )))
+            );
+        }
+
         let mut data = None;
         if let Some(schema) = &schema {
             match conforming(&answer.text, schema) {
@@ -411,10 +453,11 @@ async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                         "{full}\n\nTu respuesta anterior no cumplió el esquema:\n- {}\n\nRespuesta anterior:\n{previous}\n\nResponde de nuevo SOLO con el objeto JSON corregido.",
                         problems.join("\n- ")
                     );
-                    answer = complete(ctx, &provider, &base, key.as_deref(), &model, &system, &retry, Some(schema), temperature, max_tokens).await?;
-                    data = Some(conforming(&answer.text, schema).map_err(|problems| {
+                    answer = or_next!(ctx, index, failed, complete(ctx, &provider, &base, key.as_deref(), &model, &system, &retry, Some(schema), temperature, max_tokens).await);
+                    let conformed = conforming(&answer.text, schema).map_err(|problems| {
                         NodeError::failed(format!("The answer did not follow the schema, even after a retry: {}", problems.join("; ")))
-                    })?);
+                    });
+                    data = Some(or_next!(ctx, index, failed, conformed));
                 }
             }
         }
@@ -439,7 +482,7 @@ async fn chat(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         json.insert("durationMs".into(), json!(started.elapsed().as_millis() as u64));
         out.push(if ctx.items().is_empty() { Item::new(Value::Object(json)) } else { Item::paired(Value::Object(json), index) });
     }
-    Ok(vec![out])
+    Ok(super::with_failures(ctx, vec![out], failed, 0))
 }
 
 // ------------------------------------------------------------------------------------- embeddings
@@ -465,16 +508,45 @@ impl Embedder {
     }
 
     /// One vector per text, in order; asked in batches.
+    /// One vector per text. A blank text has none to give — a provider refuses an empty input, and one
+    /// refused text would fail the ninety-five beside it — so it gets an empty vector and is not sent.
     async fn embed(&self, ctx: &NodeCtx, texts: &[String]) -> Result<Vec<Vec<f32>>, NodeError> {
+        let sent: Vec<usize> = (0..texts.len()).filter(|index| !texts[*index].trim().is_empty()).collect();
+        let to_send: Vec<String> = sent.iter().map(|index| texts[*index].clone()).collect();
+        let mut got = self.embed_all(ctx, &to_send).await?.into_iter();
+        let mut vectors = vec![Vec::new(); texts.len()];
+        for index in sent {
+            vectors[index] = got.next().unwrap_or_default();
+        }
+        Ok(vectors)
+    }
+
+    async fn embed_all(&self, ctx: &NodeCtx, texts: &[String]) -> Result<Vec<Vec<f32>>, NodeError> {
         let http = client()?;
         let mut vectors = Vec::with_capacity(texts.len());
         for batch in texts.chunks(96) {
+            // A retry of the node (after the third batch of five failed) does not pay again for the batches it already got.
+            let key_of = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                (&self.provider, &self.model, batch).hash(&mut hasher);
+                hasher.finish()
+            };
+            let (position, earlier) = ctx.recall::<Vec<Vec<f32>>>(key_of);
+            if let Some(done) = earlier {
+                ctx.log(LogStream::Info, "Reusing the vectors an earlier attempt got for these texts");
+                vectors.extend(done);
+                continue;
+            }
             let (url, body) = embed_request(&self.provider, &self.base, &self.model, batch);
+            // A request, not a text: up to 96 texts go in one call, and one call is what is counted.
+            super::ai::take_slot(ctx)?;
             let answer = send(ctx, "Embeddings", signed(http.post(&url).json(&body), &self.provider, self.key.as_deref())).await?;
             let got = read_vectors(&self.provider, &answer);
             if got.len() != batch.len() {
                 return Err(NodeError::failed(format!("The provider gave {} vectors for {} texts", got.len(), batch.len())));
             }
+            ctx.keep(position, key_of, got.clone());
             vectors.extend(got);
         }
         Ok(vectors)
@@ -525,7 +597,8 @@ async fn embed_node(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         .map(|(index, vector)| {
             let mut json = items.get(index).map(|item| item.json.clone()).filter(Value::is_object).unwrap_or_else(|| json!({}));
             json["dimensions"] = json!(vector.len());
-            crate::flows::value::set_path(&mut json, &target, json!(vector));
+            // A blank text has no vector: null, not an empty list that reads as "embedded, and empty".
+            crate::flows::value::set_path(&mut json, &target, if vector.is_empty() { Value::Null } else { json!(vector) });
             if items.is_empty() { Item::new(json) } else { Item::paired(json, index) }
         })
         .collect();
@@ -617,6 +690,12 @@ fn from_blob(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
 }
 
+/// `text` as a `LIKE` pattern that matches it literally (with `ESCAPE '\\'`): `_` and `%` are wildcards, and
+/// `doc_1` must not take `docX1` with it.
+pub fn escape_like(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
 /// CodeFlow's own store: one SQLite file, rows per workspace and collection, searched exactly.
 pub mod local {
     use super::*;
@@ -698,12 +777,24 @@ pub mod local {
             removed += conn
                 .execute(
                     "DELETE FROM vectors WHERE workspace_id = ?1 AND collection = ?2 AND (id = ?3 OR id LIKE ?4 ESCAPE '\\')",
-                    params![workspace, collection, id, format!("{}#%", id.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))],
+                    params![workspace, collection, id, format!("{}#%", escape_like(id))],
                 )
                 .map_err(|e| e.to_string())?;
         }
         Ok(removed)
     }
+}
+
+/// Removes the documents `ids` from a Qdrant collection, every piece of each: the point of the document's
+/// own id (what a document stored whole is, and what every document was before pieces were tagged), and
+/// the points whose payload names it as their `base`.
+async fn qdrant_forget(ctx: &NodeCtx, http: &reqwest::Client, base: &str, headers: &[(String, String)], collection: &str, ids: &[String]) -> Result<(), NodeError> {
+    let url = format!("{base}/collections/{collection}/points/delete?wait=true");
+    let points: Vec<Value> = ids.iter().map(|id| json!(qdrant_point_id(collection, id))).collect();
+    send(ctx, "Qdrant delete", with_headers(http.post(&url).json(&json!({"points": points})), headers)).await?;
+    let any_of: Vec<Value> = ids.iter().map(|id| json!({"key": "base", "match": {"value": id}})).collect();
+    send(ctx, "Qdrant delete", with_headers(http.post(&url).json(&json!({"filter": {"should": any_of}})), headers)).await?;
+    Ok(())
 }
 
 /// Qdrant's point ids are UUIDs or integers: a document's id becomes a UUID derived from it, and the
@@ -796,16 +887,11 @@ async fn vectors(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let removed = match store.as_str() {
             "qdrant" => {
                 let (http, base, headers) = qdrant(ctx, &first).await?;
-                let selector = if ids.is_empty() {
-                    json!({"filter": {}})
+                if ids.is_empty() {
+                    send(ctx, "Qdrant delete", with_headers(http.post(format!("{base}/collections/{collection}/points/delete?wait=true")).json(&json!({"filter": {}})), &headers)).await?;
                 } else {
-                    let mut points: Vec<Value> = Vec::new();
-                    for id in &ids {
-                        points.push(json!(qdrant_point_id(&collection, id)));
-                    }
-                    json!({"points": points})
-                };
-                send(ctx, "Qdrant delete", with_headers(http.post(format!("{base}/collections/{collection}/points/delete?wait=true")).json(&selector), &headers)).await?;
+                    qdrant_forget(ctx, &http, &base, &headers, &collection, &ids).await?;
+                }
                 ids.len()
             }
             "pgvector" => {
@@ -814,7 +900,7 @@ async fn vectors(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                     pg_run(&session, &exec, &format!("DELETE FROM {PG_TABLE} WHERE collection = $1"), &[json!(collection)]).await?;
                 } else {
                     for id in &ids {
-                        pg_run(&session, &exec, &format!("DELETE FROM {PG_TABLE} WHERE collection = $1 AND (id = $2 OR id LIKE $3)"), &[json!(collection), json!(id), json!(format!("{id}#%"))]).await?;
+                        pg_run(&session, &exec, &format!("DELETE FROM {PG_TABLE} WHERE collection = $1 AND (id = $2 OR id LIKE $3 ESCAPE '\\')"), &[json!(collection), json!(id), json!(format!("{}#%", escape_like(id)))]).await?;
                     }
                 }
                 ids.len()
@@ -843,6 +929,11 @@ async fn vectors(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let query_vectors = embedder.embed(ctx, &questions).await?;
         let mut out = Vec::new();
         for (index, (params, vector)) in resolved.iter().zip(query_vectors).enumerate() {
+            if vector.is_empty() {
+                // A blank question looks for nothing.
+                out.push(wrap(index, json!({"query": text(params, "queryText"), "collection": collection, "matches": [], "context": ""})));
+                continue;
+            }
             let top = number(params, "topK").map(|n| n.max(1.0) as usize).unwrap_or(4);
             let min_score = number(params, "minScore").unwrap_or(0.0) as f32;
             let hits: Vec<Hit> = match store.as_str() {
@@ -899,6 +990,10 @@ async fn vectors(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
     // Store: each item's text, in pieces when asked, embedded in batches.
     let mut docs: Vec<(usize, Doc)> = Vec::new();
+    // The documents being stored, by id: each replaces whatever the store held under that id, pieces
+    // included — a document stored again shorter must not leave its old last pieces to be found.
+    let mut bases: Vec<String> = Vec::new();
+    let mut base_of_piece: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for (index, params) in resolved.iter().enumerate() {
         let body = text(params, "docText");
         if body.trim().is_empty() {
@@ -913,8 +1008,12 @@ async fn vectors(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let overlap = number(params, "chunkOverlap").map(|n| n.max(0.0) as usize).unwrap_or(0);
         let pieces = chunks(&body, size, overlap);
         let many = pieces.len() > 1;
+        if !bases.contains(&id) {
+            bases.push(id.clone());
+        }
         for (n, piece) in pieces.into_iter().enumerate() {
             let piece_id = if many { format!("{id}#{}", n + 1) } else { id.clone() };
+            base_of_piece.insert(piece_id.clone(), id.clone());
             docs.push((index, Doc { id: piece_id, text: piece, metadata: metadata.clone(), vector: Vec::new() }));
         }
     }
@@ -936,8 +1035,14 @@ async fn vectors(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             }
             let points: Vec<Value> = docs
                 .iter()
-                .map(|(_, doc)| json!({"id": qdrant_point_id(&collection, &doc.id), "vector": doc.vector, "payload": {"id": doc.id, "text": doc.text, "metadata": doc.metadata}}))
+                .map(|(_, doc)| {
+                    let document = base_of_piece.get(&doc.id).map_or(doc.id.as_str(), String::as_str);
+                    json!({"id": qdrant_point_id(&collection, &doc.id), "vector": doc.vector, "payload": {"id": doc.id, "base": document, "text": doc.text, "metadata": doc.metadata}})
+                })
                 .collect();
+            if exists {
+                qdrant_forget(ctx, &http, &base, &headers, &collection, &bases).await?;
+            }
             for batch in points.chunks(256) {
                 send(ctx, "Qdrant upsert", with_headers(http.put(format!("{base}/collections/{collection}/points?wait=true")).json(&json!({"points": batch})), &headers)).await?;
             }
@@ -951,6 +1056,9 @@ async fn vectors(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 &[],
             )
             .await?;
+            for id in &bases {
+                pg_run(&session, &exec, &format!("DELETE FROM {PG_TABLE} WHERE collection = $1 AND (id = $2 OR id LIKE $3 ESCAPE '\\')"), &[json!(collection), json!(id), json!(format!("{}#%", escape_like(id)))]).await?;
+            }
             for (_, doc) in &docs {
                 pg_run(
                     &session,
@@ -964,8 +1072,10 @@ async fn vectors(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         _ => {
             let (workspace, collection_name, path) = (ctx.run.workspace_id.clone(), collection.clone(), ctx.run.host.vectors_path());
             let owned: Vec<Doc> = docs.iter().map(|(_, doc)| doc.clone()).collect();
+            let replaced = bases.clone();
             tokio::task::spawn_blocking(move || {
                 let mut conn = local::open(&path)?;
+                local::delete(&conn, &workspace, &collection_name, &replaced)?;
                 local::upsert(&mut conn, &workspace, &collection_name, &owned)
             })
             .await
@@ -1060,6 +1170,11 @@ mod tests {
         assert_eq!(chat_url("gemini", "https://g/v1beta", "models/gemini-x"), "https://g/v1beta/models/gemini-x:generateContent");
         assert!(base_of("compatible", "").is_err());
         assert_eq!(base_of("openai", "").unwrap(), "https://api.openai.com/v1");
+        // The address of an earlier choice does not follow the key to a hosted provider.
+        assert_eq!(base_of("openai", "https://api.groq.com/openai/v1").unwrap(), "https://api.openai.com/v1");
+        assert_eq!(base_of("anthropic", "http://127.0.0.1:1234").unwrap(), "https://api.anthropic.com/v1");
+        assert_eq!(base_of("compatible", "https://api.groq.com/openai/v1/").unwrap(), "https://api.groq.com/openai/v1");
+        assert_eq!(base_of("ollama", "http://nas.local:11434").unwrap(), "http://nas.local:11434");
     }
 
     #[test]

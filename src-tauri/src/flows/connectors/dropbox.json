@@ -23,6 +23,7 @@
         "en": "A folder's files"
       },
       "method": "POST",
+      "paginate": { "style": "cursor", "next": "cursor", "more": "has_more", "param": "cursor", "in": "body", "continuePath": "/files/list_folder/continue" },
       "path": "/files/list_folder",
       "fields": [
         {
@@ -59,6 +60,7 @@
         "en": "Search files"
       },
       "method": "POST",
+      "paginate": { "style": "cursor", "next": "cursor", "more": "has_more", "param": "cursor", "in": "body", "continuePath": "/files/search/continue_v2" },
       "path": "/files/search_v2",
       "fields": [
         {

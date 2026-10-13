@@ -149,6 +149,18 @@ pub fn check(flow_id: &str, node: &FlowNode, params: &Value) -> Result<(), Strin
     Ok(())
 }
 
+/// The method and path a webhook node listens on.
+pub fn address_of(flow_id: &str, node: &FlowNode, params: &Value) -> Result<(String, String), String> {
+    let path = path_of(flow_id, node, params)?;
+    let method = param(params, "method");
+    Ok((if method.is_empty() { "POST".to_string() } else { method.to_uppercase() }, path))
+}
+
+/// The path a «Formulario web» node serves.
+pub fn form_address_of(node: &FlowNode, params: &Value) -> Result<String, String> {
+    form_path(params, node)
+}
+
 /// Registers a webhook node and returns its URL. Starts the server if it is not up.
 pub fn register(app: &AppHandle, flow_id: &str, node: &FlowNode, params: &Value) -> Result<String, String> {
     check(flow_id, node, params)?;
@@ -611,14 +623,51 @@ fn fresh(stamp: i64, tolerance: i64) -> Result<(), &'static str> {
 
 /// Whether a delivery id was seen before on this webhook — remembered in the flow's state (the last
 /// 500), so a sender retrying after a restart is still recognised. Records it when it was not.
-fn seen_before(app: &AppHandle, route: &Route, id: &str) -> bool {
-    const KEEP: usize = 500;
+/// Whether a delivery with this id was already taken — *taken*: see [`remember_delivery`].
+fn delivered_before(app: &AppHandle, route: &Route, id: &str) -> bool {
     let db = app.state::<Db>();
     let Ok(conn) = db.0.lock() else { return false };
     let key = format!("hook:{}:delivered", route.node_id);
+    flow_run_queries::state_get(&conn, &route.flow_id, &key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_array().cloned())
+        .is_some_and(|list| list.iter().any(|v| v.as_str() == Some(id)))
+}
+
+/// Deliveries being handled right now, so a duplicate that arrives before the first one is settled
+/// is recognised as one too.
+static IN_FLIGHT: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+/// Holds a delivery id in [`IN_FLIGHT`] until the request is answered.
+struct InFlight(String);
+
+impl InFlight {
+    fn enter(route: &Route, id: &str) -> Option<InFlight> {
+        let key = format!("{}|{id}", route.node_id);
+        IN_FLIGHT.lock().ok().is_some_and(|mut set| set.insert(key.clone())).then(|| InFlight(key))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Ok(mut set) = IN_FLIGHT.lock() {
+            set.remove(&self.0);
+        }
+    }
+}
+
+/// Records a delivery id as taken. Called once the flow has accepted the request — started, or held
+/// behind a running one — and not before: a request answered "busy" is one the sender will send again,
+/// and that second try must run, not be turned away as a duplicate of the first.
+fn remember_delivery(app: &AppHandle, route: &Route, id: &str) {
+    const KEEP: usize = 500;
+    let db = app.state::<Db>();
+    let Ok(conn) = db.0.lock() else { return };
+    let key = format!("hook:{}:delivered", route.node_id);
     let mut list: Vec<Value> = flow_run_queries::state_get(&conn, &route.flow_id, &key).ok().flatten().and_then(|v| v.as_array().cloned()).unwrap_or_default();
     if list.iter().any(|v| v.as_str() == Some(id)) {
-        return true;
+        return;
     }
     list.push(json!(id));
     if list.len() > KEEP {
@@ -626,7 +675,6 @@ fn seen_before(app: &AppHandle, route: &Route, id: &str) -> bool {
         list.drain(..cut);
     }
     let _ = flow_run_queries::state_set(&conn, &route.flow_id, &key, &Value::Array(list), &crate::flows::engine::now_text());
-    false
 }
 
 /// A request that came in from the internet, through the tunnel — `cloudflared` stamps
@@ -636,11 +684,19 @@ fn through_tunnel(headers: &HeaderMap) -> bool {
 }
 
 /// The request as the trigger's item.
-fn item_of(method: &Method, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Value {
+/// Headers a request carries to prove who sent it. The item is what the flow — and its run record, its
+/// log, a model's prompt — holds; the sender's credentials are not part of what was sent.
+const CREDENTIAL_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie"];
+
+fn item_of(method: &Method, uri: &Uri, headers: &HeaderMap, body: &Bytes, also_hide: &[String]) -> Value {
     let mut header_map = Map::new();
     for (name, value) in headers {
+        let name = name.as_str();
+        if CREDENTIAL_HEADERS.contains(&name) || also_hide.iter().any(|hidden| hidden.eq_ignore_ascii_case(name)) {
+            continue;
+        }
         if let Ok(text) = value.to_str() {
-            header_map.insert(name.as_str().to_string(), Value::String(text.to_string()));
+            header_map.insert(name.to_string(), Value::String(text.to_string()));
         }
     }
     let query: Map<String, Value> = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
@@ -690,6 +746,22 @@ fn item_of(method: &Method, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Val
     })
 }
 
+/// The header a route's own credential travels in, when it is a custom one (`auth: header`) — the one
+/// credential header that has no fixed name.
+fn secret_header_of(app: &AppHandle, route: &Route) -> Vec<String> {
+    if route.auth != "header" {
+        return Vec::new();
+    }
+    let db = app.state::<Db>();
+    let Ok(conn) = db.0.lock() else { return Vec::new() };
+    let name = flow_run_queries::get_credential(&conn, &route.credential)
+        .ok()
+        .flatten()
+        .and_then(|row| row.meta.get("name").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| "X-Webhook-Token".to_string());
+    vec![name]
+}
+
 fn reply_of(items: &[Item]) -> Response {
     let value = match items.len() {
         0 => json!({}),
@@ -711,6 +783,13 @@ fn foreign_origin(headers: &HeaderMap) -> bool {
     }
     let host = url::Url::parse(origin).ok().and_then(|url| url.host_str().map(|h| h.trim_matches(['[', ']']).to_ascii_lowercase()));
     !matches!(host.as_deref(), Some(h) if h == "127.0.0.1" || h == "::1" || h == "localhost" || h.ends_with(".localhost"))
+}
+
+/// A browser fetching this because a page on another site told it to (`<img src>`, a script, a link click): a
+/// simple GET carries no `Origin`, but the browser always says `Sec-Fetch-Site: cross-site`. For a hook that
+/// takes no credential — one set up for this machine — that is any web page the user opens running the flow.
+fn browser_cross_site(headers: &HeaderMap) -> bool {
+    header_text(headers, "sec-fetch-site").trim().eq_ignore_ascii_case("cross-site")
 }
 
 async fn handle(State(app): State<AppHandle>, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
@@ -737,8 +816,7 @@ async fn handle(State(app): State<AppHandle>, method: Method, uri: Uri, headers:
         return handle_wait_page(&app, "form", rest.trim_end_matches('/'), &method, &uri, &body);
     }
     if let Some(rest) = uri.path().strip_prefix("/resume/") {
-        let call = item_of(&method, &uri, &headers, &body);
-        return match crate::flows::waits::resume_by_call(&app, rest.trim_end_matches('/'), call) {
+        return match crate::flows::waits::resume_by_call(&app, rest.trim_end_matches('/'), || item_of(&method, &uri, &headers, &body, &[])) {
             Ok(run_id) => json_response(StatusCode::OK, json!({"resumed": true, "runId": run_id})),
             Err(error) if error == "not-waiting" => json_response(StatusCode::NOT_FOUND, json!({"error": "nothing waits for a call here"})),
             Err(error) => json_response(StatusCode::CONFLICT, json!({"error": error})),
@@ -777,6 +855,12 @@ async fn handle(State(app): State<AppHandle>, method: Method, uri: Uri, headers:
             json!({"error": "this webhook takes no credential, so it is not open through the tunnel"}),
         );
     }
+    if (route.auth.is_empty() || route.auth == "none") && !through_tunnel(&headers) && browser_cross_site(&headers) {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "this webhook takes no credential, so a page on another site cannot call it — give it one"}),
+        );
+    }
     if let Err(reason) = authorise(&app, &route, &headers, &body) {
         let status = if reason == "misconfigured" || reason == "unavailable" { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::UNAUTHORIZED };
         return json_response(status, json!({"error": reason}));
@@ -786,54 +870,81 @@ async fn handle(State(app): State<AppHandle>, method: Method, uri: Uri, headers:
             return answer;
         }
     }
-    if !route.dedupe_header.is_empty() {
-        let id = header_text(&headers, &route.dedupe_header.to_ascii_lowercase()).trim().to_string();
-        if !id.is_empty() && seen_before(&app, &route, &id) {
-            return json_response(StatusCode::OK, json!({"duplicate": true, "id": id}));
+    let delivery_id = (!route.dedupe_header.is_empty())
+        .then(|| header_text(&headers, &route.dedupe_header.to_ascii_lowercase()).trim().to_string())
+        .filter(|id| !id.is_empty());
+    let _in_flight = match &delivery_id {
+        Some(id) => {
+            if delivered_before(&app, &route, id) {
+                return json_response(StatusCode::OK, json!({"duplicate": true, "id": id}));
+            }
+            match InFlight::enter(&route, id) {
+                Some(guard) => Some(guard),
+                None => return json_response(StatusCode::OK, json!({"duplicate": true, "id": id})),
+            }
         }
-    }
-    let item = Item::new(item_of(&method, &uri, &headers, &body));
+        None => None,
+    };
+    let remember = || {
+        if let Some(id) = &delivery_id {
+            remember_delivery(&app, &route, id);
+        }
+    };
+    let item = Item::new(item_of(&method, &uri, &headers, &body, &secret_header_of(&app, &route)));
     match route.respond.as_str() {
         "respondNode" => {
             let (tx, rx) = tokio::sync::oneshot::channel::<Reply>();
             match super::fire_with(&app, &route.flow_id, &route.node_id, vec![item], Some(tx), false) {
                 Ok(fired) if fired.held => json_response(StatusCode::TOO_MANY_REQUESTS, json!({"error": "busy"})),
-                Ok(_) => match tokio::time::timeout(WAIT, rx).await {
-                    Ok(Ok(reply)) => {
-                        let mut builder = Response::builder()
-                            .status(StatusCode::from_u16(reply.status).unwrap_or(StatusCode::OK))
-                            .header("content-type", reply.content_type.as_str());
-                        for (name, value) in &reply.headers {
-                            if let Ok(value) = HeaderValue::from_str(value) {
-                                builder = builder.header(name.as_str(), value);
+                Ok(_) => {
+                    remember();
+                    match tokio::time::timeout(WAIT, rx).await {
+                        Ok(Ok(reply)) => {
+                            let mut builder = Response::builder()
+                                .status(StatusCode::from_u16(reply.status).unwrap_or(StatusCode::OK))
+                                .header("content-type", reply.content_type.as_str());
+                            for (name, value) in &reply.headers {
+                                if let Ok(value) = HeaderValue::from_str(value) {
+                                    builder = builder.header(name.as_str(), value);
+                                }
                             }
+                            builder.body(Body::from(reply.body)).unwrap_or_else(|_| Response::new(Body::empty()))
                         }
-                        builder.body(Body::from(reply.body)).unwrap_or_else(|_| Response::new(Body::empty()))
+                        Ok(Err(_)) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "the flow ended without answering"})),
+                        Err(_) => json_response(StatusCode::GATEWAY_TIMEOUT, json!({"error": "the flow did not answer in time"})),
                     }
-                    Ok(Err(_)) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "the flow ended without answering"})),
-                    Err(_) => json_response(StatusCode::GATEWAY_TIMEOUT, json!({"error": "the flow did not answer in time"})),
-                },
+                }
                 Err(error) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": error})),
             }
         }
         "lastNode" => match super::fire_with(&app, &route.flow_id, &route.node_id, vec![item], None, true) {
             Ok(fired) if fired.held => json_response(StatusCode::TOO_MANY_REQUESTS, json!({"error": "busy"})),
-            Ok(fired) => match fired.done {
-                Some(done) => match tokio::time::timeout(WAIT, done).await {
-                    Ok(Ok(finished)) if finished.status == "success" => reply_of(&finished.last_output),
-                    Ok(Ok(finished)) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": finished.error, "status": finished.status})),
-                    Ok(Err(_)) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "the run vanished"})),
-                    Err(_) => json_response(StatusCode::GATEWAY_TIMEOUT, json!({"error": "the flow did not finish in time"})),
-                },
-                None => json_response(StatusCode::ACCEPTED, json!({})),
-            },
+            Ok(fired) => {
+                remember();
+                match fired.done {
+                    Some(done) => match tokio::time::timeout(WAIT, done).await {
+                        Ok(Ok(finished)) if finished.status == "success" => reply_of(&finished.last_output),
+                        Ok(Ok(finished)) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": finished.error, "status": finished.status})),
+                        Ok(Err(_)) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "the run vanished"})),
+                        Err(_) => json_response(StatusCode::GATEWAY_TIMEOUT, json!({"error": "the flow did not finish in time"})),
+                    },
+                    None => json_response(StatusCode::ACCEPTED, json!({})),
+                }
+            }
             Err(error) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": error})),
         },
         _ => match super::fire(&app, &route.flow_id, &route.node_id, vec![item]) {
-            // Skipped, not queued: the sender should try again rather than count it delivered.
+            // Skipped, not queued: the sender should try again rather than count it delivered — and its
+            // second try is not a duplicate, because the first was never remembered.
             Ok(fired) if fired.dropped => json_response(StatusCode::TOO_MANY_REQUESTS, json!({"error": "busy"})),
-            Ok(fired) if fired.held => json_response(StatusCode::ACCEPTED, json!({"queued": true})),
-            Ok(fired) => json_response(StatusCode::ACCEPTED, json!({"runId": fired.run.map(|r| r.id)})),
+            Ok(fired) if fired.held => {
+                remember();
+                json_response(StatusCode::ACCEPTED, json!({"queued": true}))
+            }
+            Ok(fired) => {
+                remember();
+                json_response(StatusCode::ACCEPTED, json!({"runId": fired.run.map(|r| r.id)}))
+            }
             Err(error) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": error})),
         },
     }
@@ -862,6 +973,19 @@ mod tests {
     }
 
     #[test]
+    fn a_page_on_another_site_cannot_call_a_hook_with_no_credential() {
+        let with = |site: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("sec-fetch-site", HeaderValue::from_str(site).unwrap());
+            headers
+        };
+        assert!(browser_cross_site(&with("cross-site")));
+        assert!(!browser_cross_site(&with("none")), "the user typed the address");
+        assert!(!browser_cross_site(&with("same-origin")));
+        assert!(!browser_cross_site(&HeaderMap::new()), "curl, a server, a CLI send none");
+    }
+
+    #[test]
     fn comparison_is_exact() {
         assert!(same(b"abc", b"abc"));
         assert!(!same(b"abc", b"abd"));
@@ -873,10 +997,18 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("content-type", HeaderValue::from_static("application/json"));
         let uri: Uri = "/hooks/pagos?source=test".parse().unwrap();
-        let item = item_of(&Method::POST, &uri, &headers, &Bytes::from_static(br#"{"amount": 10}"#));
+        headers.insert("authorization", HeaderValue::from_static("Bearer s3cret"));
+        headers.insert("cookie", HeaderValue::from_static("session=abc"));
+        headers.insert("x-webhook-token", HeaderValue::from_static("tok"));
+        headers.insert("x-github-event", HeaderValue::from_static("push"));
+        let item = item_of(&Method::POST, &uri, &headers, &Bytes::from_static(br#"{"amount": 10}"#), &["X-Webhook-Token".to_string()]);
         assert_eq!(item["body"]["amount"], 10);
         assert_eq!(item["query"]["source"], "test");
         assert_eq!(item["method"], "POST");
+        // What proves who sent it stays out of what the flow is handed.
+        let kept = item["headers"].as_object().unwrap();
+        assert!(kept.contains_key("x-github-event") && kept.contains_key("content-type"));
+        assert!(!kept.contains_key("authorization") && !kept.contains_key("cookie") && !kept.contains_key("x-webhook-token"), "{kept:?}");
     }
 
     #[test]

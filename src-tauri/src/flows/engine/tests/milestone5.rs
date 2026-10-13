@@ -279,6 +279,7 @@ async fn a_picked_up_run_runs_only_what_follows_the_wait() {
         trigger_output: None,
         quiet: HashSet::from(["start".to_string(), "order".to_string()]),
         decided: Some("ask".to_string()),
+        seed_origins: HashMap::new(),
     };
     let memory = Arc::new(Memory::default());
     let host = Arc::new(Host { memory: memory.clone(), dir: std::env::temp_dir(), script: Arc::new(Script::default()) });

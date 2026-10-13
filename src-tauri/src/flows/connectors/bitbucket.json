@@ -15,6 +15,7 @@
       "id": "listPullRequests",
       "name": { "es": "Listar pull requests", "en": "List pull requests" },
       "method": "GET",
+      "paginate": { "style": "url", "next": "next" },
       "path": "/repositories/{{workspace}}/{{repo}}/pullrequests",
       "query": { "state": "{{state}}", "pagelen": "{{pagelen}}" },
       "fields": [

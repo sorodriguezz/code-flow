@@ -115,6 +115,7 @@
         "en": "Query a database"
       },
       "method": "POST",
+      "paginate": { "style": "cursor", "next": "next_cursor", "param": "start_cursor", "in": "body", "more": "has_more" },
       "path": "/databases/{{databaseId}}/query",
       "fields": [
         {
@@ -241,6 +242,7 @@
         "en": "Search pages and databases"
       },
       "method": "POST",
+      "paginate": { "style": "cursor", "next": "next_cursor", "param": "start_cursor", "in": "body", "more": "has_more" },
       "path": "/search",
       "fields": [
         {

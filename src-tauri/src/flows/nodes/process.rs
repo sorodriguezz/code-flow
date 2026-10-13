@@ -23,11 +23,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use super::{flag, pairs, strings, text, NodeCtx, NodeError};
 use crate::flows::engine::LogStream;
@@ -448,7 +448,7 @@ async fn build(ctx: &NodeCtx, params: &Value, stdin: Vec<u8>, items: &[&Value], 
             let feed = text(params, "stdin") == "json";
             Invocation {
                 program: resolved,
-                args: strings(params, "args"),
+                args: super::arguments(params, "args"),
                 cwd,
                 env,
                 stdin: feed.then_some(stdin),
@@ -456,7 +456,7 @@ async fn build(ctx: &NodeCtx, params: &Value, stdin: Vec<u8>, items: &[&Value], 
             }
         }
         "code.script" => {
-            let args = strings(params, "args");
+            let args = super::arguments(params, "args");
             let name = text(params, "name").trim().to_string();
             match text(params, "source").as_str() {
                 "file" => {
@@ -514,8 +514,21 @@ async fn build(ctx: &NodeCtx, params: &Value, stdin: Vec<u8>, items: &[&Value], 
                 return Err(NodeError::failed("Shortcuts, AppleScript and JXA run only on macOS"));
             }
             let dir = script_dir(ctx, index)?;
-            // The items as the script's argument: one item's JSON, or the list with "once".
-            let data = (if items.len() == 1 { serde_json::to_string(items[0]) } else { serde_json::to_string(items) }).unwrap_or_else(|_| "{}".into());
+            // The items as the script's argument: one item's JSON with «for each item», the list with «once» —
+            // always a list then, even of one item: a script that maps over it must not meet an object the one
+            // time a single item arrives. Also in a file (`CODEFLOW_ITEMS_FILE`), which is how a lot of data gets
+            // there: argv has a limit, and a few hundred kilobytes is already past what the system accepts.
+            let data = (if text(params, "runFor") == "each" && items.len() == 1 { serde_json::to_string(items[0]) } else { serde_json::to_string(items) }).unwrap_or_else(|_| "[]".into());
+            let items_file = dir.join("items.json");
+            write_file(&items_file, &data)?;
+            let mut env = env;
+            env.push(("CODEFLOW_ITEMS_FILE".into(), items_file.to_string_lossy().into_owned()));
+            if data.len() > ARGV_DATA_LIMIT {
+                return Err(NodeError::failed(format!(
+                    "The items are {} KB of JSON, more than the system passes to a script as an argument — read them from the file named by the CODEFLOW_ITEMS_FILE environment variable, or send fewer items",
+                    data.len() / 1024
+                )));
+            }
             match text(params, "osaKind").as_str() {
                 kind @ ("applescript" | "jxa") => {
                     let jxa = kind == "jxa";
@@ -562,25 +575,55 @@ async fn build(ctx: &NodeCtx, params: &Value, stdin: Vec<u8>, items: &[&Value], 
 
 // ------------------------------------------------------------------------------------ running one
 
+/// The longest piece of output read before it is counted, kept and logged.
+const MAX_LINE: u64 = 1024 * 1024;
+
+/// What one of a process's output streams has said so far, kept where whoever waits for the process can
+/// read it even if the stream never ends.
+#[derive(Default)]
+struct Captured {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+type Sink = Arc<Mutex<Captured>>;
+
+fn taken(sink: &Sink) -> (Vec<u8>, bool) {
+    let captured = sink.lock().map(|mut captured| (std::mem::take(&mut captured.bytes), captured.truncated)).unwrap_or_default();
+    captured
+}
+
+/// The most JSON handed to a macOS script in its argument list.
+const ARGV_DATA_LIMIT: usize = 200_000;
+
+/// How long a pipe may stay open after its process has exited. A script that starts something in the
+/// background (`npm run dev &`, `nohup server &`) leaves it holding the pipe: the script is over, and
+/// waiting for the daemon to close it would hold the node until the daemon dies.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
+
 async fn pump<R: AsyncRead + Unpin>(
     reader: R,
     stream: LogStream,
+    sink: Sink,
     ctx_log: impl Fn(LogStream, &str),
-) -> (Vec<u8>, bool) {
+) {
     let mut reader = BufReader::new(reader);
-    let mut kept = Vec::new();
-    let mut truncated = false;
     let mut line = Vec::new();
     let mut logged = 0usize;
     loop {
         line.clear();
-        match reader.read_until(b'\n', &mut line).await {
+        // A «line» is at most this long: a process that prints gigabytes with no newline (base64 on one line,
+        // a progress bar of carriage returns) would otherwise grow `line` until the memory runs out — before
+        // the capture limit below ever got a say. Past it, the line simply goes on as the next one.
+        match (&mut reader).take(MAX_LINE).read_until(b'\n', &mut line).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {
-                if kept.len() + line.len() <= CAPTURE_LIMIT {
-                    kept.extend_from_slice(&line);
-                } else {
-                    truncated = true;
+                if let Ok(mut captured) = sink.lock() {
+                    if captured.bytes.len() + line.len() <= CAPTURE_LIMIT {
+                        captured.bytes.extend_from_slice(&line);
+                    } else {
+                        captured.truncated = true;
+                    }
                 }
                 if logged < LOGGED_LINES {
                     let text = String::from_utf8_lossy(&line);
@@ -593,7 +636,6 @@ async fn pump<R: AsyncRead + Unpin>(
             }
         }
     }
-    (kept, truncated)
 }
 
 async fn run(ctx: &NodeCtx, label: String, invocation: Invocation) -> Result<Outcome, NodeError> {
@@ -636,8 +678,10 @@ async fn run(ctx: &NodeCtx, label: String, invocation: Invocation) -> Result<Out
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
     let (host_out, id_out) = (host.clone(), node_id.clone());
-    let out_task = tokio::spawn(async move { pump(stdout, LogStream::Stdout, move |s, t| host_out.log(&id_out, s, t)).await });
-    let err_task = tokio::spawn(async move { pump(stderr, LogStream::Stderr, move |s, t| host.log(&node_id, s, t)).await });
+    let (out_sink, err_sink): (Sink, Sink) = (Arc::default(), Arc::default());
+    let (out_for_task, err_for_task) = (out_sink.clone(), err_sink.clone());
+    let mut out_task = tokio::spawn(async move { pump(stdout, LogStream::Stdout, out_for_task, move |s, t| host_out.log(&id_out, s, t)).await });
+    let mut err_task = tokio::spawn(async move { pump(stderr, LogStream::Stderr, err_for_task, move |s, t| host.log(&node_id, s, t)).await });
 
     let status = tokio::select! {
         status = child.wait() => status,
@@ -650,8 +694,23 @@ async fn run(ctx: &NodeCtx, label: String, invocation: Invocation) -> Result<Out
         }
     };
     forget();
-    let (stdout, out_cut) = out_task.await.unwrap_or_default();
-    let (stderr, err_cut) = err_task.await.unwrap_or_default();
+    // The process is over. Its streams end with it — unless something it started still holds them: that
+    // is waited for a moment (the last lines may be on their way) and then let go, with what was read.
+    // The readers keep draining in the background, so the daemon is not killed by a closed pipe.
+    let drained = tokio::select! {
+        _ = async { let _ = tokio::join!(&mut out_task, &mut err_task); } => true,
+        _ = tokio::time::sleep(PIPE_GRACE) => false,
+        _ = ctx.cancel.cancelled() => {
+            out_task.abort();
+            err_task.abort();
+            return Err(NodeError::Cancelled);
+        }
+    };
+    if !drained {
+        ctx.log(LogStream::Info, "A process this one started is still running — its output is no longer captured");
+    }
+    let (stdout, out_cut) = taken(&out_sink);
+    let (stderr, err_cut) = taken(&err_sink);
     let status = status.map_err(|e| NodeError::failed(format!("{label} could not be waited for: {e}")))?;
     Ok(Outcome { stdout, stderr, code: status.code(), truncated: out_cut || err_cut })
 }

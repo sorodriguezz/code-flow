@@ -2018,11 +2018,17 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
 /// nothing — is carried to the new hash, so nobody's working flow turns "unreviewed" over a
 /// definition change. A template that carried trust (a non-empty `trusted_hash`) keeps it the same way.
 pub(crate) fn rehash_flow_trust(conn: &Connection) -> rusqlite::Result<()> {
-    const MARKER: &str = "migration:flow-exec-hash-m12";
+    // One pass per widening of `EXECUTABLE_TYPES`: each is marked done on its own, so a database
+    // that already went through an earlier one still goes through the next.
+    rehash_flow_trust_once(conn, "migration:flow-exec-hash-m12")?;
+    rehash_flow_trust_once(conn, "migration:flow-exec-hash-until-prfix-reviewer-open")
+}
+
+fn rehash_flow_trust_once(conn: &Connection, marker: &str) -> rusqlite::Result<()> {
     if !table_exists(conn, "flows")? || !has_column(conn, "flows", "exec_hash")? {
         return Ok(());
     }
-    let done: Option<String> = rusqlite::OptionalExtension::optional(conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [MARKER], |row| row.get(0)))?;
+    let done: Option<String> = rusqlite::OptionalExtension::optional(conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [marker], |row| row.get(0)))?;
     if done.is_some() {
         return Ok(());
     }
@@ -2064,7 +2070,7 @@ pub(crate) fn rehash_flow_trust(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute("UPDATE flow_templates SET trusted_hash = ?2 WHERE id = ?1", rusqlite::params![id, crate::flows::spec::executable_hash(&parsed)])?;
         }
     }
-    conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')", [MARKER])?;
+    conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')", [marker])?;
     Ok(())
 }
 

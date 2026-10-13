@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use chrono::{Datelike, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use serde_json::{json, Map, Value};
 
 use super::process::run_program;
@@ -203,13 +203,23 @@ async fn media(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                     pattern.to_string_lossy().into_owned(),
                 ])
                 .await?;
-                let prefix = pattern.file_name().map(|n| n.to_string_lossy().replace("%03d", "")).unwrap_or_default();
-                let (head, tail) = prefix.split_once('.').map(|(h, t)| (h.to_string(), format!(".{t}"))).unwrap_or((prefix.clone(), String::new()));
+                // What goes before and after the piece number in the name ffmpeg writes: split at the number itself, so a name with
+                // dots in it (`reunion.v2`) is found like any other.
+                let written = pattern.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let (head, tail) = written.split_once("%03d").map(|(h, t)| (h.to_string(), t.to_string())).unwrap_or((written.clone(), String::new()));
                 let mut pieces: Vec<PathBuf> = std::fs::read_dir(&folder)
                     .map_err(|e| NodeError::failed(e.to_string()))?
                     .flatten()
                     .map(|e| e.path())
-                    .filter(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()).is_some_and(|n| n.starts_with(&head) && n.ends_with(&tail) && n.len() == head.len() + 3 + tail.len()))
+                    .filter(|p| {
+                        p.file_name().map(|n| n.to_string_lossy().into_owned()).is_some_and(|n| {
+                            n.len() == head.len() + 3
+                                + tail.len()
+                                && n.starts_with(&head)
+                                && n.ends_with(&tail)
+                                && n.as_bytes()[head.len()..head.len() + 3].iter().all(u8::is_ascii_digit)
+                        })
+                    })
                     .collect();
                 pieces.sort();
                 Ok(pieces.iter().enumerate().map(|(i, p)| { let mut item = file_item(p); item["part"] = json!(i + 1); item["parts"] = json!(pieces.len()); item }).collect())
@@ -779,8 +789,16 @@ fn ics_unescape(text: &str) -> String {
     text.replace("\\n", "\n").replace("\\N", "\n").replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
 }
 
+/// An address as it goes after `mailto:` — without anything that would end the line and start another property (an attendee
+/// written as `x@y.z\r\nATTACH:…` is one the invitation would otherwise carry), nor the characters a parameter value is
+/// quoted by.
+fn ics_address(raw: &str) -> String {
+    raw.chars().filter(|c| !c.is_control() && !c.is_whitespace() && !matches!(c, '"' | ';' | ':' | '<' | '>' | ',')).collect()
+}
+
 fn ics_escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace(';', "\\;").replace(',', "\\,").replace('\n', "\\n")
+    // A carriage return would end the line for some readers: the text's line breaks are the `\n` escape, only.
+    text.replace('\r', "").replace('\\', "\\\\").replace(';', "\\;").replace(',', "\\,").replace('\n', "\\n")
 }
 
 /// A property line: its name, parameters and value — `DTSTART;TZID=America/Santiago:20261001T090000`.
@@ -833,155 +851,503 @@ fn ics_time(value: &str, params: &BTreeMap<String, String>, fallback: chrono_tz:
     local_instant(value_zone(v, params, fallback), naive).map(|at| (at, false))
 }
 
-/// The starts an RRULE gives from `first`, inside `[from, to]` — daily, weekly (with BYDAY), monthly
-/// and yearly, with INTERVAL, COUNT and UNTIL; at most a thousand.
-///
-/// Stepped on the wall clock of `zone`, the event's own: a meeting at 09:00 stays at 09:00 on both
-/// sides of a DST change, where adding days of absolute time moved it to 08:00 or 10:00. Every step
-/// is checked arithmetic, so an INTERVAL past any calendar ends the series instead of overflowing.
-fn expand(first: chrono::DateTime<chrono::Utc>, rule: &str, from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono::Utc>, zone: chrono_tz::Tz) -> Vec<chrono::DateTime<chrono::Utc>> {
-    let parts: BTreeMap<String, String> = rule.split(';').filter_map(|p| p.split_once('=').map(|(k, v)| (k.to_uppercase(), v.to_string()))).collect();
-    let freq = parts.get("FREQ").map(String::as_str).unwrap_or("DAILY");
-    // All digits but too big for a number is still "not again for a very long time", never "daily".
-    let interval: i64 = match parts.get("INTERVAL").map(|v| v.trim()) {
-        Some(v) if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) => v.parse::<i64>().unwrap_or(i64::MAX).max(1),
-        _ => 1,
-    };
-    let count: Option<usize> = parts.get("COUNT").and_then(|v| v.parse().ok());
-    let until = parts.get("UNTIL").and_then(|v| ics_time(v, &BTreeMap::new(), zone)).map(|t| t.0);
-    let by_day: Vec<chrono::Weekday> = parts
-        .get("BYDAY")
-        .map(|v| {
-            v.split(',')
-                .filter_map(|d| match d.trim().trim_start_matches(|c: char| c == '-' || c == '+' || c.is_ascii_digit()) {
-                    "MO" => Some(chrono::Weekday::Mon),
-                    "TU" => Some(chrono::Weekday::Tue),
-                    "WE" => Some(chrono::Weekday::Wed),
-                    "TH" => Some(chrono::Weekday::Thu),
-                    "FR" => Some(chrono::Weekday::Fri),
-                    "SA" => Some(chrono::Weekday::Sat),
-                    "SU" => Some(chrono::Weekday::Sun),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let local_first = first.with_timezone(&zone).naive_local();
-    let mut out = Vec::new();
-    let mut produced = 0usize;
-    let mut step = 0i64;
-    while out.len() < 1000 && step < 20_000 {
-        let Some(offset) = step.checked_mul(interval) else { break };
-        let candidates: Vec<NaiveDateTime> = match freq {
-            "WEEKLY" if !by_day.is_empty() => {
-                let monday = chrono::Duration::days(i64::from(local_first.weekday().num_days_from_monday()));
-                let week_start = chrono::Duration::try_weeks(offset).and_then(|weeks| local_first.checked_add_signed(weeks)).and_then(|day| day.checked_sub_signed(monday));
-                let Some(week_start) = week_start else { break };
-                let mut days: Vec<NaiveDateTime> = by_day
-                    .iter()
-                    .filter_map(|d| week_start.checked_add_signed(chrono::Duration::days(i64::from(d.num_days_from_monday()))))
-                    .filter(|d| *d >= local_first)
-                    .collect();
-                days.sort();
-                days
-            }
-            "WEEKLY" => match chrono::Duration::try_weeks(offset).and_then(|weeks| local_first.checked_add_signed(weeks)) {
-                Some(day) => vec![day],
-                None => break,
-            },
-            "MONTHLY" => {
-                let Some(months) = i64::from(local_first.month0()).checked_add(offset) else { break };
-                let Some(year) = i32::try_from(months / 12).ok().and_then(|years| local_first.year().checked_add(years)) else { break };
-                // Past the calendar's last year no month of the series is left; the 31st of a month
-                // with 30 days is no occurrence (RFC 5545 skips it), not the end of the series.
-                if NaiveDate::from_ymd_opt(year, 1, 1).is_none() {
-                    break;
-                }
-                NaiveDate::from_ymd_opt(year, (months % 12) as u32 + 1, local_first.day()).map(|d| d.and_time(local_first.time())).into_iter().collect()
-            }
-            "YEARLY" => {
-                let Some(year) = i32::try_from(offset).ok().and_then(|years| local_first.year().checked_add(years)) else { break };
-                if NaiveDate::from_ymd_opt(year, 1, 1).is_none() {
-                    break;
-                }
-                NaiveDate::from_ymd_opt(year, local_first.month(), local_first.day()).map(|d| d.and_time(local_first.time())).into_iter().collect()
-            }
-            _ => match chrono::Duration::try_days(offset).and_then(|days| local_first.checked_add_signed(days)) {
-                Some(day) => vec![day],
-                None => break,
-            },
+/// How often a rule repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Freq {
+    Minutely,
+    Hourly,
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+}
+
+/// An RRULE read: RFC 5545's parts but BYSECOND and SECONDLY (a calendar's events do not repeat by the second).
+#[derive(Debug, Clone)]
+struct Recurrence {
+    freq: Freq,
+    interval: i64,
+    count: Option<usize>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    by_month: Vec<u32>,
+    by_month_day: Vec<i32>,
+    by_year_day: Vec<i32>,
+    by_week_no: Vec<i32>,
+    /// `(n, day)`: every such day of the period with `n` 0, its n-th from the start (or the end, negative) otherwise.
+    by_day: Vec<(i32, chrono::Weekday)>,
+    by_hour: Vec<u32>,
+    by_minute: Vec<u32>,
+    by_set_pos: Vec<i32>,
+    week_start: chrono::Weekday,
+}
+
+fn weekday_code(code: &str) -> Option<chrono::Weekday> {
+    Some(match code.trim().to_ascii_uppercase().as_str() {
+        "MO" => chrono::Weekday::Mon,
+        "TU" => chrono::Weekday::Tue,
+        "WE" => chrono::Weekday::Wed,
+        "TH" => chrono::Weekday::Thu,
+        "FR" => chrono::Weekday::Fri,
+        "SA" => chrono::Weekday::Sat,
+        "SU" => chrono::Weekday::Sun,
+        _ => return None,
+    })
+}
+
+/// A comma list of whole numbers within `range` (signs allowed where the range has them), the rest left out.
+fn numbers(value: Option<&String>, range: std::ops::RangeInclusive<i32>) -> Vec<i32> {
+    value
+        .map(|v| v.split(',').filter_map(|n| n.trim().parse::<i32>().ok()).filter(|n| *n != 0 && range.contains(n)).collect())
+        .unwrap_or_default()
+}
+
+impl Recurrence {
+    fn parse(rule: &str, zone: chrono_tz::Tz) -> Recurrence {
+        let parts: BTreeMap<String, String> = rule.split(';').filter_map(|p| p.split_once('=').map(|(k, v)| (k.trim().to_uppercase(), v.trim().to_string()))).collect();
+        let freq = match parts.get("FREQ").map(|f| f.to_uppercase()).as_deref() {
+            Some("MINUTELY") => Freq::Minutely,
+            Some("HOURLY") => Freq::Hourly,
+            Some("WEEKLY") => Freq::Weekly,
+            Some("MONTHLY") => Freq::Monthly,
+            Some("YEARLY") => Freq::Yearly,
+            _ => Freq::Daily,
         };
-        step += 1;
-        for candidate in candidates {
-            let Some(utc) = local_instant(zone, candidate) else { continue };
-            if until.is_some_and(|u| utc > u) || utc > to {
-                return out;
+        // All digits but too big for a number is still "not again for a very long time", never "every time".
+        let interval: i64 = match parts.get("INTERVAL").map(|v| v.trim()) {
+            Some(v) if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) => v.parse::<i64>().unwrap_or(i64::MAX).max(1),
+            _ => 1,
+        };
+        let by_day = parts
+            .get("BYDAY")
+            .map(|v| {
+                v.split(',')
+                    .filter_map(|entry| {
+                        let entry = entry.trim();
+                        let split = entry.len().checked_sub(2)?;
+                        let (ordinal, code) = entry.split_at(split);
+                        let n = if ordinal.is_empty() { 0 } else { ordinal.trim_start_matches('+').parse::<i32>().ok()? };
+                        Some((n, weekday_code(code)?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Recurrence {
+            freq,
+            interval,
+            count: parts.get("COUNT").and_then(|v| v.parse().ok()),
+            until: parts.get("UNTIL").and_then(|v| ics_time(v, &BTreeMap::new(), zone)).map(|t| t.0),
+            by_month: numbers(parts.get("BYMONTH"), 1..=12).into_iter().map(|m| m as u32).collect(),
+            by_month_day: numbers(parts.get("BYMONTHDAY"), -31..=31),
+            by_year_day: numbers(parts.get("BYYEARDAY"), -366..=366),
+            by_week_no: numbers(parts.get("BYWEEKNO"), -53..=53),
+            by_day,
+            // An hour or a minute can be 0: read without the "not zero" rule of the day numbers.
+            by_hour: parts.get("BYHOUR").map(|v| v.split(',').filter_map(|n| n.trim().parse::<u32>().ok()).filter(|n| *n < 24).collect()).unwrap_or_default(),
+            by_minute: parts.get("BYMINUTE").map(|v| v.split(',').filter_map(|n| n.trim().parse::<u32>().ok()).filter(|n| *n < 60).collect()).unwrap_or_default(),
+            by_set_pos: numbers(parts.get("BYSETPOS"), -366..=366),
+            week_start: parts.get("WKST").and_then(|w| weekday_code(w)).unwrap_or(chrono::Weekday::Mon),
+        }
+    }
+
+    fn month_ok(&self, date: NaiveDate) -> bool {
+        self.by_month.is_empty() || self.by_month.contains(&date.month())
+    }
+
+    fn month_day_ok(&self, date: NaiveDate) -> bool {
+        let length = days_in_month(date.year(), date.month()) as i32;
+        let day = date.day() as i32;
+        self.by_month_day.is_empty() || self.by_month_day.iter().any(|n| *n == day || *n == day - length - 1)
+    }
+
+    fn weekday_ok(&self, date: NaiveDate) -> bool {
+        self.by_day.is_empty() || self.by_day.iter().any(|(_, day)| *day == date.weekday())
+    }
+
+    /// The dates of a period that the BY parts keep (or add), before the times of day.
+    fn dates(&self, period: Period, first: NaiveDate) -> Vec<NaiveDate> {
+        let mut dates: Vec<NaiveDate> = match period {
+            Period::Year(year) => {
+                let months: Vec<u32> = if self.by_month.is_empty() { (1..=12).collect() } else { self.by_month.clone() };
+                if !self.by_year_day.is_empty() {
+                    let length = if NaiveDate::from_ymd_opt(year, 12, 31).is_some_and(|d| d.ordinal() == 366) { 366 } else { 365 };
+                    self.by_year_day
+                        .iter()
+                        .filter_map(|n| {
+                            let ordinal = if *n > 0 { *n } else { length + n + 1 };
+                            NaiveDate::from_yo_opt(year, u32::try_from(ordinal).ok()?)
+                        })
+                        .filter(|d| self.month_ok(*d) && self.month_day_ok(*d) && self.weekday_ok(*d))
+                        .collect()
+                } else if !self.by_week_no.is_empty() {
+                    week_dates(year, &self.by_week_no, self.week_start)
+                        .into_iter()
+                        .filter(|d| self.month_ok(*d))
+                        .filter(|d| if self.by_day.is_empty() { d.weekday() == first.weekday() } else { self.weekday_ok(*d) })
+                        .collect()
+                } else if !self.by_month_day.is_empty() {
+                    months.iter().flat_map(|month| month_days(year, *month, &self.by_month_day)).filter(|d| self.weekday_ok(*d)).collect()
+                } else if !self.by_day.is_empty() {
+                    if self.by_month.is_empty() {
+                        nth_days(&period_dates(year, None), &self.by_day)
+                    } else {
+                        months.iter().flat_map(|month| nth_days(&period_dates(year, Some(*month)), &self.by_day)).collect()
+                    }
+                } else if !self.by_month.is_empty() {
+                    months.iter().filter_map(|month| NaiveDate::from_ymd_opt(year, *month, first.day())).collect()
+                } else {
+                    NaiveDate::from_ymd_opt(year, first.month(), first.day()).into_iter().collect()
+                }
             }
-            produced += 1;
-            if count.is_some_and(|c| produced > c) {
-                return out;
+            Period::Month(year, month) => {
+                if !self.by_month.is_empty() && !self.by_month.contains(&month) {
+                    Vec::new()
+                } else if !self.by_month_day.is_empty() {
+                    month_days(year, month, &self.by_month_day).into_iter().filter(|d| self.weekday_ok(*d)).collect()
+                } else if !self.by_day.is_empty() {
+                    nth_days(&period_dates(year, Some(month)), &self.by_day)
+                } else {
+                    // The 31st of a month with 30 days is no occurrence (RFC 5545 skips it), not the end of the series.
+                    NaiveDate::from_ymd_opt(year, month, first.day()).into_iter().collect()
+                }
             }
-            if utc >= from {
-                out.push(utc);
+            Period::Week(start) => {
+                let days: Vec<chrono::Weekday> = if self.by_day.is_empty() { vec![first.weekday()] } else { self.by_day.iter().map(|(_, day)| *day).collect() };
+                days.iter()
+                    .filter_map(|day| start.checked_add_signed(chrono::Duration::days(days_from(self.week_start, *day))))
+                    .filter(|d| self.month_ok(*d))
+                    .collect()
             }
+            Period::Day(date) => {
+                if self.month_ok(date) && self.month_day_ok(date) && self.weekday_ok(date) {
+                    vec![date]
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+        dates.sort();
+        dates.dedup();
+        dates
+    }
+
+    /// The times of day a date of a daily or coarser period gets: BYHOUR × BYMINUTE, else the first occurrence's own.
+    fn times(&self, first: chrono::NaiveTime) -> Vec<chrono::NaiveTime> {
+        let hours = if self.by_hour.is_empty() { vec![first.hour()] } else { self.by_hour.clone() };
+        let minutes = if self.by_minute.is_empty() { vec![first.minute()] } else { self.by_minute.clone() };
+        let mut out: Vec<chrono::NaiveTime> = hours.iter().flat_map(|h| minutes.iter().filter_map(move |m| chrono::NaiveTime::from_hms_opt(*h, *m, first.second()))).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The occurrences of one period (the `step`-th since the first), in order, BYSETPOS applied; `None` past the calendar.
+    fn period(&self, first: NaiveDateTime, step: i64) -> Option<Vec<NaiveDateTime>> {
+        let offset = step.checked_mul(self.interval)?;
+        let mut found: Vec<NaiveDateTime> = match self.freq {
+            Freq::Yearly => {
+                let year = i32::try_from(offset).ok().and_then(|years| first.year().checked_add(years))?;
+                NaiveDate::from_ymd_opt(year, 1, 1)?;
+                self.at_times(self.dates(Period::Year(year), first.date()), first.time())
+            }
+            Freq::Monthly => {
+                let months = i64::from(first.month0()).checked_add(offset)?;
+                let year = i32::try_from(months / 12).ok().and_then(|years| first.year().checked_add(years))?;
+                // Past the calendar's last year no month of the series is left.
+                NaiveDate::from_ymd_opt(year, 1, 1)?;
+                self.at_times(self.dates(Period::Month(year, (months % 12) as u32 + 1), first.date()), first.time())
+            }
+            Freq::Weekly => {
+                let start = first.date().checked_sub_signed(chrono::Duration::days(days_from(self.week_start, first.weekday())))?;
+                let start = chrono::Duration::try_weeks(offset).and_then(|weeks| start.checked_add_signed(weeks))?;
+                self.at_times(self.dates(Period::Week(start), first.date()), first.time())
+            }
+            Freq::Daily => {
+                let date = chrono::Duration::try_days(offset).and_then(|days| first.date().checked_add_signed(days))?;
+                self.at_times(self.dates(Period::Day(date), first.date()), first.time())
+            }
+            Freq::Hourly | Freq::Minutely => {
+                let step = if self.freq == Freq::Hourly { chrono::Duration::try_hours(offset)? } else { chrono::Duration::try_minutes(offset)? };
+                let base = first.checked_add_signed(step)?;
+                let instants: Vec<NaiveDateTime> = if self.freq == Freq::Hourly && !self.by_minute.is_empty() {
+                    self.by_minute.iter().filter_map(|m| base.with_minute(*m)).collect()
+                } else {
+                    vec![base]
+                };
+                instants
+                    .into_iter()
+                    .filter(|at| self.dates(Period::Day(at.date()), first.date()).contains(&at.date()))
+                    .filter(|at| self.by_hour.is_empty() || self.by_hour.contains(&at.hour()))
+                    .filter(|at| self.freq == Freq::Hourly || self.by_minute.is_empty() || self.by_minute.contains(&at.minute()))
+                    .collect()
+            }
+        };
+        found.sort();
+        found.dedup();
+        if !self.by_set_pos.is_empty() {
+            let length = found.len() as i32;
+            let mut picked: Vec<NaiveDateTime> = self
+                .by_set_pos
+                .iter()
+                .filter_map(|n| {
+                    let index = if *n > 0 { n - 1 } else { length + n };
+                    usize::try_from(index).ok().and_then(|i| found.get(i).copied())
+                })
+                .collect();
+            picked.sort();
+            picked.dedup();
+            found = picked;
+        }
+        Some(found)
+    }
+
+    fn at_times(&self, dates: Vec<NaiveDate>, first: chrono::NaiveTime) -> Vec<NaiveDateTime> {
+        let times = self.times(first);
+        dates.iter().flat_map(|date| times.iter().map(move |time| date.and_time(*time))).collect()
+    }
+
+    /// The length of one period, for skipping the ones wholly before what is asked for (a daily meeting since 2015).
+    fn period_length(&self) -> Option<chrono::Duration> {
+        match self.freq {
+            Freq::Minutely => chrono::Duration::try_minutes(self.interval),
+            Freq::Hourly => chrono::Duration::try_hours(self.interval),
+            Freq::Daily => chrono::Duration::try_days(self.interval),
+            Freq::Weekly => chrono::Duration::try_weeks(self.interval),
+            Freq::Monthly | Freq::Yearly => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Period {
+    Year(i32),
+    Month(i32, u32),
+    /// The week that starts on this date (on WKST).
+    Week(NaiveDate),
+    Day(NaiveDate),
+}
+
+/// Days from `start` forward to `day` within a week (0–6).
+fn days_from(start: chrono::Weekday, day: chrono::Weekday) -> i64 {
+    (i64::from(day.num_days_from_monday()) - i64::from(start.num_days_from_monday())).rem_euclid(7)
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1).and_then(|d| d.pred_opt()).map_or(31, |d| d.day())
+}
+
+/// Every date of a month, or of the whole year.
+fn period_dates(year: i32, month: Option<u32>) -> Vec<NaiveDate> {
+    let (from, to) = match month {
+        Some(month) => (NaiveDate::from_ymd_opt(year, month, 1), NaiveDate::from_ymd_opt(year, month, days_in_month(year, month))),
+        None => (NaiveDate::from_ymd_opt(year, 1, 1), NaiveDate::from_ymd_opt(year, 12, 31)),
+    };
+    let (Some(from), Some(to)) = (from, to) else { return Vec::new() };
+    from.iter_days().take_while(|d| *d <= to).collect()
+}
+
+/// The month's days a BYMONTHDAY list names — `-1` its last.
+fn month_days(year: i32, month: u32, days: &[i32]) -> Vec<NaiveDate> {
+    let length = days_in_month(year, month) as i32;
+    days.iter()
+        .filter_map(|n| {
+            let day = if *n > 0 { *n } else { length + n + 1 };
+            (1..=length).contains(&day).then(|| NaiveDate::from_ymd_opt(year, month, day as u32)).flatten()
+        })
+        .collect()
+}
+
+/// The days of `dates` a BYDAY list names: every such weekday, or its n-th (from the end when negative).
+fn nth_days(dates: &[NaiveDate], by_day: &[(i32, chrono::Weekday)]) -> Vec<NaiveDate> {
+    let mut out = Vec::new();
+    for (n, day) in by_day {
+        let matching: Vec<NaiveDate> = dates.iter().filter(|d| d.weekday() == *day).copied().collect();
+        match *n {
+            0 => out.extend(matching),
+            n if n > 0 => out.extend(matching.get(n as usize - 1).copied()),
+            n => out.extend(usize::try_from(matching.len() as i32 + n).ok().and_then(|i| matching.get(i)).copied()),
         }
     }
     out
 }
 
+/// The dates of the year's weeks a BYWEEKNO list names. Week 1 is the first with at least four of its days in the year,
+/// weeks starting on `week_start`; only days of the year itself are kept.
+fn week_dates(year: i32, weeks: &[i32], week_start: chrono::Weekday) -> Vec<NaiveDate> {
+    let first_week = |year: i32| -> Option<NaiveDate> {
+        let jan1 = NaiveDate::from_ymd_opt(year, 1, 1)?;
+        let back = days_from(week_start, jan1.weekday());
+        let start = jan1.checked_sub_signed(chrono::Duration::days(back))?;
+        // That week has 7 - back days in the year: week 1 when four or more.
+        if 7 - back >= 4 { Some(start) } else { start.checked_add_signed(chrono::Duration::days(7)) }
+    };
+    let (Some(this), Some(next)) = (first_week(year), first_week(year + 1)) else { return Vec::new() };
+    let count = ((next - this).num_days() / 7) as i32;
+    let mut out = Vec::new();
+    for n in weeks {
+        let number = if *n > 0 { *n } else { count + n + 1 };
+        if !(1..=count).contains(&number) {
+            continue;
+        }
+        let Some(start) = this.checked_add_signed(chrono::Duration::days(i64::from(number - 1) * 7)) else { continue };
+        out.extend(start.iter_days().take(7).filter(|d| d.year() == year));
+    }
+    out
+}
+
+/// The starts an RRULE gives from `first`, inside `[from, to]`, at most a thousand. `first` (DTSTART) is always the first
+/// occurrence (RFC 5545 counts it whether or not the rule would have made it).
+///
+/// Stepped on the wall clock of `zone`, the event's own: a meeting at 09:00 stays at 09:00 on both sides of a DST change,
+/// where adding days of absolute time moved it to 08:00 or 10:00. Every step is checked arithmetic, so an INTERVAL past
+/// any calendar ends the series instead of overflowing.
+fn expand(first: chrono::DateTime<chrono::Utc>, rule: &str, from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono::Utc>, zone: chrono_tz::Tz) -> Vec<chrono::DateTime<chrono::Utc>> {
+    let recurrence = Recurrence::parse(rule, zone);
+    let local_first = first.with_timezone(&zone).naive_local();
+    let mut out = Vec::new();
+    let mut produced = 0usize;
+    let mut keep = |at: chrono::DateTime<chrono::Utc>, out: &mut Vec<chrono::DateTime<chrono::Utc>>| -> bool {
+        if recurrence.until.is_some_and(|u| at > u) || at > to {
+            return false;
+        }
+        produced += 1;
+        if recurrence.count.is_some_and(|c| produced > c) {
+            return false;
+        }
+        if at >= from {
+            out.push(at);
+        }
+        out.len() < 1000
+    };
+    if !keep(first, &mut out) {
+        return out;
+    }
+    // Without a COUNT, the periods wholly before `from` need no looking at: a daily meeting since 2015 starts where asked.
+    let mut step: i64 = 0;
+    if recurrence.count.is_none() {
+        if let Some(length) = recurrence.period_length() {
+            let behind = (from - first).num_seconds();
+            let each = length.num_seconds().max(1);
+            if behind > each {
+                step = (behind / each - 1).max(0);
+            }
+        }
+    }
+    let mut periods = 0;
+    while periods < 50_000 {
+        periods += 1;
+        let Some(found) = recurrence.period(local_first, step) else { break };
+        step += 1;
+        for candidate in found {
+            if candidate <= local_first {
+                continue;
+            }
+            let Some(at) = local_instant(zone, candidate) else { continue };
+            if at <= first {
+                continue;
+            }
+            if !keep(at, &mut out) {
+                return out;
+            }
+        }
+        // A period that starts after `to` and the UNTIL ends the search, however sparse the rule.
+        let reached = match recurrence.freq {
+            Freq::Yearly => local_first.year().checked_add(i32::try_from(step.saturating_mul(recurrence.interval)).unwrap_or(i32::MAX)).is_none_or(|year| year > to.with_timezone(&zone).year() + 1),
+            _ => {
+                // A month is never shorter than 28 days: an estimate that can only fall short never ends the search early.
+                let length = recurrence.period_length().unwrap_or_else(|| chrono::Duration::days(28));
+                let ahead = length.num_seconds().checked_mul(step).and_then(chrono::Duration::try_seconds);
+                ahead.and_then(|ahead| local_first.checked_add_signed(ahead)).and_then(|at| local_instant(zone, at)).is_none_or(|at| at > to + chrono::Duration::days(1))
+            }
+        };
+        if reached {
+            break;
+        }
+    }
+    out
+}
+
+type Props = Vec<(String, BTreeMap<String, String>, String)>;
+
 pub fn parse_ics(text: &str, from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono::Utc>, zone: chrono_tz::Tz) -> Vec<Value> {
-    let mut events = Vec::new();
-    let mut current: Option<Vec<(String, BTreeMap<String, String>, String)>> = None;
+    let mut all: Vec<Props> = Vec::new();
+    let mut current: Option<Props> = None;
     for line in unfold(text) {
         match line.trim() {
             "BEGIN:VEVENT" => current = Some(Vec::new()),
-            "END:VEVENT" => {
-                let Some(props) = current.take() else { continue };
-                let get = |name: &str| props.iter().find(|p| p.0 == name);
-                let Some((start, all_day)) = get("DTSTART").and_then(|p| ics_time(&p.2, &p.1, zone)) else { continue };
-                // The event's own clock: its repetitions keep its wall-clock time, and its days are dates there.
-                let event_zone = get("DTSTART").map(|p| value_zone(&p.2, &p.1, zone)).unwrap_or(zone);
-                let end = get("DTEND").and_then(|p| ics_time(&p.2, &p.1, zone)).map(|t| t.0);
-                let length = end.map(|e| e - start).unwrap_or_else(|| if all_day { chrono::Duration::days(1) } else { chrono::Duration::zero() });
-                // A whole-day event lasts whole days, however many hours the days it falls on have.
-                let days = end
-                    .map(|e| (e.with_timezone(&event_zone).date_naive() - start.with_timezone(&event_zone).date_naive()).num_days())
-                    .unwrap_or(1)
-                    .max(0);
-                let excluded: Vec<chrono::DateTime<chrono::Utc>> = props
-                    .iter()
-                    .filter(|p| p.0 == "EXDATE")
-                    .flat_map(|p| p.2.split(',').filter_map(|v| ics_time(v, &p.1, zone).map(|t| t.0)).collect::<Vec<_>>())
-                    .collect();
-                let starts = match get("RRULE") {
-                    Some(rule) => expand(start, &rule.2, from, to, event_zone),
-                    None => {
-                        let finishes = start + length;
-                        if finishes >= from && start <= to { vec![start] } else { vec![] }
-                    }
-                };
-                for at in starts.into_iter().filter(|s| !excluded.contains(s)) {
-                    let day = at.with_timezone(&event_zone).date_naive();
-                    events.push(json!({
-                        "uid": get("UID").map(|p| p.2.clone()),
-                        "summary": get("SUMMARY").map(|p| ics_unescape(&p.2)),
-                        "description": get("DESCRIPTION").map(|p| ics_unescape(&p.2)),
-                        "location": get("LOCATION").map(|p| ics_unescape(&p.2)),
-                        "start": if all_day { day.to_string() } else { at.to_rfc3339() },
-                        "end": if all_day { day.checked_add_days(chrono::Days::new(days as u64)).unwrap_or(day).to_string() } else { (at + length).to_rfc3339() },
-                        "allDay": all_day,
-                        "recurring": get("RRULE").is_some(),
-                        "status": get("STATUS").map(|p| p.2.clone()),
-                        "url": get("URL").map(|p| p.2.clone()),
-                        "organizer": get("ORGANIZER").map(|p| p.2.trim_start_matches("mailto:").to_string()),
-                    }));
-                }
-            }
+            "END:VEVENT" => all.extend(current.take()),
             _ => {
                 if let (Some(props), Some(prop)) = (current.as_mut(), property(&line)) {
                     props.push(prop);
                 }
             }
+        }
+    }
+    let get = |props: &'_ Props, name: &str| props.iter().find(|p| p.0 == name).cloned();
+    let instants = |props: &Props, name: &str| -> Vec<chrono::DateTime<chrono::Utc>> {
+        props
+            .iter()
+            .filter(|p| p.0 == name && p.1.get("VALUE").map(String::as_str) != Some("PERIOD"))
+            .flat_map(|p| p.2.split(',').filter_map(|v| ics_time(v, &p.1, zone).map(|t| t.0)).collect::<Vec<_>>())
+            .collect()
+    };
+    // One occurrence of a series moved or changed on its own (RECURRENCE-ID): it replaces the one the rule made at that
+    // moment, and a cancelled one leaves nothing.
+    let uid_of = |props: &Props| get(props, "UID").map(|p| p.2).unwrap_or_default();
+    let replaced: Vec<(String, chrono::DateTime<chrono::Utc>)> = all
+        .iter()
+        .filter_map(|props| {
+            let id = get(props, "RECURRENCE-ID")?;
+            Some((uid_of(props), ics_time(&id.2, &id.1, zone)?.0))
+        })
+        .collect();
+    let mut events = Vec::new();
+    for props in &all {
+        let Some((start, all_day)) = get(props, "DTSTART").and_then(|p| ics_time(&p.2, &p.1, zone)) else { continue };
+        let override_of = get(props, "RECURRENCE-ID").is_some();
+        if override_of && get(props, "STATUS").is_some_and(|p| p.2.trim().eq_ignore_ascii_case("CANCELLED")) {
+            continue;
+        }
+        // The event's own clock: its repetitions keep its wall-clock time, and its days are dates there.
+        let event_zone = get(props, "DTSTART").map(|p| value_zone(&p.2, &p.1, zone)).unwrap_or(zone);
+        let end = get(props, "DTEND").and_then(|p| ics_time(&p.2, &p.1, zone)).map(|t| t.0);
+        let length = end.map(|e| e - start).unwrap_or_else(|| if all_day { chrono::Duration::days(1) } else { chrono::Duration::zero() });
+        // A whole-day event lasts whole days, however many hours the days it falls on have.
+        let days = end.map(|e| (e.with_timezone(&event_zone).date_naive() - start.with_timezone(&event_zone).date_naive()).num_days()).unwrap_or(1).max(0);
+        let excluded = instants(props, "EXDATE");
+        let uid = uid_of(props);
+        let mut starts = match get(props, "RRULE") {
+            Some(rule) if !override_of => expand(start, &rule.2, from, to, event_zone),
+            _ => {
+                let finishes = start + length;
+                if finishes >= from && start <= to { vec![start] } else { vec![] }
+            }
+        };
+        // RDATE: occurrences the rule does not make, added by hand.
+        if !override_of {
+            starts.extend(instants(props, "RDATE").into_iter().filter(|at| *at + length >= from && *at <= to));
+            starts.sort();
+            starts.dedup();
+        }
+        let recurring = override_of || get(props, "RRULE").is_some() || get(props, "RDATE").is_some();
+        for at in starts.into_iter().filter(|s| !excluded.contains(s)) {
+            if !override_of && replaced.iter().any(|(id, moment)| *id == uid && *moment == at) {
+                continue;
+            }
+            let day = at.with_timezone(&event_zone).date_naive();
+            events.push(json!({
+                "uid": get(props, "UID").map(|p| p.2),
+                "summary": get(props, "SUMMARY").map(|p| ics_unescape(&p.2)),
+                "description": get(props, "DESCRIPTION").map(|p| ics_unescape(&p.2)),
+                "location": get(props, "LOCATION").map(|p| ics_unescape(&p.2)),
+                "start": if all_day { day.to_string() } else { at.to_rfc3339() },
+                "end": if all_day { day.checked_add_days(chrono::Days::new(days as u64)).unwrap_or(day).to_string() } else { (at + length).to_rfc3339() },
+                "allDay": all_day,
+                "recurring": recurring,
+                "status": get(props, "STATUS").map(|p| p.2),
+                "url": get(props, "URL").map(|p| p.2),
+                "organizer": get(props, "ORGANIZER").map(|p| p.2.trim_start_matches("mailto:").to_string()),
+            }));
         }
     }
     events.sort_by(|a, b| a["start"].as_str().unwrap_or("").cmp(b["start"].as_str().unwrap_or("")));
@@ -1058,10 +1424,10 @@ pub fn build_invite(params: &Value, zone: chrono_tz::Tz) -> Result<String, Strin
     }
     let organizer = text(params, "organizer");
     if !organizer.trim().is_empty() {
-        lines.push(format!("ORGANIZER:mailto:{}", organizer.trim()));
+        lines.push(format!("ORGANIZER:mailto:{}", ics_address(&organizer)));
     }
     for attendee in strings(params, "attendees") {
-        lines.push(format!("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{}", attendee.trim()));
+        lines.push(format!("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{}", ics_address(&attendee)));
     }
     lines.push("STATUS:CONFIRMED".into());
     lines.push("END:VEVENT".into());
@@ -1121,6 +1487,13 @@ async fn ics(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_address_cannot_start_another_line_of_the_invitation() {
+        assert_eq!(ics_address("ana@example.com\r\nATTACH:http://x.example/"), "ana@example.comATTACHhttp//x.example/");
+        assert!(!ics_address(" ana@example.com ;ROLE=CHAIR").contains(';'));
+        assert_eq!(ics_escape("a\r\nb"), "a\\nb");
+    }
 
     #[test]
     fn placeholders_fill_across_runs() {
@@ -1222,6 +1595,98 @@ mod tests {
             let ics = format!("BEGIN:VEVENT\r\nUID:x\r\nDTSTART:20261026T120000Z\r\nRRULE:{rule}\r\nEND:VEVENT\r\n");
             assert_eq!(parse_ics(&ics, from, to, santiago).len(), expected, "{rule}");
         }
+    }
+
+    /// The starts a rule gives from `dtstart` (UTC) within `[from, to]` (whole days), as `YYYY-MM-DD HH:MM`.
+    fn occurrences(dtstart: &str, rule: &str, from: &str, to: &str) -> Vec<String> {
+        let zone = chrono_tz::UTC;
+        let first = ics_time(dtstart, &BTreeMap::new(), zone).unwrap().0;
+        let day = |d: &str| chrono::Utc.from_utc_datetime(&NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap().and_hms_opt(0, 0, 0).unwrap());
+        expand(first, rule, day(from), day(to), zone).iter().map(|at| at.format("%Y-%m-%d %H:%M").to_string()).collect()
+    }
+
+    fn days(list: &[&str]) -> Vec<String> {
+        list.iter().map(|d| if d.len() == 10 { format!("{d} 09:00") } else { d.to_string() }).collect()
+    }
+
+    #[test]
+    fn a_monthly_rule_reads_its_weekdays_with_their_place_in_the_month() {
+        // The second Tuesday, the last Friday, the last day, the last weekday.
+        assert_eq!(occurrences("20260113T090000Z", "FREQ=MONTHLY;BYDAY=2TU;COUNT=4", "2026-01-01", "2026-12-31"), days(&["2026-01-13", "2026-02-10", "2026-03-10", "2026-04-14"]));
+        assert_eq!(occurrences("20260130T090000Z", "FREQ=MONTHLY;BYDAY=-1FR;COUNT=3", "2026-01-01", "2026-12-31"), days(&["2026-01-30", "2026-02-27", "2026-03-27"]));
+        assert_eq!(occurrences("20260131T090000Z", "FREQ=MONTHLY;BYMONTHDAY=-1;COUNT=3", "2026-01-01", "2026-12-31"), days(&["2026-01-31", "2026-02-28", "2026-03-31"]));
+        assert_eq!(
+            occurrences("20260130T090000Z", "FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1;COUNT=3", "2026-01-01", "2026-12-31"),
+            days(&["2026-01-30", "2026-02-27", "2026-03-31"])
+        );
+        assert_eq!(occurrences("20260115T090000Z", "FREQ=MONTHLY;BYMONTHDAY=1,15;COUNT=3", "2026-01-01", "2026-12-31"), days(&["2026-01-15", "2026-02-01", "2026-02-15"]));
+    }
+
+    #[test]
+    fn days_hours_and_weeks_follow_their_by_parts() {
+        // Weekdays only, from a Friday.
+        assert_eq!(
+            occurrences("20261009T090000Z", "FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;COUNT=6", "2026-10-01", "2026-12-31"),
+            days(&["2026-10-09", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16"])
+        );
+        assert_eq!(
+            occurrences("20261012T090000Z", "FREQ=DAILY;BYHOUR=9,17;COUNT=4", "2026-10-01", "2026-12-31"),
+            days(&["2026-10-12 09:00", "2026-10-12 17:00", "2026-10-13 09:00", "2026-10-13 17:00"])
+        );
+        assert_eq!(occurrences("20261012T090000Z", "FREQ=HOURLY;INTERVAL=3;COUNT=3", "2026-10-01", "2026-12-31"), days(&["2026-10-12 09:00", "2026-10-12 12:00", "2026-10-12 15:00"]));
+        // RFC 5545's own example: which day starts the week decides which Sunday belongs to a fortnight.
+        assert_eq!(occurrences("19970805T090000Z", "FREQ=WEEKLY;INTERVAL=2;COUNT=4;BYDAY=TU,SU;WKST=MO", "1997-01-01", "1997-12-31"), days(&["1997-08-05", "1997-08-10", "1997-08-19", "1997-08-24"]));
+        assert_eq!(occurrences("19970805T090000Z", "FREQ=WEEKLY;INTERVAL=2;COUNT=4;BYDAY=TU,SU;WKST=SU", "1997-01-01", "1997-12-31"), days(&["1997-08-05", "1997-08-17", "1997-08-19", "1997-08-31"]));
+    }
+
+    #[test]
+    fn a_yearly_rule_reads_months_weeks_and_days_of_the_year() {
+        assert_eq!(
+            occurrences("20260315T090000Z", "FREQ=YEARLY;BYMONTH=3,9;BYMONTHDAY=15;COUNT=4", "2026-01-01", "2028-12-31"),
+            days(&["2026-03-15", "2026-09-15", "2027-03-15", "2027-09-15"])
+        );
+        // The fourth Thursday of November.
+        assert_eq!(occurrences("20261126T090000Z", "FREQ=YEARLY;BYMONTH=11;BYDAY=4TH;COUNT=3", "2026-01-01", "2030-12-31"), days(&["2026-11-26", "2027-11-25", "2028-11-23"]));
+        // RFC 5545: Monday of week 20; days 1, 100 and 200 of every third year.
+        assert_eq!(occurrences("19970512T090000Z", "FREQ=YEARLY;BYWEEKNO=20;BYDAY=MO;COUNT=3", "1997-01-01", "2000-12-31"), days(&["1997-05-12", "1998-05-11", "1999-05-17"]));
+        assert_eq!(
+            occurrences("19970101T090000Z", "FREQ=YEARLY;INTERVAL=3;COUNT=6;BYYEARDAY=1,100,200", "1997-01-01", "2001-12-31"),
+            days(&["1997-01-01", "1997-04-10", "1997-07-19", "2000-01-01", "2000-04-09", "2000-07-18"])
+        );
+    }
+
+    #[test]
+    fn a_long_running_series_is_read_where_it_is_asked_for() {
+        // Hourly since 2020: a day of 2026 has its 24 hours, however many came before.
+        let found = occurrences("20200101T000000Z", "FREQ=HOURLY", "2026-10-12", "2026-10-13");
+        assert_eq!(found.len(), 25, "00:00 to 00:00 the next day, both ends in: {found:?}");
+        assert_eq!(found[0], "2026-10-12 00:00");
+        // UNTIL ends it.
+        assert_eq!(occurrences("20261012T090000Z", "FREQ=DAILY;UNTIL=20261014T090000Z", "2026-10-01", "2026-12-31").len(), 3);
+    }
+
+    #[test]
+    fn added_dates_moved_occurrences_and_cancelled_ones_are_read() {
+        let zone = chrono_tz::UTC;
+        let ics = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\nUID:s\r\nSUMMARY:Daily\r\nDTSTART:20261012T090000Z\r\nDTEND:20261012T091500Z\r\nRRULE:FREQ=DAILY;COUNT=4\r\nRDATE:20261020T090000Z\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:s\r\nRECURRENCE-ID:20261013T090000Z\r\nSUMMARY:Daily (moved)\r\nDTSTART:20261013T110000Z\r\nDTEND:20261013T111500Z\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:s\r\nRECURRENCE-ID:20261014T090000Z\r\nSTATUS:CANCELLED\r\nDTSTART:20261014T090000Z\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let from = chrono::Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        let to = chrono::Utc.with_ymd_and_hms(2026, 10, 31, 0, 0, 0).unwrap();
+        let events = parse_ics(ics, from, to, zone);
+        let seen: Vec<(String, String)> = events.iter().map(|e| (e["start"].as_str().unwrap()[..16].to_string(), e["summary"].as_str().unwrap().to_string())).collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("2026-10-12T09:00".to_string(), "Daily".to_string()),
+                ("2026-10-13T11:00".to_string(), "Daily (moved)".to_string()),
+                ("2026-10-15T09:00".to_string(), "Daily".to_string()),
+                ("2026-10-20T09:00".to_string(), "Daily".to_string()),
+            ],
+            "the 13th moved to 11:00, the 14th cancelled, the 20th added"
+        );
     }
 
     #[test]

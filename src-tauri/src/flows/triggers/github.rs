@@ -197,11 +197,24 @@ pub fn check(app: &AppHandle, flow_id: &str, params: &Value) -> Result<(), Strin
     Ok(())
 }
 
+/// `found` without what `ignored` (logins, lower case) wrote — the account this flow comments with, a bot: a flow
+/// that answers an issue would otherwise be woken by its own answer.
+pub fn without_authors(found: Vec<(String, String, Value)>, ignored: &[String]) -> Vec<(String, String, Value)> {
+    if ignored.is_empty() {
+        return found;
+    }
+    found
+        .into_iter()
+        .filter(|(_, _, item)| item.get("author").and_then(Value::as_str).is_none_or(|author| !ignored.iter().any(|name| name.eq_ignore_ascii_case(author))))
+        .collect()
+}
+
 pub fn spawn(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view: Arc<Mutex<TriggerView>>, cancel: CancellationToken) -> Result<(), String> {
     let (base, owner, name) = repository(&text(params, "repository"))?;
     let event = text(params, "event");
     let credential = text(params, "credential");
     let labels: Vec<String> = text(params, "labelFilter").split(',').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    let ignored: Vec<String> = text(params, "ignoreAuthors").split(',').map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty()).collect();
     let interval = Duration::from_secs(params.get("intervalSec").and_then(Value::as_f64).unwrap_or(60.0).max(60.0) as u64);
     let (app, flow_id, node_id) = (app.clone(), flow_id.to_string(), node_id.to_string());
     tauri::async_runtime::spawn(async move {
@@ -211,8 +224,9 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view
         };
         let repo = format!("{owner}/{name}");
         let (url, query) = listing(&base, &owner, &name, &event);
-        let mut mark: Option<Mark> = None;
-        let mut etag: Option<String> = None;
+        // A save of the flow replaces this poller; the one that takes over starts from where this one was.
+        let key = format!("github\u{1f}{flow_id}\u{1f}{node_id}\u{1f}{base}\u{1f}{repo}\u{1f}{event}");
+        let (mut mark, mut etag): (Option<Mark>, Option<String>) = super::carry::take(&key).unwrap_or_default();
         loop {
             let look = async {
                 let mut request = client.get(&url).query(&query).header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28");
@@ -242,8 +256,8 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view
                 Ok(Some((tag, answer))) => {
                     note_problem(&view, None);
                     etag = tag;
-                    for item in fresh(found_in(&event, &repo, &answer, &labels), &mut mark) {
-                        if let Err(error) = super::fire(&app, &flow_id, &node_id, vec![Item::new(item)]) {
+                    for item in fresh(without_authors(found_in(&event, &repo, &answer, &labels), &ignored), &mut mark) {
+                        if let Err(error) = super::fire_event(&app, &flow_id, &node_id, vec![Item::new(item)]) {
                             note_problem(&view, Some(error));
                         }
                     }
@@ -252,7 +266,10 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view
             }
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {}
-                _ = cancel.cancelled() => return,
+                _ = cancel.cancelled() => {
+                    super::carry::stash(key, (mark, etag));
+                    return;
+                }
             }
         }
     });
@@ -262,6 +279,15 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_the_flow_itself_wrote_does_not_wake_it() {
+        let item = |id: &str, author: &str| ("2026-10-01T10:00:00Z".to_string(), id.to_string(), json!({"author": author}));
+        let kept = without_authors(vec![item("1", "Mi-Bot"), item("2", "ana")], &["mi-bot".to_string()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].1, "2");
+        assert_eq!(without_authors(vec![item("1", "mi-bot")], &[]).len(), 1, "nobody ignored: all pass");
+    }
 
     #[test]
     fn a_repository_is_read_from_its_name_or_its_link() {

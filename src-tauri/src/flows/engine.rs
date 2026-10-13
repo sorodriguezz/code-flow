@@ -271,6 +271,9 @@ fn not_here<'a, T: Send + 'a>(what: &'static str) -> HostFuture<'a, Result<T, St
     Box::pin(async move { Err(format!("{what} is not available in this run")) })
 }
 
+/// A change to one remembered value — see [`RunHost::state_stage`].
+pub type StateUpdate = Arc<dyn Fn(Option<Value>) -> Option<Value> + Send + Sync>;
+
 /// What a run reports to, and asks of, the app around it.
 pub trait RunHost: Send + Sync {
     fn node_started(&self, node: &FlowNode, seq: u32, items_in: usize, started_at: &str);
@@ -279,6 +282,15 @@ pub trait RunHost: Send + Sync {
     fn notify(&self, title: &str, body: &str);
     fn state_get(&self, key: &str) -> Result<Option<Value>, String>;
     fn state_set(&self, key: &str, value: Option<&Value>) -> Result<(), String>;
+    /// For what a node remembers *for the next run* (what a dedupe has seen, what «only changes» compared):
+    /// `update` gets what is stored and returns what should be. It takes hold only if the run ends well — a
+    /// run that fails after the node must not have used up the events it never finished with — and is applied
+    /// to what is stored *then*, so two runs at once each add theirs instead of one overwriting the other. Until
+    /// then `state_get` already answers as if it had. A host without the distinction applies it at once.
+    fn state_stage(&self, key: &str, update: StateUpdate) -> Result<(), String> {
+        let current = self.state_get(key)?;
+        self.state_set(key, update(current).as_ref())
+    }
     /// A workspace variable as it is now — `$vars` is the run's snapshot from when it started.
     fn var_get(&self, name: &str) -> Result<Option<String>, String>;
     fn var_set(&self, name: &str, value: Option<&str>) -> Result<(), String>;
@@ -287,7 +299,11 @@ pub trait RunHost: Send + Sync {
     fn work_dir(&self) -> PathBuf;
     /// Runs another flow from its "called by another flow" trigger with `items`; with `wait`, until
     /// it ends, answering with its last node's output.
-    fn subflow(&self, flow_id: &str, items: Vec<Item>, wait: bool) -> HostFuture<'_, Result<Vec<Item>, String>>;
+    /// Runs another flow with these items. With `wait`, the child belongs to the caller: `cancel` is the
+    /// caller's node (its Stop, its time limit), and the child stops with it — a child left running after
+    /// its caller was stopped, parked at an approval or retrying, would carry on unseen. Without `wait` it
+    /// is its own run, and outlives the caller.
+    fn subflow(&self, flow_id: &str, items: Vec<Item>, wait: bool, cancel: CancellationToken) -> HostFuture<'_, Result<Vec<Item>, String>>;
     /// Starts, stops or restarts one of the workspace's services, or reads where it is.
     fn service(&self, service_id: &str, action: &str, wait: bool, timeout: Duration) -> HostFuture<'_, Result<Value, String>>;
 
@@ -329,6 +345,13 @@ pub trait RunHost: Send + Sync {
     fn edits_recorded(&self, path: &str) {
         let _ = path;
     }
+    /// Whether the engine limits itself to reading when a node asks it to — Claude, Codex and Grok do;
+    /// agy, opencode and Cline are only *asked* to. For those a node that "may not write" can still write,
+    /// so it gets the restore point an editing one gets.
+    fn enforces_read_only(&self, engine: &EngineChoice) -> bool {
+        let _ = engine;
+        true
+    }
     /// A secret this run is holding (a Llavero value, a credential): what the run stores — its node
     /// data and its log — shows it redacted from now on.
     fn secret_used(&self, value: &str) {
@@ -367,6 +390,17 @@ pub trait RunHost: Send + Sync {
     /// its refresh token, and stored, when it was not (`flows::oauth`).
     fn oauth_token(&self, id: &str, meta: &Value) -> HostFuture<'_, Result<String, String>> {
         let _ = (id, meta);
+        not_here("An OAuth 2 credential")
+    }
+    /// Work for when the run has ended well — a queue's messages deleted once the flow did what it does with them, so a run
+    /// that fails leaves them to come back. Dropped when the run fails or is stopped. A host with no run around it does it
+    /// at once.
+    fn after_success(&self, work: HostFuture<'static, ()>) {
+        tokio::spawn(work);
+    }
+    /// A new access token for an `oauth2` credential whose token `refused` a service turned down (`flows::oauth::renewed_token`).
+    fn oauth_token_renewed(&self, id: &str, meta: &Value, refused: &str) -> HostFuture<'_, Result<String, String>> {
+        let _ = (id, meta, refused);
         not_here("An OAuth 2 credential")
     }
     /// Where the "Base vectorial" node keeps its own store.
@@ -671,6 +705,7 @@ async fn run_with_settings(ctx: &mut NodeCtx, settings: &NodeSettings) -> (Resul
         let token = ctx.run.cancel.child_token();
         ctx.cancel = token.clone();
         ctx.timeout = settings.timeout;
+        ctx.begin_attempt();
         let outcome = match settings.timeout {
             Some(limit) => {
                 let work = nodes::execute(ctx);
@@ -688,6 +723,17 @@ async fn run_with_settings(ctx: &mut NodeCtx, settings: &NodeSettings) -> (Resul
             None => nodes::execute(ctx).await,
         };
         match outcome {
+            // Some items already went out: a retry would send them again. The failure stands, and says why.
+            Err(error) if error != NodeError::Cancelled && settings.retry_on_fail && attempt < settings.max_tries && ctx.sent_count() > 0 => {
+                let sent = ctx.sent_count();
+                return (
+                    Err(NodeError::Failed(format!(
+                        "{error} — {sent} item{} had already gone out, so the node was not tried again (they would be sent twice)",
+                        if sent == 1 { "" } else { "s" }
+                    ))),
+                    attempt,
+                );
+            }
             Err(error) if error != NodeError::Cancelled && settings.retry_on_fail && attempt < settings.max_tries => {
                 if ctx.run.cancel.is_cancelled() {
                     return (Err(NodeError::Cancelled), attempt);
@@ -722,8 +768,11 @@ fn error_ports(node: &FlowNode, inputs: &Ports, message: &str, settings: &NodeSe
             ports[catalogue_outputs] = routed;
         }
         _ => {
-            if let Some(first) = ports.first_mut() {
-                first.push(Item::paired(json!({"error": message}), 0));
+            // Where an error item goes is where an item that did not pass would: a guard's second output,
+            // «blocked» — an error must not look like a text that was checked and let through.
+            let home = usize::from(node.type_id == "ai.guard");
+            if let Some(port) = ports.get_mut(home) {
+                port.push(Item::paired(json!({"error": message}), 0));
             }
         }
     }
@@ -800,7 +849,12 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
         let outputs = Arc::new(items.clone());
         {
             let mut slots = graph.slots.lock().expect("run state");
-            slots.entry(id.clone()).or_default().outputs = Some(outputs.clone());
+            let slot = slots.entry(id.clone()).or_default();
+            slot.outputs = Some(outputs.clone());
+            // What fed the seeded node, when its record said: `$('Trigger').item` is followed back through it.
+            if let Some(origins) = plan.seed_origins.get(id) {
+                slot.origins = origins.clone();
+            }
         }
         finished_nodes.insert(id.clone());
         if plan.quiet.contains(id) {
@@ -916,6 +970,30 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
                             // Its inputs were taken when it ran: the port count comes from its type.
                             let inputs = graph.node(member).map_or(1, |n| (super::catalog::input_count(&n.type_id, &n.params) as usize).max(1));
                             *slot = Slot { inputs: vec![Vec::new(); inputs], origins: vec![Vec::new(); inputs], pending: pending_of(member, Some(&members)), outputs: None };
+                        }
+                    }
+                    // What reaches a body node from outside the loop (a setting, a lookup the loop's list does
+                    // not come through) arrived once, before the first batch, and is part of every batch: it is
+                    // handed to the node again, or the second batch would run it without that input.
+                    let mut outside: Vec<(String, usize, usize, String, Arc<Ports>)> = Vec::new();
+                    for member in &body {
+                        for (index, wire) in spec.connections.iter().enumerate() {
+                            if wire.to != *member || members.contains(&wire.from) || loops.back.contains(&index) {
+                                continue;
+                            }
+                            if let Some(outputs) = slots.get(&wire.from).and_then(|slot| slot.outputs.clone()) {
+                                outside.push((member.clone(), wire.input as usize, wire.out as usize, wire.from.clone(), outputs));
+                            }
+                        }
+                    }
+                    for (member, input, out, from, outputs) in outside {
+                        if let (Some(slot), Some(items)) = (slots.get_mut(&member), outputs.get(out)) {
+                            if input < slot.inputs.len() {
+                                for (position, item) in items.iter().enumerate() {
+                                    slot.inputs[input].push(item.clone());
+                                    slot.origins[input].push(Origin { node: from.clone(), output: out as u16, index: position as u32 });
+                                }
+                            }
                         }
                     }
                     drop(slots);
@@ -1046,7 +1124,9 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
             seq += 1;
             let settings = NodeSettings::read(&node.settings);
             let mut inputs = inputs;
-            if settings.execute_once {
+            // «Ejecutar una vez» is about what the node *does* with its items; a node switched off does
+            // nothing, and hands every item it was given on.
+            if settings.execute_once && !node.disabled {
                 let first = inputs.iter().flatten().next().cloned();
                 inputs = vec![first.into_iter().collect()];
             }
@@ -1099,6 +1179,12 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
             });
         }
 
+        // A loop that became ready while other nodes were running starts now, not when the next of them
+        // happens to finish: a branch waiting for an approval must not hold the loop's body for hours.
+        if !due_loops.is_empty() && failure.is_none() && !run.cancel.is_cancelled() {
+            continue;
+        }
+
         if running.is_empty() {
             let stopped = failure.is_some() || run.cancel.is_cancelled();
             if stopped || (ready.is_empty() && due_loops.is_empty()) {
@@ -1136,9 +1222,13 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
                 (NodeStatus::Success, None, Arc::new(ports))
             }
             Err(NodeError::Cancelled) => (NodeStatus::Canceled, None, Arc::new(vec![Vec::new(); output_count(&node) as usize])),
+            // The run was stopped while this node was working, and what it answers with is the stop coming
+            // back as an error (a host call that said "cancelled", a connection cut): the run was stopped, it
+            // did not fail here — nor does the first failure of a run, which stops the others, lose its place.
+            Err(_) if run.cancel.is_cancelled() => (NodeStatus::Canceled, None, Arc::new(vec![Vec::new(); output_count(&node) as usize])),
             Err(error) => {
                 let message = error.to_string();
-                if settings.on_error == OnError::Stop || run.cancel.is_cancelled() {
+                if settings.on_error == OnError::Stop {
                     failure.get_or_insert_with(|| (id.clone(), message.clone()));
                     run.cancel.cancel();
                     (NodeStatus::Error, Some(message), Arc::new(vec![Vec::new(); output_count(&node) as usize]))
@@ -1173,6 +1263,40 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
         if carries_on && failure.is_none() && !run.cancel.is_cancelled() {
             ready.extend(deliver(&spec, &graph, &id, &outputs, &finished_nodes, &loops.back, &mut returned, None));
             body_finished(&id, &mut loop_runs, &mut due_loops);
+        }
+    }
+
+    // Nothing failed and nothing stopped the run, yet a node that was to run never did: it is waiting for
+    // an input that no longer comes (a wiring the validator could not see). Saying "success" would hide
+    // that half the flow did not happen.
+    if failure.is_none() && !run.cancel.is_cancelled() {
+        let stuck: Vec<&FlowNode> = spec.nodes.iter().filter(|n| plan.active.contains(&n.id) && !finished_nodes.contains(&n.id)).collect();
+        if let Some(first) = stuck.first() {
+            let message = format!(
+                "The run stopped with {} still waiting: {} — check how they are wired",
+                if stuck.len() == 1 { "a node" } else { "nodes" },
+                stuck.iter().map(|n| format!("“{}”", n.name)).collect::<Vec<_>>().join(", ")
+            );
+            for node in &stuck {
+                run.host.node_finished(
+                    node,
+                    NodeReport {
+                        node_id: node.id.clone(),
+                        status: NodeStatus::Error,
+                        seq: 0,
+                        started_at: None,
+                        finished_at: Some(now_text()),
+                        duration_ms: None,
+                        attempts: 0,
+                        error: Some("Never received what it was waiting for".into()),
+                        inputs: Arc::new(vec![]),
+                        origins: graph.origins(&node.id),
+                        outputs: Arc::new(vec![]),
+                        iteration: iteration_of(&node.id, &loop_runs),
+                    },
+                );
+            }
+            failure = Some((first.id.clone(), message));
         }
     }
 

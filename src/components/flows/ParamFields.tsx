@@ -27,7 +27,7 @@ import {
   McpServersField,
 } from "./AiFields";
 import { DbConnectionPicker, NotePicker, RemoteHostPicker, VaultItemPicker, ApiEnvironmentPicker, ApiRequestPicker } from "./AppFields";
-import { ApiCollectionPicker, FakeFieldsEditor, FlowTablePicker, SubflowInputsEditor, TransformCodeButton, ValidationRulesEditor } from "./MoreFields";
+import { ApiCollectionPicker, FakeFieldsEditor, FlowTablePicker, SqlParamsEditor, SubflowInputsEditor, TransformCodeButton, ValidationRulesEditor } from "./MoreFields";
 import { DbFiltersEditor, DbTableField } from "./DbFields";
 import { visible } from "../../lib/flows/paramVisibility";
 import { serializeSpec } from "../../lib/flows/spec";
@@ -514,7 +514,8 @@ function AssignmentsEditor({ value, onChange }: { value: unknown; onChange: (nex
   );
 }
 
-function SortKeysEditor({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
+/** `literal`: the node reads these entries as written — a `{{ }}` typed there would be stored as an expression the node never evaluates (a sort key that matches nothing, silently). */
+function SortKeysEditor({ value, onChange, literal = false }: { value: unknown; onChange: (next: unknown) => void; literal?: boolean }) {
   const t = useT();
   return (
     <Rows
@@ -525,7 +526,7 @@ function SortKeysEditor({ value, onChange }: { value: unknown; onChange: (next: 
       render={(row, set) => (
         <>
           <div className="min-w-0 flex-1">
-            <SmartInput value={str(row.field)} onChange={(field) => set({ ...row, field })} placeholder={t("flows.param.fieldName")} mono />
+            <SmartInput value={str(row.field)} onChange={(field) => set({ ...row, field })} placeholder={t("flows.param.fieldName")} mono literal={literal} />
           </div>
           <div className="w-[120px] shrink-0">
             <Select
@@ -544,7 +545,7 @@ function SortKeysEditor({ value, onChange }: { value: unknown; onChange: (next: 
   );
 }
 
-function AggregationsEditor({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
+function AggregationsEditor({ value, onChange, literal = false }: { value: unknown; onChange: (next: unknown) => void; literal?: boolean }) {
   const t = useT();
   return (
     <Rows
@@ -563,10 +564,10 @@ function AggregationsEditor({ value, onChange }: { value: unknown; onChange: (ne
             />
           </div>
           <div className="min-w-0 flex-1">
-            <SmartInput value={str(row.field)} onChange={(field) => set({ ...row, field })} placeholder={t("flows.param.fieldName")} mono />
+            <SmartInput value={str(row.field)} onChange={(field) => set({ ...row, field })} placeholder={t("flows.param.fieldName")} mono literal={literal} />
           </div>
           <div className="w-[28%] shrink-0">
-            <SmartInput value={str(row.as)} onChange={(as) => set({ ...row, as })} placeholder={t("flows.param.as")} mono />
+            <SmartInput value={str(row.as)} onChange={(as) => set({ ...row, as })} placeholder={t("flows.param.as")} mono literal={literal} />
           </div>
         </>
       )}
@@ -574,7 +575,7 @@ function AggregationsEditor({ value, onChange }: { value: unknown; onChange: (ne
   );
 }
 
-function StringsEditor({ value, onChange, placeholder }: { value: unknown; onChange: (next: unknown) => void; placeholder?: string }) {
+function StringsEditor({ value, onChange, placeholder, literal = false }: { value: unknown; onChange: (next: unknown) => void; placeholder?: string; literal?: boolean }) {
   const t = useT();
   const rows = Array.isArray(value) ? value.map(str) : [];
   return (
@@ -585,7 +586,7 @@ function StringsEditor({ value, onChange, placeholder }: { value: unknown; onCha
       addLabel={t("flows.param.addEntry")}
       render={(row, set) => (
         <div className="min-w-0 flex-1">
-          <SmartInput value={row} onChange={set} placeholder={placeholder} mono />
+          <SmartInput value={row} onChange={set} placeholder={placeholder} mono literal={literal} />
         </div>
       )}
     />
@@ -844,7 +845,10 @@ function ServicePicker({ value, onChange }: { value: unknown; onChange: (next: u
 function asCall(value: unknown): FlowConnectorCall {
   const record = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
   const fields = record.fields && typeof record.fields === "object" && !Array.isArray(record.fields) ? (record.fields as Record<string, unknown>) : {};
-  return { connector: str(record.connector), operation: str(record.operation), fields };
+  const call: FlowConnectorCall = { connector: str(record.connector), operation: str(record.operation), fields };
+  if (record.allPages === true) call.allPages = true;
+  if (typeof record.maxItems === "number" && record.maxItems > 0) call.maxItems = record.maxItems;
+  return call;
 }
 
 /** An operation «Cambios en un servicio» may call again and again: one that only reads. The same test
@@ -862,6 +866,7 @@ function ConnectorField({
   onChange,
   credential,
   credentialRow,
+  onServiceChange,
   listOnly = false,
 }: {
   value: unknown;
@@ -869,6 +874,8 @@ function ConnectorField({
   credential: string;
   /** The node's credential, drawn right under the service — a list of teams or channels needs it first. */
   credentialRow?: (connector: FlowConnector) => ReactNode;
+  /** Another service was picked: whatever signed in to the old one must not go on signing the new one. */
+  onServiceChange?: () => void;
   /** «Cambios en un servicio» looks at a list again and again: only the operations that read one. */
   listOnly?: boolean;
 }) {
@@ -897,7 +904,10 @@ function ConnectorField({
         <div className="w-[188px] shrink-0">
           <Select
             value={call.connector}
-            onChange={(id) => onChange({ connector: id, operation: (connectors.find((c) => c.id === id)?.operations ?? []).find((o) => !listOnly || readsOnly(o))?.id ?? "", fields: {} })}
+            onChange={(id) => {
+              if (id !== call.connector) onServiceChange?.();
+              onChange({ connector: id, operation: (connectors.find((c) => c.id === id)?.operations ?? []).find((o) => !listOnly || readsOnly(o))?.id ?? "", fields: {} });
+            }}
             options={connectors.map((c) => ({ value: c.id, label: c.name }))}
             size="sm"
             ariaLabel={t("flows.connector.service")}
@@ -976,6 +986,42 @@ function ConnectorField({
           </div>
         );
       })}
+      {operation?.paginate != null && (
+        // A list longer than a page: the first page unless asked, then up to a limit — a service with tens of thousands of
+        // entries must not be read whole by mistake.
+        <div className="flex min-h-[24px] items-center gap-2">
+          <label className="flex min-w-0 flex-1 items-center gap-2 text-[12.5px] text-[var(--cf-text)]">
+            <Checkbox
+              checked={call.allPages === true}
+              onChange={(checked) => {
+                const next: FlowConnectorCall = { ...call };
+                if (checked) next.allPages = true;
+                else delete next.allPages;
+                onChange(next);
+              }}
+            />
+            <span className="min-w-0 truncate">{t("flows.connector.allPages")}</span>
+          </label>
+          {call.allPages && (
+            <input
+              type="number"
+              min={1}
+              className={fieldClass({ size: "sm", className: "w-[96px] shrink-0 text-right" })}
+              value={call.maxItems ?? ""}
+              placeholder="1000"
+              title={t("flows.connector.maxItems")}
+              aria-label={t("flows.connector.maxItems")}
+              onChange={(event) => {
+                const next: FlowConnectorCall = { ...call };
+                const number = Number(event.target.value);
+                if (event.target.value === "" || !(number > 0)) delete next.maxItems;
+                else next.maxItems = Math.floor(number);
+                onChange(next);
+              }}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1111,13 +1157,13 @@ function ParamField({
         editor = <AssignmentsEditor value={value} onChange={onChange} />;
         break;
       case "sortKeys":
-        editor = <SortKeysEditor value={value} onChange={onChange} />;
+        editor = <SortKeysEditor value={value} onChange={onChange} literal={!spec.expr} />;
         break;
       case "aggregations":
-        editor = <AggregationsEditor value={value} onChange={onChange} />;
+        editor = <AggregationsEditor value={value} onChange={onChange} literal={!spec.expr} />;
         break;
       case "strings":
-        editor = <StringsEditor value={value} onChange={onChange} />;
+        editor = <StringsEditor value={value} onChange={onChange} literal={!spec.expr} />;
         break;
       case "folder":
         editor = <FolderField value={str(value)} onChange={onChange} />;
@@ -1238,12 +1284,16 @@ function ParamField({
       case "subflowInputs":
         editor = <SubflowInputsEditor value={value} onChange={onChange} flowId={str(params.flow)} />;
         break;
+      case "sqlParams":
+        editor = <SqlParamsEditor value={value} onChange={onChange} />;
+        break;
       case "connector":
         editor = (
           <ConnectorField
             value={value}
             onChange={onChange}
             listOnly={typeId === "trigger.connector"}
+            onServiceChange={() => setParam?.("credential", "")}
             credential={str(params.credential)}
             credentialRow={(chosen) => (
               <div className="flex flex-col gap-1">

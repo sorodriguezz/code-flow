@@ -168,6 +168,25 @@ pub fn import(conn: &Connection, workspace_id: &str, text: &str) -> Result<(Flow
             }
         }
     }
+    // A service whose server is written in the node itself (self-hosted GitLab, ntfy) gets the
+    // credential sent wherever that says — so a credential of this workspace is never bound to it on
+    // the file's word. The person picks it after reading the server.
+    for node in document.nodes.iter_mut() {
+        if !matches!(node.type_id.as_str(), "net.connector" | "trigger.connector") {
+            continue;
+        }
+        let free = node
+            .params
+            .get("call")
+            .and_then(|call| call.get("connector"))
+            .and_then(Value::as_str)
+            .and_then(super::connectors::find)
+            .is_some_and(|connector| connector.host_fields().iter().any(super::connectors::HostField::is_free));
+        if free && node.params.get("credential").and_then(Value::as_str).is_some_and(|id| !id.is_empty()) {
+            node.params["credential"] = json!("");
+            notes.cleared.push(format!("{} · credential", node.name));
+        }
+    }
     // Nothing imported starts switched on: it is a document, not a running thing.
     Ok((document, name, description, notes))
 }
@@ -231,6 +250,40 @@ mod tests {
         assert_eq!(notes.unmatched_credentials, vec!["Catálogo"]);
         assert_eq!(param("q", "connection"), json!(""));
         assert_eq!(notes.cleared, vec!["Consulta · connection"]);
+    }
+
+    #[test]
+    fn a_credential_is_not_bound_to_a_server_the_file_wrote() {
+        let conn = db();
+        conn.execute_batch(
+            "INSERT INTO flow_credentials (id, workspace_id, scope, name, kind, meta, created_at, updated_at)
+                 VALUES ('local-gl', 'w1', 'workspace', 'GitLab', 'bearer', '{}', '2026-01-01', '2026-01-01');",
+        )
+        .unwrap();
+        let file = ExportFile {
+            format: MARKER.into(),
+            schema: 1,
+            name: "Issues".into(),
+            description: String::new(),
+            exported_at: String::new(),
+            credentials: vec![ExportedCredential { id: "their-gl".into(), name: "GitLab".into(), kind: "bearer".into() }],
+            spec: spec::parse(
+                &json!({
+                    "schema": 1,
+                    "nodes": [
+                        {"id": "t", "type": "trigger.manual", "name": "Manual", "pos": [0, 0]},
+                        {"id": "c", "type": "net.connector", "name": "Comentar", "pos": [200, 0], "params": {
+                            "call": {"connector": "gitlab", "operation": "commentIssue", "fields": {"host": "evil.example"}}, "credential": "their-gl"}},
+                    ],
+                    "connections": [{"from": "t", "out": 0, "to": "c", "input": 0}],
+                })
+                .to_string(),
+            )
+            .unwrap(),
+        };
+        let (spec, _, _, notes) = import(&conn, "w1", &serde_json::to_string(&file).unwrap()).unwrap();
+        assert_eq!(spec.nodes.iter().find(|n| n.id == "c").unwrap().params["credential"], json!(""));
+        assert_eq!(notes.cleared, vec!["Comentar · credential"]);
     }
 
     #[test]

@@ -5,7 +5,7 @@ import { buttonClass } from "../common/Button";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Select } from "../common/Select";
 import { fieldClass } from "../common/recipes";
-import { Rows, asRows, str } from "./fieldRows";
+import { Rows, asRows, str, type Row } from "./fieldRows";
 import { SmartInput } from "./ParamFields";
 import { apiLoadTree } from "../../lib/tauri/apiCommands";
 import { flowsAiTransformCode, flowsGetFlow, flowsTableCreate, flowsTablesList, type FlowTable, type FlowTransformCode } from "../../lib/tauri/flowsCommands";
@@ -229,6 +229,37 @@ export function ValidationRulesEditor({ value, onChange }: { value: unknown; onC
               onChange={(event) => set({ ...row, arg: event.target.value })}
             />
           )}
+        </>
+      )}
+    />
+  );
+}
+
+/** The SQL types a query's value can be written as — `nodes::data::SQL_PARAM_TYPES`. */
+const SQL_TYPES = ["auto", "text", "integer", "decimal", "boolean", "date", "timestamp", "json", "uuid"] as const;
+
+/** A query's `$1`, `$2`…: each value (fixed or an expression) with the SQL type it is written as. A row saved before rows
+ *  had a type is the value alone, shown as «auto» — what it always was. */
+export function SqlParamsEditor({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
+  const t = useT();
+  const rows: Row[] = Array.isArray(value)
+    ? value.map((entry) => (entry && typeof entry === "object" && !Array.isArray(entry) && "type" in entry ? (entry as Row) : { value: entry ?? "", type: "auto" }))
+    : [];
+  const options = SQL_TYPES.map((type) => ({ value: type, label: t(`flows.sqlType.${type}` as TranslationKey) }));
+  return (
+    <Rows
+      rows={rows}
+      onChange={onChange}
+      blank={() => ({ value: "", type: "auto" })}
+      addLabel={t("flows.param.addEntry")}
+      render={(row, set) => (
+        <>
+          <div className="min-w-0 flex-1">
+            <SmartInput value={str(row.value)} onChange={(next) => set({ ...row, value: next })} mono ariaLabel={t("flows.sqlType.value")} />
+          </div>
+          <div className="w-[128px] shrink-0">
+            <Select value={str(row.type) || "auto"} onChange={(type) => set({ ...row, type })} options={options} size="sm" ariaLabel={t("flows.sqlType.type")} />
+          </div>
         </>
       )}
     />

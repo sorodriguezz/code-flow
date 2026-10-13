@@ -146,14 +146,24 @@ fn merge(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 let right = port(n);
                 let mut matched_right = vec![false; right.len()];
                 let mut next = Vec::new();
+                // The right side indexed by its key once, instead of walked for every left item: ten thousand
+                // against ten thousand was a hundred million path reads, with no way to stop it.
+                let mut by_key: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+                for (position, b) in right.iter().enumerate() {
+                    if let Some(found) = get_path(&b.json, &right_key) {
+                        by_key.entry(found.to_string()).or_default().push(position);
+                    }
+                }
                 for (left, paired) in &acc {
-                    let key = get_path(left, &left_key);
+                    if ctx.cancel.is_cancelled() {
+                        return Err(NodeError::Cancelled);
+                    }
                     let mut found = false;
-                    for (position, b) in right.iter().enumerate() {
-                        if key.is_some() && get_path(&b.json, &right_key) == key {
+                    if let Some(key) = get_path(left, &left_key) {
+                        for &position in by_key.get(&key.to_string()).map(Vec::as_slice).unwrap_or_default() {
                             found = true;
                             matched_right[position] = true;
-                            next.push((pair(left, &b.json), *paired));
+                            next.push((pair(left, &right[position].json), *paired));
                         }
                     }
                     if !found && (join == "left" || join == "outer") {
@@ -206,7 +216,7 @@ pub async fn subflow(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     } else {
         ctx.items().into_iter().map(|item| Item::new(item.json.clone())).collect()
     };
-    let work = ctx.run.host.subflow(target.trim(), items, wait);
+    let work = ctx.run.host.subflow(target.trim(), items, wait, ctx.cancel.clone());
     let produced = tokio::select! {
         result = work => result.map_err(NodeError::failed)?,
         _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
@@ -218,7 +228,7 @@ pub async fn subflow(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 }
 
 /// When "until" means: an RFC 3339 instant, or a local date and time without an offset.
-fn until_instant(raw: &str) -> Result<chrono::DateTime<chrono::Utc>, NodeError> {
+fn until_instant(raw: &str, zone: chrono_tz::Tz) -> Result<chrono::DateTime<chrono::Utc>, NodeError> {
     let raw = raw.trim();
     if let Ok(instant) = chrono::DateTime::parse_from_rfc3339(raw) {
         return Ok(instant.with_timezone(&chrono::Utc));
@@ -226,12 +236,24 @@ fn until_instant(raw: &str) -> Result<chrono::DateTime<chrono::Utc>, NodeError> 
     for format in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
         if let Ok(local) = chrono::NaiveDateTime::parse_from_str(raw, format) {
             use chrono::TimeZone;
-            if let Some(instant) = chrono::Local.from_local_datetime(&local).earliest() {
+            if let Some(instant) = zone.from_local_datetime(&local).earliest() {
                 return Ok(instant.with_timezone(&chrono::Utc));
             }
         }
     }
     Err(NodeError::failed(format!("\"{raw}\" is not a date and time")))
+}
+
+/// The zone a time written without one is read in: the flow's own (Flow settings > Time zone) — the one
+/// its schedules and its `$now` use — and only without one, this machine's. A node that says 09:00 means
+/// 09:00 where the flow says it lives, not where the app happens to be running.
+fn flow_zone(ctx: &NodeCtx) -> chrono_tz::Tz {
+    ctx.run
+        .timezone
+        .as_deref()
+        .and_then(|name| name.trim().parse().ok())
+        .or_else(|| iana_time_zone::get_timezone().ok().and_then(|name| name.parse().ok()))
+        .unwrap_or(chrono_tz::UTC)
 }
 
 /// Waits shorter than this stay in memory; longer ones are parked in the database, so the app
@@ -341,7 +363,7 @@ async fn wait(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         return Ok(decided_ports("logic.wait", &ctx.inputs, &answer));
     }
     let duration = if text(&params, "mode") == "until" {
-        let target = until_instant(&text(&params, "until"))?;
+        let target = until_instant(&text(&params, "until"), flow_zone(ctx))?;
         (target - chrono::Utc::now()).to_std().unwrap_or_default()
     } else {
         let amount = number(&params, "amount").unwrap_or(0.0).max(0.0);
@@ -467,7 +489,7 @@ async fn business_hours(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let params = &resolved[index.min(resolved.len() - 1)];
         let zone_name = text(params, "timezone");
         let zone: chrono_tz::Tz = if zone_name.trim().is_empty() {
-            iana_time_zone::get_timezone().ok().and_then(|z| z.parse().ok()).unwrap_or(chrono_tz::UTC)
+            flow_zone(ctx)
         } else {
             zone_name.trim().parse().map_err(|_| NodeError::failed(format!("\"{zone_name}\" is not a time zone")))?
         };
@@ -477,7 +499,7 @@ async fn business_hours(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         } else {
             chrono::DateTime::parse_from_rfc3339(raw.trim())
                 .map(|d| d.with_timezone(&chrono::Utc))
-                .or_else(|_| until_instant(raw.trim()).map_err(|_| ()))
+                .or_else(|_| until_instant(raw.trim(), zone).map_err(|_| ()))
                 .map_err(|_| NodeError::failed(format!("\"{raw}\" is not a date and time")))?
         };
         let local = moment.with_timezone(&zone);
@@ -621,8 +643,12 @@ mod tests {
 
     #[test]
     fn until_reads_offsets_and_local_times() {
-        assert!(until_instant("2026-12-31T09:00:00Z").is_ok());
-        assert!(until_instant("2026-12-31T09:00").is_ok());
-        assert!(until_instant("tomorrow").is_err());
+        assert!(until_instant("2026-12-31T09:00:00Z", chrono_tz::UTC).is_ok());
+        assert!(until_instant("2026-12-31T09:00", chrono_tz::UTC).is_ok());
+        assert!(until_instant("tomorrow", chrono_tz::UTC).is_err());
+        // A time with no zone is read in the zone given: 09:00 in Tokyo is midnight UTC.
+        let tokyo: chrono_tz::Tz = "Asia/Tokyo".parse().unwrap();
+        assert_eq!(until_instant("2026-01-05 09:00", tokyo).unwrap().to_rfc3339(), "2026-01-05T00:00:00+00:00");
+        assert_eq!(until_instant("2026-01-05 09:00", chrono_tz::UTC).unwrap().to_rfc3339(), "2026-01-05T09:00:00+00:00");
     }
 }

@@ -32,6 +32,7 @@
         "en": "Recent payments"
       },
       "method": "GET",
+      "paginate": { "style": "lastId", "next": "id", "param": "starting_after", "more": "has_more" },
       "path": "/payment_intents",
       "query": {
         "limit": "{{limit}}",
@@ -64,6 +65,7 @@
         "en": "Find customers"
       },
       "method": "GET",
+      "paginate": { "style": "lastId", "next": "id", "param": "starting_after", "more": "has_more" },
       "path": "/customers",
       "query": {
         "email": "{{email}}",
@@ -135,6 +137,7 @@
         "en": "Invoices"
       },
       "method": "GET",
+      "paginate": { "style": "lastId", "next": "id", "param": "starting_after", "more": "has_more" },
       "path": "/invoices",
       "query": {
         "customer": "{{customer}}",

@@ -76,6 +76,12 @@ pub fn describe(path: &Path) -> Value {
 /// Writes `bytes` to `path` whole: a temporary sibling, then a rename over the destination, then
 /// the size read back.
 pub fn write_whole(path: &Path, bytes: &[u8], create_folders: bool) -> Result<(), NodeError> {
+    // Writing to a link writes to what it points at: renaming over it would swap the link for a plain file.
+    let resolved = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    };
+    let path = resolved.as_path();
     let parent = path.parent().ok_or_else(|| NodeError::failed(format!("{} has no folder", path.display())))?;
     if !parent.is_dir() {
         if create_folders {
@@ -86,7 +92,14 @@ pub fn write_whole(path: &Path, bytes: &[u8], create_folders: bool) -> Result<()
     }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let temp = parent.join(format!(".{name}.cf-{}", uuid::Uuid::new_v4().simple()));
-    let written = std::fs::write(&temp, bytes).and_then(|_| std::fs::rename(&temp, path));
+    // The file keeps the permissions it had (an executable script stays one); a new one gets the default.
+    let permissions = std::fs::metadata(path).ok().map(|meta| meta.permissions());
+    let written = std::fs::write(&temp, bytes)
+        .and_then(|_| match permissions {
+            Some(permissions) => std::fs::set_permissions(&temp, permissions),
+            None => Ok(()),
+        })
+        .and_then(|_| std::fs::rename(&temp, path));
     if let Err(error) = written {
         let _ = std::fs::remove_file(&temp);
         return Err(NodeError::failed(format!("Could not write {}: {error}", path.display())));
@@ -140,9 +153,14 @@ async fn file(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 };
                 let create = flag(params, "createFolders");
                 if operation == "addToEnd" && path.is_file() {
-                    let mut current = std::fs::read(&path).map_err(|e| NodeError::failed(format!("Could not read {}: {e}", path.display())))?;
-                    current.extend_from_slice(&bytes);
-                    write_whole(&path, &current, create)?;
+                    // Appended in place: the file is not read and written back whole (a log of many megabytes, a writer
+                    // that adds a line meanwhile), and keeps its permissions and its link.
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .and_then(|mut file| file.write_all(&bytes))
+                        .map_err(|e| NodeError::failed(format!("Could not write to {}: {e}", path.display())))?;
                 } else {
                     write_whole(&path, &bytes, create)?;
                 }
@@ -171,21 +189,31 @@ async fn file(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 // ------------------------------------------------------------------------------------------- list
 
-/// More entries than this in one listing is a folder somebody pointed at by mistake (`/`).
+/// More entries than this *kept* in one listing is a folder somebody pointed at by mistake (`/`)...
 const MAX_ENTRIES: usize = 50_000;
 
-fn walk(dir: &Path, recursive: bool, depth: usize, found: &mut Vec<PathBuf>) -> Result<(), NodeError> {
+/// ...and this many looked at is the same mistake with a pattern that keeps little: a pattern for `*.csv` in a folder of
+/// 60,000 photos must not fail because of the photos.
+const MAX_VISITED: usize = 2_000_000;
+
+fn walk(dir: &Path, recursive: bool, depth: usize, keep: &dyn Fn(&Path) -> bool, found: &mut Vec<PathBuf>, visited: &mut usize) -> Result<(), NodeError> {
     let entries = std::fs::read_dir(dir).map_err(|e| NodeError::failed(format!("Could not list {}: {e}", dir.display())))?;
     for entry in entries.flatten() {
+        *visited += 1;
+        if *visited > MAX_VISITED {
+            return Err(NodeError::failed(format!("{} holds more than {MAX_VISITED} entries", dir.display())));
+        }
         if found.len() >= MAX_ENTRIES {
-            return Err(NodeError::failed(format!("{} holds more than {MAX_ENTRIES} entries", dir.display())));
+            return Err(NodeError::failed(format!("More than {MAX_ENTRIES} entries match in {} — narrow the pattern", dir.display())));
         }
         let path = entry.path();
         // A link is listed as itself and never followed: a link to `..` would otherwise list forever.
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        found.push(path.clone());
+        if keep(&path) {
+            found.push(path.clone());
+        }
         if recursive && is_dir && depth < 32 {
-            walk(&path, true, depth + 1, found)?;
+            walk(&path, true, depth + 1, keep, found, visited)?;
         }
     }
     Ok(())
@@ -209,30 +237,31 @@ async fn list(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let older_days = number(&params, "olderThanDays").unwrap_or(0.0).max(0.0);
     let limit = number(&params, "limit").unwrap_or(0.0).max(0.0) as usize;
     let root = folder.clone();
-    let mut found = tokio::task::spawn_blocking(move || {
-        let mut found = Vec::new();
-        walk(&root, recursive, 0, &mut found).map(|_| found)
-    })
-    .await
-    .map_err(|e| NodeError::failed(e.to_string()))??;
     let cutoff = (newer > 0.0).then(|| SystemTime::now() - Duration::from_secs_f64(newer * 60.0));
     // The other end: what has not changed for days — old backups to rotate, a cache to clean.
     let stale = (older_days > 0.0).then(|| SystemTime::now() - Duration::from_secs_f64(older_days * 86_400.0));
-    found.retain(|path| {
-        let Ok(meta) = std::fs::symlink_metadata(path) else { return false };
-        let kind_ok = match include.as_str() {
-            "folders" => meta.is_dir(),
-            "both" => true,
-            _ => meta.is_file(),
+    let mut found = tokio::task::spawn_blocking(move || {
+        let keep = |path: &Path| {
+            let Ok(meta) = std::fs::symlink_metadata(path) else { return false };
+            let kind_ok = match include.as_str() {
+                "folders" => meta.is_dir(),
+                "both" => true,
+                _ => meta.is_file(),
+            };
+            let name_ok = matcher.as_ref().is_none_or(|matcher| {
+                let relative = path.strip_prefix(&root).unwrap_or(path);
+                matcher.is_match(relative) || path.file_name().is_some_and(|name| matcher.is_match(name))
+            });
+            let time_ok = cutoff.is_none_or(|cutoff| meta.modified().is_ok_and(|modified| modified >= cutoff))
+                && stale.is_none_or(|stale| meta.modified().is_ok_and(|modified| modified < stale));
+            kind_ok && name_ok && time_ok
         };
-        let name_ok = matcher.as_ref().is_none_or(|matcher| {
-            let relative = path.strip_prefix(&folder).unwrap_or(path);
-            matcher.is_match(relative) || path.file_name().is_some_and(|name| matcher.is_match(name))
-        });
-        let time_ok = cutoff.is_none_or(|cutoff| meta.modified().is_ok_and(|modified| modified >= cutoff))
-            && stale.is_none_or(|stale| meta.modified().is_ok_and(|modified| modified < stale));
-        kind_ok && name_ok && time_ok
-    });
+        let mut found = Vec::new();
+        let mut visited = 0usize;
+        walk(&root, recursive, 0, &keep, &mut found, &mut visited).map(|_| found)
+    })
+    .await
+    .map_err(|e| NodeError::failed(e.to_string()))??;
     match text(&params, "sortBy").as_str() {
         "modified" => found.sort_by_key(|path| std::cmp::Reverse(std::fs::metadata(path).and_then(|m| m.modified()).ok())),
         "size" => found.sort_by_key(|path| std::cmp::Reverse(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))),
@@ -280,6 +309,27 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Clears the way for an overwrite: what is at `path` goes to the trash.
+/// Whether two paths are one file on disk — the same name written twice, a case-only difference on a
+/// disk that ignores case, a hard link. Text comparison says "different" for all of them, and what
+/// follows from that is a file moved aside to make room for itself.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => false,
+        }
+    }
+}
+
 fn make_room(path: &Path, overwrite: bool) -> Result<(), NodeError> {
     if std::fs::symlink_metadata(path).is_err() {
         return Ok(());
@@ -313,8 +363,17 @@ async fn move_files(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                     return Err(NodeError::failed("Write the new name (a name, not a path)"));
                 }
                 let target = source.with_file_name(name);
-                make_room(&target, overwrite)?;
-                std::fs::rename(&source, &target).map_err(|e| NodeError::failed(format!("Could not rename: {e}")))?;
+                if same_file(&source, &target) {
+                    // The same file under the same name — or the same letters in another case, which a
+                    // disk that ignores case calls an existing file: renamed in place, never "made room
+                    // for" (that sent the file itself to the trash, and then failed to find it).
+                    if target != source {
+                        std::fs::rename(&source, &target).map_err(|e| NodeError::failed(format!("Could not rename: {e}")))?;
+                    }
+                } else {
+                    make_room(&target, overwrite)?;
+                    std::fs::rename(&source, &target).map_err(|e| NodeError::failed(format!("Could not rename: {e}")))?;
+                }
                 set_path(&mut json, "file", describe(&target));
             }
             _ => {
@@ -323,7 +382,7 @@ async fn move_files(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 // otherwise the destination is the new path itself, as `mv` reads it.
                 let into_folder = destination.is_dir() || text(params, "destPath").trim_end().ends_with(['/', '\\']);
                 let target = if into_folder { destination.join(source.file_name().unwrap_or_default()) } else { destination };
-                if target == source {
+                if target == source || same_file(&source, &target) {
                     return Err(NodeError::failed("The destination is the file itself"));
                 }
                 if source.is_dir() && target.starts_with(&source) {
@@ -427,6 +486,10 @@ async fn git(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let remote = text(&params, "remote");
         if remote.trim().is_empty() { "origin".to_string() } else { remote.trim().to_string() }
     };
+    // Written into the argument list as it stands: git would take `--upload-pack=…` for an option, not a remote.
+    if remote.starts_with('-') {
+        return Err(NodeError::failed(format!("\"{remote}\" is not a remote")));
+    }
     let run = |args: Vec<String>| run_program(ctx, "git", args, Some(repo.clone()), git_env(), None);
     let repo_text = repo.to_string_lossy().into_owned();
     let result = match operation.as_str() {
@@ -452,6 +515,9 @@ async fn git(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             let mut args = vec!["push".to_string(), remote.clone()];
             let branch = text(&params, "branch");
             if !branch.trim().is_empty() {
+                if branch.trim().starts_with('-') {
+                    return Err(NodeError::failed(format!("\"{}\" is not a branch", branch.trim())));
+                }
                 args.push(branch.trim().to_string());
             }
             if flag(&params, "pushTags") {
@@ -465,23 +531,17 @@ async fn git(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             json!({"fetched": remote})
         }
         "checkout" => {
-            let name = text(&params, "branch");
-            if name.trim().is_empty() {
-                return Err(NodeError::failed("Write the branch name"));
-            }
+            let name = need_ref(&params, "branch", "branch name")?;
             let mut args = vec!["switch".to_string()];
             if flag(&params, "create") {
                 args.push("-c".into());
             }
-            args.push(name.trim().to_string());
+            args.push(name.clone());
             run(args).await?.ok_or_fail("git switch")?;
-            json!({"branch": name.trim()})
+            json!({"branch": name})
         }
         "createTag" => {
-            let name = text(&params, "tag");
-            if name.trim().is_empty() {
-                return Err(NodeError::failed("Write the tag name"));
-            }
+            let name = need_ref(&params, "tag", "tag name")?;
             let message = text(&params, "message");
             let mut args = vec!["tag".to_string()];
             if !message.trim().is_empty() {
@@ -496,6 +556,10 @@ async fn git(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             let base = text(&params, "base");
             let mut args = vec!["diff".to_string(), "--no-color".to_string()];
             if !base.trim().is_empty() {
+                // `--output=<file>` would write the diff over any file the app can reach.
+                if base.trim().starts_with('-') {
+                    return Err(NodeError::failed("The base is a revision, not a flag"));
+                }
                 args.push(format!("{}...HEAD", base.trim()));
             }
             let output = run(args).await?.ok_or_fail("git diff")?;
@@ -798,6 +862,9 @@ async fn docker(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         let mode = text(params, "mode");
         let mut args: Vec<String> = Vec::new();
         let mut cwd = None;
+        // A container this node starts, named so that a stopped or failed run can take it down: stopping the `docker`
+        // client does not stop what it started.
+        let mut started: Option<String> = None;
         match mode.as_str() {
             "exec" => {
                 let container = text(params, "container");
@@ -828,6 +895,9 @@ async fn docker(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                     return Err(NodeError::failed("Write the image to run"));
                 }
                 args.push("run".into());
+                let name = format!("codeflow-{}", uuid::Uuid::new_v4().simple());
+                args.extend(["--name".into(), name.clone()]);
+                started = Some(name);
                 if flag(params, "remove") {
                     args.push("--rm".into());
                 }
@@ -849,7 +919,16 @@ async fn docker(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 args.extend(strings(params, "args"));
             }
         }
-        let output = run_program(ctx, "docker", args, cwd, Vec::new(), None).await?;
+        let output = match run_program(ctx, "docker", args, cwd, Vec::new(), None).await {
+            Ok(output) => output,
+            Err(error) => {
+                // Stopped, timed out, or failed: whatever of the container is still running goes (it may not exist at all).
+                if let Some(name) = started {
+                    let _ = tokio::task::spawn_blocking(move || crate::proc::std_command("docker").args(["rm", "-f", &name]).output()).await;
+                }
+                return Err(error);
+            }
+        };
         out.extend(output_items(ctx, params, output, (each && !ctx.items().is_empty()).then_some(index))?);
     }
     Ok(vec![out])
@@ -858,6 +937,47 @@ async fn docker(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writing_a_file_keeps_its_permissions_and_a_link_stays_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch();
+        let script = dir.join("run.sh");
+        std::fs::write(&script, "old").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_whole(&script, b"new", false).unwrap();
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), "new");
+        assert_eq!(std::fs::metadata(&script).unwrap().permissions().mode() & 0o777, 0o755, "still executable");
+
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&script, &link).unwrap();
+        write_whole(&link, b"through the link", false).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link was not replaced by a file");
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), "through the link");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_listing_counts_what_matches_not_everything_it_walked() {
+        let dir = scratch();
+        for index in 0..30 {
+            std::fs::write(dir.join(format!("photo{index}.jpg")), "x").unwrap();
+        }
+        std::fs::write(dir.join("keep.csv"), "x").unwrap();
+        let keep = |path: &Path| path.extension().is_some_and(|e| e == "csv");
+        let (mut found, mut visited) = (Vec::new(), 0usize);
+        walk(&dir, false, 0, &keep, &mut found, &mut visited).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(visited, 31);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn status_reads_branch_counts_and_files() {

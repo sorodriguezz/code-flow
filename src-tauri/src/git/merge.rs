@@ -322,6 +322,27 @@ fn fast_forward(repo: &Repository, target: &git2::Commit, branch_name: &str) -> 
     Ok(())
 }
 
+/// Brings the branch that is checked out up to `upstream` (`origin/feature`) — when that is a pure
+/// fast-forward, and only then. `Ok(true)` when it moved, `Ok(false)` when there was nothing to bring
+/// (already there, ahead of it, or no such remote branch), and an error when the two have diverged: what
+/// follows would be working on a branch that is not the one the pull request holds.
+pub fn fast_forward_only(path: &str, upstream: &str) -> Result<bool, String> {
+    let repo = open(path)?;
+    refuse_in_progress(&repo)?;
+    let Ok(theirs) = repo.find_branch(upstream, BranchType::Remote) else { return Ok(false) };
+    let commit = theirs.get().peel_to_commit().map_err(|e| e.message().to_string())?;
+    let annotated = repo.reference_to_annotated_commit(theirs.get()).map_err(|e| e.message().to_string())?;
+    let (analysis, _) = repo.merge_analysis(&[&annotated]).map_err(|e| e.message().to_string())?;
+    if analysis.is_up_to_date() {
+        return Ok(false);
+    }
+    if analysis.is_fast_forward() {
+        fast_forward(&repo, &commit, upstream)?;
+        return Ok(true);
+    }
+    Err(format!("The checked-out branch and {upstream} have diverged — bring it up to date first (a rebase or a merge), then run this again"))
+}
+
 pub fn is_merging(path: &str) -> Result<bool, String> {
     let repo = open(path)?;
     Ok(repo.state() == RepositoryState::Merge)
@@ -794,6 +815,37 @@ mod tests {
     fn diverge(dir: &Path) {
         let repo = Repository::open(dir).unwrap();
         commit_files(&repo, &[("c.txt", "sea\n")], "base moves on");
+    }
+
+    /// A remote-tracking `origin/feature` at the tip of `feature`, as a fetch would leave it.
+    fn track_feature(dir: &Path) -> Oid {
+        let repo = Repository::open(dir).unwrap();
+        let tip = repo.find_branch("feature", BranchType::Local).unwrap().get().target().unwrap();
+        repo.reference("refs/remotes/origin/feature", tip, true, "fetch").unwrap();
+        tip
+    }
+
+    #[test]
+    fn a_stale_branch_is_brought_to_the_fetched_tip_and_a_diverged_one_is_refused() {
+        let _pinned = super::super::lock_rules::pin_for_test(&[]);
+        let (dir, _base) = fixture();
+        let path = dir.to_str().unwrap();
+        let tip = track_feature(&dir);
+        assert_eq!(fast_forward_only(path, "origin/feature"), Ok(true), "the checked-out branch was behind");
+        assert_eq!(head_oid(path), tip);
+        assert_eq!(fast_forward_only(path, "origin/feature"), Ok(false), "nothing more to bring");
+        assert_eq!(fast_forward_only(path, "origin/missing"), Ok(false), "no such remote branch: nothing to follow");
+        let _ = fs::remove_dir_all(&dir);
+
+        let (dir, _base) = fixture();
+        let path = dir.to_str().unwrap();
+        track_feature(&dir);
+        diverge(&dir);
+        let before = head_oid(path);
+        let error = fast_forward_only(path, "origin/feature").unwrap_err();
+        assert!(error.contains("diverged"), "{error}");
+        assert_eq!(head_oid(path), before, "nothing moved");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The P0 this module was rewritten for: a fast-forward used to force-checkout the new HEAD and

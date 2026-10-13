@@ -13,6 +13,7 @@
       "id": "listDeployments",
       "name": { "es": "Despliegues de un proyecto", "en": "A project's deployments" },
       "method": "GET",
+      "paginate": { "style": "cursor", "next": "pagination.next", "param": "until" },
       "path": "/v6/deployments",
       "query": { "projectId": "{{projectId}}", "teamId": "{{teamId}}", "target": "{{target}}", "state": "{{state}}", "limit": "{{limit}}" },
       "fields": [

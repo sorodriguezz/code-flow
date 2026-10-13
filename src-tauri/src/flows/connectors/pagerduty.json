@@ -26,6 +26,7 @@
         "en": "Open incidents"
       },
       "method": "GET",
+      "paginate": { "style": "offset", "param": "offset", "more": "more" },
       "path": "/incidents",
       "query": {
         "statuses[]": "{{status}}",
@@ -185,6 +186,7 @@
         "en": "Who is on call"
       },
       "method": "GET",
+      "paginate": { "style": "offset", "param": "offset", "more": "more" },
       "path": "/oncalls",
       "query": {
         "limit": "{{limit}}"

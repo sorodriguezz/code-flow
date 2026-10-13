@@ -138,6 +138,29 @@ async fn the_api_chat_node_asks_a_compatible_server_and_holds_the_answer_to_its_
     assert!(body["messages"][0]["content"].as_str().unwrap().contains("JSON Schema"));
 }
 
+#[tokio::test]
+async fn the_hourly_ai_cap_counts_api_calls_too() {
+    let (port, seen) = serve(chat_answer).await;
+    let spec = flow(
+        vec![
+            node("start", "trigger.manual", json!({})),
+            code("data", "return [{n: 1}, {n: 2}, {n: 3}];"),
+            node(
+                "it",
+                "ai.api",
+                json!({"apiProvider": "compatible", "baseUrl": format!("http://127.0.0.1:{port}/v1"), "credential": "token", "apiModel": "modelo-x", "prompt": "=Cuenta {{ $json.n }}"}),
+            ),
+        ],
+        vec![wire("start", 0, "data", 0), wire("data", 0, "it", 0)],
+    );
+    // Three items, a cap of two: the batch is refused before the first request goes out — nothing paid for.
+    let ran = run_scripted(spec, RunMode::Full, HashMap::new(), CancellationToken::new(), Script::answering(vec![]), Memory::default(), "flow-cap-api", 2).await;
+    assert_eq!(ran.outcome.status, RunStatus::Error);
+    let error = ran.outcome.error.unwrap_or_default();
+    assert!(error.contains("at least 3 AI calls") && error.contains("cap 2"), "{error}");
+    assert_eq!(seen.lock().unwrap().len(), 0, "no request went out past the cap");
+}
+
 /// Embeddings that put "gato" texts and "perro" texts on different axes.
 fn embeddings(seen: &Seen) -> String {
     let asked: Value = serde_json::from_str(&seen.body).unwrap_or(Value::Null);
@@ -192,6 +215,97 @@ async fn documents_are_stored_and_found_by_meaning_in_the_local_store() {
     assert_eq!(found["matches"][0]["id"], "a.md");
     assert_eq!(found["matches"][0]["metadata"]["path"], "a.md");
     assert_eq!(found["context"], "El gato duerme al sol");
+}
+
+fn cut_answer(_: &Seen) -> String {
+    json!({
+        "model": "m",
+        "choices": [{"message": {"content": "{\"total\": 3, \"resumen\": \"El pedido llegó tar"}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 64}
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn an_answer_cut_at_the_token_limit_is_not_mended_into_an_answer() {
+    let (port, _) = serve(cut_answer).await;
+    let ran = run(one(
+        "ai.api",
+        json!({
+            "apiProvider": "compatible",
+            "baseUrl": format!("http://127.0.0.1:{port}/v1"),
+            "credential": "token",
+            "apiModel": "m",
+            "prompt": "Resume",
+            "output": "json",
+            "schemaFields": [{"name": "total", "type": "number", "description": "", "required": true}, {"name": "resumen", "type": "string", "description": "", "required": true}],
+            "maxTokens": 64,
+        }),
+    ))
+    .await;
+    assert_eq!(ran.outcome.status, RunStatus::Error);
+    let error = ran.outcome.error.unwrap_or_default();
+    assert!(error.contains("reached the token limit (64)") && error.contains("Max tokens"), "{error}");
+}
+
+#[tokio::test]
+async fn one_blank_text_does_not_fail_the_batch_it_is_in() {
+    let (port, seen) = serve(embeddings).await;
+    let spec = flow(
+        vec![
+            node("start", "trigger.manual", json!({})),
+            node("docs", "transform.set", json!({})),
+            node(
+                "embed",
+                "ai.embed",
+                json!({"embedProvider": "compatible", "embedUrl": format!("http://127.0.0.1:{port}/v1"), "credential": "token", "embedModel": "e", "embedText": "={{ $json.text }}"}),
+            ),
+        ],
+        vec![wire("start", 0, "docs", 0), wire("docs", 0, "embed", 0)],
+    );
+    let pins = HashMap::from([("docs".to_string(), vec![vec![Item::new(json!({"text": "El gato"})), Item::new(json!({"text": ""})), Item::new(json!({"text": "El perro"}))]])]);
+    let ran = run_with(spec, RunMode::Full, pins, CancellationToken::new()).await;
+    assert_eq!(ran.outcome.status, RunStatus::Success, "{:?}", ran.outcome.error);
+    let out = ran.output("embed", 0);
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0]["embedding"].as_array().map(Vec::len), Some(3));
+    assert_eq!(out[1]["embedding"], Value::Null, "a blank text has no vector");
+    assert_eq!(out[2]["embedding"].as_array().map(Vec::len), Some(3));
+    let asked: Value = serde_json::from_str(&seen.lock().unwrap()[0].body).unwrap();
+    assert_eq!(asked["input"].as_array().map(Vec::len), Some(2), "the blank one was not sent");
+}
+
+#[tokio::test]
+async fn a_document_stored_again_replaces_its_old_pieces() {
+    let (port, _) = serve(embeddings).await;
+    let embedder = json!({"embedProvider": "compatible", "embedUrl": format!("http://127.0.0.1:{port}/v1"), "credential": "token", "embedModel": "e"});
+    let with = |extra: Value| {
+        let mut params = embedder.clone();
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        params
+    };
+    let spec = flow(
+        vec![
+            node("start", "trigger.manual", json!({})),
+            node("docs", "transform.set", json!({})),
+            node("first", "ai.vectors", with(json!({"vectorStore": "local", "vectorOp": "vectorUpsert", "collection": "docs", "docText": "={{ $json.text }}", "docId": "={{ $json.path }}", "chunkSize": 14, "chunkOverlap": 0}))),
+            code("again", "return [{text: 'El gato, ahora corto', path: 'a.md'}];"),
+            node("second", "ai.vectors", with(json!({"vectorStore": "local", "vectorOp": "vectorUpsert", "collection": "docs", "docText": "={{ $json.text }}", "docId": "={{ $json.path }}", "chunkSize": 0}))),
+            node("ask", "ai.vectors", with(json!({"vectorStore": "local", "vectorOp": "vectorQuery", "collection": "docs", "queryText": "gato", "topK": 20}))),
+        ],
+        vec![wire("start", 0, "docs", 0), wire("docs", 0, "first", 0), wire("first", 0, "again", 0), wire("again", 0, "second", 0), wire("second", 0, "ask", 0)],
+    );
+    let long = "gato gato gato gato gato gato gato gato gato gato";
+    // `again` is a node that runs after `first`, not a pin: a pinned node is known from the start, and the
+    // second store would run beside the first.
+    let pins = HashMap::from([("docs".to_string(), vec![vec![Item::new(json!({"text": long, "path": "a.md"}))]])]);
+    let ran = run_with(spec, RunMode::Full, pins, CancellationToken::new()).await;
+    assert_eq!(ran.outcome.status, RunStatus::Success, "{:?} at {:?}", ran.outcome.error, ran.outcome.error_node);
+    let first = ran.output("first", 0);
+    assert!(first[0]["ids"].as_array().unwrap().len() > 1, "the long document was stored in pieces: {first:?}");
+    let matches = ran.output("ask", 0)[0]["matches"].clone();
+    let ids: Vec<&str> = matches.as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
+    assert_eq!(ids, vec!["a.md"], "the old pieces are gone: {ids:?}");
 }
 
 #[tokio::test]
@@ -357,8 +471,14 @@ async fn live_sqs_sends_receives_and_deletes() {
     assert_eq!(took.status("it"), NodeStatus::Success, "{:?}", took.report("it").error);
     let message = &took.output("it", 0)[0];
     assert_eq!((message["body"]["pedido"].as_i64(), message["attributes"]["origen"].as_str()), (Some(42), Some("flujos")));
-    let empty = run(one("net.queue", json!({"broker": "sqs", "credential": "aws", "queueUrl": url, "queueOp": "queueReceive", "waitSeconds": 1, "runFor": "once"}))).await;
-    assert!(empty.output("it", 0).is_empty(), "the message was deleted once taken");
+    // Deleted when the run ends well: what the app does after a successful run, done here by hand.
+    let deferred: Vec<_> = std::mem::take(&mut *took.memory.deferred.lock().unwrap());
+    assert_eq!(deferred.len(), 1, "the delete waits for the run");
+    for work in deferred {
+        work.await;
+    }
+    let empty = run(one("net.queue", json!({"broker": "sqs", "credential": "aws", "queueUrl": url, "queueOp": "queueReceive", "waitSeconds": 1, "visibilitySeconds": 0, "runFor": "once"}))).await;
+    assert!(empty.output("it", 0).is_empty(), "the message was deleted once the run that took it ended well");
 }
 
 #[tokio::test]

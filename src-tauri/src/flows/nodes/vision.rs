@@ -10,7 +10,7 @@
 //! The request builders and the PDF page reader are plain functions, tested without a provider.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
@@ -72,8 +72,9 @@ pub async fn local_file(ctx: &NodeCtx, written: &str, index: usize) -> Result<Pa
     if written.starts_with("http://") || written.starts_with("https://") {
         let url = url::Url::parse(written).map_err(|_| NodeError::failed(format!("{written} is not a URL")))?;
         let name = url.path_segments().and_then(|mut s| s.next_back()).filter(|n| !n.is_empty()).unwrap_or("image").to_string();
-        let response = tokio::select! {
-            response = reqwest::get(url.clone()) => response.map_err(|e| NodeError::failed(format!("{}: {e}", super::http::loggable(&url))))?,
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(120)).build().map_err(|e| NodeError::failed(e.to_string()))?;
+        let mut response = tokio::select! {
+            response = client.get(url.clone()).send() => response.map_err(|e| NodeError::failed(format!("{}: {e}", super::http::loggable(&url))))?,
             _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
         };
         if !response.status().is_success() {
@@ -81,7 +82,20 @@ pub async fn local_file(ctx: &NodeCtx, written: &str, index: usize) -> Result<Pa
         }
         // A link with no extension says what it is in its Content-Type.
         let kind = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
-        let bytes = response.bytes().await.map_err(|e| NodeError::failed(e.to_string()))?;
+        // Read in pieces, so a link that answers with gigabytes is stopped at the limit — not held in
+        // memory, and not waited for to the end — and Stop is heard between two of them.
+        let mut bytes: Vec<u8> = Vec::new();
+        loop {
+            let chunk = tokio::select! {
+                chunk = response.chunk() => chunk.map_err(|e| NodeError::failed(format!("{}: {e}", super::http::loggable(&url))))?,
+                _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
+            };
+            let Some(chunk) = chunk else { break };
+            if bytes.len() + chunk.len() > DOWNLOAD_LIMIT {
+                return Err(NodeError::failed(format!("{} is larger than {} MB — more than a node downloads to look at", super::http::loggable(&url), DOWNLOAD_LIMIT / (1024 * 1024))));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         let mut name = super::google::safe_name(&name);
         if Path::new(&name).extension().is_none() {
             let extension = match kind.split(';').next().unwrap_or_default().trim() {
@@ -113,13 +127,23 @@ pub async fn local_file(ctx: &NodeCtx, written: &str, index: usize) -> Result<Pa
     Ok(path)
 }
 
-/// The file read for a request: an image or a PDF, under the inline limit.
-pub fn media(path: &Path) -> Result<Media, NodeError> {
+/// The most a link may download for a node to look at or listen to.
+const DOWNLOAD_LIMIT: usize = 256 * 1024 * 1024;
+
+/// That `path` is an image or a PDF within the limit — the same test whichever engine reads it. A path
+/// comes from an item (`{{ $json.path }}`), and a model told to open `~/.ssh/id_rsa` would.
+pub fn check(path: &Path) -> Result<&'static str, NodeError> {
     let mime = mime_of(path).ok_or_else(|| NodeError::failed(format!("{} is not an image or a PDF this node reads (png, jpg, webp, gif, bmp, tiff, heic, pdf)", path.display())))?;
     let size = std::fs::metadata(path).map_err(|e| NodeError::failed(format!("Could not read {}: {e}", path.display())))?.len();
     if size > INLINE_LIMIT {
         return Err(NodeError::failed(format!("{} is over 20 MB, more than a model takes in one request", path.display())));
     }
+    Ok(mime)
+}
+
+/// The file read for a request: an image or a PDF, under the inline limit.
+pub fn media(path: &Path) -> Result<Media, NodeError> {
+    let mime = check(path)?;
     let data = std::fs::read(path).map_err(|e| NodeError::failed(format!("Could not read {}: {e}", path.display())))?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
     Ok(Media { mime: mime.to_string(), name, data })
@@ -199,6 +223,7 @@ pub async fn api(ctx: &NodeCtx, params: &Value, media: &Media, prompt: &str, sch
     let mut body = llm::chat_body(&provider, model.trim(), "", prompt, schema, Some(0.0), 4_096);
     with_media(&provider, &mut body, prompt, media);
     let url = llm::chat_url(&provider, &base, model.trim());
+    super::ai::take_slot(ctx)?;
     let answer = llm::send(ctx, &provider, llm::signed(llm::client()?.post(&url).json(&body), &provider, key.as_deref())).await?;
     let answer = llm::read_answer(&provider, &answer);
     let mut meta = Map::new();

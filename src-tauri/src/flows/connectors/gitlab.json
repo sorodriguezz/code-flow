@@ -55,6 +55,7 @@
       "id": "listIssues",
       "name": { "es": "Listar issues", "en": "List issues" },
       "method": "GET",
+      "paginate": { "style": "link" },
       "path": "/projects/{{project}}/issues",
       "query": { "state": "{{state}}", "labels": "{{labels}}", "updated_after": "{{updatedAfter}}", "per_page": "{{perPage}}" },
       "fields": [
@@ -69,6 +70,7 @@
       "id": "listMergeRequests",
       "name": { "es": "Listar merge requests", "en": "List merge requests" },
       "method": "GET",
+      "paginate": { "style": "link" },
       "path": "/projects/{{project}}/merge_requests",
       "query": { "state": "{{state}}", "target_branch": "{{targetBranch}}", "per_page": "{{perPage}}" },
       "fields": [

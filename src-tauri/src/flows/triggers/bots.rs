@@ -33,14 +33,34 @@ fn text(params: &Value, name: &str) -> String {
     params.get(name).and_then(Value::as_str).unwrap_or_default().trim().to_string()
 }
 
-/// The token behind the trigger's credential — a bearer credential's secret, read from the keychain
-/// on every connection so a rotated token is picked up on the next reconnect.
-fn token(params: &Value) -> Result<String, String> {
+/// The token behind the trigger's credential — a bearer credential's secret, read from the keychain on every connection so a
+/// rotated token is picked up on the next reconnect, and only one this flow may use (its workspace's, or a global one).
+fn token(app: &AppHandle, flow_id: &str, params: &Value) -> Result<String, String> {
     let id = text(params, "credential");
     if id.is_empty() {
         return Err("Choose the credential with the bot's token".into());
     }
-    crate::secrets::get_secret(&crate::secrets::flow_credential_key(&id))?.ok_or_else(|| "The credential has no secret stored".to_string())
+    super::credential_secret(app, flow_id, &id, &["bearer"])
+}
+
+/// Who is reading each bot token: `(flow, node, stop)`. An entry whose reader was stopped is free.
+static READERS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, (String, String, CancellationToken)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Takes the token for this trigger, or says it is already taken by another active one. The token itself is not
+/// kept, only what tells two apart.
+fn claim_token(platform: &str, secret: &str, flow_id: &str, node_id: &str, cancel: &CancellationToken) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(secret.as_bytes());
+    let key = format!("{platform}:{}", digest.iter().take(10).map(|b| format!("{b:02x}")).collect::<String>());
+    let Ok(mut readers) = READERS.lock() else { return Ok(()) };
+    if let Some((owner_flow, owner_node, stop)) = readers.get(&key) {
+        if !stop.is_cancelled() && !(owner_flow == flow_id && owner_node == node_id) {
+            return Err(format!("Another active flow already reads this {platform} bot's messages with the same token — only one can at a time. Switch that one off, or give this bot its own token"));
+        }
+    }
+    readers.insert(key, (flow_id.to_string(), node_id.to_string(), cancel.clone()));
+    Ok(())
 }
 
 /// What the trigger was told to keep: a list of chats, words a message must contain, commands only.
@@ -91,9 +111,14 @@ pub fn spawn(
     view: Arc<Mutex<TriggerView>>,
     cancel: CancellationToken,
 ) -> Result<(), String> {
-    token(params)?;
+    let secret = token(app, flow_id, params)?;
     // Option values carry a prefix so their labels do not collide with the connectors' names.
     let platform = text(params, "platform").trim_start_matches("bot").to_lowercase();
+    // Telegram answers one reader of a bot at a time, and Slack splits a token's events between its connections:
+    // two flows on one token would each get a part, or fight over it. Discord's gateway sends everything to all.
+    if platform != "discord" {
+        claim_token(&platform, &secret, flow_id, node_id, &cancel)?;
+    }
     let filter = Filter::of(params);
     let (app, flow_id, node_id, params) = (app.clone(), flow_id.to_string(), node_id.to_string(), params.clone());
     tauri::async_runtime::spawn(async move {
@@ -112,7 +137,7 @@ pub fn spawn(
                         return;
                     }
                     super::note_problem(&view, None);
-                    if let Err(error) = super::fire(&app, &flow_id, &node_id, vec![Item::new(item)]) {
+                    if let Err(error) = super::fire_event(&app, &flow_id, &node_id, vec![Item::new(item)]) {
                         super::note_problem(&view, Some(error));
                     }
                 })
@@ -121,7 +146,7 @@ pub fn spawn(
                 let view = view.clone();
                 move || super::note_problem(&view, None)
             };
-            let outcome = match token(&params) {
+            let outcome = match token(&app, &flow_id, &params) {
                 Err(error) => Err(error),
                 Ok(token) => match platform.as_str() {
                     "slack" => slack(&token, fire, opened, cancel.clone()).await,
@@ -194,7 +219,13 @@ async fn telegram(
             let status = response.status();
             let body: Value = response.json().await.map_err(|e| format!("Telegram answered something that is not JSON: {}", e.without_url()))?;
             if status.as_u16() == 409 {
-                return Err("This bot has a webhook set, and Telegram allows one or the other: remove it (deleteWebhook) to use it from here".to_string());
+                // Telegram says which: a webhook is set, or another program is reading the bot at this moment.
+                let why = body.get("description").and_then(Value::as_str).unwrap_or_default().to_lowercase();
+                return Err(if why.contains("webhook") || why.is_empty() {
+                    "This bot has a webhook set, and Telegram allows one or the other: remove it (deleteWebhook) to use it from here".to_string()
+                } else {
+                    "Another program is reading this bot's messages (a flow on another computer, or a script, with the same token): Telegram lets only one at a time".to_string()
+                });
             }
             if body.get("ok").and_then(Value::as_bool) != Some(true) {
                 return Err(format!("Telegram: {}", body.get("description").and_then(Value::as_str).unwrap_or("the request was refused")));
@@ -289,8 +320,12 @@ async fn slack(token: &str, fire: Sink, opened: impl Fn(), cancel: CancellationT
     };
     let (mut writer, mut reader) = stream.split();
     loop {
+        // Slack pings every few seconds: two minutes of silence is a line that died without closing.
         let frame = tokio::select! {
-            frame = reader.next() => frame,
+            frame = tokio::time::timeout(SLACK_SILENCE, reader.next()) => match frame {
+                Ok(frame) => frame,
+                Err(_) => return Err("Slack: nothing heard for two minutes — reconnecting".to_string()),
+            },
             _ = cancel.cancelled() => {
                 let _ = writer.send(Message::Close(None)).await;
                 return Ok(());
@@ -352,6 +387,9 @@ async fn slack(token: &str, fire: Sink, opened: impl Fn(), cancel: CancellationT
 // -------------------------------------------------------------------------------------- Discord
 
 /// What the bot asks the Gateway for: guild messages, direct messages and their content.
+/// How long a Slack Socket Mode line may say nothing before it is taken as dead.
+const SLACK_SILENCE: Duration = Duration::from_secs(120);
+
 const DISCORD_INTENTS: u64 = (1 << 9) | (1 << 12) | (1 << 15);
 
 /// Discord's Gateway: identify with the bot token, keep the heartbeat the hello asked for, read
@@ -381,6 +419,9 @@ async fn discord(token: &str, fire: Sink, opened: impl Fn(), cancel: Cancellatio
     let mut sequence: Value = Value::Null;
     let mut beat = tokio::time::interval(Duration::from_secs(3600));
     beat.tick().await;
+    // Every heartbeat is answered: a gateway that has said nothing for several beats is gone.
+    let mut beat_every = Duration::from_millis(41_250);
+    let mut heard = Instant::now();
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -388,9 +429,13 @@ async fn discord(token: &str, fire: Sink, opened: impl Fn(), cancel: Cancellatio
                 return Ok(());
             }
             _ = beat.tick() => {
+                if heard.elapsed() > beat_every * 4 {
+                    return Err("Discord: nothing heard for several heartbeats — reconnecting".to_string());
+                }
                 writer.send(Message::text(json!({"op": 1, "d": sequence}).to_string())).await.map_err(|e| format!("Discord: {e}"))?;
             }
             frame = reader.next() => {
+                heard = Instant::now();
                 let Some(frame) = frame else { return Ok(()) };
                 let body = match frame.map_err(|e| format!("Discord: {e}"))? {
                     Message::Text(text) => text.to_string(),
@@ -410,7 +455,8 @@ async fn discord(token: &str, fire: Sink, opened: impl Fn(), cancel: Cancellatio
                 match event.get("op").and_then(Value::as_u64) {
                     Some(10) => {
                         let every = event.pointer("/d/heartbeat_interval").and_then(Value::as_u64).unwrap_or(41_250);
-                        beat = tokio::time::interval(Duration::from_millis(every));
+                        beat_every = Duration::from_millis(every);
+                        beat = tokio::time::interval(beat_every);
                         beat.tick().await;
                         let identify = json!({
                             "op": 2,
@@ -459,5 +505,23 @@ mod tests {
         assert!(!filter.keeps("1", "deploy api"), "not a command");
         assert!(!filter.keeps("-100", "/status"), "missing the words");
         assert!(Filter::of(&json!({})).keeps("anything", "anything"));
+    }
+
+    #[test]
+    fn a_bot_token_is_read_by_one_active_flow_at_a_time() {
+        let first = CancellationToken::new();
+        claim_token("telegram", "token-a", "flow-1", "n1", &first).unwrap();
+        let second = CancellationToken::new();
+        assert!(claim_token("telegram", "token-a", "flow-2", "n1", &second).is_err(), "taken");
+        // Another token, or another service, is another reader.
+        claim_token("telegram", "token-b", "flow-2", "n1", &second).unwrap();
+        claim_token("slack", "token-a", "flow-2", "n2", &second).unwrap();
+        // The same trigger arming again (a save of its flow) is not a second reader...
+        claim_token("telegram", "token-a", "flow-1", "n1", &CancellationToken::new()).unwrap();
+        // ...and once the reader is stopped, the token is free.
+        let stopped = CancellationToken::new();
+        claim_token("telegram", "token-c", "flow-1", "n1", &stopped).unwrap();
+        stopped.cancel();
+        claim_token("telegram", "token-c", "flow-9", "n9", &CancellationToken::new()).unwrap();
     }
 }

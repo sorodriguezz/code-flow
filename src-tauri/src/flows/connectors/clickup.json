@@ -121,6 +121,7 @@
         "en": "A list's tasks"
       },
       "method": "GET",
+      "paginate": { "style": "page", "param": "page", "first": 0, "last": "last_page" },
       "path": "/list/{{listId}}/task",
       "query": {
         "include_closed": "{{includeClosed}}"

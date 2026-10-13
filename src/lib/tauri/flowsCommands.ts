@@ -74,7 +74,8 @@ export type FlowParamKind =
   | { type: "apiCollection" }
   | { type: "fakeFields" }
   | { type: "validationRules" }
-  | { type: "subflowInputs" };
+  | { type: "subflowInputs" }
+  | { type: "sqlParams" };
 
 /** `engine::EngineChoice` — an AI node's engine. `provider: ""` is the Flows routing row's engine,
  *  `"local"` the local model of Settings; `account: ""` is automatic. */
@@ -195,6 +196,8 @@ export interface FlowConnectorOperation {
   name: FlowLabel;
   method: string;
   fields: FlowConnectorField[];
+  /** Present when the list goes on past its first page (`connectors::Paginate`) — the node can then ask for all of it. */
+  paginate?: unknown;
 }
 
 /** `connectors::Connector`, the parts the form draws from. */
@@ -238,6 +241,9 @@ export interface FlowConnectorCall {
   connector: string;
   operation: string;
   fields: Record<string, unknown>;
+  /** Every page of a list, not only the first — up to `maxItems` entries (1000 when empty). */
+  allPages?: boolean;
+  maxItems?: number;
 }
 
 export const flowsConnectors = () => invoke<FlowConnector[]>("flows_connectors");

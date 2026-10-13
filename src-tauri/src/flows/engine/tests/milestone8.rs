@@ -57,6 +57,8 @@ fn pages(target: &str) -> (String, String) {
             Some("k1") => (String::new(), "{\"items\":[{\"id\":\"b\"}],\"meta\":{\"next\":null}}".into()),
             _ => (String::new(), "{\"items\":[]}".into()),
         }
+    } else if target == "/hostile" {
+        ("Link: <http://other.invalid/steal>; rel=\"next\"\r\n".into(), "[{\"id\":1}]".into())
     } else if target == "/linked" {
         ("Link: </linked2>; rel=\"next\", </linked>; rel=\"first\"\r\n".into(), "[{\"id\":1}]".into())
     } else {
@@ -89,6 +91,16 @@ async fn pages_are_followed_by_number_cursor_and_link_header() {
 
     let ran = run(one("net.http", json!({"url": format!("{base}/numbered"), "pagination": "pageNumber", "pageParam": "p", "itemsField": "data", "maxPages": 1}))).await;
     assert_eq!(ran.output("it", 0).len(), 2, "never past maxPages");
+}
+
+#[tokio::test]
+async fn a_next_link_to_another_server_is_not_followed_with_the_credential() {
+    let port = serve(pages).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let ran = run(one("net.http", json!({"url": format!("{base}/hostile"), "pagination": "nextUrl", "credential": "token"}))).await;
+    assert_eq!(ran.outcome.status, RunStatus::Error);
+    let error = ran.outcome.error.unwrap_or_default();
+    assert!(error.contains("another server") && error.contains("other.invalid"), "{error}");
 }
 
 fn site(target: &str) -> (String, String) {
@@ -172,9 +184,10 @@ async fn only_what_changed_since_the_last_run_goes_through() {
             vec![wire("start", 0, "data", 0), wire("data", 0, "it", 0)],
         )
     };
-    let first = run_scripted(
+    let first = run_scripted_as(
         changes("return [{id: 1, price: 10}, {id: 2, price: 5}];"),
         RunMode::Full,
+        "trigger",
         HashMap::new(),
         CancellationToken::new(),
         Arc::new(Script::default()),
@@ -187,9 +200,10 @@ async fn only_what_changed_since_the_last_run_goes_through() {
     let remembered = first.memory.state.lock().unwrap().clone();
     let memory = Memory::default();
     *memory.state.lock().unwrap() = remembered;
-    let second = run_scripted(
+    let second = run_scripted_as(
         changes("return [{id: 1, price: 10}, {id: 2, price: 7}, {id: 3, price: 1}];"),
         RunMode::Full,
+        "trigger",
         HashMap::new(),
         CancellationToken::new(),
         Arc::new(Script::default()),

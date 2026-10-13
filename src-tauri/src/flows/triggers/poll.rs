@@ -98,6 +98,19 @@ fn repo_items(path: &str, project: &str, event: &str, branch_filter: &str, memor
     }
 }
 
+/// What a poller of this file had learnt — see [`super::carry`].
+#[derive(Default)]
+struct Learnt {
+    repo: RepoMemory,
+    seen: Option<HashSet<String>>,
+    prs: PrMemory,
+}
+
+fn learnt_key(flow_id: &str, node_id: &str, params: &Value) -> String {
+    // Everything that decides what the poller looks at.
+    format!("poll\u{1f}{flow_id}\u{1f}{node_id}\u{1f}{}\u{1f}{}\u{1f}{}", text(params, "project"), text(params, "event"), text(params, "branch"))
+}
+
 pub fn spawn(app: &AppHandle, flow_id: &str, node: &FlowNode, params: &Value, view: Arc<Mutex<TriggerView>>, cancel: CancellationToken) {
     let app = app.clone();
     let flow_id = flow_id.to_string();
@@ -111,9 +124,8 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node: &FlowNode, params: &Value, vi
             "trigger.repo" => every(&params, 10),
             _ => every(&params, 60),
         };
-        let mut repo_memory = RepoMemory::default();
-        let mut seen: Option<HashSet<String>> = None;
-        let mut pr_memory = PrMemory::default();
+        let key = learnt_key(&flow_id, &node_id, &params);
+        let Learnt { repo: mut repo_memory, mut seen, prs: mut pr_memory } = super::carry::take(&key).unwrap_or_default();
         loop {
             let project = {
                 let db = app.state::<Db>();
@@ -147,7 +159,7 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node: &FlowNode, params: &Value, vi
                 Ok(items) => {
                     note_problem(&view, None);
                     for item in items {
-                        if let Err(error) = super::fire(&app, &flow_id, &node_id, vec![Item::new(item)]) {
+                        if let Err(error) = super::fire_event(&app, &flow_id, &node_id, vec![Item::new(item)]) {
                             note_problem(&view, Some(error));
                         }
                     }
@@ -156,7 +168,10 @@ pub fn spawn(app: &AppHandle, flow_id: &str, node: &FlowNode, params: &Value, vi
             }
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {}
-                _ = cancel.cancelled() => return,
+                _ = cancel.cancelled() => {
+                    super::carry::stash(key, Learnt { repo: repo_memory, seen, prs: pr_memory });
+                    return;
+                }
             }
         }
     });
@@ -367,7 +382,7 @@ pub fn spawn_services(app: &AppHandle, flow_id: &str, node_id: &str, params: &Va
                         "ports": state.ports,
                         "error": state.error,
                     });
-                    if let Err(error) = super::fire(&app, &flow_id, &node_id, vec![Item::new(item)]) {
+                    if let Err(error) = super::fire_event(&app, &flow_id, &node_id, vec![Item::new(item)]) {
                         note_problem(&view, Some(error));
                     }
                 }

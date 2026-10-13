@@ -131,6 +131,7 @@ impl Lookup {
             result: String::new(),
             headers: Map::new(),
             form: false,
+            paginate: None,
         }
     }
 
@@ -260,6 +261,52 @@ pub struct Operation {
     /// rendered body's fields becomes one pair.
     #[serde(default)]
     pub form: bool,
+    /// How the list continues past its first page, for a node asked for every page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paginate: Option<Paginate>,
+}
+
+/// How a service hands out a long list a page at a time — each one its own way, declared by the operation and read by
+/// `nodes::connector::next_page`:
+///
+/// - `link`: the `Link` header's `rel="next"` address (GitHub, GitLab, Netlify, Sentry — whose `results="false"` says the
+///   next page is empty).
+/// - `url`: an address in the answer, at `next` (Bitbucket's `next`, Graph's `@odata.nextLink`, Twilio's
+///   `next_page_uri`); a relative one is read against `base`, an answer path (Confluence's `_links.base`), or the
+///   request's own address.
+/// - `cursor`: a token in the answer, at `next`, sent back as `param` — in the query, or in the body (`in: "body"`,
+///   a dotted path: a GraphQL variable). `continuePath` is the endpoint the following pages are asked at, with a body
+///   of the cursor alone (Dropbox's `…/continue`).
+/// - `lastId`: the last entry's `next` sent as `param` (Stripe's `starting_after`).
+/// - `page`: `param` counts pages, from `first` (1 unless said), up to `total` (an answer path) when the service says it.
+/// - `offset`: `param` counts the entries read so far.
+///
+/// `more` is an answer path that must be true for there to be another page (`has_more`); `last`, one that ends the list
+/// when true (Jira's `isLast`). Every address a page names stays on the server the first request went to — the
+/// credential goes with it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Paginate {
+    pub style: String,
+    #[serde(default)]
+    pub next: String,
+    #[serde(default)]
+    pub param: String,
+    /// `query` (the default) or `body`.
+    #[serde(default, rename = "in")]
+    pub place: String,
+    #[serde(default)]
+    pub more: String,
+    #[serde(default)]
+    pub last: String,
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub total: String,
+    #[serde(default)]
+    pub first: Option<i64>,
+    #[serde(default)]
+    pub continue_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +374,58 @@ pub struct OAuthHint {
     pub scopes: String,
 }
 
+/// How a field sits in a connector's host — see [`Connector::host_fields`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostField {
+    /// Part of a host name, with the service's own domain around it (`{{site}}.atlassian.net`):
+    /// one DNS label.
+    Label(String),
+    /// The whole host (`https://{{host}}/api/v4`): a host name or address, with an optional port.
+    Host(String),
+    /// The whole address (`{{server}}`): an http or https URL.
+    Url(String),
+}
+
+impl HostField {
+    pub fn name(&self) -> &str {
+        match self {
+            HostField::Label(name) | HostField::Host(name) | HostField::Url(name) => name,
+        }
+    }
+
+    /// Whether the person who writes the field chooses the whole destination — the credential then
+    /// goes wherever they point it, which is why an imported flow does not get one bound for it.
+    pub fn is_free(&self) -> bool {
+        !matches!(self, HostField::Label(_))
+    }
+
+    /// Whether `value` is something this field may hold.
+    pub fn accepts(&self, value: &str) -> bool {
+        let value = value.trim();
+        match self {
+            HostField::Label(_) => {
+                !value.is_empty()
+                    && value.len() <= 63
+                    && !value.starts_with('-')
+                    && !value.ends_with('-')
+                    && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            }
+            HostField::Host(_) => {
+                let (name, port) = match value.rsplit_once(':') {
+                    Some((name, port)) if !name.ends_with(':') && port.bytes().all(|b| b.is_ascii_digit()) && !port.is_empty() => (name, Some(port)),
+                    _ => (value, None),
+                };
+                let bracketed = name.starts_with('[') && name.ends_with(']') && name.len() > 2 && name[1..name.len() - 1].bytes().all(|b| b.is_ascii_hexdigit() || b == b':');
+                let plain = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') && !name.starts_with(['-', '.']);
+                (bracketed || plain) && port.is_none_or(|port| port.parse::<u32>().is_ok_and(|p| (1..=65535).contains(&p)))
+            }
+            HostField::Url(_) => url::Url::parse(value).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https") && url.host_str().is_some() && url.username().is_empty() && url.password().is_none()
+            }),
+        }
+    }
+}
+
 impl Connector {
     /// The credential kinds that can sign this connector in; empty when it needs none.
     pub fn credential_kinds(&self) -> &'static [&'static str] {
@@ -341,6 +440,33 @@ impl Connector {
 
     pub fn operation(&self, id: &str) -> Option<&Operation> {
         self.operations.iter().find(|op| op.id == id)
+    }
+
+    /// The fields that decide *where* the credential is sent: the placeholders in the host of the
+    /// base URL (`https://{{site}}.atlassian.net`, `https://{{host}}/api/v4`, a bare `{{server}}`).
+    /// Whatever fills one is part of the destination, so it is checked before the request is built —
+    /// a flow somebody else wrote, or an item, must not be able to turn `acme` into
+    /// `evil.example/#` and have the credential follow it.
+    pub fn host_fields(&self) -> Vec<HostField> {
+        let base = self.base_url.trim();
+        let (has_scheme, host) = match base.split_once("://") {
+            Some((_, rest)) => (true, rest.split('/').next().unwrap_or_default()),
+            None => (false, base),
+        };
+        let mut found = Vec::new();
+        let mut rest = host;
+        while let Some(start) = rest.find("{{") {
+            let Some(end) = rest[start + 2..].find("}}") else { break };
+            let name = rest[start + 2..start + 2 + end].trim().to_string();
+            let whole = host.trim() == format!("{{{{{name}}}}}");
+            found.push(match (whole, has_scheme) {
+                (true, false) => HostField::Url(name),
+                (true, true) => HostField::Host(name),
+                (false, _) => HostField::Label(name),
+            });
+            rest = &rest[start + 2 + end + 2..];
+        }
+        found
     }
 
     /// The fields an operation shows: the connector's own (the site) first.

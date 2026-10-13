@@ -374,8 +374,9 @@ async fn soap(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         if let Some(credential) = secret_of(ctx, &params).await? {
             request = match credential.kind.as_str() {
                 "basic" => request.basic_auth(credential.meta.get("user").and_then(Value::as_str).unwrap_or_default(), Some(&credential.secret)),
-                "header" => request.header(credential.meta.get("header").and_then(Value::as_str).unwrap_or("Authorization"), &credential.secret),
-                "query" => request.query(&[(credential.meta.get("param").and_then(Value::as_str).unwrap_or("key"), credential.secret.as_str())]),
+                // The name a header or query credential is sent under is stored as `name` (the vault's own key).
+                "header" => request.header(credential.meta.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or("Authorization"), &credential.secret),
+                "query" => request.query(&[(credential.meta.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or("key"), credential.secret.as_str())]),
                 _ => request.bearer_auth(&credential.secret),
             };
         }

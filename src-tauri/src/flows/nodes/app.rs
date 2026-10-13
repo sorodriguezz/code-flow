@@ -157,6 +157,16 @@ fn write_state(host: &std::sync::Arc<dyn crate::flows::engine::RunHost>, key: &s
     }
 }
 
+/// Held while a value is read, changed and written back. Two runs of a flow at once (overlap «parallel»),
+/// or two branches of one, each counting `5 → 6` and writing it, made one count of two; a digest lost the
+/// entries added between its read and its write. The reads and the writes are synchronous — nothing waits
+/// in between — so one lock for the process is all it takes.
+static STATE_CHANGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn changing() -> std::sync::MutexGuard<'static, ()> {
+    STATE_CHANGE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
     let operation = text(&ctx.params, "operation");
@@ -170,8 +180,12 @@ async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             return Err(NodeError::failed("Name the key the entries were collected under"));
         }
         let host = &ctx.run.host;
-        let list = read_state(host, &key)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
-        host.state_set(&key, None).map_err(NodeError::failed)?;
+        let list = {
+            let _held = changing();
+            let list = read_state(host, &key)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+            host.state_set(&key, None).map_err(NodeError::failed)?;
+            list
+        };
         if list.is_empty() {
             return Ok(vec![Vec::new()]);
         }
@@ -201,6 +215,7 @@ async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 json
             }
             "increment" => {
+                let _held = changing();
                 let current = read_state(host, &key)?.as_ref().and_then(to_number).unwrap_or(0.0);
                 let next = crate::flows::value::number(current + number(params, "amount").unwrap_or(1.0));
                 write_state(host, &key, &next, ttl)?;
@@ -213,6 +228,7 @@ async fn state(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             "collect" => {
                 // The item itself unless a value was written — what a digest usually collects.
                 let value = params.get("value").cloned().filter(|v| v != "" && !v.is_null()).unwrap_or_else(|| json.clone());
+                let _held = changing();
                 let mut list = read_state(host, &key)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
                 list.push(value);
                 let keep = number(params, "keepAtMost").filter(|n| *n >= 1.0).map(|n| n as usize).unwrap_or(1000);

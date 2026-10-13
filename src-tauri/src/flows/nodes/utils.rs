@@ -3,12 +3,13 @@
 //! and SQL over the items.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
-use super::{flag, number, strings, text, NodeCtx, NodeError};
-use crate::flows::engine::LogStream;
+use super::{flag, number, strings, text, MemoryUse, NodeCtx, NodeError};
+use crate::flows::engine::{LogStream, StateUpdate};
 use crate::flows::run::{Item, Ports};
 use crate::flows::value::{get_path, set_path, to_text};
 
@@ -317,7 +318,9 @@ async fn ping_check(target: &str, params: &Value, timeout: Duration) -> Value {
         Err(_) => return json!({"target": host, "ok": false, "error": "ping did not finish in time"}),
     };
     let text_out = String::from_utf8_lossy(&output.stdout).into_owned();
-    let (sent, received) = ping_counts(&text_out).unwrap_or((count, 0));
+    // A system in another language prints its summary in it (`Enviados = 3`): the counts then cannot be read, and the
+    // answer is what `ping` itself says by its exit status — success when anything came back — not «nothing came back».
+    let (sent, received) = ping_counts(&text_out).unwrap_or(if output.status.success() { (count, count) } else { (count, 0) });
     let average = ping_average(&text_out);
     json!({
         "target": host,
@@ -477,7 +480,9 @@ async fn tls_check(target: &str, params: &Value, timeout: Duration) -> Value {
     json!({
         "target": host,
         "port": port,
-        "ok": trusted && days_left > 0,
+        // «Warn this many days before» is what makes a certificate not ok: a check that stays green until the day it
+        // expires warns nobody.
+        "ok": trusted && days_left > warn_days.max(0),
         "trusted": trusted,
         "daysLeft": days_left,
         "expiringSoon": days_left <= warn_days,
@@ -536,12 +541,20 @@ async fn until(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let report = loop {
         attempts += 1;
         let remaining = limit.saturating_sub(started.elapsed());
-        let attempt = match check.as_str() {
-            "commandUntil" => command_attempt(&params, remaining.min(Duration::from_secs(120))).await,
-            "fileUntil" => file_attempt(&params),
-            "portUntil" => port_attempt(&params, remaining.min(Duration::from_secs(10))).await,
-            "sqlUntil" => sql_attempt(ctx, &params).await,
-            _ => http_attempt(&params, remaining.min(Duration::from_secs(60))).await,
+        // Stop is heard in the middle of an attempt, not after it: a command can run for two minutes, a
+        // request for one.
+        let work = async {
+            match check.as_str() {
+                "commandUntil" => command_attempt(&params, remaining.min(Duration::from_secs(120))).await,
+                "fileUntil" => file_attempt(&params),
+                "portUntil" => port_attempt(&params, remaining.min(Duration::from_secs(10))).await,
+                "sqlUntil" => sql_attempt(ctx, &params).await,
+                _ => http_attempt(&params, remaining.min(Duration::from_secs(60))).await,
+            }
+        };
+        let attempt = tokio::select! {
+            attempt = work => attempt,
+            _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
         };
         let (ok, mut seen) = attempt;
         if ok {
@@ -685,14 +698,18 @@ struct Seen {
 async fn changes(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
     let state_key = format!("changes:{}", ctx.node.id);
-    let stored = ctx.run.host.state_get(&state_key).map_err(NodeError::Failed)?;
+    // See `NodeCtx::memory_use`: a test or a replay starts from nothing, a look by hand reads what the real runs
+    // left, and only a real run adds to it — once it has ended well.
+    let use_memory = ctx.memory_use();
+    let stored = if use_memory == MemoryUse::Ignore { None } else { ctx.run.host.state_get(&state_key).map_err(NodeError::Failed)? };
     let first_run = stored.is_none();
-    let mut seen: Seen = stored.and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
-    let mut index_of: std::collections::HashMap<String, usize> = seen.entries.iter().enumerate().map(|(i, (k, _))| (k.clone(), i)).collect();
+    let seen: Seen = stored.and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
+    let mut known: std::collections::HashMap<String, String> = seen.entries.into_iter().collect();
     let emit_first = text(&ctx.params, "firstRun") != "emitNone";
     let fields = strings(&ctx.params, "fields");
     let by_fields = text(&ctx.params, "compare") == "someFields" && !fields.is_empty();
     let (mut changed, mut same) = (Vec::new(), Vec::new());
+    let mut touched: Vec<(String, String)> = Vec::new();
     let items = ctx.items();
     for (index, item) in items.iter().enumerate() {
         let params = &resolved[index.min(resolved.len() - 1)];
@@ -703,18 +720,9 @@ async fn changes(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         };
         let print = fingerprint(&compared);
         let key = Some(to_text(params.get("key").unwrap_or(&Value::Null))).filter(|k| !k.trim().is_empty()).unwrap_or_else(|| print.clone());
-        let is_new = match index_of.get(&key) {
-            Some(&at) => {
-                let differs = seen.entries[at].1 != print;
-                seen.entries[at].1 = print;
-                differs
-            }
-            None => {
-                index_of.insert(key.clone(), seen.entries.len());
-                seen.entries.push((key, print));
-                true
-            }
-        };
+        let is_new = known.get(&key).is_none_or(|before| *before != print);
+        known.insert(key.clone(), print.clone());
+        touched.push((key, print));
         let out = Item::paired(item.json.clone(), index);
         if is_new && (!first_run || emit_first) {
             changed.push(out);
@@ -722,13 +730,26 @@ async fn changes(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             same.push(out);
         }
     }
-    let memory = number(&ctx.params, "memory").unwrap_or(10_000.0).clamp(10.0, 1_000_000.0) as usize;
-    if seen.entries.len() > memory {
-        let drop = seen.entries.len() - memory;
-        seen.entries.drain(..drop);
+    if use_memory == MemoryUse::Keep && !touched.is_empty() {
+        let memory = number(&ctx.params, "memory").unwrap_or(10_000.0).clamp(10.0, 1_000_000.0) as usize;
+        // One entry per key, the last print each had this run, in the order they were last seen: what is
+        // dropped when the memory is full is what has gone longest without turning up.
+        let mut taken: std::collections::HashSet<&String> = std::collections::HashSet::new();
+        let mut latest: Vec<(String, String)> = touched.iter().rev().filter(|(key, _)| taken.insert(key)).cloned().collect();
+        latest.reverse();
+        let update: StateUpdate = Arc::new(move |current| {
+            let mut seen: Seen = current.and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
+            let moved: std::collections::HashSet<&String> = latest.iter().map(|(key, _)| key).collect();
+            seen.entries.retain(|(key, _)| !moved.contains(key));
+            seen.entries.extend(latest.iter().cloned());
+            if seen.entries.len() > memory {
+                let drop = seen.entries.len() - memory;
+                seen.entries.drain(..drop);
+            }
+            serde_json::to_value(&seen).ok()
+        });
+        ctx.run.host.state_stage(&state_key, update).map_err(NodeError::Failed)?;
     }
-    let value = serde_json::to_value(&seen).map_err(|e| NodeError::failed(e.to_string()))?;
-    ctx.run.host.state_set(&state_key, Some(&value)).map_err(NodeError::Failed)?;
     Ok(vec![changed, same])
 }
 
@@ -991,8 +1012,25 @@ fn from_sql(value: rusqlite::types::ValueRef<'_>) -> Value {
 /// The items as a table, `items`, one column per top-level field (nested values as JSON text, for
 /// `json_extract`), and a query over it — grouping, joining with itself, windows, whatever SQLite
 /// does. Its rows are the output.
+#[cfg(test)]
 pub(crate) fn query_items(items: &[Value], query: &str) -> Result<Vec<Value>, String> {
+    query_items_watched(items, query, None)
+}
+
+/// [`query_items`], leaving the connection's interrupt handle where the caller can reach it: SQLite
+/// runs on the thread that called it and has no clock of its own, so a query that never ends (a
+/// recursive CTE without a bound) is stopped only by someone telling the connection to stop.
+pub(crate) fn query_items_watched(
+    items: &[Value],
+    query: &str,
+    interrupt: Option<&std::sync::Mutex<Option<rusqlite::InterruptHandle>>>,
+) -> Result<Vec<Value>, String> {
     let conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
+    if let Some(slot) = interrupt {
+        if let Ok(mut slot) = slot.lock() {
+            *slot = Some(conn.get_interrupt_handle());
+        }
+    }
     let mut columns: Vec<String> = Vec::new();
     for item in items {
         if let Value::Object(map) = item {
@@ -1015,6 +1053,12 @@ pub(crate) fn query_items(items: &[Value], query: &str) -> Result<Vec<Value>, St
             statement.execute(rusqlite::params_from_iter(values)).map_err(|e| e.to_string())?;
         }
     }
+    // The query is the flow's own text, and what it may touch is the items: no ATTACH of a file on this
+    // computer (which would also create it), nor a DETACH of the table it is about.
+    conn.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| match context.action {
+        rusqlite::hooks::AuthAction::Attach { .. } | rusqlite::hooks::AuthAction::Detach { .. } => rusqlite::hooks::Authorization::Deny,
+        _ => rusqlite::hooks::Authorization::Allow,
+    }));
     let mut statement = conn.prepare(query).map_err(|e| e.to_string())?;
     let names: Vec<String> = statement.column_names().into_iter().map(str::to_string).collect();
     let mut rows = statement.query([]).map_err(|e| e.to_string())?;
@@ -1038,7 +1082,35 @@ async fn sql(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         return Err(NodeError::failed("Write the query — the items are the table \"items\""));
     }
     let items: Vec<Value> = ctx.items().iter().map(|item| item.json.clone()).collect();
-    let rows = query_items(&items, &query).map_err(|e| NodeError::failed(format!("The query failed: {e}")))?;
+    // Off the async worker, with its way out: Stop and the node's time limit tell the connection to
+    // interrupt, instead of waiting on a thread that is not going to look up.
+    let slot: std::sync::Arc<std::sync::Mutex<Option<rusqlite::InterruptHandle>>> = std::sync::Arc::default();
+    let (for_task, query_for_task) = (slot.clone(), query.clone());
+    let mut task = tokio::task::spawn_blocking(move || query_items_watched(&items, &query_for_task, Some(&for_task)));
+    let interrupt = || {
+        if let Ok(held) = slot.lock() {
+            if let Some(handle) = held.as_ref() {
+                handle.interrupt();
+            }
+        }
+    };
+    let limit = ctx.timeout.unwrap_or(Duration::from_secs(60));
+    let answered = tokio::select! {
+        answered = &mut task => answered,
+        _ = ctx.cancel.cancelled() => {
+            interrupt();
+            let _ = (&mut task).await;
+            return Err(NodeError::Cancelled);
+        }
+        _ = tokio::time::sleep(limit) => {
+            interrupt();
+            let _ = (&mut task).await;
+            return Err(NodeError::failed("The query ran past its time limit and was stopped"));
+        }
+    };
+    let rows = answered
+        .map_err(|e| NodeError::failed(format!("The query could not run: {e}")))?
+        .map_err(|e| NodeError::failed(format!("The query failed: {e}")))?;
     Ok(vec![rows.into_iter().map(Item::new).collect()])
 }
 
@@ -1121,6 +1193,10 @@ mod tests {
         let vip = query_items(&items, "SELECT json_extract(meta, '$.vip') AS vip FROM items WHERE meta IS NOT NULL").unwrap();
         assert_eq!(vip, vec![json!({"vip": 1})]);
         assert!(query_items(&items, "SELEKT").is_err());
+        // A statement may not reach out of the items to a file of this computer.
+        let attach = query_items(&items, "ATTACH DATABASE '/tmp/cf-attach-must-not-exist.db' AS other").unwrap_err();
+        assert!(attach.to_lowercase().contains("not authorized") || attach.to_lowercase().contains("authoriz"), "{attach}");
+        assert!(!std::path::Path::new("/tmp/cf-attach-must-not-exist.db").exists());
         assert_eq!(query_items(&[], "SELECT 1 AS one").unwrap(), vec![json!({"one": 1})]);
     }
 
@@ -1149,6 +1225,29 @@ mod tests {
         assert!(days > 300, "rcgen's default validity is years, not {days} days");
         assert!(found["subject"].as_str().is_some_and(|s| !s.is_empty()), "{found}");
         assert!(found["notAfter"].as_str().is_some_and(|at| !at.is_empty()), "{found}");
+    }
+
+    #[tokio::test]
+    async fn a_certificate_close_to_its_end_is_not_ok_by_the_days_asked_for() {
+        // rcgen's default validity is years: a warning window wider than that turns the same certificate «not ok».
+        let key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let certs = vec![key.cert.der().clone()];
+        let private = rustls::pki_types::PrivateKeyDer::Pkcs8(key.signing_key.serialize_der().into());
+        let config = rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, private).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else { break };
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let _ = acceptor.accept(socket).await;
+                });
+            }
+        });
+        let found = tls_check("localhost", &json!({"port": port, "warnDays": 999999}), Duration::from_secs(5)).await;
+        assert_eq!(found["expiringSoon"], true, "{found}");
     }
 
     #[test]

@@ -22,6 +22,8 @@ struct Memory {
     state: Mutex<HashMap<String, Value>>,
     vars: Mutex<HashMap<String, String>>,
     started: Mutex<Vec<String>>,
+    /// What nodes asked to have done once the run ends well — kept, for a test to run or drop.
+    deferred: Mutex<Vec<HostFuture<'static, ()>>>,
 }
 
 /// What a test's models answer, in order, and what they were asked.
@@ -100,6 +102,8 @@ impl RunHost for Host {
     fn credential(&self, id: &str) -> Result<Credential, String> {
         match id {
             "token" => Ok(Credential { kind: "bearer".into(), meta: json!({}), secret: "s3cret".into() }),
+            // A key that travels in a header of its own, and one in the query.
+            "apikey" => Ok(Credential { kind: "header".into(), meta: json!({"name": "X-Api-Key"}), secret: "k-123".into() }),
             // An OAuth 2 credential: what is stored is never sent; `oauth_token` hands out the token.
             "oauth" => Ok(Credential { kind: "oauth2".into(), meta: json!({"provider": "google", "account": "ana@example.com"}), secret: "{\"refreshToken\":\"r\"}".into() }),
             "basic" => Ok(Credential { kind: "basic".into(), meta: json!({"user": "ana"}), secret: "pw".into() }),
@@ -147,10 +151,23 @@ impl RunHost for Host {
         let id = id.to_string();
         Box::pin(async move { if id == "oauth" { Ok("ya29.fresh".to_string()) } else { Err(format!("{id} is not OAuth")) } })
     }
+    fn after_success(&self, work: HostFuture<'static, ()>) {
+        self.memory.deferred.lock().unwrap().push(work);
+    }
+    fn oauth_token_renewed(&self, id: &str, _meta: &Value, refused: &str) -> HostFuture<'_, Result<String, String>> {
+        let (id, refused) = (id.to_string(), refused.to_string());
+        Box::pin(async move {
+            match id.as_str() {
+                "oauth" if refused == "ya29.fresh" => Ok("ya29.renewed".to_string()),
+                "oauth" => Ok(refused),
+                _ => Err(format!("{id} is not OAuth")),
+            }
+        })
+    }
     fn vectors_path(&self) -> PathBuf {
         self.dir.join("vectors.sqlite")
     }
-    fn subflow(&self, flow_id: &str, items: Vec<Item>, wait: bool) -> HostFuture<'_, Result<Vec<Item>, String>> {
+    fn subflow(&self, flow_id: &str, items: Vec<Item>, wait: bool, _cancel: CancellationToken) -> HostFuture<'_, Result<Vec<Item>, String>> {
         let flow_id = flow_id.to_string();
         Box::pin(async move {
             if flow_id != "child" {
@@ -204,6 +221,10 @@ impl RunHost for Host {
     fn edits_recorded(&self, path: &str) {
         self.script.edits.lock().unwrap().push(path.to_string());
     }
+    /// opencode only asks to stay read-only, as in the real thing.
+    fn enforces_read_only(&self, engine: &EngineChoice) -> bool {
+        engine.provider != "opencode"
+    }
     fn app_call(&self, op: &str, args: Value, _cancel: CancellationToken) -> HostFuture<'_, Result<Value, String>> {
         let op = op.to_string();
         Box::pin(async move {
@@ -211,6 +232,21 @@ impl RunHost for Host {
             self.script.app_answers.lock().unwrap().pop_front().unwrap_or_else(|| Err(format!("the script has no answer for {op}")))
         })
     }
+}
+
+/// A throwaway git repository with one committed file, and its canonical path.
+fn repo_with_one_file() -> (std::path::PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("cf-flow-ro-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let repo = git2::Repository::init(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "original\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(std::path::Path::new("a.txt")).unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+    let root = dir.canonicalize().unwrap().to_string_lossy().into_owned();
+    (dir, root)
 }
 
 fn node(id: &str, type_id: &str, params: Value) -> FlowNode {
@@ -287,6 +323,23 @@ async fn run_scripted(
     flow_id: &str,
     ai_per_hour: u32,
 ) -> Ran {
+    let label = mode.label();
+    run_scripted_as(spec, mode, label, pins, cancel, script, memory, flow_id, ai_per_hour).await
+}
+
+/// `run_scripted` for a run whose `$execution.mode` is `label` — `trigger`, `test`… — whatever the plan's mode.
+#[allow(clippy::too_many_arguments)]
+async fn run_scripted_as(
+    spec: FlowSpec,
+    mode: RunMode,
+    label: &str,
+    pins: HashMap<String, Ports>,
+    cancel: CancellationToken,
+    script: Arc<Script>,
+    memory: Memory,
+    flow_id: &str,
+    ai_per_hour: u32,
+) -> Ran {
     let memory = Arc::new(memory);
     let dir = std::env::temp_dir().join(format!("cf-flow-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -297,7 +350,7 @@ async fn run_scripted(
         flow_id: flow_id.into(),
         flow_name: "Prueba".into(),
         workspace_id: "w1".into(),
-        mode: mode.label().into(),
+        mode: label.into(),
         vars: serde_json::Map::from_iter([("region".to_string(), json!("cl"))]),
         timezone: Some("America/Santiago".into()),
         locale: "es".into(),
@@ -929,11 +982,24 @@ async fn the_hourly_cap_stops_a_runaway_loop() {
         vec![wire("start", 0, "data", 0), wire("data", 0, "agent", 0)],
     );
     let script = Script::answering(vec![Ok("uno"), Ok("dos"), Ok("tres")]);
-    *script.quota.lock().unwrap() = Some((85.0, String::new()));
     let ran = run_scripted(spec, RunMode::Full, HashMap::new(), CancellationToken::new(), script.clone(), Memory::default(), "flow-cap", 2).await;
     assert_eq!(ran.outcome.status, RunStatus::Error);
-    assert!(ran.outcome.error.clone().unwrap_or_default().contains("cap of 2 AI calls an hour"));
-    assert_eq!(script.calls.lock().unwrap().len(), 2);
+    let error = ran.outcome.error.clone().unwrap_or_default();
+    assert!(error.contains("at least 3 AI calls") && error.contains("cap 2") && error.contains("nothing was sent"), "{error}");
+    // Three items cannot fit in two calls, and the batch is refused before the first one is paid for.
+    assert_eq!(script.calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn a_plan_nearly_spent_is_said_in_the_log() {
+    let spec = flow(
+        vec![node("start", "trigger.manual", json!({})), node("agent", "ai.agent", json!({"prompt": "Hola"}))],
+        vec![wire("start", 0, "agent", 0)],
+    );
+    let script = Script::answering(vec![Ok("uno")]);
+    *script.quota.lock().unwrap() = Some((85.0, String::new()));
+    let ran = run_scripted(spec, RunMode::Full, HashMap::new(), CancellationToken::new(), script.clone(), Memory::default(), "flow-cap-log", 2).await;
+    assert_eq!(ran.outcome.status, RunStatus::Success, "{:?}", ran.outcome.error);
     assert!(logs_of(&ran, "agent").iter().any(|line| line.contains("used 85 % of its plan")));
 }
 
@@ -1112,3 +1178,4 @@ mod milestone9;
 mod milestone10;
 mod milestone11;
 mod database_node;
+mod audit_fixes;

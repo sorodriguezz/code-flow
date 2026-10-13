@@ -3,7 +3,9 @@
 //! Three ways to say "when", each one a parameter set the node's form writes:
 //! - **every N minutes / hours / days**, counted from midnight in the trigger's zone, so "every 15
 //!   minutes" means :00, :15, :30, :45 rather than "15 minutes after whenever the app happened to
-//!   start" — the schedule a person reads off the form is the one that runs;
+//!   start" — the schedule a person reads off the form is the one that runs. A step of a day or more
+//!   cannot restart at every midnight, so it is counted from a fixed Monday instead ([`LONG_ANCHOR`]):
+//!   "every 3 days" is the same days whenever the flow is saved or the app is opened;
 //! - **at these times on these days** (`at` + `days`), which is a cron expression the person never
 //!   had to write;
 //! - **a cron expression**, five fields or six with seconds, read by croner.
@@ -159,6 +161,7 @@ impl Schedule {
     pub fn next_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
         match self {
             Schedule::Once { at } => (*at > after).then_some(*at),
+            Schedule::Every { step, zone } if step.num_milliseconds() >= DAY_MS => every_long(*step, *zone, after),
             Schedule::Every { step, zone } => {
                 let local = after.with_timezone(zone);
                 let midnight = zone
@@ -182,6 +185,48 @@ impl Schedule {
                 cron.find_next_occurrence(&local, false).ok().map(|next| next.with_timezone(&Utc))
             }
         }
+    }
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+/// Where steps of a day or more are counted from: a Monday long ago, so "every 7 days" is every
+/// Monday and the days of "every 3 days" do not depend on when the schedule was last armed.
+const LONG_ANCHOR: (i32, u32, u32) = (2001, 1, 1);
+
+/// Midnight of `date` in `zone` — or the first moment of it, where the clocks skip midnight itself.
+fn local_midnight(zone: Tz, date: chrono::NaiveDate) -> Option<DateTime<Utc>> {
+    let midnight = date.and_hms_opt(0, 0, 0)?;
+    zone.from_local_datetime(&midnight)
+        .earliest()
+        .or_else(|| zone.from_local_datetime(&midnight).latest())
+        .or_else(|| zone.from_local_datetime(&date.and_hms_opt(1, 0, 0)?).earliest())
+        .map(|at| at.with_timezone(&Utc))
+}
+
+/// `Every` for a step of a day or more: whole days land on local midnights, counted in calendar days
+/// from [`LONG_ANCHOR`]; anything else (36 hours) is that many hours after the anchor's midnight, as
+/// exact durations.
+fn every_long(step: Duration, zone: Tz, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let step_ms = step.num_milliseconds();
+    let anchor = chrono::NaiveDate::from_ymd_opt(LONG_ANCHOR.0, LONG_ANCHOR.1, LONG_ANCHOR.2)?;
+    if step_ms % DAY_MS == 0 {
+        let days = step_ms / DAY_MS;
+        let today = after.with_timezone(&zone).date_naive();
+        let mut slot = (today - anchor).num_days().div_euclid(days);
+        // The slot of today may already have passed (or be the very moment `after`): then the next one.
+        for _ in 0..3 {
+            let at = local_midnight(zone, anchor + Duration::days(slot * days))?;
+            if at > after {
+                return Some(at);
+            }
+            slot += 1;
+        }
+        None
+    } else {
+        let origin = local_midnight(zone, anchor)?;
+        let n = (after - origin).num_milliseconds().div_euclid(step_ms) + 1;
+        Some(origin + Duration::milliseconds(n * step_ms))
     }
 }
 
@@ -368,6 +413,34 @@ mod tests {
         let s = parse_all(&params(json!({"mode": "interval", "every": 15, "unit": "minutes", "timezone": "UTC"})), None).unwrap();
         assert_eq!(next_of(&s, utc("2026-10-05T10:22:10Z")), Some(utc("2026-10-05T10:30:00Z")));
         assert_eq!(next_of(&s, utc("2026-10-05T10:30:00Z")), Some(utc("2026-10-05T10:45:00Z")));
+    }
+
+    #[test]
+    fn a_step_of_a_day_or_more_keeps_its_rhythm_whenever_it_is_armed() {
+        let hours = |n: u32| parse_all(&params(json!({"mode": "interval", "every": n, "unit": "hours", "timezone": "UTC"})), None).unwrap();
+        // Every 36 hours is 36 hours apart, not 24 from the second fire on.
+        let s = hours(36);
+        let first = next_of(&s, utc("2026-10-13T10:00:00Z")).unwrap();
+        let second = next_of(&s, first).unwrap();
+        let third = next_of(&s, second).unwrap();
+        assert_eq!((second - first).num_hours(), 36);
+        assert_eq!((third - second).num_hours(), 36);
+
+        // Every 3 days is the same days whenever it is armed: saving the flow the next morning
+        // does not move the fire by a day.
+        let days = parse_all(&params(json!({"mode": "interval", "every": 3, "unit": "days", "timezone": "UTC"})), None).unwrap();
+        let fire = next_of(&days, utc("2026-10-13T08:00:00Z")).unwrap();
+        let armed_early = next_of(&days, fire + Duration::hours(8)).unwrap();
+        let armed_later = next_of(&days, fire + Duration::hours(32)).unwrap();
+        assert_eq!(armed_early, armed_later);
+        assert_eq!((armed_early - fire).num_days(), 3);
+        // A weekly step lands on Mondays, at midnight.
+        let weekly = parse_all(&params(json!({"mode": "interval", "every": 7, "unit": "days", "timezone": "UTC"})), None).unwrap();
+        let monday = next_of(&weekly, utc("2026-10-13T08:00:00Z")).unwrap();
+        assert_eq!(monday, utc("2026-10-19T00:00:00Z"));
+        // In a zone that skips midnight (Santiago, 2026-09-06) the day still has its fire.
+        let santiago = parse_all(&params(json!({"mode": "interval", "every": 1, "unit": "days", "timezone": "America/Santiago"})), None).unwrap();
+        assert!(next_of(&santiago, utc("2026-09-05T12:00:00Z")).is_some());
     }
 
     #[test]

@@ -421,6 +421,10 @@ fn save(image: &image::DynamicImage, output: &Path, params: &Value) -> Result<Va
     Ok(json!({"path": output.to_string_lossy(), "width": image.width(), "height": image.height(), "bytes": bytes}))
 }
 
+/// The largest picture a resize makes: a side, and the whole.
+const MAX_SIDE: u32 = 16_384;
+const MAX_PIXELS: u64 = 100_000_000;
+
 pub(crate) fn image_op(params: &Value) -> Result<Value, String> {
     let operation = text(params, "operation");
     if operation == "qrCreate" {
@@ -435,12 +439,18 @@ pub(crate) fn image_op(params: &Value) -> Result<Value, String> {
         return save(&image::DynamicImage::ImageLuma8(rendered), &output, params);
     }
     let input = path_of(params, "path", "image")?;
-    let picture = image::ImageReader::open(&input)
+    let mut decoder = image::ImageReader::open(&input)
         .map_err(|e| format!("{}: {e}", input.display()))?
         .with_guessed_format()
         .map_err(|e| e.to_string())?
-        .decode()
+        .into_decoder()
         .map_err(|e| format!("{}: {e}", input.display()))?;
+    // A phone photo is stored sideways with a note (EXIF) saying how to turn it. Everything below writes pixels without
+    // that note, so the turn is made here: a resized or converted photo would otherwise come out lying on its side.
+    let orientation = image::ImageDecoder::orientation(&mut decoder).unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut picture = image::DynamicImage::from_decoder(decoder).map_err(|e| format!("{}: {e}", input.display()))?;
+    let turned = orientation != image::metadata::Orientation::NoTransforms;
+    picture.apply_orientation(orientation);
     match operation.as_str() {
         "qrRead" => {
             let mut prepared = rqrr::PreparedImage::prepare(picture.to_luma8());
@@ -463,6 +473,10 @@ pub(crate) fn image_op(params: &Value) -> Result<Value, String> {
                 (w, 0) => (w, (picture.height() as f64 * w as f64 / picture.width() as f64).round().max(1.0) as u32),
                 both => both,
             };
+            // `width: 100000` would ask for a few tens of gigabytes: a size is bounded like the QR code's.
+            if w > MAX_SIDE || h > MAX_SIDE || (w as u64) * (h as u64) > MAX_PIXELS {
+                return Err(format!("{w}×{h} is too large — at most {MAX_SIDE} px a side and {} megapixels", MAX_PIXELS / 1_000_000));
+            }
             let resized = picture.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
             save(&resized, &path_of(params, "savePath", "file to write")?, params)
         }
@@ -483,7 +497,7 @@ pub(crate) fn image_op(params: &Value) -> Result<Value, String> {
             };
             save(&turned, &path_of(params, "savePath", "file to write")?, params)
         }
-        "stripMetadata" => strip_metadata(&input, &picture, &path_of(params, "savePath", "file to write")?, params),
+        "stripMetadata" => strip_metadata(&input, &picture, turned, &path_of(params, "savePath", "file to write")?, params),
         "watermark" => watermark(picture, params),
         "imageCompare" => compare_images(&input, &picture, params),
         _ => save(&picture, &path_of(params, "savePath", "file to write")?, params),
@@ -492,9 +506,13 @@ pub(crate) fn image_op(params: &Value) -> Result<Value, String> {
 
 /// Without what a photo says about where and with what it was taken (EXIF, XMP, IPTC, comments).
 /// A JPEG or PNG loses only those segments, byte for byte — no re-encoding, no quality lost.
-fn strip_metadata(input: &Path, picture: &image::DynamicImage, output: &Path, params: &Value) -> Result<Value, String> {
+fn strip_metadata(input: &Path, picture: &image::DynamicImage, turned: bool, output: &Path, params: &Value) -> Result<Value, String> {
     let bytes = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-    let stripped = if bytes.starts_with(&[0xFF, 0xD8]) {
+    // A photo whose only way of standing upright is its orientation note cannot lose the note byte for byte: it is
+    // turned and written again instead, which is what the note was for.
+    let stripped = if turned {
+        None
+    } else if bytes.starts_with(&[0xFF, 0xD8]) {
         Some(strip_jpeg(&bytes)?)
     } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some(strip_png(&bytes)?)
@@ -704,6 +722,43 @@ fn compare_images(input: &Path, picture: &image::DynamicImage, params: &Value) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-media-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_resize_cannot_ask_for_an_absurd_picture() {
+        let dir = scratch_dir();
+        let png = dir.join("a.png");
+        image::DynamicImage::new_rgb8(4, 4).save(&png).unwrap();
+        let params = json!({"operation": "resize", "path": png.to_string_lossy(), "width": 100000, "height": 100000, "savePath": dir.join("o.png").to_string_lossy()});
+        let error = image_op(&params).unwrap_err();
+        assert!(error.contains("too large"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_photo_stored_sideways_is_turned_before_it_is_written_again() {
+        use image::ImageEncoder;
+        // A 4×2 JPEG whose EXIF says «turn 90°»: it is a 2×4 picture as people see it.
+        let exif: Vec<u8> = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0];
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut bytes);
+            encoder.set_exif_metadata(exif).unwrap();
+            encoder.write_image(&[200u8; 4 * 2 * 3], 4, 2, image::ExtendedColorType::Rgb8).unwrap();
+        }
+        let dir = scratch_dir();
+        let input = dir.join("phone.jpg");
+        std::fs::write(&input, &bytes).unwrap();
+        let output = dir.join("copy.png");
+        let done = image_op(&json!({"operation": "convert", "path": input.to_string_lossy(), "savePath": output.to_string_lossy()})).unwrap();
+        assert_eq!((done["width"].as_u64(), done["height"].as_u64()), (Some(2), Some(4)), "{done}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn markdown_becomes_a_readable_pdf_and_reads_back() {

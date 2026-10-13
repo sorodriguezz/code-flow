@@ -175,6 +175,11 @@ async fn run(ctx: &NodeCtx, params: &Value) -> Result<Value, NodeError> {
         _ => None,
     };
     if let Some(target) = &saved {
+        // Over the notebook itself, the run's parameters do not stay in it — they were this run's. A copy
+        // keeps them, as papermill's output does: they are what that copy was run with.
+        if *target == path {
+            strip_injected(&mut notebook);
+        }
         if let Some(folder) = target.parent() {
             let _ = tokio::fs::create_dir_all(folder).await;
         }
@@ -240,8 +245,19 @@ async fn pick_kernel(folder: &Path, wanted: &str, notebook: &Value) -> Result<Ke
         })
 }
 
+const INJECTED_TAG: &str = "injected-parameters";
+
+/// Takes out the cells an earlier run injected. A notebook saved over itself used to keep the cell: the
+/// next run put its own *before* it, so the old values ran last and won, and one more cell piled up on every run.
+fn strip_injected(notebook: &mut Value) {
+    if let Some(cells) = notebook.get_mut("cells").and_then(Value::as_array_mut) {
+        cells.retain(|cell| !cell.pointer("/metadata/tags").and_then(Value::as_array).is_some_and(|tags| tags.iter().any(|t| t == INJECTED_TAG)));
+    }
+}
+
 /// Papermill's injected cell: after the one tagged `parameters`, else first.
 fn insert_parameters(notebook: &mut Value, parameters: &Map<String, Value>) {
+    strip_injected(notebook);
     let encoded = base64::engine::general_purpose::STANDARD.encode(Value::Object(parameters.clone()).to_string());
     let source = format!(
         "# Parameters\nimport base64 as _cf_b64, json as _cf_json\nglobals().update(_cf_json.loads(_cf_b64.b64decode(\"{encoded}\").decode(\"utf-8\")))\ndel _cf_b64, _cf_json\n"
@@ -250,7 +266,7 @@ fn insert_parameters(notebook: &mut Value, parameters: &Map<String, Value>) {
         "cell_type": "code",
         "execution_count": null,
         "id": format!("injected-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
-        "metadata": {"tags": ["injected-parameters"]},
+        "metadata": {"tags": [INJECTED_TAG]},
         "outputs": [],
         "source": split_lines(&source),
     });
@@ -443,6 +459,26 @@ fn nbformat_text(notebook: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parameters_are_injected_once_and_a_saved_notebook_does_not_keep_them() {
+        let mut notebook = json!({"cells": [
+            {"cell_type": "code", "metadata": {"tags": ["parameters"]}, "source": ["n = 1\n"], "outputs": [], "execution_count": null},
+            {"cell_type": "code", "metadata": {}, "source": ["print(n)\n"], "outputs": [], "execution_count": null},
+        ]});
+        let first = json!({"n": 1}).as_object().cloned().unwrap();
+        let second = json!({"n": 2}).as_object().cloned().unwrap();
+        insert_parameters(&mut notebook, &first);
+        // Saved over itself and run again: the old cell goes, the new one takes its place after `parameters`.
+        insert_parameters(&mut notebook, &second);
+        let injected = |notebook: &Value| notebook["cells"].as_array().unwrap().iter().filter(|c| c["metadata"]["tags"][0] == INJECTED_TAG).count();
+        assert_eq!(injected(&notebook), 1, "one injected cell, not one more per run");
+        assert_eq!(notebook["cells"][1]["metadata"]["tags"][0], INJECTED_TAG);
+        assert!(joined(&notebook["cells"][1]["source"]).contains(&base64::engine::general_purpose::STANDARD.encode(r#"{"n":2}"#)), "the latest values");
+        strip_injected(&mut notebook);
+        assert_eq!(injected(&notebook), 0);
+        assert_eq!(notebook["cells"].as_array().unwrap().len(), 2, "the user's own cells are untouched");
+    }
 
     fn message(msg_type: &str, parent: &str, content: Value) -> Message {
         let mut message = Message::request(msg_type, "s", content);

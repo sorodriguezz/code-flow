@@ -49,6 +49,10 @@ async fn per_item(ctx: &NodeCtx, work: Exchange) -> Result<Ports, NodeError> {
         for json in work(ctx, params).await? {
             out.push(if paired { Item::paired(json, index) } else { Item::new(json) });
         }
+        // An email sent, a message published, a mutation made: done, and not to be done again by a retry.
+        if matches!(ctx.node.type_id.as_str(), "net.email" | "net.mqtt") {
+            ctx.mark_sent();
+        }
     }
     Ok(vec![out])
 }
@@ -58,6 +62,7 @@ fn options(params: &Value) -> NetworkOptions {
         timeout_ms: number(params, "timeoutMs").map(|n| n.max(0.0) as u64).filter(|n| *n > 0).unwrap_or(30_000),
         verify_ssl: params.get("verifySsl").is_none() || flag(params, "verifySsl"),
         max_response_bytes: 64 * 1024 * 1024,
+        guard_credentials: true,
         ..NetworkOptions::default()
     }
 }
@@ -393,12 +398,127 @@ fn mqtt<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn std::f
 
 // -------------------------------------------------------------------------------------------- SSE
 
-fn http_client(params: &Value) -> Result<reqwest::Client, NodeError> {
+/// A client for the stream and download nodes. reqwest drops `Authorization` and cookies when a redirect
+/// leaves the server but forwards every other header — an `X-API-Key` among them — so when the request
+/// carries one, a redirect to another server is not followed: the key does not go along.
+fn http_client(params: &Value, headers: &[(String, String)]) -> Result<reqwest::Client, NodeError> {
     let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).user_agent("CodeFlow-Flows");
+    if headers.iter().any(|(name, _)| !name.eq_ignore_ascii_case("authorization") && !crate::api::http::is_plain_header(name)) {
+        builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("more than 10 redirects");
+            }
+            let left = attempt.previous().last().is_some_and(|before| {
+                let now = attempt.url();
+                before.scheme() != now.scheme() || before.host_str() != now.host_str() || before.port_or_known_default() != now.port_or_known_default()
+            });
+            if left { attempt.stop() } else { attempt.follow() }
+        }));
+    }
     if params.get("verifySsl").is_some() && !flag(params, "verifySsl") {
         builder = builder.danger_accept_invalid_certs(true);
     }
     builder.build().map_err(|e| NodeError::failed(e.to_string()))
+}
+
+/// How many times a request that was answered «too many requests» is sent again, and the longest wait asked for.
+const PATIENCE_TRIES: usize = 2;
+const PATIENCE_MAX: Duration = Duration::from_secs(30);
+
+/// The wait a `Retry-After` header asks for, when it is a number of seconds.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// Sends `request` — and again, after the wait the server asked for (capped), while it answers 429. A 429 means the request
+/// was not processed, so repeating it is safe whatever its method; a Sheets loop that writes a row per item meets it at
+/// 60 requests a minute. Anything else, and the last 429, is the caller's to read.
+pub(super) async fn send_patiently(ctx: &NodeCtx, request: reqwest::RequestBuilder, who: &str) -> Result<reqwest::Response, NodeError> {
+    let mut current = request;
+    for attempt in 0..=PATIENCE_TRIES {
+        let spare = current.try_clone();
+        let response = tokio::select! {
+            response = current.send() => response.map_err(|e| NodeError::failed(format!("{who} could not be reached: {e}")))?,
+            _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
+        };
+        if response.status().as_u16() != 429 || attempt == PATIENCE_TRIES {
+            return Ok(response);
+        }
+        let Some(next) = spare else { return Ok(response) };
+        let wait = retry_after(response.headers()).unwrap_or(Duration::from_secs(2 << attempt)).min(PATIENCE_MAX);
+        ctx.log(crate::flows::engine::LogStream::Info, &format!("{who} asked to slow down — waiting {} s", wait.as_secs()));
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
+        }
+        current = next;
+    }
+    unreachable!("the last attempt returns")
+}
+
+/// The file name a `Content-Disposition` asks for: `filename*=UTF-8''…` (RFC 6266, percent-encoded)
+/// when there is one, else `filename=` — quoted or not, up to its own `;` and not to the end of the
+/// header. `None` for no name, a path, or `.` and `..`: the server does not get to choose where the
+/// file goes, nor to name the folder it lands in.
+pub(super) fn disposition_filename(header: &str) -> Option<String> {
+    // Parameters split on `;` outside quotes.
+    let mut parts: Vec<String> = Vec::new();
+    let (mut current, mut quoted, mut escaped) = (String::new(), false, false);
+    for c in header.chars() {
+        match (c, quoted, escaped) {
+            ('\\', true, false) => escaped = true,
+            ('"', _, false) => {
+                quoted = !quoted;
+                current.push(c);
+            }
+            (';', false, _) => parts.push(std::mem::take(&mut current)),
+            _ => {
+                escaped = false;
+                current.push(c);
+            }
+        }
+    }
+    parts.push(current);
+    let mut plain: Option<String> = None;
+    let mut extended: Option<String> = None;
+    for part in parts.iter().skip(1) {
+        let Some((key, value)) = part.split_once('=') else { continue };
+        let value = value.trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "filename" => plain = Some(value.trim_matches('"').replace("\\\"", "\"")),
+            "filename*" => {
+                // `charset'language'percent-encoded` — only UTF-8 (and its ASCII subset) is read.
+                let mut pieces = value.splitn(3, '\'');
+                let (charset, _, encoded) = (pieces.next()?, pieces.next(), pieces.next());
+                if let Some(encoded) = encoded.filter(|_| charset.eq_ignore_ascii_case("utf-8")) {
+                    extended = Some(String::from_utf8_lossy(&percent_decode(encoded)).into_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    let name = extended.or(plain)?;
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim().to_string();
+    (!name.is_empty() && !matches!(name.as_str(), "." | "..") && !name.contains(['/', '\\'])).then_some(name)
+}
+
+fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' && at + 2 < bytes.len() {
+            if let Some(byte) = std::str::from_utf8(&bytes[at + 1..at + 3]).ok().and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                out.push(byte);
+                at += 3;
+                continue;
+            }
+        }
+        out.push(bytes[at]);
+        at += 1;
+    }
+    out
 }
 
 fn header_map(headers: &[(String, String)]) -> Result<reqwest::header::HeaderMap, NodeError> {
@@ -419,7 +539,7 @@ fn sse<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn std::fu
         apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query).await?;
         headers.push(("Accept".into(), "text/event-stream".into()));
         let url = build_url(&text(params, "url"), &query)?;
-        let client = http_client(params)?;
+        let client = http_client(params, &headers)?;
         let deadline = tokio::time::Instant::now() + window(params);
         let send = client.get(url.clone()).headers(header_map(&headers)?).send();
         let mut response = tokio::select! {
@@ -470,7 +590,7 @@ fn download<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn st
         let mut query = Vec::new();
         apply_credential(ctx, &text(params, "credential"), &mut headers, &mut query).await?;
         let url = build_url(&text(params, "url"), &query)?;
-        let client = http_client(params)?;
+        let client = http_client(params, &headers)?;
         let send = client.get(url.clone()).headers(header_map(&headers)?).send();
         let mut response = tokio::select! {
             _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
@@ -485,9 +605,7 @@ fn download<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn st
             .headers()
             .get(reqwest::header::CONTENT_DISPOSITION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split("filename=").nth(1))
-            .map(|v| v.trim_matches(['"', '\'', ' ', ';']).to_string())
-            .filter(|v| !v.is_empty() && !v.contains(['/', '\\']));
+            .and_then(disposition_filename);
         let url_name = url.path_segments().and_then(|mut s| s.next_back()).filter(|s| !s.is_empty()).map(str::to_string);
         let chosen = text(params, "fileName");
         let name = if !chosen.trim().is_empty() {
@@ -495,7 +613,7 @@ fn download<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Box<dyn st
         } else {
             disposition_name.or(url_name).unwrap_or_else(|| "download".into())
         };
-        if name.contains(['/', '\\']) || name == ".." {
+        if name.contains(['/', '\\']) || matches!(name.as_str(), "." | "..") || name.is_empty() {
             return Err(NodeError::failed("The file name must be a name, not a path"));
         }
         let folder = text(params, "folder");
@@ -649,6 +767,20 @@ pub(super) fn email<'a>(ctx: &'a NodeCtx, params: &'a Value) -> std::pin::Pin<Bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_download_is_named_by_the_header_and_never_by_what_follows_it() {
+        let name = |header: &str| disposition_filename(header);
+        assert_eq!(name("attachment; filename=\"r.pdf\"; filename*=UTF-8''r%C3%A9.pdf").as_deref(), Some("ré.pdf"), "the extended form wins");
+        assert_eq!(name("attachment; filename=\"r.pdf\"; size=12").as_deref(), Some("r.pdf"), "the name ends at its own quote");
+        assert_eq!(name("attachment; filename=report.pdf").as_deref(), Some("report.pdf"));
+        assert_eq!(name("attachment; filename=\"a;b.txt\"").as_deref(), Some("a;b.txt"), "a quoted semicolon is part of the name");
+        assert_eq!(name("inline"), None);
+        // The server does not get to name a folder, or the one the file lands in.
+        for hostile in ["attachment; filename=.", "attachment; filename=..", "attachment; filename=\"../x\"", "attachment; filename=\"a/b\"", "attachment; filename=\"\""] {
+            assert_eq!(name(hostile), None, "{hostile}");
+        }
+    }
 
     #[test]
     fn graphql_types_read_as_written() {

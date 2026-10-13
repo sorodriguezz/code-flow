@@ -6768,6 +6768,11 @@ pub struct FlowTurn<'a> {
     pub effort: Option<&'a str>,
     pub json_schema: Option<&'a str>,
     pub app_mcp: Vec<crate::mcp_registry::LiveServer>,
+    /// The user's own MCP servers this turn keeps out — see [`AiInvocation::mcp_block`]. A node that may
+    /// not write reads data nobody vetted (an email, a PR); on Codex, whose read-only sandbox confines
+    /// the model's own tools and not the programs its config starts, that is only true if each of them is
+    /// switched off by name, as the chats do for a text-only turn.
+    pub mcp_block: Vec<String>,
 }
 
 pub async fn flow_turn(engine: &dyn AiEngine, binary: &str, model: &str, turn: FlowTurn<'_>) -> Result<AiRun, String> {
@@ -6793,6 +6798,7 @@ pub async fn flow_turn(engine: &dyn AiEngine, binary: &str, model: &str, turn: F
     inv.task = task::FLOWS;
     inv.json_schema = turn.json_schema;
     inv.app_mcp = turn.app_mcp;
+    inv.mcp_block = turn.mcp_block;
     run(engine, binary, inv).await
 }
 

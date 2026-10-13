@@ -146,6 +146,14 @@ pub(super) fn wait_for(host: &AppHost, request: WaitRequest, cancel: Cancellatio
             payload: Value::Null,
         };
         let (tx, rx) = oneshot::channel();
+        // A run picked up after a restart runs this node again, and it asks again: the question it left
+        // open before is replaced by this one — not kept beside it, where deciding either would answer for
+        // a node that is waiting on the other.
+        for earlier in with_db(&app, |conn| queries::waits_of_run(conn, &host.run_id))? {
+            if earlier.decided_at.is_none() && earlier.node_id == request.node_id {
+                let _ = settle(&app, &earlier.id, "canceled", "restart", &Value::Null);
+            }
+        }
         WAITERS.lock().map_err(|e| e.to_string())?.insert(id.clone(), tx);
         with_db(&app, |conn| {
             queries::insert_wait(conn, &row)?;
@@ -185,8 +193,14 @@ pub(super) fn wait_for(host: &AppHost, request: WaitRequest, cancel: Cancellatio
             }
         };
         if outcome.is_ok() {
-            let _ = with_db(&app, |conn| queries::set_run_status(conn, &host.run_id, "running"));
-            emit_run(&app, &host.run_id);
+            // The run is going again only when nothing else of it is still waiting: two branches parked at
+            // two approvals, one decided, is a run still waiting — which is what quitting and restarting must
+            // find, and what the other approval's answer must still be able to resume.
+            let still_waiting = with_db(&app, |conn| queries::waits_of_run(conn, &host.run_id)).map(|waits| waits.iter().any(|wait| wait.decided_at.is_none())).unwrap_or(false);
+            if !still_waiting {
+                let _ = with_db(&app, |conn| queries::set_run_status(conn, &host.run_id, "running"));
+                emit_run(&app, &host.run_id);
+            }
         }
         outcome
     })
@@ -214,7 +228,9 @@ pub fn decide(app: &AppHandle, wait_id: &str, decision: &str, by: &str, payload:
 
 /// A call to `/resume/<run>[/<node name>]`: resumes that run's open "wait for a call". Returns the
 /// run id; `not-waiting` when nothing there waits for a call.
-pub fn resume_by_call(app: &AppHandle, path: &str, call: Value) -> Result<String, String> {
+/// `call` is made only once a single wait is known to be there: building it can write the request's body
+/// to disk, and a request to a URL nothing waits at must not leave a file behind.
+pub fn resume_by_call(app: &AppHandle, path: &str, call: impl FnOnce() -> Value) -> Result<String, String> {
     let (run_id, node_name) = match path.split_once('/') {
         Some((run, node)) => (run, Some(percent_encoding::percent_decode_str(node).decode_utf8_lossy().into_owned())),
         None => (path, None),
@@ -226,7 +242,7 @@ pub fn resume_by_call(app: &AppHandle, path: &str, call: Value) -> Result<String
         .collect();
     match open.as_slice() {
         [] => Err("not-waiting".into()),
-        [wait] => decide(app, &wait.id, "resumed", "webhook", call).map(|_| run_id.to_string()),
+        [wait] => decide(app, &wait.id, "resumed", "webhook", call()).map(|_| run_id.to_string()),
         _ => Err("Several nodes of this run wait for a call: add the node's name to the URL".into()),
     }
 }
@@ -335,6 +351,7 @@ fn pick_up(app: &AppHandle, wait: &FlowWaitRow, answer: WaitAnswer) -> Result<()
     let decided = super::nodes::decided_ports(&node.type_id, &inputs, &answer);
 
     let mut seeds: HashMap<String, (Ports, bool)> = HashMap::new();
+    let mut seed_origins: HashMap<String, Vec<Vec<run::Origin>>> = HashMap::new();
     let mut quiet = HashSet::new();
     for done in with_db(app, |conn| queries::run_nodes(conn, &run.id))? {
         let finished = matches!(done.status.as_str(), "success" | "skipped" | "disabled" | "pinned" | "reused" | "error");
@@ -342,17 +359,15 @@ fn pick_up(app: &AppHandle, wait: &FlowWaitRow, answer: WaitAnswer) -> Result<()
             continue;
         }
         if let Some(data) = runs::read_node_data(&run.id, &done.node_id) {
+            seed_origins.insert(done.node_id.clone(), data.origins);
             seeds.insert(done.node_id.clone(), (data.outputs, false));
             quiet.insert(done.node_id.clone());
         }
     }
     seeds.insert(node.id.clone(), (decided, false));
-    let active = if run.trigger_node.is_empty() {
-        spec.nodes.iter().map(|n| n.id.clone()).collect()
-    } else {
-        run::downstream(&spec, &run.trigger_node)
-    };
-    let plan = Plan { trigger: None, active, seeds, trigger_output: None, quiet, decided: Some(node.id.clone()) };
+    // The scope the run had — a partial or a step run does not turn into a full one by waiting.
+    let active = run::scope_of(&spec, &run.mode, &run.trigger_node, &run.target_node);
+    let plan = Plan { trigger: None, active, seeds, trigger_output: None, quiet, decided: Some(node.id.clone()), seed_origins };
 
     with_db(app, |conn| queries::set_run_status(conn, &run.id, "running"))?;
     let (vars, locale) = runs::run_environment(app, &run.workspace_id)?;
@@ -363,7 +378,7 @@ fn pick_up(app: &AppHandle, wait: &FlowWaitRow, answer: WaitAnswer) -> Result<()
     let label = row.mode.clone();
     runs::launch(
         app,
-        Launch { row, parsed: Arc::new(spec), plan, vars, locale, label, origin, respond: None, depth: 0, wait: false },
+        Launch { row, parsed: Arc::new(spec), plan, vars, locale, label, origin, respond: None, depth: 0, wait: false, parent: None },
     );
     Ok(())
 }

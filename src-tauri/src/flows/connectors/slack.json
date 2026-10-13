@@ -75,6 +75,7 @@
         "en": "List channels"
       },
       "method": "GET",
+      "paginate": { "style": "cursor", "next": "response_metadata.next_cursor", "param": "cursor" },
       "path": "/conversations.list",
       "query": {
         "limit": "200",
@@ -90,6 +91,7 @@
         "en": "Read a channel's messages"
       },
       "method": "GET",
+      "paginate": { "style": "cursor", "next": "response_metadata.next_cursor", "param": "cursor" },
       "path": "/conversations.history",
       "query": {
         "channel": "{{channel}}",

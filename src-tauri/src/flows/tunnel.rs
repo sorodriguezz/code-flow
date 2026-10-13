@@ -40,10 +40,13 @@ pub struct TunnelStatus {
 struct Tunnel {
     status: TunnelStatus,
     child: Option<Child>,
+    /// Which start is current. Starting takes seconds, and the user can turn the tunnel off, or switch it, in
+    /// the meantime: a start that finds it is no longer the current one ends what it began.
+    generation: u64,
 }
 
 static TUNNEL: LazyLock<Mutex<Tunnel>> =
-    LazyLock::new(|| Mutex::new(Tunnel { status: TunnelStatus { kind: "off".into(), ..Default::default() }, child: None }));
+    LazyLock::new(|| Mutex::new(Tunnel { status: TunnelStatus { kind: "off".into(), ..Default::default() }, child: None, generation: 0 }));
 
 pub fn status() -> TunnelStatus {
     TUNNEL.lock().map(|t| t.status.clone()).unwrap_or_default()
@@ -102,16 +105,21 @@ pub fn resume(app: &AppHandle) {
 
 fn start(app: &AppHandle, kind: &str) {
     let port = crate::flows::triggers::webhook::port();
-    if let Ok(mut tunnel) = TUNNEL.lock() {
-        tunnel.status = TunnelStatus { kind: kind.into(), url: None, starting: true, error: None };
-    }
+    let generation = match TUNNEL.lock() {
+        Ok(mut tunnel) => {
+            tunnel.generation += 1;
+            tunnel.status = TunnelStatus { kind: kind.into(), url: None, starting: true, error: None };
+            tunnel.generation
+        }
+        Err(_) => return,
+    };
     emit(app);
     let app = app.clone();
     let kind = kind.to_string();
     std::thread::spawn(move || {
-        let outcome = if kind == "tailscale" { start_tailscale(port) } else { start_cloudflared(&app, port) };
+        let outcome = if kind == "tailscale" { start_tailscale(port) } else { start_cloudflared(&app, port, generation) };
         if let Ok(mut tunnel) = TUNNEL.lock() {
-            if tunnel.status.kind == kind {
+            if tunnel.generation == generation && tunnel.status.kind == kind {
                 tunnel.status.starting = false;
                 match outcome {
                     Ok(Some(url)) => tunnel.status.url = Some(url),
@@ -142,7 +150,7 @@ fn find_tool(name: &str) -> Option<std::path::PathBuf> {
     })
 }
 
-fn start_cloudflared(app: &AppHandle, port: u16) -> Result<Option<String>, String> {
+fn start_cloudflared(app: &AppHandle, port: u16, generation: u64) -> Result<Option<String>, String> {
     let tool = find_tool("cloudflared").ok_or("cloudflared is not installed (brew install cloudflared, or cloudflare.com/products/tunnel)")?;
     // No console window on Windows (`proc::std_command`).
     let mut command = crate::proc::std_command(tool);
@@ -153,8 +161,24 @@ fn start_cloudflared(app: &AppHandle, port: u16) -> Result<Option<String>, Strin
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("cloudflared did not start: {e}"))?;
     let stderr = child.stderr.take().ok_or("cloudflared gave no log to read")?;
-    if let Ok(mut tunnel) = TUNNEL.lock() {
-        tunnel.child = Some(child);
+    {
+        let Ok(mut tunnel) = TUNNEL.lock() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the tunnel's state could not be read".into());
+        };
+        // Turned off, or started again, while this one was starting: it must not outlive the choice. A second
+        // `cloudflared` left running is a second public address nobody can see or stop.
+        if tunnel.generation != generation {
+            drop(tunnel);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the tunnel was switched while it started".into());
+        }
+        if let Some(mut earlier) = tunnel.child.replace(child) {
+            let _ = earlier.kill();
+            let _ = earlier.wait();
+        }
     }
     let pattern = regex::Regex::new(r"https://[a-z0-9-]+\.trycloudflare\.com").map_err(|e| e.to_string())?;
     let app = app.clone();
@@ -182,7 +206,15 @@ fn start_cloudflared(app: &AppHandle, port: u16) -> Result<Option<String>, Strin
     });
     match rx.recv_timeout(std::time::Duration::from_secs(45)) {
         Ok(url) => Ok(Some(url)),
-        Err(_) => Err("cloudflared did not report an address within 45 seconds".into()),
+        Err(_) => {
+            // It never gave an address: stop it rather than leave a process running behind an error message.
+            let child = TUNNEL.lock().ok().filter(|t| t.generation == generation).and_then(|mut t| t.child.take());
+            if let Some(mut child) = child {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Err("cloudflared did not report an address within 45 seconds".into())
+        }
     }
 }
 
@@ -210,6 +242,7 @@ fn start_tailscale(port: u16) -> Result<Option<String>, String> {
 pub fn stop() {
     let (kind, child) = match TUNNEL.lock() {
         Ok(mut tunnel) => {
+            tunnel.generation += 1;
             let kind = std::mem::replace(&mut tunnel.status, TunnelStatus { kind: "off".into(), ..Default::default() }).kind;
             (kind, tunnel.child.take())
         }

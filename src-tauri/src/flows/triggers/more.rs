@@ -96,7 +96,12 @@ const SEEN_MAX: usize = 5_000;
 pub fn news(items: &[Value], seen: &mut Map<String, Value>, id_field: &str, changed: bool, fields: &[String], now: i64) -> Vec<Value> {
     let mut out = Vec::new();
     for item in items {
-        let Some(id) = id_of(item, id_field) else { continue };
+        // An item with no id field is told apart by what it says, not dropped: a list whose entries carry no `id` would
+        // otherwise never announce anything.
+        let id = id_of(item, id_field).unwrap_or_else(|| {
+            use sha2::{Digest, Sha256};
+            format!("~{}", Sha256::digest(item.to_string().as_bytes()).iter().take(10).map(|b| format!("{b:02x}")).collect::<String>())
+        });
         let print = fingerprint(item, fields);
         // The older memory held the fingerprint alone.
         let old = seen.get(&id).and_then(|entry| entry.get(0).and_then(Value::as_str).or_else(|| entry.as_str())).map(str::to_string);
@@ -165,18 +170,27 @@ pub fn connector(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, 
             watched.clone(),
         );
         async move {
-            let credential = if credential_id.is_empty() {
-                None
+            let (credential, oauth) = if credential_id.is_empty() {
+                (None, None)
             } else {
                 let (row, secret) = super::credential_row(&app, &flow_id, &credential_id, &["bearer", "basic", "webhook", "oauth2", "header", "query"])?;
                 if row.kind == "oauth2" {
                     let token = crate::flows::oauth::access_token(&credential_id, &row.meta).await?;
-                    Some(crate::flows::engine::Credential { kind: "bearer".into(), meta: row.meta, secret: token })
+                    (Some(crate::flows::engine::Credential { kind: "bearer".into(), meta: row.meta.clone(), secret: token.clone() }), Some((row.meta, token)))
                 } else {
-                    Some(crate::flows::engine::Credential { kind: row.kind, meta: row.meta, secret })
+                    (Some(crate::flows::engine::Credential { kind: row.kind, meta: row.meta, secret }), None)
                 }
             };
-            let items = crate::flows::nodes::connector::call_outside(&call, credential).await?;
+            let items = match crate::flows::nodes::connector::call_outside(&call, credential).await {
+                // A sign-in's token refused before its time: renewed once, and the look made again.
+                Err(error) if error.contains(" answered 401") && oauth.is_some() => {
+                    let (meta, refused) = oauth.unwrap_or_default();
+                    let token = crate::flows::oauth::renewed_token(&credential_id, &meta, &refused).await?;
+                    let renewed = crate::flows::engine::Credential { kind: "bearer".into(), meta, secret: token };
+                    crate::flows::nodes::connector::call_outside(&call, Some(renewed)).await?
+                }
+                other => other?,
+            };
             let stored = memory_get(&app, &flow_id, &key, &watched);
             let first = stored.is_none();
             let mut seen = stored.and_then(|v| v.as_object().cloned()).unwrap_or_default();
@@ -527,6 +541,18 @@ mod tests {
         let mut old = Map::new();
         old.insert("5".into(), json!("{\"id\":5}"));
         assert!(news(&[json!({"id": 5})], &mut old, "id", true, &[], now).is_empty());
+    }
+
+    #[test]
+    fn an_item_with_no_id_is_told_apart_by_what_it_says() {
+        let mut seen = Map::new();
+        let now = 1_000_000_000;
+        let first = vec![json!({"name": "a"}), json!({"name": "b"})];
+        assert_eq!(news(&first, &mut seen, "id", false, &[], now).len(), 2, "not dropped");
+        let second = vec![json!({"name": "a"}), json!({"name": "c"})];
+        let found = news(&second, &mut seen, "id", false, &[], now);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["item"]["name"], "c");
     }
 
     #[test]

@@ -14,6 +14,7 @@
       "id": "listZones",
       "name": { "es": "Zonas (dominios)", "en": "Zones (domains)" },
       "method": "GET",
+      "paginate": { "style": "page", "param": "page", "total": "result_info.total_pages" },
       "path": "/zones",
       "query": { "name": "{{name}}" },
       "fields": [{ "name": "name", "label": { "es": "Dominio", "en": "Domain" }, "placeholder": "example.com" }],
@@ -44,6 +45,7 @@
       "id": "listDnsRecords",
       "name": { "es": "Registros DNS", "en": "DNS records" },
       "method": "GET",
+      "paginate": { "style": "page", "param": "page", "total": "result_info.total_pages" },
       "path": "/zones/{{zoneId}}/dns_records",
       "query": { "type": "{{type}}", "name": "{{name}}" },
       "fields": [

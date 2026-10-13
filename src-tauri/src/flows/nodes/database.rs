@@ -392,7 +392,7 @@ fn looks_like_object_id(text: &str) -> bool {
 /// item — an `_id` read back is its hex, a number typed in a field is text — so such a value
 /// matches either reading: `{"$in": [text, ObjectId]}`, `{"$in": ["18", 18]}`.
 fn mongo_candidates(column: &str, value: &Value) -> Vec<Value> {
-    let mut candidates = vec![value.clone()];
+    let mut candidates = vec![mongo_plain(value)];
     if let Value::String(text) = value {
         if column == "_id" && looks_like_object_id(text) {
             candidates.push(json!({ "$oid": text }));
@@ -401,6 +401,16 @@ fn mongo_candidates(column: &str, value: &Value) -> Vec<Value> {
         }
     }
     candidates
+}
+
+/// A value as a value. An object in a filter is an *operator* to MongoDB — `{"$ne": null}` in a
+/// webhook's body, taken as the user to look for, would match every document — so what an item carries
+/// goes in as the text of it, as the SQL side does. (The `{"$oid": …}` conversions below are ours.)
+fn mongo_plain(value: &Value) -> Value {
+    match value {
+        Value::Object(_) => Value::String(value.to_string()),
+        other => other.clone(),
+    }
 }
 
 /// Text that is a number, as one — never a string with leading zeros (`"01234"` is a postcode).
@@ -421,7 +431,7 @@ fn mongo_scalar(column: &str, value: &Value) -> Value {
     match value {
         Value::String(text) if column == "_id" && looks_like_object_id(text) => json!({ "$oid": text }),
         Value::String(text) => numeric(text).unwrap_or_else(|| value.clone()),
-        _ => value.clone(),
+        _ => mongo_plain(value),
     }
 }
 
@@ -601,20 +611,134 @@ async fn exists(ctx: &NodeCtx, session: &Session, target: &Target, row: &Map<Str
     Ok(!found.rows.is_empty() || !found.documents.is_empty())
 }
 
+/// A key field of an item or a row, its name in any case.
+fn key_value<'a>(row: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
+    row.get(key).or_else(|| row.iter().find(|(field, _)| field.eq_ignore_ascii_case(key)).map(|(_, value)| value))
+}
+
+/// A key value as text, exactly: `7` and `"7"` alike (the database answers in its column's type, the item in its own).
+fn exact_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => "\u{0}".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// A key value as the database might still call it equal: case and padding aside, `7.0` as `7`.
+fn loose_text(value: &Value) -> String {
+    let text = exact_text(value).trim().to_lowercase();
+    match text.parse::<f64>() {
+        Ok(number) if number.is_finite() => format!("{number}"),
+        _ => text,
+    }
+}
+
+/// The values that find a row, as one comparable text — two items with the same signature are the same row.
+fn key_signature(row: &Map<String, Value>, keys: &[String]) -> String {
+    keys.iter().map(|key| key_value(row, key).map_or_else(|| "\u{0}".to_string(), exact_text)).collect::<Vec<_>>().join("\u{1f}")
+}
+
+fn loose_signature(row: &Map<String, Value>, keys: &[String]) -> String {
+    keys.iter().map(|key| key_value(row, key).map_or_else(|| "\u{0}".to_string(), loose_text)).collect::<Vec<_>>().join("\u{1f}")
+}
+
+/// How many items' keys one lookup asks about.
+const LOOKUP_CHUNK: usize = 200;
+
+/// What an upsert found already in the table for one set of key columns.
+#[derive(Default)]
+struct Found {
+    /// The keys of the rows that are there, as [`key_signature`] writes them.
+    exact: std::collections::HashSet<String>,
+    /// The same, as [`loose_signature`] writes them: an item that matches only this way is asked about on its own — the
+    /// database's collation or a CHAR column's padding decides, not this text.
+    loose: std::collections::HashSet<String>,
+    /// A lookup that hit its row limit (keys that are not unique): what it did not return is not known to be absent.
+    unsure: bool,
+}
+
+/// The rows of the table whose keys the batch carries, read [`LOOKUP_CHUNK`] items at a time — `key IN (…)` for one key
+/// column, `(a = … AND b = …) OR …` for several. What an upsert decides insert-or-update by, instead of one SELECT per
+/// item.
+async fn existing(ctx: &NodeCtx, session: &Session, target: &Target, dialect: SqlDialect, rows: &[&Map<String, Value>], keys: &[String]) -> Result<Found, NodeError> {
+    let mut found = Found::default();
+    for chunk in rows.chunks(LOOKUP_CHUNK) {
+        let filter = if keys.len() == 1 {
+            let values: Vec<Value> = chunk.iter().filter_map(|row| key_value(row, &keys[0]).cloned()).filter(|v| !v.is_null()).collect();
+            sql_where(&[Condition { column: keys[0].clone(), op: "inList".into(), value: Value::Array(values) }], false, dialect)
+        } else {
+            chunk
+                .iter()
+                .map(|row| {
+                    let list: Vec<Condition> =
+                        keys.iter().map(|key| Condition { column: key.clone(), op: "equals".into(), value: key_value(row, key).cloned().unwrap_or(Value::Null) }).collect();
+                    sql_where(&list, false, dialect).map(|part| format!("({part})"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|parts| parts.join(" OR "))
+        }
+        .map_err(NodeError::Failed)?;
+        let limit = (chunk.len() * 10).min(10_000) as u32;
+        let request = DbTableDataRequest { node: target.relation(), offset: 0, limit, sort: Vec::new(), filter, options: DbQueryOptions::default() };
+        let mut answer = guarded(ctx, session, session.table_data(&request)).await?;
+        if let Some(error) = answer.error.take() {
+            return Err(NodeError::Failed(error));
+        }
+        retype(session, &mut answer).await;
+        found.unsure |= answer.truncated;
+        for row in rows_of(&answer) {
+            if let Value::Object(map) = row {
+                found.exact.insert(key_signature(&map, keys));
+                found.loose.insert(loose_signature(&map, keys));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The columns that find an item's row: the ones the node names, `_id` for a collection, the table's primary key otherwise.
+fn keys_for(params: &Value, target: &Target, columns: &[Column]) -> Vec<String> {
+    match strings(params, "dbKeys") {
+        named if !named.is_empty() => named,
+        _ if target.mongo() => vec!["_id".to_string()],
+        _ => columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect(),
+    }
+}
+
 async fn write(ctx: &NodeCtx, session: &Session, target: &Target, op: &str) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
     let columns = if target.mongo() { Vec::new() } else { load_columns(ctx, session, target).await? };
     let mut edits = Vec::with_capacity(resolved.len());
     let mut skipped: Vec<String> = Vec::new();
     let (mut inserts, mut updates) = (0usize, 0usize);
+    // What an upsert finds already there, asked for the whole batch at once (per set of key columns) — Mongo's `_id`
+    // forms are many, so a collection is still asked item by item.
+    let mut found: std::collections::HashMap<Vec<String>, Found> = std::collections::HashMap::new();
+    if let (true, Some(dialect)) = (op == "dbUpsert", target.dialect) {
+        let rows: Vec<(Map<String, Value>, Vec<String>)> =
+            resolved.iter().filter_map(|params| row_data(params).ok().map(|row| (row, keys_for(params, target, &columns)))).filter(|(_, keys)| !keys.is_empty()).collect();
+        let mut groups: Vec<(Vec<String>, Vec<&Map<String, Value>>)> = Vec::new();
+        for (row, keys) in &rows {
+            match groups.iter_mut().find(|(known, _)| known == keys) {
+                Some((_, members)) => members.push(row),
+                None => groups.push((keys.clone(), vec![row])),
+            }
+        }
+        for (keys, members) in &groups {
+            found.insert(keys.clone(), existing(ctx, session, target, dialect, members, keys).await?);
+        }
+        let asked = groups.iter().map(|(_, members)| members.len().div_ceil(LOOKUP_CHUNK)).sum::<usize>();
+        ctx.log(LogStream::Info, &format!("«{}»: {} key(s) looked up in {asked} query(ies)", target.table, rows.len()));
+    }
+    // The rows this batch inserts. `exists` looks at the table, which does not have them yet: a second item with
+    // the same key would be inserted again (a duplicate-key error, or a duplicated row where nothing is unique)
+    // instead of updating the first.
+    let mut inserted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (index, params) in resolved.iter().enumerate() {
         let ordinal = index + 1;
         let row = row_data(params).map_err(|e| NodeError::failed(format!("Item {ordinal}: {e}")))?;
-        let keys = match strings(params, "dbKeys") {
-            named if !named.is_empty() => named,
-            _ if target.mongo() => vec!["_id".to_string()],
-            _ => columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect(),
-        };
+        let keys = keys_for(params, target, &columns);
         if op != "dbInsert" && keys.is_empty() {
             return Err(NodeError::failed(format!(
                 "«{}» has no primary key — name the columns that find a row in «Key columns»",
@@ -673,7 +797,20 @@ async fn write(ctx: &NodeCtx, session: &Session, target: &Target, op: &str) -> R
             },
             _ => {
                 key_cells(&row, &keys, &columns, target.dialect, ordinal).map_err(NodeError::Failed)?;
-                if exists(ctx, session, target, &row, &keys).await? {
+                let signature = key_signature(&row, &keys);
+                let present = if inserted.contains(&signature) {
+                    true
+                } else {
+                    match found.get(&keys) {
+                        Some(found) if found.exact.contains(&signature) => true,
+                        // Equal only loosely (another case, a padded CHAR, 7 against 7.0), or a lookup that could not list
+                        // every row: the database says, for this item alone.
+                        Some(found) if found.unsure || found.loose.contains(&loose_signature(&row, &keys)) => exists(ctx, session, target, &row, &keys).await?,
+                        Some(_) => false,
+                        None => exists(ctx, session, target, &row, &keys).await?,
+                    }
+                };
+                if present {
                     // Found, and nothing to set besides the key: the row already says it.
                     if cells.iter().all(|cell| is_key(cell)) {
                         continue;
@@ -682,6 +819,7 @@ async fn write(ctx: &NodeCtx, session: &Session, target: &Target, op: &str) -> R
                     update(cells)?
                 } else {
                     inserts += 1;
+                    inserted.insert(signature);
                     insert(cells)?
                 }
             }
@@ -713,6 +851,27 @@ mod tests {
 
     fn condition(column: &str, op: &str, value: Value) -> Condition {
         Condition { column: column.to_string(), op: op.to_string(), value }
+    }
+
+    #[test]
+    fn a_key_is_equal_exactly_or_only_loosely() {
+        let row = |value: Value| json!({"k": value}).as_object().cloned().unwrap();
+        let keys = vec!["k".to_string()];
+        assert_eq!(key_signature(&row(json!(7)), &keys), key_signature(&row(json!("7")), &keys), "the database answers in its column's type");
+        assert_ne!(key_signature(&row(json!("ana")), &keys), key_signature(&row(json!("ANA ")), &keys));
+        assert_eq!(loose_signature(&row(json!("ana")), &keys), loose_signature(&row(json!("ANA ")), &keys), "a collation or a CHAR column may still call them one");
+        assert_eq!(loose_signature(&row(json!(7.0)), &keys), loose_signature(&row(json!(7)), &keys));
+    }
+
+    #[test]
+    fn two_items_with_one_key_have_one_signature_however_the_field_is_cased() {
+        let a = json!({"ID": 7, "name": "a"});
+        let b = json!({"id": 7, "name": "b"});
+        let c = json!({"id": 8});
+        let keys = vec!["id".to_string()];
+        let sig = |v: &Value| key_signature(v.as_object().unwrap(), &keys);
+        assert_eq!(sig(&a), sig(&b));
+        assert_ne!(sig(&a), sig(&c));
     }
 
     #[test]
@@ -765,6 +924,19 @@ mod tests {
             json!({"$or": [{"age": {"$gt": 18}}, {"name": {"$regex": "^a\\.b"}}]})
         );
         assert_eq!(mongo_filter(&[condition("x", "notNull", Value::Null)], false), json!({"x": {"$ne": null}}));
+    }
+
+    #[test]
+    fn an_object_an_item_carries_is_never_an_operator() {
+        let hostile = json!({"$ne": null});
+        let text = hostile.to_string();
+        for op in ["equals", "notEquals", "gt", "lte", "inList"] {
+            let filter = mongo_filter(&[condition("user", op, hostile.clone())], false);
+            assert!(!filter.to_string().contains("\"$ne\":null}"), "{op}: {filter}");
+        }
+        assert_eq!(mongo_filter(&[condition("user", "equals", hostile)], false), json!({"user": text}));
+        let listed = mongo_filter(&[condition("user", "inList", json!([{"$gt": ""}, "ana"]))], false);
+        assert!(listed["user"]["$in"].as_array().unwrap().iter().all(Value::is_string), "{listed}");
     }
 
     #[test]

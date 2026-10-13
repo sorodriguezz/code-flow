@@ -644,10 +644,20 @@ async fn audit(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let files: Vec<String> = if named.is_empty() { LOCKFILES.iter().map(|s| s.to_string()).collect() } else { named };
     let mut pinned: Vec<Pinned> = Vec::new();
     let mut read_files = Vec::new();
+    let asked_for_some = !strings(&params, "lockfiles").is_empty();
     for rel in &files {
-        if let Ok(content) = std::fs::read_to_string(root.join(rel)) {
-            read_files.push(rel.clone());
-            pinned.extend(parse_lockfile(rel, &content));
+        match std::fs::read_to_string(root.join(rel)) {
+            Ok(content) => {
+                read_files.push(rel.clone());
+                pinned.extend(parse_lockfile(rel, &content));
+            }
+            // The usual lockfiles are tried and most are not there. One that was asked for by name and cannot be read is
+            // a hole in the audit that would otherwise pass for a clean result.
+            Err(error) if asked_for_some && error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(NodeError::failed(format!("{rel} could not be read — {error}")));
+            }
+            Err(error) if asked_for_some => ctx.log(crate::flows::engine::LogStream::Info, &format!("{rel}: {error}")),
+            Err(_) => {}
         }
     }
     if read_files.is_empty() {
@@ -705,7 +715,10 @@ async fn audit(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             .or_else(|| doc.pointer("/affected/0/ecosystem_specific/severity").and_then(Value::as_str))
             .unwrap_or("UNKNOWN")
             .to_uppercase();
-        if severity_rank(&severity) < threshold {
+        // A gate that cannot tell how bad a finding is does not let it through: advisories with no severity, and the ones
+        // whose details could not be fetched, are kept whatever the threshold (they say UNKNOWN).
+        let unknown = severity_rank(&severity) == 0 && !matches!(severity.as_str(), "LOW");
+        if !unknown && severity_rank(&severity) < threshold {
             continue;
         }
         let fixed: Vec<String> = doc

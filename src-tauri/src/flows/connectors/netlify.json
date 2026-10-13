@@ -13,6 +13,7 @@
       "id": "listSites",
       "name": { "es": "Sitios", "en": "Sites" },
       "method": "GET",
+      "paginate": { "style": "link" },
       "path": "/sites",
       "fields": []
     },
@@ -20,6 +21,7 @@
       "id": "listDeploys",
       "name": { "es": "Despliegues de un sitio", "en": "A site's deploys" },
       "method": "GET",
+      "paginate": { "style": "link" },
       "path": "/sites/{{siteId}}/deploys",
       "query": { "per_page": "{{perPage}}" },
       "fields": [

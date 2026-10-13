@@ -148,12 +148,23 @@ static REFRESHING: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>
 
 /// A token good for at least another minute, refreshed and stored when it was not.
 pub async fn access_token(id: &str, meta: &Value) -> Result<String, String> {
+    token(id, meta, None).await
+}
+
+/// A new access token after a service refused `refused` (a 401 before its time: revoked, or replaced by a sign-in
+/// elsewhere) — renewed with the refresh token whatever its expiry says. When another caller already renewed it
+/// meanwhile, the stored one is the answer, and the refresh token is not spent twice.
+pub async fn renewed_token(id: &str, meta: &Value, refused: &str) -> Result<String, String> {
+    token(id, meta, Some(refused)).await
+}
+
+async fn token(id: &str, meta: &Value, refused: Option<&str>) -> Result<String, String> {
     let gate = REFRESHING.lock().map_err(|e| e.to_string())?.entry(id.to_string()).or_default().clone();
     let _held = gate.lock().await;
     let key = crate::secrets::flow_credential_key(id);
     let tokens = Tokens::read(&crate::secrets::get_secret(&key)?.ok_or("The credential has no secret stored on this computer")?);
     let now = chrono::Utc::now().timestamp();
-    if tokens.fresh(now) {
+    if tokens.fresh(now) && refused.is_none_or(|refused| refused != tokens.access_token) {
         return Ok(tokens.access_token);
     }
     if tokens.refresh_token.is_empty() {

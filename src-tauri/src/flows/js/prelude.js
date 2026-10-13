@@ -366,11 +366,32 @@
     return false;
   }
 
+  /** A number as a person writes one: a plain decimal. Not `0x1A`, not `1e3`, not `Infinity` — those are
+   *  texts that happen to parse — and not an integer too long for a double to hold exactly, whose
+   *  digits would be rounded into someone else's. */
   function asNumber(value) {
     if (typeof value === "number") return value;
     if (typeof value === "boolean") return value ? 1 : 0;
-    if (typeof value === "string" && value.trim() !== "" && !isNaN(Number(value))) return Number(value);
+    if (typeof value === "string") {
+      const text = value.trim();
+      if (!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(text)) return null;
+      const number = Number(text);
+      if (/^[+-]?\d+$/.test(text) && !Number.isSafeInteger(number)) return null;
+      return number;
+    }
     return null;
+  }
+
+  /** An integer too long for a double, as a BigInt — an id, a snowflake — so that two of them compare as
+   *  what they are. `null` for anything else. */
+  function asBigInteger(value) {
+    const text = typeof value === "string" ? value.trim() : typeof value === "number" && Number.isInteger(value) && !Number.isSafeInteger(value) ? BigInt(value).toString() : "";
+    if (!/^[+-]?\d+$/.test(text)) return null;
+    try {
+      return BigInt(text.replace(/^\+/, ""));
+    } catch (error) {
+      return null;
+    }
   }
 
   /** A date read the way a person typed it: an ISO string, a Luxon value, a JS Date, epoch millis. */
@@ -413,6 +434,9 @@
 
   /** Numbers compare as numbers, dates as instants, everything else as text. */
   function compare(left, right, ignoreCase) {
+    const bigLeft = asBigInteger(left);
+    const bigRight = asBigInteger(right);
+    if (bigLeft !== null && bigRight !== null) return bigLeft === bigRight ? 0 : bigLeft < bigRight ? -1 : 1;
     const a = asNumber(left);
     const b = asNumber(right);
     if (a !== null && b !== null) return a === b ? 0 : a < b ? -1 : 1;
@@ -429,6 +453,10 @@
       return JSON.stringify(left) === JSON.stringify(right);
     }
     if ((left === null || left === undefined) && (right === null || right === undefined || right === "")) return true;
+    // Two texts are compared as texts: "007" is not "7", and two ids that differ in their last digit
+    // are not the same number because a double rounds them alike. A text against a number still reads
+    // as the number — a value that came out of a CSV is a string.
+    if (typeof left === "string" && typeof right === "string") return asText(left, ignoreCase) === asText(right, ignoreCase);
     return compare(left, right, ignoreCase) === 0;
   }
 
@@ -604,15 +632,29 @@
   }
 
   /** A date read from whatever an item holds: ISO, SQL, epoch seconds or millis, or a custom format. */
-  function readDate(value, format, zone) {
+  function readDate(value, format, zone, blankIsNow) {
     const options = zone ? { zone } : {};
     if (DateTime.isDateTime(value)) return zone ? value.setZone(zone) : value;
     if (value instanceof Date) return DateTime.fromJSDate(value, options);
-    if (value === undefined || value === null || value === "") return DateTime.now().setZone(zone || "system");
+    if (value === undefined || value === null || (typeof value === "string" && value.trim() === "")) {
+      // "Now" is something to ask for (the Now operation, or a blank second date: the age of something).
+      // A date that came out empty — a field the item did not have — is not "now".
+      if (blankIsNow) return DateTime.now().setZone(zone || "system");
+      throw new Error("The date is empty");
+    }
     if (format) return DateTime.fromFormat(String(value), String(format), options);
-    if (typeof value === "number") return value > 1e11 ? DateTime.fromMillis(value, options) : DateTime.fromSeconds(value, options);
+    // A number: epoch seconds or millis — unless it is a calendar date written as digits (20240315).
+    if (typeof value === "number") {
+      if (Number.isInteger(value) && value >= 10000101 && value <= 99991231) {
+        const compact = DateTime.fromFormat(String(value), "yyyyMMdd", options);
+        if (compact.isValid) return compact;
+      }
+      return value > 1e11 ? DateTime.fromMillis(value, options) : DateTime.fromSeconds(value, options);
+    }
     const text = String(value).trim();
-    if (/^\d+$/.test(text)) return text.length > 11 ? DateTime.fromMillis(Number(text), options) : DateTime.fromSeconds(Number(text), options);
+    // Digits only: epoch seconds (10 or 11 of them) or millis (12 or more) — a shorter run is a date
+    // (2024, 202403, 20240315), never a moment in 1970.
+    if (/^\d+$/.test(text) && text.length >= 10) return text.length > 11 ? DateTime.fromMillis(Number(text), options) : DateTime.fromSeconds(Number(text), options);
     let parsed = DateTime.fromISO(text, options);
     if (!parsed.isValid) parsed = DateTime.fromSQL(text, options);
     if (!parsed.isValid) parsed = DateTime.fromRFC2822(text, options);
@@ -645,7 +687,7 @@
   /** The Date node: one operation on one date of each item. */
   function dateOperation(params) {
     const zone = params.zone || undefined;
-    const source = readDate(params.value, params.fromFormat, zone);
+    const source = params.operation === "now" ? DateTime.now().setZone(zone || "system") : readDate(params.value, params.fromFormat, zone, false);
     const output = params.format === "custom" ? params.customFormat : params.format;
     switch (params.operation) {
       case "format":
@@ -662,7 +704,8 @@
       case "endOf":
         return writeDate(source.endOf(params.unit ? params.unit.replace(/s$/, "") : "day"), output);
       case "diff": {
-        const other = readDate(params.other, params.fromFormat, zone);
+        if (!source.isValid) throw new Error("The first date is not a date");
+        const other = readDate(params.other, params.fromFormat, zone, true);
         if (!other.isValid) throw new Error("The second date is not a date");
         const unit = params.unit || "days";
         const value = source.diff(other, unit).as(unit);
@@ -691,7 +734,8 @@
         if (!source.isValid) throw new Error("Not a date");
         return isBusinessDay(source, params);
       case "businessDaysBetween": {
-        const other = readDate(params.other, params.fromFormat, zone);
+        if (!source.isValid) throw new Error("The first date is not a date");
+        const other = readDate(params.other, params.fromFormat, zone, true);
         if (!other.isValid) throw new Error("The second date is not a date");
         // Business days after the first date up to and including the second; negative when it is earlier.
         const forward = other >= source;

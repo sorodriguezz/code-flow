@@ -96,6 +96,7 @@
         "en": "Tasks"
       },
       "method": "GET",
+      "paginate": { "style": "cursor", "next": "next_cursor", "param": "cursor" },
       "path": "/tasks",
       "query": {
         "project_id": "{{project_id}}",
@@ -152,6 +153,7 @@
         "en": "Projects"
       },
       "method": "GET",
+      "paginate": { "style": "cursor", "next": "next_cursor", "param": "cursor" },
       "path": "/projects",
       "fields": [],
       "result": "results"

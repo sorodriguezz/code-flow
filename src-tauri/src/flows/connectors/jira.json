@@ -129,6 +129,7 @@
         "en": "Search issues (JQL)"
       },
       "method": "GET",
+      "paginate": { "style": "cursor", "next": "nextPageToken", "param": "nextPageToken", "last": "isLast" },
       "path": "/search/jql",
       "query": {
         "jql": "{{jql}}",

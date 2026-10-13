@@ -6,13 +6,15 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rand::seq::SliceRandom;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::{flag, number, strings, text, NodeCtx, NodeError};
+use super::{flag, number, strings, text, MemoryUse, NodeCtx, NodeError};
+use crate::flows::engine::StateUpdate;
 use crate::flows::run::{Item, Ports};
 use crate::flows::value::{as_object, get_path, leaf_name, remove_path, set_path, to_number, to_text};
 
@@ -180,24 +182,39 @@ async fn set(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 // ------------------------------------------------------------------------------------------- sort
 
-/// How two field values order: numbers numerically, text case-insensitively, missing last.
-fn compare_values(a: Option<&Value>, b: Option<&Value>) -> Ordering {
-    match (a, b) {
-        (None | Some(Value::Null), None | Some(Value::Null)) => Ordering::Equal,
-        (None | Some(Value::Null), _) => Ordering::Greater,
-        (_, None | Some(Value::Null)) => Ordering::Less,
-        (Some(a), Some(b)) => match (a, b) {
-            (Value::Number(_), Value::Number(_)) | (Value::Bool(_), Value::Bool(_)) => {
-                to_number(a).unwrap_or(0.0).total_cmp(&to_number(b).unwrap_or(0.0))
-            }
-            _ => match (to_number(a), to_number(b)) {
-                (Some(x), Some(y)) if !matches!(a, Value::String(s) if s.trim().is_empty()) => x.total_cmp(&y),
-                _ => {
-                    let (x, y) = (to_text(a), to_text(b));
-                    x.to_lowercase().cmp(&y.to_lowercase()).then(x.cmp(&y))
-                }
-            },
+/// What a sort key holds, in the order the kinds sit: numbers (and text that is a number), then
+/// everything else as text, then nothing at all. Ranking the kinds first is what makes the order a
+/// real one — compared pair by pair, `10`, `9` and `"5x"` would each come before the next in a circle.
+enum Key {
+    Number(f64),
+    Text(String),
+    Missing,
+}
+
+fn key_of(value: Option<&Value>) -> Key {
+    match value {
+        None | Some(Value::Null) => Key::Missing,
+        Some(Value::String(text)) if text.trim().is_empty() => Key::Text(String::new()),
+        Some(value @ (Value::Number(_) | Value::Bool(_) | Value::String(_))) => match to_number(value) {
+            Some(number) if number.is_finite() => Key::Number(number),
+            _ => Key::Text(to_text(value)),
         },
+        Some(other) => Key::Text(to_text(other)),
+    }
+}
+
+/// How two field values order, ascending: numbers numerically, text case-insensitively, missing last.
+/// `descending` reverses the values and never the missing ones, which stay last either way.
+fn compare_values(a: Option<&Value>, b: Option<&Value>, descending: bool) -> Ordering {
+    let flip = |order: Ordering| if descending { order.reverse() } else { order };
+    match (key_of(a), key_of(b)) {
+        (Key::Missing, Key::Missing) => Ordering::Equal,
+        (Key::Missing, _) => Ordering::Greater,
+        (_, Key::Missing) => Ordering::Less,
+        (Key::Number(x), Key::Number(y)) => flip(x.total_cmp(&y)),
+        (Key::Number(_), Key::Text(_)) => flip(Ordering::Less),
+        (Key::Text(_), Key::Number(_)) => flip(Ordering::Greater),
+        (Key::Text(x), Key::Text(y)) => flip(x.to_lowercase().cmp(&y.to_lowercase()).then(x.cmp(&y))),
     }
 }
 
@@ -223,8 +240,7 @@ async fn sort(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             }
             indexed.sort_by(|(_, a), (_, b)| {
                 for (field, descending) in &keys {
-                    let order = compare_values(get_path(&a.json, field), get_path(&b.json, field));
-                    let order = if *descending { order.reverse() } else { order };
+                    let order = compare_values(get_path(&a.json, field), get_path(&b.json, field), *descending);
                     if order != Ordering::Equal {
                         return order;
                     }
@@ -448,33 +464,44 @@ fn dedupe(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     if compare != "all" && fields.is_empty() {
         return Err(NodeError::failed("Choose the fields to compare"));
     }
-    let across_runs = text(&ctx.params, "scope") == "history";
+    // Across runs, what earlier runs saw is what this one is told it has seen — but only a real run (a
+    // trigger's) adds to it, and only once the run has ended well: a failure further down must not leave the
+    // events it never delivered marked as done, nor a test run mark what the first real event will be.
+    let use_memory = if text(&ctx.params, "scope") == "history" { ctx.memory_use() } else { MemoryUse::Ignore };
     let state_key = format!("__dedupe:{}", ctx.node.id);
-    let mut history: Vec<String> = if across_runs {
+    let history: Vec<String> = if use_memory == MemoryUse::Ignore {
+        Vec::new()
+    } else {
         ctx.run
             .host
             .state_get(&state_key)
             .map_err(NodeError::failed)?
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default()
-    } else {
-        Vec::new()
     };
-    let mut seen: HashSet<String> = history.iter().cloned().collect();
+    let mut seen: HashSet<String> = history.into_iter().collect();
+    let mut fresh: Vec<String> = Vec::new();
     let mut out = Vec::new();
     for (index, item) in ctx.items().into_iter().enumerate() {
         let print = fingerprint(&identity(&item.json, &compare, &fields));
         if seen.insert(print.clone()) {
-            history.push(print);
+            fresh.push(print);
             out.push(Item::paired(item.json.clone(), index));
         }
     }
-    if across_runs {
+    if use_memory == MemoryUse::Keep && !fresh.is_empty() {
         let keep = number(&ctx.params, "historySize").unwrap_or(10_000.0).clamp(1.0, 1_000_000.0) as usize;
-        if history.len() > keep {
-            history.drain(..history.len() - keep);
-        }
-        ctx.run.host.state_set(&state_key, Some(&json!(history))).map_err(NodeError::failed)?;
+        let update: StateUpdate = Arc::new(move |current| {
+            let mut history: Vec<String> = current.and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
+            // Applied to what is stored by then: another run may have added its own meanwhile.
+            let known: HashSet<String> = history.iter().cloned().collect();
+            history.extend(fresh.iter().filter(|print| !known.contains(*print)).cloned());
+            if history.len() > keep {
+                history.drain(..history.len() - keep);
+            }
+            Some(json!(history))
+        });
+        ctx.run.host.state_stage(&state_key, update).map_err(NodeError::failed)?;
     }
     Ok(vec![out])
 }
@@ -485,10 +512,32 @@ mod tests {
 
     #[test]
     fn values_order_numbers_then_text_and_missing_last() {
-        assert_eq!(compare_values(Some(&json!(2)), Some(&json!(10))), Ordering::Less);
-        assert_eq!(compare_values(Some(&json!("10")), Some(&json!("9"))), Ordering::Greater, "numeric text sorts as numbers");
-        assert_eq!(compare_values(Some(&json!("b")), Some(&json!("A"))), Ordering::Greater);
-        assert_eq!(compare_values(None, Some(&json!(1))), Ordering::Greater);
+        assert_eq!(compare_values(Some(&json!(2)), Some(&json!(10)), false), Ordering::Less);
+        assert_eq!(compare_values(Some(&json!("10")), Some(&json!("9")), false), Ordering::Greater, "numeric text sorts as numbers");
+        assert_eq!(compare_values(Some(&json!("b")), Some(&json!("A")), false), Ordering::Greater);
+        assert_eq!(compare_values(None, Some(&json!(1)), false), Ordering::Greater);
+        // Descending reverses the values, never the missing ones: they are last either way.
+        assert_eq!(compare_values(Some(&json!(1)), Some(&json!(3)), true), Ordering::Greater);
+        assert_eq!(compare_values(None, Some(&json!(3)), true), Ordering::Greater);
+        assert_eq!(compare_values(Some(&json!(3)), None, true), Ordering::Less);
+    }
+
+    #[test]
+    fn the_order_is_a_real_one_even_for_mixed_kinds() {
+        // Compared pair by pair, 10 < "5x" < 9 < 10. Ranked by kind first, it is a line.
+        let values = [json!(10), json!(9), json!("5x"), json!("b"), json!("A"), json!(null), json!(2.5)];
+        for descending in [false, true] {
+            for a in &values {
+                for b in &values {
+                    for c in &values {
+                        let (ab, bc, ac) = (compare_values(Some(a), Some(b), descending), compare_values(Some(b), Some(c), descending), compare_values(Some(a), Some(c), descending));
+                        if ab != Ordering::Greater && bc != Ordering::Greater {
+                            assert_ne!(ac, Ordering::Greater, "{a} <= {b} <= {c} but not {a} <= {c}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

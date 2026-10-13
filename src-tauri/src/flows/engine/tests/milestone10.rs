@@ -133,6 +133,8 @@ async fn resolver_con_ia_fixes_what_stands_one_finding_at_a_time() {
         Ok(json!([{"kind": "finding", "findingId": "F-001", "fixed": true, "result": "Validado el null"}])),
         Ok(json!([{"kind": "finding", "findingId": "F-003", "fixed": false, "error": "no compila"}])),
     ]);
+    let (repo_dir, root) = repo_with_one_file();
+    script.projects.lock().unwrap().insert("p1".into(), root.clone());
     let ran = run_script(
         one(
             "ai.prFix",
@@ -151,12 +153,22 @@ async fn resolver_con_ia_fixes_what_stands_one_finding_at_a_time() {
     assert_eq!(calls[1].1["switchBranch"], true);
     let out = ran.output("it", 0);
     assert_eq!((out.len(), out[1]["error"].as_str()), (2, Some("no compila")));
+    // An agent edits that repository: the run took its restore point first — once, for both fixes.
+    assert_eq!(script.edits.lock().unwrap().len(), 1);
+    crate::git::checkpoint::remove_flow_baseline(&root, "run-1");
+    let _ = std::fs::remove_dir_all(&repo_dir);
 
     let local = run_script(one("ai.prFix", json!({"project": "p1", "prId": "7", "engine": {"provider": "local", "model": "", "account": ""}})), scripted_app(vec![]), 0).await;
     assert!(local.report("it").error.unwrap_or_default().contains("CLI engine"));
     // Each fix is an AI run: the hourly cap counts them.
-    let capped = run_script(one("ai.prFix", json!({"project": "p1", "prId": "7", "ids": "F-001, F-002"})), scripted_app(vec![Ok(json!([]))]), 1).await;
+    let capped_script = scripted_app(vec![Ok(json!([]))]);
+    let (capped_dir, capped_root) = repo_with_one_file();
+    capped_script.projects.lock().unwrap().insert("p1".into(), capped_root.clone());
+    let capped = run_script(one("ai.prFix", json!({"project": "p1", "prId": "7", "ids": "F-001, F-002"})), capped_script, 1).await;
     assert_eq!(capped.status("it"), NodeStatus::Error);
+    assert!(capped.report("it").error.unwrap_or_default().contains("cap"), "{:?}", capped.report("it").error);
+    crate::git::checkpoint::remove_flow_baseline(&capped_root, "run-1");
+    let _ = std::fs::remove_dir_all(&capped_dir);
 }
 
 #[tokio::test]

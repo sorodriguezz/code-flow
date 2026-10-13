@@ -70,7 +70,10 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 struct Graph<'a> {
     ctx: &'a NodeCtx,
-    token: String,
+    /// The access token the calls carry: replaced once, by a renewed one, when the service refuses it (see `send`).
+    token: std::sync::Mutex<String>,
+    credential_id: String,
+    renewed: std::sync::atomic::AtomicBool,
     zone: Tz,
     client: reqwest::Client,
 }
@@ -87,18 +90,33 @@ impl<'a> Graph<'a> {
         }
         let zone = crate::flows::schedule::zone_of(&json!({}), ctx.run.timezone.as_deref()).unwrap_or(chrono_tz::UTC);
         let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build().map_err(|e| NodeError::failed(e.to_string()))?;
-        Ok(Graph { ctx, token: credential.secret, zone, client })
+        Ok(Graph { ctx, token: std::sync::Mutex::new(credential.secret), credential_id: id.trim().to_string(), renewed: Default::default(), zone, client })
     }
 
     async fn send(&self, what: &str, request: reqwest::RequestBuilder) -> Result<reqwest::Response, NodeError> {
         let started = std::time::Instant::now();
-        let response = tokio::select! {
-            response = request.bearer_auth(&self.token).send() => response.map_err(|e| NodeError::failed(format!("Microsoft could not be reached: {e}")))?,
-            _ = self.ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
-        };
+        // A call that changes something (a mail sent, a row written, an event made) is an effect that has happened once it
+        // succeeds: the node's retry must not start over from the first item and do it twice.
+        let writes = request.try_clone().and_then(|copy| copy.build().ok()).is_some_and(|built| !matches!(*built.method(), Method::GET | Method::HEAD));
+        let spare = request.try_clone();
+        let token = self.token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let mut response = super::net::send_patiently(self.ctx, request.bearer_auth(&token), "Microsoft").await?;
+        // A token refused before its time (revoked, or replaced by a sign-in elsewhere) is renewed once and the call made again.
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && !self.renewed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if let Some(again) = spare {
+                if let Some(fresh) = self.ctx.renewed_credential(&self.credential_id, &token).await? {
+                    *self.token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh.secret.clone();
+                    self.ctx.log(LogStream::Info, "Microsoft refused the sign-in's token — renewed it, asking again");
+                    response = super::net::send_patiently(self.ctx, again.bearer_auth(&fresh.secret), "Microsoft").await?;
+                }
+            }
+        }
         let status = response.status();
         self.ctx.log(LogStream::Info, &format!("{what} → {} ({} ms)", status.as_u16(), started.elapsed().as_millis()));
         if status.is_success() {
+            if writes {
+                self.ctx.mark_sent();
+            }
             return Ok(response);
         }
         let body = response.text().await.unwrap_or_default();

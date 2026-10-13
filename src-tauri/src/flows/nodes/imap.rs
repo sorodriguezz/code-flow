@@ -88,7 +88,15 @@ async fn one(ctx: &NodeCtx, session: &mut mail::Session, params: &Value) -> Resu
             let folder = Some(text(params, "attachmentsFolder")).filter(|f| !f.is_empty()).map(|f| super::expand_path(&f));
             let mut out = Vec::new();
             for (uid, raw, flags) in mail::fetch(session, &uids).await.map_err(NodeError::Failed)? {
-                out.push(mail::read(uid, &raw, &flags, &mailbox, folder.as_deref()).map_err(NodeError::Failed)?);
+                // One message that cannot be read is an item that says so, not the end of the node: it would fail the same way
+                // on every run, being always among the newest, and the mailbox would be stuck behind it.
+                match mail::read(uid, &raw, &flags, &mailbox, folder.as_deref()) {
+                    Ok(message) => out.push(message),
+                    Err(error) => {
+                        ctx.log(LogStream::Info, &format!("{mailbox}: message {uid} could not be read — {error}"));
+                        out.push(json!({"uid": uid, "mailbox": mailbox, "unreadable": true, "error": error}));
+                    }
+                }
             }
             if flag(params, "markRead") {
                 mail::mark_read(session, &uids).await.map_err(NodeError::Failed)?;

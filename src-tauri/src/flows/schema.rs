@@ -128,6 +128,76 @@ pub fn prune(value: &mut Value, schema: &Value) {
     }
 }
 
+/// [`prune`], and the small repairs a model's answer deserves before it is judged: a key the schema lets
+/// be null, left out, is null; a choice written in another case or with spaces around it (`" Cobros"` for
+/// `cobros`) is the choice; a number written as text (`"45990"`) where a number is asked is the number.
+/// None of these is worth a second question — the answer *said* what was asked — and each used to cost
+/// one (and, when the retry slipped the same way, the node).
+pub fn settle(value: &mut Value, schema: &Value) {
+    prune(value, schema);
+    repair(value, schema);
+}
+
+fn allows_null(schema: &Value) -> bool {
+    match schema.get("type") {
+        Some(Value::String(one)) => one == "null",
+        Some(Value::Array(many)) => many.iter().any(|t| t.as_str() == Some("null")),
+        _ => false,
+    }
+}
+
+fn repair(value: &mut Value, schema: &Value) {
+    if let (Value::String(text), Some(options)) = (&*value, schema.get("enum").and_then(Value::as_array)) {
+        let options: &[Value] = options;
+        if !options.contains(&Value::String(text.clone())) {
+            let wanted = text.trim().to_lowercase();
+            if let Some(found) = options.iter().find(|option| option.as_str().is_some_and(|o| o.trim().to_lowercase() == wanted)) {
+                *value = found.clone();
+                return;
+            }
+        }
+    }
+    if let Value::String(text) = &*value {
+        let wants_number = match schema.get("type") {
+            Some(Value::String(one)) => matches!(one.as_str(), "number" | "integer"),
+            Some(Value::Array(many)) => {
+                many.iter().any(|t| matches!(t.as_str(), Some("number" | "integer"))) && !many.iter().any(|t| t.as_str() == Some("string"))
+            }
+            _ => false,
+        };
+        if wants_number {
+            let parsed = text.trim().parse::<i64>().map(Value::from).ok().or_else(|| text.trim().parse::<f64>().ok().filter(|f| f.is_finite()).and_then(serde_json::Number::from_f64).map(Value::Number));
+            if let Some(number) = parsed {
+                *value = number;
+            }
+        }
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            let Some(properties) = schema.get("properties").and_then(Value::as_object) else { return };
+            for name in schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                if !map.contains_key(name) && properties.get(name).is_some_and(allows_null) {
+                    map.insert(name.to_string(), Value::Null);
+                }
+            }
+            for (name, child) in map.iter_mut() {
+                if let Some(child_schema) = properties.get(name) {
+                    repair(child, child_schema);
+                }
+            }
+        }
+        Value::Array(list) => {
+            if let Some(items) = schema.get("items") {
+                for child in list {
+                    repair(child, items);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// What is wrong with `value` against `schema` — empty when it conforms. Paths are written
 /// `$.field[2].name`, the way the retry reads them back to the model.
 pub fn validate(value: &Value, schema: &Value) -> Vec<String> {
@@ -299,6 +369,26 @@ mod tests {
         assert!(errors.contains(&"$.tags[0]: expected string, got integer".to_string()), "{errors:?}");
         assert!(errors.contains(&"$.extra: not allowed".to_string()), "{errors:?}");
         assert_eq!(validate(&json!([1]), &schema), vec!["$: expected object, got array".to_string()]);
+    }
+
+    #[test]
+    fn a_slip_that_said_what_was_asked_is_not_a_retry() {
+        let schema = from_fields(&json!([
+            {"name": "kind", "type": "enum", "options": "cobros, errores", "required": true},
+            {"name": "note", "type": "string", "required": false},
+            {"name": "amount", "type": "number", "required": true}
+        ]))
+        .unwrap();
+        // A choice in another case, an optional key left out, a number written as text.
+        let mut answer = json!({"kind": " Cobros ", "amount": "45990"});
+        settle(&mut answer, &schema);
+        assert_eq!(answer, json!({"kind": "cobros", "note": null, "amount": 45990}));
+        assert!(validate(&answer, &schema).is_empty(), "{:?}", validate(&answer, &schema));
+        // What is really wrong stays wrong.
+        let mut wrong = json!({"kind": "otra", "amount": "mucho"});
+        settle(&mut wrong, &schema);
+        let errors = validate(&wrong, &schema);
+        assert!(errors.iter().any(|e| e.contains("must be one of")) && errors.iter().any(|e| e.contains("expected number")), "{errors:?}");
     }
 
     #[test]

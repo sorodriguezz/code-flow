@@ -151,7 +151,25 @@ pub fn columns_of(objects: &[&Value]) -> Vec<String> {
 pub fn rows_to_objects(rows: Vec<Vec<String>>, header: bool) -> Vec<Value> {
     let mut rows = rows.into_iter();
     let names: Vec<String> = if header {
-        rows.next().unwrap_or_default()
+        // Two columns with one name would be one key and the first column lost: the later ones are told apart (`total`,
+        // `total_2`).
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        rows.next()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| {
+                if name.is_empty() {
+                    return name;
+                }
+                let mut unique = name.clone();
+                let mut copy = 2;
+                while !taken.insert(unique.clone()) {
+                    unique = format!("{name}_{copy}");
+                    copy += 1;
+                }
+                unique
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -177,6 +195,9 @@ fn delimiter_of(params: &Value) -> char {
 
 /// XML as JSON: an element with only text is its text; attributes are `@name`; text beside
 /// children is `#text`; an element that repeats is an array.
+/// How deep an XML document may nest.
+const XML_MAX_DEPTH: usize = 256;
+
 pub fn xml_to_json(input: &str) -> Result<Value, String> {
     use quick_xml::events::Event;
     // Text is trimmed once per element, not per event: an entity splits "Ana &amp; Co" into three
@@ -221,6 +242,11 @@ pub fn xml_to_json(input: &str) -> Result<Value, String> {
     loop {
         match reader.read_event().map_err(|e| format!("Not valid XML: {e}"))? {
             Event::Start(start) => {
+                // A document nested hundreds of thousands of levels deep is a few megabytes of tags, and a
+                // tree no recursive walk survives (a stack overflow ends the whole app, not the node).
+                if stack.len() >= XML_MAX_DEPTH {
+                    return Err(format!("The XML is nested more than {XML_MAX_DEPTH} levels deep"));
+                }
                 let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
                 stack.push((name, attrs(&start)?, String::new()));
             }
@@ -325,12 +351,24 @@ fn write_xml(out: &mut String, name: &str, value: &Value) {
 
 pub fn json_to_xml(value: &Value, root: &str) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    let root_name = if root.is_empty() { "root" } else { root };
     match value {
-        Value::Object(map) if map.len() == 1 && root.is_empty() => {
+        // `{ "pedido": {…} }` is the document `<pedido>…</pedido>` — unless what it holds is a list,
+        // which would be several roots; that one goes inside `<root>` like any other list.
+        Value::Object(map) if map.len() == 1 && root.is_empty() && !map.values().any(Value::is_array) => {
             let (name, child) = map.iter().next().expect("one key");
             write_xml(&mut out, name, child);
         }
-        other => write_xml(&mut out, if root.is_empty() { "root" } else { root }, other),
+        // A document has one root: a list at the top is that root's entries.
+        Value::Array(list) => {
+            let tag = xml_name(root_name);
+            out.push_str(&format!("<{tag}>"));
+            for entry in list {
+                write_xml(&mut out, "item", entry);
+            }
+            out.push_str(&format!("</{tag}>"));
+        }
+        other => write_xml(&mut out, root_name, other),
     }
     out
 }
@@ -384,7 +422,67 @@ fn json_to_yaml(value: &Value) -> yaml_rust2::Yaml {
     }
 }
 
+/// How many values a YAML text may expand to once its aliases are followed.
+const YAML_EXPANDED_LIMIT: u64 = 1_000_000;
+
+/// Counts what a YAML text *would* expand to, without expanding it. An alias stands for the whole
+/// anchored value, and the loader copies it: nine levels of lists whose entries are nine aliases of the
+/// level below are a few hundred bytes of text and 9⁹ values in memory.
+#[derive(Default)]
+struct YamlExpansion {
+    /// Open collections: the anchor each carries (0: none) and how many values it holds so far.
+    open: Vec<(usize, u64)>,
+    anchored: std::collections::HashMap<usize, u64>,
+    total: u64,
+}
+
+impl YamlExpansion {
+    fn add(&mut self, values: u64) {
+        match self.open.last_mut() {
+            Some((_, held)) => *held = held.saturating_add(values),
+            None => self.total = self.total.saturating_add(values),
+        }
+    }
+
+    fn over(&self) -> bool {
+        self.total > YAML_EXPANDED_LIMIT || self.open.iter().any(|(_, held)| *held > YAML_EXPANDED_LIMIT)
+    }
+}
+
+impl yaml_rust2::parser::EventReceiver for YamlExpansion {
+    fn on_event(&mut self, event: yaml_rust2::parser::Event) {
+        use yaml_rust2::parser::Event;
+        match event {
+            Event::Scalar(_, _, anchor, _) => {
+                if anchor != 0 {
+                    self.anchored.insert(anchor, 1);
+                }
+                self.add(1);
+            }
+            Event::Alias(anchor) => {
+                let size = self.anchored.get(&anchor).copied().unwrap_or(1);
+                self.add(size);
+            }
+            Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => self.open.push((anchor, 1)),
+            Event::SequenceEnd | Event::MappingEnd => {
+                if let Some((anchor, size)) = self.open.pop() {
+                    if anchor != 0 {
+                        self.anchored.insert(anchor, size);
+                    }
+                    self.add(size);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn parse_yaml(input: &str) -> Result<Value, String> {
+    let mut expansion = YamlExpansion::default();
+    // A text that does not parse is the loader's to explain; one that parses is sized first.
+    if yaml_rust2::parser::Parser::new_from_str(input).load(&mut expansion, true).is_ok() && expansion.over() {
+        return Err(format!("The YAML expands to more than {YAML_EXPANDED_LIMIT} values — aliases that hold aliases"));
+    }
     let documents = yaml_rust2::YamlLoader::load_from_str(input).map_err(|e| format!("Not valid YAML: {e}"))?;
     Ok(match documents.len() {
         0 => Value::Null,
@@ -517,6 +615,11 @@ fn digest(algorithm: &str, bytes: &[u8]) -> Vec<u8> {
 fn mac(algorithm: &str, key: &[u8], bytes: &[u8]) -> Vec<u8> {
     use hmac::{Hmac, Mac};
     match algorithm {
+        "md5" => {
+            let mut mac = Hmac::<md5::Md5>::new_from_slice(key).expect("any key length");
+            mac.update(bytes);
+            mac.finalize().into_bytes().to_vec()
+        }
         "sha1" => {
             let mut mac = Hmac::<sha1::Sha1>::new_from_slice(key).expect("any key length");
             mac.update(bytes);
@@ -605,9 +708,16 @@ pub(crate) fn jwt_verify(token: &str, algorithm: &str, secret: &[u8], now: i64) 
     if !same {
         return fail("The signature does not match", payload);
     }
-    if let Some(exp) = payload.get("exp").and_then(Value::as_i64) {
-        if now >= exp {
+    // Times in a token are seconds since 1970, and some issuers write them with decimals: read as numbers, not only integers —
+    // an `exp` of 1700000000.5 skipped the check altogether.
+    if let Some(exp) = payload.get("exp").and_then(Value::as_f64) {
+        if now as f64 >= exp {
             return fail("Expired", payload);
+        }
+    }
+    if let Some(not_before) = payload.get("nbf").and_then(Value::as_f64) {
+        if (now as f64) < not_before {
+            return fail("Not valid yet (nbf)", payload);
         }
     }
     json!({"valid": true, "error": null, "payload": payload})
@@ -1245,6 +1355,36 @@ mod tests {
     }
 
     #[test]
+    fn documents_built_to_exhaust_memory_are_refused() {
+        // 200 000 levels of nesting.
+        let deep = format!("{}x{}", "<a>".repeat(200_000), "</a>".repeat(200_000));
+        assert!(xml_to_json(&deep).unwrap_err().contains("nested"), "deep XML");
+        assert!(xml_to_json(&format!("{}x{}", "<a>".repeat(200), "</a>".repeat(200))).is_ok());
+
+        // Nine levels of nine aliases: a few hundred bytes of text, 9^9 values once followed.
+        let mut bomb = String::from("a: &a [x, x, x, x, x, x, x, x, x]\n");
+        let mut previous = 'a';
+        for level in ['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] {
+            let refs = vec![format!("*{previous}"); 9].join(", ");
+            bomb.push_str(&format!("{level}: &{level} [{refs}]\n"));
+            previous = level;
+        }
+        assert!(parse_yaml(&bomb).unwrap_err().contains("expands to more than"), "alias bomb");
+        // Aliases in ordinary use (merge keys, shared lists) are untouched.
+        let compose = "base: &base {restart: always, env: [A, B]}\nweb: {<<: *base, image: web}\ndb: {<<: *base, image: db}\n";
+        assert_eq!(parse_yaml(compose).unwrap()["db"]["image"], json!("db"));
+    }
+
+    #[test]
+    fn a_list_at_the_top_of_an_xml_document_is_inside_its_one_root() {
+        let one = |value: Value, root: &str| json_to_xml(&value, root).replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "");
+        assert_eq!(one(json!([{"a": 1}, {"a": 2}]), ""), "<root><item><a>1</a></item><item><a>2</a></item></root>");
+        assert_eq!(one(json!([1, 2]), "numeros"), "<numeros><item>1</item><item>2</item></numeros>");
+        assert_eq!(one(json!({"orders": [{"id": 1}, {"id": 2}]}), ""), "<root><orders><id>1</id></orders><orders><id>2</id></orders></root>");
+        assert_eq!(one(json!({"pedido": {"id": 7}}), ""), "<pedido><id>7</id></pedido>");
+    }
+
+    #[test]
     fn digests_and_macs_match_known_vectors() {
         assert_eq!(encode(&digest("sha256", b"abc"), "hex"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert_eq!(encode(&digest("md5", b"abc"), "hex"), "900150983cd24fb0d6963f7d28e17f72");
@@ -1253,6 +1393,8 @@ mod tests {
             encode(&mac("sha256", b"key", b"The quick brown fox jumps over the lazy dog"), "hex"),
             "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
         );
+        // RFC 2202: the MD5 option is HMAC-MD5, not HMAC-SHA-256 under another name.
+        assert_eq!(encode(&mac("md5", b"Jefe", b"what do ya want for nothing?"), "hex"), "750c783e6ab0b503eaa86e310a5db738");
     }
 
     #[test]
@@ -1360,6 +1502,27 @@ mod tests {
 #[cfg(test)]
 mod crypto_tests {
     use super::*;
+
+    #[test]
+    fn a_token_with_a_decimal_expiry_or_a_future_start_is_still_judged_on_time() {
+        // Signed with the node's own signer, whose `exp` is whole; decimals and `nbf` come from other issuers.
+        let sign = |claims: Value| {
+            let header = B64URL.encode(json!({"alg": "HS256", "typ": "JWT"}).to_string());
+            let body = B64URL.encode(claims.to_string());
+            let signature = B64URL.encode(mac(jwt_hash("HS256"), b"k", format!("{header}.{body}").as_bytes()));
+            format!("{header}.{body}.{signature}")
+        };
+        assert_eq!(jwt_verify(&sign(json!({"exp": 1000.5})), "HS256", b"k", 2_000)["error"], "Expired", "decimals count");
+        assert_eq!(jwt_verify(&sign(json!({"nbf": 5_000})), "HS256", b"k", 2_000)["error"], "Not valid yet (nbf)");
+        assert_eq!(jwt_verify(&sign(json!({"nbf": 1_000, "exp": 9_000})), "HS256", b"k", 2_000)["valid"], true);
+    }
+
+    #[test]
+    fn two_columns_with_one_name_are_both_kept() {
+        let rows = vec![vec!["id".to_string(), "total".into(), "total".into(), "".into()], vec!["1".into(), "10".into(), "20".into(), "x".into()]];
+        let objects = rows_to_objects(rows, true);
+        assert_eq!(objects[0], json!({"id": "1", "total": "10", "total_2": "20", "column4": "x"}));
+    }
 
     #[test]
     fn a_jwt_round_trips_and_a_wrong_secret_an_alg_swap_or_an_expiry_fail() {

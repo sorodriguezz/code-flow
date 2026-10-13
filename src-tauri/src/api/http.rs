@@ -326,6 +326,8 @@ fn redirect_policy(options: &NetworkOptions, hops: &Arc<Mutex<Vec<String>>>) -> 
     let hops = Arc::clone(hops);
     let max = options.max_redirects;
     let keep_auth = options.keep_auth_on_redirect;
+    // A hop to another server is ours to make, so that what authenticates the request can stay behind.
+    let guard = options.guard_credentials && !keep_auth;
 
     redirect::Policy::custom(move |attempt| {
         // `previous` starts with the original URL, so its length is the number of hops already
@@ -338,7 +340,7 @@ fn redirect_policy(options: &NetworkOptions, hops: &Arc<Mutex<Vec<String>>>) -> 
         // offers no way to opt out, which is exactly right when `keep_auth_on_redirect` is off.
         // When it is on, we hand the 3xx back to `exchange` and re-issue the request ourselves
         // with the credentials still attached.
-        if keep_auth {
+        if keep_auth || guard {
             let crosses_host = attempt
                 .previous()
                 .last()
@@ -383,9 +385,12 @@ async fn run_exchange(
     let mut url = url.clone();
     let mut with_body = true;
     let mut sent: Option<SentRequestSummary> = None;
+    // The request as it goes out from here: the one given, until a hop leaves the server and the
+    // credentials stay behind (`NetworkOptions::guard_credentials`).
+    let mut current: std::borrow::Cow<'_, HttpSendRequest> = std::borrow::Cow::Borrowed(req);
 
     loop {
-        let built = build_request(client, req, &method, &url, extra_headers, with_body).await?;
+        let built = build_request(client, &current, &method, &url, extra_headers, with_body).await?;
         let summary = built.summary;
         if sent.is_none() {
             sent = Some(summary);
@@ -398,7 +403,7 @@ async fn run_exchange(
             .map_err(|e| transport_error(&method, &url, &e))?;
         let first_byte_ms = started.elapsed().as_millis() as i64;
 
-        let Some(next) = manual_redirect_target(&req.options, &response, &url)? else {
+        let Some(next) = manual_redirect_target(&current.options, &response, &url)? else {
             return Ok(Exchange {
                 response,
                 sent: sent.expect("the first iteration always records a summary"),
@@ -430,8 +435,37 @@ async fn run_exchange(
             }
             _ => {}
         }
+        if req.options.guard_credentials && !req.options.keep_auth_on_redirect && !same_origin_full(&url, &next) {
+            current = std::borrow::Cow::Owned(without_credentials(req));
+        }
         url = next;
     }
+}
+
+/// Scheme, host and port all the same — the server a credential was meant for.
+fn same_origin_full(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme() && same_origin(a, b)
+}
+
+/// Headers that say nothing secret, and so stay on a request that has left the server.
+const PLAIN_HEADERS: &[&str] = &[
+    "accept", "accept-encoding", "accept-language", "cache-control", "content-type", "content-length", "user-agent", "range", "if-none-match",
+    "if-modified-since", "x-requested-with", "pragma", "dnt",
+];
+
+/// Whether a header says nothing secret (see [`PLAIN_HEADERS`]).
+pub(crate) fn is_plain_header(name: &str) -> bool {
+    PLAIN_HEADERS.contains(&name.trim().to_ascii_lowercase().as_str())
+}
+
+/// The request without anything that authenticates it: no login, no cookies, no signature, and only the
+/// plain headers.
+fn without_credentials(req: &HttpSendRequest) -> HttpSendRequest {
+    let mut plain = req.clone();
+    plain.headers.retain(|(name, _)| PLAIN_HEADERS.contains(&name.trim().to_ascii_lowercase().as_str()));
+    plain.auth = None;
+    plain.options.cookies.clear();
+    plain
 }
 
 /// `Some(target)` only when the redirect policy deliberately stopped so we could re-send with the
@@ -442,7 +476,7 @@ fn manual_redirect_target(
     current: &Url,
 ) -> Result<Option<Url>, String> {
     if !options.follow_redirects
-        || !options.keep_auth_on_redirect
+        || !(options.keep_auth_on_redirect || options.guard_credentials)
         || !response.status().is_redirection()
     {
         return Ok(None);
@@ -1433,14 +1467,44 @@ fn decode_body(bytes: Vec<u8>, content_type: Option<&str>) -> (String, Option<St
         return (String::new(), Some(encoded));
     }
 
-    let text = match content_type.and_then(charset_of).as_deref() {
-        Some("iso-8859-1" | "latin1" | "latin-1" | "windows-1252" | "cp1252") => {
-            bytes.iter().map(|&b| b as char).collect()
-        }
-        _ => String::from_utf8_lossy(&bytes).into_owned(),
-    };
+    let text = decode_text(&bytes, content_type.and_then(charset_of).as_deref());
     drop(bytes);
     (text, None)
+}
+
+/// A text body in the charset it declares, a byte order mark deciding over the declaration: an invisible U+FEFF at the
+/// front of a JSON document is what makes `JSON.parse` refuse it, and a UTF-16 body read as UTF-8 is a string of NULs.
+fn decode_text(bytes: &[u8], charset: Option<&str>) -> String {
+    match bytes {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => return String::from_utf8_lossy(rest).into_owned(),
+        [0xFF, 0xFE, rest @ ..] => return decode_utf16(rest, false),
+        [0xFE, 0xFF, rest @ ..] => return decode_utf16(rest, true),
+        _ => {}
+    }
+    match charset {
+        Some("utf-16" | "utf-16le") => decode_utf16(bytes, false),
+        Some("utf-16be") => decode_utf16(bytes, true),
+        Some("iso-8859-1" | "latin1" | "latin-1") => bytes.iter().map(|&b| b as char).collect(),
+        Some("windows-1252" | "cp1252") => bytes.iter().map(|&b| cp1252(b)).collect(),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+fn decode_utf16(bytes: &[u8], big_endian: bool) -> String {
+    let units = bytes.chunks_exact(2).map(|pair| if big_endian { u16::from_be_bytes([pair[0], pair[1]]) } else { u16::from_le_bytes([pair[0], pair[1]]) });
+    char::decode_utf16(units).map(|unit| unit.unwrap_or('\u{FFFD}')).collect()
+}
+
+/// Windows-1252 differs from Latin-1 in 0x80–0x9F: the curly quotes, the euro sign, the dashes.
+fn cp1252(byte: u8) -> char {
+    const HIGH: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›',
+        'œ', '\u{9D}', 'ž', 'Ÿ',
+    ];
+    match byte {
+        0x80..=0x9F => HIGH[(byte - 0x80) as usize],
+        other => other as char,
+    }
 }
 
 #[cfg(test)]
@@ -1456,6 +1520,20 @@ mod decode_tests {
         assert!(text.starts_with("<!doctype html>"), "{text}");
         assert!(text.ends_with('\u{FFFD}'), "the bad byte becomes a replacement char");
         assert!(base64.is_none());
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_not_part_of_the_text_and_decides_the_charset() {
+        let mut json = vec![0xEF, 0xBB, 0xBF];
+        json.extend_from_slice(b"{\"a\":1}");
+        assert_eq!(decode_body(json, Some("application/json")).0, "{\"a\":1}");
+        // UTF-16, with its mark (little endian), whatever the header says.
+        let wide: Vec<u8> = [0xFF, 0xFE].into_iter().chain("hola ñ".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        assert_eq!(decode_body(wide, Some("text/plain; charset=utf-8")).0, "hola ñ");
+        // Declared Windows-1252: the curly quote and the euro sign are not control characters.
+        assert_eq!(decode_body(vec![0x93, b'a', 0x94, 0x80], Some("text/plain; charset=windows-1252")).0, "“a”€");
+        // Declared Latin-1 stays Latin-1.
+        assert_eq!(decode_body(vec![0xE9], Some("text/plain; charset=iso-8859-1")).0, "é");
     }
 
     #[test]

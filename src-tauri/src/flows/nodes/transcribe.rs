@@ -42,22 +42,27 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         written => written.trim().to_string(),
     };
     let mut out = Vec::with_capacity(resolved.len());
+    let mut failed: Vec<Item> = Vec::new();
     for (index, params) in resolved.iter().enumerate() {
-        let written = text(params, "audioPath");
-        if written.trim().is_empty() {
-            return Err(NodeError::failed("Name the audio file to transcribe"));
-        }
-        let path = super::vision::local_file(ctx, written.trim(), index).await?;
-        if !path.is_file() {
-            return Err(NodeError::failed(format!("{} is not a file", path.display())));
-        }
         let started = Instant::now();
-        let transcript = match engine.as_str() {
-            "gemini" => gemini(ctx, params, &path).await?,
-            "whisperLocal" => whisper_local(ctx, params, &path, index).await?,
-            "codeflowWhisper" => codeflow_whisper(ctx, params, &path).await?,
-            _ => openai_like(ctx, params, &path, engine == "compatible").await?,
+        // One file the engine cannot read does not take the others' transcripts with it (when the node goes on after errors).
+        let work = async {
+            let written = text(params, "audioPath");
+            if written.trim().is_empty() {
+                return Err(NodeError::failed("Name the audio file to transcribe"));
+            }
+            let path = super::vision::local_file(ctx, written.trim(), index).await?;
+            if !path.is_file() {
+                return Err(NodeError::failed(format!("{} is not a file", path.display())));
+            }
+            match engine.as_str() {
+                "gemini" => gemini(ctx, params, &path).await,
+                "whisperLocal" => whisper_local(ctx, params, &path, index).await,
+                "codeflowWhisper" => codeflow_whisper(ctx, params, &path).await,
+                _ => openai_like(ctx, params, &path, engine == "compatible").await,
+            }
         };
+        let transcript = crate::or_next!(ctx, index, failed, work.await);
         let mut json = items.get(index).map(|item| item.json.clone()).filter(Value::is_object).unwrap_or_else(|| json!({}));
         set_path(&mut json, &target, json!(transcript.text.trim()));
         if flag(params, "timestamps") {
@@ -73,11 +78,12 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
                 meta.insert("language".into(), json!(language));
             }
             meta.insert("durationMs".into(), json!(started.elapsed().as_millis() as u64));
-            map.entry("ai").or_insert(Value::Object(meta));
+            // This node's own call: a chain (vision, then summarize) shows the last one's, not the first's.
+            map.insert("ai".into(), Value::Object(meta));
         }
         out.push(if items.is_empty() { Item::new(json) } else { Item::paired(json, index) });
     }
-    Ok(vec![out])
+    Ok(super::with_failures(ctx, vec![out], failed, 0))
 }
 
 /// CodeFlow's own Whisper — the engine and a model «Dictar» or «Reuniones» downloaded — run by the
@@ -186,6 +192,7 @@ async fn openai_like(ctx: &NodeCtx, params: &Value, path: &Path, compatible: boo
         form.text("response_format", "json")
     };
     let request = llm::signed(llm::client()?.post(format!("{base}/audio/transcriptions")).multipart(form), provider, key.as_deref());
+    super::ai::take_slot(ctx)?;
     let answer = llm::send(ctx, if compatible { "The transcription server" } else { "OpenAI" }, request).await?;
     let mut transcript = read_verbose(&answer);
     transcript.model = model;
@@ -206,6 +213,7 @@ async fn gemini(ctx: &NodeCtx, params: &Value, path: &Path) -> Result<Transcript
     let timestamps = flag(params, "timestamps");
     let request = gemini_body(audio_mime(path), &base64::engine::general_purpose::STANDARD.encode(bytes), &text(params, "audioLanguage"), &text(params, "audioPrompt"), timestamps);
     let url = llm::chat_url("gemini", &base, &model);
+    super::ai::take_slot(ctx)?;
     let answer = llm::send(ctx, "Gemini", llm::signed(llm::client()?.post(&url).json(&request), "gemini", key.as_deref())).await?;
     let reply = llm::read_answer("gemini", &answer);
     let mut transcript = if timestamps {

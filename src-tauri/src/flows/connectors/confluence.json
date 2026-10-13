@@ -39,6 +39,7 @@
         "en": "Search pages"
       },
       "method": "GET",
+      "paginate": { "style": "url", "next": "_links.next", "base": "_links.base" },
       "path": "/rest/api/content/search",
       "query": {
         "cql": "{{cql}}",
@@ -225,6 +226,7 @@
         "en": "Spaces"
       },
       "method": "GET",
+      "paginate": { "style": "url", "next": "_links.next", "base": "_links.base" },
       "path": "/rest/api/space",
       "query": {
         "limit": "{{limit}}"

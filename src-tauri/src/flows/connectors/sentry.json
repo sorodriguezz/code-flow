@@ -13,6 +13,7 @@
       "id": "listIssues",
       "name": { "es": "Issues de un proyecto", "en": "A project's issues" },
       "method": "GET",
+      "paginate": { "style": "link" },
       "path": "/projects/{{org}}/{{project}}/issues/",
       "query": { "query": "{{query}}", "statsPeriod": "{{period}}", "limit": "{{limit}}" },
       "fields": [

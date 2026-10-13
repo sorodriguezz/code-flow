@@ -109,6 +109,11 @@ pub fn iban_ok(iban: &str) -> bool {
     if compact.len() < 15 || compact.len() > 34 {
         return false;
     }
+    // An IBAN is ASCII letters and digits. Anything else cannot be one — and slicing the text at byte 4
+    // would land inside a multibyte character and abort the whole run.
+    if !compact.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return false;
+    }
     let rearranged = format!("{}{}", &compact[4..], &compact[..4]);
     let mut remainder: u64 = 0;
     for c in rearranged.chars() {
@@ -158,8 +163,12 @@ static SECRETS: LazyLock<Vec<Detector>> = LazyLock::new(|| {
         },
         Detector {
             kind: "secret".into(),
-            pattern: Regex::new(r#"(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)\s*[:=]\s*["']?(?P<v>[^\s"',;]{6,})"#)
-                .expect("a shipped pattern compiles"),
+            // The name may be one word of a longer one (`DB_PASSWORD`, `JWT_SECRET`,
+            // `AWS_SECRET_ACCESS_KEY`) and may be quoted (`"password": "…"`): the assignment is what counts.
+            pattern: Regex::new(
+                r#"(?i)\b[A-Za-z0-9_]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_]*["']?\s*[:=]\s*["']?(?P<v>[^\s"',;]{6,})"#,
+            )
+            .expect("a shipped pattern compiles"),
             group: Some("v"),
             check: always,
         },
@@ -238,7 +247,9 @@ fn mask(kind: &str, value: &str) -> String {
             let (body, check) = value.rsplit_once('-').unwrap_or((value, ""));
             format!("{}-{check}", mask_keeping(body, 0))
         }
-        "secret" => format!("{}••••", value.chars().take(4).collect::<String>()),
+        // The start of a token helps to tell which one it was — but only of a long one: four characters of a
+        // six-character password are most of it.
+        "secret" => format!("{}••••", value.chars().take((value.chars().count() / 4).min(4)).collect::<String>()),
         _ => mask_keeping(value, 0),
     }
 }
@@ -248,6 +259,29 @@ fn tag(kind: &str) -> String {
         "custom" => "REDACTED".into(),
         other => other.to_ascii_uppercase(),
     }
+}
+
+/// The card inside a longer run of digits: a window of 16, 15, 19, 14 or 13 digits that starts or ends the
+/// run and passes the Luhn check. Only for runs of 17 digits or more — a 16-digit number that fails the
+/// check is not a card, and a shorter window of it that happens to pass is not either.
+fn salvage_card(run: &str) -> Option<(usize, usize)> {
+    let digits: Vec<usize> = run.char_indices().filter(|(_, c)| c.is_ascii_digit()).map(|(at, _)| at).collect();
+    let count = digits.len();
+    if count < 17 {
+        return None;
+    }
+    for len in [16, 15, 19, 14, 13] {
+        if len >= count {
+            continue;
+        }
+        for first in [0, count - len] {
+            let (from, to) = (digits[first], digits[first + len - 1] + 1);
+            if luhn(&run[from..to]) {
+                return Some((from, to));
+            }
+        }
+    }
+    None
 }
 
 /// What a found value becomes.
@@ -280,11 +314,24 @@ pub fn redact_text(text: &str, detectors: &[&Detector], mode: Mode, salt: &str, 
                 continue;
             };
             let value = span.as_str().trim_end_matches([' ', '-']);
-            if value.is_empty() || !(detector.check)(value) {
+            if value.is_empty() {
                 continue;
             }
-            let end = span.start() + value.len();
-            out.push_str(&current[last..span.start()]);
+            // A card number with something stuck to it (`4111 1111 1111 1111 12/26`) is matched whole,
+            // fails the check as a whole, and would leave the card in the clear: its own digits are looked
+            // for inside the match.
+            let (start, value) = if (detector.check)(value) {
+                (span.start(), value)
+            } else if detector.kind == "card" {
+                match salvage_card(value) {
+                    Some((from, to)) => (span.start() + from, &value[from..to]),
+                    None => continue,
+                }
+            } else {
+                continue;
+            };
+            let end = start + value.len();
+            out.push_str(&current[last..start]);
             out.push_str(&replacement(&detector.kind, value, mode, salt));
             last = end;
             *found.entry(detector.kind.clone()).or_default() += 1;
@@ -377,6 +424,42 @@ mod tests {
         let (out, found) = redacted("Pedido 4111111111111112 del 2026-10-06 a las 10:30:45, total $12.990", Mode::Placeholder);
         assert_eq!(out, "Pedido 4111111111111112 del 2026-10-06 a las 10:30:45, total $12.990", "{found:?}");
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_short_secret_shows_next_to_nothing_of_itself() {
+        assert_eq!(mask("secret", "hunter2xyz"), "hu••••");
+        assert_eq!(mask("secret", "abc123"), "a••••");
+        assert_eq!(mask("secret", "abcdefghijklmnop"), "abcd••••");
+        assert_eq!(mask("secret", "abc"), "••••");
+    }
+
+    #[test]
+    fn a_card_with_something_stuck_to_it_is_still_found() {
+        let (out, found) = redacted("Card 4111 1111 1111 1111 12/26 CVV 123", Mode::Placeholder);
+        assert_eq!(out, "Card [CARD] 12/26 CVV 123", "{found:?}");
+        let (out, _) = redacted("ref 99 4111111111111111 ok", Mode::Placeholder);
+        assert!(out.contains("[CARD]"), "{out}");
+        // A long number that holds no card stays as it is.
+        let (out, found) = redacted("pedido 12345678901234567890", Mode::Placeholder);
+        assert_eq!(out, "pedido 12345678901234567890");
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn secrets_are_found_in_environment_names_and_in_json() {
+        let (out, _) = redacted("DB_PASSWORD=hunter2xyz JWT_SECRET=abcdef123456 AWS_SECRET_ACCESS_KEY=AKIAxxxx1234", Mode::Placeholder);
+        assert_eq!(out, "DB_PASSWORD=[SECRET] JWT_SECRET=[SECRET] AWS_SECRET_ACCESS_KEY=[SECRET]");
+        let (out, found) = redacted(r#"{"password":"hunter2xyz","user":"ana"}"#, Mode::Placeholder);
+        assert_eq!(out, r#"{"password":"[SECRET]","user":"ana"}"#);
+        assert_eq!(found.get("secret"), Some(&1));
+    }
+
+    #[test]
+    fn an_iban_with_a_multibyte_character_is_no_iban_and_no_panic() {
+        assert!(!iban_ok("ES9é1 2100 0418 4502 0005 1332"));
+        assert!(!iban_ok("ESé91 2100 0418 4502 0005 1332"));
+        assert!(iban_ok("GB82 WEST 1234 5698 7654 32"));
     }
 
     #[test]

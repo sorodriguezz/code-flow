@@ -43,7 +43,21 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             .enumerate()
             .map(|(index, params)| (index, params.clone(), row_of(params, items.get(index).map(|item| &item.json))))
             .collect();
-        let written = if ctx.param_str("sheetsOp") == "sheetsAppend" { sheets_append(&google, &rows).await? } else { sheets_update(&google, &rows).await? };
+        // Rows go to the sheet their own item names: each distinct spreadsheet and sheet is one request, not the first item's
+        // for all of them.
+        let mut groups: Vec<((String, String), Vec<(usize, Value, Map<String, Value>)>)> = Vec::new();
+        for row in rows {
+            let key = (doc_id(&text(&row.1, "spreadsheetId")), sheet_of(&text(&row.1, "sheetRange")));
+            match groups.iter_mut().find(|(known, _)| *known == key) {
+                Some((_, members)) => members.push(row),
+                None => groups.push((key, vec![row])),
+            }
+        }
+        let mut written = Vec::new();
+        for (_, members) in &groups {
+            written.extend(if ctx.param_str("sheetsOp") == "sheetsAppend" { sheets_append(&google, members).await? } else { sheets_update(&google, members).await? });
+        }
+        written.sort_by_key(|(index, _)| *index);
         let paired = !items.is_empty();
         return Ok(vec![written.into_iter().map(|(index, json)| if paired { Item::paired(json, index) } else { Item::new(json) }).collect()]);
     }
@@ -68,7 +82,10 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 struct Google<'a> {
     ctx: &'a NodeCtx,
-    token: String,
+    /// The access token the calls carry: replaced once, by a renewed one, when the service refuses it (see `send`).
+    token: std::sync::Mutex<String>,
+    credential_id: String,
+    renewed: std::sync::atomic::AtomicBool,
     /// The signed-in address, when the credential knows it — Gmail's sender.
     account: String,
     zone: Tz,
@@ -88,18 +105,33 @@ impl<'a> Google<'a> {
         let account = credential.meta.get("account").and_then(Value::as_str).unwrap_or_default().to_string();
         let zone = crate::flows::schedule::zone_of(&json!({}), ctx.run.timezone.as_deref()).unwrap_or(chrono_tz::UTC);
         let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build().map_err(|e| NodeError::failed(e.to_string()))?;
-        Ok(Google { ctx, token: credential.secret, account, zone, client })
+        Ok(Google { ctx, token: std::sync::Mutex::new(credential.secret), credential_id: id.trim().to_string(), renewed: Default::default(), account, zone, client })
     }
 
     async fn send(&self, what: &str, request: reqwest::RequestBuilder) -> Result<reqwest::Response, NodeError> {
         let started = std::time::Instant::now();
-        let response = tokio::select! {
-            response = request.bearer_auth(&self.token).send() => response.map_err(|e| NodeError::failed(format!("Google could not be reached: {e}")))?,
-            _ = self.ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
-        };
+        // A call that changes something (a mail sent, a row written, an event made) is an effect that has happened once it
+        // succeeds: the node's retry must not start over from the first item and do it twice.
+        let writes = request.try_clone().and_then(|copy| copy.build().ok()).is_some_and(|built| !matches!(*built.method(), Method::GET | Method::HEAD));
+        let spare = request.try_clone();
+        let token = self.token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let mut response = super::net::send_patiently(self.ctx, request.bearer_auth(&token), "Google").await?;
+        // A token refused before its time (revoked, or replaced by a sign-in elsewhere) is renewed once and the call made again.
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && !self.renewed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if let Some(again) = spare {
+                if let Some(fresh) = self.ctx.renewed_credential(&self.credential_id, &token).await? {
+                    *self.token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh.secret.clone();
+                    self.ctx.log(LogStream::Info, "Google refused the sign-in's token — renewed it, asking again");
+                    response = super::net::send_patiently(self.ctx, again.bearer_auth(&fresh.secret), "Google").await?;
+                }
+            }
+        }
         let status = response.status();
         self.ctx.log(LogStream::Info, &format!("{what} → {} ({} ms)", status.as_u16(), started.elapsed().as_millis()));
         if status.is_success() {
+            if writes {
+                self.ctx.mark_sent();
+            }
             return Ok(response);
         }
         let body = response.text().await.unwrap_or_default();
@@ -215,7 +247,10 @@ async fn gmail_raw(params: &Value, account: &str) -> Result<String, NodeError> {
     if to.is_empty() {
         return Err(NodeError::failed("Write who the email goes to"));
     }
-    let mut builder = lettre::Message::builder().from(from).subject(text(params, "subject"));
+    // The Gmail API reads its recipients from the message's own headers — there is no separate envelope —
+    // so the Bcc header has to stay in the text (Gmail removes it before delivery). Lettre drops it by
+    // default, and a Bcc'd person would never be mailed while the node said `sent`.
+    let mut builder = lettre::Message::builder().keep_bcc().from(from).subject(text(params, "subject"));
     for mailbox in to {
         builder = builder.to(mailbox);
     }
@@ -442,6 +477,14 @@ pub(super) fn headers_of(values: &[Value]) -> Vec<String> {
     values.first().and_then(Value::as_array).map(|row| row.iter().map(cell_text).collect()).unwrap_or_default()
 }
 
+/// How Sheets reads what is written. `RAW`: a cell holds what it was given — a text starting with `=` is a text, `00123` and
+/// `+56912345678` stay as they are — which is what data from a webhook or an API must get: as typed, `=IMPORTDATA(…)` in a
+/// field is a formula that runs for whoever opens the sheet. `USER_ENTERED` (the node's «Read as typed») is for texts that
+/// are meant to be formulas or dates.
+fn input_option(params: &Value) -> &'static str {
+    if flag(params, "sheetsParse") { "USER_ENTERED" } else { "RAW" }
+}
+
 async fn sheets_append(google: &Google<'_>, rows: &[(usize, Value, Map<String, Value>)]) -> Result<Vec<(usize, Value)>, NodeError> {
     let Some((_, params, _)) = rows.first() else { return Ok(Vec::new()) };
     let spreadsheet = doc_id(&required(params, "spreadsheetId", "the spreadsheet (its link or id)")?);
@@ -470,7 +513,7 @@ async fn sheets_append(google: &Google<'_>, rows: &[(usize, Value, Map<String, V
     if !skipped.is_empty() {
         google.ctx.log(LogStream::Info, &format!("Not in the sheet's header, so not written: {}", skipped.join(", ")));
     }
-    let query = [("valueInputOption", "USER_ENTERED".to_string()), ("insertDataOption", "INSERT_ROWS".to_string())];
+    let query = [("valueInputOption", input_option(params).to_string()), ("insertDataOption", "INSERT_ROWS".to_string())];
     let answer = google
         .json("Sheets append", Method::POST, &format!("{}:append", values_url(&spreadsheet, &sheet)), &query, Some(&json!({"values": values})))
         .await?;
@@ -532,11 +575,11 @@ async fn sheets_update(google: &Google<'_>, rows: &[(usize, Value, Map<String, V
         out.push((*index, json));
     }
     if !data.is_empty() {
-        let body = json!({"valueInputOption": "USER_ENTERED", "data": data});
+        let body = json!({"valueInputOption": input_option(first), "data": data});
         google.json("Sheets update", Method::POST, &format!("{SHEETS}/{}/values:batchUpdate", crate::oauth::urlencode(&spreadsheet)), &[], Some(&body)).await?;
     }
     if !appended.is_empty() {
-        let query = [("valueInputOption", "USER_ENTERED".to_string()), ("insertDataOption", "INSERT_ROWS".to_string())];
+        let query = [("valueInputOption", input_option(first).to_string()), ("insertDataOption", "INSERT_ROWS".to_string())];
         google
             .json("Sheets append", Method::POST, &format!("{}:append", values_url(&spreadsheet, &sheet)), &query, Some(&json!({"values": appended})))
             .await?;
@@ -557,7 +600,12 @@ pub fn moment(raw: &str, zone: Tz) -> Option<DateTime<FixedOffset>> {
         .iter()
         .find_map(|format| NaiveDateTime::parse_from_str(raw, format).ok())
         .or_else(|| NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok().and_then(|d| d.and_hms_opt(0, 0, 0)))?;
-    zone.from_local_datetime(&local).earliest().map(|at| at.fixed_offset())
+    // A time inside the hour a clock skips forward (02:30 the night summer time starts) does not exist: it is the same
+    // wall-clock reading an hour later, which is what the person who wrote it meant.
+    zone.from_local_datetime(&local)
+        .earliest()
+        .or_else(|| zone.from_local_datetime(&(local + chrono::Duration::hours(1))).earliest())
+        .map(|at| at.fixed_offset())
 }
 
 fn event_json(event: &Value) -> Value {
@@ -816,6 +864,22 @@ async fn drive(google: &Google<'_>, params: &Value) -> Result<Vec<Value>, NodeEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn values_are_written_as_given_unless_the_node_says_to_read_them_as_typed() {
+        assert_eq!(input_option(&json!({})), "RAW", "a field that starts with = is a text");
+        assert_eq!(input_option(&json!({"sheetsParse": false})), "RAW");
+        assert_eq!(input_option(&json!({"sheetsParse": true})), "USER_ENTERED");
+    }
+
+    #[test]
+    fn a_time_in_the_hour_a_clock_skips_is_read_an_hour_later() {
+        // Santiago's summer time starts at midnight: 00:00 → 01:00 on 2026-09-06, so 00:30 never happens.
+        let zone: Tz = "America/Santiago".parse().unwrap();
+        let at = moment("2026-09-06 00:30", zone).expect("not an error");
+        assert_eq!(at.format("%Y-%m-%d %H:%M %:z").to_string(), "2026-09-06 01:30 -03:00");
+        assert_eq!(moment("2026-09-07 00:30", zone).unwrap().format("%H:%M").to_string(), "00:30", "an ordinary night is untouched");
+    }
 
     #[test]
     fn links_are_read_down_to_their_ids() {

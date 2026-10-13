@@ -399,20 +399,24 @@ pub fn routes_by_category(params: &Value) -> bool {
     params.get("routing").and_then(Value::as_str) == Some("routeBranch")
 }
 
-/// A classifier's category names, in order, blank ones left out.
+/// A classifier's category names, in order, blank ones and repeats left out: a name written twice is one
+/// category, and one port — the second would be a port nothing is ever sent to.
 pub fn category_names(params: &Value) -> Vec<String> {
-    params
+    let mut names: Vec<String> = Vec::new();
+    for name in params
         .get("categories")
         .and_then(Value::as_array)
-        .map(|list| {
-            list.iter()
-                .filter_map(|c| c.get("name").and_then(Value::as_str))
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("name").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 /// The descriptor for a type, or `None` for one this build does not know.

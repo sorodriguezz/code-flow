@@ -60,6 +60,7 @@
       "id": "listChannels",
       "name": { "es": "Listar los canales de un equipo", "en": "List a team's channels" },
       "method": "GET",
+      "paginate": { "style": "url", "next": "@odata.nextLink" },
       "path": "/teams/{{teamId}}/channels",
       "fields": [
         { "name": "teamId", "label": { "es": "Equipo", "en": "Team" }, "required": true, "lookup": {"path": "/me/joinedTeams", "result": "value", "value": "id", "label": "{{displayName}}"} }
@@ -70,6 +71,7 @@
       "id": "listTeams",
       "name": { "es": "Listar mis equipos", "en": "List my teams" },
       "method": "GET",
+      "paginate": { "style": "url", "next": "@odata.nextLink" },
       "path": "/me/joinedTeams",
       "result": "value"
     }

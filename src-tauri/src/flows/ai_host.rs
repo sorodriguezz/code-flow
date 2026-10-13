@@ -101,6 +101,14 @@ pub(super) async fn cli(host: &AppHost, call: AiCall, cancel: CancellationToken)
         };
         (config, app_mcp)
     };
+    // Codex's read-only sandbox does not reach the programs its own config starts: a node that may not
+    // write switches the user's MCP servers off by name, as a text-only chat turn does.
+    let mcp_block = if !call.can_edit && config.provider == "codex" {
+        let env = config.engine.account().cloned().unwrap_or_else(|| crate::ai_accounts::AccountEnv::system(&config.provider));
+        crate::chat_mcp::codex_read_only_block(&config.binary, &env).await
+    } else {
+        Vec::new()
+    };
     // Other agents in the same checkout are told a flow is working there, as they are told of a chat.
     let _presence = call.cwd.as_deref().map(|cwd| {
         crate::ai_locks::enter(cwd, &format!("el flujo «{}» (nodo «{}»)", host.flow_name, call.node_name))
@@ -120,6 +128,7 @@ pub(super) async fn cli(host: &AppHost, call: AiCall, cancel: CancellationToken)
         effort: call.effort.as_deref(),
         json_schema: schema.as_deref(),
         app_mcp,
+        mcp_block,
     };
     let run = ai_runs::scoped(
         host.app.clone(),
@@ -164,6 +173,13 @@ fn nonblank(text: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Whether a node's address is the server Settings points at: none written (it uses Settings'), or the
+/// same one (a trailing slash aside). What lets Settings' API key go with the request.
+fn is_settings_server(written: &str, settings_url: &str) -> bool {
+    let written = written.trim().trim_end_matches('/');
+    written.is_empty() || written == settings_url.trim().trim_end_matches('/')
+}
+
 /// One request to a local model.
 pub(super) async fn local(host: &AppHost, call: LocalCall, cancel: CancellationToken) -> Result<LocalAnswer, String> {
     local_on(&host.app, Some(host), call, cancel).await
@@ -179,7 +195,11 @@ async fn local_on(app: &tauri::AppHandle, host: Option<&AppHost>, call: LocalCal
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         local_config::read(&conn)?
     };
-    let api_key = call.api_key.clone().or_else(local_config::api_key);
+    // The key in Settings belongs to the server Settings points at. A node that names another address —
+    // written in the flow, perhaps by somebody else — is not handed it: that server gets the key the node
+    // carries (its own credential), or none.
+    let own_server = |kind: BackendKind| is_settings_server(&call.url, &settings.url_for(kind));
+    let api_key = call.api_key.clone().or_else(|| BackendKind::from_setting(&call.server).filter(|kind| own_server(*kind)).and_then(|_| local_config::api_key()));
     let (kind, url, model, context) = match BackendKind::from_setting(&call.server) {
         Some(kind) => {
             let url = nonblank(&call.url).unwrap_or_else(|| settings.url_for(kind));
@@ -391,6 +411,16 @@ pub(super) fn template(host: &AppHost, kind: &str) -> String {
     lock_db(host).ok().and_then(|conn| shared_template(&conn, key, legacy).ok()).unwrap_or_default()
 }
 
+/// Whether the engine this node would use limits itself to reading. An engine that cannot be found is
+/// taken as one that does not: the restore point costs little, the missing one a repository.
+pub(super) fn enforces_read_only(host: &AppHost, engine: &EngineChoice) -> bool {
+    let Ok(conn) = lock_db(host) else { return false };
+    match engine_config(&conn, engine, &host.workspace_id) {
+        Ok(config) => crate::ai::engine_for(&config.provider).enforces_read_only(),
+        Err(_) => false,
+    }
+}
+
 /// The engine's plan at the last reading, from the quota cache — never a request.
 pub(super) fn quota(host: &AppHost, engine: &EngineChoice) -> Option<(f64, String)> {
     let key = {
@@ -518,6 +548,21 @@ fn chain_summary(detail: &crate::db::models::ChainDetail) -> Value {
 /// `CODEFLOW_LIVE_FLOWS=1 cargo test --lib flows::ai_host::live -- --ignored --nocapture`, or name
 /// the CLIs (`CODEFLOW_LIVE_FLOWS=claude,codex`).
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_key_goes_only_to_the_server_settings_names() {
+        let own = "http://127.0.0.1:11434";
+        assert!(is_settings_server("", own));
+        assert!(is_settings_server("  ", own));
+        assert!(is_settings_server("http://127.0.0.1:11434/", own));
+        assert!(!is_settings_server("https://third-party.example/v1", own));
+        assert!(!is_settings_server("http://127.0.0.1:11435", own));
+    }
+}
+
+#[cfg(test)]
 mod live {
     use std::time::Instant;
 
@@ -571,13 +616,14 @@ mod live {
                 effort: None,
                 json_schema: Some(&schema_text),
                 app_mcp: Vec::new(),
+                mcp_block: Vec::new(),
             };
             let started = Instant::now();
             match crate::ai::flow_turn(&*engine, binary, model, turn).await {
                 Ok(run) => {
                     let mut object = crate::flows::schema::answer_object(&run.text);
                     if let Some(object) = &mut object {
-                        crate::flows::schema::prune(object, &schema);
+                        crate::flows::schema::settle(object, &schema);
                     }
                     let problems = match &object {
                         Some(object) => crate::flows::schema::validate(object, &schema),

@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Cpu, Plus, RefreshCw, X } from "lucide-react";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { Checkbox } from "../common/Checkbox";
@@ -415,8 +415,19 @@ export function ApiModelField({
   const [tick, setTick] = useState(0);
   // The hosted APIs list nothing without a key; a local or compatible server may not need one.
   const askable = !!credentialId || provider === "compatible" || provider === "ollama";
+  // The address the field opened with, and the one the person last asked for by hand. The model list is
+  // read with the credential's key: typing `https://api.openai.com/v1` passes through `https://api.openai.co`,
+  // and that is somebody else's server — so with a key, an address being typed is not asked on its own.
+  const openedWith = useRef(baseUrl);
+  const askedFor = useRef<string | null>(null);
+  const custom = provider === "compatible" || provider === "ollama";
   useEffect(() => {
     if (!askable || (provider === "compatible" && !baseUrl.trim())) {
+      setModels([]);
+      setProblem(null);
+      return;
+    }
+    if (credentialId && custom && baseUrl !== openedWith.current && baseUrl !== askedFor.current) {
       setModels([]);
       setProblem(null);
       return;
@@ -435,7 +446,7 @@ export function ApiModelField({
       alive = false;
       clearTimeout(timer);
     };
-  }, [askable, provider, baseUrl, credentialId, purpose, tick]);
+  }, [askable, custom, provider, baseUrl, credentialId, purpose, tick]);
   return (
     <div className="flex flex-col gap-1">
       <div className="flex min-w-0 items-center gap-1.5">
@@ -458,7 +469,10 @@ export function ApiModelField({
           title={t("flows.ai.reloadModels")}
           aria-label={t("flows.ai.reloadModels")}
           disabled={!askable}
-          onClick={() => setTick((n) => n + 1)}
+          onClick={() => {
+            askedFor.current = baseUrl;
+            setTick((n) => n + 1);
+          }}
         >
           <RefreshCw size={13} />
         </button>

@@ -58,6 +58,7 @@
       "id": "listMessages",
       "name": { "es": "Listar mensajes", "en": "List messages" },
       "method": "GET",
+      "paginate": { "style": "url", "next": "next_page_uri" },
       "path": "/Messages.json",
       "query": { "To": "{{to}}", "From": "{{from}}", "PageSize": "{{pageSize}}" },
       "fields": [

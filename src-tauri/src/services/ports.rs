@@ -276,15 +276,32 @@ pub fn signal(pid: u32, signal: i32, whole_group: bool) {
 pub fn terminate(pid: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
-        signal(pid, libc::SIGTERM, false);
+        // `kill` fails for two very different reasons: ESRCH, nothing there any more (the goal), and EPERM, a process of
+        // another user that the signal could not touch (still running). Reading both as «gone» reported a port freed
+        // that nothing had freed.
+        let gone = || -> Result<bool, String> {
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ESRCH) => Ok(true),
+                Some(libc::EPERM) => Err(format!("Not allowed to end process {pid}: it belongs to another user")),
+                _ => Err(format!("Process {pid} could not be ended: {error}")),
+            }
+        };
+        // SAFETY: `kill` takes integers; signal 0 only asks whether the process exists.
+        if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 && gone()? {
+            return Ok(());
+        }
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            // SAFETY: signal 0 only asks whether the process exists.
-            if unsafe { libc::kill(pid as i32, 0) } != 0 {
+            // SAFETY: as above.
+            if unsafe { libc::kill(pid as i32, 0) } != 0 && gone()? {
                 return Ok(());
             }
         }
-        signal(pid, libc::SIGKILL, false);
+        // SAFETY: as above.
+        if unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0 && gone()? {
+            return Ok(());
+        }
         Ok(())
     }
     #[cfg(windows)]

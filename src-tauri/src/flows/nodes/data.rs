@@ -360,6 +360,8 @@ pub(crate) fn literal_for(value: &Value, dialect: SqlDialect) -> Result<String, 
             SqlDialect::TSql | SqlDialect::Oracle | SqlDialect::Iris => if *b { "1" } else { "0" }.to_string(),
             _ => if *b { "TRUE" } else { "FALSE" }.to_string(),
         },
+        // A negative number in brackets: `5-$1` with -1 would read `5--1`, and `--` starts a comment.
+        Value::Number(n) if n.to_string().starts_with('-') => format!("({n})"),
         Value::Number(n) => n.to_string(),
         Value::String(text) => {
             let quoted = crate::datasource::sqlgen::literal(Some(text), dialect)?;
@@ -369,9 +371,143 @@ pub(crate) fn literal_for(value: &Value, dialect: SqlDialect) -> Result<String, 
     })
 }
 
+/// The SQL types a query's value can be written as (`queryParams` rows' `type`); `auto` takes the value's own JSON type.
+pub const SQL_PARAM_TYPES: &[&str] = &["auto", "text", "integer", "decimal", "boolean", "date", "timestamp", "json", "uuid"];
+
+/// A value as a literal of the SQL type asked for, in the dialect's own spelling — `DATE '2026-10-13'`, `'…'::jsonb`,
+/// `CAST('…' AS UNIQUEIDENTIFIER)`. A text that is not what the type says is an error that names it, not a value the
+/// server reads some other way: `"42"` as an integer is `42`, `"4x"` is refused. Null is `NULL` whatever the type.
+pub(crate) fn typed_literal(value: &Value, kind: &str, dialect: SqlDialect) -> Result<String, String> {
+    let written = || crate::flows::value::to_text(value).trim().to_string();
+    let quoted = |text: &str| -> Result<String, String> {
+        let quoted = crate::datasource::sqlgen::literal(Some(text), dialect)?;
+        Ok(if dialect == SqlDialect::TSql { format!("N{quoted}") } else { quoted })
+    };
+    let plain = |text: &str| crate::datasource::sqlgen::literal(Some(text), dialect);
+    let signed = |number: String| if number.starts_with('-') { format!("({number})") } else { number };
+    if value.is_null() && kind != "auto" && kind != "text" {
+        return Ok("NULL".into());
+    }
+    match kind {
+        "" | "auto" => literal_for(value, dialect),
+        "text" => {
+            if value.is_null() {
+                return Ok("NULL".into());
+            }
+            quoted(&crate::flows::value::to_text(value))
+        }
+        "integer" => {
+            let text = written();
+            let number = match value {
+                Value::Number(n) if n.is_i64() || n.is_u64() => n.to_string(),
+                _ => text.trim_start_matches('+').parse::<i128>().map_err(|_| format!("“{text}” is not a whole number"))?.to_string(),
+            };
+            Ok(signed(number))
+        }
+        "decimal" => {
+            let text = written();
+            let shape = regex::Regex::new(r"^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$").map_err(|e| e.to_string())?;
+            if !shape.is_match(&text) {
+                return Err(format!("“{text}” is not a number (digits, a point for decimals)"));
+            }
+            // Written as it came: a decimal passed through a float would lose digits (0.1 + 0.2).
+            Ok(signed(text.trim_start_matches('+').to_string()))
+        }
+        "boolean" => {
+            let truth = match value {
+                Value::Bool(b) => *b,
+                _ => match written().to_lowercase().as_str() {
+                    "true" | "1" | "yes" | "sí" | "si" | "t" | "y" => true,
+                    "false" | "0" | "no" | "f" | "n" => false,
+                    other => return Err(format!("“{other}” is not true or false")),
+                },
+            };
+            literal_for(&Value::Bool(truth), dialect)
+        }
+        "date" => {
+            let text = written();
+            let day = chrono::DateTime::parse_from_rfc3339(&text)
+                .map(|at| at.date_naive())
+                .ok()
+                .or_else(|| text.get(..10).and_then(|head| chrono::NaiveDate::parse_from_str(head, "%Y-%m-%d").ok()))
+                .ok_or_else(|| format!("“{text}” is not a date (YYYY-MM-DD)"))?
+                .format("%Y-%m-%d")
+                .to_string();
+            Ok(match dialect {
+                SqlDialect::Postgres | SqlDialect::MySql { .. } | SqlDialect::Oracle => format!("DATE {}", plain(&day)?),
+                SqlDialect::Sqlite => plain(&day)?,
+                SqlDialect::TSql | SqlDialect::Iris => format!("CAST({} AS DATE)", plain(&day)?),
+            })
+        }
+        "timestamp" => {
+            let text = written();
+            let aware = chrono::DateTime::parse_from_rfc3339(&text).ok();
+            let naive = match aware {
+                Some(at) => at.naive_utc(),
+                None => ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"]
+                    .iter()
+                    .find_map(|format| chrono::NaiveDateTime::parse_from_str(&text, format).ok())
+                    .or_else(|| chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d").ok().and_then(|d| d.and_hms_opt(0, 0, 0)))
+                    .ok_or_else(|| format!("“{text}” is not a date and time (YYYY-MM-DD HH:MM:SS, or ISO 8601)"))?,
+            };
+            let clock = naive.format("%Y-%m-%d %H:%M:%S%.f").to_string();
+            Ok(match (dialect, aware) {
+                // Postgres keeps the moment with its offset; the others get it in UTC.
+                (SqlDialect::Postgres, Some(at)) => format!("TIMESTAMPTZ {}", plain(&at.to_rfc3339())?),
+                (SqlDialect::Postgres | SqlDialect::MySql { .. } | SqlDialect::Oracle, _) => format!("TIMESTAMP {}", plain(&clock)?),
+                (SqlDialect::Sqlite, _) => plain(&clock)?,
+                (SqlDialect::TSql, _) => format!("CAST({} AS DATETIME2)", plain(&naive.format("%Y-%m-%dT%H:%M:%S%.f").to_string())?),
+                (SqlDialect::Iris, _) => format!("CAST({} AS TIMESTAMP)", plain(&clock)?),
+            })
+        }
+        "json" => {
+            let document = match value {
+                Value::String(text) => {
+                    serde_json::from_str::<Value>(text).map_err(|e| format!("not JSON: {e}"))?;
+                    text.clone()
+                }
+                other => other.to_string(),
+            };
+            Ok(match dialect {
+                SqlDialect::Postgres => format!("{}::jsonb", plain(&document)?),
+                SqlDialect::MySql { .. } => format!("CAST({} AS JSON)", plain(&document)?),
+                _ => quoted(&document)?,
+            })
+        }
+        "uuid" => {
+            let text = written();
+            let id = uuid::Uuid::parse_str(&text).map_err(|_| format!("“{text}” is not a UUID"))?.hyphenated().to_string();
+            Ok(match dialect {
+                SqlDialect::Postgres => format!("{}::uuid", plain(&id)?),
+                SqlDialect::TSql => format!("CAST({} AS UNIQUEIDENTIFIER)", plain(&id)?),
+                _ => plain(&id)?,
+            })
+        }
+        other => Err(format!("“{other}” is not a type this node writes ({})", SQL_PARAM_TYPES.join(", "))),
+    }
+}
+
+/// A `queryParams` row: `{ "value": …, "type": "integer" }`, or — written before rows had a type — the value alone.
+pub(crate) fn param_row(entry: &Value) -> (Value, String) {
+    match entry {
+        Value::Object(map)
+            if map.len() == 2 && map.contains_key("value") && map.get("type").and_then(Value::as_str).is_some_and(|kind| SQL_PARAM_TYPES.contains(&kind)) =>
+        {
+            (map["value"].clone(), map["type"].as_str().unwrap_or("auto").to_string())
+        }
+        other => (other.clone(), "auto".to_string()),
+    }
+}
+
 /// `$1…$n` in `sql`, outside strings, quoted identifiers, comments and Postgres dollar-quoted bodies,
 /// replaced by `values` as literals.
 pub fn bind(sql: &str, values: &[Value], dialect: SqlDialect) -> Result<String, String> {
+    let literals = values.iter().map(|value| literal_for(value, dialect)).collect::<Result<Vec<_>, _>>()?;
+    bind_literals(sql, &literals, dialect)
+}
+
+/// [`bind`] with the literals already written.
+pub fn bind_literals(sql: &str, values: &[String], dialect: SqlDialect) -> Result<String, String> {
     let chars: Vec<char> = sql.chars().collect();
     let mut out = String::with_capacity(sql.len());
     let mut i = 0;
@@ -433,7 +569,7 @@ pub fn bind(sql: &str, values: &[Value], dialect: SqlDialect) -> Result<String, 
                     .and_then(|slot| values.get(slot))
                     .ok_or_else(|| format!("The query uses ${index} but only {} value(s) were given", values.len()))?;
                 used[index - 1] = true;
-                out.push_str(&literal_for(value, dialect)?);
+                out.push_str(value);
                 i += 1 + digits.len();
                 continue;
             }
@@ -595,8 +731,22 @@ async fn query(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             return Err(NodeError::failed("Write the query"));
         }
         let values: Vec<Value> = params.get("queryParams").and_then(Value::as_array).cloned().unwrap_or_default();
+        let typed = |dialect: SqlDialect| -> Result<String, NodeError> {
+            let literals = values
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    let (value, kind) = param_row(entry);
+                    typed_literal(&value, &kind, dialect).map_err(|e| NodeError::failed(format!("Value ${} ({kind}): {e}", index + 1)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            bind_literals(&statement, &literals, dialect).map_err(NodeError::Failed)
+        };
+        // What the item and the error say about the statement is the text as written (`$1`), never the one with
+        // the values inlined: those can be secrets, and the item travels on to other nodes.
+        let template = statement.clone();
         let statement = match (dialect, values.is_empty()) {
-            (Some(dialect), false) => bind(&statement, &values, dialect).map_err(NodeError::Failed)?,
+            (Some(dialect), false) => typed(dialect)?,
             (None, false) => return Err(NodeError::failed("Query values ($1, $2…) are for SQL connections")),
             _ => statement,
         };
@@ -612,17 +762,17 @@ async fn query(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         }
         for statement_result in &result.results {
             if let Some(error) = &statement_result.error {
-                return Err(NodeError::failed(format!("{error}\n— {}", statement_result.statement.chars().take(200).collect::<String>())));
+                return Err(NodeError::failed(format!("{error}\n— {}", template.chars().take(200).collect::<String>())));
             }
             for message in &statement_result.messages {
                 ctx.log(LogStream::Info, message);
             }
             if statement_result.truncated {
-                ctx.log(LogStream::Info, &format!("Only the first {} rows were read (Max rows)", exec.max_rows));
+                ctx.log(LogStream::Info, &format!("⚠ Only the first {} rows were read (Max rows) — there are more", exec.max_rows));
             }
             let rows = rows_of(statement_result);
             if rows.is_empty() && statement_result.columns.is_empty() {
-                let summary = json!({"rowsAffected": statement_result.rows_affected, "statement": statement_result.statement});
+                let summary = json!({"rowsAffected": statement_result.rows_affected, "statement": if values.is_empty() { statement_result.statement.clone() } else { template.clone() }});
                 out.push(if paired { Item::paired(summary, index) } else { Item::new(summary) });
             }
             for row in rows {
@@ -843,6 +993,53 @@ mod tests {
         assert_eq!(bind("SELECT $$ a $1 $$, $1", &[json!(null)], postgres).unwrap(), "SELECT $$ a $1 $$, NULL");
         assert!(bind("SELECT $2", &[json!(1)], postgres).is_err());
         assert!(bind("SELECT 1", &[json!(1)], postgres).is_err(), "an unused value is a mistake");
+    }
+
+    #[test]
+    fn a_typed_value_is_written_as_its_type_in_each_dialect() {
+        let pg = SqlDialect::Postgres;
+        let tsql = SqlDialect::TSql;
+        let mysql = SqlDialect::MySql { backslash_escapes: true };
+        let lite = SqlDialect::Sqlite;
+        assert_eq!(typed_literal(&json!("42"), "integer", pg).unwrap(), "42", "a text of digits is a number when asked");
+        assert_eq!(typed_literal(&json!("-7"), "integer", pg).unwrap(), "(-7)");
+        assert!(typed_literal(&json!("4x"), "integer", pg).unwrap_err().contains("not a whole number"));
+        assert_eq!(typed_literal(&json!("0.10000000000000000001"), "decimal", pg).unwrap(), "0.10000000000000000001", "every digit kept");
+        assert!(typed_literal(&json!("1,5"), "decimal", pg).is_err());
+        assert_eq!(typed_literal(&json!(42), "text", pg).unwrap(), "'42'");
+        assert_eq!(typed_literal(&json!("ñ"), "text", tsql).unwrap(), "N'ñ'");
+        assert_eq!(typed_literal(&json!("sí"), "boolean", pg).unwrap(), "TRUE");
+        assert_eq!(typed_literal(&json!("0"), "boolean", tsql).unwrap(), "0");
+        assert_eq!(typed_literal(&json!("2026-10-13T08:30:00Z"), "date", pg).unwrap(), "DATE '2026-10-13'");
+        assert_eq!(typed_literal(&json!("2026-10-13"), "date", tsql).unwrap(), "CAST('2026-10-13' AS DATE)");
+        assert_eq!(typed_literal(&json!("2026-10-13"), "date", lite).unwrap(), "'2026-10-13'");
+        assert!(typed_literal(&json!("13/10/2026"), "date", pg).is_err());
+        assert_eq!(typed_literal(&json!("2026-10-13T08:30:00-03:00"), "timestamp", pg).unwrap(), "TIMESTAMPTZ '2026-10-13T08:30:00-03:00'");
+        assert_eq!(typed_literal(&json!("2026-10-13T08:30:00-03:00"), "timestamp", mysql).unwrap(), "TIMESTAMP '2026-10-13 11:30:00'", "in UTC");
+        assert_eq!(typed_literal(&json!("2026-10-13 08:30"), "timestamp", tsql).unwrap(), "CAST('2026-10-13T08:30:00' AS DATETIME2)");
+        assert_eq!(typed_literal(&json!({"a": "O'Brien"}), "json", pg).unwrap(), r#"'{"a":"O''Brien"}'::jsonb"#);
+        assert_eq!(typed_literal(&json!("[1,2]"), "json", mysql).unwrap(), "CAST('[1,2]' AS JSON)");
+        assert!(typed_literal(&json!("{nope"), "json", pg).is_err());
+        assert_eq!(typed_literal(&json!("6F9619FF-8B86-D011-B42D-00C04FC964FF"), "uuid", pg).unwrap(), "'6f9619ff-8b86-d011-b42d-00c04fc964ff'::uuid");
+        assert!(typed_literal(&json!("not-a-uuid"), "uuid", pg).is_err());
+        assert_eq!(typed_literal(&Value::Null, "integer", pg).unwrap(), "NULL");
+        assert!(typed_literal(&json!(1), "money", pg).is_err());
+    }
+
+    #[test]
+    fn a_row_with_a_type_and_a_bare_value_are_both_read() {
+        assert_eq!(param_row(&json!({"value": "42", "type": "integer"})), (json!("42"), "integer".to_string()));
+        assert_eq!(param_row(&json!("42")), (json!("42"), "auto".to_string()), "saved before rows had a type");
+        // An object an expression gave is a value, unless it is exactly a typed row.
+        assert_eq!(param_row(&json!({"value": 1, "type": "money"})).1, "auto");
+        assert_eq!(param_row(&json!({"value": 1, "type": "integer", "x": 2})).1, "auto");
+    }
+
+    #[test]
+    fn a_negative_value_cannot_turn_the_minus_before_it_into_a_comment() {
+        let postgres = SqlDialect::Postgres;
+        assert_eq!(bind("SELECT 5-$1", &[json!(-1)], postgres).unwrap(), "SELECT 5-(-1)");
+        assert_eq!(bind("SELECT $1", &[json!(2.5)], postgres).unwrap(), "SELECT 2.5");
     }
 
     #[test]

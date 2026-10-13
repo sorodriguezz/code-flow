@@ -487,6 +487,14 @@ fn format_currency(value: f64, locale: &str, code: &str, decimals: Option<usize>
 
 /// A number written by a person: `$ 1.234,56`, `1,234.56`, `12%` — the locale's marks first, and
 /// when both marks appear the last one is the decimal.
+/// `1e3`, `-2.5E-4`: a float written with an exponent, which no locale writes differently.
+fn is_exponent_form(text: &str) -> bool {
+    let text = text.trim();
+    let Some(at) = text.find(['e', 'E']) else { return false };
+    let (mantissa, exponent) = (&text[..at], &text[at + 1..]);
+    mantissa.parse::<f64>().is_ok() && exponent.trim_start_matches(['+', '-']).parse::<u32>().is_ok()
+}
+
 pub fn parse_number(raw: &str, locale: &str) -> Option<f64> {
     let cleaned: String = raw.chars().filter(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | '-' | '\'' | '\u{202f}' | ' ' | '\u{a0}')).collect();
     let cleaned = cleaned.replace(['\'', '\u{202f}', ' ', '\u{a0}'], "");
@@ -601,9 +609,14 @@ fn number_op(params: &Value) -> Result<Value, NodeError> {
     let locale = { let l = text(params, "numLocale"); if l.trim().is_empty() { "es-CL".to_string() } else { l } };
     let raw = params.get("value").cloned().unwrap_or(Value::Null);
     let read = || -> Result<f64, NodeError> {
-        to_number(&raw)
-            .or_else(|| parse_number(&to_text(&raw), &locale))
-            .ok_or_else(|| NodeError::failed(format!("\"{}\" is not a number", to_text(&raw))))
+        let found = match &raw {
+            // A text is read the way its locale writes numbers: `1.234` is 1234 where the point groups
+            // thousands. Only a number JSON already holds, or a text that is plainly a float with an
+            // exponent, needs no locale.
+            Value::String(text) if !is_exponent_form(text) => parse_number(text, &locale).or_else(|| to_number(&raw)),
+            _ => to_number(&raw).or_else(|| parse_number(&to_text(&raw), &locale)),
+        };
+        found.ok_or_else(|| NodeError::failed(format!("\"{}\" is not a number", to_text(&raw))))
     };
     Ok(match op.as_str() {
         "numParse" => crate::flows::value::number(read()?),
@@ -695,6 +708,10 @@ fn date_ok(value: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(v).is_ok()
         || chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").is_ok()
         || chrono::NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S").is_ok()
+        // ISO without an offset — what most databases and `new Date().toISOString().slice(0, 19)` write.
+        || chrono::NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
+        || chrono::NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S%.f").is_ok()
+        || chrono::NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M").is_ok()
         || chrono::NaiveDate::parse_from_str(v, "%d/%m/%Y").is_ok()
         || chrono::NaiveDate::parse_from_str(v, "%d-%m-%Y").is_ok()
 }
@@ -794,25 +811,35 @@ async fn validate(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let mut invalid = Vec::new();
     for (index, item) in ctx.items().into_iter().enumerate() {
         let mut json = item.json.clone();
-        // Normalised first, so a padded email still passes as an email.
-        if let Value::Object(map) = &mut json {
-            for (key, value) in map.iter_mut() {
-                let Value::String(s) = value else { continue };
-                if normalize.iter().any(|n| n == "normTrim") {
-                    *s = s.trim().to_string();
+        // Normalised first, so a padded email still passes as an email. The fields the rules name — wherever they
+        // are, `customer.email` included — and no others: «clean up» is for what is being checked, not every
+        // string the item happens to carry.
+        if !normalize.is_empty() {
+            let mut ruled: Vec<&str> = Vec::new();
+            for (field, _, _) in &rules {
+                if !ruled.contains(&field.as_str()) {
+                    ruled.push(field);
                 }
-                if normalize.iter().any(|n| n == "normLowerEmail") && email_ok(s) {
-                    *s = s.to_lowercase();
+            }
+            for key in ruled {
+                let Some(Value::String(current)) = get_path(&json, key) else { continue };
+                let mut s = current.clone();
+                if normalize.iter().any(|n| n == "normTrim") {
+                    s = s.trim().to_string();
+                }
+                if normalize.iter().any(|n| n == "normLowerEmail") && email_ok(&s) {
+                    s = s.to_lowercase();
                 }
                 let rule_for = |check: &str| rules.iter().any(|(f, c, _)| f == key && c == check);
-                if normalize.iter().any(|n| n == "normRut") && (rule_for("isRut") || super::redact::rut_ok(s)) && super::redact::rut_ok(s) {
-                    *s = format_rut(s);
+                if normalize.iter().any(|n| n == "normRut") && super::redact::rut_ok(&s) {
+                    s = format_rut(&s);
                 }
                 if normalize.iter().any(|n| n == "normPhone") && rule_for("isPhone") {
-                    if let Some(digits) = phone_digits(s, &phone_country) {
-                        *s = format!("+{digits}");
+                    if let Some(digits) = phone_digits(&s, &phone_country) {
+                        s = format!("+{digits}");
                     }
                 }
+                set_path(&mut json, key, Value::String(s));
             }
         }
         let mut errors: Vec<Value> = Vec::new();

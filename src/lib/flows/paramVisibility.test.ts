@@ -37,6 +37,17 @@ describe("visible", () => {
     expect(shown({ service: "gmail", gmailOp: "gmailSearch" })).toEqual(["service", "gmailOp"]);
   });
 
+  it("shows what a switch reveals — a switch holds a boolean, the catalogue names it as a word", () => {
+    const toggle: FlowParamSpec = { name: "skipHolidays", kind: { type: "boolean" }, default: false, expr: false };
+    const country = field("holidayCountry", { param: "skipHolidays", values: ["true"] });
+    const specs = [toggle, country];
+    expect(visible(country, {}, specs)).toBe(false);
+    expect(visible(country, { skipHolidays: false }, specs)).toBe(false);
+    expect(visible(country, { skipHolidays: true }, specs)).toBe(true);
+    // A switch that starts on (the Business hours node) shows it before it is touched.
+    expect(visible(country, {}, [{ ...toggle, default: true }, country])).toBe(true);
+  });
+
   it("asks both conditions of a field that has two", () => {
     const queue = [
       select("broker", ["rabbitmq", "kafka"], "rabbitmq"),

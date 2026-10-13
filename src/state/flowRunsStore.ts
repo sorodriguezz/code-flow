@@ -444,6 +444,12 @@ export function ensureFlowRunEvents(): void {
     });
   });
   let triggerTimer: ReturnType<typeof setTimeout> | undefined;
+  // A flow that is on but could not be armed when the app started (a credential gone, a port taken): its trigger is not
+  // listening, and nothing else says so.
+  void listen<{ flowId: string; name: string; error: string }>("flows:arm-failed", (event) => {
+    if (!isMainWindow()) return;
+    pushErrorToast(translate("flows.armFailed", { flow: event.payload.name || event.payload.flowId, error: event.payload.error }));
+  });
   void listen("flows:triggers", () => {
     if (triggerTimer) clearTimeout(triggerTimer);
     triggerTimer = setTimeout(() => void useFlowRunsStore.getState().loadTriggers(), 250);

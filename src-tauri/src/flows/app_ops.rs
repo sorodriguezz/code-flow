@@ -115,9 +115,14 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
             to_json(summary)
         }
         "pr.merge" => {
+            let method = arg(&args, "method");
+            // `MergeChoice` is read in camelCase, like everything the panel sends it: a snake_case key
+            // here was ignored, and the branch was never deleted. GitLab squashes by a flag of its own,
+            // not by a method name.
             let choice: crate::commands::ado_cmd::MergeChoice = serde_json::from_value(json!({
-                "method": arg(&args, "method"),
-                "delete_source_branch": args.get("deleteSourceBranch").and_then(Value::as_bool).unwrap_or(false),
+                "method": method,
+                "deleteSourceBranch": args.get("deleteSourceBranch").and_then(Value::as_bool).unwrap_or(false),
+                "squash": (method == "squash").then_some(true),
             }))
             .map_err(|e| e.to_string())?;
             let outcome = crate::commands::ado_cmd::merge_pull_request(db(host), arg(&args, "projectId"), arg_i64(&args, "prId")?, choice).await?;
@@ -271,8 +276,18 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
                 .ok_or_else(|| "That Llavero item no longer exists".to_string())?;
             let field = arg(&args, "field");
             let secret = to_json(&item.secret)?;
+            // The seed of a one-time code never leaves the Llavero — a flow asks for the code of the moment (`vault.totp`).
+            if field.trim().eq_ignore_ascii_case("totp") {
+                return Err("The seed of the one-time code stays in the Llavero — ask for the code instead".to_string());
+            }
             let value = if field.trim().is_empty() {
-                secret.get("password").or_else(|| secret.get("secret")).or_else(|| secret.get("value")).cloned().unwrap_or(secret.clone())
+                secret.get("password").or_else(|| secret.get("secret")).or_else(|| secret.get("value")).cloned().unwrap_or_else(|| {
+                    let mut whole = secret.clone();
+                    if let Value::Object(map) = &mut whole {
+                        map.remove("totp");
+                    }
+                    whole
+                })
             } else {
                 secret.get(field.trim()).cloned().ok_or_else(|| format!("The item has no field \"{}\"", field.trim()))?
             };
@@ -291,8 +306,13 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
             if op == "app.open" {
                 use tauri_plugin_opener::OpenerExt;
                 let target = arg(&args, "target");
-                match arg(&args, "kind").as_str() {
+                let kind = arg(&args, "kind");
+                if let Some(refusal) = open_refusal(&kind, &target) {
+                    return Err(refusal);
+                }
+                match kind.as_str() {
                     "url" => {
+                        let target = target.trim().to_string();
                         host.app.opener().open_url(target.clone(), None::<&str>).map_err(|e| e.to_string())?;
                         return Ok(json!({"opened": target}));
                     }
@@ -311,6 +331,39 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
             Ok(json!({"sent": true}))
         }
         other => Err(format!("{other} is not something a flow can ask CodeFlow for")),
+    }
+}
+
+/// Extensions the operating system would *run* rather than show when asked to open them: scripts,
+/// installers, programs, shortcuts, an application bundle. «Abrir» is for documents and pages.
+const RUNNABLE: &[&str] = &[
+    "app", "command", "sh", "bash", "zsh", "fish", "csh", "ksh", "scpt", "scptd", "workflow", "action", "pkg", "mpkg", "dmg", "terminal", "tool",
+    "exe", "com", "bat", "cmd", "msi", "msp", "scr", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "lnk", "pif", "hta", "reg", "jar",
+    "desktop", "appimage", "run", "deb", "rpm",
+];
+
+/// Why a node may not open `target` as a `kind` (`url`, `file`, `folder`, `view`) — or `None`. A flow
+/// somebody else wrote, or an item, names the target: only a web page or a mail address may be an
+/// address (not `ssh://`, `smb://`, `file://` or an app's own scheme), and nothing that runs on opening.
+fn open_refusal(kind: &str, target: &str) -> Option<String> {
+    match kind {
+        "url" => {
+            let parsed = url::Url::parse(target.trim());
+            match parsed {
+                Ok(url) if matches!(url.scheme(), "http" | "https" | "mailto") => None,
+                _ => Some("Only web (http, https) and mail (mailto) addresses can be opened from a flow".to_string()),
+            }
+        }
+        "file" | "folder" => {
+            let extension = std::path::Path::new(target.trim().trim_end_matches(['/', '\\'])).extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+            match extension {
+                Some(extension) if RUNNABLE.contains(&extension.as_str()) => {
+                    Some(format!("A .{extension} is run, not shown, when it is opened — a flow cannot open it"))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -937,6 +990,22 @@ mod tests {
             "archivo": file, "lineas": lines, "confianza": 80,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_flow_opens_pages_and_documents_but_not_what_would_run() {
+        for fine in ["https://example.com/a?b=1", "http://localhost:3000", "mailto:ana@example.com"] {
+            assert_eq!(open_refusal("url", fine), None, "{fine}");
+        }
+        for hostile in ["ssh://host", "smb://nas/share", "file:///etc/passwd", "vscode://x", "javascript:alert(1)", "example.com", ""] {
+            assert!(open_refusal("url", hostile).is_some(), "{hostile}");
+        }
+        assert_eq!(open_refusal("file", "~/Informes/q3.pdf"), None);
+        assert_eq!(open_refusal("folder", "~/Descargas/"), None);
+        for hostile in ["~/Descargas/instalar.command", "/Applications/Foo.app", "C:\\x\\y.EXE", "run.sh", "~/x/a.jar"] {
+            assert!(open_refusal("file", hostile).is_some(), "{hostile}");
+        }
+        assert!(open_refusal("folder", "/Applications/Foo.app/").is_some());
     }
 
     #[test]

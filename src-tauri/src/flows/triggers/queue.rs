@@ -30,29 +30,30 @@ fn text(params: &Value, name: &str) -> String {
     params.get(name).and_then(Value::as_str).unwrap_or_default().trim().to_string()
 }
 
-/// The trigger's credential: kind, `meta.user`, and the secret from the keychain.
-fn credential(app: &AppHandle, params: &Value) -> Result<Option<(String, String, String)>, String> {
+/// The trigger's credential: kind, `meta.user`, and the secret from the keychain — one this flow may use (its workspace's, or
+/// a global one): a flow brought in from elsewhere names credentials by id, and that must not reach another workspace's.
+fn credential(app: &AppHandle, flow_id: &str, params: &Value) -> Result<Option<(String, String, String)>, String> {
     let id = text(params, "credential");
     if id.is_empty() {
         return Ok(None);
     }
-    let row = {
-        let db = app.state::<Db>();
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        flow_run_queries::get_credential(&conn, &id).map_err(|e| e.to_string())?.ok_or("The credential no longer exists")?
-    };
-    let secret = crate::secrets::get_secret(&crate::secrets::flow_credential_key(&id))?.ok_or("The credential has no secret stored")?;
+    let (row, secret) = super::credential_row(app, flow_id, &id, &["basic", "bearer", "header", "query", "aws"])?;
     let user = row.meta.get("user").and_then(Value::as_str).unwrap_or_default().to_string();
     Ok(Some((row.kind, user, secret)))
 }
 
-/// Fires the flow for one message; with `wait`, until it finished, and whether it finished well.
+/// Fires the flow for one message and says whether the broker may let go of it: the flow took it
+/// (started, or — without `wait` — held behind the run in progress, which keeps it), and with `wait`
+/// finished well. `false` means the flow did not take it, and the broker keeps the message.
 async fn deliver(app: &AppHandle, flow_id: &str, node_id: &str, view: &Arc<Mutex<TriggerView>>, message: Value, wait: bool) -> bool {
-    match super::fire_with(app, flow_id, node_id, vec![Item::new(message)], None, wait) {
+    match super::fire_message(app, flow_id, node_id, vec![Item::new(message)], wait) {
         Ok(fired) => {
             super::note_problem(view, None);
-            if fired.held {
+            if fired.dropped {
                 return false;
+            }
+            if fired.held {
+                return true;
             }
             match (wait, fired.done) {
                 (true, Some(done)) => matches!(done.await, Ok(finished) if finished.status == "success"),
@@ -81,7 +82,8 @@ pub fn spawn(
         "rabbitmq" | "" if text(params, "amqpUrl").is_empty() || text(params, "queueName").is_empty() => {
             return Err("write the broker's address and the queue".into())
         }
-        _ => {}
+        "kafka" | "sqs" | "rabbitmq" | "" => {}
+        other => return Err(format!("“{other}” is not a broker this version can talk to — choose RabbitMQ, Kafka or SQS")),
     }
     let (app, flow_id, node_id, params) = (app.clone(), flow_id.to_string(), node_id.to_string(), params.clone());
     tauri::async_runtime::spawn(async move {
@@ -122,7 +124,7 @@ async fn rabbit(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, v
     use lapin::types::{FieldTable, ShortString};
     use lapin::{Connection, ConnectionProperties};
 
-    let login = credential(app, params)?.map(|(_, user, secret)| (user, secret));
+    let login = credential(app, flow_id, params)?.map(|(_, user, secret)| (user, secret));
     let uri = amqp_uri(&text(params, "amqpUrl"), login.as_ref())?;
     let connection = tokio::time::timeout(Duration::from_secs(20), Connection::connect(&uri, ConnectionProperties::default()))
         .await
@@ -183,7 +185,7 @@ async fn kafka(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vi
             .with_no_client_auth();
         builder = builder.tls_config(Arc::new(config));
     }
-    if let Some((_, user, password)) = credential(app, params)? {
+    if let Some((_, user, password)) = credential(app, flow_id, params)? {
         let login = Credentials::new(user, password);
         builder = builder.sasl_config(match text(params, "saslMechanism").as_str() {
             "scramSha256" => SaslConfig::ScramSha256(login),
@@ -239,8 +241,9 @@ async fn kafka(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vi
                 "body": value,
                 "timestamp": record.record.timestamp.to_rfc3339(),
             });
-            if !deliver(app, flow_id, node_id, view, message, wait).await && wait {
-                // Not committed: read again after a pause.
+            if !deliver(app, flow_id, node_id, view, message, wait).await {
+                // Not taken by the flow: the offset stays where it is, and the record is read again
+                // after a pause — whether or not the flow was asked to finish first.
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 break;
             }
@@ -251,7 +254,7 @@ async fn kafka(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vi
 }
 
 async fn sqs(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view: &Arc<Mutex<TriggerView>>, cancel: CancellationToken) -> Result<(), String> {
-    let Some((kind, access_key, secret)) = credential(app, params)? else { return Err("choose the AWS credential".into()) };
+    let Some((kind, access_key, secret)) = credential(app, flow_id, params)? else { return Err("choose the AWS credential".into()) };
     if kind != "aws" {
         return Err("SQS signs in with an AWS credential".into());
     }

@@ -11,7 +11,11 @@ export function visible(spec: FlowParamSpec, values: Record<string, unknown>, sp
     const other = specs.find((s) => s.name === condition.param);
     if (other && depth < 8 && !visible(other, values, specs, depth + 1)) return false;
     const current = values[condition.param] ?? other?.default;
-    return typeof current === "string" && condition.values.includes(current);
+    // A switch holds `true`/`false`, and the catalogue names them as the words "true"/"false" (`.when("skipHolidays", &["true"])`).
+    // Read as a boolean it matched nothing, and the fields such a switch reveals — the holiday calendar's
+    // country, a published node's icon, the engine of a guard — were never shown.
+    const word = typeof current === "boolean" ? String(current) : current;
+    return typeof word === "string" && condition.values.includes(word);
   };
   return holds(spec.showIf) && holds(spec.alsoIf);
 }

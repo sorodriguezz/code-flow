@@ -153,6 +153,13 @@ pub struct NetworkOptions {
     /// timing it by idleness instead of a total deadline. See `api::stream`.
     #[serde(default)]
     pub stream: bool,
+    /// For requests a flow makes with a credential: when a redirect leaves the server (another scheme,
+    /// host or port), the request that follows carries nothing that authenticates it — not
+    /// `Authorization`, `Cookie` or a signature, which reqwest drops by itself, and not the other headers
+    /// a credential travels in (`X-API-Key`, a token header), which it forwards untouched. Only the plain
+    /// ones stay (`Accept`, `Content-Type`…). The API client's own requests leave this off.
+    #[serde(default)]
+    pub guard_credentials: bool,
 }
 
 impl Default for NetworkOptions {
@@ -180,6 +187,7 @@ impl Default for NetworkOptions {
             // runs with lives in `defaultApiSettings()`.
             max_response_bytes: 4 * 1024 * 1024,
             stream: false,
+            guard_credentials: false,
         }
     }
 }

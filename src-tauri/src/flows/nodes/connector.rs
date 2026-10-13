@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 
 use super::http::loggable;
 use super::{number, text, NodeCtx, NodeError};
-use crate::api::{HttpSendRequest, NetworkOptions};
+use crate::api::{HttpResponse, HttpSendRequest, NetworkOptions};
 use crate::flows::connectors::{self, Choice, Connector, Field, Lookup, Operation};
 use crate::flows::engine::{Credential, LogStream};
 use crate::flows::run::{Item, Ports};
@@ -26,6 +26,10 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     for (index, params) in resolved.iter().enumerate() {
         for json in call(ctx, params).await? {
             out.push(if paired { Item::paired(json, index) } else { Item::new(json) });
+        }
+        // A call that writes (a message, a charge, an issue) has happened once it answered.
+        if params.get("call").and_then(|call| chosen(call).ok()).is_some_and(|(_, operation)| !operation.method.eq_ignore_ascii_case("GET")) {
+            ctx.mark_sent();
         }
     }
     Ok(vec![out])
@@ -129,7 +133,7 @@ async fn call(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError> {
     };
     let timeout_ms = number(params, "timeoutMs").map(|n| n.max(0.0) as u64).filter(|n| *n > 0).unwrap_or(30_000);
     let forms = secret_forms(credential.as_ref());
-    let (request, url) = request_for(connector, operation, values, credential.as_ref(), timeout_ms).map_err(|e| hidden(e, &forms))?;
+    let (request, _) = request_for(connector, operation, values, credential.as_ref(), timeout_ms).map_err(|e| hidden(e, &forms))?;
     if let Some(Credential { kind, .. }) = &credential {
         if kind == "basic" || connector.auth == "basic" {
             // The encoded pair is as much the password as the password.
@@ -138,15 +142,356 @@ async fn call(ctx: &NodeCtx, params: &Value) -> Result<Vec<Value>, NodeError> {
             }
         }
     }
-    let response = tokio::select! {
-        response = crate::api::http::send(request, None, None) => response.map_err(|e| NodeError::failed(redact(&e, &forms)))?,
-        _ = ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
+    // A bearer token is what an OAuth sign-in resolves to: the one kind of credential a 401 can be answered with a new token.
+    let token = credential.as_ref().filter(|_| connector.auth == "bearer").map(|credential| credential.secret.clone());
+    let mut sender = Sender { ctx, connector, operation, credential_id: id.trim().to_string(), token, renewed: false, forms };
+    let response = sender.page(request.clone()).await?;
+    let first = answer_items(connector, operation, response.status, &response.body_text).map_err(|e| hidden(e, &sender.forms))?;
+    match (operation.paginate.as_ref(), pages_wanted(&call)) {
+        (Some(paginate), Some(max)) => {
+            let forms = sender.forms.clone();
+            every_page(&mut sender, connector, operation, paginate, request, response, first, max).await.map_err(|e| hidden(e, &forms))
+        }
+        _ => Ok(first),
+    }
+}
+
+// ------------------------------------------------------------------------------------------ pages
+
+/// How many entries a call that asks for every page stops at, unless the node says another number — and the most it may.
+const DEFAULT_MAX_ITEMS: usize = 1_000;
+const MOST_ITEMS: usize = 100_000;
+/// Past this many pages a list is a service that never says «last»: stopped, and said.
+const MAX_PAGES: usize = 500;
+/// How many times a request answered «too many requests» is sent again, and the longest wait asked for.
+const TOO_MANY_TRIES: usize = 2;
+const TOO_MANY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The node's «every page» choice (`call.allPages`) with its limit (`call.maxItems`): `None` for the first page only.
+fn pages_wanted(call: &Value) -> Option<usize> {
+    let on = match call.get("allPages") {
+        Some(Value::Bool(on)) => *on,
+        Some(Value::String(text)) => text.trim() == "true",
+        _ => false,
     };
-    ctx.log(
-        LogStream::Info,
-        &redact(&format!("{} {} {} → {} ({} ms)", connector.name, operation.method, loggable(&url), response.status, response.duration_ms), &forms),
-    );
-    answer_items(connector, operation, response.status, &response.body_text).map_err(|e| hidden(e, &forms))
+    if !on {
+        return None;
+    }
+    let limit = match call.get("maxItems") {
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(text)) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    Some(limit.filter(|n| *n >= 1.0).map_or(DEFAULT_MAX_ITEMS, |n| n as usize).min(MOST_ITEMS))
+}
+
+/// What sends one request of a call: in a run (waiting out a 429, renewing an OAuth sign-in after a 401) or outside one.
+trait Pager {
+    fn page(&mut self, request: HttpSendRequest) -> impl std::future::Future<Output = Result<HttpResponse, NodeError>>;
+    fn note(&self, text: &str);
+}
+
+/// The wait a `Retry-After` header asks for, when it is a number of seconds.
+fn retry_after(headers: &[(String, String)]) -> Option<std::time::Duration> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+}
+
+/// A run's requests for one call. A 429 is waited out as the service asks (twice at most: it means the request was not
+/// processed, so sending it again is safe). A 401 to an OAuth sign-in's token is answered once with a renewed token —
+/// revoked, or replaced by a sign-in elsewhere before its expiry — and every request after that carries the new one.
+struct Sender<'a> {
+    ctx: &'a NodeCtx,
+    connector: &'a Connector,
+    operation: &'a Operation,
+    credential_id: String,
+    token: Option<String>,
+    renewed: bool,
+    forms: Vec<String>,
+}
+
+impl Sender<'_> {
+    fn sign(&self, request: &mut HttpSendRequest) {
+        let Some(token) = &self.token else { return };
+        for (name, value) in request.headers.iter_mut() {
+            if name.eq_ignore_ascii_case("authorization") && value.starts_with("Bearer ") {
+                *value = format!("Bearer {token}");
+            }
+        }
+    }
+}
+
+impl Pager for Sender<'_> {
+    async fn page(&mut self, mut request: HttpSendRequest) -> Result<HttpResponse, NodeError> {
+        let mut waited = 0;
+        loop {
+            self.sign(&mut request);
+            let shown = url::Url::parse(&request.url).map(|url| loggable(&url)).unwrap_or_default();
+            let response = tokio::select! {
+                response = crate::api::http::send(request.clone(), None, None) => response.map_err(|e| NodeError::failed(redact(&e, &self.forms)))?,
+                _ = self.ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
+            };
+            self.ctx.log(
+                LogStream::Info,
+                &redact(&format!("{} {} {} → {} ({} ms)", self.connector.name, self.operation.method, shown, response.status, response.duration_ms), &self.forms),
+            );
+            if response.status == 429 && waited < TOO_MANY_TRIES {
+                let wait = retry_after(&response.headers).unwrap_or(std::time::Duration::from_secs(2 << waited)).min(TOO_MANY_WAIT);
+                self.ctx.log(LogStream::Info, &format!("{} asked to slow down — waiting {} s", self.connector.name, wait.as_secs()));
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = self.ctx.cancel.cancelled() => return Err(NodeError::Cancelled),
+                }
+                waited += 1;
+                continue;
+            }
+            if response.status == 401 && !self.renewed {
+                if let Some(refused) = self.token.clone() {
+                    self.renewed = true;
+                    if let Some(fresh) = self.ctx.renewed_credential(&self.credential_id, &refused).await? {
+                        self.forms.extend(secret_forms(Some(&fresh)));
+                        self.forms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+                        self.forms.dedup();
+                        self.token = Some(fresh.secret);
+                        self.ctx.log(LogStream::Info, &format!("{} refused the sign-in's token — renewed it, asking again", self.connector.name));
+                        continue;
+                    }
+                }
+            }
+            return Ok(response);
+        }
+    }
+
+    fn note(&self, text: &str) {
+        self.ctx.log(LogStream::Info, text);
+    }
+}
+
+/// Requests made outside a run — the «Cambios en un servicio» trigger's look.
+struct Outside {
+    forms: Vec<String>,
+}
+
+impl Pager for Outside {
+    async fn page(&mut self, request: HttpSendRequest) -> Result<HttpResponse, NodeError> {
+        crate::api::http::send(request, None, None).await.map_err(|e| NodeError::failed(redact(&e, &self.forms)))
+    }
+
+    fn note(&self, _text: &str) {}
+}
+
+/// The entries of every page of a list, from the first (already read), until the service says there are no more, `max`
+/// entries are in hand, or [`MAX_PAGES`] were read.
+#[allow(clippy::too_many_arguments)]
+async fn every_page<P: Pager>(
+    pager: &mut P,
+    connector: &Connector,
+    operation: &Operation,
+    paginate: &connectors::Paginate,
+    mut request: HttpSendRequest,
+    mut response: HttpResponse,
+    mut items: Vec<Value>,
+    max: usize,
+) -> Result<Vec<Value>, NodeError> {
+    let mut on_page = items.len();
+    let mut asked: std::collections::HashSet<String> = std::collections::HashSet::from([request_print(&request)]);
+    let mut pages = 1;
+    while items.len() < max && listed(operation, &response.body_text) {
+        if pages >= MAX_PAGES {
+            pager.note(&format!("{} still had more after {MAX_PAGES} pages — stopped there", connector.name));
+            break;
+        }
+        let answer = parse_answer(&response.body_text);
+        let page = Page { request: &request, headers: &response.headers, answer: &answer, items: &items[items.len() - on_page..], number: pages - 1, read: items.len() };
+        let Some(next) = next_page(paginate, operation, &page).map_err(NodeError::Failed)? else { break };
+        // A service that hands back the page it just gave would be asked for it for ever.
+        if !asked.insert(request_print(&next)) {
+            pager.note(&format!("{} named a page it had already given — stopped there", connector.name));
+            break;
+        }
+        response = pager.page(next.clone()).await?;
+        let got = if listed(operation, &response.body_text) { answer_items(connector, operation, response.status, &response.body_text)? } else { Vec::new() };
+        on_page = got.len();
+        request = next;
+        pages += 1;
+        if got.is_empty() {
+            break;
+        }
+        items.extend(got);
+    }
+    if items.len() > max {
+        pager.note(&format!("Kept the first {max} entries (the node's limit); the list goes on"));
+        items.truncate(max);
+    } else if items.len() == max {
+        pager.note(&format!("Stopped at {max} entries (the node's limit)"));
+    }
+    Ok(items)
+}
+
+/// Whether an answer holds a list where the operation says (an empty last page may leave the key out).
+fn listed(operation: &Operation, body: &str) -> bool {
+    operation.result.is_empty() || answer_at(&parse_answer(body), &operation.result).is_some_and(|found| !found.is_null())
+}
+
+fn request_print(request: &HttpSendRequest) -> String {
+    format!("{} {} {}", request.method, request.url, request.body_text.as_deref().unwrap_or_default())
+}
+
+/// What a page left behind for the next one to be asked from.
+pub(super) struct Page<'a> {
+    pub request: &'a HttpSendRequest,
+    pub headers: &'a [(String, String)],
+    pub answer: &'a Value,
+    /// The entries this page gave.
+    pub items: &'a [Value],
+    /// This page's place, from 0.
+    pub number: usize,
+    /// The entries read so far, this page's included.
+    pub read: usize,
+}
+
+/// A value of the answer at `path` — a key with dots in it (`@odata.nextLink`) taken whole first.
+fn answer_at<'a>(answer: &'a Value, path: &str) -> Option<&'a Value> {
+    answer.get(path).or_else(|| crate::flows::value::get_path(answer, path))
+}
+
+fn answer_text(answer: &Value, path: &str) -> Option<String> {
+    match answer_at(answer, path)? {
+        Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+/// The `rel="next"` address of a `Link` header — none when the service marks it empty (Sentry's `results="false"`).
+fn link_next(headers: &[(String, String)]) -> Option<String> {
+    for (_, value) in headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case("link")) {
+        let mut rest = value.as_str();
+        while let Some(start) = rest.find('<') {
+            let Some(length) = rest[start..].find('>') else { break };
+            let address = &rest[start + 1..start + length];
+            let after = &rest[start + length + 1..];
+            let end = after.find('<').unwrap_or(after.len());
+            let params: Vec<(String, String)> = after[..end]
+                .split([';', ','])
+                .filter_map(|param| param.split_once('='))
+                .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim().trim_matches('"').to_ascii_lowercase()))
+                .collect();
+            if params.iter().any(|(key, value)| key == "rel" && value.split_whitespace().any(|rel| rel == "next")) {
+                let empty = params.iter().any(|(key, value)| key == "results" && value == "false");
+                return (!empty).then(|| address.to_string());
+            }
+            rest = &after[end..];
+        }
+    }
+    None
+}
+
+/// Whether two addresses are the same server — scheme, host and port: a page's address goes with the credential.
+fn same_server(a: &url::Url, b: &url::Url) -> bool {
+    a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
+}
+
+fn with_query(url: &url::Url, name: &str, value: &str) -> url::Url {
+    let kept: Vec<(String, String)> = url.query_pairs().filter(|(key, _)| key != name).map(|(key, value)| (key.into_owned(), value.into_owned())).collect();
+    let mut next = url.clone();
+    next.set_query(None);
+    {
+        let mut pairs = next.query_pairs_mut();
+        for (key, value) in &kept {
+            pairs.append_pair(key, value);
+        }
+        pairs.append_pair(name, value);
+    }
+    next
+}
+
+/// The request for the page after `page`, or `None` when that was the last one.
+pub(super) fn next_page(paginate: &connectors::Paginate, operation: &Operation, page: &Page) -> Result<Option<HttpSendRequest>, String> {
+    if !paginate.more.is_empty() && answer_at(page.answer, &paginate.more) != Some(&Value::Bool(true)) {
+        return Ok(None);
+    }
+    if !paginate.last.is_empty() && answer_at(page.answer, &paginate.last) == Some(&Value::Bool(true)) {
+        return Ok(None);
+    }
+    let current = url::Url::parse(&page.request.url).map_err(|e| e.to_string())?;
+    let mut next = page.request.clone();
+    let address = |written: &str, base: Option<String>| -> Result<url::Url, String> {
+        let found = match base {
+            Some(base) => url::Url::parse(&format!("{}{}", base.trim_end_matches('/'), written)),
+            None => current.join(written),
+        }
+        .map_err(|_| "The service named a next page that is not an address".to_string())?;
+        if !same_server(&current, &found) {
+            return Err(format!("The service named a next page on another server ({}) — not followed: the credential would go with it", found.host_str().unwrap_or_default()));
+        }
+        Ok(found)
+    };
+    match paginate.style.as_str() {
+        "link" => {
+            let Some(written) = link_next(page.headers) else { return Ok(None) };
+            next.url = address(&written, None)?.to_string();
+        }
+        "url" => {
+            let Some(written) = answer_text(page.answer, &paginate.next) else { return Ok(None) };
+            let base = (!paginate.base.is_empty()).then(|| answer_text(page.answer, &paginate.base)).flatten();
+            let resolved = if base.is_some() && !written.contains("://") { address(&written, base)? } else { address(&written, None)? };
+            next.url = resolved.to_string();
+        }
+        "cursor" | "lastId" => {
+            let token = if paginate.style == "lastId" { page.items.last().and_then(|entry| answer_text(entry, &paginate.next)) } else { answer_text(page.answer, &paginate.next) };
+            let Some(token) = token else { return Ok(None) };
+            if paginate.place == "body" {
+                if paginate.continue_path.is_empty() {
+                    let mut body: Value = page.request.body_text.as_deref().and_then(|text| serde_json::from_str(text).ok()).unwrap_or_else(|| json!({}));
+                    crate::flows::value::set_path(&mut body, &paginate.param, Value::String(token));
+                    next.body_text = Some(body.to_string());
+                } else {
+                    // The pages after the first are asked at their own endpoint, with the cursor alone.
+                    let path = current.path().to_string();
+                    let root = if path.ends_with(&paginate.continue_path) {
+                        path[..path.len() - paginate.continue_path.len()].to_string()
+                    } else if let Some(root) = path.strip_suffix(operation.path.as_str()) {
+                        root.to_string()
+                    } else {
+                        return Err("The next page's address could not be worked out".into());
+                    };
+                    let mut continued = current.clone();
+                    continued.set_path(&format!("{}{}", root.trim_end_matches('/'), paginate.continue_path));
+                    continued.set_query(None);
+                    next.url = continued.to_string();
+                    let mut body = json!({});
+                    crate::flows::value::set_path(&mut body, &paginate.param, Value::String(token));
+                    next.body_text = Some(body.to_string());
+                }
+            } else {
+                next.url = with_query(&current, &paginate.param, &token).to_string();
+            }
+        }
+        "page" => {
+            if page.items.is_empty() {
+                return Ok(None);
+            }
+            let first = paginate.first.unwrap_or(1);
+            let number = first + page.number as i64 + 1;
+            let total = (!paginate.total.is_empty()).then(|| answer_at(page.answer, &paginate.total).and_then(Value::as_i64)).flatten();
+            if total.is_some_and(|total| number > first + total - 1) {
+                return Ok(None);
+            }
+            next.url = with_query(&current, &paginate.param, &number.to_string()).to_string();
+        }
+        "offset" => {
+            if page.items.is_empty() {
+                return Ok(None);
+            }
+            next.url = with_query(&current, &paginate.param, &page.read.to_string()).to_string();
+        }
+        other => return Err(format!("“{other}” is not a way of paging this build knows")),
+    }
+    Ok(Some(next))
 }
 
 /// One call outside a run — what the «Cambios en un servicio» trigger looks with. The credential is
@@ -159,8 +504,15 @@ pub(crate) async fn call_outside(call: &Value, credential: Option<Credential>) -
     let forms = secret_forms(credential.as_ref());
     let hide = |error: String| redact(&error, &forms);
     let (request, _) = request_for(connector, operation, values, credential.as_ref(), 30_000).map_err(|e| hide(e.to_string()))?;
-    let response = crate::api::http::send(request, None, None).await.map_err(hide)?;
-    answer_items(connector, operation, response.status, &response.body_text).map_err(|e| hide(e.to_string()))
+    let response = crate::api::http::send(request.clone(), None, None).await.map_err(hide)?;
+    let first = answer_items(connector, operation, response.status, &response.body_text).map_err(|e| hide(e.to_string()))?;
+    match (operation.paginate.as_ref(), pages_wanted(call)) {
+        (Some(paginate), Some(max)) => {
+            let mut pager = Outside { forms: forms.clone() };
+            every_page(&mut pager, connector, operation, paginate, request, response, first, max).await.map_err(|e| hide(e.to_string()))
+        }
+        _ => Ok(first),
+    }
 }
 
 /// The HTTP request a call makes. Required fields are checked here; the credential signs it the way
@@ -178,6 +530,15 @@ pub(super) fn request_for(
         }
         if field.required && is_blank(values.get(&field.name).unwrap_or(&Value::Null)) {
             return Err(NodeError::failed(format!("Fill in “{}”", field.label.en)));
+        }
+    }
+    // Where the request goes is part of what the credential is trusted with: a host written in a
+    // field is held to what a host looks like before anything is built from it.
+    for host in connector.host_fields() {
+        let written = crate::flows::value::to_text(values.get(host.name()).unwrap_or(&Value::Null));
+        if !written.trim().is_empty() && !host.accepts(&written) {
+            let label = connector.fields_of(operation).into_iter().find(|f| f.name == host.name()).map_or(host.name().to_string(), |f| f.label.en.clone());
+            return Err(NodeError::failed(format!("“{label}” is not a valid address for {} — write only the server, nothing around it", connector.name)));
         }
     }
     if let Some(credential) = credential {
@@ -226,6 +587,19 @@ pub(super) fn request_for(
     for (name, value) in connector.headers.iter().chain(operation.headers.iter()) {
         headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
         headers.push((name.clone(), connectors::splice(value.as_str().unwrap_or_default(), &values)));
+    }
+
+    // A field written into the path as it is (no `encode`: it may hold slashes, a repository's file path) must not be able
+    // to end the path or climb out of it — `?`, `#`, a backslash or a `..` segment in it are a different address.
+    for field in connector.fields_of(operation).into_iter().filter(|f| !f.encode) {
+        if !operation.path.contains(&format!("{{{{{}}}}}", field.name)) {
+            continue;
+        }
+        if let Some(Value::String(raw)) = values.get(&field.name) {
+            if raw.contains(['?', '#', '\\']) || raw.split('/').any(|segment| segment == "..") {
+                return Err(NodeError::failed(format!("“{}” becomes part of the address, so it cannot contain ? # \\ or ..", field.name)));
+            }
+        }
     }
 
     // A field marked `encode` is percent-encoded in the URL only — the body keeps it as written.
@@ -316,7 +690,7 @@ pub(super) fn request_for(
         form_data: None,
         urlencoded,
         auth: None,
-        options: NetworkOptions { timeout_ms, max_response_bytes: 64 * 1024 * 1024, ..NetworkOptions::default() },
+        options: NetworkOptions { timeout_ms, max_response_bytes: 64 * 1024 * 1024, guard_credentials: true, ..NetworkOptions::default() },
     };
     Ok((request, url))
 }
@@ -389,11 +763,14 @@ pub(super) fn answer_items(connector: &Connector, operation: &Operation, status:
             Value::Object(map) => map.get("message").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| value.to_string()),
             other => other.to_string(),
         };
-        match found {
+        let said = match found {
             Some(Value::Array(list)) => list.iter().map(message).collect::<Vec<_>>().join("; "),
             Some(other) => message(other),
-            None => body.chars().take(300).collect(),
-        }
+            None => String::new(),
+        };
+        // The field that should hold the message can be there and empty (Jira's `errorMessages: []` beside the `errors`
+        // that say what is wrong): then the answer itself is the message.
+        if said.trim().is_empty() { body.chars().take(300).collect() } else { said }
     };
     if status >= 400 {
         return Err(NodeError::failed(format!("{} answered {status}: {}", connector.name, error_text())));
@@ -448,6 +825,230 @@ mod tests {
         (connector, lookup_operation(connector, lookup))
     }
 
+    fn request(url: &str, body: Option<Value>) -> HttpSendRequest {
+        HttpSendRequest {
+            method: if body.is_some() { "POST".into() } else { "GET".into() },
+            url: url.into(),
+            headers: vec![("Authorization".into(), "Bearer t".into())],
+            body_text: body.map(|b| b.to_string()),
+            body_base64: None,
+            body_file: None,
+            form_data: None,
+            urlencoded: None,
+            auth: None,
+            options: NetworkOptions::default(),
+        }
+    }
+
+    fn paginate_of(connector: &str, operation: &str) -> (&'static Operation, connectors::Paginate) {
+        let (_, op) = op(connector, operation);
+        (op, op.paginate.clone().expect("this operation pages"))
+    }
+
+    fn next(connector: &str, operation: &str, request: &HttpSendRequest, headers: &[(&str, &str)], answer: Value, items: Vec<Value>, number: usize) -> Option<HttpSendRequest> {
+        let (op, paginate) = paginate_of(connector, operation);
+        let headers: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let read = items.len() * (number + 1);
+        next_page(&paginate, op, &Page { request, headers: &headers, answer: &answer, items: &items, number, read }).unwrap()
+    }
+
+    #[test]
+    fn a_link_header_names_the_next_page_and_an_empty_one_ends_the_list() {
+        let first = request("https://api.github.com/repos/o/r/issues?state=open", None);
+        let link = r#"<https://api.github.com/repositories/1/issues?state=open&page=2>; rel="next", <https://api.github.com/repositories/1/issues?state=open&page=5>; rel="last""#;
+        let second = next("github", "listIssues", &first, &[("Link", link)], json!([{"id": 1}]), vec![json!({"id": 1})], 0).unwrap();
+        assert_eq!(second.url, "https://api.github.com/repositories/1/issues?state=open&page=2");
+        assert_eq!(second.headers, first.headers, "signed the same way");
+        assert!(next("github", "listIssues", &first, &[("Link", r#"<https://api.github.com/x?page=1>; rel="prev""#)], json!([]), vec![], 0).is_none());
+        // Sentry says the next page is empty rather than leaving it out.
+        let sentry = request("https://sentry.io/api/0/projects/o/p/issues/", None);
+        let empty = r#"<https://sentry.io/api/0/projects/o/p/issues/?cursor=0:100:0>; rel="next"; results="false"; cursor="0:100:0""#;
+        assert!(next("sentry", "listIssues", &sentry, &[("link", empty)], json!([]), vec![json!({})], 0).is_none());
+        let more = empty.replace("results=\"false\"", "results=\"true\"");
+        assert!(next("sentry", "listIssues", &sentry, &[("link", &more)], json!([]), vec![json!({})], 0).is_some());
+    }
+
+    #[test]
+    fn a_next_page_on_another_server_is_not_followed() {
+        let first = request("https://api.github.com/repos/o/r/issues", None);
+        let (op, paginate) = paginate_of("github", "listIssues");
+        let headers = vec![("Link".to_string(), r#"<https://collector.example/steal?page=2>; rel="next""#.to_string())];
+        let refused = next_page(&paginate, op, &Page { request: &first, headers: &headers, answer: &json!([]), items: &[json!({})], number: 0, read: 1 });
+        assert!(refused.unwrap_err().contains("another server"));
+    }
+
+    #[test]
+    fn an_address_in_the_answer_is_read_against_its_base_or_the_request() {
+        let bitbucket = request("https://api.bitbucket.org/2.0/repositories/w/r/pullrequests", None);
+        let second = next("bitbucket", "listPullRequests", &bitbucket, &[], json!({"next": "https://api.bitbucket.org/2.0/repositories/w/r/pullrequests?page=2"}), vec![json!({})], 0).unwrap();
+        assert!(second.url.ends_with("pullrequests?page=2"));
+        assert!(next("bitbucket", "listPullRequests", &bitbucket, &[], json!({"values": []}), vec![], 0).is_none(), "no next: the last page");
+        // Confluence: relative to its `_links.base` (the site's /wiki).
+        let confluence = request("https://acme.atlassian.net/wiki/rest/api/content/search?cql=x", None);
+        let answer = json!({"_links": {"base": "https://acme.atlassian.net/wiki", "next": "/rest/api/content/search?cql=x&start=25"}});
+        let second = next("confluence", "searchPages", &confluence, &[], answer, vec![json!({})], 0).unwrap();
+        assert_eq!(second.url, "https://acme.atlassian.net/wiki/rest/api/content/search?cql=x&start=25");
+        // Graph's key has dots in it.
+        let graph = request("https://graph.microsoft.com/v1.0/me/joinedTeams", None);
+        let second = next("teamsgraph", "listTeams", &graph, &[], json!({"@odata.nextLink": "https://graph.microsoft.com/v1.0/me/joinedTeams?$skiptoken=X"}), vec![json!({})], 0).unwrap();
+        assert!(second.url.contains("skiptoken=X"));
+        // Twilio's is a path on its own server.
+        let twilio = request("https://api.twilio.com/2010-04-01/Accounts/AC1/Messages.json?PageSize=50", None);
+        let second = next("twilio", "listMessages", &twilio, &[], json!({"next_page_uri": "/2010-04-01/Accounts/AC1/Messages.json?Page=1&PageToken=PA"}), vec![json!({})], 0).unwrap();
+        assert_eq!(second.url, "https://api.twilio.com/2010-04-01/Accounts/AC1/Messages.json?Page=1&PageToken=PA");
+    }
+
+    #[test]
+    fn a_cursor_goes_back_in_the_query_or_in_the_body() {
+        let slack = request("https://slack.com/api/conversations.list?limit=200&cursor=old", None);
+        let second = next("slack", "listChannels", &slack, &[], json!({"response_metadata": {"next_cursor": "dXNlcjpV"}}), vec![json!({})], 0).unwrap();
+        assert_eq!(second.url, "https://slack.com/api/conversations.list?limit=200&cursor=dXNlcjpV", "replaced, not added twice");
+        assert!(next("slack", "listChannels", &slack, &[], json!({"response_metadata": {"next_cursor": ""}}), vec![json!({})], 0).is_none());
+        // Notion: in the body, while `has_more`.
+        let notion = request("https://api.notion.com/v1/databases/d/query", Some(json!({"filter": {"x": 1}})));
+        let second = next("notion", "queryDatabase", &notion, &[], json!({"has_more": true, "next_cursor": "c2"}), vec![json!({})], 0).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(second.body_text.as_deref().unwrap()).unwrap(), json!({"filter": {"x": 1}, "start_cursor": "c2"}));
+        assert!(next("notion", "queryDatabase", &notion, &[], json!({"has_more": false, "next_cursor": "c2"}), vec![json!({})], 0).is_none());
+        // Linear: a GraphQL variable.
+        let linear = request("https://api.linear.app/graphql", Some(json!({"query": "q", "variables": {"text": "bug"}})));
+        let answer = json!({"data": {"issues": {"pageInfo": {"hasNextPage": true, "endCursor": "e1"}}}});
+        let second = next("linear", "searchIssues", &linear, &[], answer, vec![json!({})], 0).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(second.body_text.as_deref().unwrap()).unwrap()["variables"], json!({"text": "bug", "after": "e1"}));
+        // Jira ends with `isLast`.
+        let jira = request("https://acme.atlassian.net/rest/api/3/search/jql?jql=x", None);
+        assert!(next("jira", "search", &jira, &[], json!({"isLast": true, "nextPageToken": "n"}), vec![json!({})], 0).is_none());
+        assert!(next("jira", "search", &jira, &[], json!({"isLast": false, "nextPageToken": "n"}), vec![json!({})], 0).unwrap().url.ends_with("nextPageToken=n"));
+    }
+
+    #[test]
+    fn dropbox_asks_for_the_rest_at_its_own_endpoint() {
+        let first = request("https://api.dropboxapi.com/2/files/list_folder", Some(json!({"path": "", "limit": 200})));
+        let second = next("dropbox", "listFolder", &first, &[], json!({"has_more": true, "cursor": "AAA"}), vec![json!({})], 0).unwrap();
+        assert_eq!(second.url, "https://api.dropboxapi.com/2/files/list_folder/continue");
+        assert_eq!(second.body_text.as_deref(), Some(r#"{"cursor":"AAA"}"#));
+        let third = next("dropbox", "listFolder", &second, &[], json!({"has_more": true, "cursor": "BBB"}), vec![json!({})], 1).unwrap();
+        assert_eq!((third.url.as_str(), third.body_text.as_deref()), ("https://api.dropboxapi.com/2/files/list_folder/continue", Some(r#"{"cursor":"BBB"}"#)));
+    }
+
+    #[test]
+    fn stripe_pages_after_its_last_entry_and_counters_count() {
+        let stripe = request("https://api.stripe.com/v1/customers?limit=100", None);
+        let second = next("stripe", "listCustomers", &stripe, &[], json!({"has_more": true}), vec![json!({"id": "cus_1"}), json!({"id": "cus_2"})], 0).unwrap();
+        assert_eq!(second.url, "https://api.stripe.com/v1/customers?limit=100&starting_after=cus_2");
+        // Cloudflare counts pages up to what it says the total is.
+        let cloudflare = request("https://api.cloudflare.com/client/v4/zones", None);
+        let second = next("cloudflare", "listZones", &cloudflare, &[], json!({"result_info": {"total_pages": 3}}), vec![json!({})], 0).unwrap();
+        assert!(second.url.ends_with("zones?page=2"));
+        assert!(next("cloudflare", "listZones", &second, &[], json!({"result_info": {"total_pages": 3}}), vec![json!({})], 1).unwrap().url.ends_with("page=3"));
+        assert!(next("cloudflare", "listZones", &second, &[], json!({"result_info": {"total_pages": 3}}), vec![json!({})], 2).is_none());
+        // ClickUp counts from 0 and says `last_page`.
+        let clickup = request("https://api.clickup.com/api/v2/list/1/task", None);
+        assert!(next("clickup", "listTasks", &clickup, &[], json!({"last_page": false}), vec![json!({})], 0).unwrap().url.ends_with("page=1"));
+        assert!(next("clickup", "listTasks", &clickup, &[], json!({"last_page": true}), vec![json!({})], 0).is_none());
+        // PagerDuty: an offset of what was read, while `more`.
+        let pagerduty = request("https://api.pagerduty.com/incidents?limit=25", None);
+        let second = next("pagerduty", "listIncidents", &pagerduty, &[], json!({"more": true}), vec![json!({}); 25], 0).unwrap();
+        assert!(second.url.ends_with("offset=25"));
+        assert!(next("pagerduty", "listIncidents", &pagerduty, &[], json!({"more": false}), vec![json!({}); 25], 0).is_none());
+    }
+
+    /// A loopback server answering `/items?page=N` with two entries a page and a `Link` to the next, up to page 3.
+    async fn paged_server() -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 8192];
+                    let n = socket.read(&mut buffer).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buffer[..n]).to_string();
+                    let page: usize = head.split("page=").nth(1).and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse().ok()).unwrap_or(1);
+                    let body = json!([{"id": page * 10 + 1}, {"id": page * 10 + 2}]).to_string();
+                    let link = if page < 3 { format!("Link: <http://127.0.0.1:{port}/items?page={}>; rel=\"next\"\r\n", page + 1) } else { String::new() };
+                    let answer = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{link}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = socket.write_all(answer.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn every_page_is_read_until_the_last_or_the_limit() {
+        let port = paged_server().await;
+        let (connector, operation) = op("github", "listIssues");
+        let paginate = operation.paginate.clone().unwrap();
+        let first = request(&format!("http://127.0.0.1:{port}/items?page=1"), None);
+        let read = |max: usize| {
+            let first = first.clone();
+            let paginate = paginate.clone();
+            async move {
+                let response = crate::api::http::send(first.clone(), None, None).await.unwrap();
+                let items = answer_items(connector, operation, response.status, &response.body_text).unwrap();
+                let mut pager = Outside { forms: Vec::new() };
+                every_page(&mut pager, connector, operation, &paginate, first, response, items, max).await.unwrap()
+            }
+        };
+        let all: Vec<i64> = read(1_000).await.iter().map(|item| item["id"].as_i64().unwrap()).collect();
+        assert_eq!(all, vec![11, 12, 21, 22, 31, 32], "three pages, in order");
+        let some: Vec<i64> = read(3).await.iter().map(|item| item["id"].as_i64().unwrap()).collect();
+        assert_eq!(some, vec![11, 12, 21], "stopped at the limit");
+    }
+
+    #[test]
+    fn every_way_of_paging_a_connector_declares_is_one_this_build_reads() {
+        for connector in connectors::all() {
+            for operation in &connector.operations {
+                let Some(paginate) = &operation.paginate else { continue };
+                let place = format!("{}.{}", connector.id, operation.id);
+                assert!(["link", "url", "cursor", "lastId", "page", "offset"].contains(&paginate.style.as_str()), "{place}: {}", paginate.style);
+                if matches!(paginate.style.as_str(), "url" | "cursor" | "lastId") {
+                    assert!(!paginate.next.is_empty(), "{place} says where the next page is");
+                }
+                if matches!(paginate.style.as_str(), "cursor" | "lastId" | "page" | "offset") {
+                    assert!(!paginate.param.is_empty(), "{place} says how it is asked for");
+                }
+                assert!(paginate.place.is_empty() || paginate.place == "query" || paginate.place == "body", "{place}");
+                // Asked again and again: only an operation that reads may (the same rule as the «changes» trigger's).
+                let id = operation.id.to_ascii_lowercase();
+                let reads = operation.method == "GET" || ["list", "search", "query", "get", "history"].iter().any(|p| id.starts_with(p));
+                assert!(reads, "{place} pages, so it must only read");
+            }
+        }
+    }
+
+    #[test]
+    fn the_node_asks_for_every_page_only_when_told_and_never_without_a_limit() {
+        assert_eq!(pages_wanted(&json!({})), None);
+        assert_eq!(pages_wanted(&json!({"allPages": false, "maxItems": 50})), None);
+        assert_eq!(pages_wanted(&json!({"allPages": true})), Some(DEFAULT_MAX_ITEMS));
+        assert_eq!(pages_wanted(&json!({"allPages": true, "maxItems": 250})), Some(250));
+        assert_eq!(pages_wanted(&json!({"allPages": true, "maxItems": 10_000_000})), Some(MOST_ITEMS));
+    }
+
+    #[test]
+    fn a_field_in_the_path_cannot_leave_it() {
+        let (connector, operation) = op("github", "createIssue");
+        let call = |repo: &str| {
+            request_for(connector, operation, values(json!({"owner": "acme", "repo": repo, "title": "t"})), Some(&token("ghp_1", json!({}))), 20_000)
+        };
+        assert!(call("app").is_ok());
+        for bad in ["../../orgs/acme", "app?x=1", "app#frag", "a\\b"] {
+            let error = call(bad).map(|_| ()).unwrap_err().to_string();
+            assert!(error.contains("cannot contain"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_error_message_that_is_empty_falls_back_to_the_answer() {
+        let (connector, operation) = op("jira", "createIssue");
+        let body = r#"{"errorMessages":[],"errors":{"summary":"You must specify a summary of the issue."}}"#;
+        let error = answer_items(connector, operation, 400, body).unwrap_err().to_string();
+        assert!(error.contains("You must specify a summary"), "{error}");
+    }
+
     #[test]
     fn lookups_are_sent_and_signed_the_way_calls_are() {
         // Linear: a GraphQL POST with the bare key in its header.
@@ -484,6 +1085,32 @@ mod tests {
         let (connector, operation) = field_lookup("gitlab", "commentIssue", "iid");
         let (request, _) = request_for(connector, &operation, values(json!({"project": "grupo/web"})), Some(&token("glpat", json!({}))), 20_000).unwrap();
         assert!(request.url.starts_with("https://gitlab.com/api/v4/projects/grupo%2Fweb/issues?"), "{}", request.url);
+    }
+
+    #[test]
+    fn a_host_field_cannot_carry_the_request_somewhere_else() {
+        let jira = Credential { kind: "basic".into(), meta: json!({"user": "ana@example.com"}), secret: "t".into() };
+        let (connector, operation) = op("jira", "createIssue");
+        for hostile in ["evil.example/#", "evil.example/", "a.b", "acme?x", "acme@evil.example", "-acme", "acme:80"] {
+            let error = request_for(connector, operation, values(json!({"site": hostile, "projectKey": "OPS", "summary": "x", "issueType": "Task"})), Some(&jira), 20_000).unwrap_err();
+            assert!(matches!(error, NodeError::Failed(ref text) if text.contains("valid address")), "{hostile}: {error:?}");
+        }
+        let (request, _) = request_for(connector, operation, values(json!({"site": "acme-2", "projectKey": "OPS", "summary": "x", "issueType": "Task"})), Some(&jira), 20_000).unwrap();
+        assert!(request.url.starts_with("https://acme-2.atlassian.net/"), "{}", request.url);
+
+        // A whole host: a name or an address with a port, never a path or a login.
+        let (gitlab, operation) = op("gitlab", "commentIssue");
+        for hostile in ["evil.example/api", "user@evil.example", "evil.example#", "evil example"] {
+            let error = request_for(gitlab, operation, values(json!({"host": hostile, "project": "g/r", "iid": "1", "body": "x"})), Some(&token("glpat", json!({}))), 20_000).unwrap_err();
+            assert!(matches!(error, NodeError::Failed(ref text) if text.contains("valid address")), "{hostile}: {error:?}");
+        }
+        let (request, _) = request_for(gitlab, operation, values(json!({"host": "git.corp.example:8443", "project": "g/r", "iid": "1", "body": "x"})), Some(&token("glpat", json!({}))), 20_000).unwrap();
+        assert!(request.url.starts_with("https://git.corp.example:8443/api/v4/"), "{}", request.url);
+
+        // A whole address: http(s) only, no login in it.
+        let (ntfy, operation) = op("ntfy", "publish");
+        let error = request_for(ntfy, operation, values(json!({"server": "https://user:pw@evil.example", "topic": "t", "message": "m"})), None, 20_000).unwrap_err();
+        assert!(matches!(error, NodeError::Failed(ref text) if text.contains("valid address")), "{error:?}");
     }
 
     #[test]

@@ -40,15 +40,13 @@ pub fn extension_for(mime: &str) -> &'static str {
 /// A file name for bytes that came with `disposition` (a `Content-Disposition`), from `url`, of
 /// type `mime` — the first of those that names one.
 pub fn name_for(disposition: &str, url: &str, mime: &str) -> String {
-    let named = disposition.split(';').map(str::trim).find_map(|part| {
-        let (key, value) = part.split_once('=')?;
-        matches!(key.trim().to_ascii_lowercase().as_str(), "filename" | "filename*")
-            .then(|| value.trim().trim_start_matches("UTF-8''").trim_matches('"').to_string())
-    });
+    // The header's own name is read once, by the one parser of that header (`filename*` over `filename`, quoted `;`
+    // kept, never a path): it is already the name, and decoding it again would turn a literal `%41` into `A`.
+    let named = super::net::disposition_filename(disposition);
     let from_url = url::Url::parse(url).ok().and_then(|u| u.path_segments().and_then(|mut s| s.next_back()).map(str::to_string)).filter(|s| s.contains('.'));
     // Percent-decoded (`factura%2042.pdf`), a literal `+` kept as one.
-    let name = named.or(from_url).map(|n| url::form_urlencoded::parse(format!("x={}", n.replace('+', "%2B")).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or(n));
-    let name = name.map(|n| super::google::safe_name(&n)).filter(|n| !n.is_empty());
+    let from_url = from_url.map(|n| url::form_urlencoded::parse(format!("x={}", n.replace('+', "%2B")).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or(n));
+    let name = named.or(from_url).map(|n| super::google::safe_name(&n)).filter(|n| !n.is_empty());
     name.unwrap_or_else(|| format!("archivo.{}", extension_for(mime)))
 }
 
@@ -195,6 +193,10 @@ mod tests {
         assert_eq!(name_for("attachment; filename=\"factura 42.pdf\"", "https://example.com/x", "application/pdf"), "factura 42.pdf");
         assert_eq!(name_for("", "https://example.com/files/report.csv?x=1", "text/csv"), "report.csv");
         assert_eq!(name_for("", "https://example.com/download", "image/png"), "archivo.png");
+        // The extended form wins, a quoted `;` is part of the name, and a name taken from the header is not decoded twice.
+        assert_eq!(name_for("attachment; filename*=UTF-8''caf%C3%A9%2042.pdf; filename=\"x.pdf\"", "", "application/pdf"), "café 42.pdf");
+        assert_eq!(name_for("attachment; filename=\"a;b.txt\"", "", "text/plain"), super::super::google::safe_name("a;b.txt"));
+        assert_eq!(name_for("attachment; filename=\"100%41.txt\"", "", "text/plain"), "100%41.txt");
     }
 
     #[test]

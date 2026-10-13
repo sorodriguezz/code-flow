@@ -202,7 +202,54 @@ pub fn validate(spec: &FlowSpec) -> Result<(), String> {
     if has_cycle_outside_loops(spec, &nodes) {
         return invalid("a cycle that does not pass through a loop node".into());
     }
+    if let Some(problem) = loop_wiring_conflict(spec) {
+        return invalid(problem);
+    }
     Ok(())
+}
+
+/// Every node reachable from `starts` along the connections, up to `stop`. With `through_loops` off, the
+/// walk does not enter another loop at all — a loop that encloses this one is reached from its «done»
+/// branch by the very wire that closes it, and is not a node waiting on it.
+fn reachable_from(spec: &FlowSpec, starts: impl IntoIterator<Item = String>, stop: &str, through_loops: bool) -> HashSet<String> {
+    let is_loop = |id: &str| spec.nodes.iter().any(|n| n.id == id && n.type_id == LOOP_TYPE);
+    let mut seen = HashSet::new();
+    let mut queue: VecDeque<String> = starts.into_iter().collect();
+    while let Some(next) = queue.pop_front() {
+        if next == stop || (!through_loops && is_loop(&next)) || !seen.insert(next.clone()) {
+            continue;
+        }
+        queue.extend(spec.connections.iter().filter(|w| w.from == next).map(|w| w.to.clone()));
+    }
+    seen
+}
+
+/// The nodes a loop hands its items to: everything reachable from its «loop» output before the run comes
+/// back to the loop. What `engine::LoopPlan` calls its body.
+pub(crate) fn loop_body(spec: &FlowSpec, loop_id: &str) -> HashSet<String> {
+    reachable_from(spec, spec.connections.iter().filter(|w| w.from == loop_id && w.out == 0).map(|w| w.to.clone()), loop_id, true)
+}
+
+/// A loop hands its items to its body one batch at a time and waits for the body to come back before it
+/// opens «done». A node that waits for *both* — fed by the body and by the «done» output, or by
+/// something only «done» leads to — waits for a thing that cannot happen before the thing it is waiting
+/// on: the run would stop with the loop half-way and nothing said. Refused when the flow is saved.
+fn loop_wiring_conflict(spec: &FlowSpec) -> Option<String> {
+    let name_of = |id: &str| spec.nodes.iter().find(|n| n.id == id).map_or(id.to_string(), |n| n.name.clone());
+    for node in spec.nodes.iter().filter(|n| n.type_id == LOOP_TYPE) {
+        let body = loop_body(spec, &node.id);
+        let after = reachable_from(spec, spec.connections.iter().filter(|w| w.from == node.id && w.out == 1).map(|w| w.to.clone()), &node.id, false);
+        if let Some(both) = spec.nodes.iter().find(|n| body.contains(&n.id) && after.contains(&n.id)) {
+            return Some(format!(
+                "“{}” is reached from the body of “{}” and from its «done» output, so it would wait for the loop to end while the loop waits for it",
+                both.name, node.name
+            ));
+        }
+        if let Some(wire) = spec.connections.iter().find(|w| w.to == node.id && after.contains(&w.from)) {
+            return Some(format!("“{}” sends its result back into “{}” from the loop's «done» branch, which only opens when the loop is over", name_of(&wire.from), node.name));
+        }
+    }
+    None
 }
 
 /// Kahn's algorithm over the graph with every loop node removed: whatever cannot be peeled off sits
@@ -278,6 +325,15 @@ pub const EXECUTABLE_TYPES: &[&str] = &[
     "ai.transform",
     "app.process",
     "net.browser",
+    // Added after the first review of what an imported flow can do unasked: a Wait-until that runs a
+    // shell line or a statement on every poll, an agent that edits a repository to fix a pull request,
+    // the Reviewer's `prepare`/`build`/`test` lines (run through `sh -c`), and a node that hands any
+    // address or file to the operating system. `migrations::rehash_flow_trust` carries the trust
+    // already given across each of these additions.
+    "logic.until",
+    "ai.prFix",
+    "app.reviewer",
+    "app.open",
 ];
 
 /// The nodes of `spec` that run code, in id order.

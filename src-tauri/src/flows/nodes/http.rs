@@ -27,6 +27,9 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     for index in 0..count {
         let params = &resolved[index.min(resolved.len() - 1)];
         let produced = request(ctx, params).await?;
+        if !matches!(text(params, "method").to_ascii_uppercase().as_str(), "" | "GET" | "HEAD" | "OPTIONS") {
+            ctx.mark_sent();
+        }
         out.extend(produced.into_iter().map(|json| if items.is_empty() { Item::new(json) } else { Item::paired(json, index) }));
     }
     Ok(vec![out])
@@ -80,7 +83,17 @@ pub(super) async fn apply_credential(
             headers.push(("Authorization".into(), format!("Basic {token}")));
         }
         "header" => headers.push((meta_text("name"), credential.secret.clone())),
-        "query" => query.push((meta_text("name"), credential.secret.clone())),
+        "query" => {
+            // In the URL the secret is percent-encoded, and an error that prints the address (a refused
+            // connection, a timeout) prints that form — which the run's redaction, knowing the raw text
+            // only, would let through into the run's data and the screen.
+            for form in [url::form_urlencoded::byte_serialize(credential.secret.as_bytes()).collect::<String>(), crate::oauth::urlencode(&credential.secret)] {
+                if form != credential.secret {
+                    ctx.run.host.secret_used(&form);
+                }
+            }
+            query.push((meta_text("name"), credential.secret.clone()));
+        }
         other => return Err(NodeError::failed(format!("A {other} credential cannot sign an HTTP request"))),
     }
     Ok(())
@@ -169,6 +182,16 @@ async fn paginate(ctx: &NodeCtx, params: &Value, mode: &str) -> Result<Vec<Value
                         // Relative to the page it came from (`</items?page=2>`); it carries its own query.
                         let here = build_url(&text(&page_params, "url"), &[])?;
                         let url = here.join(next.trim()).map_err(|e| NodeError::failed(format!("The next page's URL is not valid: {e}")))?;
+                        // The credential and the headers go with every page. A `next` link that names another
+                        // server — written by whoever controls the response, or by a man in the middle once it
+                        // is plain http — would be sent them. Pages come from the server that was asked.
+                        if !same_origin(&here, &url) {
+                            return Err(NodeError::failed(format!(
+                                "The next page is on another server ({}) than the one asked ({}): it was not followed, so the credential does not go there",
+                                url.host_str().unwrap_or_default(),
+                                here.host_str().unwrap_or_default()
+                            )));
+                        }
                         page_params["url"] = Value::String(url.to_string());
                         page_params["query"] = json!([]);
                         true
@@ -205,6 +228,11 @@ async fn paginate(ctx: &NodeCtx, params: &Value, mode: &str) -> Result<Vec<Value
     }
     ctx.log(LogStream::Info, &format!("Stopped at the limit of {max} pages ({} items) — there were more", out.len()));
     Ok(out)
+}
+
+/// Whether two addresses are the same server: scheme, host and port.
+fn same_origin(a: &url::Url, b: &url::Url) -> bool {
+    a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
 }
 
 /// One request, sent and read — failing on a 4xx/5xx unless asked not to.
@@ -269,6 +297,7 @@ async fn send(ctx: &NodeCtx, params: &Value) -> Result<Answer, NodeError> {
         follow_redirects: params.get("followRedirects").is_none() || flag(params, "followRedirects"),
         verify_ssl: params.get("verifySsl").is_none() || flag(params, "verifySsl"),
         max_response_bytes: MAX_RESPONSE,
+        guard_credentials: true,
         ..NetworkOptions::default()
     };
     let shown = loggable(&url);
@@ -384,6 +413,16 @@ mod tests {
         let url = build_url("example.com/api", &[("q".into(), "a b".into())]).unwrap();
         assert_eq!(url.as_str(), "https://example.com/api?q=a+b");
         assert!(build_url("  ", &[]).is_err());
+    }
+
+    #[test]
+    fn pages_come_from_the_server_that_was_asked() {
+        let at = |text: &str| url::Url::parse(text).unwrap();
+        assert!(same_origin(&at("https://api.example.com/items"), &at("https://api.example.com/items?page=2")));
+        assert!(same_origin(&at("https://api.example.com/items"), &at("https://api.example.com:443/other")));
+        assert!(!same_origin(&at("https://api.example.com/items"), &at("https://evil.example/items")));
+        assert!(!same_origin(&at("https://api.example.com/items"), &at("http://api.example.com/items")), "never down to plain http");
+        assert!(!same_origin(&at("https://api.example.com/items"), &at("https://api.example.com:8443/items")));
     }
 
     #[test]

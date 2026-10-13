@@ -97,6 +97,29 @@ fn run_of(host: &AppHost, project_id: &str, pr_id: i64, run_id: &str) -> Result<
     queries::get_review_run(&conn, &id).map_err(|e| e.to_string())
 }
 
+/// The head commit a saved review was made against (empty for runs saved before it was recorded).
+fn reviewed_head(run: &crate::db::models::ReviewRunDetail) -> String {
+    serde_json::from_str::<Value>(&run.meta).ok().and_then(|meta| meta.get("head_sha").and_then(Value::as_str).map(str::to_string)).unwrap_or_default()
+}
+
+/// Whether the pull request still stands at the commit the review looked at. When the host cannot say where it stands
+/// now, or the review did not record where it was, there is nothing to compare and the approval goes ahead.
+async fn reviewed_head_is_current(host: &AppHost, project_id: &str, pr_id: i64, run: &crate::db::models::ReviewRunDetail) -> Result<(), String> {
+    let reviewed = reviewed_head(run);
+    if reviewed.is_empty() {
+        return Ok(());
+    }
+    let current = ado_cmd::pr_checks(db(host), project_id.to_string(), pr_id).await.ok().and_then(|checks| checks.head_sha).filter(|sha| !sha.is_empty());
+    match current {
+        Some(now) if !now.eq_ignore_ascii_case(&reviewed) => Err(format!(
+            "#{pr_id} has new commits since it was reviewed ({} → {}) — review it again before approving",
+            reviewed.chars().take(7).collect::<String>(),
+            now.chars().take(7).collect::<String>()
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn findings_of(run: &crate::db::models::ReviewRunDetail) -> Vec<MemoryFinding> {
     serde_json::from_str(&run.findings).unwrap_or_default()
 }
@@ -200,14 +223,24 @@ async fn decide(host: &AppHost, args: &Value, cancel: CancellationToken) -> Resu
     let run = run_of(host, &project_id, pr_id, "")?;
     let gate = run.as_ref().map(|run| gate_passes(&findings_of(run)));
     let action = match arg(args, "decision").as_str() {
-        "byReview" => match gate {
-            Some(true) => "approve",
-            Some(false) => "request_changes",
-            None => return Err(no_review(pr_id)),
-        },
+        "byReview" => {
+            let run = run.as_ref().ok_or_else(|| no_review(pr_id))?;
+            // A review that cannot be read is not a review that found nothing: it would pass the gate.
+            let findings: Vec<MemoryFinding> =
+                serde_json::from_str(&run.findings).map_err(|e| format!("The saved review of #{pr_id} could not be read ({e}) — run it again"))?;
+            if gate_passes(&findings) {
+                // An approval is for the code that was reviewed, not for whatever has been pushed since.
+                reviewed_head_is_current(host, &project_id, pr_id, run).await?;
+                "approve"
+            } else {
+                "request_changes"
+            }
+        }
+        "approvePr" | "approve" => "approve",
         "requestChanges" => "request_changes",
         "closePr" => "close",
-        _ => "approve",
+        // Anything else — a blank from an expression, a misspelling — decides nothing: the old fall-through approved.
+        other => return Err(format!("“{other}” is not a decision — choose approve, request changes, close, or by the review")),
     };
     let note = Some(arg(args, "note")).filter(|n| !n.trim().is_empty());
     let outcome = ado_cmd::act_on_pull_request(db(host), project_id.clone(), pr_id, action.to_string(), note).await?;
@@ -347,25 +380,33 @@ fn memory_rules(host: &AppHost, args: &Value) -> Result<Value, String> {
 /// otherwise. True when it switched.
 async fn on_branch(host: &AppHost, path: &str, branch: &str, may_switch: bool) -> Result<bool, String> {
     let status = crate::git::repo::get_status(path)?;
-    if status.current_branch.as_deref() == Some(branch) {
-        return Ok(false);
-    }
-    if !may_switch {
-        return Err(format!(
-            "The checkout is on {} and the pull request on {branch} — let the node switch, or switch first",
-            status.current_branch.as_deref().unwrap_or("a detached HEAD")
-        ));
-    }
     let dirty = !status.staged.is_empty() || !status.unstaged.is_empty() || !status.untracked.is_empty() || !status.conflicted.is_empty();
-    if dirty {
-        return Err(format!("The checkout has uncommitted changes — commit or stash them before switching to {branch}"));
+    let already = status.current_branch.as_deref() == Some(branch);
+    if !already {
+        if !may_switch {
+            return Err(format!(
+                "The checkout is on {} and the pull request on {branch} — let the node switch, or switch first",
+                status.current_branch.as_deref().unwrap_or("a detached HEAD")
+            ));
+        }
+        if dirty {
+            return Err(format!("The checkout has uncommitted changes — commit or stash them before switching to {branch}"));
+        }
     }
-    // Fetched first, so a branch this clone has not seen yet is there to switch to.
+    // Fetched first, so a branch this clone has not seen yet is there to switch to — and so the one it
+    // has is at the pull request's tip: a fix made on a stale local copy of the branch is rejected when it
+    // is pushed.
     let _ = crate::commands::git_ops::git_fetch_branch(host.app.clone(), path.to_string(), branch.to_string()).await;
-    crate::git::branch::checkout_local_branch(path, branch)
-        .or_else(|_| crate::git::branch::checkout_remote_tracking(path, &format!("origin/{branch}")).map(|_| ()))?;
-    tell(host, crate::remotectl::dispatch::Invalidate::Repo, "");
-    Ok(true)
+    if !already {
+        crate::git::branch::checkout_local_branch(path, branch)
+            .or_else(|_| crate::git::branch::checkout_remote_tracking(path, &format!("origin/{branch}")).map(|_| ()))?;
+    }
+    // A working copy with edits in it is not moved under them.
+    let moved = if dirty { false } else { crate::git::merge::fast_forward_only(path, &format!("origin/{branch}"))? };
+    if !already || moved {
+        tell(host, crate::remotectl::dispatch::Invalidate::Repo, "");
+    }
+    Ok(!already)
 }
 
 /// The threads a helper works on: the ids asked for, or every open one.
@@ -493,6 +534,25 @@ mod tests {
             "archivo": null, "lineas": null, "confianza": null, "estado": estado
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_review_knows_the_commit_it_was_made_against() {
+        let run = |meta: &str| crate::db::models::ReviewRunDetail {
+            id: "r".into(),
+            project_id: "p".into(),
+            pr_id: 7,
+            iter: 1,
+            level: "standard".into(),
+            meta: meta.into(),
+            review_md: String::new(),
+            diff: String::new(),
+            findings: "[]".into(),
+            created_at: String::new(),
+        };
+        assert_eq!(reviewed_head(&run(r#"{"head_sha": "abc1234"}"#)), "abc1234");
+        assert_eq!(reviewed_head(&run("{}")), "", "saved before heads were recorded");
+        assert_eq!(reviewed_head(&run("not json")), "");
     }
 
     #[test]

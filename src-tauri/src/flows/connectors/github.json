@@ -57,6 +57,7 @@
       "id": "listIssues",
       "name": { "es": "Listar issues", "en": "List issues" },
       "method": "GET",
+      "paginate": { "style": "link" },
       "path": "/repos/{{owner}}/{{repo}}/issues",
       "query": { "state": "{{state}}", "labels": "{{labels}}", "since": "{{since}}", "per_page": "{{perPage}}" },
       "fields": [
@@ -72,6 +73,7 @@
       "id": "searchIssues",
       "name": { "es": "Buscar issues y PRs", "en": "Search issues and PRs" },
       "method": "GET",
+      "paginate": { "style": "link" },
       "path": "/search/issues",
       "query": { "q": "{{q}}", "per_page": "{{perPage}}" },
       "fields": [

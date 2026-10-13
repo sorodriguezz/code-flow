@@ -284,6 +284,11 @@ export function startFlowSharing(onShared: (event: FlowSharedEvent) => void): vo
     onShared(event.payload);
     void useFlowShareStore.getState().refresh();
   });
+  // A teammate's version that can no longer be armed switches the flow off — say so, with the reason: otherwise the
+  // flow just stops listening and nobody knows why.
+  void listen<{ flowId: string; error: string }>("flows:shared-disarmed", (event) => {
+    pushErrorToast(translate("flows.share.disarmed", { error: event.payload.error }));
+  });
   if (polling || !isMainWindow()) return;
   polling = true;
   const loop = async () => {

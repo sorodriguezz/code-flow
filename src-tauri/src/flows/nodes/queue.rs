@@ -30,7 +30,9 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         match ctx.param_str("broker").as_str() {
             "kafka" => kafka(ctx, &resolved, credential.as_ref()).await,
             "sqs" => sqs(ctx, &resolved, credential.as_ref()).await,
-            _ => rabbit(ctx, &resolved, credential.as_ref()).await,
+            "rabbitmq" | "" => rabbit(ctx, &resolved, credential.as_ref()).await,
+            // A flow saved while NATS and Azure Service Bus were offered: said, not run as RabbitMQ.
+            other => Err(NodeError::failed(format!("“{other}” is not a broker this version can talk to — choose RabbitMQ, Kafka or SQS"))),
         }
     };
     let answers = tokio::select! {
@@ -100,6 +102,10 @@ async fn rabbit(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credentia
     let mut out = Vec::new();
     let result: Result<(), NodeError> = async {
         if ctx.param_str("queueOp") == "queueReceive" {
+            // Taken off the queue only once all of them have been read: a failure on the fifth would otherwise leave the
+            // first four acknowledged and gone, while the node reports an error and returns nothing. Unacknowledged
+            // ones go back to the queue when the channel closes.
+            let mut taken = Vec::new();
             for (index, params) in resolved.iter().enumerate() {
                 let queue = text(params, "queueName");
                 if queue.is_empty() {
@@ -142,12 +148,15 @@ async fn rabbit(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credentia
                     if keep {
                         held.push(message);
                     } else {
-                        delivery.acker.ack(BasicAckOptions::default()).await.map_err(|e| NodeError::failed(e.to_string()))?;
+                        taken.push(message);
                     }
                 }
                 for message in held {
                     message.delivery.acker.nack(BasicNackOptions { requeue: true, ..Default::default() }).await.map_err(|e| NodeError::failed(e.to_string()))?;
                 }
+            }
+            for message in taken {
+                message.delivery.acker.ack(BasicAckOptions::default()).await.map_err(|e| NodeError::failed(e.to_string()))?;
             }
             return Ok(());
         }
@@ -158,7 +167,8 @@ async fn rabbit(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credentia
             if exchange.is_empty() && routing_key.is_empty() {
                 return Err(NodeError::failed("Write the queue (as the routing key) or the exchange to publish to"));
             }
-            let message = params.get("message").and_then(Value::as_str).unwrap_or_default().to_string();
+            // A message that resolves to an object or a number (`={{ $json }}`) is its JSON text — not an empty body.
+            let message = text(params, "message");
             let mut properties = BasicProperties::default()
                 .with_content_type(ShortString::from(if is_json(&message) { "application/json" } else { "text/plain" }))
                 .with_delivery_mode(if flag(params, "persistent") { 2 } else { 1 });
@@ -185,6 +195,7 @@ async fn rabbit(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credentia
                 }
                 _ => {}
             }
+            ctx.mark_sent();
             out.push((index, json!({"broker": "rabbitmq", "published": true, "exchange": exchange, "routingKey": routing_key, "bytes": message.len()})));
         }
         Ok(())
@@ -302,7 +313,7 @@ async fn kafka(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credential
 
     let mut records = Vec::new();
     for params in resolved {
-        let message = params.get("message").and_then(Value::as_str).unwrap_or_default();
+        let message = text(params, "message");
         let key = text(params, "messageKey");
         let headers: BTreeMap<String, Vec<u8>> = pairs(params, "messageHeaders").into_iter().map(|(k, v)| (k, v.into_bytes())).collect();
         records.push(Record {
@@ -314,6 +325,7 @@ async fn kafka(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credential
     }
     let offsets = partition_client.produce(records, Compression::NoCompression).await.map_err(|e| NodeError::failed(format!("Publishing to {topic} failed: {e}")))?;
     for (index, offset) in offsets.into_iter().enumerate() {
+        ctx.mark_sent();
         out.push((index, json!({"broker": "kafka", "published": true, "topic": topic, "partition": partition, "offset": offset})));
     }
     ctx.log(LogStream::Info, &format!("Kafka {topic}/{partition}: {} record(s) published", out.len()));
@@ -333,43 +345,81 @@ pub fn sqs_region(queue_url: &str) -> Option<String> {
     }
 }
 
-async fn sqs_call(ctx: &NodeCtx, credential: &Credential, region: &str, queue_url: &str, action: &str, body: Value) -> Result<Value, NodeError> {
-    let queue = url::Url::parse(queue_url).map_err(|e| NodeError::failed(format!("\"{queue_url}\" is not a queue URL: {e}")))?;
+/// What signs an SQS request, owned — a delete done after the run outlives the node's borrowed credential.
+#[derive(Clone)]
+struct SqsSigner {
+    access_key: String,
+    secret: String,
+    session_token: String,
+}
+
+impl SqsSigner {
+    fn of(credential: &Credential) -> SqsSigner {
+        let meta = |key: &str| credential.meta.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        SqsSigner { access_key: meta("user"), secret: credential.secret.clone(), session_token: meta("sessionToken") }
+    }
+}
+
+/// One SQS action, signed: the answer, or what SQS said was wrong — and how long it took, for the log.
+async fn sqs_request(signer: &SqsSigner, region: &str, queue_url: &str, action: &str, body: Value) -> Result<(Value, u16, u128), String> {
+    let queue = url::Url::parse(queue_url).map_err(|e| format!("\"{queue_url}\" is not a queue URL: {e}"))?;
     let mut endpoint = queue.clone();
     endpoint.set_path("/");
     endpoint.set_query(None);
     let payload = body.to_string();
     let headers = vec![("content-type".to_string(), "application/x-amz-json-1.0".to_string()), ("x-amz-target".to_string(), format!("AmazonSQS.{action}"))];
-    let access_key = credential.meta.get("user").and_then(Value::as_str).unwrap_or_default();
     let signed = crate::sigv4::sigv4_headers(
         "POST",
         &endpoint,
         &headers,
         &crate::sigv4::hex_sha256(payload.as_bytes()),
-        access_key,
-        &credential.secret,
-        "",
+        &signer.access_key,
+        &signer.secret,
+        &signer.session_token,
         region,
         "sqs",
         &chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
-    )
-    .map_err(NodeError::Failed)?;
+    )?;
     let mut request = reqwest::Client::new().post(endpoint.as_str()).timeout(Duration::from_secs(40)).body(payload);
     for (name, value) in headers.into_iter().chain(signed) {
         request = request.header(name, value);
     }
     let started = std::time::Instant::now();
-    let response = request.send().await.map_err(|e| NodeError::failed(format!("SQS could not be reached: {e}")))?;
+    let response = request.send().await.map_err(|e| format!("SQS could not be reached: {e}"))?;
     let status = response.status();
-    ctx.log(LogStream::Info, &format!("SQS {action} → {} ({} ms)", status.as_u16(), started.elapsed().as_millis()));
-    let text = response.text().await.map_err(|e| NodeError::failed(e.to_string()))?;
+    let text = response.text().await.map_err(|e| e.to_string())?;
     let answer: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     if !status.is_success() {
         let kind = answer.get("__type").and_then(Value::as_str).unwrap_or_default().rsplit('#').next().unwrap_or_default().to_string();
         let message = answer.get("message").or_else(|| answer.get("Message")).and_then(Value::as_str).unwrap_or(text.as_str()).to_string();
-        return Err(NodeError::failed(format!("SQS answered {}: {kind} {message}", status.as_u16()).trim().to_string()));
+        return Err(format!("SQS answered {}: {kind} {message}", status.as_u16()).trim().to_string());
     }
+    Ok((answer, status.as_u16(), started.elapsed().as_millis()))
+}
+
+async fn sqs_call(ctx: &NodeCtx, credential: &Credential, region: &str, queue_url: &str, action: &str, body: Value) -> Result<Value, NodeError> {
+    let (answer, status, ms) = sqs_request(&SqsSigner::of(credential), region, queue_url, action, body).await.map_err(NodeError::Failed)?;
+    ctx.log(LogStream::Info, &format!("SQS {action} → {status} ({ms} ms)"));
     Ok(answer)
+}
+
+/// The messages read from one queue, to be deleted — ten a request, the most `DeleteMessageBatch` takes. Answers how many
+/// were deleted, and what SQS said about the ones it kept (they come back after their invisibility, and are read again).
+async fn sqs_delete(signer: &SqsSigner, region: &str, queue_url: &str, receipts: &[String]) -> (usize, Vec<String>) {
+    let (mut deleted, mut kept) = (0, Vec::new());
+    for chunk in receipts.chunks(10) {
+        let entries: Vec<Value> = chunk.iter().enumerate().map(|(i, receipt)| json!({"Id": format!("m{i}"), "ReceiptHandle": receipt})).collect();
+        match sqs_request(signer, region, queue_url, "DeleteMessageBatch", json!({"QueueUrl": queue_url, "Entries": entries})).await {
+            Ok((answer, _, _)) => {
+                deleted += answer.get("Successful").and_then(Value::as_array).map_or(0, Vec::len);
+                for failed in answer.get("Failed").and_then(Value::as_array).into_iter().flatten() {
+                    kept.push(failed.get("Message").and_then(Value::as_str).unwrap_or("not deleted").to_string());
+                }
+            }
+            Err(error) => kept.extend(std::iter::repeat_n(error, chunk.len())),
+        }
+    }
+    (deleted, kept)
 }
 
 async fn sqs(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credential>) -> Result<Vec<(usize, Value)>, NodeError> {
@@ -389,17 +439,33 @@ async fn sqs(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credential>)
             .unwrap_or_else(|| "us-east-1".into());
         if ctx.param_str("queueOp") == "queueReceive" {
             let wait = number(params, "waitSeconds").unwrap_or(0.0).clamp(0.0, 20.0) as u64;
-            let answer = sqs_call(
-                ctx,
-                credential,
-                &region,
-                &queue_url,
-                "ReceiveMessage",
-                json!({"QueueUrl": queue_url, "MaxNumberOfMessages": limit_of(params, 10).min(10), "WaitTimeSeconds": wait, "MessageAttributeNames": ["All"], "MessageSystemAttributeNames": ["All"]}),
-            )
-            .await?;
+            let limit = limit_of(params, 10);
+            // How long the messages read stay out of other readers' sight while this run works on them: a delete after the
+            // run must come before they reappear.
+            let hidden = number(params, "visibilitySeconds").unwrap_or(300.0).clamp(0.0, 43_200.0) as u64;
+            let mut messages: Vec<Value> = Vec::new();
+            // SQS hands out ten at most a request: asked again until the limit, or until it has no more.
+            while messages.len() < limit {
+                let mut ask = json!({
+                    "QueueUrl": queue_url,
+                    "MaxNumberOfMessages": (limit - messages.len()).min(10),
+                    "WaitTimeSeconds": if messages.is_empty() { wait } else { 0 },
+                    "MessageAttributeNames": ["All"],
+                    "MessageSystemAttributeNames": ["All"],
+                });
+                if hidden > 0 {
+                    ask["VisibilityTimeout"] = json!(hidden);
+                }
+                let answer = sqs_call(ctx, credential, &region, &queue_url, "ReceiveMessage", ask).await?;
+                let got = answer.get("Messages").and_then(Value::as_array).cloned().unwrap_or_default();
+                if got.is_empty() {
+                    break;
+                }
+                messages.extend(got);
+            }
             let keep = flag(params, "leaveInQueue");
-            for message in answer.get("Messages").and_then(Value::as_array).cloned().unwrap_or_default() {
+            let mut receipts: Vec<String> = Vec::new();
+            for message in messages {
                 let receipt = message.get("ReceiptHandle").and_then(Value::as_str).unwrap_or_default().to_string();
                 let attributes: Map<String, Value> = message
                     .get("MessageAttributes")
@@ -417,13 +483,36 @@ async fn sqs(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credential>)
                         "receiptHandle": receipt,
                     }),
                 ));
-                if !keep {
-                    sqs_call(ctx, credential, &region, &queue_url, "DeleteMessage", json!({"QueueUrl": queue_url, "ReceiptHandle": receipt})).await?;
+                if !keep && !receipt.is_empty() {
+                    receipts.push(receipt);
+                }
+            }
+            // Deleted once every message is read and made an item — never one by one as it arrives, which left the first
+            // ones gone when a later read failed. With «when the run ends well» (the default), only then: a run that fails
+            // leaves them to come back after their invisibility.
+            if !receipts.is_empty() {
+                let signer = SqsSigner::of(credential);
+                if text(params, "sqsDelete") == "afterRead" {
+                    let (deleted, kept) = sqs_delete(&signer, &region, &queue_url, &receipts).await;
+                    ctx.log(LogStream::Info, &format!("SQS: {deleted} message(s) deleted from the queue"));
+                    if !kept.is_empty() {
+                        ctx.log(LogStream::Stderr, &format!("SQS kept {} message(s) it could not delete — they will be read again: {}", kept.len(), kept[0]));
+                    }
+                } else {
+                    ctx.log(LogStream::Info, &format!("SQS: {} message(s) will be deleted when the run ends well", receipts.len()));
+                    let queue = queue_url.clone();
+                    let region = region.clone();
+                    ctx.run.host.after_success(Box::pin(async move {
+                        let (_, kept) = sqs_delete(&signer, &region, &queue, &receipts).await;
+                        if !kept.is_empty() {
+                            crate::applog::warn(&format!("flows: SQS kept {} message(s) it could not delete after the run — they will be read again: {}", kept.len(), kept[0]));
+                        }
+                    }));
                 }
             }
             continue;
         }
-        let message = params.get("message").and_then(Value::as_str).unwrap_or_default();
+        let message = text(params, "message");
         let mut body = json!({"QueueUrl": queue_url, "MessageBody": message});
         let group = text(params, "messageGroupId");
         if !group.is_empty() {
@@ -436,6 +525,7 @@ async fn sqs(ctx: &NodeCtx, resolved: &[Value], credential: Option<&Credential>)
             body["MessageAttributes"] = Value::Object(attributes);
         }
         let answer = sqs_call(ctx, credential, &region, &queue_url, "SendMessage", body).await?;
+        ctx.mark_sent();
         out.push((index, json!({"broker": "sqs", "published": true, "messageId": answer.get("MessageId"), "sequenceNumber": answer.get("SequenceNumber")})));
     }
     Ok(out)

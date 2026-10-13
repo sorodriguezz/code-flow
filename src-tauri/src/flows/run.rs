@@ -160,6 +160,10 @@ pub struct Plan {
     /// Nodes whose output is already known — pinned, or reused from an earlier run — keyed by id,
     /// with whether each was pinned (as opposed to reused).
     pub seeds: HashMap<String, (Ports, bool)>,
+    /// Where each input item of a seeded node came from, when it is known (a reused node's record keeps
+    /// it): without it `$('Trigger').item` cannot be followed back through a seed, and a retry from the
+    /// failure failed on an expression the first run evaluated fine.
+    pub seed_origins: HashMap<String, Vec<Vec<Origin>>>,
     /// What the trigger emitted when something outside fired it — a webhook's request, a file
     /// that appeared. `None` for a run started by hand, where the trigger makes its own item.
     pub trigger_output: Option<Ports>,
@@ -185,6 +189,18 @@ pub(crate) fn downstream(spec: &FlowSpec, from: &str) -> HashSet<String> {
         }
     }
     seen
+}
+
+/// The nodes a run could execute, from what its row remembers of it — for a run picked up after a wait,
+/// which must run the part of the flow it set out to run and no more: a «run up to here» parked at an
+/// approval must not, once decided, go on past the node it was run up to.
+pub fn scope_of(spec: &FlowSpec, mode: &str, trigger: &str, target: &str) -> HashSet<String> {
+    match mode {
+        "step" if !target.is_empty() => HashSet::from([target.to_string()]),
+        "partial" if !target.is_empty() && !trigger.is_empty() => downstream(spec, trigger).intersection(&upstream(spec, target)).cloned().collect(),
+        _ if trigger.is_empty() => spec.nodes.iter().map(|n| n.id.clone()).collect(),
+        _ => downstream(spec, trigger),
+    }
 }
 
 fn upstream(spec: &FlowSpec, to: &str) -> HashSet<String> {
@@ -256,7 +272,7 @@ pub fn plan(
             let start = chosen_trigger(None)?;
             let active = downstream(spec, &start);
             let seeds = seeds_for(&active);
-            Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None, quiet: HashSet::new(), decided: None })
+            Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None, quiet: HashSet::new(), decided: None, seed_origins: HashMap::new() })
         }
         RunMode::UpTo { node: target } => {
             let target_node = node(target).ok_or_else(|| format!("No node {target} in this flow"))?;
@@ -268,12 +284,12 @@ pub fn plan(
                 let start = chosen_trigger(Some(&HashSet::from([target.clone()])))?;
                 let active = HashSet::from([start.clone()]);
                 let seeds = seeds_for(&active);
-                return Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None, quiet: HashSet::new(), decided: None });
+                return Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None, quiet: HashSet::new(), decided: None, seed_origins: HashMap::new() });
             }
             let start = chosen_trigger(Some(&leads))?;
             let active: HashSet<String> = downstream(spec, &start).intersection(&leads).cloned().collect();
             let seeds = seeds_for(&active);
-            Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None, quiet: HashSet::new(), decided: None })
+            Ok(Plan { trigger: Some(start), active, seeds, trigger_output: None, quiet: HashSet::new(), decided: None, seed_origins: HashMap::new() })
         }
         RunMode::Step { node: target } => {
             let target_node = node(target).ok_or_else(|| format!("No node {target} in this flow"))?;
@@ -295,7 +311,7 @@ pub fn plan(
                     return Err("needs-upstream".into());
                 }
             }
-            Ok(Plan { trigger: None, active: HashSet::from([target.clone()]), seeds, trigger_output: None, quiet: HashSet::new(), decided: None })
+            Ok(Plan { trigger: None, active: HashSet::from([target.clone()]), seeds, trigger_output: None, quiet: HashSet::new(), decided: None, seed_origins: HashMap::new() })
         }
     }
 }
@@ -311,6 +327,7 @@ fn standalone(target: &str) -> Plan {
         trigger_output: None,
         quiet: HashSet::new(),
         decided: None,
+        seed_origins: HashMap::new(),
     }
 }
 
@@ -387,6 +404,24 @@ mod tests {
         fed.connections.push(wire("d", "e"));
         let refused = super::plan(&fed, &RunMode::UpTo { node: "e".into() }, None, &HashMap::new(), &HashMap::new());
         assert_eq!(refused, Err("no-trigger".into()));
+    }
+
+    #[test]
+    fn a_run_picked_up_after_a_wait_keeps_the_scope_it_had() {
+        let spec = spec();
+        let ids = |set: HashSet<String>| {
+            let mut ids: Vec<String> = set.into_iter().collect();
+            ids.sort();
+            ids
+        };
+        // A full run from `t`: everything below it.
+        assert_eq!(ids(scope_of(&spec, "manual", "t", "")), vec!["a", "b", "c", "t"]);
+        // «Run up to b»: what leads to b from `t` — not c, which comes after what it was run up to.
+        assert_eq!(ids(scope_of(&spec, "partial", "t", "b")), vec!["a", "b", "t"]);
+        // A step: that node alone.
+        assert_eq!(ids(scope_of(&spec, "step", "", "b")), vec!["b"]);
+        // No trigger remembered: the whole flow, as before.
+        assert_eq!(scope_of(&spec, "trigger", "", "").len(), 6);
     }
 
     #[test]

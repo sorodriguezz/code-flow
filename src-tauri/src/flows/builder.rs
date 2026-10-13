@@ -170,6 +170,7 @@ fn kind_text(spec: &ParamSpec) -> String {
                                   matches|minLength|maxLength|minValue|maxValue|oneOf, arg}]"
             .into(),
         Kind::SubflowInputs => "{inputName: value} — the inputs the called flow declares".into(),
+        Kind::SqlParams => "[{value, type: auto|text|integer|decimal|boolean|date|timestamp|json|uuid}] — the query's $1, $2…, in order".into(),
         Kind::DbTable => "a table name of the connection, e.g. \"pedidos\" or \"ventas.pedidos\"".into(),
         Kind::DbFilters => "{combinator: \"and\"|\"or\", conditions: [{column, op, value}]}; op: equals, notEquals, gt, gte, lt, lte, \
                             contains, notContains, startsWith, endsWith, isNull, notNull, inList (value: list or \"a, b\")"

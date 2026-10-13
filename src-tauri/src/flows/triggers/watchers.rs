@@ -51,6 +51,20 @@ pub(super) fn memory_get(app: &AppHandle, flow_id: &str, key: &str, watched: &Va
     stored.get("value").cloned()
 }
 
+/// `memory_get` for the pollers whose memory was written before it was tied to what they watch (a feed's ids, a table's
+/// watermark, a folder's snapshot): such a memory is trusted this once — it is rewritten with its print on the same
+/// look — rather than turning the first look after an update into a first look that fires nothing.
+pub(super) fn bound_get(app: &AppHandle, flow_id: &str, key: &str, watched: &Value) -> Option<Value> {
+    bound_value(state_get(app, flow_id, key)?, watched)
+}
+
+fn bound_value(stored: Value, watched: &Value) -> Option<Value> {
+    match stored.get("watch").and_then(Value::as_str) {
+        Some(print) if stored.get("value").is_some() => (print == watch_print(watched)).then(|| stored.get("value").cloned()).flatten(),
+        _ => Some(stored),
+    }
+}
+
 pub(super) fn memory_set(app: &AppHandle, flow_id: &str, key: &str, watched: &Value, value: &Value) {
     state_set(app, flow_id, key, &json!({"watch": watch_print(watched), "value": value}));
 }
@@ -76,7 +90,7 @@ pub(super) fn announced_once(app: &AppHandle, flow_id: &str, key: &str, watched:
 }
 
 pub(super) fn fire(app: &AppHandle, flow_id: &str, node_id: &str, view: &Arc<Mutex<TriggerView>>, item: Value) {
-    if let Err(error) = super::fire(app, flow_id, node_id, vec![Item::new(item)]) {
+    if let Err(error) = super::fire_event(app, flow_id, node_id, vec![Item::new(item)]) {
         super::note_problem(view, Some(error));
     }
 }
@@ -117,7 +131,8 @@ pub fn feed(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view:
         let (app, flow_id, node_id, url, key, view) = (app.clone(), flow_id.clone(), node_id.clone(), url.clone(), key.clone(), fire_view.clone());
         async move {
             let (meta, entries) = crate::flows::nodes::feed::fetch(&url).await?;
-            let stored = state_get(&app, &flow_id, &key);
+            let watched = json!({"feedUrl": url});
+            let stored = bound_get(&app, &flow_id, &key, &watched);
             let first = stored.is_none();
             let mut seen: Vec<String> = stored.and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
             let known: HashSet<String> = seen.iter().cloned().collect();
@@ -138,7 +153,7 @@ pub fn feed(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view:
                 let cut = seen.len() - 2000;
                 seen.drain(..cut);
             }
-            state_set(&app, &flow_id, &key, &json!(seen));
+            memory_set(&app, &flow_id, &key, &watched, &json!(seen));
             Ok(())
         }
     });
@@ -160,6 +175,23 @@ fn db_config(app: &AppHandle, connection_id: &str) -> Result<crate::datasource::
     Ok(config)
 }
 
+/// Pages a Gmail or Drive look reads at most while it is still finding things it has not seen.
+const GOOGLE_PAGES: usize = 6;
+
+/// Whether `event` is something an engine of this `kind` can tell us about.
+fn event_fits(event: &str, kind: crate::datasource::DbKind) -> Result<(), String> {
+    use crate::datasource::DbKind;
+    let label = kind.label();
+    match (event, kind) {
+        ("pgNotify", DbKind::Postgres | DbKind::Supabase) => Ok(()),
+        ("pgNotify", _) => Err(format!("A NOTIFY channel is a PostgreSQL thing — {label} has none; use «A new row» or pick a PostgreSQL connection")),
+        ("redisChannel", DbKind::Redis) => Ok(()),
+        ("redisChannel", _) => Err(format!("A channel message is a Redis thing — {label} has none; pick a Redis connection")),
+        ("newRow", DbKind::Redis | DbKind::Mongodb) => Err(format!("«A new row» reads a table with a column that only grows — {label} has none; use a Redis channel or a SQL connection")),
+        _ => Ok(()),
+    }
+}
+
 /// «Evento de base de datos»: a Postgres `NOTIFY`, a Redis channel message, or a row with a higher
 /// value in an ever-growing column (an id, a `created_at`) than the last one seen.
 pub fn database(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, view: Arc<Mutex<TriggerView>>, cancel: CancellationToken) -> Result<(), String> {
@@ -171,6 +203,11 @@ pub fn database(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, v
     let channels: Vec<String> = text(params, "channels").split([',', ' ']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
     if matches!(event.as_str(), "pgNotify" | "redisChannel") && channels.is_empty() {
         return Err("write the channel to listen to".into());
+    }
+    // The event has to be one the connection's engine has: arming a Postgres `LISTEN` on a Redis connection
+    // "worked" and then failed at every reconnect, where nobody looks.
+    if let Ok(config) = db_config(app, &connection) {
+        event_fits(&event, config.kind)?;
     }
     let (app, flow_id, node_id, params) = (app.clone(), flow_id.to_string(), node_id.to_string(), params.clone());
     if event == "newRow" {
@@ -246,7 +283,8 @@ async fn new_rows(
     let (table_sql, column_sql) = (quote_path(table), crate::datasource::sqlgen::quote_ident(column, dialect));
     let session = Session::open_tagged(&config, None, &format!("flow-trigger-{node_id}")).await?;
     let exec = DbExecContext { database: None, schema: None, max_rows: 500 };
-    let stored = state_get(app, flow_id, key);
+    let watched = json!({"connection": connection, "table": table, "column": column});
+    let stored = bound_get(app, flow_id, key, &watched);
     let rows = |sql: String| {
         let session = &session;
         let exec = &exec;
@@ -263,7 +301,7 @@ async fn new_rows(
         // First look: remember where the table is now, run nothing.
         let found = rows(format!("SELECT MAX({column_sql}) AS mark FROM {table_sql}")).await?;
         let mark = found.first().and_then(|row| row.get("mark")).cloned().unwrap_or(Value::Null);
-        state_set(app, flow_id, key, &if mark.is_null() { json!(0) } else { mark });
+        memory_set(app, flow_id, key, &watched, &if mark.is_null() { json!(0) } else { mark });
         return Ok(());
     };
     let statement = crate::flows::nodes::data::bind(
@@ -278,7 +316,7 @@ async fn new_rows(
         fire(app, flow_id, node_id, view, row);
     }
     if let Some(last) = last {
-        state_set(app, flow_id, key, &last);
+        memory_set(app, flow_id, key, &watched, &last);
     }
     Ok(())
 }
@@ -301,8 +339,8 @@ pub fn remote_file(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value
     let (app, flow_id, node_id) = (app.clone(), flow_id.to_string(), node_id.to_string());
     let fire_view = view.clone();
     every(interval, view, cancel, move || {
-        let (app, flow_id, node_id, host_id, folder, key, view, matcher) =
-            (app.clone(), flow_id.clone(), node_id.clone(), host_id.clone(), folder.clone(), key.clone(), fire_view.clone(), matcher.clone());
+        let (app, flow_id, node_id, host_id, folder, key, view, matcher, pattern) =
+            (app.clone(), flow_id.clone(), node_id.clone(), host_id.clone(), folder.clone(), key.clone(), fire_view.clone(), matcher.clone(), pattern.clone());
         async move {
             let row = {
                 let db = app.state::<Db>();
@@ -312,7 +350,8 @@ pub fn remote_file(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value
             let spec: crate::remotes::RemoteHostSpec = serde_json::from_str(&row.spec).map_err(|e| e.to_string())?;
             let page = crate::remotes::files::ListPage { prefix: String::new(), marker: String::new() };
             let listing = crate::remotes::files::list(&host_id, &spec, &folder, &page).await?;
-            let stored = state_get(&app, &flow_id, &key);
+            let watched = json!({"host": host_id, "remotePath": folder, "pattern": pattern, "changed": changed_too});
+            let stored = bound_get(&app, &flow_id, &key, &watched);
             let first = stored.is_none();
             let before: Map<String, Value> = stored.and_then(|v| v.as_object().cloned()).unwrap_or_default();
             let mut now = Map::new();
@@ -332,7 +371,7 @@ pub fn remote_file(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value
                     fire(&app, &flow_id, &node_id, &view, json!({"event": event, "name": entry.name, "path": entry.path, "size": entry.size, "modifiedAt": modified, "host": row.name}));
                 }
             }
-            state_set(&app, &flow_id, &key, &Value::Object(now));
+            memory_set(&app, &flow_id, &key, &watched, &Value::Object(now));
             Ok(())
         }
     });
@@ -359,11 +398,7 @@ pub fn google(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vie
         let (app, flow_id, node_id, params, credential, event, view) =
             (app.clone(), flow_id.clone(), node_id.clone(), params.clone(), credential.clone(), event.clone(), fire_view.clone());
         async move {
-            let meta = {
-                let db = app.state::<Db>();
-                let conn = db.0.lock().map_err(|e| e.to_string())?;
-                flow_run_queries::get_credential(&conn, &credential).map_err(|e| e.to_string())?.ok_or("The sign-in no longer exists")?.meta
-            };
+            let meta = super::credential_row(&app, &flow_id, &credential, &["oauth2"])?.0.meta;
             let token = crate::flows::oauth::access_token(&credential, &meta).await?;
             let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
             let get = |url: String| {
@@ -406,13 +441,27 @@ pub fn google(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vie
             }
             if event == "gmailNew" || event == "driveNew" {
                 let encode = |text: &str| url::form_urlencoded::byte_serialize(text.as_bytes()).collect::<String>();
-                let entries: Vec<Value> = if event == "gmailNew" {
+                let key = format!("google:{node_id}:seen");
+                let watched = json!({
+                    "event": event,
+                    "gmailQuery": text(&params, "gmailQuery"),
+                    "driveFolder": text(&params, "driveFolder"),
+                    "driveQuery": text(&params, "driveQuery"),
+                });
+                let stored = memory_get(&app, &flow_id, &key, &watched);
+                let first = stored.is_none();
+                let mut seen: Vec<String> = stored.and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+                let known: HashSet<String> = seen.iter().cloned().collect();
+                let (first_url, list_key) = if event == "gmailNew" {
                     let query = text(&params, "gmailQuery");
-                    let mut url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25".to_string();
-                    if !query.is_empty() {
+                    let mut url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50".to_string();
+                    // With no search, «a new mail» is what arrives in the inbox — not what the user sends, nor drafts.
+                    if query.is_empty() {
+                        url.push_str("&labelIds=INBOX");
+                    } else {
                         url.push_str(&format!("&q={}", encode(&query)));
                     }
-                    get(url).await?.get("messages").and_then(Value::as_array).cloned().unwrap_or_default()
+                    (url, "messages")
                 } else {
                     // A folder by its id or its link (…/folders/<id>).
                     let given = text(&params, "driveFolder");
@@ -426,22 +475,32 @@ pub fn google(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, vie
                         q.push_str(&format!(" and ({query})"));
                     }
                     let url = format!(
-                        "https://www.googleapis.com/drive/v3/files?q={}&orderBy=createdTime%20desc&pageSize=50&fields=files(id,name,mimeType,createdTime,modifiedTime,webViewLink,size,owners(displayName,emailAddress))",
+                        "https://www.googleapis.com/drive/v3/files?q={}&orderBy=createdTime%20desc&pageSize=50&fields=nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,webViewLink,size,owners(displayName,emailAddress))",
                         encode(&q)
                     );
-                    get(url).await?.get("files").and_then(Value::as_array).cloned().unwrap_or_default()
+                    (url, "files")
                 };
-                let key = format!("google:{node_id}:seen");
-                let watched = json!({
-                    "event": event,
-                    "gmailQuery": text(&params, "gmailQuery"),
-                    "driveFolder": text(&params, "driveFolder"),
-                    "driveQuery": text(&params, "driveQuery"),
-                });
-                let stored = memory_get(&app, &flow_id, &key, &watched);
-                let first = stored.is_none();
-                let mut seen: Vec<String> = stored.and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
-                let known: HashSet<String> = seen.iter().cloned().collect();
+                // Newest first. More arriving between two looks than a page holds is read page by page until one
+                // holds something already seen — the first look only needs to learn where the newest are.
+                let entries: Vec<Value> = {
+                    let mut collected: Vec<Value> = Vec::new();
+                    let mut page_token: Option<String> = None;
+                    for _ in 0..GOOGLE_PAGES {
+                        let mut url = first_url.clone();
+                        if let Some(token) = &page_token {
+                            url.push_str(&format!("&pageToken={}", encode(token)));
+                        }
+                        let body = get(url).await?;
+                        let page: Vec<Value> = body.get(list_key).and_then(Value::as_array).cloned().unwrap_or_default();
+                        let reached_known = page.iter().any(|entry| entry.get("id").and_then(Value::as_str).is_some_and(|id| known.contains(id)));
+                        collected.extend(page);
+                        page_token = body.get("nextPageToken").and_then(Value::as_str).map(str::to_string);
+                        if first || reached_known || page_token.is_none() {
+                            break;
+                        }
+                    }
+                    collected
+                };
                 // A message that could not be read is left for the next look — and what was fired
                 // before it is still saved, rather than fired again because one read failed.
                 let mut problem = None;
@@ -761,5 +820,34 @@ pub fn handle_args(app: &AppHandle, argv: &[String]) {
         .unwrap_or(Value::Null);
     if let Err(error) = open_link(app, name, input) {
         crate::applog::warn(&format!("flows: --flow {name}: {error}"));
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use crate::datasource::DbKind;
+
+    #[test]
+    fn a_memory_applies_to_what_it_was_written_for() {
+        let feed = json!({"feedUrl": "https://a.example/feed"});
+        let other = json!({"feedUrl": "https://b.example/feed"});
+        let stored = json!({"watch": watch_print(&feed), "value": ["1", "2"]});
+        assert_eq!(bound_value(stored.clone(), &feed), Some(json!(["1", "2"])));
+        assert_eq!(bound_value(stored, &other), None, "another address: a first look again");
+        // Written before memories carried a print: trusted once, rewritten on the same look.
+        assert_eq!(bound_value(json!(["1", "2"]), &feed), Some(json!(["1", "2"])));
+    }
+
+    #[test]
+    fn a_database_event_must_be_one_its_engine_has() {
+        assert!(event_fits("pgNotify", DbKind::Postgres).is_ok());
+        assert!(event_fits("pgNotify", DbKind::Supabase).is_ok());
+        assert!(event_fits("pgNotify", DbKind::Mysql).is_err());
+        assert!(event_fits("redisChannel", DbKind::Redis).is_ok());
+        assert!(event_fits("redisChannel", DbKind::Postgres).is_err());
+        assert!(event_fits("newRow", DbKind::Mariadb).is_ok());
+        assert!(event_fits("newRow", DbKind::Redis).is_err());
+        assert!(event_fits("newRow", DbKind::Mongodb).is_err());
     }
 }

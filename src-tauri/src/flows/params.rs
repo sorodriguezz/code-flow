@@ -109,6 +109,9 @@ pub enum Kind {
     ValidationRules,
     /// `{ name: value }` — the inputs the called flow declares, filled per item (a custom node).
     SubflowInputs,
+    /// `[{ value, type }]` — a query's `$1`, `$2`… with the SQL type each is written as (`nodes::data::typed_literal`);
+    /// a bare value (rows saved before they had a type) is `auto`.
+    SqlParams,
 }
 
 /// Shown only while another parameter holds one of `values`.
@@ -559,6 +562,7 @@ const GITHUB_TRIGGER: &[ParamSpec] = &[
     p("event", select(&["issueOpened", "issueClosed", "issueComment", "release"]), "\"issueOpened\"").literal(),
     p("credential", Kind::Credential { kinds: &["bearer"] }, "\"\"").literal(),
     p("labelFilter", text("bug, urgente"), "\"\"").literal().when("event", &["issueOpened", "issueClosed"]),
+    p("ignoreAuthors", text("mi-bot, dependabot[bot]"), "\"\"").literal().when("event", &["issueOpened", "issueComment"]),
     p("intervalSec", Kind::Number { min: Some(60.0), max: None }, "120").literal(),
 ];
 
@@ -1136,7 +1140,7 @@ const SQL: &[ParamSpec] = &[
     p("database", text(""), "\"\"").literal(),
     p("schema", text(""), "\"\"").literal(),
     p("queryText", Kind::Code { lang: "sql" }, "\"\""),
-    p("queryParams", Kind::Strings, "[]"),
+    p("queryParams", Kind::SqlParams, "[]"),
     p("maxRows", COUNT, "10000").literal(),
     EACH,
 ];
@@ -1537,14 +1541,12 @@ const PR_MEMORY: &[ParamSpec] = &[
 ];
 
 /// RabbitMQ, Kafka or SQS (`nodes::queue`): publish, or take messages. A field of one broker and one
-/// operation carries both conditions.
+/// operation carries both conditions. (NATS and Azure Service Bus were offered here for a while with
+/// their fields and no code behind them: the node fell through to RabbitMQ and asked for an AMQP
+/// address. They come back when the brokers are implemented.)
 const QUEUE: &[ParamSpec] = &[
-    p("broker", select(&["rabbitmq", "kafka", "sqs", "nats", "azureServiceBus"]), "\"rabbitmq\"").literal(),
+    p("broker", select(&["rabbitmq", "kafka", "sqs"]), "\"rabbitmq\"").literal(),
     p("queueOp", select(&["queuePublish", "queueReceive"]), "\"queuePublish\"").literal(),
-    p("natsUrl", text("nats://localhost:4222"), "\"\"").literal().when("broker", &["nats"]),
-    p("natsSubject", text("pedidos.nuevos"), "\"\"").when("broker", &["nats"]),
-    p("sbNamespace", text("mi-namespace"), "\"\"").literal().when("broker", &["azureServiceBus"]),
-    p("sbEntity", text("pedidos"), "\"\"").when("broker", &["azureServiceBus"]),
     p("credential", Kind::Credential { kinds: &["basic", "aws"] }, "\"\"").literal(),
     p("amqpUrl", text("amqp://rabbit.example.com:5672/%2f"), "\"\"").literal().when("broker", &["rabbitmq"]),
     p("exchange", text(""), "\"\"").when("broker", &["rabbitmq"]).and_when("queueOp", &["queuePublish"]),
@@ -1564,7 +1566,9 @@ const QUEUE: &[ParamSpec] = &[
     p("message", long_text("{{ JSON.stringify($json) }}"), "\"={{ JSON.stringify($json) }}\"").when("queueOp", &["queuePublish"]),
     p("messageHeaders", Kind::KeyValue, "[]").when("queueOp", &["queuePublish"]),
     p("messageLimit", Kind::Number { min: Some(1.0), max: None }, "10").when("queueOp", &["queueReceive"]),
-    p("leaveInQueue", Kind::Boolean, "false").when("broker", &["rabbitmq", "sqs", "azureServiceBus"]).and_when("queueOp", &["queueReceive"]),
+    p("leaveInQueue", Kind::Boolean, "false").when("broker", &["rabbitmq", "sqs"]).and_when("queueOp", &["queueReceive"]),
+    p("sqsDelete", select(&["afterRun", "afterRead"]), "\"afterRun\"").literal().when("broker", &["sqs"]).and_when("queueOp", &["queueReceive"]),
+    p("visibilitySeconds", Kind::Number { min: Some(0.0), max: Some(43200.0) }, "300").literal().when("broker", &["sqs"]).and_when("queueOp", &["queueReceive"]),
     EACH,
 ];
 
@@ -1606,6 +1610,7 @@ const GOOGLE: &[ParamSpec] = &[
     p("header", Kind::Boolean, "true").literal().when("sheetsOp", &["sheetsRead"]),
     p("rowLimit", COUNT, "0").when("sheetsOp", &["sheetsRead"]),
     p("columns", Kind::KeyValue, "[]").when("sheetsOp", &["sheetsAppend", "sheetsUpdate"]),
+    p("sheetsParse", Kind::Boolean, "false").literal().when("sheetsOp", &["sheetsAppend", "sheetsUpdate"]),
     p("matchColumn", text("id"), "\"\"").literal().when("sheetsOp", &["sheetsUpdate"]),
     p("matchValue", text(""), "\"\"").when("sheetsOp", &["sheetsUpdate"]),
     p("ifMissing", select(&["skipRow", "appendRow"]), "\"skipRow\"").literal().when("sheetsOp", &["sheetsUpdate"]),
