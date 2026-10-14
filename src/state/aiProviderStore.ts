@@ -40,9 +40,16 @@ interface AiProviderState {
   model: string;
   /** Raw per-task provider overrides, keyed by task. Absent/blank = inherit `providerId`. */
   taskProviders: Record<string, string>;
-  /** Effective model id per task (its own override, else — commits only — the engine's fast model,
-   * else its provider's base model). Empty means the provider picks. Recomputed by `refresh`. */
+  /** The provider each task resolves to — its override, else what it inherits (the meetings row
+   * inherits the notes row, not `providerId`). Recomputed by `refresh`. */
+  effectiveProviders: Record<string, string>;
+  /** Effective model id per task (its own override — only on a row that names its provider — else,
+   * commits only, the engine's fast model, else its provider's base model). Empty means the provider
+   * picks. Recomputed by `refresh`. */
   taskModels: Record<string, string>;
+  /** What each task's model is with no pin of its own: the model "Modelo del proveedor" stands for
+   * on that row. Equal to `taskModels` wherever the row has no pin. */
+  taskDefaults: Record<string, string>;
   init: () => Promise<void>;
   /** Re-reads the routing table — call after Settings writes a provider/model so the chat chip and
    * the agentic feature gates reflect the change without a restart. */
@@ -81,7 +88,7 @@ async function loadRouting(defaultProvider: string, prefetched?: Record<string, 
   for (const { key } of AI_TASKS) {
     const override = routed[taskProviderKey(key)]?.trim() ?? "";
     taskProviders[key] = override;
-    // The meetings row, unset, is the notes row — Rust's `load_ai_config_in` says the same.
+    // The meetings row, unset, is the notes row — Rust's `route_for` says the same.
     providerFor[key] = override || (key === "meetings" ? providerFor.notes : "") || defaultProvider;
   }
 
@@ -89,38 +96,46 @@ async function loadRouting(defaultProvider: string, prefetched?: Record<string, 
   // with no routing overrides at all that is 14 identical `${provider}_model` reads collapsing into
   // one. `modelKey(defaultProvider)` is added unconditionally: every caller wants the global
   // provider's own model too, and it is free here when some task already inherits it.
+  //
+  // A row's own model pin is read only where the row names its provider: an inheriting row inherits
+  // the whole engine, provider *and* model, and a pin left on it is not consulted (Rust's
+  // `route_for`). Honouring it was the bug where "Heredar" rows ignored a new base model.
   const wanted = new Set<string>([modelKey(defaultProvider)]);
   for (const { key } of AI_TASKS) {
-    wanted.add(taskModelKey(providerFor[key], key));
+    if (taskProviders[key]) wanted.add(taskModelKey(providerFor[key], key));
     wanted.add(modelKey(providerFor[key]));
   }
   const models = await readMany([...wanted]);
 
   const taskModels: Record<string, string> = {};
+  const taskDefaults: Record<string, string> = {};
   for (const { key } of AI_TASKS) {
-    const override = models[taskModelKey(providerFor[key], key)];
+    const override = taskProviders[key] ? models[taskModelKey(providerFor[key], key)] : undefined;
     const base = models[modelKey(providerFor[key])];
-    // Commits and chat titles have a step between the two: the engine's own fast model, which is
-    // what `load_ai_config_in` runs them on when the row names none. Without it every chip for
-    // commits named the base model — Opus, say — over a run that went to Haiku.
+    // Commits, chat titles and spoken summaries have a step between the two: the engine's own fast
+    // model, which is what `load_ai_config_in` runs them on when the row names none. Without it
+    // every chip for commits named the base model — Opus, say — over a run that went to Haiku.
     const dedicated =
-      key === "commit" || key === "chat_title"
+      key === "commit" || key === "chat_title" || key === "spoken_summary"
         ? AI_PROVIDERS.find((p) => p.id === providerFor[key])?.commitMessageModel
         : undefined;
-    // The meetings row, with no model of its own, writes with the notes row's.
-    const inheritedModel = key === "meetings" ? taskModels.notes : undefined;
-    taskModels[key] = override?.trim() || inheritedModel || dedicated || base?.trim() || "";
+    // The meetings row, inheriting, is the notes row: its engine and its model.
+    taskDefaults[key] =
+      key === "meetings" && !taskProviders[key] ? taskModels.notes : dedicated || base?.trim() || "";
+    taskModels[key] = override?.trim() || taskDefaults[key];
   }
   // Handed back rather than read again by the caller: it rode along in the wave-two call, and
   // `?? null` restores exactly the `string | null` the old `read(modelKey(providerId))` returned.
-  return { taskProviders, taskModels, defaultModel: models[modelKey(defaultProvider)] ?? null };
+  return { taskProviders, effectiveProviders: providerFor, taskModels, taskDefaults, defaultModel: models[modelKey(defaultProvider)] ?? null };
 }
 
 export const useAiProviderStore = create<AiProviderState>((set, get) => ({
   providerId: DEFAULT_AI_PROVIDER,
   model: "",
   taskProviders: {},
+  effectiveProviders: {},
   taskModels: {},
+  taskDefaults: {},
 
   // Two round-trips at boot where there were 46, in four dependent waves that could not overlap.
   // Everything whose key is known without reading anything first — the global provider and all 14
@@ -178,7 +193,7 @@ export const useAiProviderStore = create<AiProviderState>((set, get) => ({
  * Use this (not `providerId`) wherever a feature's availability depends on the engine, so routing
  * one task elsewhere is reflected in the UI. */
 export const useTaskProvider = (task: string) =>
-  useAiProviderStore((s) => s.taskProviders[task]?.trim() || s.providerId);
+  useAiProviderStore((s) => s.taskProviders[task]?.trim() || s.effectiveProviders[task] || s.providerId);
 
 // Providers and per-task routing are chosen in Settings (main window only), and a detached chat or
 // Agents window routes its own turns off this table. The family is wide — one provider row, one per

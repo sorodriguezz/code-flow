@@ -3839,6 +3839,7 @@ export const es = {
   "settings.taskProviderLabel": "Proveedor",
   "settings.taskInherit": "Heredar ({provider})",
   "settings.taskModelInherit": "Modelo del proveedor",
+  "settings.taskModelInheritNamed": "Modelo del proveedor ({model})",
   "settings.taskAgenticRequired": "Este proveedor no puede aplicar cambios — elige uno agéntico.",
   "settings.taskAgenticInherited": "El proveedor heredado no puede aplicar cambios — elige uno agéntico aquí.",
   "task.chat": "Chat",

@@ -34,7 +34,7 @@ import {
 } from "lucide-react";
 import { getSetting, setSetting } from "../../lib/tauri/commands";
 import { useAiModelsStore } from "../../state/aiModelsStore";
-import { AI_PROVIDERS, isAgenticProvider } from "../../lib/aiProviders";
+import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { AI_TASKS, AI_TASK_AREAS, type AiTaskArea, type AiTaskDef } from "../../lib/aiTasks";
 import {
@@ -102,7 +102,9 @@ export function AiTasksSettings({ area }: { area?: AiTaskArea } = {}) {
   const defaultProvider = useAiProviderStore((s) => s.providerId);
   const taskProviders = useAiProviderStore((s) => s.taskProviders);
   const taskModels = useAiProviderStore((s) => s.taskModels);
+  const taskDefaults = useAiProviderStore((s) => s.taskDefaults);
   const setTaskProvider = useAiProviderStore((s) => s.setTaskProvider);
+  const setTaskRouting = useAiProviderStore((s) => s.setTaskRouting);
   const refresh = useAiProviderStore((s) => s.refresh);
   const statuses = useProviderStatusStore((s) => s.byProvider);
   const checkProviders = useProviderStatusStore((s) => s.checkAll);
@@ -156,7 +158,11 @@ export function AiTasksSettings({ area }: { area?: AiTaskArea } = {}) {
       await Promise.all(
         AI_TASKS.map(async ({ key }) => {
           const provider = effectiveProvider(key);
-          const stored = await getSetting(`${provider}_${key}_model`).catch(() => null);
+          // An inheriting row inherits the model too, so a pin left on it is not what runs and is
+          // not shown — the field reads "Modelo del proveedor (…)", which is what does run.
+          const stored = taskProviders[key]?.trim()
+            ? await getSetting(`${provider}_${key}_model`).catch(() => null)
+            : null;
           const ids = modelOptionsFor(provider, cache[provider] ?? []).map((o) => o.id);
           const parsed = parseModel(stored, ids);
           nextChoice[key] = parsed.choice;
@@ -217,6 +223,14 @@ export function AiTasksSettings({ area }: { area?: AiTaskArea } = {}) {
   const persistModel = async (task: string, value: string) => {
     const provider = effectiveProvider(task);
     if (value.trim()) void rememberModel(provider, value);
+    // A model picked on an inheriting row names the engine it was picked for: the row stops
+    // inheriting and says so ("Claude Code" in place of "Heredar"). Pinned under an inherited
+    // provider, the pick would either be ignored or — as it used to be — silently outvote the base
+    // model, and come back from the dead whenever the default provider changed.
+    if (value.trim() && !taskProviders[task]?.trim()) {
+      await setTaskRouting(task, provider, value);
+      return;
+    }
     await setSetting(`${provider}_${task}_model`, value);
     await refresh();
   };
@@ -377,6 +391,7 @@ export function AiTasksSettings({ area }: { area?: AiTaskArea } = {}) {
                     defaultProvider={inheritedProvider(task.key)}
                     selectedProvider={taskProviders[task.key]?.trim() ?? ""}
                     taskModels={taskModels}
+                    defaultModel={taskDefaults[task.key] ?? ""}
                     statuses={statuses}
                     modelsByProvider={modelsByProvider}
                     choice={choice[task.key] ?? ""}
@@ -511,6 +526,7 @@ function TaskRow({
   defaultProvider,
   selectedProvider,
   taskModels,
+  defaultModel,
   statuses,
   modelsByProvider,
   choice,
@@ -535,6 +551,8 @@ function TaskRow({
   defaultProvider: string;
   selectedProvider: string;
   taskModels: Record<string, string>;
+  /** What "Modelo del proveedor" resolves to on this row — named in that option. */
+  defaultModel: string;
   statuses: Record<string, { available?: boolean } | undefined>;
   modelsByProvider: Record<string, string[]>;
   choice: string;
@@ -673,7 +691,11 @@ function TaskRow({
                 options={options}
                 choice={choice}
                 custom={custom}
-                defaultLabel={t("settings.taskModelInherit")}
+                defaultLabel={
+                  defaultModel.trim()
+                    ? t("settings.taskModelInheritNamed", { model: modelDisplayLabel(provider, defaultModel, t) })
+                    : t("settings.taskModelInherit")
+                }
                 customPlaceholder={customModelPlaceholder(provider, t("settings.modelIdPlaceholder"))}
                 onChoice={onChoice}
                 onCustom={onCustom}

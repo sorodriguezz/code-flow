@@ -3883,6 +3883,7 @@ const en = {
   "settings.taskProviderLabel": "Provider",
   "settings.taskInherit": "Inherit ({provider})",
   "settings.taskModelInherit": "Provider default",
+  "settings.taskModelInheritNamed": "Provider default ({model})",
   "settings.taskAgenticRequired": "This provider can't apply changes — pick an agentic one.",
   "settings.taskAgenticInherited": "The inherited provider can't apply changes — pick an agentic one here.",
   "task.chat": "Chat",

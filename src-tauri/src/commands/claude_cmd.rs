@@ -230,17 +230,24 @@ impl AiTask {
     }
 }
 
-/// The provider that should handle `task`: its own routing override when set, else the global
-/// `ai_provider` default. Blank counts as unset, so clearing a row in the UI means "inherit".
-fn provider_for(conn: &Connection, task: AiTask) -> Result<String, String> {
+/// Where `task` runs: the provider, and the row whose model pin applies — `None` when no row names
+/// its own engine and the provider's base model answers.
+///
+/// A row that names a provider (`ai_provider_{task}`) owns its engine, and its model pin
+/// (`{provider}_{task}_model`) applies. A row that does not **inherits the whole engine**, provider
+/// *and* model: a pin left on it is ignored. It used to be honoured, and "Heredar" then lied twice —
+/// changing the provider's base model did not move the row, and switching the default provider
+/// revived whatever that provider's pin for the row had been months ago. Blank counts as unset, so
+/// clearing a row in the UI means "inherit". The meetings row, unset, is the Notes row (which itself
+/// falls back to the default).
+fn route_for(conn: &Connection, task: AiTask) -> Result<(String, Option<AiTask>), String> {
     let routed = queries::get_setting(conn, &format!("ai_provider_{}", task.key()))
         .map_err(|e| e.to_string())?
         .filter(|p| !p.trim().is_empty());
     match routed {
-        Some(p) => Ok(p),
-        // A meeting's row, unset, follows the Notes row (which itself falls back to the default).
-        None if task == AiTask::Meetings => provider_for(conn, AiTask::Notes),
-        None => active_provider(conn),
+        Some(p) => Ok((p, Some(task))),
+        None if task == AiTask::Meetings => route_for(conn, AiTask::Notes),
+        None => Ok((active_provider(conn)?, None)),
     }
 }
 
@@ -280,7 +287,8 @@ pub(crate) fn routed_providers(conn: &Connection) -> Result<std::collections::Ha
 /// namespaced per provider (`{provider}_binary_path`, `{provider}_model`, `{provider}_allowed_tools`)
 /// because they're intrinsically provider-specific — a binary path and model id only mean
 /// something for one CLI, and tool names differ between CLIs. `model` is resolved for the specific
-/// [`AiTask`] requested (per-task override → base model → engine default). The prompt *templates*,
+/// [`AiTask`] requested (per-task override, on a row that names its provider → base model → engine
+/// default; see [`route_for`]). The prompt *templates*,
 /// by contrast, are shared across providers (see [`shared_template`]).
 pub(crate) struct AiConfig {
     /// Already bound to [`AiConfig::account`] — every process it starts runs as that account.
@@ -309,9 +317,8 @@ pub(crate) fn load_ai_config_in(
     task: AiTask,
     workspace_id: Option<&str>,
 ) -> Result<AiConfig, String> {
-    // The meetings row follows the Notes row where it says nothing: its provider (`provider_for`),
-    // and below, its model.
-    let provider = provider_for(conn, task)?;
+    // The meetings row follows the Notes row where it says nothing — provider and model (`route_for`).
+    let (provider, pinned_by) = route_for(conn, task)?;
     let account = ai_accounts::resolve(conn, &provider, Some(task.key()), workspace_id, ai_accounts::Choice::Auto);
     let engine = ai::engine_as(&provider, account.clone());
 
@@ -330,12 +337,13 @@ pub(crate) fn load_ai_config_in(
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Per-task model override → (for commits and chat titles) the engine's dedicated fast model →
-    // the base model. The last fallback matters for engines with no fast model of their own (Cline,
-    // opencode), whose model depends entirely on what the user configured inside them.
-    let own = match nonblank(get(&format!("{}_model", task.key()))?) {
-        None if task == AiTask::Meetings => nonblank(get(&format!("{}_model", AiTask::Notes.key()))?),
-        found => found,
+    // Per-task model override (only on a row that names its provider) → (for commits and chat
+    // titles) the engine's dedicated fast model → the base model. The last fallback matters for
+    // engines with no fast model of their own (Cline, opencode), whose model depends entirely on
+    // what the user configured inside them.
+    let own = match pinned_by {
+        Some(row) => nonblank(get(&format!("{}_model", row.key()))?),
+        None => None,
     };
     let model = match own {
         Some(override_model) => override_model,
@@ -1519,8 +1527,8 @@ mod tests {
     }
 
     /// The meetings row says nothing until it is set: it writes with whatever engine and model the
-    /// notes row names — and a model picked on the meetings row alone (its provider still inherited)
-    /// is the one used.
+    /// notes row names. A model pin left on the meetings row while it still inherits is not "saying
+    /// otherwise" — only naming its own provider is, and then its own pin applies.
     #[test]
     fn the_meetings_row_follows_the_notes_row_until_it_says_otherwise() {
         let conn = install();
@@ -1530,9 +1538,53 @@ mod tests {
         assert_eq!((config.provider.as_str(), config.model.as_str()), ("codex", "gpt-notes"));
         queries::set_setting(&conn, "codex_meetings_model", "gpt-meetings").unwrap();
         let config = load_ai_config_in(&conn, AiTask::Meetings, None).unwrap();
+        assert_eq!((config.provider.as_str(), config.model.as_str()), ("codex", "gpt-notes"));
+        queries::set_setting(&conn, "ai_provider_meetings", "codex").unwrap();
+        let config = load_ai_config_in(&conn, AiTask::Meetings, None).unwrap();
         assert_eq!((config.provider.as_str(), config.model.as_str()), ("codex", "gpt-meetings"));
         queries::set_setting(&conn, "ai_provider_meetings", "claude").unwrap();
         assert_eq!(load_ai_config_in(&conn, AiTask::Meetings, None).unwrap().provider, "claude");
+    }
+
+    /// "Heredar" is the whole engine. A row that inherits its provider runs on that provider's base
+    /// model and moves when it moves — a pin left on the row (by an earlier pick, or for the
+    /// provider it used to inherit) is not consulted. The bug: changing Claude's base model left
+    /// inheriting rows on the old one, and switching the default to Codex revived the row's
+    /// months-old Codex pin instead of Codex's base model.
+    #[test]
+    fn an_inheriting_row_follows_the_base_model_and_ignores_its_pins() {
+        let conn = install();
+        queries::set_setting(&conn, "ai_provider", "claude").unwrap();
+        queries::set_setting(&conn, "claude_model", "opus").unwrap();
+        queries::set_setting(&conn, "claude_review_model", "stale-claude-pin").unwrap();
+        queries::set_setting(&conn, "codex_review_model", "stale-codex-pin").unwrap();
+        let route = |conn: &Connection| {
+            let config = load_ai_config_in(conn, AiTask::Review, None).unwrap();
+            (config.provider, config.model)
+        };
+        assert_eq!(route(&conn), ("claude".into(), "opus".into()));
+        queries::set_setting(&conn, "claude_model", "sonnet").unwrap();
+        assert_eq!(route(&conn), ("claude".into(), "sonnet".into()), "the base model moves the row");
+        queries::set_setting(&conn, "ai_provider", "codex").unwrap();
+        queries::set_setting(&conn, "codex_model", "gpt-base").unwrap();
+        assert_eq!(route(&conn), ("codex".into(), "gpt-base".into()), "not the old Codex pin");
+
+        // Naming the provider is what makes the row's own pin count.
+        queries::set_setting(&conn, "ai_provider_review", "claude").unwrap();
+        assert_eq!(route(&conn), ("claude".into(), "stale-claude-pin".into()));
+        queries::set_setting(&conn, "claude_review_model", "").unwrap();
+        assert_eq!(route(&conn), ("claude".into(), "sonnet".into()), "a blank pin is the base model");
+    }
+
+    /// Commits inherit the engine's fast model, not its base one — inheriting keeps that step.
+    #[test]
+    fn an_inheriting_commit_row_keeps_the_fast_model() {
+        let conn = install();
+        queries::set_setting(&conn, "ai_provider", "claude").unwrap();
+        queries::set_setting(&conn, "claude_model", "opus").unwrap();
+        queries::set_setting(&conn, "claude_commit_model", "stale-pin").unwrap();
+        let config = load_ai_config_in(&conn, AiTask::Commit, None).unwrap();
+        assert_eq!(config.model, config.engine.commit_message_model());
     }
 
     /// A fresh install routes everything to Claude without any setting being written, so the panel
