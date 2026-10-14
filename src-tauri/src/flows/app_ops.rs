@@ -818,7 +818,7 @@ async fn pr_review(host: &AppHost, args: &Value, cancel: CancellationToken) -> R
                 }
                 body
             });
-            let outcome = ado_cmd::publish_pr_review(db(host), project_id.clone(), pr_id, run.id.clone(), items, with_summary, summary).await?;
+            let outcome = ado_cmd::publish_pr_review(db(host), project_id.clone(), pr_id, run.id.clone(), items, with_summary, summary, None).await?;
             answer["published"] = to_json(outcome)?;
         }
     }

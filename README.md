@@ -11,7 +11,7 @@ a backlog, and let AI write your commits, find your bugs and resolve your confli
 native app. Then test the endpoint you just changed, query the database behind it and SSH into the
 box it runs on without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-2.3.27-6C5CE7)
+![version](https://img.shields.io/badge/version-2.3.28-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -343,12 +343,21 @@ don't, rather than showing an empty screen.
   merge methods the host allows, and on Azure DevOps *complete* with its linked work items — and
   read their **CI checks** without leaving the PR.
 - **The review is planned before anything is spent**: CodeFlow trims each file down to the symbols
-  the PR touched — the whole method, numbered, with `>` marking what changed — splits the work
-  across several reviewers in parallel, and closes with a cross-file pass looking for what no
-  single-file reviewer can see: signatures that left their callers behind, schemas that drifted
-  apart.
+  the PR touched — the whole method, numbered, with `>` marking what changed and `-` what it deleted
+  — splits the work across several reviewers in parallel, and runs a cross-file pass beside them
+  looking for what no single-file reviewer can see: signatures that left their callers behind,
+  schemas that drifted apart. The panel shows what a review would read and roughly cost before you
+  start it, and an enormous PR asks first.
+- **Reviewers read the PR's own commit**: whatever they open beyond their bundle comes from a
+  read-only checkout of the PR's head, never from the branch you happen to have checked out, and
+  each one is told only about its own files — fewer tokens, less noise.
+- **Findings are checked before you read them**: each one quotes the line it is about, and one whose
+  quote is nowhere in the file is dropped (or its location corrected to where the code really is);
+  depending on the level, the serious ones get a second look that tries to refute them. A reviewer
+  that fails is said in the report, and never makes a finding look fixed.
 - **Three depth levels** (basic · full · ultra) with a real contract rather than a suggestion:
-  confidence threshold, reported severities, active lenses and parallelism. All of it is edited in
+  confidence threshold, reported severities, active lenses, parallelism, reasoning effort and which
+  severities get verified. All of it is edited in
   Settings → Review → Engine, enforced in code, and frozen into every saved review so an old one
   still says which rules produced it.
 - **Memory that gets consulted, not just stored**: what was already dismissed on those same files in
@@ -356,7 +365,10 @@ don't, rather than showing an empty screen.
   touching arrives as a hint for contract changes.
 - **Create a PR** with an AI title and description, as a draft too.
 - Publish the **AI review's** comments straight onto the pull request, and see item by item which
-  ones landed.
+  ones landed — on GitHub as one review, with one-click suggestions where the fix is exact, edited
+  first if you want, the summary updated in place rather than piling up, and the threads of fixed
+  findings closed for you. **Fix with AI** can verify itself with your type check or build, and gets
+  one more try when it breaks it.
 
 ## 📄 From a document to a backlog — and to the code
 

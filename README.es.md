@@ -12,7 +12,7 @@ una sola app nativa y rápida. Después prueba el endpoint que acabas de cambiar
 datos que hay detrás y entra por SSH a la máquina donde corre, sin salir de la ventana. **Tú decides
 qué modelo hace qué.**
 
-![versión](https://img.shields.io/badge/versión-2.3.27-6C5CE7)
+![versión](https://img.shields.io/badge/versión-2.3.28-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-EN%20%7C%20ES-0984E3)
@@ -358,12 +358,21 @@ que no, en vez de mostrar una pantalla vacía.
   métodos de merge que el host permite, y en Azure DevOps *complétalos* junto con sus work items
   vinculados — y mira sus **checks de CI** sin salir del PR.
 - **La revisión se planifica antes de gastar nada**: CodeFlow recorta cada archivo hasta los símbolos
-  que el PR toca — el método entero, numerado, con `>` marcando lo que cambió — reparte el trabajo
-  entre varios revisores en paralelo y cierra con una pasada entre archivos buscando lo que ningún
-  revisor de un solo archivo puede ver: firmas que dejaron atrás a quien las llama, esquemas que se
-  separaron.
+  que el PR toca — el método entero, numerado, con `>` marcando lo que cambió y `-` lo que borró —
+  reparte el trabajo entre varios revisores en paralelo y, junto a ellos, corre una pasada entre
+  archivos buscando lo que ningún revisor de un solo archivo puede ver: firmas que dejaron atrás a
+  quien las llama, esquemas que se separaron. El panel muestra qué leería y cuánto costaría
+  aproximadamente una revisión antes de lanzarla, y un PR enorme pregunta primero.
+- **Los revisores leen el commit del propio PR**: lo que abren fuera de su bundle sale de una copia de
+  solo lectura del head del PR, nunca de la rama que tengas activa, y a cada uno se le cuenta solo lo
+  de sus archivos — menos tokens, menos ruido.
+- **Los hallazgos se comprueban antes de que los leas**: cada uno cita la línea de la que habla, y uno
+  cuya cita no está en el archivo se descarta (o su ubicación se corrige a donde está el código); según
+  el nivel, los graves reciben una segunda mirada que intenta refutarlos. Un revisor que falla se dice
+  en el reporte, y nunca hace que un hallazgo parezca corregido.
 - **Tres niveles de profundidad** (básico · completo · ultra) con un contrato real y no una sugerencia:
-  umbral de confianza, severidades reportadas, lentes activas y paralelismo. Todo se edita en Ajustes →
+  umbral de confianza, severidades reportadas, lentes activas, paralelismo, esfuerzo de razonamiento y
+  qué severidades se verifican. Todo se edita en Ajustes →
   Revisión → Motor, se aplica en código y se congela en cada revisión guardada, para que una antigua
   siga diciendo qué reglas la produjeron.
 - **Memoria que se consulta, no solo se guarda**: lo que ya se descartó sobre esos mismos archivos en
@@ -371,7 +380,10 @@ que no, en vez de mostrar una pantalla vacía.
   tocando llega como pista para cambios de contrato.
 - **Crea un PR** con título y descripción de la IA, también como borrador.
 - Publica los comentarios de la **revisión de la IA** directamente en el pull request, y ve ítem por
-  ítem cuáles llegaron.
+  ítem cuáles llegaron — en GitHub como una sola review, con sugerencias de un clic cuando el arreglo
+  es exacto, editados antes si quieres, el resumen actualizado en su lugar en vez de acumularse, y los
+  hilos de los hallazgos corregidos cerrados por ti. **Corregir con IA** puede verificarse con tu type
+  check o build, y tiene un intento más si lo rompe.
 
 ## 📄 De un documento a un backlog — y al código
 

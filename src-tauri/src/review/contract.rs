@@ -33,6 +33,19 @@ pub fn normalize_level(level: &str) -> &'static str {
     }
 }
 
+/// How deep a level goes, for comparing two of them: `basico` < `completo` < `ultra`. An empty or
+/// unknown level is the shallowest — a run that does not say how deep it went proves nothing.
+pub fn level_rank(level: &str) -> u8 {
+    if level.trim().is_empty() {
+        return 0;
+    }
+    match normalize_level(level) {
+        "basico" => 1,
+        "completo" => 2,
+        _ => 3,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Taxonomy
 // ---------------------------------------------------------------------------
@@ -250,6 +263,21 @@ pub struct LevelContract {
     /// Whether to spend one extra pass reading only the outline, for the lenses that span files
     /// (API/contract, breaking changes, migrations) and that no single-file worker can see.
     pub cross_file: bool,
+    /// How hard the reviewers think, on the app's neutral scale (`low` · `medium` · `high` ·
+    /// `max`), or empty to leave the CLI's own default alone.
+    ///
+    /// The single biggest lever on a review's time and tokens that is not the amount of code: a
+    /// triage does not need the reasoning budget an exhaustive review does, and paying it anyway is
+    /// most of why a `basico` review used to take as long as a `completo` one.
+    #[serde(default)]
+    pub effort: String,
+    /// Which severities get a second look before they are reported: a short pass that sees each such
+    /// finding with its code and tries to refute it. Empty means the deterministic checks only.
+    ///
+    /// Spent where a false positive costs the most and is cheapest to check — a handful of serious
+    /// findings, each a few dozen lines — rather than on every nitpick.
+    #[serde(default)]
+    pub verify: Vec<Severity>,
 }
 
 impl LevelContract {
@@ -285,6 +313,8 @@ fn level_defaults(level: &str) -> LevelContract {
             files_per_group: 5,
             max_groups: 4,
             cross_file: false,
+            effort: "low".into(),
+            verify: Vec::new(),
         },
         "ultra" => LevelContract {
             level: "ultra".into(),
@@ -299,6 +329,8 @@ fn level_defaults(level: &str) -> LevelContract {
             files_per_group: 3,
             max_groups: 8,
             cross_file: true,
+            effort: "high".into(),
+            verify: vec![Severity::Blocker, Severity::Critico, Severity::Mayor],
         },
         _ => LevelContract {
             level: "completo".into(),
@@ -311,6 +343,8 @@ fn level_defaults(level: &str) -> LevelContract {
             files_per_group: 5,
             max_groups: 4,
             cross_file: true,
+            effort: "medium".into(),
+            verify: vec![Severity::Blocker, Severity::Critico],
         },
     }
 }
@@ -330,6 +364,8 @@ pub struct LevelOverride {
     pub files_per_group: Option<usize>,
     pub max_groups: Option<usize>,
     pub cross_file: Option<bool>,
+    pub effort: Option<String>,
+    pub verify: Option<Vec<String>>,
 }
 
 /// Which severities make the Quality Gate `FAILED`.
@@ -514,6 +550,19 @@ pub fn resolve_level_contract(level: &str, config: &ReviewEngineConfig) -> Level
     if let Some(v) = over.cross_file {
         contract.cross_file = v;
     }
+    if let Some(v) = &over.effort {
+        let v = v.trim().to_lowercase();
+        // Empty is a real choice ("the CLI's default"); anything else has to be a level the engines
+        // know, or the CLI would refuse the whole run over it.
+        if v.is_empty() || crate::ai::effort::valid(&v) {
+            contract.effort = v;
+        }
+    }
+    if let Some(list) = &over.verify {
+        // Unlike `severities`, an empty list is meaningful here: "no second look at all".
+        let parsed: Vec<Severity> = list.iter().filter_map(|s| Severity::parse(s)).collect();
+        contract.verify = Severity::ALL.iter().copied().filter(|s| parsed.contains(s)).collect();
+    }
     contract
 }
 
@@ -542,6 +591,10 @@ pub struct LevelView {
     pub files_per_group: usize,
     pub max_groups: usize,
     pub cross_file: bool,
+    #[serde(default)]
+    pub effort: String,
+    #[serde(default)]
+    pub verify: Vec<String>,
 }
 
 impl From<&LevelContract> for LevelView {
@@ -557,6 +610,8 @@ impl From<&LevelContract> for LevelView {
             files_per_group: c.files_per_group,
             max_groups: c.max_groups,
             cross_file: c.cross_file,
+            effort: c.effort.clone(),
+            verify: c.verify.iter().map(|s| s.label().to_string()).collect(),
         }
     }
 }
@@ -573,6 +628,8 @@ impl From<&LevelView> for LevelOverride {
             files_per_group: Some(v.files_per_group),
             max_groups: Some(v.max_groups),
             cross_file: Some(v.cross_file),
+            effort: Some(v.effort.clone()),
+            verify: Some(v.verify.clone()),
         }
     }
 }
@@ -753,6 +810,36 @@ mod tests {
         assert_eq!(c.min_confidence, 60);
         assert_eq!(c.files_per_group, 5);
         assert!(c.reports(Severity::Mayor), "the unusable severity list was dropped whole");
+    }
+
+    /// Each level spends what it is for: a triage thinks less and checks nothing twice.
+    #[test]
+    fn levels_scale_effort_and_verification() {
+        let cfg = ReviewEngineConfig::default();
+        let (b, c, u) = (
+            resolve_level_contract("basico", &cfg),
+            resolve_level_contract("completo", &cfg),
+            resolve_level_contract("ultra", &cfg),
+        );
+        assert_eq!((b.effort.as_str(), c.effort.as_str(), u.effort.as_str()), ("low", "medium", "high"));
+        assert!(b.verify.is_empty());
+        assert_eq!(c.verify, vec![Severity::Blocker, Severity::Critico]);
+        assert!(u.verify.contains(&Severity::Mayor));
+    }
+
+    #[test]
+    fn effort_and_verification_can_be_overridden_and_an_unknown_effort_cannot() {
+        let mut cfg = ReviewEngineConfig::default();
+        cfg.levels.insert(
+            "completo".into(),
+            LevelOverride { effort: Some("".into()), verify: Some(vec![]), ..Default::default() },
+        );
+        let c = resolve_level_contract("completo", &cfg);
+        assert_eq!(c.effort, "", "empty is the CLI's own default — a real choice");
+        assert!(c.verify.is_empty(), "an empty list switches the second look off");
+
+        cfg.levels.insert("completo".into(), LevelOverride { effort: Some("turbo".into()), ..Default::default() });
+        assert_eq!(resolve_level_contract("completo", &cfg).effort, "medium", "a level no CLI knows is ignored");
     }
 
     #[test]

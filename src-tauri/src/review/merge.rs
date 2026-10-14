@@ -37,6 +37,16 @@ pub struct Finding {
     pub sugerencia: String,
     pub ejemplo_lang: String,
     pub ejemplo_code: String,
+    /// The one line of code the finding is about, copied verbatim by the reviewer (`🔎 Evidencia`).
+    ///
+    /// Never rendered: it exists to be *checked*. A finding whose evidence is nowhere in the file it
+    /// names is one the model described from memory rather than from the code — and when the line
+    /// is there but not where the finding says, the location is corrected to where it actually is,
+    /// which is what anchors the comment to the right line on the pull request.
+    pub evidencia: String,
+    /// The exact replacement for a span of lines, when the fix is that local (`✏️ Reemplazo`) —
+    /// what becomes a one-click suggestion on hosts that have them.
+    pub reemplazo: Option<Replacement>,
     /// `None` when the worker didn't state one. Treated as "not flagged as uncertain" rather than
     /// as zero — see [`passes`].
     pub confianza: Option<u8>,
@@ -47,6 +57,15 @@ pub struct Finding {
     pub resuelto_en_iter: Option<usize>,
     pub motivo_descarte: Option<String>,
     pub delta: Option<String>,
+}
+
+/// The exact new text for lines `start..=end` of the finding's file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Replacement {
+    pub start: u32,
+    pub end: u32,
+    pub lang: String,
+    pub code: String,
 }
 
 impl Finding {
@@ -116,8 +135,15 @@ fn code_re() -> &'static Regex {
 
 /// The field markers, by their base codepoint — the variation selector that may follow is left to
 /// the value and trimmed with the label.
-const MARKERS: [(char, &str); 5] =
-    [('📍', "location"), ('💭', "why"), ('💡', "suggestion"), ('🛠', "example"), ('🎯', "confidence")];
+const MARKERS: [(char, &str); 7] = [
+    ('📍', "location"),
+    ('💭', "why"),
+    ('💡', "suggestion"),
+    ('🛠', "example"),
+    ('✏', "replacement"),
+    ('🔎', "evidence"),
+    ('🎯', "confidence"),
+];
 
 /// Splits a finding's body into its labelled fields.
 ///
@@ -176,6 +202,28 @@ fn parse_location(raw: &str) -> (Option<String>, Option<String>) {
         }
         _ => (Some(normalize_path(cleaned)), None),
     }
+}
+
+/// The quoted line out of a `🔎 Evidencia` value: the first non-empty line, with the backticks or
+/// fence the model wrapped it in taken off. Kept verbatim otherwise — it is compared against the code.
+fn evidence_of(raw: &str) -> String {
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("```"))
+        .map(|l| l.trim_matches('`').trim().to_string())
+        .find(|l| !l.is_empty())
+        .unwrap_or_default()
+}
+
+/// A `✏️ Reemplazo: 42-44` value and the fence under it. The span falls back to the finding's own
+/// lines; without a fence there is nothing to replace with, so no replacement.
+fn replacement_of(raw: &str, lineas: Option<&str>) -> Option<Replacement> {
+    let caps = code_re().captures(raw)?;
+    let code = caps.get(2)?.as_str().trim_end_matches('\n').to_string();
+    let head = raw.split("```").next().unwrap_or("");
+    let (start, end) = crate::review_memory::line_span(Some(head))
+        .or_else(|| crate::review_memory::line_span(lineas))?;
+    Some(Replacement { start, end, lang: caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default(), code })
 }
 
 /// Everything before the first finding heading — the model's own prose, kept so a review that found
@@ -258,6 +306,8 @@ pub fn parse(markdown: &str) -> Vec<Finding> {
         // A "why" or "suggestion" runs to the next marker, so it can still trail the `---` that
         // separates findings.
         let clean = |s: &str| s.trim().trim_end_matches('-').trim().to_string();
+        let evidencia = field_of(&parsed, "evidence").map(evidence_of).unwrap_or_default();
+        let reemplazo = field_of(&parsed, "replacement").and_then(|raw| replacement_of(raw, lineas.as_deref()));
 
         out.push(Finding {
             id: id.unwrap_or_default(),
@@ -271,6 +321,8 @@ pub fn parse(markdown: &str) -> Vec<Finding> {
             sugerencia: field_of(&parsed, "suggestion").map(clean).unwrap_or_default(),
             ejemplo_lang,
             ejemplo_code,
+            evidencia,
+            reemplazo,
             confianza,
             estado: "abierto".to_string(),
             thread_id: None,
@@ -382,6 +434,12 @@ pub fn dedupe(findings: Vec<Finding>) -> (Vec<Finding>, usize) {
         if winner.confianza.is_none() {
             winner.confianza = loser.confianza;
         }
+        if winner.evidencia.is_empty() {
+            winner.evidencia = loser.evidencia;
+        }
+        if winner.reemplazo.is_none() {
+            winner.reemplazo = loser.reemplazo;
+        }
 
         existing_spans.extend(mine);
         existing_spans.sort_unstable();
@@ -486,12 +544,17 @@ pub fn number(findings: &mut [Finding], start: usize) {
 /// The whole mechanical step, in the order the runbook specifies: merge every worker's reply,
 /// dedupe, apply the contract, order, and number from `start`.
 ///
+/// The pipeline runs these same steps itself, because it grounds each finding in its code
+/// (`review::verify`) between the dedupe and the contract — this composition is the reference the
+/// tests hold the steps to.
+///
 /// **Whatever id a worker wrote is discarded.** With one reviewer that number was merely redundant;
 /// with several it is actively wrong, because each worker numbers its own findings from `F-001` and
 /// three of them return three different defects all claiming that id. Numbering is this module's
 /// job, and the ids that ultimately reach the report are the *reconciled* ones — assigned by
 /// identity against the previous run so a finding keeps one id, and one comment thread, for the life
 /// of the pull request.
+#[cfg(test)]
 pub fn consolidate(
     replies: &[String],
     contract: &LevelContract,

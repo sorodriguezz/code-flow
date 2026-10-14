@@ -1115,6 +1115,8 @@ export interface PublishOutcome {
   items: PublishedItem[];
   summary_posted: boolean | null;
   summary_error: string | null;
+  /** The summary went out by editing the one already on the PR instead of as a new comment. */
+  summary_updated?: boolean;
 }
 
 /** What a pasted pull-request link turned out to be. `Ready` is the happy path: the PR was read

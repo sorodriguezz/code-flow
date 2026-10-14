@@ -6349,27 +6349,41 @@ pub async fn resolve_conflict(
 
 /// One reviewer invocation — the primitive every shape of PR review is built from.
 ///
-/// A "chunk" is whatever that reviewer is responsible for: one group's reading bundle, the
-/// cross-file outline pass, or (with no local clone to build bundles from) the whole diff. The
-/// caller owns the prompt and the payload; this owns only the plumbing, which is why the parallel
-/// fan-out is a loop over this rather than a second copy of the invocation logic.
+/// A pass is whatever that reviewer is responsible for: one group's reading bundle, the cross-file
+/// outline pass, the closing synthesis, the verification, or (with no local clone to build bundles
+/// from) the whole diff. The caller owns the prompt and the payload; this owns only the plumbing,
+/// which is why the parallel fan-out is a loop over this rather than a second copy of the invocation
+/// logic.
 ///
 /// No footer is stamped here: a worker's reply is an intermediate that gets parsed, merged and
 /// re-rendered, and a signature line in the middle of that would end up inside the report.
-#[allow(clippy::too_many_arguments)]
-pub async fn review_chunk(
-    engine: &dyn AiEngine,
-    binary: &str,
-    model: &str,
-    prompt: &str,
-    stdin_payload: &str,
-    allowed_tools: &[String],
-    cwd: &str,
-) -> Result<AiRun, String> {
+/// What one reviewing pass runs on besides its prompt and its data.
+pub struct ReviewPass<'a> {
+    pub model: &'a str,
+    /// The level's reasoning budget, on the neutral scale — `None` (or empty) for the CLI's default.
+    pub effort: Option<&'a str>,
+    /// Where it runs: the pull request's own checkout, so whatever it opens is the PR's code.
+    pub cwd: &'a str,
+    /// The user's tools for the Review task — only used by an engine that has no read-only set of
+    /// its own to restrict to.
+    pub fallback_tools: &'a [String],
+}
+
+/// A reviewing pass: always **read-only**.
+///
+/// A review reads; it never writes. It used to run with the user's general tool list for the
+/// Review task, which on most setups includes `Edit` and a shell — so a worker that "tried a fix to
+/// see if it compiles" could change the user's checkout in the middle of a review. Read-only also
+/// trims what each turn carries (no write tools in the list, no MCP servers but the repository map),
+/// which is tokens on every one of a review's turns.
+pub async fn review_pass(engine: &dyn AiEngine, binary: &str, prompt: &str, stdin_payload: &str, pass: ReviewPass<'_>) -> Result<AiRun, String> {
+    let read_only_tools = engine.read_only_tools();
     let mut inv = AiInvocation::new(prompt, stdin_payload);
-    inv.model = model;
-    inv.allowed_tools = allowed_tools;
-    inv.cwd = Some(cwd);
+    inv.model = pass.model;
+    inv.allowed_tools = if read_only_tools.is_empty() { pass.fallback_tools } else { &read_only_tools };
+    inv.cwd = Some(pass.cwd);
+    inv.read_only = true;
+    inv.effort = pass.effort.map(str::trim).filter(|e| !e.is_empty());
     inv.task = task::REVIEW_PR;
     run(engine, binary, inv).await
 }
@@ -6416,6 +6430,7 @@ pub async fn review_pull_request(
     allowed_tools: &[String],
     cwd: &str,
     prompt: &str,
+    effort: Option<&str>,
 ) -> Result<String, String> {
     if diff_text.trim().is_empty() {
         return Err("This pull request has no changes to review".to_string());
@@ -6425,8 +6440,19 @@ pub async fn review_pull_request(
     let mut stdin_payload = review_preamble(pr_title, pr_description, contexts);
     stdin_payload.push_str("DIFF:\n");
     stdin_payload.push_str(&truncated);
+    // Said to the model, not just done to it: a diff cut mid-file reads as a PR that ends there, and
+    // "nothing wrong in the rest" is then a claim about code nobody showed it.
+    let total = diff_text.chars().count();
+    if total > MAX_REVIEW_DIFF_CHARS {
+        stdin_payload.push_str(&format!(
+            "\n\n[... DIFF TRUNCADO: se omitieron {} de {total} caracteres. No concluyas nada sobre lo que no ves; \
+             dilo en el resumen ...]\n",
+            total - MAX_REVIEW_DIFF_CHARS
+        ));
+    }
 
-    let run = review_chunk(engine, binary, model, prompt, &stdin_payload, allowed_tools, cwd).await?;
+    let pass = ReviewPass { model, effort, cwd, fallback_tools: allowed_tools };
+    let run = review_pass(engine, binary, prompt, &stdin_payload, pass).await?;
     // Prefer what the CLI reports it actually ran over what was configured — they differ
     // whenever `model` is empty and the CLI picked its own default.
     Ok(review_footer(&run.text, engine.label(), run.model.as_deref().unwrap_or(model)))

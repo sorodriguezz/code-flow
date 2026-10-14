@@ -454,8 +454,18 @@ pub fn get_project(db: State<Db>, id: String) -> Result<Option<Project>, String>
 
 #[tauri::command]
 pub fn delete_project(db: State<Db>, id: String) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::delete_project(&conn, &id).map_err(|e| e.to_string())
+    let path = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let path = queries::get_project(&conn, &id).ok().flatten().map(|p| p.local_path);
+        queries::delete_project(&conn, &id).map_err(|e| e.to_string())?;
+        path
+    };
+    // The checkout PR reviews read from (`review::checkout`) is the project's, and goes with it —
+    // off the lock, since removing a worktree is a git process and a folder's worth of deletes.
+    if let Some(path) = path {
+        std::thread::spawn(move || crate::review::checkout::discard(&path, &id));
+    }
+    Ok(())
 }
 
 #[tauri::command]

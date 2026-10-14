@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Ban,
   Check,
@@ -9,8 +9,10 @@ import {
   EyeOff,
   Info,
   Lightbulb,
+  ListChecks,
   Loader2,
   MapPin,
+  PencilLine,
   MessageCircleQuestionMark,
   MessageSquarePlus,
   OctagonAlert,
@@ -34,7 +36,7 @@ import {
   type QualityGrades,
 } from "../../lib/parseAnalysis";
 import { renderInlineMarkdown } from "../../lib/markdown";
-import { resolveFindingWithAi } from "../../lib/tauri/commands";
+import { fixVerifyCommand, resolveFindingWithAi, setSetting } from "../../lib/tauri/commands";
 import { whenRepoFree, useIsQueued } from "../../lib/repoQueue";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { useAiPanelStore } from "../../state/aiPanelStore";
@@ -170,7 +172,8 @@ export function useResolveWithAi(
     else setLocalResolution(null);
   };
 
-  const resolve = async (promptText: string) => {
+  /** `verifyCommand`: the project's check to run after the fix — see `fix_verify` on the backend. */
+  const resolve = async (promptText: string, verifyCommand?: string | null) => {
     if (prSourceBranch) {
       const { status, branches, checkoutBranch, checkoutRemoteBranch } = useRepoStore.getState();
       if (status?.current_branch !== prSourceBranch) {
@@ -219,7 +222,7 @@ export function useResolveWithAi(
     try {
       // A fix writes to the working tree, so it takes the repository's lease like a chat turn or an
       // analysis does — and waits for it instead of failing when one of those holds it.
-      const result = await whenRepoFree(projectId, id, () => resolveFindingWithAi(projectId, promptText, id));
+      const result = await whenRepoFree(projectId, id, () => resolveFindingWithAi(projectId, promptText, id, verifyCommand));
       record(result);
       // The proposal is on the finding it belongs to; the notification leads there.
       notify({
@@ -252,6 +255,45 @@ export function useResolveWithAi(
   return { resolving, resolution, resolve, clearResolution, runId, runStartedAt };
 }
 
+/** Commands already read this session, by project — every card of a review asks for the same one. */
+const verifyCommands = new Map<string, string>();
+
+/**
+ * The project's check for "fix with AI": what it saved, or what the Reviewer would build it with.
+ *
+ * Saved as typed (`fix_verify_command:<projectId>`), an empty one included — that is how a project
+ * turns verification off, as opposed to never having chosen (which gets the proposal again).
+ * `command` is `null` until it has been read.
+ */
+function useFixVerifyCommand(projectId: string | undefined) {
+  const [command, setCommand] = useState<string | null>(projectId ? (verifyCommands.get(projectId) ?? null) : null);
+  useEffect(() => {
+    if (!projectId || verifyCommands.has(projectId)) return;
+    let live = true;
+    fixVerifyCommand(projectId)
+      .then((value) => {
+        verifyCommands.set(projectId, value);
+        if (live) setCommand(value);
+      })
+      .catch(() => {
+        if (live) setCommand("");
+      });
+    return () => {
+      live = false;
+    };
+  }, [projectId]);
+  const edit = (value: string) => {
+    setCommand(value);
+    if (projectId) verifyCommands.set(projectId, value);
+  };
+  // Written when the field is left, not per keystroke: every settings write is broadcast to every
+  // store that watches settings.
+  const persist = () => {
+    if (projectId && command !== null) void setSetting(`fix_verify_command:${projectId}`, command.trim());
+  };
+  return { command, edit, persist };
+}
+
 /** The button + result text for `useResolveWithAi` — identical markup in `FindingCard` and
  * `PrCommentCard`, just pulled out so the two don't drift. Once resolved the button flips to
  * "resolve again" and the outcome is shown in a persistent, dismissable "resolved" card.
@@ -270,6 +312,7 @@ export function ResolveWithAiButton({
   trailing,
   showAi = true,
   noteKey,
+  verifyProjectId,
 }: {
   resolving: boolean;
   resolution: string | null;
@@ -277,8 +320,9 @@ export function ResolveWithAiButton({
   runId?: string | null;
   /** When that run began — the card can be reopened long after, and the timer has to say so. */
   runStartedAt?: number | null;
-  /** Receives whatever the user typed in the note field, already trimmed and `""` when empty. */
-  onClick: (extraInstructions: string) => void;
+  /** Receives whatever the user typed in the note field, already trimmed and `""` when empty — and
+   *  the command to verify the fix with, `null` when there is none. */
+  onClick: (extraInstructions: string, verifyCommand: string | null) => void;
   onClear?: () => void;
   /** An extra action sharing this row — a PR comment's "resolve the thread on the host", which
    * belongs beside the fix that earned it rather than on a line of its own. */
@@ -288,6 +332,8 @@ export function ResolveWithAiButton({
   /** Where the note is kept while this card is off screen (the assistant's drafts). Without it the
    *  note lives in the card and goes when the card does. */
   noteKey?: string;
+  /** The project whose check runs after the fix — offers the "verify with" field. */
+  verifyProjectId?: string;
 }) {
   const t = useT();
   /** Extra instructions for the fix, kept whether the field is open or shut — collapsing it is
@@ -307,6 +353,9 @@ export function ResolveWithAiButton({
   const providerId = useTaskProvider("fix");
   const hideAi = !showAi || (!isAgenticProvider(providerId) && !resolution);
   const hasNote = extra.trim().length > 0;
+  const verify = useFixVerifyCommand(verifyProjectId);
+  const [verifyOpen, setVerifyOpen] = useState(false);
+  const verifyCommand = verify.command?.trim() || null;
   if (hideAi && !trailing) return null;
   return (
     <>
@@ -314,7 +363,7 @@ export function ResolveWithAiButton({
         {!hideAi && (
           <>
             <button
-              onClick={() => onClick(extra.trim())}
+              onClick={() => onClick(extra.trim(), verifyCommand)}
               disabled={resolving}
               className={buttonClass({ variant: "secondary", size: "sm" })}
             >
@@ -343,10 +392,37 @@ export function ResolveWithAiButton({
               <MessageSquarePlus size={13} />
               {hasNote ? t("finding.instructionsAdded") : t("finding.addInstructions")}
             </button>
+            {verifyProjectId && verify.command !== null && (
+              <Tooltip label={verifyCommand ? t("finding.verifyWithHint", { command: verifyCommand }) : t("finding.verifyOffHint")}>
+                <button
+                  onClick={() => setVerifyOpen((open) => !open)}
+                  disabled={resolving}
+                  aria-expanded={verifyOpen}
+                  className={buttonClass({ variant: "ghost", size: "sm", className: verifyCommand ? "text-[var(--cf-success)]" : undefined })}
+                >
+                  <ListChecks size={13} />
+                  {verifyCommand ? t("finding.verifyOn") : t("finding.verifyOff")}
+                </button>
+              </Tooltip>
+            )}
           </>
         )}
         {trailing}
       </div>
+      {!hideAi && verifyOpen && verifyProjectId && (
+        <label className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+          <span className="shrink-0">{t("finding.verifyWith")}</span>
+          <input
+            value={verify.command ?? ""}
+            onChange={(e) => verify.edit(e.target.value)}
+            onBlur={verify.persist}
+            disabled={resolving}
+            spellCheck={false}
+            placeholder={t("finding.verifyPlaceholder")}
+            className="h-6 min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 font-mono text-[11px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+          />
+        </label>
+      )}
       {!hideAi && noteOpen && (
         <textarea
           data-ai-input
@@ -367,12 +443,23 @@ export function ResolveWithAiButton({
         />
       )}
       {resolution && (
-        <div className="relative rounded-md border border-[color-mix(in_oklab,var(--cf-success)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_9%,transparent)] px-2.5 py-2 pr-8">
-          <span className="mb-0.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-success)]">
-            <CircleCheck size={12} />
-            {t("finding.resolved")}
+        // A fix whose check still fails is a proposal to read, not a result — said in its colour.
+        <div
+          className={`relative rounded-md border px-2.5 py-2 pr-8 ${
+            resolution.includes("❌")
+              ? "border-[color-mix(in_oklab,var(--cf-warning)_40%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_9%,transparent)]"
+              : "border-[color-mix(in_oklab,var(--cf-success)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_9%,transparent)]"
+          }`}
+        >
+          <span
+            className={`mb-0.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] ${
+              resolution.includes("❌") ? "text-[var(--cf-warning)]" : "text-[var(--cf-success)]"
+            }`}
+          >
+            {resolution.includes("❌") ? <TriangleAlert size={12} /> : <CircleCheck size={12} />}
+            {resolution.includes("❌") ? t("finding.resolvedUnverified") : t("finding.resolved")}
           </span>
-          <p className="select-text text-[12px] leading-relaxed text-[var(--cf-text)]">{resolution}</p>
+          <p className="select-text whitespace-pre-wrap text-[12px] leading-relaxed text-[var(--cf-text)]">{resolution}</p>
           {onClear && (
             <button
               onClick={onClear}
@@ -612,9 +699,18 @@ export function SeverityCountBadges({ findings }: { findings: AnalysisFinding[] 
 /** Quality Gate chip + the model's own A–E grades — shown once per review, above the
  * findings list, in both the pre-commit analysis view and the PR review view. The grades are one
  * chip of three letters; which letter is which is its tooltip, so the strip stays one line. */
-export function QualityGateBadges({ grades, findings }: { grades: QualityGrades | null; findings: AnalysisFinding[] }) {
+export function QualityGateBadges({
+  grades,
+  findings,
+  blocking,
+}: {
+  grades: QualityGrades | null;
+  findings: AnalysisFinding[];
+  /** The policy the run was reviewed under (its frozen gate); the default policy without one. */
+  blocking?: string[];
+}) {
   const t = useT();
-  const passed = computeQualityGatePassed(findings);
+  const passed = computeQualityGatePassed(findings, blocking);
   const spelled = grades
     ? `${t("analyze.reliability")} ${grades.reliability} · ${t("analyze.security")} ${grades.security} · ${t("analyze.maintainability")} ${grades.maintainability}`
     : "";
@@ -807,6 +903,22 @@ export function FindingCard({
               {finding.exampleCode}
             </pre>
           )}
+          {finding.replacement && (
+            <div className="space-y-1">
+              <p className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--cf-text)]">
+                <PencilLine size={12} className="text-[var(--cf-accent)]" />
+                {t("finding.replacement", {
+                  lines:
+                    finding.replacement.end > finding.replacement.start
+                      ? `${finding.replacement.start}-${finding.replacement.end}`
+                      : `${finding.replacement.start}`,
+                })}
+              </p>
+              <pre className="overflow-x-auto rounded-md border border-[color-mix(in_oklab,var(--cf-accent)_30%,var(--cf-border))] bg-[var(--cf-sunken)] px-2.5 py-2 font-mono text-[11px] leading-relaxed">
+                {finding.replacement.code}
+              </pre>
+            </div>
+          )}
 
           {/* Except once rejected, where offering to fix what was just called a non-defect would
               be the panel arguing with itself. */}
@@ -816,9 +928,10 @@ export function FindingCard({
               resolution={resolution}
               runId={runId}
               runStartedAt={runStartedAt}
-              onClick={(extra) => void resolve(withExtraInstructions(formatFindingAsFixPrompt(finding), extra))}
+              onClick={(extra, verifyCommand) => void resolve(withExtraInstructions(formatFindingAsFixPrompt(finding), extra), verifyCommand)}
               onClear={clearResolution}
               noteKey={resolutionKey ? `note:${resolutionKey}` : undefined}
+              verifyProjectId={projectId}
               trailing={rulingsInRow ? <DiscardButtons onPick={setDrafting} /> : undefined}
             />
           )}

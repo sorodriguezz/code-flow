@@ -75,7 +75,7 @@ impl RepoFeatures {
 /// `$GIT_COMMON_DIR` — where hooks, `info/attributes` and bisect state live. For a linked worktree
 /// `repo.path()` is `.git/worktrees/<name>/`, and the shared directory is named by the `commondir`
 /// file in it (git2 0.19 has no accessor for this).
-pub(super) fn common_dir(repo: &Repository) -> PathBuf {
+pub(crate) fn common_dir(repo: &Repository) -> PathBuf {
     let own = repo.path().to_path_buf();
     match std::fs::read_to_string(own.join("commondir")) {
         Ok(text) => {

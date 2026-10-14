@@ -778,6 +778,9 @@ pub async fn analyze_working_changes(
 /// directly to the working tree — `finding_prompt` is the finding's location/why/suggestion,
 /// pre-formatted by the frontend from the already-parsed finding. Leaves the result as
 /// uncommitted changes; nothing here stages, commits, or pushes anything.
+///
+/// `verify_command`, when given, is run after the fix (see `fix_verify`): a failure gets the agent
+/// one more turn with the command's output, and the outcome is appended to the result.
 #[tauri::command]
 pub async fn resolve_finding_with_ai(
     app: AppHandle,
@@ -785,8 +788,9 @@ pub async fn resolve_finding_with_ai(
     project_id: String,
     finding_prompt: String,
     run_id: Option<String>,
+    verify_command: Option<String>,
 ) -> Result<String, String> {
-    resolve_finding_on(app, db, project_id, finding_prompt, run_id, None).await
+    resolve_finding_on(app, db, project_id, finding_prompt, run_id, None, verify_command).await
 }
 
 /// [`resolve_finding_with_ai`] on a chosen engine — Flujos' "Resolver con IA".
@@ -797,6 +801,7 @@ pub(crate) async fn resolve_finding_on(
     finding_prompt: String,
     run_id: Option<String>,
     engine: Option<(String, String)>,
+    verify_command: Option<String>,
 ) -> Result<String, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -818,9 +823,29 @@ pub(crate) async fn resolve_finding_on(
     };
 
     let checkpoint = checkpoint_before(&project.local_path, "fix-finding");
+    let verify_command = verify_command.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
     let result = ai_runs::scoped(app, run_id, async {
-        ai::apply_finding_fix(&*config.engine, &config.binary, &config.model, &finding_prompt, &project.local_path)
-            .await
+        let fixed = ai::apply_finding_fix(&*config.engine, &config.binary, &config.model, &finding_prompt, &project.local_path)
+            .await?;
+        let Some(command) = verify_command.as_deref() else { return Ok(fixed) };
+        let repo = std::path::Path::new(&project.local_path);
+        let first = super::fix_verify::run(command, repo).await?;
+        if first.passed {
+            return Ok(format!("{fixed}\n\n✅ Verificado: `{command}` pasó."));
+        }
+        // One repair turn with the command's own words, then the command again — never a loop.
+        let repair = super::fix_verify::repair_prompt(&finding_prompt, command, &first);
+        let repaired = ai::apply_finding_fix(&*config.engine, &config.binary, &config.model, &repair, &project.local_path).await?;
+        let second = super::fix_verify::run(command, repo).await?;
+        Ok(if second.passed {
+            format!("{fixed}\n\n🔁 La primera versión no pasaba `{command}`; se ajustó y ahora pasa.\n{repaired}")
+        } else {
+            let tail: String = second.tail.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+            format!(
+                "{fixed}\n\n❌ `{command}` sigue fallando{} tras un intento de reparación. Revisa los cambios antes de confirmarlos:\n```\n{tail}\n```",
+                if second.timed_out { " (tiempo agotado)" } else { "" }
+            )
+        })
     })
     .await;
     // Runs after failures and cancellations too: an agent killed mid-edit is exactly when a

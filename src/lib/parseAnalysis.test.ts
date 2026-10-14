@@ -201,6 +201,62 @@ describe("the summary comment", () => {
   });
 });
 
+describe("severities, the gate policy and exact replacements", () => {
+  const parsed = parseAnalysis(REPORT);
+
+  it("keeps the fine severity the heading names, not just the bucket", () => {
+    expect(parsed.findings.map((f) => f.severityLabel)).toEqual(["Crítico", "Mayor", "Menor"]);
+    expect(parsed.findings[1].severity).toBe("warning");
+  });
+
+  /** The badge follows the policy the run was reviewed under — a gate that blocks on Mayor fails here. */
+  it("judges the gate by the run's own policy", () => {
+    const withoutCritical = parsed.findings.slice(1);
+    expect(computeQualityGatePassed(withoutCritical)).toBe(true);
+    expect(computeQualityGatePassed(withoutCritical, ["Blocker", "Crítico", "Mayor"])).toBe(false);
+    expect(computeQualityGatePassed(withoutCritical, ["blocker", "major"])).toBe(false);
+  });
+
+  it("counts the published findings by their real severity", () => {
+    const body = formatSummaryComment(parsed, "2026-10-14", parsed.findings);
+    expect(body).toContain("1 Crítico · 1 Mayor · 1 Menor");
+    expect(body).not.toMatch(/\d Info/);
+  });
+
+  const withReplacement = parseAnalysis(`### 🚨 [Crítico · Bug] npe · F-001
+
+Se lee saldo sin validar.
+
+📍 Ubicación: src/a.ts:4-5
+
+💭 Por qué: puede ser null.
+
+💡 Sugerencia: Valida antes.
+
+✏️ Reemplazo: 4-5
+\`\`\`ts
+if (!c) return;
+return c.saldo;
+\`\`\`
+
+🎯 Confianza: 80/100
+`).findings[0];
+
+  it("reads an exact replacement apart from the example and the suggestion", () => {
+    expect(withReplacement.replacement).toEqual({ start: 4, end: 5, lang: "ts", code: "if (!c) return;\nreturn c.saldo;" });
+    expect(withReplacement.exampleCode).toBe("");
+    expect(withReplacement.suggestion).toBe("Valida antes.");
+  });
+
+  it("publishes it as the host's own suggestion when it can apply", () => {
+    expect(formatFindingAsComment(withReplacement, "github")).toContain("```suggestion\nif (!c) return;");
+    expect(formatFindingAsComment(withReplacement, "gitlab")).toContain("```suggestion:-1+0");
+    expect(formatFindingAsComment(withReplacement, "azure")).toContain("Reemplazo sugerido (líneas 4-5)");
+    const elsewhere = { ...withReplacement, location: { file: "src/a.ts", startLine: 9, endLine: 9 } };
+    expect(formatFindingAsComment(elsewhere, "github")).not.toContain("```suggestion");
+  });
+});
+
 describe("the fix-pack", () => {
   it("carries every finding under action names", () => {
     const pack = JSON.parse(buildFixpack(parseAnalysis(REPORT), 42));

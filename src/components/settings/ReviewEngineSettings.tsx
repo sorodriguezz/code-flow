@@ -21,6 +21,9 @@ import { Group } from "../api/settingsChrome";
  * these labels back, accents and all, so they are values rather than display strings. */
 const SEVERITIES = ["Blocker", "Crítico", "Mayor", "Menor", "Info"];
 
+/** The reasoning budgets, on the app's neutral scale — `""` leaves the CLI's own default alone. */
+const EFFORTS = ["", "low", "medium", "high", "max"] as const;
+
 /** The level names the engine knows, in the order the depth selector shows them. */
 const LEVEL_LABEL: Record<string, string> = {
   basico: "Básico",
@@ -342,6 +345,36 @@ export function ReviewEngineSettings() {
               min={1}
               max={32}
               onChange={(maxGroups) => patchLevel(level.level, { maxGroups })}
+            />
+            <label className="flex items-center justify-between gap-3 py-1">
+              <span className="min-w-0">
+                <span className="block break-words text-[12px] leading-snug text-[var(--cf-text)]">{t("settings.engineEffort")}</span>
+                <span className="block break-words text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("settings.engineEffortHint")}</span>
+              </span>
+              <select
+                value={level.effort ?? ""}
+                onChange={(e) => patchLevel(level.level, { effort: e.target.value })}
+                className={fieldClass({ size: "sm", className: "w-28 shrink-0" })}
+              >
+                {EFFORTS.map((effort) => (
+                  <option key={effort} value={effort}>
+                    {effort ? t(`settings.engineEffort.${effort}` as never) : t("settings.engineEffort.default")}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="mt-1.5 text-[12px] text-[var(--cf-text)]">{t("settings.engineVerify")}</p>
+            <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("settings.engineVerifyHint")}</p>
+            <ChipPicker
+              options={SEVERITIES.map((s) => ({ value: s, label: s }))}
+              selected={level.verify ?? []}
+              onToggle={(value) => {
+                const current = level.verify ?? [];
+                // Unlike the reported severities, an empty list is a real choice here: no second look.
+                patchLevel(level.level, {
+                  verify: current.includes(value) ? current.filter((s) => s !== value) : [...current, value],
+                });
+              }}
             />
           </Group>
         ))}

@@ -123,7 +123,7 @@ pub fn blast_radius(
         let head = if file.is_readable() { extract::extract(&path, &file.content) } else { extract::Facts::default() };
         let before = map.index_of(&path).filter(|i| map.path(*i) == path).map(|i| map.facts(i).clone());
         let mut claims: Vec<(String, Option<ContractChange>)> = Vec::new();
-        for sym in touched(&head.symbols, &file.changed) {
+        for sym in touched(&head.symbols, &file.touched()) {
             let change = before.as_ref().and_then(|facts| {
                 let old = facts.symbols.iter().find(|s| s.name == sym.name && s.kind == sym.kind)?;
                 (normalized(&old.signature) != normalized(&sym.signature))
@@ -261,6 +261,7 @@ mod tests {
             deletions: 0,
             symbols: super::super::outline::symbols_for(path, content, &changed),
             changed,
+            removed: vec![],
         }
     }
 

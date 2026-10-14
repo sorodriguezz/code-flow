@@ -34,8 +34,24 @@ pub struct Symbol {
     pub label: String,
 }
 
+/// A run of lines the pull request deleted, placed where it used to sit in the new file.
+///
+/// Deleted code has no line number on the new side, which is why it was invisible to every reader:
+/// the bundles showed the new side with `>` on what was added, and a PR that only *removed* a
+/// validation or an `await` reached the model as nothing at all. Anchoring each run to the new-side
+/// line that now follows it is what lets a bundle print it in place, and lets a pure deletion pull
+/// the method it happened in into the review like any other change.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RemovedBlock {
+    /// The new-side line the removed run sat immediately before (1-based). `lines + 1` for a
+    /// deletion at the end of the file.
+    pub before: usize,
+    /// The removed lines' text, without their trailing newline.
+    pub lines: Vec<String>,
+}
+
 /// A file this pull request changed, with everything the pipeline needs to read it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChangedFile {
     /// Repository-relative, forward slashes, no leading separator.
     pub path: String,
@@ -54,9 +70,23 @@ pub struct ChangedFile {
     pub deletions: usize,
     /// The declarations that contain at least one changed line.
     pub symbols: Vec<Symbol>,
+    /// What the pull request deleted, in place — see [`RemovedBlock`].
+    pub removed: Vec<RemovedBlock>,
 }
 
 impl ChangedFile {
+    /// Every new-side line the pull request touched: the ones it added or modified, plus the line
+    /// each deletion now sits before. What decides which symbols a file contributes — a method the
+    /// PR only deleted lines from is still a method it changed.
+    pub fn touched(&self) -> BTreeSet<usize> {
+        let mut out = self.changed.clone();
+        for block in &self.removed {
+            // A deletion at the very end anchors past the last line; the last line is what holds it.
+            out.insert(block.before.min(self.lines.max(1)).max(1));
+        }
+        out
+    }
+
     /// The cost of reviewing this file, in lines the worker will actually read.
     ///
     /// With symbols that is the sum of their ranges; without them the file is read whole, so it
@@ -403,9 +433,66 @@ pub fn normalize_path(path: &str) -> String {
 }
 
 /// Whether two paths name the same file, tolerating the prefix differences above.
+///
+/// A suffix only counts when it starts at a path separator: `app/foo.ts` is `src/app/foo.ts`, but
+/// `xa/foo.ts` is not `a/foo.ts`. Without the boundary two different files whose names happen to
+/// end alike were one file to every comparison built on this — a finding on one resolved or kept
+/// alive by a change to the other.
 pub fn same_path(a: &str, b: &str) -> bool {
     let (a, b) = (normalize_path(a).to_lowercase(), normalize_path(b).to_lowercase());
-    a == b || a.ends_with(&b) || b.ends_with(&a)
+    if a.is_empty() || b.is_empty() {
+        return a == b;
+    }
+    let suffix_of = |long: &str, short: &str| long.len() > short.len() && long.ends_with(short) && long[..long.len() - short.len()].ends_with('/');
+    a == b || suffix_of(&a, &b) || suffix_of(&b, &a)
+}
+
+/// The runs of lines a diff deleted, each anchored to the new-side line that follows it.
+///
+/// Read straight off git's line origins, like [`changed_lines`]: a `-` line carries only its old
+/// number, so its place in the new file is the new number of whatever comes next in the hunk — a
+/// context line or an added one — and, when the hunk ends on the deletion, one past the last new
+/// line the hunk reached.
+pub fn removed_blocks(file: &FileDiffInfo) -> Vec<RemovedBlock> {
+    let mut out: Vec<RemovedBlock> = Vec::new();
+    for hunk in &file.hunks {
+        let mut pending: Vec<String> = Vec::new();
+        // The last new-side line seen in this hunk, so a run at the hunk's end lands after it.
+        let mut last_new: Option<usize> = None;
+        for line in &hunk.lines {
+            match line.origin.as_str() {
+                "-" => pending.push(line.content.trim_end_matches(['\n', '\r']).to_string()),
+                _ => {
+                    let Some(n) = line.new_lineno.map(|n| n as usize) else { continue };
+                    if !pending.is_empty() {
+                        out.push(RemovedBlock { before: n, lines: std::mem::take(&mut pending) });
+                    }
+                    last_new = Some(n);
+                }
+            }
+        }
+        if !pending.is_empty() {
+            let before = match last_new {
+                Some(n) => n + 1,
+                // A hunk of nothing but deletions: its header names where the new side resumes.
+                None => hunk_new_start(&hunk.header).max(1),
+            };
+            out.push(RemovedBlock { before, lines: pending });
+        }
+    }
+    out
+}
+
+/// The new-side start of a hunk header — `@@ -12,4 +10,0 @@` → `10`, the line after which the
+/// deleted run sat, so the run itself sits before `10 + 1`. Zero when the header is unreadable.
+fn hunk_new_start(header: &str) -> usize {
+    header
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix('+'))
+        .and_then(|spec| spec.split(',').next())
+        .and_then(|n| n.parse::<usize>().ok())
+        .map(|n| n + 1)
+        .unwrap_or(0)
 }
 
 /// Builds the outline of a whole pull request: one [`ChangedFile`] per file in the diff, with its
@@ -425,22 +512,22 @@ pub fn build(repo_path: &str, head_ref: &str, files: &[FileDiffInfo]) -> Vec<Cha
         } else {
             crate::git::diff::file_at_ref(repo_path, head_ref, &path).unwrap_or_default()
         };
-        let symbols = symbols_for(&path, &content, &changed);
-        let deletions = file
-            .hunks
-            .iter()
-            .flat_map(|h| h.lines.iter())
-            .filter(|l| l.origin == "-")
-            .count();
-        out.push(ChangedFile {
+        let removed = removed_blocks(file);
+        let deletions = removed.iter().map(|b| b.lines.len()).sum();
+        let mut out_file = ChangedFile {
             path,
             status: file.status.clone(),
             lines: content.lines().count(),
             content,
             changed,
             deletions,
-            symbols,
-        });
+            symbols: Vec::new(),
+            removed,
+        };
+        // Symbols from every touched line, deletions included: a method the PR only removed lines
+        // from is a method it changed, and its bundle has to show it.
+        out_file.symbols = symbols_for(&out_file.path, &out_file.content, &out_file.touched());
+        out.push(out_file);
     }
     out
 }
@@ -573,6 +660,7 @@ function real(a) {
             changed: changed(&[5]),
             deletions: 0,
             symbols: vec![Symbol { start: 3, end: 6, label: "f".into() }],
+            removed: vec![],
         };
         assert_eq!(file.weight(), 4, "the symbol's range, not the file's size");
 
@@ -587,5 +675,68 @@ function real(a) {
         assert!(same_path("/src/app/foo.ts", "src/app/foo.ts"));
         assert!(same_path("app/foo.ts", "src/app/foo.ts"));
         assert!(!same_path("src/app/foo.ts", "src/app/bar.ts"));
+    }
+
+    /// The suffix has to start at a separator — two files whose names merely end alike are two files.
+    #[test]
+    fn a_suffix_only_matches_at_a_path_boundary() {
+        assert!(!same_path("xa/b.ts", "a/b.ts"));
+        assert!(!same_path("src/myfoo.ts", "foo.ts"));
+        assert!(same_path("src/foo.ts", "foo.ts"));
+        assert!(same_path("FOO.ts", "foo.ts"), "case-insensitive, as before");
+        assert!(!same_path("", "foo.ts"));
+    }
+
+    fn diff_line(origin: &str, content: &str, old: Option<u32>, new: Option<u32>) -> crate::git::diff::DiffLine {
+        crate::git::diff::DiffLine { origin: origin.into(), content: content.into(), old_lineno: old, new_lineno: new }
+    }
+
+    fn diff(header: &str, lines: Vec<crate::git::diff::DiffLine>) -> FileDiffInfo {
+        FileDiffInfo {
+            old_path: Some("a.ts".into()),
+            new_path: Some("a.ts".into()),
+            status: "modified".into(),
+            binary: false,
+            hunks: vec![crate::git::diff::DiffHunkInfo { header: header.into(), lines }],
+        }
+    }
+
+    /// A deleted run sits before the new-side line that follows it — and a pure deletion is a touch.
+    #[test]
+    fn a_deletion_is_anchored_before_the_line_that_follows_it() {
+        let file = diff(
+            "@@ -1,5 +1,3 @@",
+            vec![
+                diff_line(" ", "function pagar() {\n", Some(1), Some(1)),
+                diff_line("-", "  validar(dto);\n", Some(2), None),
+                diff_line("-", "  await guardar(dto);\n", Some(3), None),
+                diff_line(" ", "  return 1;\n", Some(4), Some(2)),
+                diff_line(" ", "}\n", Some(5), Some(3)),
+            ],
+        );
+        let blocks = removed_blocks(&file);
+        assert_eq!(blocks, vec![RemovedBlock { before: 2, lines: vec!["  validar(dto);".into(), "  await guardar(dto);".into()] }]);
+        assert!(changed_lines(&file).is_empty(), "nothing was added");
+
+        let content = "function pagar() {\n  return 1;\n}\n".to_string();
+        let mut changed_file = ChangedFile { path: "a.ts".into(), lines: 3, content, removed: blocks, ..Default::default() };
+        assert_eq!(changed_file.touched().into_iter().collect::<Vec<_>>(), vec![2]);
+        changed_file.symbols = symbols_for("a.ts", &changed_file.content, &changed_file.touched());
+        assert_eq!(changed_file.symbols.len(), 1, "the method the lines were deleted from is in the review");
+    }
+
+    #[test]
+    fn a_deletion_at_the_end_of_a_hunk_lands_after_its_last_line() {
+        let file = diff(
+            "@@ -8,3 +8,1 @@",
+            vec![
+                diff_line(" ", "x\n", Some(8), Some(8)),
+                diff_line("-", "y\n", Some(9), None),
+                diff_line("-", "z\n", Some(10), None),
+            ],
+        );
+        assert_eq!(removed_blocks(&file)[0].before, 9);
+        let only = diff("@@ -4,2 +3,0 @@", vec![diff_line("-", "a\n", Some(4), None), diff_line("-", "b\n", Some(5), None)]);
+        assert_eq!(removed_blocks(&only)[0].before, 4, "after new line 3, per the header");
     }
 }

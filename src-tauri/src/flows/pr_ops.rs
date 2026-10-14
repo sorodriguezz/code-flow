@@ -263,7 +263,7 @@ async fn decide(host: &AppHost, args: &Value, cancel: CancellationToken) -> Resu
                 let summary = async {
                     let body = super::bridge::ask(&host.app, "pr.decisionComment", json!({"runId": run.id, "decision": action}), Duration::from_secs(60), cancel.clone()).await?;
                     let body = body.as_str().ok_or("The window answered without a summary")?.to_string();
-                    let posted = ado_cmd::publish_pr_review(db(host), project_id.clone(), pr_id, run.id.clone(), Vec::new(), true, Some(body)).await?;
+                    let posted = ado_cmd::publish_pr_review(db(host), project_id.clone(), pr_id, run.id.clone(), Vec::new(), true, Some(body), None).await?;
                     match posted.summary_error {
                         Some(error) => Err(error),
                         None => Ok(()),
@@ -468,7 +468,7 @@ async fn fix(host: &AppHost, args: &Value, cancel: CancellationToken) -> Result<
     let mut out = Vec::new();
     for (kind, prompt, mut item) in jobs {
         let job = uuid::Uuid::new_v4().to_string();
-        let work = claude_cmd::resolve_finding_on(host.app.clone(), host.app.state::<crate::db::Db>(), project_id.clone(), prompt, Some(job.clone()), engine(args));
+        let work = claude_cmd::resolve_finding_on(host.app.clone(), host.app.state::<crate::db::Db>(), project_id.clone(), prompt, Some(job.clone()), engine(args), None);
         let result = tokio::select! {
             result = work => result,
             _ = cancel.cancelled() => {

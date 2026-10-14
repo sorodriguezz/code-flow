@@ -1246,6 +1246,41 @@ pub async fn reply_pr_thread(
     Ok(())
 }
 
+/// Rewrites the opening comment of a general thread in place — what keeps the review summary to one
+/// sticky thread that each publish updates, rather than a new thread per run. `thread_id` is what
+/// [`post_pr_comment`] returned. Azure numbers a thread's comments from 1, and comment `1` is the
+/// one the thread was opened with — the summary itself; replies, if anyone left some, are untouched.
+pub async fn edit_pr_thread_comment(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    thread_id: i64,
+    content: &str,
+    pat: &str,
+) -> Result<(), String> {
+    let org = encode_segment(&normalize_org(org));
+    let project = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/threads/{thread_id}/comments/1\
+         ?api-version={API_VERSION}"
+    );
+    let body = serde_json::json!({ "content": content });
+    let res = client()
+        .patch(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(describe_failure(status, &body));
+    }
+    Ok(())
+}
+
 /// Sets a thread's status. Azure's thread status ints: 1=active, 2=fixed, 3=wontFix, 4=closed,
 /// 5=byDesign, 6=pending. A resolved finding's thread is marked `2` (fixed).
 pub async fn set_pr_thread_status(

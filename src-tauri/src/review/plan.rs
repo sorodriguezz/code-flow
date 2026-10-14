@@ -21,6 +21,12 @@ const NON_CODE_EXT: [&str; 18] = [
 /// is not worth a review.
 const TRIVIAL_LINES: usize = 10;
 
+/// Past this many files in scope, a pull request is big enough to ask before spending on it.
+const LARGE_FILES: usize = 100;
+
+/// Past this many lines to read (the sum of the touched symbols' ranges), the same.
+const LARGE_LINES: usize = 12_000;
+
 /// Why a review would be skipped, and whether the human gets a say.
 ///
 /// The distinction is the whole point of the type. A draft or an already-merged pull request is
@@ -65,6 +71,10 @@ pub struct ReviewPlan {
     pub mode: PlanMode,
     /// The files this review will actually read, after scope and delta filtering.
     pub files: Vec<ChangedFile>,
+    /// In-scope files the pull request deleted. No worker opens them — there is no new side to read —
+    /// but what they declared is part of the change: the cross-file pass and the blast radius are
+    /// told, so a caller left pointing at a deleted function is still found.
+    pub deleted: Vec<ChangedFile>,
     /// Paths dropped by the scope globs, so the report can say what it never looked at.
     pub out_of_scope: Vec<String>,
     /// Paths dropped because a re-review is bounded to the delta.
@@ -207,6 +217,21 @@ fn triage(pr_status: &str, files: &[ChangedFile], additions: usize, deletions: u
             requires_confirmation: false,
         });
     }
+
+    // Enormous: still reviewable, but the human decides whether it is worth what it costs — and is
+    // told that most of it will be read in fragments, which a "reviewed ✅" on 300 files would hide.
+    let to_read: usize = files.iter().filter(|f| f.is_readable()).map(ChangedFile::weight).sum();
+    if files.len() > LARGE_FILES || to_read > LARGE_LINES {
+        return Some(Skip {
+            reason: format!(
+                "PR muy grande: {} archivo(s) y ~{} línea(s) que leer. Gran parte se revisará recortada; \
+                 conviene revisarlo por partes o con nivel básico.",
+                files.len(),
+                to_read
+            ),
+            requires_confirmation: true,
+        });
+    }
     None
 }
 
@@ -262,14 +287,18 @@ pub fn build(
     let skip = triage(pr_status, &in_scope_files, additions, deletions);
 
     // Only files with content to show can be handed to a worker; a deletion is reported in the
-    // scope and reasoned about from the diff, not opened.
-    let readable: Vec<ChangedFile> = in_scope_files.into_iter().filter(|f| f.is_readable()).collect();
+    // scope and reasoned about from what it removed, not opened.
+    let (readable, unreadable): (Vec<ChangedFile>, Vec<ChangedFile>) =
+        in_scope_files.into_iter().partition(|f| f.is_readable());
+    let deleted: Vec<ChangedFile> =
+        unreadable.into_iter().filter(|f| f.status.eq_ignore_ascii_case("deleted")).collect();
     let groups = partition(&readable, contract.max_groups, contract.files_per_group);
 
     ReviewPlan {
         contract,
         mode,
         files: readable,
+        deleted,
         out_of_scope,
         outside_delta,
         groups,
@@ -296,6 +325,7 @@ mod tests {
             changed: (1..=changed.min(lines)).collect::<BTreeSet<usize>>(),
             deletions: 0,
             symbols: vec![Symbol { start: 1, end: lines.max(1), label: "s".into() }],
+            removed: vec![],
         }
     }
 
@@ -442,5 +472,17 @@ mod tests {
         let plan = build(files, contract("basico"), &ScopeConfig::default(), "open", None);
         assert!(plan.groups.len() > 1, "the split still happens");
         assert!(!plan.parallel(), "but the level says one pass");
+    }
+
+    /// An enormous PR asks before spending — answered like a draft, with "review anyway".
+    #[test]
+    fn an_enormous_pr_asks_first() {
+        let files: Vec<ChangedFile> = (0..120).map(|i| file(&format!("src/f{i}.ts"), 20, 5)).collect();
+        let plan = build(files, contract("completo"), &ScopeConfig::default(), "open", None);
+        let skip = plan.skip.expect("asks");
+        assert!(skip.requires_confirmation);
+        assert!(skip.reason.contains("PR muy grande"));
+        let one_huge = vec![file("src/huge.ts", 13_000, 10)];
+        assert!(build(one_huge, contract("completo"), &ScopeConfig::default(), "open", None).skip.is_some());
     }
 }

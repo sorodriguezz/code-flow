@@ -365,7 +365,7 @@ export const usePrStore = create<PrState>((set, get) => ({
     const key = targetPrKey(target, prId);
     set((s) => ({ postingByPr: { ...s.postingByPr, [key]: true } }));
     try {
-      const outcome = await prTarget.postFindings(target, prId, runId, items, postSummary, summary);
+      const outcome = await prTarget.postFindings(target, prId, runId, items, postSummary, summary, true);
       const failed = outcome.items.some((item) => item.status === "failed") || Boolean(outcome.summary_error);
       const landed = outcome.items
         .filter((item) => item.status !== "failed" && item.status !== "skipped" && item.id)

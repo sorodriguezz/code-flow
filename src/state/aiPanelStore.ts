@@ -90,6 +90,12 @@ export interface TabView {
   /** The finding shown in the detail column of the wide layout. */
   picked?: string | null;
   scroll?: number;
+  /** Which findings the list shows: by fine severity (`Blocker` … `Info`; empty = all), by file, and
+   *  by words in their text. A view, never a ruling — publishing and the gate ignore it. */
+  findingFilter?: { severities?: string[]; file?: string | null; query?: string };
+  /** Finding id → the comment text the human rewrote before publishing it (what gets posted
+   *  instead of the generated one). */
+  commentEdits?: Record<string, string>;
 }
 
 export interface UnreadMark {

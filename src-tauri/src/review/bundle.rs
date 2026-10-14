@@ -32,11 +32,19 @@ const NO_OUTLINE_CONTEXT: usize = 12;
 /// (imports, top-level constants). Caps the worst case: a whole-file reformat.
 const MAX_ORPHAN_BLOCKS: usize = 200;
 
+/// Ceiling on the lines shown for one deleted run. Past it the run is summarised — a whole deleted
+/// function is worth seeing, a deleted 2,000-line file inlined in place is not.
+const MAX_REMOVED_LINES_PER_BLOCK: usize = 30;
+
 /// One group's bundle, ready to be piped to a worker.
 #[derive(Debug, Clone)]
 pub struct Bundle {
     pub group_id: usize,
+    /// The contract header followed by the code — what one worker reads.
     pub text: String,
+    /// The code alone, without the header: what a single reviewer reading every group at once is
+    /// handed after **one** header, instead of the same checklist once per group.
+    pub body: String,
     /// Paths that had to be degraded to a stub to fit the group's budget — reported to the run log
     /// so a bundle that lost content says so out loud.
     pub degraded: Vec<String>,
@@ -189,21 +197,23 @@ fn ranges_for(file: &ChangedFile, context: usize, max_lines: usize) -> (Vec<(usi
     if total == 0 {
         return (Vec::new(), 0);
     }
+    // Deletions count as change here: a range that only lost lines is a range the PR touched, and
+    // the budget must keep it like any other.
+    let touched = file.touched();
 
     if file.symbols.is_empty() {
-        let ranges = if total <= WHOLE_FILE_THRESHOLD || file.changed.is_empty() {
+        let ranges = if total <= WHOLE_FILE_THRESHOLD || touched.is_empty() {
             vec![(1, total)]
         } else {
             merge_ranges(
-                &file
-                    .changed
+                &touched
                     .iter()
                     .map(|ln| (ln.saturating_sub(NO_OUTLINE_CONTEXT).max(1), ln + NO_OUTLINE_CONTEXT))
                     .collect::<Vec<_>>(),
                 total,
             )
         };
-        return cap_ranges(ranges, &file.changed, total, max_lines, NO_OUTLINE_CONTEXT);
+        return cap_ranges(ranges, &touched, total, max_lines, NO_OUTLINE_CONTEXT);
     }
 
     let mut ranges: Vec<(usize, usize)> = file
@@ -214,8 +224,7 @@ fn ranges_for(file: &ChangedFile, context: usize, max_lines: usize) -> (Vec<(usi
 
     // Padding counts as covered: a line already visible in a margin does not need its own block.
     let covered = merge_ranges(&ranges, total);
-    let orphans: Vec<usize> = file
-        .changed
+    let orphans: Vec<usize> = touched
         .iter()
         .filter(|ln| !covered.iter().any(|(a, b)| (a..=b).contains(ln)))
         .take(MAX_ORPHAN_BLOCKS)
@@ -228,7 +237,57 @@ fn ranges_for(file: &ChangedFile, context: usize, max_lines: usize) -> (Vec<(usi
     );
 
     // Unmerged on purpose — see `cap_ranges`, which merges once it has decided what survives.
-    cap_ranges(ranges, &file.changed, total, max_lines, context)
+    cap_ranges(ranges, &touched, total, max_lines, context)
+}
+
+/// Prints new-side lines `start..=end` of `file`, numbered, `>` on what the PR added or modified,
+/// and each run the PR deleted in its place as `-` lines with no number — they no longer exist.
+/// Returns how many new-side lines it printed.
+///
+/// Shared with [`snippet`], so a verifier reads a finding's code exactly as the reviewer that wrote
+/// it did.
+fn push_lines(out: &mut String, file: &ChangedFile, lines: &[&str], start: usize, end: usize, width: usize) -> usize {
+    let total = lines.len();
+    let mut emitted = 0usize;
+    let blank = " ".repeat(width);
+    let push_removed = |out: &mut String, at: usize| {
+        for block in file.removed.iter().filter(|b| b.before == at) {
+            for text in block.lines.iter().take(MAX_REMOVED_LINES_PER_BLOCK) {
+                out.push_str(&format!("-{blank} | {text}\n"));
+            }
+            if block.lines.len() > MAX_REMOVED_LINES_PER_BLOCK {
+                out.push_str(&format!(
+                    "-{blank} | [... {} línea(s) eliminadas más ...]\n",
+                    block.lines.len() - MAX_REMOVED_LINES_PER_BLOCK
+                ));
+            }
+        }
+    };
+    for i in start..=end.min(total) {
+        push_removed(out, i);
+        let mark = if file.changed.contains(&i) { ">" } else { " " };
+        out.push_str(&format!("{mark}{i:>width$} | {}\n", lines[i - 1], width = width));
+        emitted += 1;
+    }
+    // A deletion at the very end of the file sits after its last line.
+    if end >= total {
+        push_removed(out, total + 1);
+    }
+    emitted
+}
+
+/// A finding's surroundings, as the verification pass reads them: lines `start..=end` (clipped to
+/// the file) in the bundle's own notation.
+pub fn snippet(file: &ChangedFile, start: usize, end: usize) -> String {
+    let lines: Vec<&str> = file.content.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let (start, end) = (start.clamp(1, lines.len()), end.clamp(1, lines.len()));
+    let width = lines.len().to_string().len();
+    let mut out = String::new();
+    push_lines(&mut out, file, &lines, start.min(end), end.max(start), width);
+    out
 }
 
 /// Renders one file's blocks. Returns `(text, lines emitted)`.
@@ -255,11 +314,7 @@ fn render_file(file: &ChangedFile, context: usize, max_lines: usize) -> (String,
             }
             None => out.push_str(&format!("--- líneas {start}-{end}\n")),
         }
-        for i in *start..=*end {
-            let mark = if file.changed.contains(&i) { ">" } else { " " };
-            out.push_str(&format!("{mark}{i:>width$} | {}\n", lines[i - 1], width = width));
-            emitted += 1;
-        }
+        emitted += push_lines(&mut out, file, &lines, *start, *end, width);
         out.push('\n');
     }
 
@@ -314,7 +369,7 @@ fn stub_block(file: &ChangedFile) -> String {
 /// copies of the same checklist — and because a worker had no way of knowing the threshold its
 /// findings would be held to, which is exactly the number that decides whether writing one is worth
 /// the tokens.
-fn header(
+pub fn header(
     group_id: usize,
     total_groups: usize,
     file_count: usize,
@@ -323,10 +378,22 @@ fn header(
 ) -> String {
     let mut out = format!(
         "# Bundle de revisión · grupo {group_id} de {total_groups} · {file_count} archivo(s)\n\
-         # '>' marca las líneas que introdujo o modificó el PR.\n\
-         # Tienes el repositorio completo abierto: si necesitas más contexto del que trae este \
-         bundle (un callee, otra parte del archivo), ábrelo con tus herramientas.\n#\n"
+         # '>' marca las líneas que introdujo o modificó el PR; '-' las que ELIMINÓ (ya no existen: \
+         van sin número, en el lugar donde estaban). Un cambio que solo borra código también se revisa.\n"
     );
+    // How far to go beyond the bundle is the level's call, and the cheapest lever on a review's time
+    // and tokens after the bundle itself: every file a worker opens is another turn.
+    if contract.cross_file || contract.subagents {
+        out.push_str(
+            "# Tienes el repositorio del PR abierto en su commit exacto (solo lectura): si necesitas más \
+             contexto del que trae este bundle (un callee, otra parte del archivo), ábrelo con tus herramientas.\n#\n",
+        );
+    } else {
+        out.push_str(
+            "# Es un triage: trabaja con lo que trae este bundle. Abre otro archivo solo si un posible \
+             Blocker no se puede confirmar sin él.\n#\n",
+        );
+    }
     out.push_str(&format!(
         "# Nivel {} · reporta solo {} con confianza >= {} (Blocker >= {}).\n",
         contract.level,
@@ -342,9 +409,44 @@ fn header(
     }
     out.push_str(
         "# Descartes en todos los niveles: código preexistente (igual en la rama destino), lo ya \
-         discutido\n#   en los comentarios del PR, y tipos/lint/formato (los cubre CI).\n\n",
+         discutido\n#   en los comentarios del PR, y tipos/lint/formato (los cubre CI).\n#\n",
     );
+    out.push_str(EVIDENCE_RULES);
+    out.push('\n');
     out
+}
+
+/// The two fields every reviewer adds to the standard's format, stated where the code is rather
+/// than in the editable prompt — so they reach every workspace, whatever its prompt says.
+pub const EVIDENCE_RULES: &str = "\
+# En cada hallazgo, justo antes de 🎯, agrega `🔎 Evidencia: <UNA línea del código tal cual aparece arriba, sin el número>`.
+#   Se coteja contra el archivo: si no aparece, el hallazgo se descarta; si aparece en otra línea, la ubicación se corrige.
+# Si la corrección es local (hasta 8 líneas) y sabes el texto exacto, agrega también
+#   `✏️ Reemplazo: <línea inicio>-<línea fin>` y debajo un bloque de código con las líneas nuevas que reemplazan
+#   EXACTAMENTE ese rango (sin las de alrededor). En ese caso omite 🛠️.
+";
+
+/// What the pull request deleted outright, for a reader that will never open those files: each
+/// deleted file with the declarations it took with it. `None` when nothing was deleted.
+pub fn deleted_block(deleted: &[ChangedFile]) -> Option<String> {
+    if deleted.is_empty() {
+        return None;
+    }
+    let mut out = String::from("=== Archivos que el PR ELIMINA ===\n");
+    for file in deleted {
+        let content: String = file.removed.iter().flat_map(|b| b.lines.iter()).map(|l| format!("{l}\n")).collect();
+        let declared: Vec<String> = super::outline::declarations(&file.path, &content)
+            .into_iter()
+            .take(15)
+            .map(|s| format!("`{}`", s.label))
+            .collect();
+        match declared.is_empty() {
+            true => out.push_str(&format!("- {} ({} líneas)\n", file.path, file.deletions)),
+            false => out.push_str(&format!("- {} ({} líneas) · declaraba {}\n", file.path, file.deletions, declared.join(", "))),
+        }
+    }
+    out.push('\n');
+    Some(out)
 }
 
 /// Builds one group's bundle, degrading files to stubs if the whole thing overflows its budget.
@@ -391,6 +493,7 @@ pub fn render_group(
     Bundle {
         group_id,
         text,
+        body: blocks.join("\n"),
         degraded,
         files: readable.iter().map(|f| f.path.clone()).collect(),
     }
@@ -421,6 +524,7 @@ mod tests {
             changed: changed.iter().copied().collect(),
             deletions: 0,
             symbols,
+            removed: vec![],
         }
     }
 
@@ -548,9 +652,65 @@ mod tests {
             changed: BTreeSet::new(),
             deletions: 0,
             symbols: vec![],
+            removed: vec![],
         };
         let bundle = render_group(1, 1, &[&deleted], &contract(), &lenses(), &BundleConfig::default());
         assert!(bundle.files.is_empty());
         assert!(!bundle.text.contains("src/gone.ts"));
+    }
+
+    /// What the PR deleted is printed where it was, unnumbered — the change a reader used to miss.
+    #[test]
+    fn deleted_lines_are_shown_in_place() {
+        use crate::review::outline::RemovedBlock;
+        let mut f = file(6, &[], vec![Symbol { start: 1, end: 6, label: "function pagar()".into() }]);
+        f.removed = vec![RemovedBlock { before: 3, lines: vec!["  validar(dto);".into()] }];
+        let bundle = render_group(1, 1, &[&f], &contract(), &lenses(), &BundleConfig::default());
+        let at = bundle.text.find("-  | ").expect("the deleted line is printed");
+        let before = bundle.text.find("\n 2 | linea 2").expect("line 2");
+        let after = bundle.text.find("\n 3 | linea 3").expect("line 3");
+        assert!(before < at && at < after, "between the lines it sat between");
+        assert!(bundle.text.contains("validar(dto);"));
+        assert!(bundle.body.contains("validar(dto);"));
+        assert!(!bundle.body.contains("# Bundle de revisión"), "the body carries no header");
+    }
+
+    #[test]
+    fn a_long_deletion_is_summarised_rather_than_inlined_whole() {
+        use crate::review::outline::RemovedBlock;
+        let mut f = file(4, &[], vec![]);
+        f.removed = vec![RemovedBlock { before: 5, lines: (0..100).map(|i| format!("old {i}")).collect() }];
+        let text = snippet(&f, 1, 4);
+        assert!(text.contains("old 0"));
+        assert!(!text.contains("old 99"));
+        assert!(text.contains("70 línea(s) eliminadas más"), "a deletion at the end sits after the last line, capped");
+    }
+
+    #[test]
+    fn every_bundle_asks_for_evidence_and_the_triage_stays_in_its_bundle() {
+        let f = file(10, &[2], vec![]);
+        let full = render_group(1, 1, &[&f], &contract(), &lenses(), &BundleConfig::default());
+        assert!(full.text.contains("🔎 Evidencia"));
+        assert!(full.text.contains("✏️ Reemplazo"));
+        assert!(full.text.contains("commit exacto"));
+        let basico = resolve_level_contract("basico", &ReviewEngineConfig::default());
+        let triage = render_group(1, 1, &[&f], &basico, &lenses(), &BundleConfig::default());
+        assert!(triage.text.contains("Es un triage"));
+    }
+
+    #[test]
+    fn deleted_files_are_listed_with_what_they_declared() {
+        use crate::review::outline::RemovedBlock;
+        let gone = ChangedFile {
+            path: "src/legacy.ts".into(),
+            status: "deleted".into(),
+            deletions: 3,
+            removed: vec![RemovedBlock { before: 1, lines: vec!["export function viejo(a) {".into(), "  return a;".into(), "}".into()] }],
+            ..Default::default()
+        };
+        let block = deleted_block(&[gone]).expect("a block");
+        assert!(block.contains("src/legacy.ts"));
+        assert!(block.contains("viejo"));
+        assert!(deleted_block(&[]).is_none());
     }
 }

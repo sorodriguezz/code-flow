@@ -11,13 +11,16 @@
 //!
 //! | Module | What it owns |
 //! |---|---|
-//! | [`contract`] | The level's resolved contract (threshold, severities, lenses) and the gate policy. Numbers, not prose. |
+//! | [`contract`] | The level's resolved contract (threshold, severities, lenses, effort, verification) and the gate policy. Numbers, not prose. |
+//! | [`checkout`] | The read-only checkout of the PR's head commit the reviewers' tools read from. |
 //! | [`outline`] | Which symbols each changed file declares, and which of their lines the PR touched. |
 //! | [`plan`] | Scope filtering, skip triage, and the split of the files into balanced worker groups. |
 //! | [`bundle`] | The reading bundle each worker gets: whole methods, numbered, `>` on what changed. |
 //! | [`graph`] | Blast radius — who else in the repository calls the symbols this PR touched. |
 //! | [`hints`] | What the saved review memory already settled about these same files, in other PRs. |
+//! | [`context`] | Cutting all of that (and the PR's conversation) down to what each reviewer's files need. |
 //! | [`merge`] | Parsing the workers' findings, deduping, filtering by contract, numbering. |
+//! | [`verify`] | Grounding each finding in the code it names, and the level's refutation pass. |
 //! | [`render`] | Findings back to the canonical review Markdown the whole frontend already reads. |
 //!
 //! **The output format is not this module's to change.** `render` emits exactly the shape
@@ -27,6 +30,8 @@
 //! cards, or a single saved review.
 
 pub mod bundle;
+pub mod checkout;
+pub mod context;
 pub mod contract;
 pub mod graph;
 pub mod hints;
@@ -34,3 +39,4 @@ pub mod merge;
 pub mod outline;
 pub mod plan;
 pub mod render;
+pub mod verify;

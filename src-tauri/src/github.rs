@@ -614,15 +614,203 @@ pub async fn post_pr_comment_anchored(
     Ok(created.id)
 }
 
+/// One inline comment of a batched review — see [`post_pr_review_batch`].
+#[derive(Debug, Clone, Copy)]
+pub struct BatchComment<'a> {
+    pub path: &'a str,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub body: &'a str,
+}
+
+impl BatchComment<'_> {
+    /// The path as GitHub stores it: relative to the repository root, no leading `/`.
+    fn normalized_path(&self) -> &str {
+        self.path.trim_start_matches('/')
+    }
+
+    /// The line GitHub anchors to — the last of the range, exactly as [`post_pr_comment_anchored`]
+    /// picks it, so a batched comment lands where a one-by-one one would have.
+    fn line(&self) -> i64 {
+        self.end_line.max(self.start_line)
+    }
+}
+
+#[derive(Deserialize)]
+struct ReviewCreated {
+    id: i64,
+}
+
+/// The body that creates a batched review. Each comment is anchored the way
+/// [`post_pr_comment_anchored`] anchors one — `start_line` only for a range of more than one line,
+/// since GitHub 422s on `start_line == line`.
+///
+/// The review's own `body` is one line naming what it carries, never a summary: GitHub's reference
+/// lists `body` as required for a `COMMENT` review, and a refusal over a missing one would send every
+/// publish down the one-by-one path for good. The summary stays the one sticky comment
+/// ([`edit_pr_comment`]).
+fn review_batch_body(commit_id: &str, comments: &[BatchComment<'_>]) -> serde_json::Value {
+    let comments: Vec<serde_json::Value> = comments
+        .iter()
+        .map(|c| {
+            let line = c.line();
+            let mut comment = serde_json::json!({
+                "path": c.normalized_path(),
+                "body": c.body,
+                "line": line,
+                "side": "RIGHT",
+            });
+            if c.start_line < line {
+                comment["start_line"] = serde_json::json!(c.start_line);
+                comment["start_side"] = serde_json::json!("RIGHT");
+            }
+            comment
+        })
+        .collect();
+    let body = format!("🤖 CodeFlow · {} hallazgo(s) en línea de la revisión automatizada.", comments.len());
+    serde_json::json!({ "commit_id": commit_id, "event": "COMMENT", "body": body, "comments": comments })
+}
+
+/// A comment of a just-created review, as `GET …/reviews/{id}/comments` lists it — only what
+/// [`match_batch_ids`] compares.
+#[derive(Deserialize)]
+struct RawBatchReviewComment {
+    id: i64,
+    #[serde(default)]
+    path: Option<String>,
+    /// Null when the line is no longer in the diff. Not expected on a review this fresh, but the
+    /// field is nullable, and `original_line` still says where the comment was written.
+    #[serde(default)]
+    line: Option<i64>,
+    #[serde(default)]
+    original_line: Option<i64>,
+    #[serde(default)]
+    body: Option<String>,
+}
+
+/// A body as it compares on the loose pass of [`match_batch_ids`]: line endings unified and trailing
+/// whitespace off every line, so a body that came back re-wrapped in whitespace alone still matches.
+fn comparable_body(body: &str) -> String {
+    // `lines` splits on `\r\n` as well as `\n`, which is what unifies the endings.
+    body.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_string()
+}
+
+/// The created comments' ids in the order they were sent — `result[i]` is the id of `sent[i]`, each
+/// of which is `(path, line, body)`.
+///
+/// Creating a review answers with the review, not with its comments, so each sent comment is found
+/// in the listing by what it is — path, line and body — rather than by position. Two comments on one
+/// line are told apart by their bodies, and each listed comment is claimed once, so identical twins
+/// still get an id each. Bodies are first compared trimmed; only the comments left over after that
+/// are compared ignoring line endings and trailing whitespace, so a loose match can't take the
+/// listed comment another sent comment matches exactly.
+///
+/// A comment left without an id fails the whole mapping: half a mapping would hang a thread on the
+/// wrong finding. The message says the review was posted, and never starts the way
+/// [`is_unanchorable`] looks for — a caller must not re-post comments that are already there.
+fn match_batch_ids(sent: &[(String, i64, String)], got: &[RawBatchReviewComment]) -> Result<Vec<i64>, String> {
+    let listed: Vec<(&str, Option<i64>, &str)> = got
+        .iter()
+        .map(|c| {
+            (
+                c.path.as_deref().unwrap_or_default().trim_start_matches('/'),
+                c.line.or(c.original_line),
+                c.body.as_deref().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let passes: [fn(&str, &str) -> bool; 2] =
+        [|a, b| a.trim() == b.trim(), |a, b| comparable_body(a) == comparable_body(b)];
+
+    let mut ids: Vec<Option<i64>> = vec![None; sent.len()];
+    let mut used = vec![false; got.len()];
+    for same_body in passes {
+        for (slot, (path, line, body)) in ids.iter_mut().zip(sent) {
+            if slot.is_some() {
+                continue;
+            }
+            let path = path.trim_start_matches('/');
+            let found = listed.iter().enumerate().position(|(j, (p, l, b))| {
+                !used[j] && *p == path && *l == Some(*line) && same_body(b, body)
+            });
+            if let Some(j) = found {
+                used[j] = true;
+                *slot = Some(got[j].id);
+            }
+        }
+    }
+
+    ids.into_iter()
+        .zip(sent)
+        .map(|(id, (path, line, _))| {
+            id.ok_or_else(|| {
+                format!(
+                    "GitHub posted the review, but none of the comments it listed matches the one on {} line {line}",
+                    path.trim_start_matches('/')
+                )
+            })
+        })
+        .collect()
+}
+
+/// Publishes many inline comments as **one** review — one notification and one timeline entry for
+/// the author instead of one per finding — and returns the created comment ids aligned with
+/// `comments` (`result[i]` is the id of `comments[i]`), each one a thread root that a re-review
+/// replies to and resolves exactly like one [`post_pr_comment_anchored`] created.
+///
+/// GitHub creates the review whole or not at all: a single comment it can't anchor 422s the request
+/// and nothing is posted. That error comes back untouched, so the caller can tell it with
+/// [`is_unanchorable`] and fall back to posting one by one. Anything that fails *after* the review
+/// exists — listing its comments, or matching them — says so instead, because re-posting then would
+/// duplicate every comment.
+pub async fn post_pr_review_batch(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: i64,
+    commit_id: &str,
+    comments: &[BatchComment<'_>],
+    token: &str,
+) -> Result<Vec<i64>, String> {
+    if comments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = api_root(host);
+    let url = format!("{root}/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
+    let review: ReviewCreated = post_json_returning(&url, token, &review_batch_body(commit_id, comments)).await?;
+
+    let listing = format!("{root}/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{}/comments?per_page=100", review.id);
+    let listed: Vec<RawBatchReviewComment> = get_all_pages(&root, &listing, token)
+        .await
+        .map_err(|e| format!("GitHub posted the review, but listing its comments failed: {e}"))?;
+    let sent: Vec<(String, i64, String)> = comments
+        .iter()
+        .map(|c| (c.normalized_path().to_string(), c.line(), c.body.to_string()))
+        .collect();
+    match_batch_ids(&sent, &listed)
+}
+
 /// Posts a general (non-file-anchored) comment on the PR's conversation — used for the summary
 /// comment and as a fallback for any finding whose location couldn't be parsed. GitHub models
 /// these as issue comments (a PR is an issue), a different endpoint from inline review comments.
-/// Returns the created issue-comment id (issue comments aren't threaded, so it isn't reused).
+/// Returns the created issue-comment id (issue comments aren't threaded, so it is never replied to —
+/// only rewritten, by [`edit_pr_comment`]).
 pub async fn post_pr_comment(host: &str, owner: &str, repo: &str, pr_number: i64, content: &str, token: &str) -> Result<i64, String> {
     let url = format!("{}/repos/{owner}/{repo}/issues/{pr_number}/comments", api_root(host));
     let body = serde_json::json!({ "body": content });
     let created: CommentCreated = post_json_returning(&url, token, &body).await?;
     Ok(created.id)
+}
+
+/// Rewrites a conversation comment in place — what keeps the review summary to one sticky comment
+/// that each publish updates, rather than a new one on the timeline every time. `comment_id` is what
+/// [`post_pr_comment`] returned (and what [`list_pr_comment_threads`] reports for a conversation
+/// thread): an issue-comment id, so it is edited through the issue-comments endpoint, which needs no
+/// pull request number — the review-comments one would not know the id.
+pub async fn edit_pr_comment(host: &str, owner: &str, repo: &str, comment_id: i64, content: &str, token: &str) -> Result<(), String> {
+    let url = format!("{}/repos/{owner}/{repo}/issues/comments/{comment_id}", api_root(host));
+    let body = serde_json::json!({ "body": content });
+    patch_json(&url, token, &body).await
 }
 
 /// Replies to an existing inline review comment (keeps the conversation on one thread instead of
@@ -1451,5 +1639,97 @@ mod tests {
         assert_eq!(threads[0].file_path.as_deref(), Some("src/a.ts"));
         assert_eq!(threads[1].id, 9);
         assert_eq!(threads[1].file_path, None);
+    }
+
+    /// Each comment of a batched review is anchored like a single inline comment: the last line of
+    /// the range as `line`, and a `start_line` only when the range spans more than one.
+    #[test]
+    fn a_batched_review_anchors_each_comment_like_a_single_one() {
+        let comments = [
+            BatchComment { path: "/src/a.rs", start_line: 7, end_line: 7, body: "one line" },
+            BatchComment { path: "src/b.rs", start_line: 10, end_line: 14, body: "a range" },
+            BatchComment { path: "src/c.rs", start_line: 9, end_line: 3, body: "backwards" },
+        ];
+        let body = review_batch_body("abc123", &comments);
+        assert_eq!(body["commit_id"], "abc123");
+        assert_eq!(body["event"], "COMMENT");
+        assert_eq!(body["body"], "🤖 CodeFlow · 3 hallazgo(s) en línea de la revisión automatizada.", "one line, never a second summary");
+        assert_eq!(
+            body["comments"][0],
+            serde_json::json!({ "path": "src/a.rs", "body": "one line", "line": 7, "side": "RIGHT" })
+        );
+        assert_eq!(
+            body["comments"][1],
+            serde_json::json!({ "path": "src/b.rs", "body": "a range", "line": 14, "side": "RIGHT", "start_line": 10, "start_side": "RIGHT" })
+        );
+        // A range written backwards is one line at its larger end, never a start after the end.
+        assert_eq!(body["comments"][2]["line"], 9);
+        assert!(body["comments"][2].get("start_line").is_none());
+    }
+
+    fn listed(value: serde_json::Value) -> Vec<RawBatchReviewComment> {
+        serde_json::from_value(value).expect("review comments")
+    }
+
+    fn sent(items: &[(&str, i64, &str)]) -> Vec<(String, i64, String)> {
+        items.iter().map(|(path, line, body)| (path.to_string(), *line, body.to_string())).collect()
+    }
+
+    /// The listing is matched by content, not position: a reordered listing can't cross the ids.
+    #[test]
+    fn batch_ids_come_back_in_the_order_the_comments_were_sent() {
+        let got = listed(serde_json::json!([
+            { "id": 30, "path": "src/c.rs", "line": 5, "body": "third" },
+            { "id": 10, "path": "src/a.rs", "line": 1, "body": "first" },
+            { "id": 20, "path": "src/b.rs", "line": null, "original_line": 9, "body": "second\n" }
+        ]));
+        let ids = match_batch_ids(&sent(&[("/src/a.rs", 1, "first"), ("src/b.rs", 9, "second"), ("src/c.rs", 5, "third")]), &got);
+        assert_eq!(ids.unwrap(), vec![10, 20, 30]);
+        assert_eq!(match_batch_ids(&[], &got).unwrap(), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn two_comments_on_one_line_are_told_apart_by_their_bodies() {
+        let got = listed(serde_json::json!([
+            { "id": 1, "path": "a.rs", "line": 4, "body": "naming" },
+            { "id": 2, "path": "a.rs", "line": 4, "body": "null check" }
+        ]));
+        assert_eq!(match_batch_ids(&sent(&[("a.rs", 4, "null check"), ("a.rs", 4, "naming")]), &got).unwrap(), vec![2, 1]);
+    }
+
+    #[test]
+    fn each_listed_comment_is_claimed_once() {
+        let twins = listed(serde_json::json!([
+            { "id": 1, "path": "a.rs", "line": 4, "body": "same" },
+            { "id": 2, "path": "a.rs", "line": 4, "body": "same" }
+        ]));
+        assert_eq!(match_batch_ids(&sent(&[("a.rs", 4, "same"), ("a.rs", 4, "same")]), &twins).unwrap(), vec![1, 2]);
+        let one = listed(serde_json::json!([{ "id": 1, "path": "a.rs", "line": 4, "body": "same" }]));
+        assert!(match_batch_ids(&sent(&[("a.rs", 4, "same"), ("a.rs", 4, "same")]), &one).is_err());
+    }
+
+    /// Whitespace alone doesn't break a match — but an exact match is claimed first, so the loose
+    /// pass can't take the listed comment another sent comment matches exactly.
+    #[test]
+    fn a_whitespace_only_difference_still_matches_after_the_exact_ones() {
+        let got = listed(serde_json::json!([
+            { "id": 1, "path": "a.rs", "line": 4, "body": "fix this\nplease" },
+            { "id": 2, "path": "a.rs", "line": 4, "body": "fix this \r\nplease" }
+        ]));
+        let ids = match_batch_ids(&sent(&[("a.rs", 4, "fix this  \nplease"), ("a.rs", 4, "fix this\nplease")]), &got);
+        assert_eq!(ids.unwrap(), vec![2, 1]);
+    }
+
+    /// An unmatched comment fails the mapping, and the error never reads as a 422: the review is
+    /// already posted, so the caller must not fall back to posting its comments one by one.
+    #[test]
+    fn an_unmatched_comment_fails_the_mapping_without_inviting_a_repost() {
+        let got = listed(serde_json::json!([
+            { "id": 1, "path": "a.rs", "line": 5, "body": "naming" },
+            { "id": 2, "path": "a.rs", "line": 4, "body": "something else" }
+        ]));
+        let error = match_batch_ids(&sent(&[("/a.rs", 4, "naming")]), &got).unwrap_err();
+        assert_eq!(error, "GitHub posted the review, but none of the comments it listed matches the one on a.rs line 4");
+        assert!(!is_unanchorable(&error));
     }
 }

@@ -15,6 +15,8 @@ use crate::git;
 use crate::github;
 use crate::gitlab;
 use crate::paths;
+use crate::review::context::is_newer_than;
+use crate::review::contract::level_rank;
 use crate::secrets;
 
 /// Which VCS host a project's PR features talk to, resolved from whichever set of link columns
@@ -1121,8 +1123,9 @@ pub async fn review_pr_from_link(
         // review with no clone is shallower in what it can *read*, not in the rules it is held to.
         let (_, contract) = review_pipeline::contract_for(&conn, &workspace_id, &level);
         let prompts = review_pipeline::ReviewPrompts::load(&conn, &workspace_id, &contract)?;
-        (contexts, skills, config, prompts.for_role(None))
+        (contexts, skills, config, (prompts.for_role(None), contract.effort))
     };
+    let (review_prompt, effort) = review_prompt;
 
     let LinkPr { pr, diff: diff_text, repo_label, clone_url } = fetch_pr_and_diff(&target, &credential).await?;
     let cwd = link_review_workspace(&target, &pr, &diff_text)?;
@@ -1159,7 +1162,7 @@ pub async fn review_pr_from_link(
         }
     };
     // A link session keeps no memory, so there is no "last run" to mark comments as newer than.
-    if let Some(block) = pending_comments_block(&[], &open_threads, None) {
+    if let Some(block) = crate::review::context::pending_comments_block(&[], &open_threads, None, crate::review::context::Audience::All) {
         enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
     }
 
@@ -1176,6 +1179,7 @@ pub async fn review_pr_from_link(
             &config.tools,
             &cwd,
             &review_prompt,
+            Some(effort.as_str()),
         )
         .await
     })
@@ -1919,6 +1923,66 @@ pub async fn discard_pr_finding(
     Ok(outcome)
 }
 
+/// What reviewing this PR at `level` would read and roughly cost, without running it.
+///
+/// Read from the refs already on disk — no fetch, so it answers in a moment and costs nothing; the
+/// review itself fetches, so the two can differ by whatever was pushed since. An estimate, and the
+/// panel says so.
+#[tauri::command]
+pub async fn preview_pr_review(
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+    level: String,
+) -> Result<review_pipeline::ReviewPreview, String> {
+    let project = load_project(&db, &project_id)?;
+    let link = linked_repo(&project)?;
+    let repo = repo_key(&link);
+    let workspace_id = project.workspace_id.clone();
+    let (engine_config, contract, prompts, context_chars, prev_head) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let (engine_config, contract) = review_pipeline::contract_for(&conn, &workspace_id, &level);
+        let prompts = review_pipeline::ReviewPrompts::load(&conn, &workspace_id, &contract)?;
+        let context_chars: usize = queries::list_review_contexts(&conn, &workspace_id)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .filter(|c| c.enabled)
+            .map(|c| c.name.len() + c.content.len() + 4)
+            .sum();
+        let prev = queries::latest_review_head(&conn, &project_id, pr_id, &repo).ok().flatten();
+        (engine_config, contract, prompts, context_chars, prev)
+    };
+    let pr = fetch_linked_pull_request(&link, pr_id).await?;
+    let local_path = project.local_path.clone();
+    // The ref the last review fetched, when there is one — the same head the review would read.
+    let fetched = match &link {
+        LinkedRepo::GitHub { .. } => Some(format!("refs/remotes/origin/codeflow-pr-{pr_id}")),
+        LinkedRepo::GitLab { .. } => Some(format!("refs/remotes/origin/codeflow-mr-{pr_id}")),
+        _ => None,
+    };
+    let head_ref = fetched.filter(|r| git::diff::resolve_sha(&local_path, r).is_ok()).unwrap_or_else(|| pr.source_branch.clone());
+    let preamble_chars = pr.title.len() + pr.description.len() + context_chars + 200;
+    tokio::task::spawn_blocking(move || {
+        let diff = git::diff::get_branch_diff(&local_path, &pr.target_branch, &head_ref)?;
+        let changed = prev_head
+            .filter(|p| !p.is_empty())
+            .and_then(|prev| git::diff::changed_files_between(&local_path, &prev, &head_ref).ok());
+        Ok(review_pipeline::preview(
+            &local_path,
+            &head_ref,
+            &diff,
+            &contract,
+            &engine_config,
+            &prompts,
+            &pr.status,
+            changed.as_deref(),
+            preamble_chars,
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Reviews one pull request of a linked project and saves the run as durable memory.
 ///
 /// `force` is the human's answer to a skip that asks ("it is a draft — review it anyway?"). It is
@@ -2011,7 +2075,7 @@ pub async fn review_pull_request(
     // because the *ids of the threads this app opened* are part of the skip decision: CodeFlow's own
     // published findings are comments on the PR too, and they must not read as somebody answering.
     let head_sha = git::diff::resolve_sha(&project.local_path, &head_ref).unwrap_or_default();
-    let (prev_head, last_run_at, remembered, repo_rules) = {
+    let (prev_head, prev_run, last_run_at, remembered, repo_rules) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let remembered: Vec<crate::review_memory::MemoryFinding> =
             queries::latest_review_findings(&conn, &project_id, pr_id, &repo)
@@ -2028,6 +2092,7 @@ pub async fn review_pull_request(
                 .collect();
         (
             queries::latest_review_head(&conn, &project_id, pr_id, &repo).ok().flatten(),
+            queries::latest_review_depth(&conn, &project_id, pr_id, &repo).ok().flatten(),
             queries::latest_review_run_at(&conn, &project_id, pr_id, &repo).ok().flatten(),
             remembered,
             repo_rules,
@@ -2078,12 +2143,16 @@ pub async fn review_pull_request(
     let ours: std::collections::HashSet<i64> = remembered.iter().filter_map(|f| f.thread_id).collect();
     let new_comments = comments_since(&open_threads, last_run_at.as_deref(), &ours, me.as_deref());
 
-    // Same head *and* nothing new said on the PR — skip the whole (costly) analysis.
+    // Same head *and* nothing new said on the PR — skip the whole (costly) analysis. Unless there is
+    // something the last run did not do: it was shallower than what is asked for now, or it lost a
+    // reviewer — or the human asked for it anyway.
     if let Some(prev) = &prev_head {
-        if !head_sha.is_empty() && prev == &head_sha && new_comments == 0 {
+        let (prev_level, prev_incomplete) = prev_run.clone().unwrap_or_default();
+        let deeper = level_rank(&level) > level_rank(&prev_level);
+        if !force && !deeper && !prev_incomplete && !head_sha.is_empty() && prev == &head_sha && new_comments == 0 {
             let short = &head_sha[..head_sha.len().min(8)];
             return Ok(format!(
-                "🔁 Sin cambios desde la última revisión (mismo commit `{short}`). No se volvió a analizar."
+                "🔁 Sin cambios desde la última revisión (mismo commit `{short}`, nivel {prev_level}). No se volvió a analizar."
             ));
         }
     }
@@ -2123,47 +2192,83 @@ pub async fn review_pull_request(
         enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
     }
 
-    // What the conversation on the PR still has open — the findings this app published and that the
-    // last run left active (from the memory read above), plus whatever else the host still shows
-    // unresolved. A re-review without them only re-derives defects from the diff, and says nothing
-    // about the question the second run is actually asked: were the comments already left on this
-    // PR addressed?
-    if let Some(block) = pending_comments_block(&remembered, &open_threads, last_run_at.as_deref()) {
-        enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
-    }
-    // Two "do not raise this" blocks, deliberately not folded into the one above: that block asks
-    // the model to *answer* what is still open, and these ask it to stay off ground a human already
-    // ruled on. One list carrying both meanings is a list the model has to guess its way through.
-    //
-    // Without them a dismissed finding is re-derived on every run — reconciliation re-applies the
-    // mark afterwards, so the user never sees it, but it is re-analysed and re-paid for each time.
-    if let Some(block) = crate::review_memory::discarded_block(&remembered) {
-        enabled_contexts.push(("Hallazgos ya descartados en este PR".to_string(), block));
-    }
-    if let Some(block) = crate::review_memory::suppressions_block(&repo_rules) {
-        enabled_contexts.push(("Falsos positivos conocidos de este repositorio".to_string(), block));
-    }
+    // The repository's conventions, for an engine that would not read them from the checkout itself.
+    let conventions = crate::review::context::conventions_block(config.engine.id(), &|name: &str| {
+        git::diff::file_at_ref(&project.local_path, &head_ref, name).ok()
+    });
 
+    // Everything else the reviewers are told, raw: the pipeline cuts it per reviewer, so each one
+    // pays only for what concerns its own files. What is in it, and why each part is there:
+    // - the conversation still open on the PR (the findings this app published and the last run left
+    //   active, plus whatever else the host shows unresolved) — a re-review without it says nothing
+    //   about the question it is actually asked: were the comments already left addressed?
+    // - what a human already ruled on (discarded findings, standing false positives) — without it a
+    //   dismissed finding is re-derived and re-paid for on every run;
+    // - what other PRs settled about these files, and the PR's checks.
+    let mut inputs = Some(crate::review::context::ReviewInputs {
+        contexts: enabled_contexts,
+        remembered: remembered.clone(),
+        threads: open_threads,
+        since: last_run_at.clone(),
+        rules: repo_rules,
+        hints,
+        checks: None,
+        conventions,
+    });
+    let credential = link_credential(&link).ok();
 
     // Everything from here is the pipeline's: the plan, the bundles, the reviewers and the merge.
     // Same identity for the job row and the run, so the row can stream its own output and stop it.
-    let request = review_pipeline::ReviewRequest {
-        config: &config,
-        repo_path: &project.local_path,
-        head_ref: &head_ref,
-        target_ref: &pr.target_branch,
-        pr_title: &pr.title,
-        pr_description: &pr.description,
-        pr_status: &pr.status,
-        contexts: enabled_contexts,
-        prompts,
-        engine: engine_config,
-        contract: contract.clone(),
-        changed_since: changed_files.clone(),
-        hints,
-        force,
-    };
     let result = crate::ai_runs::scoped(app.clone(), Some(job_id.clone()), async {
+        // The checkout the reviewers read from, and the PR's checks — independent, so together.
+        let checkout = async {
+            if !config.engine.agentic() {
+                return project.local_path.clone();
+            }
+            if let Some(ctx) = crate::ai_runs::current() {
+                crate::ai_runs::emit_line(&ctx, "stdout", "▶ Preparando la copia del commit del PR para los revisores…");
+            }
+            let (repo, id, sha) = (project.local_path.clone(), project.id.clone(), head_sha.clone());
+            match tokio::task::spawn_blocking(move || crate::review::checkout::prepare(&repo, &id, &sha)).await {
+                Ok(Ok(path)) => path,
+                Ok(Err(e)) => {
+                    if let Some(ctx) = crate::ai_runs::current() {
+                        crate::ai_runs::emit_line(&ctx, "stdout", &format!("  sin copia del PR ({e}): los revisores leen tu copia de trabajo"));
+                    }
+                    project.local_path.clone()
+                }
+                Err(_) => project.local_path.clone(),
+            }
+        };
+        let checks = async {
+            let credential = credential.as_deref()?;
+            checks_on(&linked_host(&link, credential), pr_id).await.ok()
+        };
+        let (tools_cwd, checks) = tokio::join!(checkout, checks);
+        // The workspace's skills live in the clone; a reviewer running in the PR's checkout has to
+        // find them there too. Best-effort, like the sync into the clone above.
+        if tools_cwd != project.local_path {
+            let _ = skills_cmd::sync_skills_into_project(&skills, &workspace_id, &tools_cwd);
+        }
+        let mut inputs = inputs.take().unwrap_or_default();
+        inputs.checks = checks.as_ref().and_then(crate::review::context::checks_block);
+
+        let request = review_pipeline::ReviewRequest {
+            config: &config,
+            repo_path: &project.local_path,
+            tools_cwd: &tools_cwd,
+            head_ref: &head_ref,
+            target_ref: &pr.target_branch,
+            pr_title: &pr.title,
+            pr_description: &pr.description,
+            pr_status: &pr.status,
+            inputs,
+            prompts,
+            engine: engine_config,
+            contract: contract.clone(),
+            changed_since: changed_files.clone(),
+            force,
+        };
         review_pipeline::run(request, &diff_files).await
     })
     .await;
@@ -2237,30 +2342,6 @@ pub async fn review_pull_request(
     result
 }
 
-/// How much of one comment's text is carried into the prompt. Enough to know what was asked;
-/// short enough that twenty threads don't crowd out the diff.
-const COMMENT_EXCERPT: usize = 500;
-
-/// At most this many host threads are carried. Past it the conversation is long enough that the
-/// tail adds noise rather than context, and the truncation is stated in the block itself.
-const MAX_THREADS: usize = 20;
-
-/// Whether a comment was published after `since` (both RFC 3339). Parsed rather than compared as
-/// strings: the hosts and this app's own clock write the offset differently (`Z` vs `+00:00`), and
-/// lexicographic order across those two spellings is wrong.
-///
-/// Unparseable input counts as *not* newer. A timestamp nothing can read is not evidence that
-/// something happened, and the failure mode of guessing "newer" is re-running every review forever.
-fn is_newer_than(published: &str, since: &str) -> bool {
-    match (
-        chrono::DateTime::parse_from_rfc3339(published),
-        chrono::DateTime::parse_from_rfc3339(since),
-    ) {
-        (Ok(a), Ok(b)) => a > b,
-        _ => false,
-    }
-}
-
 /// How many comments *somebody else* wrote on this pull request after the last review ran.
 ///
 /// This is what makes a second review answer a reviewer who wrote something without pushing a
@@ -2290,97 +2371,6 @@ fn comments_since(
         .filter(|c| !me.is_some_and(|me| c.author.eq_ignore_ascii_case(me)))
         .filter(|c| is_newer_than(&c.published_date, since))
         .count()
-}
-
-/// The still-open conversation on a pull request, rendered as one context block for the review
-/// prompt.
-///
-/// Two sources, deliberately kept apart: the findings **this app** published and still holds
-/// active (from the durable review memory — they carry their stable `F-NNN` id, which is what lets
-/// reconciliation match the re-review's findings back to the threads already opened for them), and
-/// every other thread the host still shows open (a human reviewer's). The instructions matter as
-/// much as the list: a finding that persists must be re-reported *with the same file and category*
-/// or reconciliation reads it as fixed, and one that really was fixed must be left out and said so
-/// in the summary — that is exactly the signal that flips it to `resuelto`.
-///
-/// Returns `None` when nothing is pending: a first review has no conversation to carry, and an
-/// empty "still open" section only invites the model to invent one.
-fn pending_comments_block(
-    remembered: &[crate::review_memory::MemoryFinding],
-    threads: &[ado::PrCommentThread],
-    // When this PR was last reviewed, so anything written since can be marked as such. `None` on a
-    // first review, where nothing is new because nothing came before.
-    since: Option<&str>,
-) -> Option<String> {
-    let published: Vec<&crate::review_memory::MemoryFinding> = remembered
-        .iter()
-        .filter(|f| f.is_active() && f.thread_id.is_some())
-        .collect();
-    // Threads CodeFlow opened are already described, in richer terms, by the memory above —
-    // listing them again would ask the model to answer the same finding twice.
-    let ours: std::collections::HashSet<i64> = remembered.iter().filter_map(|f| f.thread_id).collect();
-    let others: Vec<&ado::PrCommentThread> = threads.iter().filter(|t| !ours.contains(&t.id)).collect();
-    if published.is_empty() && others.is_empty() {
-        return None;
-    }
-
-    // Leading newline: contexts are rendered as `- {name}: {content}`, and a multi-line block
-    // reads as part of that bullet unless it starts on its own line.
-    let mut out = String::from(
-        "\nEste pull request ya tiene conversación abierta. Además de revisar el diff actual, \
-         responde explícitamente por cada punto pendiente si esta iteración lo corrige.\n",
-    );
-
-    if !published.is_empty() {
-        out.push_str(
-            "\n## Hallazgos que esta app publicó y siguen abiertos\n\
-             Reglas: si el hallazgo SIGUE presente, vuelve a reportarlo con el mismo archivo y la \
-             misma categoría (así se reconoce como el mismo hallazgo y se responde en su hilo). Si \
-             ya está corregido, NO lo reportes como hallazgo y dilo en el resumen.\n\n",
-        );
-        for f in &published {
-            let loc = match (&f.archivo, &f.lineas) {
-                (Some(file), Some(lines)) => format!(" · `{file}:{lines}`"),
-                (Some(file), None) => format!(" · `{file}`"),
-                _ => String::new(),
-            };
-            out.push_str(&format!(
-                "- **{}** · {} · categoría `{}`{} — {}\n",
-                f.id, f.severity, f.categoria, loc, f.subtitulo
-            ));
-        }
-    }
-
-    if !others.is_empty() {
-        out.push_str(
-            "\n## Otros comentarios abiertos en el PR\n\
-             Son de personas revisoras. Indica en el resumen si el cambio actual los atiende. Los \
-             marcados como 🆕 se escribieron DESPUÉS de la última revisión: trátalos como entrada \
-             nueva y respóndelos uno por uno en el resumen, aunque el código no haya cambiado.\n\n",
-        );
-        for thread in others.iter().take(MAX_THREADS) {
-            let loc = match (&thread.file_path, thread.start_line) {
-                (Some(file), Some(line)) => format!(" (`{file}:{line}`)"),
-                (Some(file), None) => format!(" (`{file}`)"),
-                _ => String::new(),
-            };
-            out.push_str(&format!("- Hilo #{}{}\n", thread.id, loc));
-            for c in &thread.comments {
-                let text: String = c.content.chars().take(COMMENT_EXCERPT).collect();
-                let ellipsis = if c.content.chars().count() > COMMENT_EXCERPT { "…" } else { "" };
-                let nuevo = match since {
-                    Some(s) if is_newer_than(&c.published_date, s) => "🆕 ",
-                    _ => "",
-                };
-                out.push_str(&format!("  - {}{}: {}{}\n", nuevo, c.author, text.replace('\n', " "), ellipsis));
-            }
-        }
-        if others.len() > MAX_THREADS {
-            out.push_str(&format!("\n_(+{} hilos abiertos no listados.)_\n", others.len() - MAX_THREADS));
-        }
-    }
-
-    Some(out)
 }
 
 /// Turns one finished pipeline run into the review the user reads, and saves it.
@@ -2427,7 +2417,11 @@ fn finalize_review(
             .flatten()
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        let (merged, d) = mem::reconcile(&prev, &projected, prior, changed_files);
+        // What this run did not actually re-read — a failed reviewer's files, the ones trimmed out of
+        // their bundles — must not read as fixed just because nobody re-reported them.
+        let unread_files: Vec<String> = outcome.unreviewed.iter().chain(outcome.degraded.iter()).cloned().collect();
+        let unread = mem::Unread { files: &unread_files, unlocated: outcome.unlocated_unread };
+        let (merged, d) = mem::reconcile_with(&prev, &projected, prior, changed_files, unread);
         (merged, Some(d))
     } else {
         let mut first = projected;
@@ -2457,7 +2451,7 @@ fn finalize_review(
         finding.resuelto_en_iter = stored.resuelto_en_iter;
         finding.motivo_descarte = stored.motivo_descarte.clone();
         finding.delta = stored.delta.clone();
-        stored.comentario_md = render::comment_markdown(finding);
+        stored.comentario_md = render::comment_markdown(finding, &pr.provider);
     }
     crate::review::merge::sort(&mut findings);
 
@@ -2475,6 +2469,9 @@ fn finalize_review(
             delta_files: (plan.mode == crate::review::plan::PlanMode::Delta).then(|| plan.files.len()),
             degraded: &outcome.degraded,
             workers: outcome.workers,
+            unreviewed: &outcome.unreviewed,
+            failed_passes: &outcome.failed_passes,
+            checking: outcome.checking,
         },
     );
 
@@ -2522,6 +2519,7 @@ fn finalize_review(
         quality_gate_policy: blocking.iter().map(|s| s.label().to_string()).collect(),
         quality_gate: render::passes_gate(&findings, blocking),
         workers: outcome.workers,
+        incomplete: !outcome.unreviewed.is_empty() || !outcome.failed_passes.is_empty(),
     };
 
     let meta_json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
@@ -2535,7 +2533,7 @@ fn finalize_review(
     text
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CommentLocation {
     pub file: String,
@@ -2546,7 +2544,7 @@ pub struct CommentLocation {
 /// One human-selected finding to post, matched back to its stored finding so its thread is reused
 /// across re-reviews — by `id` (see `review_memory::match_publish_item`), with `file` + `category`
 /// as the fallback for a client that sends none.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PostFindingItem {
     /// The finding's `F-NNN`. Optional on the wire: the phone predates it.
@@ -2594,6 +2592,8 @@ pub struct PublishOutcome {
     /// `None` when no summary was asked for.
     pub summary_posted: Option<bool>,
     pub summary_error: Option<String>,
+    /// The summary went out by editing the one already on the PR rather than as a new comment.
+    pub summary_updated: bool,
 }
 
 impl PublishOutcome {
@@ -2679,7 +2679,13 @@ fn record_published(
 /// one that landed, even when others failed — so a later re-post continues the same threads instead
 /// of duplicating. Optionally posts a summary comment. Every item is attempted even if one fails,
 /// and the outcome says, item by item, what happened.
+///
+/// `close_resolved` also closes, on the host, the threads of every finding this run's memory holds as
+/// `resuelto` — the reply "resuelto en la iteración N" and the thread marked fixed — so the PR's
+/// conversation follows the code without anybody ticking them. The desktop panel asks for it; a
+/// caller that chooses its items itself (Flujos) leaves it off and sends them explicitly.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn publish_pr_review(
     db: State<'_, Db>,
     project_id: String,
@@ -2688,8 +2694,10 @@ pub async fn publish_pr_review(
     items: Vec<PostFindingItem>,
     post_summary: bool,
     summary: Option<String>,
+    close_resolved: Option<bool>,
 ) -> Result<PublishOutcome, String> {
-    publish_project_review(&db, &project_id, pr_id, &run_id, &items, post_summary, summary.as_deref()).await
+    publish_project_review(&db, &project_id, pr_id, &run_id, &items, post_summary, summary.as_deref(), close_resolved.unwrap_or(false))
+        .await
 }
 
 /// [`publish_pr_review`] with the older all-or-nothing answer — kept, with its signature, for the
@@ -2705,11 +2713,30 @@ pub async fn post_pr_review_comment(
     post_summary: bool,
     summary: Option<String>,
 ) -> Result<(), String> {
-    publish_project_review(&db, &project_id, pr_id, &run_id, &items, post_summary, summary.as_deref())
+    publish_project_review(&db, &project_id, pr_id, &run_id, &items, post_summary, summary.as_deref(), false)
         .await?
         .into_legacy()
 }
 
+/// The items that close the threads of this run's resolved findings — the ones with a thread, not
+/// yet written to in this iteration, and not already among `items` (sent twice, the second copy would
+/// be matched to some *other* finding of the same kind).
+fn resolved_closures(findings: &[crate::review_memory::MemoryFinding], iter: usize, items: &[PostFindingItem]) -> Vec<PostFindingItem> {
+    findings
+        .iter()
+        .filter(|f| f.estado == "resuelto" && f.thread_id.is_some() && !already_published(f, Some(iter)))
+        .filter(|f| !items.iter().any(|item| item.id.as_deref() == Some(f.id.as_str())))
+        .map(|f| PostFindingItem {
+            id: Some(f.id.clone()),
+            file: f.archivo.clone(),
+            category: f.categoria.clone(),
+            content: String::new(),
+            location: None,
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn publish_project_review(
     db: &State<'_, Db>,
     project_id: &str,
@@ -2718,6 +2745,7 @@ async fn publish_project_review(
     items: &[PostFindingItem],
     post_summary: bool,
     summary: Option<&str>,
+    close_resolved: bool,
 ) -> Result<PublishOutcome, String> {
     let project = load_project(db, project_id)?;
     let link = linked_repo(&project)?;
@@ -2733,6 +2761,14 @@ async fn publish_project_review(
 
     let credential = link_credential(&link)?;
     let host = linked_host(&link, &credential);
+    let mut all: Vec<PostFindingItem> = Vec::new();
+    let items: &[PostFindingItem] = if close_resolved {
+        all.extend(items.iter().cloned());
+        all.extend(resolved_closures(&findings, iter, items));
+        &all
+    } else {
+        items
+    };
     let outcome = publish_to_host(&host, pr_id, items, &mut findings, Some(iter), post_summary, summary).await;
 
     // Write back the thread ids / states just changed — before anything else can fail: a thread that
@@ -2874,6 +2910,40 @@ impl ThreadHost<'_> {
         }
     }
 
+    /// The PR's threads, or none when the host would not say — a missing list only costs a publish
+    /// its deduplication and its summary edit, never the publish itself.
+    async fn threads(&self, pr_id: i64) -> Vec<ado::PrCommentThread> {
+        match self {
+            ThreadHost::Azure { org, project, repo, pat } => ado::list_pr_comment_threads(org, project, repo, pr_id, pat).await,
+            ThreadHost::GitHub { host, owner, repo, token } => github::list_pr_comment_threads(host, owner, repo, pr_id, token).await,
+            ThreadHost::GitLab { host, project, token } => gitlab::list_pr_comment_threads(host, project, pr_id, token).await,
+            ThreadHost::Bitbucket { workspace, repo, auth } => bitbucket::list_pr_comment_threads(workspace, repo, pr_id, auth).await,
+        }
+        .unwrap_or_default()
+    }
+
+    /// Who the credential is, as a comment's author reads on this host.
+    async fn me(&self) -> Option<String> {
+        match self {
+            ThreadHost::Azure { org, pat, .. } => ado::authenticated_user_name(org, pat).await.ok(),
+            ThreadHost::GitHub { host, token, .. } => github::get_authenticated_user(host, token).await.ok(),
+            ThreadHost::GitLab { host, token, .. } => gitlab::get_authenticated_user(host, token).await.ok(),
+            ThreadHost::Bitbucket { auth, .. } => {
+                bitbucket::get_authenticated_user(auth).await.ok().map(|u| u.display_name).filter(|n| !n.is_empty())
+            }
+        }
+    }
+
+    /// Rewrites a conversation comment this app posted (`open_general`'s id).
+    async fn edit_general(&self, pr_id: i64, thread: i64, content: &str) -> Result<(), String> {
+        match self {
+            ThreadHost::Azure { org, project, repo, pat } => ado::edit_pr_thread_comment(org, project, repo, pr_id, thread, content, pat).await,
+            ThreadHost::GitHub { host, owner, repo, token } => github::edit_pr_comment(host, owner, repo, thread, content, token).await,
+            ThreadHost::GitLab { host, project, token } => gitlab::edit_pr_comment(host, project, pr_id, thread, content, token).await,
+            ThreadHost::Bitbucket { workspace, repo, auth } => bitbucket::edit_pr_comment(workspace, repo, pr_id, thread, content, auth).await,
+        }
+    }
+
     /// Closes a thread as fixed.
     async fn close_as_fixed(&self, pr_id: i64, thread: i64) -> Result<(), String> {
         match self {
@@ -2893,8 +2963,62 @@ impl ThreadHost<'_> {
     }
 }
 
+/// The heading every review summary opens with (`formatSummaryComment` in `parseAnalysis.ts`) — how
+/// a publish finds the summary it left last time, to edit it instead of posting another.
+const SUMMARY_HEADING: &str = "### 📋 Revisión automatizada";
+
+/// The summary the signed-in user already left on this PR, if any — the newest one.
+///
+/// Only theirs: editing somebody else's comment is either refused or, for an admin, worse. Without a
+/// name to compare (`me` unknown) nothing is edited and a new summary is posted, which is what
+/// happened before this existed.
+fn own_summary(threads: &[ado::PrCommentThread], me: Option<&str>) -> Option<i64> {
+    let me = me?;
+    threads
+        .iter()
+        .filter(|t| t.file_path.is_none())
+        .filter_map(|t| t.comments.first().map(|c| (t.id, c)))
+        .filter(|(_, c)| c.author.eq_ignore_ascii_case(me) && c.content.trim_start().starts_with(SUMMARY_HEADING))
+        .max_by(|(_, a), (_, b)| {
+            if is_newer_than(&a.published_date, &b.published_date) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            }
+        })
+        .map(|(id, _)| id)
+}
+
+/// Whether a comment carrying this body is already on the PR — for a review with no memory (one
+/// reached by link), the only way a second publish after a restart knows not to post it again.
+///
+/// Matched on the heading *and* the subtitle: a link review numbers its findings from F-001 on every
+/// run, so the heading alone would take a different finding for one already posted.
+fn already_on_pr(threads: &[ado::PrCommentThread], content: &str) -> bool {
+    let signature: Vec<&str> = content.lines().map(str::trim).filter(|l| !l.is_empty()).take(2).collect();
+    if signature.len() < 2 {
+        return false;
+    }
+    threads.iter().filter_map(|t| t.comments.first()).any(|c| signature.iter().all(|line| c.content.contains(line)))
+}
+
+/// What a publish decided to do with one item, before doing any of it.
+enum Step {
+    /// Already written to in this iteration.
+    Skip,
+    /// A review with no memory found the same comment on the PR already.
+    AlreadyOnPr,
+    Open,
+    FollowUp { thread: i64, general: bool },
+}
+
 /// Publishes `items` (and the summary) on one host, updating `findings` — the run's memory, empty
 /// for a review reached by link — as it goes. `iter` is the run's iteration, `None` without memory.
+///
+/// Decides everything first and then acts, which is what allows the three things a one-by-one loop
+/// could not: GitHub's new inline comments go out as **one review** (one notification for the
+/// author, not one per finding), a review with no memory skips what is already on the PR, and the
+/// summary **edits** the one this user left last time instead of piling up a new one per publish.
 async fn publish_to_host(
     host: &ThreadHost<'_>,
     pr_id: i64,
@@ -2914,23 +3038,87 @@ async fn publish_to_host(
         }
         _ => None,
     };
+    // What is already on the PR, read once and only when something needs it.
+    let wants_summary = post_summary && summary.is_some();
+    let (threads, me) = if (iter.is_none() && !items.is_empty()) || wants_summary {
+        tokio::join!(host.threads(pr_id), host.me())
+    } else {
+        (Vec::new(), None)
+    };
 
+    // 1. Decide.
     let mut claimed = vec![false; findings.len()];
-    let mut outcome = PublishOutcome::default();
+    let mut steps: Vec<(Option<usize>, Option<String>, Step)> = Vec::with_capacity(items.len());
     for item in items {
         let idx = crate::review_memory::match_publish_item(findings, &item.key(), &claimed);
         if let Some(k) = idx {
             claimed[k] = true;
         }
         let id = idx.map(|k| findings[k].id.clone()).or_else(|| item.id.clone());
-        if idx.is_some_and(|k| already_published(&findings[k], iter)) {
-            outcome.items.push(PublishedItem { id, status: "skipped".to_string(), error: None });
+        let step = if idx.is_some_and(|k| already_published(&findings[k], iter)) {
+            Step::Skip
+        } else if let Some((thread, general)) = idx.and_then(|k| findings[k].thread_id.map(|t| (t, findings[k].hilo_general))) {
+            Step::FollowUp { thread, general }
+        } else if iter.is_none() && already_on_pr(&threads, &item.content) {
+            Step::AlreadyOnPr
+        } else {
+            Step::Open
+        };
+        steps.push((idx, id, step));
+    }
+    let mut results: Vec<Option<(&'static str, Result<(), String>)>> = (0..items.len()).map(|_| None).collect();
+
+    // 2. GitHub: every new anchored comment as one review. All or nothing on GitHub's side — one line
+    //    it cannot anchor refuses the lot — so a refusal falls through to one by one below, where each
+    //    item gets its own fallback to a general comment.
+    if let (ThreadHost::GitHub { host: gh, owner, repo, token }, Some(head)) = (host, github_head.as_deref()) {
+        let batch: Vec<usize> =
+            (0..items.len()).filter(|i| matches!(steps[*i].2, Step::Open) && items[*i].location.is_some()).collect();
+        if batch.len() >= 2 {
+            let comments: Vec<github::BatchComment> = batch
+                .iter()
+                .filter_map(|i| {
+                    let loc = items[*i].location.as_ref()?;
+                    Some(github::BatchComment { path: &loc.file, start_line: loc.start_line, end_line: loc.end_line, body: &items[*i].content })
+                })
+                .collect();
+            match github::post_pr_review_batch(gh, owner, repo, pr_id, head, &comments, token).await {
+                Ok(ids) => {
+                    for (i, thread) in batch.iter().zip(ids) {
+                        if let Some(k) = steps[*i].0 {
+                            record_published(&mut findings[k], iter, Some((thread, false)));
+                        }
+                        results[*i] = Some(("opened", Ok(())));
+                    }
+                }
+                // The review exists but its comments could not be told apart: they are on the PR, so
+                // re-posting would duplicate every one. Marked as published in this iteration without a
+                // thread — a later iteration opens fresh ones rather than replying into the void.
+                Err(e) if e.starts_with("GitHub posted the review") => {
+                    for i in &batch {
+                        if let Some(k) = steps[*i].0 {
+                            record_published(&mut findings[k], iter, None);
+                        }
+                        results[*i] = Some(("opened", Err(e.clone())));
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    // 3. Everything else, one by one.
+    let mut outcome = PublishOutcome::default();
+    for (i, item) in items.iter().enumerate() {
+        let (idx, id, step) = &steps[i];
+        if let Some((status, result)) = results[i].take() {
+            outcome.items.push(PublishedItem { id: id.clone(), status: status.to_string(), error: result.err() });
             continue;
         }
-
-        let existing = idx.and_then(|k| findings[k].thread_id.map(|thread| (thread, findings[k].hilo_general)));
-        let (status, result) = match existing {
-            None => {
+        let (status, result) = match step {
+            Step::Skip => ("skipped", Ok(())),
+            Step::AlreadyOnPr => ("skipped", Ok(())),
+            Step::Open => {
                 let opened = match &item.location {
                     Some(loc) if !(matches!(host, ThreadHost::GitHub { .. }) && github_head.is_none()) => {
                         match host.open_anchored(pr_id, &item.content, loc, github_head.as_deref()).await {
@@ -2951,26 +3139,26 @@ async fn publish_to_host(
                 match opened {
                     Ok((thread, general, status)) => {
                         if let Some(k) = idx {
-                            record_published(&mut findings[k], iter, Some((thread, general)));
+                            record_published(&mut findings[*k], iter, Some((thread, general)));
                         }
                         (status, Ok(()))
                     }
                     Err(e) => ("failed", Err(e)),
                 }
             }
-            Some((thread, general)) => {
+            Step::FollowUp { thread, general } => {
                 let k = idx.expect("a thread comes from a stored finding");
                 let resolved = findings[k].estado == "resuelto";
-                let about = (general && !azure).then_some(findings[k].id.as_str());
+                let about = (*general && !azure).then_some(findings[k].id.as_str());
                 let text = follow_up_text(azure, resolved, iter.unwrap_or(1), &today, about);
-                match host.follow_up(pr_id, thread, &text, general).await {
+                match host.follow_up(pr_id, *thread, &text, *general).await {
                     Ok(()) => {
                         record_published(&mut findings[k], iter, None);
                         // Azure closes any thread; GitHub and GitLab cannot resolve a general comment.
                         if resolved && (azure || !general) {
                             // The reply stands either way; a thread the host won't close stays open,
                             // and the outcome says so rather than reporting it closed.
-                            match host.close_as_fixed(pr_id, thread).await {
+                            match host.close_as_fixed(pr_id, *thread).await {
                                 Ok(()) => ("resolved", Ok(())),
                                 Err(e) => ("replied", Err(e)),
                             }
@@ -2982,11 +3170,23 @@ async fn publish_to_host(
                 }
             }
         };
-        outcome.items.push(PublishedItem { id, status: status.to_string(), error: result.err() });
+        outcome.items.push(PublishedItem { id: id.clone(), status: status.to_string(), error: result.err() });
     }
 
-    if post_summary {
-        if let Some(text) = summary {
+    // 4. The summary: the one this user left last time, rewritten — or a new one.
+    if wants_summary {
+        let text = summary.unwrap_or_default();
+        // Only a review summary replaces a review summary — a decision note or a flow's own text is
+        // a comment of its own.
+        let existing = if text.trim_start().starts_with(SUMMARY_HEADING) { own_summary(&threads, me.as_deref()) } else { None };
+        let edited = match existing {
+            Some(thread) => host.edit_general(pr_id, thread, text).await.is_ok(),
+            None => false,
+        };
+        if edited {
+            outcome.summary_posted = Some(true);
+            outcome.summary_updated = true;
+        } else {
             match host.open_general(pr_id, text).await {
                 Ok(_) => outcome.summary_posted = Some(true),
                 Err(e) => {
@@ -3552,9 +3752,56 @@ mod tests {
             items: vec![item("opened", None), item("failed", Some("GitHub returned 500")), item("fallback", None)],
             summary_posted: Some(false),
             summary_error: Some("timeout".into()),
+            ..Default::default()
         };
         let error = partial.into_legacy().unwrap_err();
         assert_eq!(error, "2 comment(s) failed to post (2 posted) — #2: GitHub returned 500; summary: timeout");
+    }
+
+    fn general(id: i64, author: &str, content: &str, at: &str) -> ado::PrCommentThread {
+        ado::PrCommentThread {
+            id,
+            file_path: None,
+            start_line: None,
+            end_line: None,
+            comments: vec![ado::PrThreadComment { author: author.into(), content: content.into(), published_date: at.into() }],
+        }
+    }
+
+    /// A publish edits the newest summary *this user* left — never somebody else's, never a decision.
+    #[test]
+    fn the_summary_to_edit_is_my_newest_one() {
+        let threads = vec![
+            general(1, "me", "### 📋 Revisión automatizada (pr-review) — 2026-10-01", "2026-10-01T10:00:00Z"),
+            general(2, "me", "### 📋 Revisión automatizada (pr-review) — 2026-10-03", "2026-10-03T10:00:00Z"),
+            general(3, "ana", "### 📋 Revisión automatizada (pr-review) — 2026-10-04", "2026-10-04T10:00:00Z"),
+            general(4, "me", "### ✅ **Aprobado** — 2026-10-05", "2026-10-05T10:00:00Z"),
+        ];
+        assert_eq!(own_summary(&threads, Some("ME")), Some(2));
+        assert_eq!(own_summary(&threads, None), None, "without knowing who we are, edit nothing");
+    }
+
+    /// A review with no memory recognises a comment already on the PR by heading *and* subtitle — the
+    /// heading alone repeats across runs (F-001 every time).
+    #[test]
+    fn a_comment_already_on_the_pr_is_recognised_by_its_first_two_lines() {
+        let threads = vec![general(9, "me", "📍 `a.ts:3` _(fuera del diff)_\n\n### 🚨 [Bug] npe · F-001\n\nSe lee saldo sin validar.\n\n💭 x", "2026-10-01T10:00:00Z")];
+        assert!(already_on_pr(&threads, "### 🚨 [Bug] npe · F-001\n\nSe lee saldo sin validar.\n\n💭 y"));
+        assert!(!already_on_pr(&threads, "### 🚨 [Bug] npe · F-001\n\nOtra cosa distinta."));
+    }
+
+    /// Closing the threads of resolved findings never sends one twice — a second copy would be matched
+    /// to another finding of the same kind.
+    #[test]
+    fn resolved_threads_are_closed_once_and_only_theirs() {
+        let mut gone = stored("F-001", "resuelto", Some(11));
+        gone.publicado_en_iter = Some(1);
+        let findings = vec![gone, stored("F-002", "resuelto", Some(12)), stored("F-003", "resuelto", None), stored("F-004", "posteado", Some(14))];
+        let closures = resolved_closures(&findings, 2, &[]);
+        assert_eq!(closures.iter().filter_map(|c| c.id.clone()).collect::<Vec<_>>(), vec!["F-001", "F-002"]);
+        assert!(resolved_closures(&findings, 1, &[]).iter().all(|c| c.id.as_deref() != Some("F-001")), "already written this iteration");
+        let explicit = vec![PostFindingItem { id: Some("F-002".into()), file: None, category: String::new(), content: String::new(), location: None }];
+        assert_eq!(resolved_closures(&findings, 2, &explicit).len(), 1, "the caller already sent F-002");
     }
 
     fn project_with(columns: &[(&str, &str)]) -> Project {

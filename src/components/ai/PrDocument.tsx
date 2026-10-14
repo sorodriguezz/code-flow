@@ -11,11 +11,14 @@ import {
   Link2,
   Loader2,
   MessageSquareShare,
+  PencilLine,
   RefreshCw,
+  Search,
   SkipForward,
   Square,
   ThumbsDown,
   ThumbsUp,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { AiGlyph } from "../common/AiGlyph";
@@ -23,7 +26,14 @@ import { buttonClass, iconButtonClass } from "../common/Button";
 import { chipClass, popoverClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import { CONFIRM_POST_KEYS, POSTED_KEYS, VIEW_ON_KEYS } from "../../lib/providerLabels";
-import { discardPrFinding, getReviewRun, notifyStateChange, REVIEW_SKIPPED } from "../../lib/tauri/commands";
+import {
+  discardPrFinding,
+  getReviewRun,
+  notifyStateChange,
+  previewPrReview,
+  REVIEW_SKIPPED,
+  type ReviewPreview,
+} from "../../lib/tauri/commands";
 import {
   listCommentThreads,
   mergeOptions as loadMergeOptions,
@@ -40,6 +50,7 @@ import {
   formatFindingAsComment,
   formatSummaryComment,
   parseAnalysis,
+  SEVERITY_LABELS,
   type AnalysisFinding,
   type SummaryMemory,
   summaryMemoryOf,
@@ -74,6 +85,7 @@ import {
   SPLIT_MIN_WIDTH,
   menuRowClass,
   relativeTime,
+  textAreaClass,
   useCopy,
   useDismiss,
   useElementWidth,
@@ -104,7 +116,12 @@ const EMPTY_VIEW: TabView = {};
 const EMPTY_FLAGS: Record<string, boolean> = {};
 const EMPTY_FINDINGS: AnalysisFinding[] = [];
 const EMPTY_IDS: string[] = [];
+const EMPTY_FILTER: NonNullable<TabView["findingFilter"]> = {};
+const EMPTY_EDITS: Record<string, string> = {};
 const LEVELS: ReviewLevel[] = ["basico", "completo", "ultra"];
+
+/** Below this many findings the list is short enough to read whole — no filter bar. */
+const FILTER_MIN_FINDINGS = 4;
 
 /**
  * A run that finished without producing a review: the plan stopped to ask (a draft, a merged PR),
@@ -298,6 +315,55 @@ export function PrDocument({
   const activeFindings = useMemo(() => findings.filter((f) => !isDiscarded(marks.get(f.id))), [findings, marks]);
   const activeParsed = useMemo(() => (parsed ? { ...parsed, findings: activeFindings } : null), [parsed, activeFindings]);
 
+  // ── Filtering the list ───────────────────────────────────────────────────────────────────
+  // A view only: what is published, counted and gated is never what happens to be on screen.
+  const findingFilter = view.findingFilter ?? EMPTY_FILTER;
+  const filterOn = (findingFilter.severities?.length ?? 0) > 0 || Boolean(findingFilter.file) || Boolean(findingFilter.query?.trim());
+  const shown = useMemo(() => {
+    if (!filterOn) return findings;
+    const query = findingFilter.query?.trim().toLowerCase() ?? "";
+    return findings.filter(
+      (f) =>
+        (!findingFilter.severities?.length || findingFilter.severities.includes(f.severityLabel)) &&
+        (!findingFilter.file || f.location?.file === findingFilter.file) &&
+        (!query ||
+          [f.id, f.category, f.subtitle, f.why, f.suggestion, f.location?.file ?? ""].some((s) => s.toLowerCase().includes(query))),
+    );
+  }, [findings, findingFilter, filterOn]);
+  const setFilter = (patch: Partial<NonNullable<TabView["findingFilter"]>>) => setView({ findingFilter: { ...findingFilter, ...patch } });
+  const commentEdits = view.commentEdits ?? EMPTY_EDITS;
+  const [editingComment, setEditingComment] = useState<string | null>(null);
+  const fileOptions = useMemo(
+    () => [...new Set(findings.map((f) => f.location?.file).filter((f): f is string => Boolean(f)))].sort(),
+    [findings],
+  );
+
+  // ── What a first review would cost ───────────────────────────────────────────────────────
+  // Measured from the refs on disk (no fetch), for the level picked — so "ultra" on a big PR is a
+  // choice made knowing its price. Only for a project review with nothing on screen yet.
+  const [preview, setPreview] = useState<ReviewPreview | null>(null);
+  const wantsPreview = target.kind === "project" && reviews.length === 0 && !runningJob;
+  useEffect(() => {
+    if (!wantsPreview || !projectId) {
+      setPreview(null);
+      return;
+    }
+    let live = true;
+    const timer = window.setTimeout(() => {
+      previewPrReview(projectId, pr.id, reviewLevel)
+        .then((next) => {
+          if (live) setPreview(next);
+        })
+        .catch(() => {
+          if (live) setPreview(null);
+        });
+    }, 250);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [wantsPreview, projectId, pr.id, reviewLevel]);
+
   // What changed since the review before this one. Only a project review keeps its finding ids
   // stable across iterations (the memory reconciles them), so only there is the comparison honest.
   const diff = useMemo(() => {
@@ -388,7 +454,9 @@ export function PrDocument({
       id: f.id,
       file: f.location?.file ?? null,
       category: f.category,
-      content: formatFindingAsComment(f),
+      // What the human rewrote, when they did; otherwise the finding in this host's terms (a
+      // replacement becomes a one-click suggestion where the host has them).
+      content: commentEdits[f.id]?.trim() || formatFindingAsComment(f, pr.provider),
       location: f.location,
     }));
     // `chosen`, not every finding: the summary describes what actually gets posted — plus what the
@@ -410,8 +478,15 @@ export function PrDocument({
     if (tally.failed === 0) {
       useToastStore
         .getState()
-        .pushToast(tally.fallback > 0 ? t("pr.publishedFallback", { n: tally.fallback }) : t("pr.publishedAll"), "success");
-      setView({ selecting: false });
+        .pushToast(
+          tally.fallback > 0
+            ? t("pr.publishedFallback", { n: tally.fallback })
+            : outcome.summary_updated
+              ? t("pr.summaryUpdated")
+              : t("pr.publishedAll"),
+          "success",
+        );
+      setView({ selecting: false, commentEdits: {} });
     } else if (landed > 0) {
       pushErrorToast(t("pr.publishPartial", { ok: landed, failed: tally.failed, error: tally.firstError ?? "" }));
       setView({ selecting: true, ...(outcome.summary_posted ? { includeSummary: false } : {}) });
@@ -579,7 +654,7 @@ export function PrDocument({
 
   const split = segment === "findings" && width >= SPLIT_MIN_WIDTH && findings.length > 0 && !hydrating;
   const expanded = view.expanded ?? EMPTY_FLAGS;
-  const picked = findings.find((f) => f.id === view.picked) ?? findings[0] ?? null;
+  const picked = shown.find((f) => f.id === view.picked) ?? shown[0] ?? null;
   const [fixpackCopied, copyFixpack] = useCopy();
 
   const cardProps = (finding: AnalysisFinding, at: number) => {
@@ -614,17 +689,130 @@ export function PrDocument({
             <Check size={14} className="text-[var(--cf-success)]" />
           </span>
         ) : (
-          <Checkbox
-            checked={!deselected[finding.id]}
-            onChange={() => {
-              const next = { ...deselected };
-              if (next[finding.id]) delete next[finding.id];
-              else next[finding.id] = true;
-              setView({ deselected: next });
-            }}
-          />
+          <span className="flex flex-col items-center gap-1">
+            <Checkbox
+              checked={!deselected[finding.id]}
+              onChange={() => {
+                const next = { ...deselected };
+                if (next[finding.id]) delete next[finding.id];
+                else next[finding.id] = true;
+                setView({ deselected: next });
+              }}
+            />
+            <Tooltip label={t("doc.editComment")}>
+              <button
+                onClick={() => setEditingComment((id) => (id === finding.id ? null : finding.id))}
+                aria-label={t("doc.editComment")}
+                aria-pressed={editingComment === finding.id}
+                className={iconButtonClass({
+                  size: "xs",
+                  className: commentEdits[finding.id] ? "text-[var(--cf-accent)]" : undefined,
+                })}
+              >
+                <PencilLine size={12} />
+              </button>
+            </Tooltip>
+          </span>
         )}
       </span>
+    ) : null;
+
+  /** The comment a finding will be published as, open for rewriting — while choosing what to publish. */
+  const commentEditor = (finding: AnalysisFinding) =>
+    selecting && editingComment === finding.id ? (
+      <div className="mt-1.5 space-y-1">
+        <textarea
+          data-ai-input
+          value={commentEdits[finding.id] ?? formatFindingAsComment(finding, pr.provider)}
+          onChange={(e) => setView({ commentEdits: { ...commentEdits, [finding.id]: e.target.value } })}
+          rows={8}
+          autoFocus
+          className={textAreaClass}
+        />
+        <div className="flex items-center justify-end gap-1.5">
+          {commentEdits[finding.id] !== undefined && (
+            <button
+              onClick={() => {
+                const { [finding.id]: _dropped, ...rest } = commentEdits;
+                setView({ commentEdits: rest });
+              }}
+              className={buttonClass({ variant: "ghost", size: "sm" })}
+            >
+              {t("doc.restoreComment")}
+            </button>
+          )}
+          <button onClick={() => setEditingComment(null)} className={buttonClass({ variant: "secondary", size: "sm" })}>
+            <Check size={13} />
+            {t("common.close")}
+          </button>
+        </div>
+      </div>
+    ) : null;
+
+  /** Severity chips, a file picker and a search — compact, and only once the list is long enough to
+   *  need them. */
+  const filterBar =
+    findings.length >= FILTER_MIN_FINDINGS ? (
+      <div className="flex flex-wrap items-center gap-1.5">
+        {SEVERITY_LABELS.map((label) => {
+          const n = findings.filter((f) => f.severityLabel === label).length;
+          if (n === 0) return null;
+          const on = findingFilter.severities?.includes(label) ?? false;
+          return (
+            <button
+              key={label}
+              aria-pressed={on}
+              onClick={() =>
+                setFilter({
+                  severities: on
+                    ? (findingFilter.severities ?? []).filter((s) => s !== label)
+                    : [...(findingFilter.severities ?? []), label],
+                })
+              }
+              className={chipClass(on ? "accent" : "neutral", "cursor-pointer tabular-nums")}
+            >
+              {label} {n}
+            </button>
+          );
+        })}
+        {fileOptions.length > 1 && (
+          <select
+            value={findingFilter.file ?? ""}
+            onChange={(e) => setFilter({ file: e.target.value || null })}
+            aria-label={t("doc.filterAllFiles")}
+            className="h-6 max-w-[14rem] truncate rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 text-[11px] text-[var(--cf-text)]"
+          >
+            <option value="">{t("doc.filterAllFiles")}</option>
+            {fileOptions.map((file) => (
+              <option key={file} value={file}>
+                {file}
+              </option>
+            ))}
+          </select>
+        )}
+        <label className="flex h-6 min-w-[8rem] flex-1 items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 text-[11px] focus-within:border-[var(--cf-accent)]">
+          <Search size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
+          <input
+            value={findingFilter.query ?? ""}
+            onChange={(e) => setFilter({ query: e.target.value })}
+            placeholder={t("doc.filterSearch")}
+            spellCheck={false}
+            className="min-w-0 flex-1 bg-transparent text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)]"
+          />
+        </label>
+        {filterOn && (
+          <>
+            <span className="text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+              {t("doc.filterShown", { n: shown.length, total: findings.length })}
+            </span>
+            <Tooltip label={t("doc.filterClear")}>
+              <button onClick={() => setView({ findingFilter: {} })} aria-label={t("doc.filterClear")} className={iconButtonClass({ size: "xs" })}>
+                <X size={12} />
+              </button>
+            </Tooltip>
+          </>
+        )}
+      </div>
     ) : null;
 
   const findingsBody = (() => {
@@ -659,11 +847,14 @@ export function PrDocument({
         </div>
       );
     }
+    if (shown.length === 0) {
+      return <p className="px-1 py-6 text-center text-[12px] text-[var(--cf-text-faint)]">{t("doc.filterNone")}</p>;
+    }
     if (split && picked) {
       return (
         <div className="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] items-start gap-3">
           <div className="space-y-2">
-            {findings.map((finding, at) => (
+            {shown.map((finding, at) => (
               <div key={finding.id} className="flex items-start gap-2">
                 {selectBox(finding)}
                 <div className="min-w-0 flex-1">
@@ -673,6 +864,7 @@ export function PrDocument({
                     highlighted={finding.id === picked.id}
                     onToggle={() => setView({ picked: finding.id })}
                   />
+                  {commentEditor(finding)}
                 </div>
               </div>
             ))}
@@ -685,7 +877,7 @@ export function PrDocument({
     }
     return (
       <div className="space-y-2">
-        {findings.map((finding, at) => (
+        {shown.map((finding, at) => (
           <div key={finding.id} className="flex items-start gap-2">
             {selectBox(finding)}
             <div className="min-w-0 flex-1">
@@ -694,6 +886,7 @@ export function PrDocument({
                 open={Boolean(expanded[finding.id])}
                 onToggle={() => setView({ expanded: { ...expanded, [finding.id]: !expanded[finding.id] } })}
               />
+              {commentEditor(finding)}
             </div>
           </div>
         ))}
@@ -767,7 +960,7 @@ export function PrDocument({
           </div>
           {displayJob && parsed && !hydrating && (
             <div className="flex flex-wrap items-center gap-1.5">
-              <QualityGateBadges grades={parsed.grades} findings={activeFindings} />
+              <QualityGateBadges grades={parsed.grades} findings={activeFindings} blocking={runMemory?.gatePolicy} />
               <SeverityCountBadges findings={activeFindings} />
               <RunMenu
                 runs={iterations}
@@ -837,7 +1030,9 @@ export function PrDocument({
               <SkipForward size={14} className="mt-0.5 shrink-0 text-[var(--cf-warning)]" />
               <div className="min-w-0 flex-1">
                 <p className="select-text break-words">{settledNote.text}</p>
-                {settledNote.kind === "confirm" && !prClosed && (
+                {/* "Same commit, nothing new" is an answer too — and re-running it anyway (another
+                    level, after editing the prompts) is the human's call to make. */}
+                {(settledNote.kind === "confirm" || settledNote.text.startsWith("🔁")) && !prClosed && (
                   <button onClick={() => runReview(undefined, true)} className="mt-1 text-[var(--cf-accent)] underline">
                     {t("pr.reviewAnyway")}
                   </button>
@@ -855,6 +1050,7 @@ export function PrDocument({
                   {diff.kept > 0 && <span className={chipClass("neutral")}>{t("doc.diffKept", { n: diff.kept })}</span>}
                 </div>
               )}
+              {displayJob && !hydrating && filterBar}
               {findingsBody}
             </>
           )}
@@ -968,6 +1164,7 @@ export function PrDocument({
             <span className="shrink-0 text-[12px] text-[var(--cf-text-muted)]">{t("pr.levelLabel")}</span>
             <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={Boolean(runningJob)} />
             <ReviewEngineTag />
+            {preview && !runningJob && <PreviewEstimate preview={preview} />}
             {/* `ml-auto` keeps it at the right edge when a narrow panel wraps it onto a line of
                 its own, instead of letting it fall back under the selector. */}
             <button
@@ -1471,6 +1668,27 @@ function MergePanel({
  * What a link-only review says about itself: which repository the PR is in (nothing else on screen
  * says so), what it cannot see, and the way out — cloning it.
  */
+/** One quiet line beside the level picker: how much the review would read and roughly send. The
+ *  detail — what the number does and does not include — is the tooltip, not more text. */
+function PreviewEstimate({ preview }: { preview: ReviewPreview }) {
+  const t = useT();
+  const tokens = Math.max(1, Math.round(preview.inputTokens / 1000));
+  const hint = [
+    t("pr.previewHint"),
+    preview.degraded > 0 ? t("pr.previewDegraded", { n: preview.degraded }) : null,
+    preview.skip ? preview.skip.reason : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <Tooltip label={hint}>
+      <span className={chipClass(preview.skip?.requiresConfirmation || preview.degraded > 0 ? "warn" : "neutral", "tabular-nums")}>
+        {t("pr.previewEstimate", { files: preview.files + preview.deleted, passes: preview.passes, tokens })}
+      </span>
+    </Tooltip>
+  );
+}
+
 function LinkReviewNotice({ session }: { session: LinkPrSession }) {
   const t = useT();
   const openCloneOffer = useUiStore((s) => s.openPrLinkModal);

@@ -160,6 +160,10 @@ pub struct ReviewMeta {
     /// How many reviewers produced it — what the level actually bought.
     #[serde(default)]
     pub workers: usize,
+    /// A reviewer or pass failed: part of the PR was not looked at. Lets the next review of the same
+    /// commit run instead of answering "nothing changed".
+    #[serde(default)]
+    pub incomplete: bool,
 }
 
 /// The *kind* of defect a finding is, across runs: file + category, falling back to the subtitle
@@ -172,9 +176,34 @@ pub struct ReviewMeta {
 /// be (see [`pair_up`], which settles the rest by line) and is the fallback for a publish that names
 /// no id (see [`match_publish_item`]).
 pub fn finding_identity(archivo: Option<&str>, categoria: &str) -> String {
-    let file = archivo.unwrap_or_default().trim_start_matches('/').to_lowercase();
-    let cat = categoria.to_lowercase();
-    format!("{file}|{cat}")
+    let file = crate::review::outline::normalize_path(archivo.unwrap_or_default()).to_lowercase();
+    format!("{file}|{}", category_slug(categoria))
+}
+
+/// A category as the model would have meant it, whatever it typed: lowercase, accents and
+/// punctuation folded, words joined by `-`. `Null dereference`, `null-dereference` and
+/// `NULL_DEREFERENCE` are one category.
+///
+/// The prompt asks for a kebab-case slug, and most of the time it gets one — but "most of the time"
+/// was the weak point of reconciliation: the same defect re-reported as `Null Dereference` read as a
+/// new finding *and* the old one as fixed, and its thread got a "resuelto" it had not earned.
+pub fn category_slug(categoria: &str) -> String {
+    let folded: String = categoria
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            c if c.is_alphanumeric() => c,
+            _ => ' ',
+        })
+        .collect();
+    folded.split_whitespace().collect::<Vec<_>>().join("-")
 }
 
 fn identity(f: &MemoryFinding) -> String {
@@ -259,19 +288,78 @@ fn pair_up(prev: &[MemoryFinding], current: &[MemoryFinding]) -> Vec<Option<usiz
             taken[j] = true;
         }
     }
+
+    // Second chance for what the category could not settle: the same defect re-reported under
+    // another name. Only on overwhelming evidence — same file, same type, within a few lines, and
+    // saying the same thing — because pairing two *different* defects is worse than missing one:
+    // the second one's text would be posted as a "sigue presente" reply in the first one's thread.
+    let mut near: Vec<(u32, usize, usize)> = Vec::new();
+    for (i, cur) in current.iter().enumerate() {
+        if of_current[i].is_some() || cur.archivo.is_none() {
+            continue;
+        }
+        let here = line_span(cur.lineas.as_deref());
+        for (j, p) in prev.iter().enumerate() {
+            if taken[j] || p.estado == "resuelto" || p.tipo != cur.tipo {
+                continue;
+            }
+            let same_file = matches!((&cur.archivo, &p.archivo), (Some(a), Some(b)) if crate::review::outline::same_path(a, b));
+            let distance = span_distance(here, line_span(p.lineas.as_deref()));
+            if same_file && distance <= RENAMED_MAX_DISTANCE && says_the_same(cur, p) {
+                near.push((distance, i, j));
+            }
+        }
+    }
+    near.sort_unstable();
+    for (_, i, j) in near {
+        if of_current[i].is_none() && !taken[j] {
+            of_current[i] = Some(j);
+            taken[j] = true;
+        }
+    }
     of_current
+}
+
+/// How far apart, in lines, a re-named finding may be from the one it continues.
+const RENAMED_MAX_DISTANCE: u32 = 3;
+
+/// Whether two findings describe the same thing in words: their categories share a word, or their
+/// subtitles share enough of theirs. Deliberately crude — it only has to separate "the null check,
+/// renamed" from "a different bug two lines down", and the line distance already did most of that.
+fn says_the_same(a: &MemoryFinding, b: &MemoryFinding) -> bool {
+    fn words(s: &str) -> std::collections::HashSet<String> {
+        category_slug(s).split('-').filter(|w| w.chars().count() > 3).map(str::to_string).collect()
+    }
+    let (ca, cb) = (words(&a.categoria), words(&b.categoria));
+    if ca.intersection(&cb).next().is_some() {
+        return true;
+    }
+    let (sa, sb) = (words(&a.subtitulo), words(&b.subtitulo));
+    let union = sa.union(&sb).count();
+    union > 0 && sa.intersection(&sb).count() * 4 >= union
+}
+
+/// What a run did **not** re-read, so reconciliation never mistakes "not looked at" for "fixed".
+///
+/// A previous finding is declared `resuelto` because the run that should have re-found it did not.
+/// That inference only holds for code the run actually read: a reviewer that failed, a file whose
+/// content had to be dropped from its bundle, a cross-file pass that never ran — each leaves
+/// findings nobody re-checked, and calling those fixed is how a Blocker used to be marked resolved
+/// (and its thread closed on the pull request) by a review that crashed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Unread<'a> {
+    /// Files whose reviewer failed or whose content never reached one.
+    pub files: &'a [String],
+    /// Findings with no file were not re-checked either — a failed cross-file pass, or any failure
+    /// at all when the run cannot say which reviewer would have owned them.
+    pub unlocated: bool,
 }
 
 /// True when `finding_file` is (a suffix-tolerant match of) one of `changed`. File paths differ
 /// between the review markdown (repo-relative) and git (also repo-relative, sometimes with a
 /// leading slash), so compare normalized and allow either to be a suffix of the other.
 fn file_in_changed(finding_file: &str, changed: &[String]) -> bool {
-    let norm = |s: &str| s.trim_start_matches('/').to_lowercase();
-    let a = norm(finding_file);
-    changed.iter().any(|c| {
-        let c = norm(c);
-        c == a || c.ends_with(&a) || a.ends_with(&c)
-    })
+    changed.iter().any(|c| crate::review::outline::same_path(c, finding_file))
 }
 
 /// Reconciles a fresh parse (`current`) against the previous run (`prev`) and returns the full,
@@ -296,11 +384,24 @@ fn file_in_changed(finding_file: &str, changed: &[String]) -> bool {
 /// Ids come out unique even from a memory that has duplicates in it — which runs saved before the
 /// matching was one to one do. The first holder keeps the id; any later one is renumbered, thread
 /// and all, rather than left sharing it.
+#[cfg(test)]
 pub fn reconcile(
     prev: &[MemoryFinding],
     current: &[MemoryFinding],
     prev_iter: usize,
     changed_files: Option<&[String]>,
+) -> (Vec<MemoryFinding>, ReviewDelta) {
+    reconcile_with(prev, current, prev_iter, changed_files, Unread::default())
+}
+
+/// [`reconcile`], told what the run did not re-read — see [`Unread`]. A finding there persists
+/// exactly as one on a file the re-review never touched does.
+pub fn reconcile_with(
+    prev: &[MemoryFinding],
+    current: &[MemoryFinding],
+    prev_iter: usize,
+    changed_files: Option<&[String]>,
+    unread: Unread<'_>,
 ) -> (Vec<MemoryFinding>, ReviewDelta) {
     let iter_actual = prev_iter + 1;
     let mut next_id = max_id_num(prev).max(max_id_num(current)) + 1;
@@ -376,6 +477,12 @@ pub fn reconcile(
                 // No changed-file info (full review) or no location → treat as re-analyzed.
                 _ => true,
             };
+            // …unless the run never actually read it: a failed reviewer is not evidence of a fix.
+            let reread = match &p.archivo {
+                Some(file) => !file_in_changed(file, unread.files),
+                None => !unread.unlocated,
+            };
+            let file_touched = file_touched && reread;
             if file_touched {
                 // Its file was re-reviewed and it's gone → resolved (thread kept for the reply).
                 f.estado = "resuelto".to_string();
@@ -474,16 +581,12 @@ impl FpSuppression {
     /// True when `f` is what this rule denies: same category, and — for a file-scoped rule — the
     /// same file. Suffix-tolerant on the path for the same reason [`file_in_changed`] is.
     pub fn matches(&self, categoria: &str, archivo: Option<&str>) -> bool {
-        if !self.categoria.eq_ignore_ascii_case(categoria.trim()) {
+        if category_slug(&self.categoria) != category_slug(categoria) {
             return false;
         }
         match (&self.archivo, archivo) {
             (None, _) => true,
-            (Some(rule_file), Some(f)) => {
-                let norm = |s: &str| s.trim().trim_start_matches('/').to_lowercase();
-                let (a, b) = (norm(rule_file), norm(f));
-                a == b || a.ends_with(&b) || b.ends_with(&a)
-            }
+            (Some(rule_file), Some(f)) => crate::review::outline::same_path(rule_file.trim(), f.trim()),
             (Some(_), None) => false,
         }
     }
@@ -1171,5 +1274,72 @@ mod tests {
         assert!(block.contains("src/app/Seguimiento.tsx"));
         assert!(block.contains("todo el repositorio"));
         assert!(block.contains("el padre remonta por key={id}"));
+    }
+
+    #[test]
+    fn categories_compare_by_their_slug() {
+        assert_eq!(category_slug("Null Dereference"), "null-dereference");
+        assert_eq!(category_slug("NULL_DEREFERENCE"), "null-dereference");
+        assert_eq!(category_slug(" validación-faltante "), "validacion-faltante");
+        assert_eq!(finding_identity(Some("/src/a.ts"), "Null dereference"), finding_identity(Some("src/a.ts"), "null-dereference"));
+    }
+
+    /// The same defect, re-reported with its category spelled differently, keeps its id and thread
+    /// instead of reading as one new finding plus one fixed.
+    #[test]
+    fn a_reworded_category_still_continues_its_finding() {
+        let prev = vec![MemoryFinding {
+            subtitulo: "Se lee cuenta.saldo sin verificar que la cuenta exista".into(),
+            ..remembered("F-004", "posteado", "null-dereference", "src/a.ts", "40-45", Some(77))
+        }];
+        let current = vec![MemoryFinding {
+            subtitulo: "Acceso a cuenta.saldo sin comprobar si la cuenta existe".into(),
+            ..reported("acceso-nulo-a-cuenta", "src/a.ts", "41-45")
+        }];
+        let (merged, delta) = reconcile(&prev, &current, 1, None);
+        assert_eq!(merged[0].id, "F-004");
+        assert_eq!(merged[0].thread_id, Some(77));
+        assert_eq!((delta.nuevos, delta.resueltos), (0, 0));
+    }
+
+    /// …but a different defect a few lines away is not taken for it.
+    #[test]
+    fn a_different_defect_nearby_is_not_paired_by_proximity() {
+        let prev = vec![MemoryFinding {
+            subtitulo: "Se lee cuenta.saldo sin verificar que la cuenta exista".into(),
+            ..remembered("F-004", "posteado", "null-dereference", "src/a.ts", "40-45", Some(77))
+        }];
+        let current = vec![MemoryFinding {
+            subtitulo: "El bucle recorre una posición de más al final del arreglo".into(),
+            ..reported("off-by-one", "src/a.ts", "44")
+        }];
+        let (merged, delta) = reconcile(&prev, &current, 1, None);
+        assert_ne!(merged[0].id, "F-004");
+        assert_eq!((delta.nuevos, delta.resueltos), (1, 1));
+    }
+
+    /// A reviewer that failed is not evidence of a fix: its files' findings persist.
+    #[test]
+    fn findings_on_files_nobody_reread_persist_instead_of_resolving() {
+        let prev = vec![
+            remembered("F-001", "posteado", "npe", "src/a.ts", "40", Some(7)),
+            remembered("F-002", "posteado", "sqli", "src/b.ts", "10", Some(8)),
+            MemoryFinding { archivo: None, lineas: None, ..remembered("F-003", "abierto", "breaking-change", "x", "1", None) },
+        ];
+        let unread_files = vec!["src/a.ts".to_string()];
+        let (merged, delta) =
+            reconcile_with(&prev, &[], 1, None, Unread { files: &unread_files, unlocated: true });
+        let state = |id: &str| merged.iter().find(|f| f.id == id).map(|f| f.estado.clone()).unwrap();
+        assert_eq!(state("F-001"), "posteado", "its reviewer failed");
+        assert_eq!(state("F-002"), "resuelto", "its file was re-read and it is gone");
+        assert_eq!(state("F-003"), "abierto", "no file, and the run cannot vouch for it");
+        assert_eq!(delta.resueltos, 1);
+    }
+
+    #[test]
+    fn a_rule_matches_its_category_however_it_is_spelled_and_only_its_own_file() {
+        let r = rule("Null dereference", Some("app/Seguimiento.tsx"));
+        assert!(r.matches("null-dereference", Some("src/app/Seguimiento.tsx")));
+        assert!(!r.matches("null-dereference", Some("src/myapp/Seguimiento.tsx")), "a path boundary, not a raw suffix");
     }
 }

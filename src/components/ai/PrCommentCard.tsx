@@ -238,8 +238,9 @@ export function PrCommentCard({
             resolution={resolution}
             runId={runId}
             runStartedAt={runStartedAt}
-            onClick={(extra) => void resolve(withExtraInstructions(threadFixPrompt(thread), extra))}
+            onClick={(extra, verifyCommand) => void resolve(withExtraInstructions(threadFixPrompt(thread), extra), verifyCommand)}
             onClear={clearResolution}
+            verifyProjectId={projectId ?? undefined}
             trailing={
               onResolveThread && (
                 <button

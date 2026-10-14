@@ -1400,8 +1400,14 @@ export const analyzeWorkingChanges = (projectId: string, jobId: string, agent?: 
     agentPrompt: agent?.prompt ?? null,
   });
 
-export const resolveFindingWithAi = (projectId: string, findingPrompt: string, runId?: string) =>
-  invoke<string>("resolve_finding_with_ai", { projectId, findingPrompt, runId });
+/** `verifyCommand`, when set, runs after the fix (the project's type check or build): a failure
+ * gets the agent one repair turn with the command's output, and the result says how it ended. */
+export const resolveFindingWithAi = (projectId: string, findingPrompt: string, runId?: string, verifyCommand?: string | null) =>
+  invoke<string>("resolve_finding_with_ai", { projectId, findingPrompt, runId, verifyCommand: verifyCommand ?? null });
+
+/** The project's verification command for "fix with AI": the one saved for it (setting
+ * `fix_verify_command:<projectId>`), or what the Reviewer would build it with. Empty when neither. */
+export const fixVerifyCommand = (projectId: string) => invoke<string>("fix_verify_command", { projectId });
 
 export interface ChatReply {
   text: string;
@@ -1704,6 +1710,25 @@ export const reviewPullRequest = (
  * `review_pipeline::SKIP_MARKER`. */
 export const REVIEW_SKIPPED = "REVIEW_SKIPPED::";
 
+/** What a review would read and roughly cost, measured from the refs already on disk — see
+ * `review_pipeline::ReviewPreview`. An estimate: the review itself fetches first. */
+export interface ReviewPreview {
+  files: number;
+  deleted: number;
+  outOfScope: number;
+  groups: number;
+  /** Model invocations at most: reviewers, cross-file pass, closing pass. */
+  passes: number;
+  degraded: number;
+  /** Tokens CodeFlow itself sends — not what the model reads on its own afterwards. */
+  inputTokens: number;
+  delta: boolean;
+  skip: { reason: string; requiresConfirmation: boolean } | null;
+}
+
+export const previewPrReview = (projectId: string, prId: number, level: string) =>
+  invoke<ReviewPreview>("preview_pr_review", { projectId, prId, level });
+
 /** One depth level as the settings screen edits it — every value resolved, so the screen shows
  * what a review will really run under even before anything is customised. */
 export interface ReviewLevelSettings {
@@ -1717,6 +1742,10 @@ export interface ReviewLevelSettings {
   filesPerGroup: number;
   maxGroups: number;
   crossFile: boolean;
+  /** How hard the reviewers think: `low` · `medium` · `high` · `max`, or `""` for the CLI's default. */
+  effort: string;
+  /** The severities that get a second look (a refutation pass) before they are reported. */
+  verify: string[];
 }
 
 /** The workspace's whole PR review policy. The numbers the engine enforces and freezes into every
@@ -1779,6 +1808,8 @@ export const publishPrReview = (
   items: PostFindingItem[],
   postSummary: boolean,
   summary: string | null,
+  /** Also close, on the host, the threads of the findings this run holds as resolved. */
+  closeResolved = false,
 ) =>
   invoke<import("../../types/domain").PublishOutcome>("publish_pr_review", {
     projectId,
@@ -1787,6 +1818,7 @@ export const publishPrReview = (
     items,
     postSummary,
     summary,
+    closeResolved,
   });
 
 /** Posts the findings of a link-only review, addressed by URL. There's no saved run to reconcile

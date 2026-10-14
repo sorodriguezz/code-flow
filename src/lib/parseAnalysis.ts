@@ -6,9 +6,23 @@ export interface FindingLocation {
   endLine: number;
 }
 
+/** The exact new text for a span of the finding's file (`✏️ Reemplazo`), when the fix is that
+ * local — what becomes a one-click suggestion on hosts that have them. */
+export interface FindingReplacement {
+  start: number;
+  end: number;
+  lang: string;
+  code: string;
+}
+
 export interface AnalysisFinding {
   id: string;
+  /** The UI's three buckets, from the heading's emoji. */
   severity: "critical" | "warning" | "info";
+  /** The fine severity the heading names — `Blocker` · `Crítico` · `Mayor` · `Menor` · `Info`. What
+   * the Quality Gate policy is written in, which the three buckets cannot express (a gate that
+   * blocks on `Mayor` but not on `Menor` needs both apart). */
+  severityLabel: string;
   type: string;
   category: string;
   subtitle: string;
@@ -17,6 +31,7 @@ export interface AnalysisFinding {
   suggestion: string;
   exampleLang: string;
   exampleCode: string;
+  replacement: FindingReplacement | null;
   confidence: number | null;
 }
 
@@ -47,6 +62,38 @@ function severityFromEmoji(emoji: string): AnalysisFinding["severity"] {
   if (emoji === "⚠️") return "warning";
   return "info";
 }
+
+/** The five severities, most severe first — the backend's `Severity::label`, accents included. */
+export const SEVERITY_LABELS = ["Blocker", "Crítico", "Mayor", "Menor", "Info"] as const;
+
+/** Any spelling of a severity (either language, with or without accents) as its canonical label —
+ * the same tolerance as the backend's `Severity::parse`. `null` for nothing recognisable. */
+export function canonicalSeverity(raw: string): string | null {
+  const key = raw
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (["blocker", "bloqueante"].includes(key)) return "Blocker";
+  if (["critico", "critical", "critica"].includes(key)) return "Crítico";
+  if (["mayor", "major", "advertencia", "warning"].includes(key)) return "Mayor";
+  if (["menor", "minor"].includes(key)) return "Menor";
+  if (["info", "nit", "nitpick", "sugerencia", "informativo"].includes(key)) return "Info";
+  return null;
+}
+
+/** The fine label a heading's emoji implies when its words don't parse — the bucket's most likely
+ * member, as the backend's parser falls back too. */
+function labelFromEmoji(emoji: string): string {
+  if (emoji === "🚨") return "Crítico";
+  if (emoji === "⚠️") return "Mayor";
+  return "Menor";
+}
+
+/** The Quality Gate's default policy — what the backend's `GateConfig` defaults to. */
+export const DEFAULT_GATE_POLICY = ["Blocker", "Crítico"];
+
+const REPLACEMENT_RE = /✏️?\s*Reemplazo:\s*(\d+)(?:\s*-\s*(\d+))?[^\n]*\n```(\w*)\n([\s\S]*?)```/;
 
 /** Parses "{file}:{startLine}-{endLine}" (or a single "{file}:{line}") from the finding's
  * "📍 Ubicación" field — the file/line this comment gets anchored to when posted to the PR.
@@ -98,7 +145,7 @@ export function parseAnalysis(raw: string): ParsedAnalysis {
       continue;
     }
     sawHeader = true;
-    const [, emoji, , typeRaw, categoryRaw, id] = headerMatch;
+    const [, emoji, severityRaw, typeRaw, categoryRaw, id] = headerMatch;
     i++;
     const blockLines: string[] = [];
     while (i < lines.length && !lines[i].match(HEADER_RE)) {
@@ -110,13 +157,21 @@ export function parseAnalysis(raw: string): ParsedAnalysis {
     const subtitleMatch = block.match(/^([\s\S]*?)\n\n?(?:📍|💭)/);
     const locationMatch = block.match(/📍\s*Ubicaci[oó]n:\s*([^\n]+)/);
     const whyMatch = block.match(/💭\s*Por qué:\s*([\s\S]*?)\n\n?💡/);
-    const suggestionMatch = block.match(/💡\s*Sugerencia:\s*([\s\S]*?)\n\n?(?:🛠️|🎯)/);
-    const codeMatch = block.match(/```(\w*)\n([\s\S]*?)```/);
+    const suggestionMatch = block.match(/💡\s*Sugerencia:\s*([\s\S]*?)\n\n?(?:🛠️|✏️|🔎|🎯)/);
+    // The example is the fence under 🛠️ — not just the first fence in the block, which on a finding
+    // that carries an exact replacement (and no example) would be the replacement.
+    const exampleAt = block.indexOf("🛠️");
+    const replacementAt = block.indexOf("✏️");
+    const exampleSection =
+      exampleAt >= 0 ? block.slice(exampleAt, replacementAt > exampleAt ? replacementAt : undefined) : replacementAt >= 0 ? "" : block;
+    const codeMatch = exampleSection.match(/```(\w*)\n([\s\S]*?)```/);
+    const replacementMatch = block.match(REPLACEMENT_RE);
     const confidenceMatch = block.match(/🎯\s*Confianza:\s*(\d+)/);
 
     findings.push({
       id: id.trim(),
       severity: severityFromEmoji(emoji),
+      severityLabel: canonicalSeverity(severityRaw) ?? labelFromEmoji(emoji),
       type: typeRaw.trim(),
       category: categoryRaw.trim(),
       subtitle: (subtitleMatch?.[1] ?? block.split("\n")[0] ?? "").trim(),
@@ -125,6 +180,14 @@ export function parseAnalysis(raw: string): ParsedAnalysis {
       suggestion: (suggestionMatch?.[1] ?? "").trim(),
       exampleLang: codeMatch?.[1] ?? "",
       exampleCode: codeMatch?.[2] ?? "",
+      replacement: replacementMatch
+        ? {
+            start: Number(replacementMatch[1]),
+            end: Number(replacementMatch[2] ?? replacementMatch[1]),
+            lang: replacementMatch[3] ?? "",
+            code: (replacementMatch[4] ?? "").replace(/\n$/, ""),
+          }
+        : null,
       confidence: confidenceMatch ? Number(confidenceMatch[1]) : null,
     });
   }
@@ -144,21 +207,43 @@ const SEVERITY_DOT: Record<AnalysisFinding["severity"], string> = {
   info: "🔵",
 };
 
-const SEVERITY_LABEL_ES: Record<AnalysisFinding["severity"], string> = {
-  critical: "Crítico",
-  warning: "Menor",
-  info: "Info",
-};
+/** What a publish's tally counts: how many of each fine severity, most severe first — "2 Crítico ·
+ * 1 Mayor". (It used to count the three buckets and call the middle one "Menor", which it never is:
+ * the ⚠️ bucket is `Mayor`.) */
+function severityTally(findings: AnalysisFinding[]): string[] {
+  return SEVERITY_LABELS.map((label) => ({ label, n: findings.filter((f) => f.severityLabel === label).length }))
+    .filter(({ n }) => n > 0)
+    .map(({ label, n }) => `${n} ${label}`);
+}
 
 export function locationLabel(location: FindingLocation): string {
   return `${location.file}:${location.startLine}${location.endLine !== location.startLine ? `-${location.endLine}` : ""}`;
 }
 
-/** No critical findings = the change is postable/mergeable as far as this review is
- * concerned — computed deterministically rather than asking the model to self-report a
- * pass/fail that might contradict its own findings list. */
-export function computeQualityGatePassed(findings: AnalysisFinding[]): boolean {
-  return !findings.some((f) => f.severity === "critical");
+/** Whether `findings` pass the Quality Gate: none of them carries a severity the policy blocks on —
+ * computed deterministically rather than asking the model to self-report a pass/fail that might
+ * contradict its own findings list.
+ *
+ * `blocking` is the policy the run was reviewed under (the run's `quality_gate_policy`, frozen in its
+ * memory); without one, the default. It used to be "no 🚨" whatever the policy said, so a workspace
+ * that blocks on `Mayor` saw a PASSED badge on a review the backend had FAILED. */
+export function computeQualityGatePassed(findings: AnalysisFinding[], blocking: string[] = DEFAULT_GATE_POLICY): boolean {
+  const policy = new Set(blocking.map((s) => canonicalSeverity(s) ?? s));
+  return !findings.some((f) => policy.has(f.severityLabel));
+}
+
+/** A replacement in the host's own suggestion syntax when it has one and the comment lands on
+ * exactly the lines it replaces; a plain block naming its lines otherwise. Mirrors the backend's
+ * `render::replacement_markdown` — a finding published from here and from a phone or a flow reads
+ * the same. */
+export function replacementMarkdown(finding: AnalysisFinding, provider?: string): string | null {
+  const r = finding.replacement;
+  if (!r) return null;
+  const exact = finding.location !== null && finding.location.startLine === r.start && finding.location.endLine === r.end;
+  if (exact && provider === "github") return `✏️ **Sugerencia aplicable:**\n\`\`\`suggestion\n${r.code}\n\`\`\``;
+  if (exact && provider === "gitlab") return `✏️ **Sugerencia aplicable:**\n\`\`\`suggestion:-${r.end - r.start}+0\n${r.code}\n\`\`\``;
+  const lines = r.end > r.start ? `${r.start}-${r.end}` : `${r.start}`;
+  return `✏️ **Reemplazo sugerido (líneas ${lines}):**\n\`\`\`${r.lang}\n${r.code}\n\`\`\``;
 }
 
 /** Reconstructs one finding as a standalone markdown block — the same shape the model
@@ -166,11 +251,13 @@ export function computeQualityGatePassed(findings: AnalysisFinding[]): boolean {
  * without the "📍 Ubicación" line (redundant once the comment is anchored to that exact
  * line on the PR). Used to post a PR review as one comment thread per finding instead of one
  * giant comment. */
-export function formatFindingAsComment(finding: AnalysisFinding): string {
+export function formatFindingAsComment(finding: AnalysisFinding, provider?: string): string {
   const lines = [`### ${SEVERITY_EMOJI[finding.severity]} [${finding.type}] ${finding.category} · ${finding.id}`, "", finding.subtitle];
   if (finding.why) lines.push("", `💭 **Por qué:** ${finding.why}`);
   if (finding.suggestion) lines.push("", `💡 **Sugerencia:** ${finding.suggestion}`);
   if (finding.exampleCode) lines.push("", "🛠️ Ejemplo de solución:", `\`\`\`${finding.exampleLang}`, finding.exampleCode, "```");
+  const replacement = replacementMarkdown(finding, provider);
+  if (replacement) lines.push("", replacement);
   if (finding.confidence !== null) lines.push("", `🎯 Confianza: ${finding.confidence}/100`);
   return lines.join("\n");
 }
@@ -201,6 +288,10 @@ export function formatFindingAsFixPrompt(finding: AnalysisFinding): string {
   if (finding.why) lines.push(`Por qué: ${finding.why}`);
   if (finding.suggestion) lines.push(`Sugerencia: ${finding.suggestion}`);
   if (finding.exampleCode) lines.push("Ejemplo de solución:", `\`\`\`${finding.exampleLang}`, finding.exampleCode, "```");
+  if (finding.replacement) {
+    const r = finding.replacement;
+    lines.push(`Reemplazo propuesto para las líneas ${r.start}-${r.end}:`, `\`\`\`${r.lang}`, r.code, "```");
+  }
   return lines.join("\n");
 }
 
@@ -236,6 +327,7 @@ export function buildFixpack(parsed: ParsedAnalysis, prId: number): string {
     causa: f.why,
     correccion: f.suggestion,
     codigo_sugerido: f.exampleCode || null,
+    reemplazo: f.replacement,
     confianza: f.confidence,
   }));
   return JSON.stringify(
@@ -284,7 +376,22 @@ export interface SummaryMemory {
   files: number;
   additions: number;
   deletions: number;
+  /** The severities this run's Quality Gate blocked on (its frozen `quality_gate_policy`). */
+  gatePolicy?: string[];
+  /** The lens numbers this run's contract applied (its frozen `level_contract.lenses`). */
+  lenses?: number[];
 }
+
+/** The built-in lens catalog, by number — the short names the summary prints for a run's frozen
+ * lens list (`DEFAULT_LENSES` in `review::contract`). */
+const LENS_NAMES: Record<number, string> = {
+  1: "correctness",
+  2: "seguridad",
+  3: "rendimiento",
+  4: "contrato / integridad de datos",
+  5: "tests",
+  6: "mantenibilidad",
+};
 
 /** The lenses each depth actually applies — the same split the backend's level directive makes
  * (`ai.rs`: básico is a Blocker/Crítico triage, completo runs the five main lenses, ultra adds
@@ -314,7 +421,7 @@ export function formatSummaryComment(
   posted: AnalysisFinding[],
   memory?: SummaryMemory | null,
 ): string {
-  const passed = computeQualityGatePassed(parsed.findings);
+  const passed = computeQualityGatePassed(parsed.findings, memory?.gatePolicy);
   const lines = [`### 📋 Revisión automatizada (pr-review) — ${date}`, "", `🛡️ **Quality Gate:** ${passed ? "✅ PASSED" : "❌ FAILED"}`];
   if (parsed.grades) {
     lines.push(
@@ -327,10 +434,7 @@ export function formatSummaryComment(
   // this one no longer finds. It's the half of the story the review text can't tell — a clean run
   // looks identical whether the PR never had a defect or had three that were all fixed.
   const resolved = memory?.resolved ?? [];
-  const counts = (["critical", "warning", "info"] as const)
-    .map((sev) => ({ sev, n: posted.filter((f) => f.severity === sev).length }))
-    .filter(({ n }) => n > 0)
-    .map(({ sev, n }) => `${n} ${SEVERITY_LABEL_ES[sev]}`);
+  const counts = severityTally(posted);
 
   // Nothing open and nothing on the record. Rejections still count as "on the record": a review
   // whose every finding was thrown out must say so, not report a clean bill of health.
@@ -428,7 +532,8 @@ function scopeLines(memory?: SummaryMemory | null): string[] {
   if (memory.iter > 0) scope.push(`iteración ${memory.iter}`);
   if (memory.level) scope.push(`nivel **${memory.level}**`);
   if (scope.length > 0) out.push("", `**Alcance analizado:** ${scope.join(" · ")}`);
-  const lenses = REVIEW_LENSES[memory.level];
+  // The run's own lens list when its memory froze one; the level's usual set for older runs.
+  const lenses = memory.lenses?.length ? memory.lenses.map((n) => LENS_NAMES[n] ?? `lente ${n}`) : REVIEW_LENSES[memory.level];
   if (lenses) out.push(`**Lentes aplicadas:** ${lenses.join(" · ")}`);
   return out;
 }
@@ -490,7 +595,16 @@ export function summaryMemoryOf(run: Pick<ReviewRunDetail, "findings" | "meta" |
     files: typeof meta.files === "number" ? meta.files : 0,
     additions: typeof meta.additions === "number" ? meta.additions : 0,
     deletions: typeof meta.deletions === "number" ? meta.deletions : 0,
+    gatePolicy: Array.isArray(meta.quality_gate_policy) ? (meta.quality_gate_policy as unknown[]).filter((s): s is string => typeof s === "string") : undefined,
+    lenses: lensesOf(meta.level_contract),
   };
+}
+
+/** A run's frozen lens numbers, or `undefined` for a run that predates them. */
+function lensesOf(contract: unknown): number[] | undefined {
+  if (!contract || typeof contract !== "object") return undefined;
+  const lenses = (contract as { lenses?: unknown }).lenses;
+  return Array.isArray(lenses) ? lenses.filter((n): n is number => typeof n === "number") : undefined;
 }
 
 /** The decision comment for a saved run — what the PR panel posts when it decides, with the run's
@@ -531,7 +645,7 @@ export function formatDecisionComment(
     return lines.join("\n");
   }
 
-  const passed = computeQualityGatePassed(open);
+  const passed = computeQualityGatePassed(open, memory?.gatePolicy);
   lines.push(`🛡️ **Quality Gate:** ${passed ? "✅ PASSED" : "❌ FAILED"}`);
   if (parsed.grades) {
     lines.push(

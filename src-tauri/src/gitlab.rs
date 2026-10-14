@@ -792,6 +792,26 @@ pub async fn post_pr_comment(
     Ok(created.id)
 }
 
+/// Rewrites a plain comment in place — what keeps the review summary to one sticky note that each
+/// publish updates, rather than a new one per run. `note_id` is what [`post_pr_comment`] returned,
+/// which is also the thread id [`list_pr_comment_threads`] reports for it. A note is edited directly
+/// by its own id; unlike a reply or a resolve, there is no discussion to look up first.
+pub async fn edit_pr_comment(
+    host: &str,
+    project: &str,
+    iid: i64,
+    note_id: i64,
+    content: &str,
+    token: &str,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/projects/{}/merge_requests/{iid}/notes/{note_id}",
+        api_root(host),
+        encode_path(project)
+    );
+    send_ignoring_body(client().put(&url), token, &serde_json::json!({ "body": content })).await
+}
+
 /// Replies on the conversation a note belongs to, keeping it one thread rather than opening a new
 /// one beside it.
 pub async fn reply_pr_comment(

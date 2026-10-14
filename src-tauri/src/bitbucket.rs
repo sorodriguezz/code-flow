@@ -1065,6 +1065,22 @@ pub async fn post_pr_comment(workspace: &str, repo: &str, id: i64, content: &str
     Ok(created.id)
 }
 
+/// Rewrites a comment in place — what keeps the review summary to one sticky comment that each
+/// publish updates, rather than a new one per run. `comment_id` is what [`post_pr_comment`] returned,
+/// which is also the thread id [`list_pr_comment_threads`] reports for it.
+pub async fn edit_pr_comment(
+    workspace: &str,
+    repo: &str,
+    id: i64,
+    comment_id: i64,
+    content: &str,
+    auth: &BitbucketAuth,
+) -> Result<(), String> {
+    let url = format!("{}/pullrequests/{id}/comments/{comment_id}", repo_root(workspace, repo));
+    let body = serde_json::json!({ "content": { "raw": content } });
+    send_ignoring_body(client().put(&url), auth, Some(&body), false).await
+}
+
 /// Replies in the conversation `parent_id` belongs to, keeping it one thread.
 pub async fn reply_pr_comment(
     workspace: &str,

@@ -159,6 +159,28 @@ pub fn latest_review_head(
     .map(|opt| opt.flatten().filter(|s| !s.is_empty()))
 }
 
+/// How deep this PR's newest run went, and whether it finished whole: its level, and the
+/// `incomplete` flag its meta carries when a reviewer failed.
+///
+/// What lets "same commit, nothing new" stop skipping when there *is* something new to do: a deeper
+/// level than last time, or a run that lost part of its review.
+pub fn latest_review_depth(
+    conn: &Connection,
+    project_id: &str,
+    pr_id: i64,
+    repo_key: &str,
+) -> rusqlite::Result<Option<(String, bool)>> {
+    conn.query_row(
+        &format!(
+            "SELECT level, COALESCE(json_extract(meta, '$.incomplete'), 0) FROM review_runs
+             WHERE {MEMORY_SCOPE} ORDER BY created_at DESC LIMIT 1"
+        ),
+        params![project_id, pr_id, repo_key],
+        |row| Ok((row.get::<_, Option<String>>(0)?.unwrap_or_default(), row.get::<_, i64>(1)? != 0)),
+    )
+    .optional()
+}
+
 /// When this PR was last reviewed (RFC 3339, UTC), if ever.
 ///
 /// Used to tell a re-review what has happened *on the pull request* since — a comment written after

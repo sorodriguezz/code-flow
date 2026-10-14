@@ -138,11 +138,14 @@ export function postFindings(
   items: PostFindingItem[],
   postSummary: boolean,
   summary: string | null,
+  /** Close the threads of the run's resolved findings too — the panel's publish does; a decision
+   * note does not. A link review has no memory of what was resolved, so it is ignored there. */
+  closeResolved = false,
 ): Promise<PublishOutcome> {
   if (target.kind !== "project") return api.postPrLinkReviewComment(target.url, items, postSummary, summary);
   const projectId = target.projectId;
   const notify = () => api.notifyStateChange("reviews", projectId);
-  return api.publishPrReview(projectId, prId, runId, items, postSummary, summary).then(
+  return api.publishPrReview(projectId, prId, runId, items, postSummary, summary, closeResolved).then(
     // Publishing rewrites the run's saved findings — each one gains the host thread it was posted
     // under — so a phone holding that review is now showing findings it would offer to publish
     // again. Only the project-backed half emits: a link review saves no run, so there is nothing

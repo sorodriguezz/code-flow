@@ -61,6 +61,26 @@ pub struct ReportContext<'a> {
     pub degraded: &'a [String],
     /// How many workers produced this review — worth stating, because it is what the level bought.
     pub workers: usize,
+    /// Files whose reviewer failed: not reviewed this run, said so — and their earlier findings kept
+    /// rather than resolved (see `review_memory::Unread`).
+    pub unreviewed: &'a [String],
+    /// Passes beyond the per-file reviewers that failed (the cross-file pass, the verification).
+    pub failed_passes: &'a [String],
+    /// How the findings were checked before landing here — see [`Checking`].
+    pub checking: Checking,
+}
+
+/// What the checks between the reviewers and the report did, for the one line that says so.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Checking {
+    /// Findings the verification pass was shown.
+    pub verified: usize,
+    /// …and how many of those it refuted.
+    pub refuted: usize,
+    /// Findings dropped for pointing at code that is not there (or not the PR's).
+    pub ungrounded: usize,
+    /// Locations corrected to where the quoted code really is.
+    pub relocated: usize,
 }
 
 /// Removes the model's own `📈 CALIDAD` line from its prose.
@@ -109,11 +129,40 @@ fn render_finding(finding: &Finding) -> String {
             finding.ejemplo_lang, finding.ejemplo_code
         ));
     }
+    if let Some(r) = &finding.reemplazo {
+        out.push_str(&format!(
+            "✏️ Reemplazo: {}\n```{}\n{}\n```\n\n",
+            span_label(r.start, r.end),
+            r.lang,
+            r.code
+        ));
+    }
     if let Some(confidence) = finding.confianza {
         out.push_str(&format!("🎯 Confianza: {confidence}/100\n\n"));
     }
     out.push_str("---\n\n");
     out
+}
+
+fn span_label(start: u32, end: u32) -> String {
+    if end > start { format!("{start}-{end}") } else { start.to_string() }
+}
+
+/// A replacement in the host's own suggestion syntax, when it has one and the comment will be
+/// anchored on exactly the lines it replaces; otherwise a plain block naming its lines.
+///
+/// GitHub's ```` ```suggestion ```` replaces the commented range. GitLab anchors a note on the
+/// range's **last** line, so its suggestion reaches `end - start` lines up from there. Azure DevOps
+/// and Bitbucket have no API-level suggestion, and a block a person can copy is the honest
+/// substitute.
+pub fn replacement_markdown(finding: &Finding, provider: &str) -> Option<String> {
+    let r = finding.reemplazo.as_ref()?;
+    let anchored_exactly = crate::review_memory::line_span(finding.lineas.as_deref()) == Some((r.start, r.end));
+    Some(match (provider, anchored_exactly) {
+        ("github", true) => format!("✏️ **Sugerencia aplicable:**\n```suggestion\n{}\n```", r.code),
+        ("gitlab", true) => format!("✏️ **Sugerencia aplicable:**\n```suggestion:-{}+0\n{}\n```", r.end - r.start, r.code),
+        _ => format!("✏️ **Reemplazo sugerido (líneas {}):**\n```{}\n{}\n```", span_label(r.start, r.end), r.lang, r.code),
+    })
 }
 
 /// One finding as the body of a pull-request comment.
@@ -138,7 +187,7 @@ fn render_finding(finding: &Finding) -> String {
 /// posted once becomes the thread every *future* desktop publish replies to — the full finding
 /// never gets written anywhere. Rendering it at save time is what lets any client publish the same
 /// comment the desktop would have.
-pub fn comment_markdown(finding: &Finding) -> String {
+pub fn comment_markdown(finding: &Finding, provider: &str) -> String {
     let mut out = format!(
         "### {} [{}] {} · {}",
         finding.severity.emoji(),
@@ -160,6 +209,9 @@ pub fn comment_markdown(finding: &Finding) -> String {
             "\n\n🛠️ Ejemplo de solución:\n```{}\n{}\n```",
             finding.ejemplo_lang, finding.ejemplo_code
         ));
+    }
+    if let Some(block) = replacement_markdown(finding, provider) {
+        out.push_str(&format!("\n\n{block}"));
     }
     if let Some(confidence) = finding.confianza {
         out.push_str(&format!("\n\n🎯 Confianza: {confidence}/100"));
@@ -227,6 +279,36 @@ pub fn review_markdown(findings: &[Finding], ctx: &ReportContext) -> String {
     }
     out.push_str(&scope_line(ctx));
 
+    if !ctx.unreviewed.is_empty() || !ctx.failed_passes.is_empty() {
+        // Said before anything else is read, because it qualifies everything else: a clean report
+        // from a run that lost a reviewer is not a clean report.
+        let mut parts: Vec<String> = Vec::new();
+        if !ctx.unreviewed.is_empty() {
+            parts.push(format!("no se revisaron {}", ctx.unreviewed.join(", ")));
+        }
+        if !ctx.failed_passes.is_empty() {
+            parts.push(format!("falló: {}", ctx.failed_passes.join(", ")));
+        }
+        out.push_str(&format!(
+            "⚠️ Revisión incompleta — {}. Sus hallazgos anteriores se mantienen; vuelve a revisar para completarla.\n",
+            parts.join(" · ")
+        ));
+    }
+    let c = ctx.checking;
+    if c.verified > 0 || c.ungrounded > 0 || c.relocated > 0 {
+        let mut parts: Vec<String> = Vec::new();
+        if c.verified > 0 {
+            parts.push(format!("{} verificado(s), {} refutado(s)", c.verified, c.refuted));
+        }
+        if c.ungrounded > 0 {
+            parts.push(format!("{} descartado(s) al cotejarlos con el código del PR", c.ungrounded));
+        }
+        if c.relocated > 0 {
+            parts.push(format!("{} ubicación(es) corregida(s)", c.relocated));
+        }
+        out.push_str(&format!("🔎 Verificación: {}\n", parts.join(" · ")));
+    }
+
     if !ctx.degraded.is_empty() {
         out.push_str(&format!(
             "ℹ️ Contexto recortado por presupuesto en: {}. Si algo de ahí importa, vuelve a revisarlo con más nivel.\n",
@@ -241,8 +323,10 @@ pub fn review_markdown(findings: &[Finding], ctx: &ReportContext) -> String {
         out.push_str("\n\n");
     }
 
-    if active.is_empty() {
+    if active.is_empty() && ctx.unreviewed.is_empty() {
         out.push_str("✅ Sin hallazgos que reportar en el alcance analizado.\n\n");
+    } else if active.is_empty() {
+        out.push_str("Sin hallazgos en lo que sí se revisó.\n\n");
     }
 
     for finding in findings.iter().filter(|f| f.is_active()) {
@@ -274,6 +358,9 @@ mod tests {
             delta_files: None,
             degraded: &[],
             workers: 1,
+            unreviewed: &[],
+            failed_passes: &[],
+            checking: Checking::default(),
         }
     }
 
@@ -371,7 +458,7 @@ mod tests {
     /// and nothing else — and the thread id that comes back would pin every later publish to it.
     #[test]
     fn a_comment_carries_the_fields_the_stored_memory_drops() {
-        let body = comment_markdown(&finding(Severity::Mayor, FindingType::Bug, "F-007"));
+        let body = comment_markdown(&finding(Severity::Mayor, FindingType::Bug, "F-007"), "github");
         assert!(body.contains("F-007"), "the reconciled id, not the pre-reconciliation one");
         assert!(body.contains("**Por qué:** p"));
         assert!(body.contains("**Sugerencia:** s"));
@@ -385,7 +472,7 @@ mod tests {
     #[test]
     fn a_comment_leaves_out_the_location_the_report_block_carries() {
         let f = finding(Severity::Mayor, FindingType::Bug, "F-001");
-        assert!(!comment_markdown(&f).contains("📍 Ubicación"));
+        assert!(!comment_markdown(&f, "github").contains("📍 Ubicación"));
         assert!(render_finding(&f).contains("📍 Ubicación: a.ts:1-2"));
     }
 
@@ -442,5 +529,46 @@ mod tests {
         assert!(md.contains("re-revisión acotada a 2 archivo(s)"));
         assert!(md.contains("3 revisores en paralelo"));
         assert!(md.contains("src/big.ts"));
+    }
+
+    /// A run that lost a reviewer never reads as a clean bill of health.
+    #[test]
+    fn an_incomplete_review_says_so_and_does_not_claim_clean() {
+        let c = contract("completo");
+        let unreviewed = vec!["src/pago.ts".to_string()];
+        let context = ReportContext { unreviewed: &unreviewed, ..ctx(&c, &[Severity::Blocker], "") };
+        let md = review_markdown(&[], &context);
+        assert!(md.contains("Revisión incompleta"));
+        assert!(md.contains("src/pago.ts"));
+        assert!(!md.contains("✅ Sin hallazgos"));
+    }
+
+    #[test]
+    fn the_checking_line_counts_what_the_checks_did() {
+        let c = contract("ultra");
+        let context = ReportContext {
+            checking: Checking { verified: 3, refuted: 1, ungrounded: 2, relocated: 1 },
+            ..ctx(&c, &[Severity::Blocker], "")
+        };
+        let md = review_markdown(&[], &context);
+        assert!(md.contains("🔎 Verificación: 3 verificado(s), 1 refutado(s) · 2 descartado(s)"));
+    }
+
+    /// A replacement becomes a one-click suggestion only where the host has one and the comment
+    /// lands on exactly the lines it replaces.
+    #[test]
+    fn a_replacement_is_a_suggestion_only_where_it_can_apply() {
+        let mut f = parse(
+            "### 🚨 [Crítico · Bug] npe · F-001\n\nsub\n\n📍 Ubicación: a.ts:4-5\n\n💭 Por qué: p\n\n✏️ Reemplazo: 4-5\n```ts\nif (!c) return;\nreturn c.saldo;\n```\n\n🎯 Confianza: 80",
+        )
+        .remove(0);
+        let r = f.reemplazo.clone().expect("parsed");
+        assert_eq!((r.start, r.end, r.lang.as_str()), (4, 5, "ts"));
+        assert!(comment_markdown(&f, "github").contains("```suggestion\nif (!c) return;"));
+        assert!(comment_markdown(&f, "gitlab").contains("```suggestion:-1+0"));
+        assert!(comment_markdown(&f, "azure").contains("Reemplazo sugerido (líneas 4-5)"));
+        assert!(review_markdown(&[f.clone()], &ctx(&contract("completo"), &[Severity::Blocker], "")).contains("✏️ Reemplazo: 4-5"));
+        f.lineas = Some("9".into());
+        assert!(!comment_markdown(&f, "github").contains("```suggestion"), "anchored elsewhere: a plain block");
     }
 }
