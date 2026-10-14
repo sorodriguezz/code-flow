@@ -450,8 +450,8 @@ const TIBERO: DbLogo = {
  * disappeared.
  */
 const IRIS: DbLogo = {
-  width: LOCAL_ICON_SET.width ?? 13,
-  height: LOCAL_ICON_SET.height ?? 32,
+  width: LOCAL_ICON_SET.icons.iris.width ?? 13,
+  height: LOCAL_ICON_SET.icons.iris.height ?? 32,
   ink: "#2e3192",
   body: LOCAL_ICON_SET.icons.iris.body.replace('fill="#2e3192"', 'fill="currentColor"'),
 };

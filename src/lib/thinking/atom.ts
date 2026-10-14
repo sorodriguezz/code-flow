@@ -1,8 +1,9 @@
 import { ended, type RunPhase, type ThinkingActivity } from "./activity";
-import { WHITE } from "./face";
+import { WHITE, type Gaze } from "./face";
 import { clamp01, easeIn, easeOut, endColor, finishClock, rgba, TAU } from "./finish";
 import { aiHue, mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { easeToward, lean, toward } from "./pointer";
 
 /**
  * "Átomo" — a glowing nucleus with three electrons on orbits crossed at 60°.
@@ -14,6 +15,9 @@ import { prepareCanvas, type Painter } from "./ticker";
  *
  * Finish: the orbits collapse into the nucleus, it flashes, and they open out again green — fusion.
  * Failed: the orbits wobble and the electrons fly off and fade, leaving a red nucleus — decay.
+ *
+ * Following the pointer (`ThinkingOrb follow`), the whole atom tips toward it like a gyroscope: the
+ * orbits' near side swings out and grows, the far side recedes, and the nucleus drifts its way.
  */
 
 /** [electron speed in rad/s, orbit precession in rad/s] per phase. */
@@ -45,6 +49,8 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
   let open = 0;
   let warn = 0;
   let alpha = 1;
+  let gaze: Gaze = null;
+  const look = toward();
 
   function motion(act: ThinkingActivity | undefined): [number, number] {
     if (act?.failed) return [0, 0];
@@ -54,14 +60,16 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     return MOTION[act?.phase ?? "think"] ?? [2.6, 0.25];
   }
 
-  /** Point on orbit `i` at electron angle `a`, in the 0–1 square, scaled by `size`. */
-  function onOrbit(i: number, a: number, size: number, wobble: number): [number, number] {
+  /** Point on orbit `i` at electron angle `a`, in the 0–1 square, scaled by `size` — and how much
+   *  nearer the lean toward the pointer brought it. */
+  function onOrbit(i: number, a: number, size: number, wobble: number): [number, number, number] {
     const rx = 0.4 * size * (1 + wobble * Math.sin(time * 23 + i));
     const ry = 0.14 * size * (1 + wobble * Math.cos(time * 19 + i));
     const x = Math.cos(a) * rx;
     const y = Math.sin(a) * ry;
     const r = ORBITS[i] + turn;
-    return [0.5 + x * Math.cos(r) - y * Math.sin(r), 0.5 + x * Math.sin(r) + y * Math.cos(r)];
+    const [lx, ly, nearer] = lean(look, x * Math.cos(r) - y * Math.sin(r), x * Math.sin(r) + y * Math.cos(r), 0.4);
+    return [0.5 + lx, 0.5 + ly, nearer];
   }
 
   function paint() {
@@ -108,6 +116,7 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     const writing = !ended(act) && !act?.quiet && act?.phase === "write";
     const throb = writing ? 1 + 0.12 * Math.abs(Math.sin(time * 7)) : 1;
     const core = 0.085 * throb * (1 + flash * 0.6) * (failed ? 1 - 0.15 * clamp01(fin / 0.6) : 1);
+    const [nx, ny] = lean(look, 0, 0, 0.4);
     ctx.save();
     ctx.shadowColor = rgba(mix(mix(p.a, end, tint), WHITE, flash * 0.6), (0.7 + flash * 0.3) * alpha);
     ctx.shadowBlur = u(0.12 + flash * 0.2);
@@ -119,8 +128,8 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     ];
     for (const [dx, dy, c] of parts) {
       const col = mix(mix(mix(c, end, tint), WHITE, flash * 0.7), p.warning, warn * 0.3);
-      const x = u(0.5 + dx * core);
-      const y = u(0.5 + dy * core);
+      const x = u(0.5 + nx + dx * core);
+      const y = u(0.5 + ny + dy * core);
       const grad = ctx.createRadialGradient(x - u(core * 0.3), y - u(core * 0.3), 0, x, y, u(core * 0.75));
       grad.addColorStop(0, rgba(mix(col, WHITE, 0.45), alpha));
       grad.addColorStop(1, rgba(col, alpha));
@@ -137,7 +146,7 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
       ctx.strokeStyle = rgba(mix(end, WHITE, 0.3), (1 - k) * 0.8 * alpha);
       ctx.lineWidth = Math.max(0.8, u(0.03) * (1 - k));
       ctx.beginPath();
-      ctx.arc(u(0.5), u(0.5), u(0.1 + 0.36 * k), 0, TAU);
+      ctx.arc(u(0.5 + nx), u(0.5 + ny), u(0.1 + 0.36 * k), 0, TAU);
       ctx.stroke();
     }
 
@@ -155,10 +164,10 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     }
     electrons.forEach((a, i) => {
       for (let t = 3; t >= 0; t--) {
-        const [x, y] = onOrbit(i, a - t * 0.22 * Math.sign(spin || 1), size, wobble);
+        const [x, y, nearer] = onOrbit(i, a - t * 0.22 * Math.sign(spin || 1), size, wobble);
         ctx.fillStyle = rgba(mix(hue(i), WHITE, t === 0 ? 0.35 : 0), (t === 0 ? 1 : 0.5 - t * 0.12) * alpha);
         ctx.beginPath();
-        ctx.arc(u(x), u(y), dot * (1 - t * 0.2), 0, TAU);
+        ctx.arc(u(x), u(y), dot * (1 - t * 0.2) * nearer, 0, TAU);
         ctx.fill();
       }
     });
@@ -181,9 +190,13 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
       clock.set(activity);
       if (clock.failed && !wasFailed) launchEscape();
     },
+    setGaze(next) {
+      gaze = next;
+    },
     tick(dt) {
       clock.step(dt);
       const act = clock.act;
+      easeToward(look, ended(act) || act?.quiet || act?.stopping ? null : gaze, dt);
       const [s, q] = motion(act);
       const fin = clock.fin;
       // The collapse whips the electrons round before the flash.

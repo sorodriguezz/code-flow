@@ -90,6 +90,10 @@ export function sleepZ(ctx: CanvasRenderingContext2D, px: number, time: number, 
   ctx.restore();
 }
 
+/** Where a mark that follows the pointer is told to look (`pointer.ts`): (x, y) in -1..1, the same
+ *  space as `lookFor` — or `null` when it is not following, and looks around by itself. */
+export type Gaze = readonly [number, number] | null;
+
 /** Where a character's eyes go while it thinks — (x, y) in -1..1, held a beat each. */
 export const LOOK_AROUND: readonly (readonly [number, number])[] = [
   [0, 0],

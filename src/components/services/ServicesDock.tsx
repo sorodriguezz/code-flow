@@ -569,9 +569,13 @@ function TerminalRow({
   const t = useT();
 
   return (
+    // The whole row selects, not just its text: the row is as tall as its action buttons and padded
+    // on every side, and a click on that margin used to land on nothing. The button inside stays for
+    // the keyboard — its click bubbles here — and the action buttons and the rename field stop theirs.
     <div
+      onClick={() => !renaming && onSelect()}
       onDoubleClick={() => !renaming && onRenameStart()}
-      className={`group/row flex items-center gap-1.5 px-2 py-[3px] pl-4 text-[12px] ${
+      className={`group/row flex cursor-pointer items-center gap-1.5 px-2 py-[3px] pl-4 text-[12px] ${
         selected
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
           : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
@@ -592,7 +596,7 @@ function TerminalRow({
         />
       ) : (
         <>
-          <button onClick={onSelect} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+          <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
             <TerminalSquare
               size={10}
               className={`shrink-0 ${inSplit ? "text-[var(--cf-accent)]" : "opacity-60"}`}

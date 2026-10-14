@@ -1,5 +1,5 @@
 import { ended, type ThinkingActivity } from "./activity";
-import { blink, INK, lookFor, sleepZ, strokeEye, WHITE } from "./face";
+import { blink, INK, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
@@ -29,6 +29,8 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
   let time = 0;
   let grow = 0;
   let lookX = 0;
+  /** The pointer, when this mark follows it (`setGaze`). */
+  let gaze: Gaze = null;
   let lookY = 0;
   let sleep = 0;
   let warn = 0;
@@ -200,7 +202,7 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
   function settle(act: ThinkingActivity | undefined, k: number) {
     const fin = clock.fin;
     const phase = phaseOf(act);
-    const [tx, ty] = phase ? lookFor(phase, time) : [0, 0];
+    const [tx, ty] = gaze && !ended(act) && !act?.quiet && !act?.stopping ? gaze : phase ? lookFor(phase, time) : [0, 0];
     lookX += (tx - lookX) * Math.min(1, k * 10);
     lookY += (ty - lookY) * Math.min(1, k * 10);
     const resting = act?.quiet && !ended(act) ? 1 : 0;
@@ -250,6 +252,9 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
   }
 
   return {
+    setGaze(next) {
+      gaze = next;
+    },
     setActivity(activity) {
       clock.set(activity);
     },

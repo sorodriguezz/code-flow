@@ -3,6 +3,8 @@ import { clamp01, easeIn, easeOut, easeOutBack, endColor, finishClock, rgba, TAU
 import { mix, palette, rgb, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { voiceLevel } from "./voice";
+import type { Gaze } from "./face";
+import { easeToward, leanOf, toward } from "./pointer";
 
 /**
  * "Orbe" — the voice-powered orb (21st.dev, @isaiahbjork), the glowing ring whose edge boils with
@@ -22,6 +24,10 @@ import { voiceLevel } from "./voice";
  * orb renders its own frame there and copies it onto its plain 2D canvas in the same tick
  * (`preserveDrawingBuffer`, so the copy never reads a cleared buffer). Where WebGL is missing the
  * orb falls back to a 2D ring with the same hues.
+ *
+ * Following the pointer (`ThinkingOrb follow`), the bright point that runs round the ring stops
+ * running and swings round to the pointer's side — the pointer becomes the light — and goes back
+ * to circling when the pointer leaves.
  */
 
 const VERTEX = `
@@ -33,7 +39,8 @@ void main() {
 }`;
 
 // The shader as published (it is ReactBits' "Orb"), with the hue rotation taken out — the base
-// colours are swapped for the app's own instead.
+// colours are swapped for the app's own instead — and one addition: `focus`, a direction (x, y, in
+// screen space with y up) and how strongly (z) the travelling bright point is drawn toward it.
 const FRAGMENT = `
 precision highp float;
 uniform float iTime;
@@ -43,6 +50,7 @@ uniform float rot;
 uniform vec3 color1;
 uniform vec3 color2;
 uniform vec3 color3;
+uniform vec3 focus;
 varying vec2 vUv;
 
 vec3 hash33(vec3 p3) {
@@ -83,7 +91,7 @@ float light2(float intensity, float attenuation, float dist) {
   return intensity / (1.0 + dist * dist * attenuation);
 }
 
-vec4 draw(vec2 uv) {
+vec4 draw(vec2 uv, vec3 toward) {
   float ang = atan(uv.y, uv.x);
   float len = length(uv);
   float invLen = len > 0.0 ? 1.0 / len : 0.0;
@@ -94,6 +102,11 @@ vec4 draw(vec2 uv) {
   v0 *= smoothstep(r0 * 1.05, r0, len);
   float cl = cos(ang + iTime * 2.0) * 0.5 + 0.5;
   float a = iTime * -1.0;
+  if (toward.z > 0.0) {
+    // The shortest way round to the pointer side, as far as toward.z says.
+    float delta = mod(atan(toward.y, toward.x) - a + 3.14159265, 6.28318531) - 3.14159265;
+    a += delta * toward.z;
+  }
   vec2 pos = vec2(cos(a), sin(a)) * r0;
   float d = distance(uv, pos);
   float v1 = light2(1.5, 5.0, d);
@@ -117,14 +130,16 @@ void main() {
   uv = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
   uv.x += hover * 0.1 * sin(uv.y * 10.0 + iTime);
   uv.y += hover * 0.1 * sin(uv.x * 10.0 + iTime);
-  vec4 col = draw(uv);
+  // Turned with the disc, so it points at the same place on screen whatever the turn.
+  vec3 toward = vec3(c * focus.x - s * focus.y, s * focus.x + c * focus.y, focus.z);
+  vec4 col = draw(uv, toward);
   gl_FragColor = vec4(col.rgb * col.a, col.a);
 }`;
 
 interface Shared {
   canvas: HTMLCanvasElement;
   gl: WebGLRenderingContext;
-  u: Record<"time" | "res" | "hover" | "rot" | "c1" | "c2" | "c3", WebGLUniformLocation | null>;
+  u: Record<"time" | "res" | "hover" | "rot" | "c1" | "c2" | "c3" | "focus", WebGLUniformLocation | null>;
 }
 
 let shared: Shared | null | undefined;
@@ -172,6 +187,7 @@ function sharedGl(): Shared | null {
         c1: at("color1"),
         c2: at("color2"),
         c3: at("color3"),
+        focus: at("focus"),
       },
     };
   } catch {
@@ -194,6 +210,8 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
   let voice = 0;
   let alpha = 1;
   let activity: ThinkingActivity | undefined;
+  let gaze: Gaze = null;
+  const look = toward();
 
   /** How far the ring is drawn at its full size: pulled in during the wind-up, sprung back after —
    *  or, for a failure, shrunk a little and left there. */
@@ -275,6 +293,10 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
       g.uniform3f(gl.u.c2, ...unit(hue2));
       // The deep tone under the ring: the indigo, darkened — the published navy, in our hue.
       g.uniform3f(gl.u.c3, ...unit(deep));
+      // Every orb sets it, following or not: the program is shared, and a value left by a
+      // following orb would steer the next one drawn. The pull fades in with how far the pointer
+      // is — on top of the orb there is no side to turn to.
+      g.uniform3f(gl.u.focus, look.x, -look.y, Math.min(1, look.on * Math.min(1, leanOf(look) * 4)));
       g.drawArrays(g.TRIANGLES, 0, 3);
       ctx.drawImage(gl.canvas, at, at, size, size);
     } else {
@@ -309,8 +331,12 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
       activity = next;
       clock.set(next);
     },
+    setGaze(next) {
+      gaze = next;
+    },
     tick(dt) {
       clock.step(dt);
+      easeToward(look, ended(activity) || activity?.quiet || activity?.stopping ? null : gaze, dt, 4);
       time += dt * (activity?.quiet ? 0.3 : 1);
       voice += (target() - voice) * Math.min(1, dt * 6);
       // A failure brings the turn to a stop over half a second.

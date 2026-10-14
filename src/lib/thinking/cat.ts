@@ -1,6 +1,6 @@
 import { ended, type ThinkingActivity } from "./activity";
 import { aiCycle, clamp01, easeOut, easeOutBack, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
-import { blink, fillHeart, INK, lookFor, sleepZ, strokeEye, WHITE } from "./face";
+import { blink, fillHeart, INK, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 
@@ -39,6 +39,8 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
   let time = 0;
   let grow = 0;
   let lookX = 0;
+  /** The pointer, when this mark follows it (`setGaze`). */
+  let gaze: Gaze = null;
   let lookY = 0;
   let dilate = 0;
   let crouch = 0;
@@ -52,8 +54,9 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
 
   function lookTarget(act: ThinkingActivity | undefined): readonly [number, number] {
     if (ended(act) || act?.quiet || act?.stopping) return [0, 0];
-    // Working, the point it darts after is the dot it is about to pounce on.
-    return lookFor(act?.phase, time);
+    // Following the pointer, that is what it watches — the way a cat does. Working, the point it
+    // darts after is the dot it is about to pounce on.
+    return gaze ?? lookFor(act?.phase, time);
   }
 
   /** One ear, as a soft triangle turned `angle` outward about its base. */
@@ -274,6 +277,9 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
   }
 
   return {
+    setGaze(next) {
+      gaze = next;
+    },
     setActivity(activity) {
       clock.set(activity);
     },

@@ -1,4 +1,5 @@
 import { ended } from "./activity";
+import type { Gaze } from "./face";
 import { aiCycle, clamp01, finishClock, rgba, TAU } from "./finish";
 import { mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
@@ -54,6 +55,9 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
       : [[1, 1], [3, 1], [0, 4], [1, 3], [2, 3], [3, 3], [4, 4]];
   let time = 0;
   let alpha = 1;
+  /** The pointer, when this mark follows it (`setGaze`). An LED face can only look a column to
+   *  either side, so only its side reads. */
+  let gaze: Gaze = null;
 
   const set = (col: number, row: number, value = 1, kind = 0) => {
     if (col < 0 || col >= G || row < 0 || row >= G) return;
@@ -65,7 +69,15 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
   };
 
   function face(sleepy: boolean) {
-    const look = sleepy ? 0 : LOOK[Math.floor(time / 0.7) % LOOK.length];
+    const look = sleepy
+      ? 0
+      : gaze
+        ? gaze[0] > 0.35
+          ? 1
+          : gaze[0] < -0.35
+            ? -1
+            : 0
+        : LOOK[Math.floor(time / 0.7) % LOOK.length];
     const blink = !sleepy && time % 3.6 > 3.42;
     const eyeRow = G === 7 ? 2 : 1;
     const kind = sleepy ? 2 : 0;
@@ -194,6 +206,9 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
   }
 
   return {
+    setGaze(next) {
+      gaze = next;
+    },
     setActivity(activity) {
       clock.set(activity);
     },

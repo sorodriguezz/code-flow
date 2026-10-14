@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactElement } from "react";
+import { useEffect, useRef, type MutableRefObject, type ReactElement } from "react";
 import { thinkingDesignKind, thinkingSpeaksItself, type ThinkingDesign } from "../../lib/thinkingDesigns";
 import { phaseGroup, thinkingState, type ThinkingActivity } from "../../lib/thinking/activity";
 import { ORB_PX, register, prefersReducedMotion, type OrbSize, type Painter } from "../../lib/thinking/ticker";
@@ -20,6 +20,7 @@ import { createBulb } from "../../lib/thinking/bulb";
 import { createAlien } from "../../lib/thinking/alien";
 import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
 import { voiceLevel } from "../../lib/thinking/voice";
+import { gazeAt, nearness, watchPointer } from "../../lib/thinking/pointer";
 
 /**
  * The "something is working" mark, shown wherever an engine is actually running — an agent turn,
@@ -36,6 +37,18 @@ import { voiceLevel } from "../../lib/thinking/voice";
  * state off `data-state` and, while running, the kind of phase off `data-phase` (thinking, reading,
  * working, writing). A failed run turns every design red. Without it a mark simply runs.
  *
+ * `follow` makes the mark notice the pointer, wherever it is in the window — for the assistant's
+ * button on the rail (the user: "que siga el mouse con los ojos", and then for the designs with no
+ * eyes, "¿qué se puede hacer?"). The designs with eyes — the robot, the blob, the LED face and the
+ * characters — look at it instead of looking around; the rest turn to it each in their own way: the
+ * globe, the crystal and the atom tip toward it, the drops are drawn to it, the orb's light and the
+ * halo's glow swing round to its side, the plasma's lights drift there, the wave's crest leans its
+ * way, the net lights up on that side and fires toward it, the moon turns its face. Out of the
+ * window, they go back to what they were doing. And every one of them perks up as the pointer comes
+ * close (`nearness`): brighter, a soft glow, and running a little faster — as if about to be
+ * clicked. None of it while the run is ending or resting, nor for a reader who asked for reduced
+ * motion.
+ *
  * `aria-hidden`: it says nothing a screen reader can use. Every caller sits next to text that
  * already names what is running, and a second announcement per row would be noise.
  */
@@ -43,10 +56,12 @@ export function ThinkingOrb({
   size = "md",
   design,
   activity,
+  follow = false,
 }: {
   size?: OrbSize;
   design?: ThinkingDesign;
   activity?: ThinkingActivity;
+  follow?: boolean;
 }) {
   const chosen = useThinkingDesignStore((s) => s.design);
   const look = design ?? chosen;
@@ -54,6 +69,8 @@ export function ThinkingOrb({
   const kind = thinkingDesignKind(look);
   const speaking = state === "run" && activity?.phase === "speak";
   const ref = useRef<HTMLSpanElement>(null);
+  /** How close the pointer is, 0–1, while following — read by the canvas loop to run faster. */
+  const near = useRef(0);
   // While it speaks, the whole mark breathes with the voice: one value per frame, written straight
   // to a CSS variable on the shared ticker (visible marks only), so nothing re-renders.
   useEffect(() => {
@@ -69,6 +86,46 @@ export function ThinkingOrb({
       el.style.removeProperty("--cf-orb-voice");
     };
   }, [speaking]);
+  // Following: how close the pointer is (`--cf-near` and `data-near`, which every design's glow
+  // reads), and for the CSS designs where it is too (`--cf-gaze-x/y` while `data-gaze` is set) and
+  // how fast they run — written straight onto the element each frame the pointer moves, so nothing
+  // re-renders. The canvas designs are told where it is by their own painter (`OrbCanvas`).
+  const css = kind === "css";
+  useEffect(() => {
+    const el = ref.current;
+    if (!follow || !el || prefersReducedMotion()) return;
+    el.setAttribute("data-follow", "");
+    const pace = (rate: number) => {
+      // CSS animations only, not the transitions: the glow's own fade keeps its pace.
+      for (const animation of el.getAnimations({ subtree: true })) {
+        if ("animationName" in animation && animation.playbackRate !== rate) animation.playbackRate = rate;
+      }
+    };
+    const off = watchPointer((at) => {
+      const rect = el.getBoundingClientRect();
+      const close = at ? nearness(rect, at.x, at.y) : 0;
+      near.current = close;
+      if (close > 0) {
+        el.style.setProperty("--cf-near", close.toFixed(3));
+        el.setAttribute("data-near", "");
+      } else el.removeAttribute("data-near");
+      if (!css) return;
+      const gaze = at && gazeAt(rect, at.x, at.y);
+      if (gaze) {
+        el.style.setProperty("--cf-gaze-x", gaze[0].toFixed(3));
+        el.style.setProperty("--cf-gaze-y", gaze[1].toFixed(3));
+        el.setAttribute("data-gaze", "");
+      } else el.removeAttribute("data-gaze");
+      // Running only: a finish or a failure plays at its own speed.
+      pace(el.hasAttribute("data-state") ? 1 : 1 + RUSH * close);
+    });
+    return () => {
+      off();
+      near.current = 0;
+      pace(1);
+      for (const name of ["data-follow", "data-near", "data-gaze"]) el.removeAttribute(name);
+    };
+  }, [follow, css]);
   return (
     <span
       ref={ref}
@@ -80,7 +137,14 @@ export function ThinkingOrb({
     >
       {kind === "canvas" ? (
         // Keyed by look and size: a painter is built for one canvas at one size.
-        <OrbCanvas key={`${look}-${size}`} design={look} px={ORB_PX[size]} activity={activity} />
+        <OrbCanvas
+          key={`${look}-${size}`}
+          design={look}
+          px={ORB_PX[size]}
+          activity={activity}
+          follow={follow}
+          near={near}
+        />
       ) : (
         PARTS[look]
       )}
@@ -107,7 +171,23 @@ const PAINTERS: Partial<Record<ThinkingDesign, (canvas: HTMLCanvasElement, px: n
   alien: createAlien,
 };
 
-function OrbCanvas({ design, px, activity }: { design: ThinkingDesign; px: number; activity?: ThinkingActivity }) {
+/** How much faster a mark runs with the pointer right on it: 1 + this, easing in as it comes close. */
+const RUSH = 0.6;
+
+function OrbCanvas({
+  design,
+  px,
+  activity,
+  follow,
+  near,
+}: {
+  design: ThinkingDesign;
+  px: number;
+  activity?: ThinkingActivity;
+  follow: boolean;
+  /** How close the pointer is, 0–1 — the painter runs up to `1 + RUSH` times faster for it. */
+  near: MutableRefObject<number>;
+}) {
   const ref = useRef<HTMLCanvasElement>(null);
   const painter = useRef<Painter | null>(null);
   const latest = useRef(activity);
@@ -120,13 +200,37 @@ function OrbCanvas({ design, px, activity }: { design: ThinkingDesign; px: numbe
     const p = make(canvas, px);
     p.setActivity(latest.current);
     painter.current = p;
-    const off = register(canvas, p);
+    // The pointer's nearness speeds the painter's clock while the run runs — eased, so the pace
+    // gathers and lets go instead of jumping when the pointer leaves the window.
+    let rate = 1;
+    const off = register(canvas, {
+      tick(dt) {
+        const wanted = 1 + RUSH * (thinkingState(latest.current) === "run" ? near.current : 0);
+        rate += (wanted - rate) * Math.min(1, dt * 4);
+        p.tick(dt * rate);
+      },
+      still: () => p.still(),
+      setActivity: (next) => p.setActivity(next),
+    });
     return () => {
       off();
       p.destroy?.();
       painter.current = null;
     };
-  }, [design, px]);
+  }, [design, px, near]);
+
+  // After the effect above, so it finds this canvas's painter — and runs again whenever that one is
+  // rebuilt for another design or size.
+  useEffect(() => {
+    const canvas = ref.current;
+    const p = painter.current;
+    if (!follow || !canvas || !p?.setGaze || prefersReducedMotion()) return;
+    const off = watchPointer((at) => p.setGaze?.(at && gazeAt(canvas.getBoundingClientRect(), at.x, at.y)));
+    return () => {
+      off();
+      p.setGaze?.(null);
+    };
+  }, [follow, design, px]);
 
   // Primitives, so a caller passing a fresh object each render does not re-run this. Speaking is
   // drawn as writing by the designs that have no voice of their own; the ones that do (the orb's
@@ -157,10 +261,14 @@ const PARTS: Partial<Record<ThinkingDesign, ReactElement>> = {
   // The AI loader (21st.dev, @beratberkayg): a disc lit from inside by three hues, turning, its
   // colours drifting as a second layer fades over the first.
   halo: (
-    <span className="cf-orb-halo">
-      <span className="cf-orb-halo-glow" />
-      <span className="cf-orb-halo-glow cf-orb-halo-glow-2" />
-    </span>
+    <>
+      <span className="cf-orb-halo">
+        <span className="cf-orb-halo-glow" />
+        <span className="cf-orb-halo-glow cf-orb-halo-glow-2" />
+      </span>
+      {/* Its light on the pointer's side while it follows — still while the disc turns. */}
+      <span className="cf-orb-halo-lean" />
+    </>
   ),
   // A little robot: the antenna blinks, the eyes look left, right, then up and to the side the way
   // someone does when working something out — and blink, out of step with the looking.

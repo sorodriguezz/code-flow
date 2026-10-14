@@ -542,6 +542,19 @@ pub async fn list_ai_models(
     ai::list_models(&*engine, &binary).await
 }
 
+/// The engine a chat turn in this project runs on when nothing pins one: the chat routing of the
+/// project's workspace, provider and model (the model empty for "the CLI's own default"). What the
+/// phone's chat chip names before its conversation has an answer to read the engine from — see the
+/// `chat_routing` arm in `remotectl::dispatch`.
+pub(crate) fn chat_route(db: &Db, project_id: &str) -> Result<(String, String), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let workspace_id = queries::get_project(&conn, project_id)
+        .map_err(|e| e.to_string())?
+        .map(|project| project.workspace_id);
+    let config = load_ai_config_in(&conn, AiTask::Chat, workspace_id.as_deref())?;
+    Ok((config.provider, config.model))
+}
+
 /// Whether a provider is ready to use, for the Settings status badge.
 #[derive(Serialize)]
 pub struct ProviderStatus {

@@ -35,6 +35,7 @@ import { StashScreen } from "./screens/StashScreen";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
 import type { ServiceRuntime } from "../types/services";
 import { ScopeSheet } from "./screens/ScopeSheet";
+import { EngineSheet } from "./screens/EngineSheet";
 import { useSwipeBack } from "./ui/gestures";
 
 /**
@@ -542,6 +543,15 @@ function RouteView({ route }: { route: Route }) {
       return <SettingsScreen />;
     case "scope":
       return <ScopeSheet />;
+    case "engine":
+      return (
+        <EngineSheet
+          projectId={route.projectId}
+          conversationId={route.conversationId}
+          current={route.current}
+          locked={route.locked}
+        />
+      );
   }
 }
 

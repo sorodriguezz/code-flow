@@ -5,6 +5,8 @@ import { watchSettings } from "../lib/settingsSync";
 const WORD_WRAP_KEY = "editor_word_wrap";
 const INLAY_HINTS_KEY = "editor_inlay_hints";
 const FONT_SIZE_KEY = "editor_font_size";
+const IMPORT_COST_KEY = "editor_import_cost";
+const PRISMA_HIGHLIGHT_KEY = "editor_prisma_highlight";
 
 /** The size the editor always drew at, and the range the slider offers. */
 export const DEFAULT_EDITOR_FONT_SIZE = 13;
@@ -13,7 +15,7 @@ export const EDITOR_FONT_SIZES = { min: 10, max: 22 } as const;
 /**
  * How the Editor lays its text out — Settings › Editor › Display, and ⌥Z from the code.
  *
- * Two switches and a size.
+ * Four switches and a size.
  *
  * **Word wrap.** With it on, a line wider than the pane carries on underneath instead of running off
  * to the right, and where it breaks is the pane's own width — Monaco's `wordWrap: "on"`, not a column
@@ -31,6 +33,13 @@ export const EDITOR_FONT_SIZES = { min: 10, max: 22 } as const;
  * **Font size** — 13 px until 2026-10-09, when it became a setting: the editor and its side-by-side
  * diff follow it; the terminal, notes and the SQL console keep their own.
  *
+ * **Package weights** — what each imported package weighs on disk, at the end of its import line
+ * (`useImportCost`). **On unless turned off**, as it always was; the switch (the user's ask,
+ * 2026-10-14) is for whoever finds a number on every import line noise. Off, nothing is measured.
+ *
+ * **Prisma colours** — `schema.prisma` highlighted (`monacoPrisma`). **On unless turned off**, and
+ * off draws the file plain rather than taking its language away.
+ *
  * Global rather than per file, and remembered: both were asked for as preferences of the editor, and
  * ⌥Z flips the same preference rather than a per-tab override nobody could find again.
  *
@@ -41,11 +50,15 @@ interface EditorDisplayState {
   wordWrap: boolean;
   inlayHints: boolean;
   fontSize: number;
+  importCost: boolean;
+  prismaHighlight: boolean;
   init: () => Promise<void>;
   setFontSize: (px: number) => Promise<void>;
   setWordWrap: (on: boolean) => Promise<void>;
   toggleWordWrap: () => Promise<void>;
   setInlayHints: (on: boolean) => Promise<void>;
+  setImportCost: (on: boolean) => Promise<void>;
+  setPrismaHighlight: (on: boolean) => Promise<void>;
 }
 
 let loading: Promise<void> | null = null;
@@ -54,16 +67,20 @@ export const useEditorDisplayStore = create<EditorDisplayState>((set, get) => ({
   wordWrap: false,
   inlayHints: true,
   fontSize: DEFAULT_EDITOR_FONT_SIZE,
+  importCost: true,
+  prismaHighlight: true,
 
   init: () =>
-    (loading ??= getSettings([WORD_WRAP_KEY, INLAY_HINTS_KEY, FONT_SIZE_KEY])
+    (loading ??= getSettings([WORD_WRAP_KEY, INLAY_HINTS_KEY, FONT_SIZE_KEY, IMPORT_COST_KEY, PRISMA_HIGHLIGHT_KEY])
       .then((stored) =>
         set({
           wordWrap: stored[WORD_WRAP_KEY] === "true",
           // Anything but an explicit "off" is on — including the absent key of every install
-          // that predates the switch.
+          // that predates the switch. The same for the two below.
           inlayHints: stored[INLAY_HINTS_KEY] !== "false",
           fontSize: clampFontSize(Number(stored[FONT_SIZE_KEY])),
+          importCost: stored[IMPORT_COST_KEY] !== "false",
+          prismaHighlight: stored[PRISMA_HIGHLIGHT_KEY] !== "false",
         }),
       )
       .catch(() => undefined)),
@@ -78,6 +95,16 @@ export const useEditorDisplayStore = create<EditorDisplayState>((set, get) => ({
   setInlayHints: async (on) => {
     set({ inlayHints: on });
     await setSetting(INLAY_HINTS_KEY, String(on)).catch(() => undefined);
+  },
+
+  setImportCost: async (on) => {
+    set({ importCost: on });
+    await setSetting(IMPORT_COST_KEY, String(on)).catch(() => undefined);
+  },
+
+  setPrismaHighlight: async (on) => {
+    set({ prismaHighlight: on });
+    await setSetting(PRISMA_HIGHLIGHT_KEY, String(on)).catch(() => undefined);
   },
 
   setFontSize: async (px) => {
@@ -105,7 +132,7 @@ export function monacoInlayHints(on: boolean): "on" | "off" {
 
 // Switched in Settings or with ⌥Z in any window; a floating editor or a repository window repaints
 // with the main one.
-watchSettings([WORD_WRAP_KEY, INLAY_HINTS_KEY], () => {
+watchSettings([WORD_WRAP_KEY, INLAY_HINTS_KEY, IMPORT_COST_KEY, PRISMA_HIGHLIGHT_KEY], () => {
   loading = null;
   return useEditorDisplayStore.getState().init();
 });

@@ -1,5 +1,5 @@
 import { ended, phaseGroup, type PhaseGroup, type ThinkingActivity } from "./activity";
-import { blink, INK, lipSync, lookFor, sleepZ, strokeEye, WHITE } from "./face";
+import { blink, INK, lipSync, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
@@ -34,6 +34,8 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
   let time = 0;
   let grow = 0;
   let lookX = 0;
+  /** The pointer, when this mark follows it (`setGaze`). */
+  let gaze: Gaze = null;
   let lookY = 0;
   let sleep = 0;
   let warn = 0;
@@ -282,7 +284,13 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
     const fin = clock.fin;
     const group = groupOf(act);
     // Speaking, it looks at whoever it is talking to.
-    const [tx, ty] = group ? lookFor(group === "work" ? "edit" : group === "speak" ? "start" : act?.phase, time) : [0, 0];
+    // Following the pointer, it looks at it — awake, and not while it is talking to someone.
+    const [tx, ty] =
+      gaze && group !== "speak" && !ended(act) && !act?.quiet && !act?.stopping
+        ? gaze
+        : group
+          ? lookFor(group === "work" ? "edit" : group === "speak" ? "start" : act?.phase, time)
+          : [0, 0];
     lookX += (tx - lookX) * Math.min(1, k * 10);
     lookY += (ty - lookY) * Math.min(1, k * 10);
     const resting = act?.quiet && !ended(act) ? 1 : 0;
@@ -346,6 +354,9 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
   }
 
   return {
+    setGaze(next) {
+      gaze = next;
+    },
     setActivity(activity) {
       clock.set(activity);
     },

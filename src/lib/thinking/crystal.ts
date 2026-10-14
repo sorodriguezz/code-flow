@@ -1,7 +1,9 @@
-import type { RunPhase, ThinkingActivity } from "./activity";
+import { ended, type RunPhase, type ThinkingActivity } from "./activity";
 import { aiCycle, clamp01, easeIn, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import type { Gaze } from "./face";
+import { easeToward, facing, lean, toward } from "./pointer";
 
 /**
  * "Cristal" — an icosahedron in wireframe, tumbling slowly with a soft core of light inside and
@@ -12,6 +14,9 @@ import { prepareCanvas, type Painter } from "./ticker";
  * wind-up), it bursts into sparks, pulls itself back together in green, and its corners catch the
  * light one after another. Failed: it stops dead, turns red and a third of its edges go dark —
  * cracked.
+ *
+ * Following the pointer (`ThinkingOrb follow`), it leans toward it — the near side larger, the core
+ * drifting its way — and the corners and edges facing it catch more light.
  */
 
 const GOAL: Partial<Record<RunPhase, [spin: number, energy: number]>> = {
@@ -63,6 +68,8 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
   let energy = 0.5;
   let warn = 0;
   let alpha = 1;
+  let gaze: Gaze = null;
+  const look = toward();
 
   function goal(activity: ThinkingActivity | undefined): [number, number] {
     if (activity?.failed) return [0, 0];
@@ -95,10 +102,12 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
       const y2 = y * cx - z1 * sx;
       const z2 = y * sx + z1 * cx;
       const persp = 3 / (3 - z2);
-      return [c + x1 * R * persp, c - y2 * R * persp, (z2 + 1) / 2] as const;
+      const [lx, ly] = lean(look, x1 * R * persp, -y2 * R * persp, R);
+      return [c + lx, c + ly, (z2 + 1) / 2, facing(look, lx, ly, R)] as const;
     });
-    // The core: light inside the glass.
-    const core = ctx.createRadialGradient(c, c, 0, c, c, px * 0.36);
+    // The core: light inside the glass — drifting with the lean.
+    const [kx, ky] = lean(look, 0, 0, R);
+    const core = ctx.createRadialGradient(c + kx, c + ky, 0, c + kx, c + ky, px * 0.36);
     const coreHue = mix(aiCycle(p, 0.35 + Math.sin(time * 0.7) * 0.2), end, green);
     core.addColorStop(0, rgba(coreHue, (0.35 + energy * 0.25 + burst * 0.5) * alpha));
     core.addColorStop(1, rgba(coreHue, 0));
@@ -114,7 +123,9 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
       let col = mix(p.text, aiCycle(p, n / EDGES.length + time * 0.05), 0.55);
       col = mix(col, end, green);
       col = mix(col, p.warning, warn * 0.3);
-      ctx.strokeStyle = rgba(col, (0.12 + 0.6 * depth) * alpha * edgeAlpha * (n % 3 === 0 ? 1 - crack : 1));
+      const lit = (pts[i][3] + pts[j][3]) / 2;
+      col = mix(col, aiCycle(p, 0.85), lit * 0.5);
+      ctx.strokeStyle = rgba(col, (0.12 + 0.6 * depth + 0.35 * lit) * alpha * edgeAlpha * (n % 3 === 0 ? 1 - crack : 1));
       ctx.lineWidth = lw * (0.6 + 0.6 * depth);
       ctx.beginPath();
       ctx.moveTo(pts[i][0], pts[i][1]);
@@ -134,13 +145,13 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
     }
     // The glint once it is whole again: its corners catch the light one after another.
     const white: readonly [number, number, number] = [255, 255, 255];
-    pts.forEach(([x, y, depth], i) => {
+    pts.forEach(([x, y, depth, lit], i) => {
       const glow = 0.5 + 0.5 * Math.sin(time * 3 + i * 1.7);
       let col = mix(p.text, aiCycle(p, i / 12 + time * 0.08), 0.5 + 0.5 * glow * energy);
       col = mix(col, end, green);
       col = mix(col, p.warning, warn * 0.3);
       const shine = !failed && fin > 1.0 && fin < 1.7 ? Math.max(0, Math.sin(((fin - 1.0) / 0.7) * Math.PI * 1.5 - i * 0.35)) : 0;
-      col = mix(col, white, shine);
+      col = mix(col, white, Math.max(shine, lit * 0.6));
       ctx.fillStyle = rgba(col, (0.25 + 0.75 * depth) * alpha);
       ctx.beginPath();
       ctx.arc(x, y, Math.max(0.7, px / 30) * (0.6 + 0.7 * depth) * (1 + shine * 0.8), 0, TAU);
@@ -164,10 +175,14 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
     setActivity(activity) {
       clock.set(activity);
     },
+    setGaze(next) {
+      gaze = next;
+    },
     tick(dt) {
       clock.step(dt);
       const act = clock.act;
       const fin = clock.fin;
+      easeToward(look, ended(act) || act?.quiet || act?.stopping ? null : gaze, dt);
       const [s, e] = goal(act);
       const k = Math.min(1, dt * 2.5);
       spin += (s - spin) * k;

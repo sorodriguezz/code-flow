@@ -24,6 +24,11 @@ import { scriptKind } from "../../lib/tsserver";
  * `./thing` and `../lib/x` are your own files: their size is the file you can already see, and
  * annotating them would put a number on every line of every import block for no information. Node's
  * builtins are skipped for the same reason — `node:fs` has no weight to report.
+ *
+ * # It can be turned off
+ *
+ * Settings › Editor › Display › Package weights (`editorDisplayStore.importCost`). Off clears what is
+ * drawn and asks the backend nothing — not a hidden badge over a measurement still being taken.
  */
 
 /** What the backend answers for each name. */
@@ -86,7 +91,7 @@ function human(bytes: number): string {
 export function useImportCost(
   editor: MonacoEditorNS.IStandaloneCodeEditor | null,
   monaco: Monaco | null,
-  { repoPath, activePath }: { repoPath: string | null; activePath: string | null },
+  { repoPath, activePath, enabled }: { repoPath: string | null; activePath: string | null; enabled: boolean },
 ) {
   /** Sizes already measured for this repository. A package's size on disk does not change while you
    *  type, so it is asked for once and reused across every file that imports it. */
@@ -97,7 +102,7 @@ export function useImportCost(
   }, [repoPath]);
 
   useEffect(() => {
-    if (!editor || !monaco || !repoPath || !activePath || !scriptKind(activePath)) return;
+    if (!enabled || !editor || !monaco || !repoPath || !activePath || !scriptKind(activePath)) return;
     const model = editor.getModel();
     if (!model) return;
 
@@ -171,5 +176,5 @@ export function useImportCost(
       changed.dispose();
       collection?.clear();
     };
-  }, [editor, monaco, repoPath, activePath]);
+  }, [editor, monaco, repoPath, activePath, enabled]);
 }

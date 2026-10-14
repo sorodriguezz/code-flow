@@ -1,3 +1,4 @@
+import { fileGlyphId, folderGlyphId } from "./frameworkGlyphs";
 import { parseIconPattern, sameRuleTarget, type IconRule } from "./rules";
 
 /**
@@ -27,8 +28,9 @@ import { parseIconPattern, sameRuleTarget, type IconRule } from "./rules";
  * As the patterns the panel itself reads — `*.spec.ts`, `src/`, `vite.config.*`, `Dockerfile` —
  * parsed by `parseIconPattern`, so a shipped rule looks in the list exactly like one typed there.
  * The icon is the vscode-icons name without its `file-type-`/`folder-type-` prefix, which the
- * pattern's own trailing slash decides. `packs.test.ts` checks that every one exists in the set and
- * that no rule is shadowed by one above it.
+ * pattern's own trailing slash decides — or, for a glyph this repo draws itself (`localSet.ts`), its
+ * full id, `cf:nest-guard`, taken as written. `packs.test.ts` checks that every one exists and that
+ * no rule is shadowed by one above it.
  *
  * Order inside a table is the matching order: exact names and prefixes before compound suffixes
  * (`*.d.ts`, `*.spec.ts`) before plain extensions, because the list is first-match-wins.
@@ -40,7 +42,8 @@ function rows(prefix: string, table: readonly Row[]): IconRule[] {
   return table.map(([pattern, icon]) => {
     const parsed = parseIconPattern(pattern);
     const kind = parsed.target === "folder" ? "folder-type" : "file-type";
-    return { id: `${prefix}:${pattern}`, ...parsed, icon: `vscode-icons:${kind}-${icon}`, enabled: true };
+    const id = icon.includes(":") ? icon : `vscode-icons:${kind}-${icon}`;
+    return { id: `${prefix}:${pattern}`, ...parsed, icon: id, enabled: true };
   });
 }
 
@@ -50,6 +53,17 @@ const ext = (icon: string, ...extensions: string[]): Row[] => extensions.map((e)
 const named = (icon: string, ...patterns: string[]): Row[] => patterns.map((p) => [p, icon]);
 /** Several folder names, one glyph. */
 const dirs = (icon: string, ...names: string[]): Row[] => names.map((n) => [`${n}/`, icon]);
+/**
+ * Patterns drawn with one framework's own glyphs — its mark in the kind's colour, with the kind's
+ * emblem (`frameworkGlyphs.ts`, which says why not vscode-icons'): `files` names a kind of file,
+ * `dirs` a kind of folder.
+ */
+function drawn(framework: string) {
+  return {
+    files: (kind: string, ...patterns: string[]): Row[] => patterns.map((p) => [p, fileGlyphId(framework, kind)]),
+    dirs: (kind: string, ...names: string[]): Row[] => names.map((n) => [`${n}/`, folderGlyphId(framework, kind)]),
+  };
+}
 
 // ---------------------------------------------------------------------------------------------
 // General
@@ -161,8 +175,9 @@ const GENERAL_NAMED_FILES: Row[] = [
   ...named("npm", "package.json", "package-lock.json", ".npmrc", ".npmignore"),
   ...named("yarn", "yarn.lock", ".yarnrc", ".yarnrc.yml"),
   ...named("pnpm", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".pnpmfile.cjs"),
-  ...named("bun", "bun.lockb", "bun.lock"),
-  ...named("bunfig", "bunfig.toml"),
+  // Bun's own: every pack shows a Bun lockfile and config as Bun's, not only the Bun pack.
+  ...drawn("bun").files("lockfile", "bun.lockb", "bun.lock"),
+  ...drawn("bun").files("config", "bunfig.toml"),
   ...named("node", ".nvmrc", ".node-version"),
   ...named("deno", "deno.json", "deno.jsonc", "deno.lock"),
   // Language and tool configuration.
@@ -414,48 +429,124 @@ const GENERAL_EXTENSIONS: Row[] = [
   ...ext("vsix", "vsix"),
 ];
 
+/** General's folders and named files — everything ahead of the plain extensions. */
+const GENERAL_NAMES: IconRule[] = rows("g", [...GENERAL_FOLDERS, ...GENERAL_NAMED_FILES]);
+const GENERAL_EXTENSION_RULES: IconRule[] = rows("g", GENERAL_EXTENSIONS);
+
 /** The General pack's rules: its folders, then its named files, then the extensions. */
-export const GENERAL_RULES: IconRule[] = rows("g", [
-  ...GENERAL_FOLDERS,
-  ...GENERAL_NAMED_FILES,
-  ...GENERAL_EXTENSIONS,
-]);
+export const GENERAL_RULES: IconRule[] = [...GENERAL_NAMES, ...GENERAL_EXTENSION_RULES];
 
 // ---------------------------------------------------------------------------------------------
 // Frameworks
 // ---------------------------------------------------------------------------------------------
 
+const ng = drawn("angular");
+
+/**
+ * What `ng generate` writes, what NgRx adds, and the folders they are filed in — each kind with the
+ * shield in its colour and its emblem. Tests are here and not left to General, whose flask is the same
+ * for every stack.
+ */
 const ANGULAR: Row[] = [
-  ["*.component.ts", "ng-component-ts"],
-  ["*.component.html", "ng-component-html"],
-  ["*.component.scss", "ng-component-scss"],
-  ["*.component.sass", "ng-component-sass"],
-  ["*.component.less", "ng-component-less"],
-  ["*.component.css", "ng-component-css"],
-  ["*.service.ts", "ng-service-ts"],
-  // Above `*.module.ts`, because a routing module ends in it too.
-  ["*-routing.module.ts", "ng-routing-ts"],
-  ["*.routes.ts", "ng-routing-ts"],
-  ["*.resolver.ts", "ng-routing-ts"],
-  ["*.module.ts", "ng-module-ts"],
-  ["*.directive.ts", "ng-directive-ts"],
-  ["*.pipe.ts", "ng-pipe-ts"],
-  ["*.guard.ts", "ng-guard-ts"],
-  ["*.interceptor.ts", "ng-interceptor-ts"],
-  ["app.config.ts", "angular"],
+  ...ng.files("main", "main.ts", "main.server.ts"),
+  ...ng.files("config", "app.config.ts", "app.config.server.ts", "environment*"),
   ["ngsw-config.json", "angular"],
   ["proxy.conf.*", "config"],
-  ["resolvers/", "route"],
+  // `*.e2e-spec.ts` is not caught by `*.spec.ts` — a dash, not a dot.
+  ...ng.files("e2e", "*.e2e-spec.ts", "*.e2e.ts"),
+  ...ng.files("spec", "*.spec.ts", "*.test.ts"),
+  ...ng.files("component", "*.component.ts"),
+  ...ng.files("template", "*.component.html"),
+  ...ng.files("style", "*.component.scss", "*.component.sass", "*.component.less", "*.component.css"),
+  ...ng.files("service", "*.service.ts"),
+  // Above `*.module.ts`, because a routing module ends in it too.
+  ...ng.files("route", "*-routing.module.ts", "*.routes.ts", "*.resolver.ts"),
+  ...ng.files("module", "*.module.ts"),
+  ...ng.files("directive", "*.directive.ts"),
+  ...ng.files("pipe", "*.pipe.ts"),
+  ...ng.files("guard", "*.guard.ts"),
+  ...ng.files("interceptor", "*.interceptor.ts"),
+  ...ng.files("validator", "*.validator.ts", "*.validators.ts"),
+  ...ng.files("token", "*.token.ts", "*.tokens.ts"),
+  ...ng.files("provider", "*.provider.ts", "*.providers.ts"),
+  // NgRx, and the signal and component stores.
+  ...ng.files("action", "*.actions.ts"),
+  ...ng.files("reducer", "*.reducer.ts"),
+  ...ng.files("effect", "*.effects.ts"),
+  ...ng.files("selector", "*.selectors.ts"),
+  ...ng.files("store", "*.store.ts", "*.state.ts", "*.facade.ts"),
+  // Contracts — an Angular `*.model.ts` is almost always an interface, not an ORM entity.
+  ...ng.files("interface", "*.model.ts", "*.interface.ts", "*.types.ts", "*.type.ts"),
+  ...ng.files("enum", "*.enum.ts"),
+  ...ng.files("constants", "constants.ts", "*.constants.ts"),
+  ...ng.files("util", "*.util.ts", "*.utils.ts", "*.helper.ts", "*.helpers.ts"),
+  // The folders. `shared/`, `core/`, `pages/` and `environments/` keep General's.
+  ...ng.dirs("component", "components"),
+  ...ng.dirs("service", "services"),
+  ...ng.dirs("module", "modules"),
+  ...ng.dirs("guard", "guards"),
+  ...ng.dirs("interceptor", "interceptors"),
+  ...ng.dirs("pipe", "pipes"),
+  ...ng.dirs("directive", "directives"),
+  ...ng.dirs("validator", "validators"),
+  ...ng.dirs("route", "resolvers", "routes"),
+  ...ng.dirs("store", "store", "state", "+state"),
+  ...ng.dirs("interface", "models", "interfaces"),
+  ...ng.dirs("enum", "enums"),
 ];
 
-/** What React adds to General — which already draws `.tsx`/`.jsx`, tests, stories and the tooling. */
+/** `registerAs` and friends are `database.config.ts`; so is `vitest.config.ts`, which is Vitest's. Read
+ * after General's named files, so every tool's config keeps its own glyph and only the rest are the
+ * framework's. One row per framework that draws config files. */
+const lateConfig = (framework: string): Row[] => drawn(framework).files("config", "*.config.ts");
+
+const react = drawn("react");
+
+/**
+ * React's kinds, each with the atom in its colour and its emblem — and every `.tsx`/`.jsx` a
+ * component, since that is what they are in a React tree. Everything more specific comes first, or
+ * the component rule would claim it: tests, stories, contexts, providers, stores, styles.
+ *
+ * **Hooks are only `use-*`.** The camel-case `useAuth.ts` is the usual name, but a rule is a prefix
+ * and case-blind, so `use*` would claim `UserCard.tsx` and `users.ts` too — a hook icon on every user
+ * file is worse than none. `hooks/` is drawn as hooks either way.
+ */
 const REACT: Row[] = [
   ["components.json", "shadcn"],
   ["craco.config.*", "craco"],
   ["react-router.config.*", "reactrouter"],
-  ["routes.tsx", "reactrouter"],
-  ["routes.ts", "reactrouter"],
-  ["slices/", "redux"],
+  ...react.files("main", "main.tsx", "main.jsx"),
+  ...react.files("route", "routes.tsx", "routes.ts", "router.tsx", "router.ts", "*.routes.tsx", "*.routes.ts"),
+  ...react.files("spec", "*.test.tsx", "*.spec.tsx", "*.test.jsx", "*.spec.jsx", "*.test.ts", "*.spec.ts", "*.test.js", "*.spec.js"),
+  // General's, repeated here so the component rule below does not claim them.
+  ["*.stories.*", "storybook"],
+  ["*.cy.*", "cypress-spec"],
+  ...react.files("hook", "use-*", "*.hook.ts", "*.hooks.ts", "*.hook.tsx"),
+  ...react.files("context", "*context.tsx", "*context.ts"),
+  ...react.files("provider", "*provider.tsx"),
+  ...react.files("store", "*store.ts", "*store.tsx", "*slice.ts"),
+  ...react.files("reducer", "*reducer.ts"),
+  ...react.files("action", "*actions.ts"),
+  ...react.files("selector", "*selectors.ts"),
+  ...react.files("query", "*.queries.ts", "*.query.ts"),
+  ...react.files("api", "*.api.ts", "*.client.ts"),
+  ...react.files("service", "*.service.ts"),
+  ...react.files("style", "*.styles.ts", "*.styled.ts", "*.styled.tsx", "*.css.ts"),
+  ...react.files("validator", "*.schema.ts", "*.schemas.ts"),
+  ...react.files("interface", "*.types.ts", "*.type.ts", "*.interface.ts"),
+  ...react.files("enum", "*.enum.ts"),
+  ...react.files("constants", "constants.ts", "*.constants.ts"),
+  ...react.files("util", "*.util.ts", "*.utils.ts", "*.helper.ts", "*.helpers.ts"),
+  ...react.files("component", "*.tsx", "*.jsx"),
+  ...react.dirs("component", "components"),
+  ...react.dirs("hook", "hooks"),
+  ...react.dirs("context", "context", "contexts"),
+  ...react.dirs("provider", "providers"),
+  ...react.dirs("store", "store", "stores", "slices", "redux", "state"),
+  ...react.dirs("api", "api"),
+  ...react.dirs("service", "services"),
+  ...react.dirs("route", "routes", "router"),
+  ...react.dirs("style", "styles"),
 ];
 
 /** The App Router's reserved file names, and its route-segment folders. */
@@ -482,34 +573,163 @@ const NEXT: Row[] = [
   ...REACT,
 ];
 
+const vue = drawn("vue");
+
+/** Vue's and Nuxt's kinds, with the V in each kind's colour. Composables are `use-*` only, for the
+ * reason React's hooks are. */
 const VUE: Row[] = [
   ["app.config.ts", "nuxt"],
   ["nuxt.schema.ts", "nuxt"],
-  ["directives/", "plugin"],
+  ...vue.files("main", "main.ts", "main.js"),
+  ...vue.files("e2e", "*.e2e-spec.ts", "*.e2e.ts"),
+  ...vue.files("spec", "*.spec.ts", "*.test.ts", "*.spec.js", "*.test.js"),
+  ["*.stories.*", "storybook"],
+  ...vue.files("component", "*.vue"),
+  ...vue.files("composable", "use-*", "*.composable.ts"),
+  ...vue.files("store", "*store.ts", "*store.js"),
+  ...vue.files("route", "router.ts", "router.js", "routes.ts", "routes.js", "*.routes.ts"),
+  ...vue.files("plugin", "*.plugin.ts"),
+  ...vue.files("directive", "*.directive.ts"),
+  // Nuxt: `auth.global.ts` is route middleware; `users.get.ts` a server route.
+  ...vue.files("middleware", "*.global.ts", "*.middleware.ts"),
+  ...vue.files("api", "*.get.ts", "*.post.ts", "*.put.ts", "*.patch.ts", "*.delete.ts"),
+  ...vue.files("service", "*.service.ts"),
+  ...vue.files("validator", "*.schema.ts"),
+  ...vue.files("interface", "*.types.ts", "*.type.ts", "*.interface.ts"),
+  ...vue.files("enum", "*.enum.ts"),
+  ...vue.files("constants", "constants.ts", "*.constants.ts"),
+  ...vue.files("util", "*.util.ts", "*.utils.ts", "*.helper.ts", "*.helpers.ts"),
+  ...vue.dirs("component", "components"),
+  ...vue.dirs("composable", "composables"),
+  ...vue.dirs("store", "stores", "store"),
+  ...vue.dirs("route", "router", "routes"),
+  ...vue.dirs("plugin", "plugins"),
+  ...vue.dirs("directive", "directives"),
+  ...vue.dirs("middleware", "middleware"),
+  ...vue.dirs("service", "services"),
+  ...vue.dirs("api", "api"),
 ];
 
-const NEST: Row[] = [
-  ["*.controller.ts", "nest-controller-ts"],
-  ["*.service.ts", "nest-service-ts"],
-  ["*.module.ts", "nest-module-ts"],
-  ["*.guard.ts", "nest-guard-ts"],
-  ["*.strategy.ts", "nest-guard-ts"],
-  ["*.pipe.ts", "nest-pipe-ts"],
-  ["*.filter.ts", "nest-filter-ts"],
-  ["*.interceptor.ts", "nest-interceptor-ts"],
-  ["*.middleware.ts", "nest-middleware-ts"],
-  ["*.gateway.ts", "nest-gateway-ts"],
-  ["*.decorator.ts", "nest-decorator-ts"],
-  ["*.adapter.ts", "nest-adapter-ts"],
-  ["*.resolver.ts", "graphql"],
-  ["*.entity.ts", "db"],
-  ["*.repository.ts", "db"],
-  ["*.schema.ts", "db"],
-  ["*.dto.ts", "typescriptdef"],
-  ["*.interface.ts", "typescriptdef"],
-  ["main.ts", "nestjs"],
-  ["repositories/", "db"],
+const bun = drawn("bun");
+
+/**
+ * A Bun project — a server on Bun, a CLI, a library — with the bun in each kind's colour. The lockfile
+ * and `bunfig.toml` are General's (every pack draws them as Bun's). `index.ts`, which `bun init`
+ * makes the entry, is left alone: the same name is every folder's barrel.
+ */
+const BUN: Row[] = [
+  ...bun.files("interface", "bun-env.d.ts", "bun.d.ts", "*.types.ts", "*.type.ts"),
+  ...bun.files("main", "main.ts"),
+  ...bun.files("server", "server.ts", "*.server.ts"),
+  ...bun.files("build", "build.ts", "build.js", "*.build.ts"),
+  ...bun.files("macro", "*.macro.ts"),
+  ...bun.files("spec", "*.test.ts", "*.spec.ts", "*.test.tsx", "*.test.js", "*.spec.js"),
+  ...bun.files("route", "routes.ts", "*.routes.ts", "*.route.ts"),
+  ...bun.files("controller", "*.controller.ts"),
+  ...bun.files("middleware", "*.middleware.ts"),
+  ...bun.files("plugin", "*.plugin.ts"),
+  ...bun.files("worker", "*.worker.ts"),
+  ...bun.files("service", "*.service.ts"),
+  ...bun.files("validator", "*.schema.ts"),
+  ...bun.files("constants", "constants.ts", "*.constants.ts"),
+  ...bun.files("util", "*.util.ts", "*.utils.ts"),
+  ...bun.dirs("route", "routes"),
+  ...bun.dirs("controller", "controllers"),
+  ...bun.dirs("middleware", "middleware", "middlewares"),
+  ...bun.dirs("plugin", "plugins"),
+  ...bun.dirs("worker", "workers"),
+  ...bun.dirs("service", "services"),
 ];
+
+const nest = drawn("nest");
+
+/**
+ * Every kind of file a Nest project is made of, each with a glyph of its own: what `nest generate`
+ * writes, what TypeORM, Mongoose, Passport, CQRS and Bull add to it, and the folders they are filed
+ * in. Tests are here and not left to General because General's are the same flask for every stack —
+ * the point of this pack is a tree that reads as Nest.
+ */
+const NEST: Row[] = [
+  ...nest.files("main", "main.ts"),
+  ...named("jest", "jest-e2e.json"),
+  // `nest new` writes `app.e2e-spec.ts` under `test/`. Not caught by `*.spec.ts` — a dash, not a dot.
+  ...nest.files("e2e", "*.e2e-spec.ts", "*.e2e-test.ts", "*.e2e.ts"),
+  ...nest.files("spec", "*.spec.ts", "*.test.ts"),
+  // What `nest generate` writes.
+  ...nest.files("module", "*.module.ts"),
+  ...nest.files("controller", "*.controller.ts"),
+  ...nest.files("service", "*.service.ts"),
+  ...nest.files("provider", "*.provider.ts", "*.providers.ts"),
+  ...nest.files("guard", "*.guard.ts"),
+  ...nest.files("strategy", "*.strategy.ts"),
+  ...nest.files("pipe", "*.pipe.ts"),
+  ...nest.files("filter", "*.filter.ts"),
+  ...nest.files("interceptor", "*.interceptor.ts"),
+  ...nest.files("middleware", "*.middleware.ts"),
+  ...nest.files("decorator", "*.decorator.ts", "*.decorators.ts"),
+  ...nest.files("gateway", "*.gateway.ts"),
+  ...nest.files("resolver", "*.resolver.ts"),
+  ...nest.files("adapter", "*.adapter.ts"),
+  // Data.
+  ...nest.files("repository", "*.repository.ts"),
+  ...nest.files("entity", "*.entity.ts", "*.model.ts"),
+  ...nest.files("schema", "*.schema.ts"),
+  ...nest.files("seed", "*.seed.ts", "*.seeder.ts"),
+  // Contracts and types — GraphQL's inputs and args are DTOs by another name.
+  ...nest.files("dto", "*.dto.ts", "*.input.ts", "*.args.ts", "*.payload.ts", "*.request.ts", "*.response.ts"),
+  ...nest.files("interface", "*.interface.ts", "*.interfaces.ts", "*.types.ts", "*.type.ts"),
+  ...nest.files("enum", "*.enum.ts", "*.enums.ts"),
+  ...nest.files("mapper", "*.mapper.ts", "*.serializer.ts"),
+  // Events, CQRS and background work.
+  ...nest.files("event", "*.event.ts", "*.events.ts"),
+  ...nest.files("listener", "*.listener.ts", "*.handler.ts", "*.subscriber.ts"),
+  ...nest.files("command", "*.command.ts"),
+  ...nest.files("query", "*.query.ts"),
+  ...nest.files("processor", "*.processor.ts", "*.consumer.ts", "*.queue.ts", "*.job.ts"),
+  ...nest.files("task", "*.task.ts", "*.tasks.ts", "*.cron.ts", "*.scheduler.ts"),
+  ...nest.files("health", "*.health.ts"),
+  // Everything around them.
+  ...nest.files("exception", "*.exception.ts", "*.error.ts"),
+  ...nest.files("factory", "*.factory.ts"),
+  ...nest.files("constants", "constants.ts", "*.constants.ts", "*.constant.ts"),
+  ...nest.files("util", "*.util.ts", "*.utils.ts", "*.helper.ts", "*.helpers.ts"),
+  ...nest.files("config", "configuration.ts", "config.ts"),
+  // The folders they live in. `config/`, `utils/`, `common/` and `test/` keep General's.
+  ...nest.dirs("module", "modules"),
+  ...nest.dirs("controller", "controllers"),
+  ...nest.dirs("service", "services"),
+  ...nest.dirs("provider", "providers"),
+  ...nest.dirs("guard", "guards"),
+  ...nest.dirs("strategy", "strategies"),
+  ...nest.dirs("pipe", "pipes"),
+  ...nest.dirs("filter", "filters"),
+  ...nest.dirs("interceptor", "interceptors"),
+  ...nest.dirs("middleware", "middleware", "middlewares"),
+  ...nest.dirs("decorator", "decorators"),
+  ...nest.dirs("gateway", "gateways"),
+  ...nest.dirs("resolver", "resolvers"),
+  ...nest.dirs("adapter", "adapters"),
+  ...nest.dirs("repository", "repositories", "repository"),
+  ...nest.dirs("entity", "entities", "entity", "models"),
+  ...nest.dirs("schema", "schemas", "schema"),
+  ...nest.dirs("seed", "seeds", "seeders", "seed"),
+  ...nest.dirs("dto", "dto", "dtos"),
+  ...nest.dirs("interface", "interfaces"),
+  ...nest.dirs("enum", "enums"),
+  ...nest.dirs("mapper", "mappers"),
+  ...nest.dirs("event", "events"),
+  ...nest.dirs("listener", "listeners", "handlers", "subscribers"),
+  ...nest.dirs("command", "commands"),
+  ...nest.dirs("query", "queries"),
+  ...nest.dirs("processor", "processors", "queues", "consumers", "jobs"),
+  ...nest.dirs("task", "tasks", "cron", "schedulers"),
+  ...nest.dirs("health", "health"),
+  ...nest.dirs("exception", "exceptions", "errors"),
+  ...nest.dirs("factory", "factories"),
+  ...nest.dirs("constants", "constants"),
+];
+
+
 
 const SPRING: Row[] = [
   ["application.properties", "config"],
@@ -622,10 +842,15 @@ const LARAVEL: Row[] = [
 /**
  * A framework's rules first, then every General rule it did not already claim — the same target,
  * kind and pattern would be a duplicate the panel flags as "never applies".
+ *
+ * `late` rows go between General's named files and its plain extensions: a suffix broad enough to
+ * claim a well-known name (`*.config.ts` and `vite.config.ts`) has to come after that name to lose it.
  */
-function pack(prefix: string, specific: readonly Row[]): IconRule[] {
+function pack(prefix: string, specific: readonly Row[], late: readonly Row[] = []): IconRule[] {
   const own = rows(prefix, specific);
-  return [...own, ...GENERAL_RULES.filter((rule) => !own.some((mine) => sameRuleTarget(mine, rule)))];
+  const after = rows(prefix, late);
+  const unclaimed = (rule: IconRule) => ![...own, ...after].some((mine) => sameRuleTarget(mine, rule));
+  return [...own, ...GENERAL_NAMES.filter(unclaimed), ...after, ...GENERAL_EXTENSION_RULES.filter(unclaimed)];
 }
 
 export interface ShippedPack {
@@ -643,11 +868,12 @@ export interface ShippedPack {
  */
 export const SHIPPED_PACKS: ShippedPack[] = [
   { id: "base", name: "General", rules: GENERAL_RULES },
-  { id: "angular", name: "Angular", rules: pack("ng", ANGULAR) },
-  { id: "react", name: "React", rules: pack("react", REACT) },
-  { id: "nextjs", name: "Next.js", rules: pack("next", NEXT) },
-  { id: "vue", name: "Vue / Nuxt", rules: pack("vue", VUE) },
-  { id: "nestjs", name: "NestJS", rules: pack("nest", NEST) },
+  { id: "angular", name: "Angular", rules: pack("ng", ANGULAR, lateConfig("angular")) },
+  { id: "react", name: "React", rules: pack("react", REACT, lateConfig("react")) },
+  { id: "nextjs", name: "Next.js", rules: pack("next", NEXT, lateConfig("react")) },
+  { id: "vue", name: "Vue / Nuxt", rules: pack("vue", VUE, lateConfig("vue")) },
+  { id: "nestjs", name: "NestJS", rules: pack("nest", NEST, lateConfig("nest")) },
+  { id: "bun", name: "Bun", rules: pack("bun", BUN, lateConfig("bun")) },
   { id: "spring", name: "Spring Boot", rules: pack("spring", SPRING) },
   { id: "dotnet", name: ".NET", rules: pack("dotnet", DOTNET) },
   { id: "fastapi", name: "FastAPI", rules: pack("fastapi", FASTAPI) },
@@ -662,11 +888,12 @@ export const SHIPPED_PACKS: ShippedPack[] = [
  */
 const PREVIEWS: Record<string, string[]> = {
   base: ["typescript", "python", "go", "docker"],
-  angular: ["ng-component-ts", "ng-service-ts", "ng-module-ts", "ng-pipe-ts"],
-  react: ["reactts", "testts", "storybook", "vite"],
-  nextjs: ["next", "reactts", "layout", "rest"],
-  vue: ["vue", "nuxt", "vueconfig", "typescript"],
-  nestjs: ["nest-controller-ts", "nest-service-ts", "nest-module-ts", "nest-guard-ts"],
+  angular: ["cf:angular-component", "cf:angular-service", "cf:angular-module", "cf:angular-pipe"],
+  react: ["cf:react-component", "cf:react-hook", "cf:react-context", "cf:react-spec"],
+  nextjs: ["next", "cf:react-component", "layout", "rest"],
+  vue: ["cf:vue-component", "cf:vue-composable", "cf:vue-store", "cf:vue-route"],
+  nestjs: ["cf:nest-controller", "cf:nest-service", "cf:nest-module", "cf:nest-guard"],
+  bun: ["cf:bun-server", "cf:bun-spec", "cf:bun-build", "cf:bun-lockfile"],
   spring: ["java", "maven", "rest", "config"],
   dotnet: ["csharp", "csproj", "razor", "nuget"],
   fastapi: ["python", "pytest", "json-schema", "pip"],
@@ -675,10 +902,11 @@ const PREVIEWS: Record<string, string[]> = {
 };
 
 /** The preview for any profile: the shipped pick, or — for one the user wrote — the first four
- * different file glyphs its rules draw. Catalogue ids, ready for `IconGlyph`. */
+ * different file glyphs its rules draw. Catalogue ids, ready for `IconGlyph`. A pick is a
+ * vscode-icons file-type name, or a full id when the glyph is this repo's own. */
 export function previewIcons(profile: { id: string; rules: IconRule[] }): string[] {
   const picked = PREVIEWS[profile.id];
-  if (picked) return picked.map((name) => `vscode-icons:file-type-${name}`);
+  if (picked) return picked.map((name) => (name.includes(":") ? name : `vscode-icons:file-type-${name}`));
   const seen = new Set<string>();
   for (const rule of profile.rules) {
     if (rule.target !== "file" || !rule.enabled || seen.has(rule.icon)) continue;

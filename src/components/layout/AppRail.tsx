@@ -597,8 +597,11 @@ function AssistantButton() {
         }`}
       >
         {/* `card` (32px) rather than `md`: the designs draw inside their square with room to spare,
-            and at 22px the mark read smaller than the app icons above it (user: "un poco más grande"). */}
-        <ThinkingOrb size="card" />
+            and at 22px the mark read smaller than the app icons above it (user: "un poco más grande").
+            `follow`: every design notices the pointer — the ones with eyes look at it (user: "que siga el
+            mouse con los ojos"), the rest turn, lean or light up toward it — and perks up as it comes
+            close to the button. See `ThinkingOrb`. */}
+        <ThinkingOrb size="card" follow />
       </button>
     </Tooltip>
   );

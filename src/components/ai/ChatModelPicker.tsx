@@ -48,6 +48,12 @@ const EDGE = 8;
  * is one hover away from either. The menu hangs from the whole control, dropping below it like any
  * header dropdown.
  *
+ * `button` is `split` at a button's size with the run's name spelled out — for a row of worded
+ * actions, where an icon alone would be the odd one out: the Inbox's "Analizar cambios", whose
+ * engine could only be changed in Settings until the user asked for "la flechita al lado"
+ * (2026-10-14). It is drawn as the `secondary`/`sm` button of `Button.tsx`, its neighbours' recipe,
+ * with the chevron's half split off by a rule.
+ *
  * While a conversation is open (`chatActive`) only the *current* provider's versions can be picked.
  * Switching provider mid-chat can't work: each CLI keeps its own session store, so the turns so far
  * live somewhere the next engine can't read, and its resume token means nothing there. Rather than
@@ -106,7 +112,7 @@ export function ChatModelPicker({
   task?: string;
   /** The chip's tooltip; on `tag`, `icon` and `split`'s chevron, the line under the route. */
   title?: string;
-  variant?: "chip" | "tag" | "icon" | "split";
+  variant?: "chip" | "tag" | "icon" | "split" | "button";
   /** Added to the trigger's classes (on `split`, the whole control's), for a place that has to put
    *  it somewhere (the ✨ pinned in the commit message's corner). Only for what the variant leaves
    *  unset — two utilities for one property do not stack. */
@@ -114,9 +120,10 @@ export function ChatModelPicker({
   /** `icon` only: the mark to show in place of the provider's — the editor's inline edit keeps the
    *  ✨ it always had, which is the thing its user reaches for. */
   children?: ReactNode;
-  /** `split` only: the run the control starts — its glyph, its name (the accessible name and the
-   *  tooltip's first line, over the route) and what a click on it does. */
-  action?: { icon: ReactNode; label: string; onClick: () => void; disabled?: boolean };
+  /** `split` and `button` only: the run the control starts — its glyph, its name (the accessible
+   *  name and the tooltip's first line, over the route; on `button`, also its text), what a click on
+   *  it does, and why it is off when it is (`title`, the tooltip's last line). */
+  action?: { icon: ReactNode; label: string; onClick: () => void; disabled?: boolean; title?: string };
   /** `data-tour` for the guided tour, on the whole control. */
   tour?: string;
   /** With `chatActive`: where a version of a *locked* provider goes — the chat workspace's
@@ -225,7 +232,8 @@ export function ChatModelPicker({
       setPos(null);
       return;
     }
-    const anchor = variant === "split" ? splitRef.current : triggerRef.current;
+    const hangs = variant === "split" || variant === "button";
+    const anchor = hangs ? splitRef.current : triggerRef.current;
     const menu = menuRef.current;
     if (!anchor || !menu) return;
     const rect = anchor.getBoundingClientRect();
@@ -233,7 +241,7 @@ export function ChatModelPicker({
     const above = rect.top - height - GAP;
     const below = rect.bottom + GAP;
     const top =
-      variant === "split"
+      hangs
         ? // A header dropdown: below it, unless only the space above can hold it.
           below + height <= window.innerHeight - EDGE || above < EDGE
           ? Math.min(below, window.innerHeight - height - EDGE)
@@ -371,6 +379,37 @@ export function ChatModelPicker({
             }`}
           >
             {chevron(10)}
+          </button>
+        </div>
+      ) : variant === "button" ? (
+        // `split` with words: the secondary small button's look (`Button.tsx`), the run's half
+        // carrying its glyph and name, the chevron's half split off by the same hairline.
+        <div
+          ref={splitRef}
+          data-tour={tour}
+          className={`inline-flex h-6 shrink-0 items-stretch rounded-md bg-[var(--cf-control)] text-[12px] font-medium text-[var(--cf-text)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] ${className}`}
+        >
+          <button
+            type="button"
+            onClick={action?.onClick}
+            disabled={action?.disabled}
+            title={[action?.label, routeLabel, action?.title].filter(Boolean).join("\n")}
+            className="cf-press inline-flex items-center gap-1.5 whitespace-nowrap rounded-l-md pl-2 pr-1.5 transition-colors duration-100 enabled:hover:bg-[color-mix(in_oklab,var(--cf-text)_4%,var(--cf-control))] disabled:opacity-45"
+          >
+            {action?.icon}
+            {action?.label}
+          </button>
+          <button
+            {...trigger}
+            title={[routeLabel, title].filter(Boolean).join("\n")}
+            aria-label={`${heading}: ${routeLabel}`}
+            className={`flex w-5 items-center justify-center rounded-r-md border-l border-[var(--cf-border-strong)] transition-colors duration-100 ${
+              open
+                ? "bg-[var(--cf-hover)] text-[var(--cf-text)]"
+                : "text-[var(--cf-text-muted)] hover:bg-[color-mix(in_oklab,var(--cf-text)_4%,var(--cf-control))] hover:text-[var(--cf-text)]"
+            }`}
+          >
+            {chevron(12)}
           </button>
         </div>
       ) : variant === "icon" ? (

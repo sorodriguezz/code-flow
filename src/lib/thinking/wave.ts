@@ -3,6 +3,8 @@ import { clamp01, easeOut, endColor, finishClock } from "./finish";
 import { mix, palette, rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { voiceLevel } from "./voice";
+import type { Gaze } from "./face";
+import { easeToward, toward } from "./pointer";
 
 /**
  * "Onda" — three voice waves in the assistant's hues, the way a voice assistant draws itself
@@ -16,6 +18,10 @@ import { voiceLevel } from "./voice";
  * Finish (asked for 2026-10-08, like the Orbe's): one last swell, then the three waves fold into a
  * single one as they turn green, and it calms to a soft green ripple. Failed: one jolt, and the line
  * goes flat and red — a monitor flatlining.
+ *
+ * Following the pointer (`ThinkingOrb follow`), the swell moves along the line to the pointer's
+ * side — the waves stay pinned at both ends, their crest leaning toward it — and the line rises or
+ * dips a little toward it.
  */
 
 /** The finish's beats, in seconds since `done`. */
@@ -34,6 +40,8 @@ export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
   let time = 0;
   let energy = 0.4;
   let activity: ThinkingActivity | undefined;
+  let gaze: Gaze = null;
+  const look = toward();
 
   function target(): number {
     if (ended(activity)) {
@@ -61,7 +69,9 @@ export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
     if (!ctx) return;
     const p = palette();
     ctx.clearRect(0, 0, px, px);
-    const mid = px / 2;
+    const mid = px / 2 + look.y * look.on * px * 0.08;
+    // Where the swell peaks along the line, -1..1: the middle, or toward the pointer.
+    const crest = look.x * look.on * 0.5;
     const left = px * 0.06;
     const width = px - left * 2;
     const height = px * 0.38 * energy;
@@ -87,7 +97,9 @@ export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
       ctx.beginPath();
       for (let s = 0; s <= steps; s++) {
         const nx = (s / steps) * 2 - 1;
-        const envelope = Math.pow(1 - nx * nx, 2);
+        // Pinned at both ends, peaking at the crest: each side stretched to fit its half.
+        const k = nx < crest ? (nx - crest) / (1 + crest) : (nx - crest) / (1 - crest);
+        const envelope = Math.pow(1 - k * k, 2);
         const own = yOf(curve, i, nx, envelope);
         const y = mid + (merge > 0 ? own + (yOf(CURVES[0], 0, nx, envelope) - own) * merge : own);
         const x = left + (s / steps) * width;
@@ -111,8 +123,12 @@ export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
       activity = next;
       clock.set(next);
     },
+    setGaze(next) {
+      gaze = next;
+    },
     tick(dt) {
       clock.step(dt);
+      easeToward(look, ended(activity) || activity?.quiet || activity?.stopping ? null : gaze, dt, 4);
       time += dt;
       energy += (target() - energy) * Math.min(1, dt * 5);
       paint();

@@ -1,8 +1,9 @@
 import { ended, type RunPhase, type ThinkingActivity } from "./activity";
-import { WHITE } from "./face";
+import { WHITE, type Gaze } from "./face";
 import { clamp01, endColor, finishClock, rgba, TAU } from "./finish";
 import { aiHue, mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { easeToward, facing, lean, toward } from "./pointer";
 
 /**
  * "Red neuronal" — a small layered network, drawn the way networks are drawn: columns of neurons,
@@ -19,7 +20,13 @@ import { prepareCanvas, type Painter } from "./ticker";
  *
  * Finish: one last pass that leaves every neuron it reaches green. Failed: the pass dies part-way —
  * what it reached goes red, and the links past it go dark.
+ *
+ * Following the pointer (`ThinkingOrb follow`), the net tips toward it, the neurons on its side
+ * light up, and the passes run toward it — right to left when it is to the left.
  */
+
+/** The net's radius in the square, for leaning it toward the pointer. */
+const REACH = 0.38;
 
 /** [passes' speed in layers/s, gap between passes in s] per phase. */
 const PACE: Partial<Record<RunPhase, [number, number]>> = {
@@ -84,6 +91,14 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
   let alpha = 1;
   /** On a finish, how far its last pass has got, in layers; -1 while the run runs. */
   let endFront = -1;
+  let gaze: Gaze = null;
+  const look = toward();
+
+  /** A point of the net, in px, leaned toward the pointer. */
+  function at(x: number, y: number): [number, number] {
+    const [lx, ly] = lean(look, x - 0.5, y - 0.5, REACH);
+    return [u(0.5 + lx), u(0.5 + ly)];
+  }
 
   function pace(act: ThinkingActivity | undefined): [number, number] {
     if (act?.stopping) return [0, 1];
@@ -132,8 +147,8 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
       ctx.strokeStyle = rgba(ink(A.layer, lit), (0.1 + 0.18 * link.weight + 0.35 * lit) * vis * broken * alpha);
       ctx.lineWidth = Math.max(0.5, u(0.012 + 0.012 * link.weight));
       ctx.beginPath();
-      ctx.moveTo(u(A.x), u(A.y));
-      ctx.lineTo(u(B.x), u(B.y));
+      ctx.moveTo(...at(A.x, A.y));
+      ctx.lineTo(...at(B.x, B.y));
       ctx.stroke();
     }
 
@@ -153,8 +168,9 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
           const y = src.y + (dst.y - src.y) * t;
           const col = mix(aiHue(p, (from + (to - from) * t) / last), WHITE, backward ? 0 : 0.3);
           ctx.fillStyle = rgba(mix(col, p.warning, warn * 0.3), (0.5 + 0.5 * link.weight) * alpha * (backward ? 0.6 : 1));
+          const [sx, sy] = at(x, y);
           ctx.beginPath();
-          ctx.arc(u(x), u(y), Math.max(0.6, u(0.022)), 0, TAU);
+          ctx.arc(sx, sy, Math.max(0.6, u(0.022)), 0, TAU);
           ctx.fill();
         }
       }
@@ -167,6 +183,7 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
       if (vis <= 0) continue;
       const col = ink(n.layer, n.glow);
       const radius = r * (0.85 + 0.25 * n.glow) * vis;
+      const [nx, ny] = at(n.x, n.y);
       ctx.save();
       if (n.glow > 0.3) {
         ctx.shadowColor = rgba(col, 0.8 * alpha);
@@ -174,13 +191,13 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
       }
       ctx.fillStyle = rgba(mix(p.surface, col, 0.25 + 0.75 * n.glow), vis * alpha);
       ctx.beginPath();
-      ctx.arc(u(n.x), u(n.y), radius, 0, TAU);
+      ctx.arc(nx, ny, radius, 0, TAU);
       ctx.fill();
       ctx.restore();
       ctx.strokeStyle = rgba(col, (0.55 + 0.45 * n.glow) * vis * alpha);
       ctx.lineWidth = Math.max(0.6, u(0.016));
       ctx.beginPath();
-      ctx.arc(u(n.x), u(n.y), radius, 0, TAU);
+      ctx.arc(nx, ny, radius, 0, TAU);
       ctx.stroke();
     }
   }
@@ -197,9 +214,13 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
       }
       if (!ended(activity)) endFront = -1;
     },
+    setGaze(next) {
+      gaze = next;
+    },
     tick(dt) {
       clock.step(dt);
       const act = clock.act;
+      easeToward(look, ended(act) || act?.quiet || act?.stopping ? null : gaze, dt);
       time += dt;
       grow = Math.min(1, grow + dt * 1.6);
       warn += ((act?.quiet && !ended(act) ? 1 : 0) - warn) * Math.min(1, dt * 3);
@@ -231,8 +252,10 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
             neurons[input].glow = Math.max(neurons[input].glow, 0.9);
           }
         } else if (speed > 0) {
-          // Thinking alternates: forward, then the error running back.
-          newPass(thinking && nextBack);
+          // Thinking alternates: forward, then the error running back — unless the pointer is off
+          // to one side, and every pass runs toward it.
+          const pulled = look.on > 0.5 && Math.abs(look.x) > 0.3 ? look.x < 0 : null;
+          newPass(pulled ?? (thinking && nextBack));
           nextBack = thinking ? !nextBack : false;
         }
       }
@@ -247,6 +270,8 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
           wait = gap;
         }
       }
+      // The side the pointer is on, lit.
+      for (const n of neurons) n.glow = Math.max(n.glow, facing(look, n.x - 0.5, n.y - 0.5, REACH) * 0.75);
       // Writing: the outputs pulse with the words.
       if (phase === "write") {
         for (const i of layers[last]) neurons[i].glow = Math.max(neurons[i].glow, 0.5 + 0.5 * Math.abs(Math.sin(time * 8)));

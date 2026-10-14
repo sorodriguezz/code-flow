@@ -2936,7 +2936,7 @@ const en = {
   "settings.searchTermsCsv": "csv, tsv, psv, columns, separator, delimiter, rainbow, comma, semicolon, tab",
   "settings.searchTermsFormatting": "format, prettier, formatter, format on save",
   "settings.searchTermsEditorDisplay":
-    "word wrap, wrap, soft wrap, long lines, line wrap, alt+z, display, inlay hints, hints, parameter names, inferred types",
+    "word wrap, wrap, soft wrap, long lines, line wrap, alt+z, display, inlay hints, hints, parameter names, inferred types, package weight, import cost, library size, dependency size, prisma, prisma colours, prisma highlighting, schema.prisma",
   "settings.searchTermsNetwork": "timeout, redirects, ssl, tls, verify",
   "settings.searchTermsProxy": "http proxy, socks, corporate",
   "settings.searchTermsCertificates": "client certificate, mtls, pem, pfx",
@@ -9764,6 +9764,12 @@ const en = {
   "editor.inlayHints": "Inlay hints",
   "editor.inlayHintsTip":
     "Shows, faint beside the code, the type the compiler inferred for a variable or a return value, and the name of the parameter a literal argument lands in. Which ones a language has is its server's call. Only the display changes — nothing is written into the file.",
+  "editor.importCost": "Package weights",
+  "editor.importCostTip":
+    "Shows, at the end of each import line, how much the imported package weighs on disk — its installed size under node_modules, not what it adds to a bundle. Off, nothing is measured.",
+  "editor.prismaHighlight": "Prisma colours",
+  "editor.prismaHighlightTip":
+    "Colours .prisma schemas: models, enums, field types, @attributes and @@indexes. Off, the file is drawn plain — it still opens as Prisma, with comments and brackets working.",
   // Rename across the project (`components/editor/renameFlow`).
   "editor.renameNothing": "Nothing to rename in this repository",
   "editor.renameSummary": "{changes} change(s) in {files} file(s)",

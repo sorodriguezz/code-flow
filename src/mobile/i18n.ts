@@ -117,6 +117,17 @@ const es = {
   "chat.thinking": "Pensando…",
   "chat.failed": "No se pudo enviar. Tu mensaje sigue escrito abajo.",
   "chat.loadFailed": "No se pudo leer la conversación de este proyecto.",
+  "engine.title": "Modelo del chat",
+  "engine.change": "Cambiar el modelo del chat",
+  "engine.providers": "Proveedores",
+  "engine.default": "Predeterminado",
+  "engine.cliDefault": "Predeterminado del CLI",
+  "engine.cliDefaultHint": "Sin elegir versión: el CLI usa la suya",
+  "engine.loading": "Preguntando al CLI qué modelos tiene…",
+  "engine.older": "Versiones anteriores",
+  "engine.newConversation": "Abre una conversación nueva",
+  "engine.newConversationHint":
+    "Esta conversación sigue con su proveedor. Elegir un modelo de este abre una conversación nueva con él.",
 
   // ── Terminal ────────────────────────────────────────────────────────────────
   "terminal.refused":
@@ -516,6 +527,17 @@ const en: Record<MobileKey, string> = {
   "chat.thinking": "Thinking…",
   "chat.failed": "Could not send. Your message is still in the box below.",
   "chat.loadFailed": "This project's conversation could not be read.",
+  "engine.title": "Chat model",
+  "engine.change": "Change the chat model",
+  "engine.providers": "Providers",
+  "engine.default": "Default",
+  "engine.cliDefault": "CLI default",
+  "engine.cliDefaultHint": "No version picked: the CLI uses its own",
+  "engine.loading": "Asking the CLI which models it has…",
+  "engine.older": "Older versions",
+  "engine.newConversation": "Starts a new conversation",
+  "engine.newConversationHint":
+    "This conversation stays with its provider. Picking one of these models starts a new conversation on it.",
 
   "terminal.refused":
     "Terminals are switched off for remote devices. Turn them on at the desktop, under Settings → Remote control.",

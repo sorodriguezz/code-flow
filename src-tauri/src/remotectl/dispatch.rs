@@ -479,6 +479,8 @@ pub const ALLOWED: &[&str] = &[
     "send_chat_message",
     "list_chat_conversations",
     "get_chat_conversation",
+    "chat_routing",
+    "list_ai_models",
     // The notification centre — read only.
     "list_notifications",
     // Terminals — every one but `close_terminal` behind `SETTING_ALLOW_TERMINAL`.
@@ -494,6 +496,39 @@ pub const ALLOWED: &[&str] = &[
 /// Whether a phone may name `cmd` at all. See [`ALLOWED`].
 pub fn is_allowed(cmd: &str) -> bool {
     ALLOWED.contains(&cmd)
+}
+
+/// The engines a phone may name for a chat turn: the app's own seven, by the ids the routing uses.
+/// Not `local-exec` — a command runner that `send_chat_message` takes in the provider slot — and not
+/// an id this build does not know, which `ai::engine_for` would quietly turn into Claude.
+const PHONE_ENGINES: &[&str] = &["claude", "gemini", "codex", "grok", "opencode", "cline", crate::local_agent::PROVIDER_ID];
+
+/// The engine a phone named for its chat turn, checked: `None` when it named none (the routing
+/// decides), a refusal for a provider outside [`PHONE_ENGINES`] or a model id that is not plainly
+/// one. A model with no provider means nothing and is dropped with it.
+fn phone_engine(provider: Option<String>, model: Option<String>) -> Result<Option<(String, String)>, DispatchError> {
+    let Some(provider) = provider.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    if !PHONE_ENGINES.contains(&provider.as_str()) {
+        return Err(DispatchError::BadArgs(format!("unknown provider `{provider}`")));
+    }
+    let model = model.unwrap_or_default().trim().to_string();
+    if !plain_model_id(&model) {
+        return Err(DispatchError::BadArgs("argument `model`: not a model id".to_string()));
+    }
+    Ok(Some((provider, model)))
+}
+
+/// A model id the way the CLIs spell them — `claude-opus-5-5`, `claude-opus-4-6[1m]`,
+/// `anthropic/claude-sonnet-4-5`, `ollama/qwen2.5-coder:7b` — or empty, for the CLI's own default.
+/// It reaches a command line as `--model <id>`, so nothing that could be read as another flag or
+/// split into another word: no leading dash, no whitespace, no quotes.
+fn plain_model_id(model: &str) -> bool {
+    model.is_empty()
+        || (model.len() <= 160
+            && !model.starts_with('-')
+            && model.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@[]+".contains(c)))
 }
 
 /// What a stash action answers when the list moved under the phone: a code the client turns into
@@ -1041,36 +1076,60 @@ pub async fn dispatch(
         // Chat with an engine
         // ---------------------------------------------------------------
         //
-        // Same rule as the review above and for the same reason: the provider, model and prompt are
-        // `None`, so the turn routes exactly as the desktop would route it. The phone contributes
-        // the message and nothing else.
+        // The phone picks the engine of its conversation the way the desk's chip does (user,
+        // 2026-10-14: "en chat no se puede elegir modelo") — provider and model, and nothing more:
+        // the prompt is never sent, and the account is the workspace's automatic one. Both are
+        // checked here (`phone_engine`): a provider out of the app's own seven, or a model id that
+        // could read as anything but an id on a command line, is refused before any engine starts.
+        // Without them the turn routes exactly as the desktop would route it.
         //
         // `send_chat_message` holds a per-repository lease while it runs, so a phone and the desk
         // cannot start two engines in one working copy — that guard already existed and needed no
         // help from here.
-        "send_chat_message" => ok_with(
-            commands::claude_cmd::send_chat_message(
-                app.clone(),
-                app.state::<Db>(),
-                arg(args, "projectId")?,
-                arg(args, "message")?,
-                opt(args, "sessionId")?,
-                opt(args, "conversationId")?,
-                opt(args, "runId")?,
-                None,
-                None,
-                None,
-                None,
-                // No streaming: deltas are never forwarded to a phone.
-                None,
-                // The phone has no skill picker.
-                None,
-                // Nor an attachment picker.
-                None,
+        "send_chat_message" => {
+            let engine = phone_engine(opt(args, "provider")?, opt(args, "model")?)?;
+            let (provider, model) = match engine {
+                Some((provider, model)) => (Some(provider), Some(model)),
+                None => (None, None),
+            };
+            ok_with(
+                commands::claude_cmd::send_chat_message(
+                    app.clone(),
+                    app.state::<Db>(),
+                    arg(args, "projectId")?,
+                    arg(args, "message")?,
+                    opt(args, "sessionId")?,
+                    opt(args, "conversationId")?,
+                    opt(args, "runId")?,
+                    provider,
+                    model,
+                    None,
+                    None,
+                    // No streaming: deltas are never forwarded to a phone.
+                    None,
+                    // The phone has no skill picker.
+                    None,
+                    // Nor an attachment picker.
+                    None,
+                )
+                .await?,
+                Invalidate::Chat,
             )
-            .await?,
-            Invalidate::Chat,
-        ),
+        }
+        // What the chat chip names before a conversation has an answer to read the engine from.
+        "chat_routing" => {
+            let (provider, model) = commands::claude_cmd::chat_route(&app.state::<Db>(), &arg::<String>(args, "projectId")?)?;
+            ok(json!({ "provider": provider, "model": model }))
+        }
+        // The models a provider offers, asked of its CLI — what the chip's list is built from, with
+        // the app's own catalogue merged in on the phone. Read only, for one of the seven.
+        "list_ai_models" => {
+            let provider: String = arg(args, "provider")?;
+            if !PHONE_ENGINES.contains(&provider.as_str()) {
+                return Err(DispatchError::BadArgs(format!("unknown provider `{provider}`")));
+            }
+            ok(commands::claude_cmd::list_ai_models(app.state::<Db>(), Some(provider), None).await?)
+        }
         "list_chat_conversations" => ok(commands::activity_cmd::list_chat_conversations(
             app.state::<Db>(),
             arg(args, "projectId")?,
@@ -1465,6 +1524,29 @@ fn unfinished() -> Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chat chip on a phone names an engine; this is what it may name.
+    #[test]
+    fn a_phone_names_only_the_apps_engines_and_plain_model_ids() {
+        let named = |p: &str, m: &str| phone_engine(Some(p.to_string()), Some(m.to_string()));
+        assert_eq!(named("claude", "claude-opus-5-5").unwrap(), Some(("claude".into(), "claude-opus-5-5".into())));
+        assert_eq!(named("claude", "").unwrap(), Some(("claude".into(), String::new())));
+        assert!(named("claude", "claude-opus-4-6[1m]").is_ok());
+        assert!(named("opencode", "anthropic/claude-sonnet-4-5").is_ok());
+        assert!(named("cline", "ollama/qwen2.5-coder:7b").is_ok());
+        assert!(named(crate::local_agent::PROVIDER_ID, "").is_ok());
+        // Nothing named: the routing decides.
+        assert_eq!(phone_engine(None, Some("claude-opus-5-5".into())).unwrap(), None);
+        assert_eq!(phone_engine(Some("  ".into()), None).unwrap(), None);
+        // A command runner, an unknown id, and anything a command line could read as more.
+        for provider in ["local-exec", "openai-ish", "sh"] {
+            assert!(named(provider, "").is_err(), "`{provider}` must be refused");
+        }
+        for model in ["--dangerously-skip-permissions", "-x", "opus 5", "a;b", "a\nb", "\"q\"", "$(id)"] {
+            assert!(named("claude", model).is_err(), "`{model}` must be refused");
+        }
+        assert!(named("claude", &"m".repeat(161)).is_err());
+    }
 
     #[test]
     fn arguments_are_accepted_in_either_spelling() {

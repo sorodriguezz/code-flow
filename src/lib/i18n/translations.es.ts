@@ -2903,7 +2903,7 @@ export const es = {
   "settings.searchTermsCsv": "csv, tsv, psv, columnas, separador, delimitador, rainbow, coma, punto y coma, tabulación",
   "settings.searchTermsFormatting": "formato, prettier, formateador, formatear al guardar",
   "settings.searchTermsEditorDisplay":
-    "ajuste de línea, ajustar líneas, líneas largas, word wrap, envolver, alt+z, visualización, inlay hints, pistas en línea, nombres de parámetros, tipos inferidos",
+    "ajuste de línea, ajustar líneas, líneas largas, word wrap, envolver, alt+z, visualización, inlay hints, pistas en línea, nombres de parámetros, tipos inferidos, peso de las librerías, peso de paquetes, import cost, tamaño de dependencias, prisma, colores de prisma, resaltado de prisma, schema.prisma",
   "settings.searchTermsNetwork": "tiempo de espera, redirecciones, ssl, tls, verificar",
   "settings.searchTermsProxy": "proxy http, socks, corporativo",
   "settings.searchTermsCertificates": "certificado de cliente, mtls, pem, pfx",
@@ -9628,6 +9628,12 @@ export const es = {
   "editor.inlayHints": "Inlay hints (pistas en línea)",
   "editor.inlayHintsTip":
     "Muestra en gris, junto al código, el tipo que el compilador infiere para una variable o un valor de retorno, y el nombre del parámetro que recibe cada argumento literal. Cuáles hay depende del servidor de cada lenguaje. Solo cambia lo que se ve: no se escribe nada en el archivo.",
+  "editor.importCost": "Peso de las librerías",
+  "editor.importCostTip":
+    "Muestra al final de cada import cuánto pesa en disco el paquete importado: lo instalado en node_modules, no lo que suma al bundle. Desactivado, no se mide nada.",
+  "editor.prismaHighlight": "Colores de Prisma",
+  "editor.prismaHighlightTip":
+    "Colorea los esquemas .prisma: modelos, enums, tipos de campo, @atributos y @@índices. Desactivado, el archivo se ve sin colores, pero sigue abriéndose como Prisma, con comentarios y llaves funcionando.",
   "editor.renameNothing": "No hay nada que renombrar en este repositorio",
   "editor.renameSummary": "{changes} cambio(s) en {files} archivo(s)",
   "editor.renameIncomplete": "algunos archivos no cambiaron",

@@ -1,4 +1,5 @@
 import type { ThinkingActivity } from "./activity";
+import type { Gaze } from "./face";
 import { motionOff } from "../motion";
 
 /**
@@ -11,6 +12,10 @@ export interface Painter {
   tick(dt: number): void;
   still(): void;
   setActivity(activity: ThinkingActivity | undefined): void;
+  /** Where the pointer is, as seen from the mark, when the mark follows it (`ThinkingOrb follow`):
+   *  the designs with eyes look there, the rest turn, lean or light up toward it. Every canvas
+   *  design has one; `null` is "no pointer to follow". */
+  setGaze?(gaze: Gaze): void;
   destroy?(): void;
 }
 

@@ -1,8 +1,9 @@
 import { ended, type ThinkingActivity } from "./activity";
-import { INK, WHITE } from "./face";
+import { INK, WHITE, type Gaze } from "./face";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { easeToward, toward } from "./pointer";
 
 /**
  * "Luna" — the moon, glowing in the assistant's hues, going through its phases. It took the Panda's
@@ -18,6 +19,10 @@ import { prepareCanvas, type Painter } from "./ticker";
  *
  * The shadow is a second disc slid across the first and clipped to it — the crescent every moon icon
  * draws — so one number (`lit`) is the whole phase. Below 20px the craters and stars go.
+ *
+ * Following the pointer (`ThinkingOrb follow`), it turns toward it: the disc drifts its way, the
+ * craters roll round to face it, its light gathers on that side and the stars slip the other way,
+ * behind it. The shadow never moves for it — how much of the moon is lit is the run's phase.
  */
 
 /** Craters: [x, y, r] on a moon of radius 1, drifting across it as it turns. */
@@ -54,6 +59,8 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
   let warn = 0;
   let alpha = 1;
   let twinkle = 0;
+  let gaze: Gaze = null;
+  const look = toward();
 
   const awake = (act: ThinkingActivity | undefined) => !ended(act) && !act?.quiet && !act?.stopping;
 
@@ -98,8 +105,11 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
 
     // Bigger where there are no stars to leave room for.
     const R = u(detail ? 0.34 : 0.42);
-    const cx = u(0.5);
-    const cy = u(0.5 + (1 - easeOut(rise)) * 0.18);
+    // Turned toward the pointer: `tx`, `ty` -1..1, nothing at rest.
+    const tx = look.x * look.on;
+    const ty = look.y * look.on;
+    const cx = u(0.5) + tx * R * 0.12;
+    const cy = u(0.5 + (1 - easeOut(rise)) * 0.18) + ty * R * 0.12;
     const a = alpha * (0.3 + 0.7 * easeOut(rise));
 
     // Stars, twinkling round it.
@@ -108,7 +118,7 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
         const tw = 0.5 + 0.5 * Math.sin(twinkle + i * 1.9);
         ctx.fillStyle = rgba(warmed(mix(mix(p.c, WHITE, 0.4), end, tint)), (0.25 + 0.6 * tw) * a);
         ctx.beginPath();
-        ctx.arc(u(x), u(y), Math.max(0.6, u(0.016 + 0.014 * tw)), 0, TAU);
+        ctx.arc(u(x - tx * 0.035), u(y - ty * 0.035), Math.max(0.6, u(0.016 + 0.014 * tw)), 0, TAU);
         ctx.fill();
       });
     }
@@ -116,7 +126,10 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
     // The disc, lit, with its glow.
     const bright: Rgb = warmed(mix(mix(WHITE, p.c, 0.22), mix(end, WHITE, 0.45), tint));
     const rim: Rgb = warmed(mix(mix(p.a, WHITE, 0.2), end, tint));
-    const grad = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.35, R * 0.1, cx, cy, R);
+    // Its light: from the top left, swung toward the pointer as it follows.
+    const hx = -0.35 + (tx * 0.5 + 0.35) * look.on;
+    const hy = -0.35 + (ty * 0.5 + 0.35) * look.on;
+    const grad = ctx.createRadialGradient(cx + R * hx, cy + R * hy, R * 0.1, cx, cy, R);
     grad.addColorStop(0, rgba(bright, a));
     grad.addColorStop(1, rgba(rim, a));
     ctx.save();
@@ -137,10 +150,10 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
     if (detail) {
       ctx.fillStyle = rgba(warmed(mix(rim, INK, 0.12)), 0.35 * a);
       for (const [x, y, r] of CRATERS) {
-        let ox = x + turn;
+        let ox = x + turn + tx * 0.35;
         ox = ((((ox + 1.3) % 2.6) + 2.6) % 2.6) - 1.3;
         ctx.beginPath();
-        ctx.arc(cx + ox * R, cy + y * R, r * R, 0, TAU);
+        ctx.arc(cx + ox * R, cy + (y + ty * 0.3) * R, r * R, 0, TAU);
         ctx.fill();
       }
     }
@@ -186,9 +199,13 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
     setActivity(activity) {
       clock.set(activity);
     },
+    setGaze(next) {
+      gaze = next;
+    },
     tick(dt) {
       clock.step(dt);
       const act = clock.act;
+      easeToward(look, awake(act) ? gaze : null, dt, 4);
       time += dt * (act?.quiet && !ended(act) ? 0.4 : 1);
       rise = Math.min(1, rise + dt * 1.4);
       if (!ended(act)) lit += (litGoal(act) - lit) * Math.min(1, dt * 3);

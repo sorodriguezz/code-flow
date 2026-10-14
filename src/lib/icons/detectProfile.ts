@@ -72,6 +72,13 @@ export async function detectProfileId(probe: RepoProbe): Promise<string | null> 
   }
   if (any(/^next\.config\./i)) return "nextjs";
   if (any(/^nuxt\.config\./i)) return "vue";
+  // Bun, last: a React or Vue app that installs with Bun is still a React or Vue tree, so this only
+  // answers for a repository nothing above claimed — a server, a CLI or a library on Bun.
+  if (has("bun.lock") || has("bun.lockb") || has("bunfig.toml")) return "bun";
+  if (has("package.json")) {
+    const deps = dependenciesOf(await read("package.json"));
+    if (deps.has("@types/bun") || deps.has("bun-types")) return "bun";
+  }
   return null;
 }
 

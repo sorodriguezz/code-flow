@@ -16,6 +16,7 @@ import { AiPanel } from "./components/ai/AiPanel";
 import { DockSlot } from "./components/services/DockSlot";
 import { beginEdgeResize, slideTiming, useEdgeSlide, type EdgeSlide } from "./lib/useEdgeSlide";
 import { SwitcherLock } from "./components/layout/SwitcherLock";
+import { SwitchMotion } from "./components/layout/SwitchMotion";
 import { UpdateNotesModal } from "./components/layout/UpdateNotesModal";
 import { RequirementsModal } from "./components/layout/RequirementsModal";
 import { DataDirsNotice } from "./components/layout/DataDirsNotice";
@@ -427,6 +428,13 @@ function NotARepoPanel({ project }: { project: Project }) {
   );
 }
 
+/** Whether the view on screen is the repository's rather than the workspace's — `SwitchMotion` brings
+ *  the view into focus on a repository switch only when the switch changed what it shows. */
+function repoViewShown(): boolean {
+  const view = useUiStore.getState().activeView;
+  return !WORKSPACE_VIEWS.some((v) => v.id === view);
+}
+
 function MainContent() {
   const activeView = useUiStore((s) => s.activeView);
   const project = useWorkspaceStore((s) => s.activeProject());
@@ -584,6 +592,9 @@ export default function App() {
   const initFileNesting = useFileNestingStore((s) => s.init);
   const initTour = useTourStore((s) => s.init);
   const initRequirements = useRequirementsStore((s) => s.init);
+  // What a repository or workspace switch moves at the full motion level — see `SwitchMotion`.
+  const columnRef = useRef<HTMLDivElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
   const project = useWorkspaceStore((s) => s.activeProject());
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
@@ -1230,13 +1241,13 @@ export default function App() {
             that line, the ring's top edge was cut away: the two rounded corners still curved down
             into view and then stopped dead, so the sheet looked tucked under the title bar with its
             top edge missing in the middle (user report). The AI panel's wrapper does the same. */}
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5 pb-1.5 pt-px">
+        <div ref={columnRef} className="flex min-w-0 flex-1 flex-col gap-1.5 pb-1.5 pt-px">
           {/* A floor, not `min-h-0`, now that the terminal dock below yields space instead of
               overflowing: without one, a dock taller than the window would win the whole column
               and leave the view it docks *into* at zero height. This is the point past which the
               dock shrinks instead. Still far below the content's own height, so the item shrinks
               freely — which is all `min-h-0` was ever here for. */}
-          <div data-tour="main-content" className="cf-sheet cf-ambient-bg min-h-[120px] flex-1">
+          <div ref={sheetRef} data-tour="main-content" className="cf-sheet cf-ambient-bg min-h-[120px] flex-1">
             <ShellMainContent />
           </div>
           {/* The dock appears and goes; it no longer grows from zero height. Animating a height
@@ -1291,6 +1302,8 @@ export default function App() {
       )}
       {/* Draws nothing until its chord is held — see `SwitcherLock`. */}
       <SwitcherLock />
+      {/* Draws nothing until the repository or the workspace changes at the full motion level. */}
+      <SwitchMotion column={columnRef} sheet={sheetRef} showsRepo={repoViewShown} />
       {shortcutsModalOpen && (
         <Suspense fallback={<DialogSkeleton overlayClass="items-center bg-black/40 p-6" />}>
           <ShortcutsModal onClose={closeShortcutsModal} />

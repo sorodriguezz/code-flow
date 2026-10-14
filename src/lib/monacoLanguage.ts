@@ -44,6 +44,8 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   // Registered by `monacoToml` — Monaco ships no TOML, so until that existed this pointed at an id
   // nothing had registered and `Cargo.toml` opened as plain text.
   toml: "toml",
+  // Registered by `monacoPrisma`, the same way: `schema.prisma` used to open as plain text.
+  prisma: "prisma",
   // Single-file components are markup around a script and a style block, which is what Monaco's
   // HTML grammar tokenizes — `lang="ts"` / `lang="scss"` included, see `monacoSfc`. They used to
   // open as plain text.

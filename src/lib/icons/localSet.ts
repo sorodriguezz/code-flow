@@ -1,11 +1,20 @@
 import type { IconifySet } from "./catalog";
+import { frameworkGlyphs } from "./frameworkGlyphs";
+import { SHIPPED_PACKS } from "./packs";
 
 /**
- * This repo's own icon set — one glyph, and the reason it exists.
+ * This repo's own icon set — the marks neither installed set draws well enough, and the reason for
+ * each.
  *
- * Neither installed set has an InterSystems mark. `@iconify-json/vscode-icons` (1,572 icons) and
- * `@iconify-json/logos` (2,091) between them offer Memcached, Cachet and `file-type-class` in Java
- * orange; nothing that says IRIS. So a `.cls` file had no icon that named what it was, in a picker
+ * **The framework packs' kinds** (`frameworkGlyphs.ts`): NestJS's cat, Angular's shield, React's
+ * atom, Vue's V and Bun's bun, each in the kind's colour with the kind's emblem — controller, service,
+ * component, hook, store and some fifty more — and a folder per kind. Composed for exactly the ids the
+ * shipped packs name; vscode-icons' own framework glyphs, and why they were not enough, are in that
+ * file.
+ *
+ * **IRIS.** Neither installed set has an InterSystems mark. `@iconify-json/vscode-icons` (1,572
+ * icons) and `@iconify-json/logos` (2,091) between them offer Memcached, Cachet and
+ * `file-type-class` in Java orange; nothing that says IRIS. So a `.cls` file had no icon that named what it was, in a picker
  * whose whole index is the name you search for.
  *
  * The mark is the InterSystems IRIS one the user asked for: two angled ribbons forming a bracket, the
@@ -18,25 +27,29 @@ import type { IconifySet } from "./catalog";
  * If brand fidelity matters, replacing it is a single field: drop the official SVG's paths into `body`
  * below, keeping `width`/`height` in step with its `viewBox`. Nothing else in the app needs to know.
  *
- * Bundled rather than fetched: it is a few hundred bytes, and the fetch machinery in `catalog.ts`
- * exists to keep 11MB out of the entry chunk.
+ * Bundled rather than fetched: the whole set is a few kilobytes of markup — the folders are composed
+ * from the file glyphs at load, not stored — and the fetch machinery in `catalog.ts` exists to keep
+ * 11MB out of the entry chunk.
  *
  * Named `iris` under the prefix `cf`, so the picker's id — which is also its only label — reads
  * `cf:iris`, and searching "iris" ranks it first.
  */
 export const LOCAL_ICON_SET: IconifySet = {
   prefix: "cf",
-  /**
-   * Not the 32×32 box its neighbours use, and deliberately: the mark is far taller than it is wide
-   * (295:760 in the source artwork), and padding it into a square would render it at 40% of the height
-   * every other file glyph gets. The renderer sets `width`/`height` to the requested size and leaves
-   * `preserveAspectRatio` alone, so a viewBox of these proportions is scaled to full height and centred
-   * — which is what the mark wants.
-   */
-  width: 13,
+  width: 32,
   height: 32,
   icons: {
+    ...frameworkGlyphs(SHIPPED_PACKS.flatMap((pack) => pack.rules.map((rule) => rule.icon))),
     iris: {
+      /**
+       * Not the 32×32 box its neighbours use, and deliberately: the mark is far taller than it is
+       * wide (295:760 in the source artwork), and padding it into a square would render it at 40% of
+       * the height every other file glyph gets. The renderer sets `width`/`height` to the requested
+       * size and leaves `preserveAspectRatio` alone, so a viewBox of these proportions is scaled to
+       * full height and centred — which is what the mark wants.
+       */
+      width: 13,
+      height: 32,
       /**
        * Two identical brackets, one rotated 180°, interlocking around a diagonal gap: the indigo one
        * is a bar down the left with a foot along the bottom, the teal one the same shape turned over —

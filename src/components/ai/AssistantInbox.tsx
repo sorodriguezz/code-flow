@@ -47,6 +47,7 @@ import {
 import { usePrStore } from "../../state/prStore";
 import { useRepoQueueStore } from "../../lib/repoQueue";
 import { ReviewPrMenu } from "./PanelTabStrip";
+import { ChatModelPicker } from "./ChatModelPicker";
 import { EMPTY_JOBS, useJobsStore, type Job } from "../../state/jobsStore";
 import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activityStore";
 import { liveSessionsOf, useChatStore, type ChatSession } from "../../state/chatStore";
@@ -229,12 +230,23 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
             onClick={() => activeProject && openNewChat(activeProject.id)}
           />
           {activeProject && <ReviewPrMenu projectId={activeProject.id} variant="button" />}
-          <InboxAction
-            icon={ShieldCheck}
-            label={t("assistant.analyze")}
-            disabled={!activeProject || changes === 0}
-            title={changes === 0 ? t("analyze.nothingToAnalyze") : undefined}
-            onClick={() => activeProject && openAnalysis(activeProject.id, { run: true })}
+          {/* The run and its engine as one button, as the 🛡 in Changes is: the words analyze, the
+              chevron changes the `analyze` routing — provider, model, account — right here (user:
+              "no puedo elegir el modelo ni proveedor, pone la flechita al lado"). The chevron works
+              with nothing to analyze, too: choosing the engine first is a fair order. */}
+          <ChatModelPicker
+            task="analyze"
+            variant="button"
+            liveModel={null}
+            chatActive={false}
+            title={t("changes.analyzeModelHint")}
+            action={{
+              icon: <ShieldCheck size={13} />,
+              label: t("assistant.analyze"),
+              disabled: !activeProject || changes === 0,
+              title: changes === 0 ? t("analyze.nothingToAnalyze") : undefined,
+              onClick: () => activeProject && openAnalysis(activeProject.id, { run: true }),
+            }}
           />
         </div>
       </div>

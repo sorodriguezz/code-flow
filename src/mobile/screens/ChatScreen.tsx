@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, MessageSquarePlus, MessagesSquare, SendHorizontal } from "lucide-react";
+import { ChevronDown, Loader2, MessageSquarePlus, MessagesSquare, SendHorizontal } from "lucide-react";
 import { t } from "../i18n";
 import { rpc } from "../transport";
 import { newId } from "../ids";
@@ -7,6 +7,8 @@ import { useBusy, useMobileStore } from "../store";
 import { onInvalidate } from "../invalidate";
 import { clearDraft, readDraft, writeDraft } from "../drafts";
 import { sinceIso } from "../time";
+import { useNav } from "../nav";
+import { lastEngine, modelLabel, PHONE_PROVIDERS, providerLabel, useChatEngine, type ChatEngine } from "../chatEngine";
 import { RootBar } from "../ui/RootBar";
 import { Screen } from "../ui/Screen";
 import { BottomBar } from "../ui/BottomBar";
@@ -21,14 +23,19 @@ import type { ActivityLogEntry } from "../../types/domain";
 const newConversationId = () => `conv-${newId()}`;
 
 /**
- * A conversation with whichever engine this workspace routes to.
+ * A conversation with an engine of the desk's.
  *
- * # What the phone does not choose
+ * # What the phone chooses
  *
- * Provider, model and prompt are never sent. The allowlist passes `None` for all three, so the turn
- * routes exactly as the desktop would route it. That is not a limitation to be lifted later — it is
- * the point. A device on a home network should not be able to pick what somebody's API bill looks
- * like, and the routing already has a home in Settings where that decision belongs.
+ * The engine, as the desk's chip does (`chatEngine.ts`): the chip over the composer names it and
+ * opens a sheet of providers and their models. A conversation runs on what was picked for it, else on
+ * what its last answer ran on, else on the workspace's chat routing — and the turn carries provider
+ * and model only when one of the first two says so, so a new conversation still routes exactly as
+ * the desktop would. It was not possible at first, on purpose ("a device on a home network should
+ * not pick what somebody's API bill looks like"); the user asked for it (2026-10-14: "en chat no se
+ * puede elegir modelo"), and the backend still checks what may be named — one of the app's seven
+ * providers and a plain model id (`phone_engine` in `remotectl::dispatch`). The prompt and the
+ * account are never sent.
  *
  * # Two ids, and why conflating them broke every turn
  *
@@ -86,6 +93,14 @@ export function ChatScreen() {
   const [listFailure, setListFailure] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
+  const push = useNav((s) => s.push);
+  const picked = useChatEngine((s) => s.picked[conversationId]);
+  const routed = useChatEngine((s) => (projectId ? s.routing[projectId] : undefined));
+  const fresh = useChatEngine((s) => s.fresh);
+  /** What the next turn is sent with — picked, else the last answer's; `null` leaves it to the
+   *  routing. And what the chip names: that, else the routing once it has been read. */
+  const engine = picked ?? lastEngine(entries);
+  const shown = engine ?? routed ?? null;
   /**
    * Which conversation the in-flight reads belong to.
    *
@@ -154,6 +169,32 @@ export function ChatScreen() {
     // `attempt` is the retry button; bumping it re-runs the read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, attempt]);
+
+  // The routing, for the chip of a conversation nothing has answered yet.
+  useEffect(() => {
+    if (projectId) void useChatEngine.getState().loadRouting(projectId);
+  }, [projectId]);
+
+  /** A conversation from nothing — the bar's button, or a model of another provider picked in the
+   *  engine sheet, which this one cannot move to. Nothing is deleted: the old conversation stays in
+   *  the history on both clients. */
+  const startNew = (on?: ChatEngine) => {
+    const id = newConversationId();
+    // Reads still in the air belong to the conversation being left.
+    generation.current += 1;
+    if (on) useChatEngine.getState().pick(id, on);
+    setConversationId(id);
+    setEngineSessionId(null);
+    setEntries([]);
+  };
+
+  useEffect(() => {
+    if (!fresh || fresh.projectId !== projectId) return;
+    useChatEngine.getState().takeFresh();
+    startNew(fresh.engine);
+    // `startNew` only touches setters and a ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fresh, projectId]);
 
   // The draft follows the conversation it belongs to, so starting a new one does not inherit a
   // half-written question from the old.
@@ -229,12 +270,19 @@ export function ChatScreen() {
     setSending(true);
     void run(async () => {
       try {
-        const reply = await rpc<{ text: string; session_id: string | null; provider: string }>(
+        const reply = await rpc<{ text: string; session_id: string | null; provider: string; model: string | null }>(
           "send_chat_message",
           // Both ids, in their own slots. `conversationId` is what the turn is filed under — without
           // it the backend mints a new conversation per message, so the desk sees a stack of
-          // one-turn activities instead of the conversation you are having.
-          { projectId, message, conversationId, sessionId: engineSessionId },
+          // one-turn activities instead of the conversation you are having. The engine only when the
+          // conversation has one; otherwise the routing answers.
+          {
+            projectId,
+            message,
+            conversationId,
+            sessionId: engineSessionId,
+            ...(engine ? { provider: engine.provider, model: engine.model } : {}),
+          },
         );
         // Only now. A turn that never landed leaves the question in the box, where it can be sent
         // again with one tap instead of retyped.
@@ -263,6 +311,7 @@ export function ChatScreen() {
             response_time_ms: null,
             is_error: false,
             provider: reply.provider,
+            model: reply.model,
           } as ActivityLogEntry,
         ]);
       } finally {
@@ -283,6 +332,8 @@ export function ChatScreen() {
     );
   }
 
+  const ProviderIcon = PHONE_PROVIDERS.find((p) => p.id === shown?.provider)?.icon;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[var(--cf-bg)]">
       <RootBar
@@ -297,11 +348,7 @@ export function ChatScreen() {
               icon={<MessageSquarePlus size={18} />}
               label={t("chat.new")}
               disabled={sending}
-              onClick={() => {
-                setConversationId(newConversationId());
-                setEngineSessionId(null);
-                setEntries([]);
-              }}
+              onClick={() => startNew()}
             />
           ) : undefined
         }
@@ -347,7 +394,13 @@ export function ChatScreen() {
               </p>
             </div>
             <p className="mt-1 text-2xs text-[var(--cf-text-faint)]">
-              {[entry.provider, entry.model, sinceIso(entry.created_at)].filter(Boolean).join(" · ")}
+              {[
+                entry.provider && providerLabel(entry.provider),
+                entry.provider && entry.model ? modelLabel(entry.provider, entry.model) : null,
+                sinceIso(entry.created_at),
+              ]
+                .filter(Boolean)
+                .join(" · ")}
             </p>
           </div>
         ))}
@@ -362,6 +415,29 @@ export function ChatScreen() {
       </div>
 
       <BottomBar className="p-2">
+        {/* The engine, named and changeable where the question is written — the desk's chip. */}
+        <button
+          type="button"
+          disabled={sending}
+          aria-label={t("engine.change")}
+          onClick={() =>
+            push({ k: "engine", projectId, conversationId, current: shown, locked: entries.length > 0 })
+          }
+          className="cf-tap mb-1.5 inline-flex min-h-[36px] max-w-full items-center gap-1.5 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-xs text-[var(--cf-text-muted)] disabled:opacity-50"
+        >
+          {ProviderIcon && <ProviderIcon size={14} className="shrink-0" aria-hidden />}
+          <span className="truncate">
+            {shown ? (
+              <>
+                <span className="text-[var(--cf-text)]">{providerLabel(shown.provider)}</span>
+                {` · ${modelLabel(shown.provider, shown.model)}`}
+              </>
+            ) : (
+              t("engine.title")
+            )}
+          </span>
+          <ChevronDown size={14} className="shrink-0" aria-hidden />
+        </button>
         <div className="flex items-end gap-2">
           <textarea
             value={draft}

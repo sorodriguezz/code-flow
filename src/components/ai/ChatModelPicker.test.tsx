@@ -53,3 +53,44 @@ describe("ChatModelPicker split", () => {
     expect(chevron).toMatch(/title="[^"]+\nchanges\.analyzeModelHint"/);
   });
 });
+
+/**
+ * The Inbox's "Analizar cambios": the same two halves at a button's size, with the run's name in
+ * words — the text runs it, the chevron beside it opens the `analyze` routing menu.
+ */
+describe("ChatModelPicker button", () => {
+  const render = (disabled: boolean) =>
+    renderToStaticMarkup(
+      <ChatModelPicker
+        task="analyze"
+        variant="button"
+        liveModel={null}
+        chatActive={false}
+        title="changes.analyzeModelHint"
+        action={{
+          icon: <svg data-glyph="shield" />,
+          label: "assistant.analyze",
+          disabled,
+          title: disabled ? "analyze.nothingToAnalyze" : undefined,
+          onClick: () => {},
+        }}
+      />,
+    );
+
+  it("spells the run out on its half and keeps the chevron as the menu's trigger", () => {
+    const markup = render(false);
+    const buttons = markup.match(/<button[^>]*>/g) ?? [];
+    expect(buttons).toHaveLength(2);
+    expect(markup).toMatch(/data-glyph="shield"[^]*assistant\.analyze<\/button>/);
+    expect(buttons[0]).not.toContain("aria-haspopup");
+    expect(buttons[1]).toContain('aria-haspopup="menu"');
+    expect(buttons[1]).toMatch(/aria-label="task\.analyzeModelFor: [^"]+"/);
+  });
+
+  it("turns only the run off when there is nothing to run — the engine can still be chosen", () => {
+    const buttons = render(true).match(/<button[^>]*>/g) ?? [];
+    expect(buttons[0]).toContain("disabled");
+    expect(buttons[0]).toMatch(/title="assistant\.analyze\n[^"]+\nanalyze\.nothingToAnalyze"/);
+    expect(buttons[1]).not.toContain("disabled");
+  });
+});

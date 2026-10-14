@@ -1,6 +1,8 @@
-import type { RunPhase, ThinkingActivity } from "./activity";
+import { ended, type RunPhase, type ThinkingActivity } from "./activity";
+import type { Gaze } from "./face";
+import { easeToward, leanOf, toward } from "./pointer";
 import { aiCycle, clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
-import { mix, palette } from "./palette";
+import { aiHue, mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 
 /**
@@ -15,6 +17,10 @@ import { prepareCanvas, type Painter } from "./ticker";
  *
  * The field is evaluated per pixel at the canvas's own resolution (an upscaled field reads as a
  * blur, not a drop) — at the 44px it is used at most, 88² pixels for four drops.
+ *
+ * Following the pointer (`ThinkingOrb follow`), the drops are drawn to it like mercury to a magnet:
+ * each pulled its way, the smallest furthest, so the body stretches out toward it in a tongue — and
+ * the light on them comes from its side instead of the top left.
  */
 
 const GOAL: Partial<Record<RunPhase, [spread: number, speed: number]>> = {
@@ -34,6 +40,8 @@ const BALLS = [
   { ax: 0.36, ay: 0.24, fx: 0.7, fy: 1.1, ph: 4.2, r: 0.22 },
   { ax: 0.22, ay: 0.3, fx: 1.7, fy: 1.5, ph: 1.1, r: 0.18 },
 ];
+/** How far each drop is pulled toward the pointer, in the -1..1 square: the small ones lead. */
+const PULL = [0.12, 0.2, 0.3, 0.42];
 
 export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
   const ctx = prepareCanvas(canvas, px);
@@ -49,6 +57,8 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
   let speed = 1;
   let warn = 0;
   let alpha = 1;
+  let gaze: Gaze = null;
+  const look = toward();
 
   function goal(activity: ThinkingActivity | undefined): [number, number] {
     if (activity?.stopping) return [0.15, 0.3];
@@ -66,11 +76,19 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
     const green = fin >= 0 ? clamp01((fin - (failed ? 0 : 0.15)) / 0.4) : 0;
     const end = endColor(p, failed);
     const sp = spread * (1 - merge);
-    const pos = BALLS.map((b) => [
-      Math.sin(time * b.fx + b.ph) * b.ax * sp,
-      Math.cos(time * b.fy + b.ph) * b.ay * sp,
+    const pullX = look.x * look.on;
+    const pullY = look.y * look.on;
+    const pos = BALLS.map((b, n) => [
+      Math.sin(time * b.fx + b.ph) * b.ax * sp + pullX * PULL[n],
+      Math.cos(time * b.fy + b.ph) * b.ay * sp + pullY * PULL[n],
       b.r * (1 - 0.15 * (1 - Math.min(1, spread))) * (1 - merge * 0.12),
     ]);
+    // Where the light comes from: the top left, swung round to the pointer's side as it follows —
+    // as far as it leans, so a pointer right on top (no side to come from) leaves it where it was.
+    const reach = Math.hypot(pullX, pullY);
+    const swing = Math.min(1, leanOf(look) * 3);
+    const lightX = -0.45 + (reach > 1e-3 ? (pullX / reach) * 0.64 + 0.45 : 0) * swing;
+    const lightY = -0.45 + (reach > 1e-3 ? (pullY / reach) * 0.64 + 0.45 : 0) * swing;
     const white: readonly [number, number, number] = [255, 255, 255];
     for (let j = 0; j < res; j++) {
       const y = ((j + 0.5) / res) * 2 - 1;
@@ -88,10 +106,12 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
           data[k + 3] = 0;
           continue;
         }
-        let col = aiCycle(p, 0.5 + x * 0.32 + y * 0.42 + Math.sin(time * 0.5) * 0.15);
+        // Along the ramp, never round it: wrapped, the far top left turned from cyan back to violet
+        // in one hard edge — rarely reached until the drops could be pulled up there.
+        let col = aiHue(p, clamp01(0.5 + x * 0.32 + y * 0.42 + Math.sin(time * 0.5) * 0.15));
         col = mix(col, end, green);
         // Lit from the top left, a rim of shade at the bottom right: a drop, not a sticker.
-        const light = clamp01(0.5 - (x + y) * 0.45);
+        const light = clamp01(0.5 + x * lightX + y * lightY);
         col = mix(col, white, light * light * 0.55 * clamp01((f - 1) * 1.5));
         col = mix(col, p.warning, warn * 0.3);
         data[k] = col[0];
@@ -150,9 +170,13 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number): Painter {
     setActivity(activity) {
       clock.set(activity);
     },
+    setGaze(next) {
+      gaze = next;
+    },
     tick(dt) {
       clock.step(dt);
       const act = clock.act;
+      easeToward(look, ended(act) || act?.quiet || act?.stopping ? null : gaze, dt, 4);
       const [s, v] = goal(act);
       const k = Math.min(1, dt * 2.5);
       spread += (s - spread) * k;

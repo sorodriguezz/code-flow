@@ -1,6 +1,8 @@
 import { ended, type RunPhase, type ThinkingActivity } from "./activity";
 import { aiHue, mix, palette, rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import type { Gaze } from "./face";
+import { easeToward, toward } from "./pointer";
 
 /**
  * "Esfera" — a globe of dots that lights up by what the run is doing.
@@ -14,6 +16,10 @@ import { prepareCanvas, type Painter } from "./ticker";
  *
  * Scaled down for a gutter: fewer, fatter dots as it shrinks — three hundred hairline dots in 32px
  * read as fog, not as a globe.
+ *
+ * Following the pointer (`ThinkingOrb follow`), the globe turns its face to it: it tips toward it,
+ * and the dots facing it light up — a light that the pointer carries. It does not drift: the globe
+ * already fills its square, and moved, its lit edge was cut off by the canvas.
  */
 
 const TAU = Math.PI * 2;
@@ -83,12 +89,17 @@ export function createSphere(canvas: HTMLCanvasElement, px: number): Painter {
   // Eased toward `goal` every tick; `sweep` runs at its own steady pace.
   const now = { k: 0, spin: 0.9, gain: 1, sweep: 0, alpha: 1, warn: 0 };
   const goal = { ...now, k: 1 };
+  let gaze: Gaze = null;
+  /** Following the pointer only while it runs: a finish, a stop or a quiet spell is its own look. */
+  let awake = true;
+  const look = toward();
 
   function setActivity(activity: ThinkingActivity | undefined) {
     const done = ended(activity);
     failed = !!activity?.failed;
     const stopping = !!activity?.stopping;
     const quiet = !!activity?.quiet && !done && !stopping;
+    awake = !done && !stopping && !quiet;
     light = done || stopping || quiet ? -1 : LIGHT[activity?.phase ?? "work"];
     goal.k = stopping ? 0 : 1;
     goal.spin = quiet ? 0.18 : failed ? 0.04 : done ? 0.3 : 0.9;
@@ -124,9 +135,17 @@ export function createSphere(canvas: HTMLCanvasElement, px: number): Painter {
     const band = Math.sin(time * 2.2);
     const cr = Math.cos(turn);
     const sr = Math.sin(turn);
-    const ct = Math.cos(0.35);
-    const st = Math.sin(0.35);
+    // Tipped toward the pointer: up when it is above, over toward it when it is below.
+    const tilt = 0.35 - look.y * look.on * 0.5;
+    const ct = Math.cos(tilt);
+    const st = Math.sin(tilt);
     const c = px / 2;
+    // The pointer's light: from its side, and from the front — the screen's y runs down, the
+    // globe's up.
+    const toLen = Math.hypot(look.x, look.y, 0.85);
+    const lx = look.x / toLen;
+    const ly = -look.y / toLen;
+    const lz = 0.85 / toLen;
     const ring = (i: number, at: number, width: number) => {
       let d = Math.abs(i - at);
       if (d > count - d) d = count - d;
@@ -150,15 +169,19 @@ export function createSphere(canvas: HTMLCanvasElement, px: number): Painter {
         lit = Math.max(lit, v * v * weights[2]);
       }
       if (weights[3] > 0.001) lit = Math.max(lit, ring(i, trailB, widthB) * weights[3]);
+      const mx = q.x * cr + q.z * sr;
+      const mz = -q.x * sr + q.z * cr;
+      const my = q.y * ct - mz * st;
+      const depth = q.y * st + mz * ct;
+      if (look.on > 0.01) {
+        const f = Math.max(0, (mx * lx + my * ly + depth * lz - 0.62) / 0.38);
+        lit = Math.max(lit, f * f * look.on * 0.9);
+      }
       const g = Math.max(glow[i] * decay, lit * now.gain);
       glow[i] = g;
       const shown = clamp01(now.k * 1.6 - 0.6 * q.u);
       if (shown <= 0.001) continue;
       const e = 1 - Math.pow(1 - shown, 3);
-      const mx = q.x * cr + q.z * sr;
-      const mz = -q.x * sr + q.z * cr;
-      const my = q.y * ct - mz * st;
-      const depth = q.y * st + mz * ct;
       const persp = 2.8 / (2.8 - depth);
       const ma = (depth + 1) / 2;
       const sw = clamp01((now.sweep * 1.4 - q.u) / 0.4);
@@ -191,7 +214,11 @@ export function createSphere(canvas: HTMLCanvasElement, px: number): Painter {
 
   return {
     setActivity,
+    setGaze(next) {
+      gaze = next;
+    },
     tick(dt) {
+      easeToward(look, awake ? gaze : null, dt);
       const ease = (key: "k" | "spin" | "gain" | "alpha" | "warn", rate: number) => {
         now[key] += (goal[key] - now[key]) * Math.min(1, dt * rate);
       };

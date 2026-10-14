@@ -941,10 +941,12 @@ export function EditorPane({
     t,
   });
 
-  // The weight of each imported package, at the end of its import line.
+  // The weight of each imported package, at the end of its import line — unless switched off.
+  const importCost = useEditorDisplayStore((s) => s.importCost);
   useImportCost(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {
     repoPath: project.local_path,
     activePath,
+    enabled: importCost,
   });
 
   usePackageJsonLens(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {

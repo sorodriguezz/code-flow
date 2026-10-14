@@ -90,17 +90,26 @@ export type Route =
   | { k: "notifications" }
   | { k: "settings" }
   /** The workspace/project picker. Presented as a sheet rather than a push — see `isSheet`. */
-  | { k: "scope" };
+  | { k: "scope" }
+  /** The chat's engine picker — a sheet too. `current` is what the chip showed, `locked` whether the
+   *  conversation already has turns (another provider then starts a new one). */
+  | {
+      k: "engine";
+      projectId: string;
+      conversationId: string;
+      current: { provider: string; model: string } | null;
+      locked: boolean;
+    };
 
 /**
  * Which routes come up from the bottom behind a scrim instead of in from the side.
  *
  * A sheet is for a choice you make and dismiss; a push is for a place you go. The scope picker is
- * the only sheet, and it is one because picking a project is a modal act that then puts you back
- * exactly where you were.
+ * one because picking a project is a modal act that then puts you back exactly where you were; the
+ * chat's engine picker for the same reason.
  */
 export function isSheet(route: Route): boolean {
-  return route.k === "scope";
+  return route.k === "scope" || route.k === "engine";
 }
 
 /**

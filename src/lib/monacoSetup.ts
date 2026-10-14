@@ -8,6 +8,7 @@ import { registerDbmlLanguage } from "./monacoDbml";
 import { registerObjectScript } from "./monacoObjectScript";
 import { registerCsvLanguages } from "./monacoCsv";
 import { registerTomlLanguage } from "./monacoToml";
+import { registerPrismaLanguage } from "./monacoPrisma";
 import { teachLangAttribute } from "./monacoSfc";
 import { installIsolatedTsFallback } from "./tsWorkerFallback";
 // Subpaths go through the package's own `exports` map (`./*` → `./esm/vs/*.js`), so these are
@@ -253,6 +254,8 @@ registerCsvLanguages();
 // `.toml`, which Monaco ships no grammar for. The id is registered here so the language list (and
 // the two installers below) know it; the grammar itself loads the first time a TOML file opens.
 registerTomlLanguage();
+// `.prisma`, the same way — and its colours can be switched off in Settings. See `monacoPrisma.ts`.
+registerPrismaLanguage();
 
 // Ctrl/Cmd+click to jump to a definition. Registered here, once, because both halves of it (the
 // definition provider and the editor opener) are global to Monaco rather than per-instance —

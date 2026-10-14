@@ -7,10 +7,10 @@ import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useT } from "../../state/languageStore";
 
 /**
- * Settings › Editor › Display. Two switches: word wrap and inlay hints. Where a line breaks is not a
- * setting — it is the editor's own width, which is the whole of what was asked for — so there is no
- * column to pick, and the tip says so. Which hints a language draws is its server's to decide; this
- * only says whether they are drawn at all.
+ * Settings › Editor › Display. Four switches: word wrap, inlay hints, package weights and Prisma's
+ * colours. Where a line breaks is not a setting — it is the editor's own width, which is the whole of
+ * what was asked for — so there is no column to pick, and the tip says so. Which hints a language
+ * draws is its server's to decide; this only says whether they are drawn at all.
  */
 export function EditorDisplaySettings() {
   const t = useT();
@@ -19,6 +19,10 @@ export function EditorDisplaySettings() {
   const setWordWrap = useEditorDisplayStore((s) => s.setWordWrap);
   const inlayHints = useEditorDisplayStore((s) => s.inlayHints);
   const setInlayHints = useEditorDisplayStore((s) => s.setInlayHints);
+  const importCost = useEditorDisplayStore((s) => s.importCost);
+  const setImportCost = useEditorDisplayStore((s) => s.setImportCost);
+  const prismaHighlight = useEditorDisplayStore((s) => s.prismaHighlight);
+  const setPrismaHighlight = useEditorDisplayStore((s) => s.setPrismaHighlight);
   const fontSize = useEditorDisplayStore((s) => s.fontSize);
   const setFontSize = useEditorDisplayStore((s) => s.setFontSize);
   /** From the registry, so a rebound chord reads as what it is now. */
@@ -43,6 +47,18 @@ export function EditorDisplaySettings() {
         onChange={(value) => void setInlayHints(value)}
         label={t("editor.inlayHints")}
         tip={t("editor.inlayHintsTip")}
+      />
+      <Switch
+        checked={importCost}
+        onChange={(value) => void setImportCost(value)}
+        label={t("editor.importCost")}
+        tip={t("editor.importCostTip")}
+      />
+      <Switch
+        checked={prismaHighlight}
+        onChange={(value) => void setPrismaHighlight(value)}
+        label={t("editor.prismaHighlight")}
+        tip={t("editor.prismaHighlightTip")}
       />
       <div className="pt-1">
         <div className="flex flex-wrap items-center gap-3">
