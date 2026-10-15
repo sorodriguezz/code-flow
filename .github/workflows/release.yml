@@ -109,6 +109,74 @@ jobs:
       # is paid for.
       - run: pnpm exec vitest run
 
+  # The frontend, built once, here, instead of once per platform inside `tauri build`. Nothing in
+  # it depends on the OS it is built on (the only `TAURI_ENV_*` the vite config reads is
+  # `TAURI_ENV_DEBUG`, for sourcemaps, which a release never sets), so two builds of it were the
+  # same bytes paid for twice — and on the critical path: v2.3.30's macOS leg spent 8m29s in
+  # `vite build` (2m07s on Windows), on a 3-core runner with 7 GB, before its 29-minute Rust build
+  # could start. Here it runs on Ubuntu next to `verify`, which is why `tsc` is skipped: `verify`
+  # already gates the release on it.
+  #
+  # The legs restore `dist/` and `src-tauri/resources/mobile/` from the artifact, and
+  # `src-tauri/tauri.ci.conf.json` narrows their `beforeBuildCommand` to the two steps that *are*
+  # per platform (the JDBC bridge and the llama runtime).
+  frontend:
+    needs: check-version
+    if: needs.check-version.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # `--ignore-scripts`, like `verify`: nothing here needs the desktop toolchain's postinstalls.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # 61 MB of draw.io, unpacked from a `draw.war` fetched from jgraph's releases. It is pinned by
+      # version *and* SHA-256 inside the script, so hashing the script is an exact identity for the
+      # output, and the stamp the script reads (`public/drawio/.drawio-version`) lives inside the
+      # cached directory, so a hit turns the step below into a no-op instead of a re-download.
+      #
+      # It is also the largest single input to `vite build`: `public/` is copied wholesale into
+      # `dist/`, so this is 61 MB the frontend build cannot start without.
+      - uses: actions/cache@v4
+        with:
+          path: public/drawio
+          key: drawio-webapp-${{ runner.os }}-${{ hashFiles('scripts/build-drawio-webapp.mjs') }}
+
+      # On its own line, where a failed download reads as a failed download.
+      - run: pnpm drawio:webapp
+
+      # `vite build` peaks well above Node's default heap: it died at ~2 GB on the macOS runner
+      # with "Ineffective mark-compacts near heap limit". The peak is a minifier working on the
+      # largest single chunk — `@dbml/core` at ~15.6 MB — so the ceiling has to clear it. Ubuntu's
+      # runner has 16 GB; raise this if the bundle grows a lot.
+      - run: pnpm exec vite build
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+
+      - run: pnpm build:mobile
+
+      # Both paths share the repository root as their common ancestor, so the artifact keeps them at
+      # `dist/…` and `src-tauri/resources/mobile/…`, and a download into `.` puts them back.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend
+          path: |
+            dist
+            src-tauri/resources/mobile
+          if-no-files-found: error
+          # `dist/drawio/.drawio-version` is a dotfile, which upload-artifact@v4 drops by default.
+          # Nothing reads it at runtime, but the bundle should hold what `vite build` wrote.
+          include-hidden-files: true
+          retention-days: 1
+
   # The single writer of the release object, so that the two builds below can run at the same time.
   #
   # This job exists because the matrix used to be `max-parallel: 1`, and the reason it was is worth
@@ -212,7 +280,7 @@ jobs:
           echo "release-id=$(cat release-id)" >> "$GITHUB_OUTPUT"
 
   release:
-    needs: [check-version, create-release]
+    needs: [check-version, create-release, frontend]
     permissions:
       contents: write
     strategy:
@@ -286,22 +354,13 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # 61 MB of draw.io, unpacked from a `draw.war` fetched from jgraph's releases — per runner,
-      # per release, and until now not cached at all. It is pinned by version *and* SHA-256 inside
-      # the script, so hashing the script is an exact identity for the output, and the stamp the
-      # script reads (`public/drawio/.drawio-version`) lives inside the cached directory, so a hit
-      # turns the step below into a no-op instead of a re-download.
-      #
-      # It is also the largest single input to `vite build`: `public/` is copied wholesale into
-      # `dist/`, so this is 61 MB the frontend build cannot start without.
-      - uses: actions/cache@v4
+      # Built once by the `frontend` job above, rather than by `vite build` inside `tauri build` on
+      # each leg. `tauri.ci.conf.json` (passed to `tauri-action` below) is what stops the leg from
+      # building it again.
+      - uses: actions/download-artifact@v4
         with:
-          path: public/drawio
-          key: drawio-webapp-${{ runner.os }}-${{ hashFiles('scripts/build-drawio-webapp.mjs') }}
-
-      # Same reason as the two runtime steps below: on its own line, where a failed download reads
-      # as a failed download.
-      - run: pnpm drawio:webapp
+          name: frontend
+          path: .
 
       # `javac` costs seconds, but it is the step where a broken Java toolchain shows, so it runs on its
       # own line — where a failure reads as one — rather than somewhere inside a ten-minute Rust build.
@@ -346,16 +405,6 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # `beforeBuildCommand` runs `vite build`, which peaks well above Node's default heap on
-          # the macOS runner — it died at ~2 GB there with "Ineffective mark-compacts near heap
-          # limit". The runner has 7 GB, so 4 GB is headroom without risking swap. Raise this if
-          # the bundle grows a lot.
-          #
-          # It used to be Monaco in a ~20 MB entry chunk that did it. Since v1.14.13 the entry is
-          # ~1.4 MB and the weight lives in lazily-imported chunks instead, but the peak is a
-          # minifier working on the largest single chunk — now `@dbml/core` at ~15.6 MB — so the
-          # ceiling still has to clear it.
-          NODE_OPTIONS: --max-old-space-size=4096
           # Updater signing — required so the app can verify and auto-install updates.
           # Add ONE repository secret (Settings › Secrets and variables › Actions):
           #   TAURI_SIGNING_PRIVATE_KEY → contents of ~/.tauri/codeflow-updater.key
@@ -431,7 +480,10 @@ jobs:
           # a finished bundle to somebody else's bad minute, and the other thing this covers is
           # `bundle_dmg.sh`, whose `hdiutil` is flaky in a way no amount of correctness here fixes.
           retryAttempts: 2
-          args: ${{ matrix.args }}
+          # Merged over `tauri.conf.json`: `beforeBuildCommand` without `drawio:webapp`, `build` and
+          # `build:mobile`, whose output the `frontend` artifact already put in place. A path, not
+          # inline JSON, because the action splits `args` on whitespace and quotes.
+          args: --config src-tauri/tauri.ci.conf.json ${{ matrix.args }}
 
       # The one thing no unit test can check: that the JDBC bridge actually made it *inside* what was
       # built. Everything upstream can pass while a `bundle.resources` change quietly drops it, and the
