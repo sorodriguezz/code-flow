@@ -301,9 +301,13 @@ jobs:
           - platform: macos-latest
             args: ""
     runs-on: ${{ matrix.platform }}
-    # Warm is 11 minutes and cold is 26, per the note on `rust-toolchain` above. The default is six
-    # hours, which is what a bundler waiting on a prompt that will never come costs.
-    timeout-minutes: 60
+    # The default is six hours, which is what a bundler waiting on a prompt that will never come
+    # costs. 90, not 60: v2.3.31's Windows leg changed a `windows-sys` feature, which recompiles
+    # everything that depends on it — 46 minutes of `cargo build`, then a 2 GB `rust-cache` save
+    # in the post step that the 60-minute limit cancelled at 18:06, after every asset was already
+    # uploaded. A cancelled leg skips `updater-json`, so the release stayed a draft, and the cache
+    # that would have made the retry warm was never written.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
