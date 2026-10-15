@@ -3325,7 +3325,6 @@ const en = {
   "assistant.canEditHint": "This chat works inside {repo} and may change its files. A restore point is taken before each turn.",
   "assistant.askPlaceholder": "Ask about {repo}…",
   "assistant.wsChat": "Workspace chat",
-  "assistant.chatForRepo": "For this repository",
   "assistant.chatForWorkspace": "For the workspace",
   "assistant.wsChatDetail": "Every repository · SDD/Harness",
   "assistant.wsChatHint": "Talks to every repository of the workspace, can edit them (a restore point per repository each turn) and sees the agents' work in progress.",

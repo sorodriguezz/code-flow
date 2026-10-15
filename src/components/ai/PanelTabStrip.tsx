@@ -38,9 +38,10 @@ import { INBOX_KEY, NO_WORKSPACE, useAiPanelStore, type PanelTab } from "../../s
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
-import type { PullRequestSummary } from "../../types/domain";
+import type { Project, PullRequestSummary } from "../../types/domain";
 
 const EMPTY_PRS: PullRequestSummary[] = [];
+const EMPTY_PROJECTS: Project[] = [];
 
 /**
  * The top of the assistant: the Inbox, one tab per open thing, and the three controls that act on
@@ -446,7 +447,7 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
           />
           {chatScope && (
             <div className="pl-4">
-              <ChatScopeOptions workspaceId={workspaceId} projectId={projectId} projectName={project?.name} onPicked={() => setOpen(false)} />
+              <ChatScopeOptions workspaceId={workspaceId} project={projectId ? project : null} onPicked={() => setOpen(false)} />
             </div>
           )}
           <MenuItem
@@ -516,31 +517,42 @@ function MenuItem({
   );
 }
 
-/** Where a new chat goes: the repository on screen, or every repository of the workspace. */
+/**
+ * Where a new chat goes: any repository of the workspace — the one on screen first — or every
+ * repository of it at once. A chat for a repository is filed under that repository, whichever one
+ * the sidebar has selected.
+ */
 function ChatScopeOptions({
   workspaceId,
-  projectId,
-  projectName,
+  project,
   onPicked,
 }: {
   workspaceId: string;
-  projectId: string | null;
-  projectName?: string;
+  /** The repository on screen, when it is this workspace's. */
+  project: Project | null;
   onPicked: () => void;
 }) {
   const t = useT();
+  const projects = useWorkspaceStore((s) => s.projectsByWorkspace[workspaceId] ?? EMPTY_PROJECTS);
+  const repos = useMemo(() => {
+    if (!project) return projects;
+    return [project, ...projects.filter((p) => p.id !== project.id)];
+  }, [project, projects]);
   return (
     <>
-      <MenuItem
-        icon={FolderGit2}
-        label={t("assistant.chatForRepo")}
-        detail={projectName}
-        disabled={!projectId}
-        onClick={() => {
-          onPicked();
-          if (projectId) openNewChat(projectId);
-        }}
-      />
+      <div className="max-h-60 overflow-y-auto">
+        {repos.map((repo) => (
+          <MenuItem
+            key={repo.id}
+            icon={FolderGit2}
+            label={repo.name}
+            onClick={() => {
+              onPicked();
+              openNewChat(repo.id);
+            }}
+          />
+        ))}
+      </div>
       <MenuItem
         icon={Layers}
         label={t("assistant.chatForWorkspace")}
@@ -558,13 +570,11 @@ function ChatScopeOptions({
 /** "Chat" as a button with its own menu — the Inbox's door to both chats, asking which one. */
 export function NewChatMenu({
   workspaceId,
-  projectId,
-  projectName,
+  project,
   disabled,
 }: {
   workspaceId: string;
-  projectId: string | null;
-  projectName?: string;
+  project: Project | null;
   disabled?: boolean;
 }) {
   const t = useT();
@@ -586,7 +596,7 @@ export function NewChatMenu({
       </button>
       {open && (
         <div role="menu" className={`absolute left-0 top-full z-40 mt-1 w-64 ${popoverClass}`}>
-          <ChatScopeOptions workspaceId={workspaceId} projectId={projectId} projectName={projectName} onPicked={() => setOpen(false)} />
+          <ChatScopeOptions workspaceId={workspaceId} project={project} onPicked={() => setOpen(false)} />
         </div>
       )}
     </div>

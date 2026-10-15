@@ -553,12 +553,15 @@ pub fn discard_conversation_attachments(conversation_id: &str) {
 #[tauri::command]
 pub fn chat_sweep_attachments(db: State<'_, Db>) -> Result<usize, String> {
     let root = crate::paths::chat_attachments_dir();
+    // The assistant's workspace chats too: they keep their images under this root (`chat_send` is
+    // what resolves them), and the chat workspace's list never names them.
     let live: std::collections::HashSet<String> = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         chat_queries::list_conversations(&conn, true)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|c| c.id)
+            .chain(chat_queries::workspace_conversation_ids(&conn).map_err(|e| e.to_string())?)
             .collect()
     };
     let mut removed = sweep_root(&root, &live);

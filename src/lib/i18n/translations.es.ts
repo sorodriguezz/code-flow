@@ -3289,7 +3289,6 @@ export const es = {
   "assistant.canEditHint": "Este chat trabaja dentro de {repo} y puede modificar sus archivos. Antes de cada turno se crea un punto de restauración.",
   "assistant.askPlaceholder": "Pregunta sobre {repo}…",
   "assistant.wsChat": "Chat del workspace",
-  "assistant.chatForRepo": "Para este repositorio",
   "assistant.chatForWorkspace": "Para el workspace",
   "assistant.wsChatDetail": "Todos los repos · SDD/Harness",
   "assistant.wsChatHint": "Habla con todos los repositorios del workspace, puede editarlos (un punto de restauración por repositorio en cada turno) y ve el trabajo en curso de los agentes.",

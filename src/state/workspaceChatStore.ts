@@ -2,16 +2,20 @@ import { create } from "zustand";
 import { speakAnswer } from "../lib/speech/speakAnswer";
 import { isRepoBusy } from "../lib/tauri/commands";
 import {
+  chatAttachBytes,
+  chatAttachFile,
   chatCreateWorkspaceConversation,
   chatDeleteConversation,
   chatGetConversation,
   chatInflightTurns,
   chatListWorkspaceConversations,
+  chatRemoveAttachment,
   chatSend,
   chatSetEffort,
   chatSetEngine,
   chatSetUnread,
   chatSetWorkspaceAgent,
+  type ChatAttachment,
   type ChatConversation,
   type ChatMessageRow,
 } from "../lib/tauri/chatCommands";
@@ -51,6 +55,9 @@ import { pushErrorToast } from "./toastStore";
  * - **Every turn is stamped with its workspace before the first await** (run isolation): the run
  *   row, the notification and the unread mark name the workspace the question was asked in.
  * - **Enter keeps working while a turn runs** — the same queue the other chats use (`chatQueueStore`).
+ * - **Images, like the repository chat** — staged per conversation, offered only where the model
+ *   reads them. Copied under the chat workspace's root (`chat_attach_*`), because `chat_send` is
+ *   what resolves the ids; a queued question carries its own.
  */
 
 export interface WsChatSession {
@@ -84,6 +91,11 @@ export interface WsChatSession {
 interface WsChatState {
   byConversation: Record<string, WsChatSession>;
   listByWorkspace: Record<string, ChatConversation[]>;
+  /** Images waiting in each conversation's composer, sent with its next question. */
+  attachments: Record<string, ChatAttachment[]>;
+  attachImagePath: (conversationId: string, sourcePath: string) => Promise<void>;
+  attachImageBytes: (conversationId: string, name: string, data: Uint8Array) => Promise<void>;
+  removeAttachment: (conversationId: string, attachmentId: string) => void;
   /** Opens a session in memory — a fresh one, or one read back from disk. */
   prepare: (conversationId: string, workspaceId: string, opts?: { focusChainId?: string | null }) => void;
   /** Reads a persisted conversation's transcript (and a turn another window is running in it). */
@@ -94,7 +106,8 @@ interface WsChatState {
   setAgent: (conversationId: string, agentId: string) => Promise<void>;
   /** Sends now, or queues behind the turn that is running. */
   submit: (conversationId: string, text: string) => void;
-  send: (conversationId: string, text: string) => void;
+  /** `files` are a queued question's own images; absent, the composer's staged ones go. */
+  send: (conversationId: string, text: string, files?: ChatAttachment[]) => void;
   drainQueue: (conversationId: string) => void;
   resumeQueue: (conversationId: string) => void;
   discardQueued: (conversationId: string, itemId: string) => void;
@@ -235,6 +248,36 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
   return {
     byConversation: {},
     listByWorkspace: {},
+    attachments: {},
+
+    attachImagePath: async (conversationId, sourcePath) => {
+      try {
+        const file = await chatAttachFile(conversationId, sourcePath);
+        set((s) => ({ attachments: { ...s.attachments, [conversationId]: [...(s.attachments[conversationId] ?? []), file] } }));
+      } catch (e) {
+        pushErrorToast(String(e));
+      }
+    },
+
+    attachImageBytes: async (conversationId, name, data) => {
+      try {
+        const file = await chatAttachBytes(conversationId, name, Array.from(data));
+        set((s) => ({ attachments: { ...s.attachments, [conversationId]: [...(s.attachments[conversationId] ?? []), file] } }));
+      } catch (e) {
+        pushErrorToast(String(e));
+      }
+    },
+
+    removeAttachment: (conversationId, attachmentId) => {
+      set((s) => ({
+        attachments: {
+          ...s.attachments,
+          [conversationId]: (s.attachments[conversationId] ?? []).filter((file) => file.id !== attachmentId),
+        },
+      }));
+      // Best effort: a copy that could not be deleted goes with the conversation, or with the sweep.
+      void chatRemoveAttachment(conversationId, attachmentId).catch(() => {});
+    },
 
     prepare: (conversationId, workspaceId, opts) => {
       listen();
@@ -345,7 +388,10 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
         get().send(conversationId, trimmed);
         return;
       }
-      enqueueChatMessage(key, { text: trimmed });
+      // A queued question takes the staged images with it: the box is free for the next one.
+      const files = get().attachments[conversationId] ?? [];
+      if (files.length > 0) set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
+      enqueueChatMessage(key, { text: trimmed, attachments: files.length > 0 ? files : undefined });
       get().drainQueue(conversationId);
     },
 
@@ -353,7 +399,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       const session = get().byConversation[conversationId];
       if (!session || session.sending) return;
       const next = shiftChatQueue(wsChatQueueKey(conversationId));
-      if (next) get().send(conversationId, next.text);
+      if (next) get().send(conversationId, next.text, next.attachments ?? []);
     },
 
     resumeQueue: (conversationId) => {
@@ -385,8 +431,10 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       dropChatQueue(wsChatQueueKey(conversationId));
       set((s) => {
         const { [conversationId]: _gone, ...byConversation } = s.byConversation;
+        const { [conversationId]: _staged, ...attachments } = s.attachments;
         return {
           byConversation,
+          attachments,
           listByWorkspace: Object.fromEntries(
             Object.entries(s.listByWorkspace).map(([ws, rows]) => [ws, rows.filter((row) => row.id !== conversationId)]),
           ),
@@ -394,11 +442,15 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       });
     },
 
-    send: (conversationId, text) => {
+    send: (conversationId, text, filesArg) => {
       listen();
       const trimmed = text.trim();
       const session = get().byConversation[conversationId];
       if (!trimmed || !session || session.sending) return;
+
+      // The images go with this question — a queued one's own, else the composer's, taken off now.
+      const files = filesArg ?? get().attachments[conversationId] ?? [];
+      if (!filesArg && files.length > 0) set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
 
       // Captured before the first await, never re-read: the answer may land while the user stands
       // in another workspace, and everything this turn files is the asking workspace's.
@@ -429,6 +481,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             createdAt: new Date().toISOString(),
             isError: false,
             isCancelled: false,
+            attachments: files.length > 0 ? files : undefined,
           },
         ],
       }));
@@ -448,7 +501,16 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
           });
           patch(conversationId, (s) => ({ ...s, persisted: true, accountId: row.accountId ?? s.accountId, provider: row.provider, model: row.model }));
         }
-        return chatSend(conversationId, trimmed, runId, null, null, true, [], null);
+        return chatSend(
+          conversationId,
+          trimmed,
+          runId,
+          null,
+          null,
+          true,
+          files.map((file) => file.id),
+          null,
+        );
       };
 
       void run()
@@ -503,7 +565,10 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
               runStartedAt: null,
               streamText: "",
             }));
-            requeueChatMessageFirst(wsChatQueueKey(conversationId), { text: trimmed });
+            requeueChatMessageFirst(wsChatQueueKey(conversationId), {
+              text: trimmed,
+              attachments: files.length > 0 ? files : undefined,
+            });
             holdChatQueue(wsChatQueueKey(conversationId), "error");
             pushErrorToast(translate("assistant.wsChatBusy"));
             return;

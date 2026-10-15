@@ -6,6 +6,7 @@ import { SkillChip } from "../chat/ChatComposer";
 import { AttachmentBar } from "../chat/AttachmentBar";
 import { useTextMenu } from "../common/TextMenu";
 import { useModelReadsImages } from "../../lib/useModelReadsImages";
+import { IMAGE_EXTENSIONS, useImageDrop } from "../../lib/useImageDrop";
 import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import type { ChatAttachment } from "../../lib/tauri/chatCommands";
 import { McpMenu } from "../chat/McpMenu";
@@ -41,8 +42,6 @@ function isCompactCommand(message: { role: string; content: string } | undefined
   return message?.role === "user" && /^\/compact(\s|$)/i.test(message.content.trim());
 }
 
-/** What the repository chat attaches: images, by the extensions the backend calls images. */
-const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
 const NO_FILES: ChatAttachment[] = [];
 
 /** How far from the bottom still counts as "reading the newest", for following a reply as it lands. */
@@ -295,12 +294,20 @@ export function PanelChat({
   // conversation's own folder when picked or pasted, sent with the next question.
   const readsImages = useModelReadsImages(provider, model);
   const staged = useChatStore((s) => s.attachments[conversationId]) ?? NO_FILES;
-  const attachImages = async () => {
-    const picked = await openDialog({ multiple: true, filters: [{ name: t("assistant.images"), extensions: IMAGE_EXTENSIONS }] });
-    const paths = typeof picked === "string" ? [picked] : Array.isArray(picked) ? picked : [];
+  const attachPaths = async (paths: string[]) => {
     for (const path of paths) await useChatStore.getState().attachImagePath(conversationId, path);
     boxRef.current?.focus();
   };
+  const attachImages = async () => {
+    const picked = await openDialog({ multiple: true, filters: [{ name: t("assistant.images"), extensions: IMAGE_EXTENSIONS }] });
+    await attachPaths(typeof picked === "string" ? [picked] : Array.isArray(picked) ? picked : []);
+  };
+  /** Images dragged from the desktop onto the composer. */
+  const composerRef = useRef<HTMLDivElement>(null);
+  const dropOver = useImageDrop(composerRef, (paths) => {
+    if (readsImages) void attachPaths(paths);
+    else pushErrorToast(t("assistant.imagesUnsupported"));
+  });
   /** A screenshot pasted into the box becomes an attachment — or, for a model that cannot see one,
    *  is said not to be rather than vanishing. Text pastes are left alone. */
   const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -538,7 +545,12 @@ export function PanelChat({
         )}
         <QueuedMessages queue={queue} />
         {textMenu.menu}
-        <div className="flex flex-col gap-1.5 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1.5 focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]">
+        <div
+          ref={composerRef}
+          className={`flex flex-col gap-1.5 rounded-xl border bg-[var(--cf-surface-raised)] p-1.5 focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))] ${
+            dropOver ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)]"
+          }`}
+        >
           <AttachmentBar
             files={staged}
             canSeeImages={readsImages}

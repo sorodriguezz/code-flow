@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Bot, Check, FolderGit2, History, Link2, ListPlus, SquarePen, Square, Trash2, Workflow } from "lucide-react";
+import { ArrowDown, ArrowUp, Bot, Check, FolderGit2, History, ImagePlus, Link2, ListPlus, SquarePen, Square, Trash2, Workflow } from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { menuRowClass, useDismiss } from "./docParts";
+import { AttachmentBar } from "../chat/AttachmentBar";
 import { EffortPicker } from "../chat/EffortPicker";
 import { ChatMessageBubble, dayDivider } from "../chat/ChatMessageBubble";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
@@ -13,8 +15,10 @@ import { openWorkspaceChat } from "../../lib/aiPanelNav";
 import { resolveAccount } from "../../lib/aiAccounts";
 import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import { useEffortSupported } from "../../lib/useEffortSupport";
+import { IMAGE_EXTENSIONS, useImageDrop } from "../../lib/useImageDrop";
+import { useModelReadsImages } from "../../lib/useModelReadsImages";
 import { listWorkspaceAgents } from "../../lib/tauri/commands";
-import { workspaceChatSnapshot, type WorkspaceChatSnapshot } from "../../lib/tauri/chatCommands";
+import { workspaceChatSnapshot, type ChatAttachment, type WorkspaceChatSnapshot } from "../../lib/tauri/chatCommands";
 import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
 import { useAiAccountsStore } from "../../state/aiAccountsStore";
@@ -24,6 +28,7 @@ import { useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
 import { confirmAction } from "../../state/confirmStore";
 import { registerDictationSend } from "../../state/dictationStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { pushErrorToast } from "../../state/toastStore";
 import { EMPTY_WS_CHAT, EMPTY_WS_LIST, useWorkspaceChatStore, wsChatQueueKey } from "../../state/workspaceChatStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { WorkspaceAgent } from "../../types/domain";
@@ -32,6 +37,7 @@ const STICK_PX = 48;
 const MAX_COMPOSER_HEIGHT = 180;
 const PENDING_SHELL = { role: "assistant" as const, content: "" };
 const NO_AGENTS: WorkspaceAgent[] = [];
+const NO_FILES: ChatAttachment[] = [];
 
 /**
  * A chat with every repository of the workspace, in its own tab of the assistant — beside, not
@@ -40,7 +46,7 @@ const NO_AGENTS: WorkspaceAgent[] = [];
  * in flight (`src-tauri/src/workspace_chat.rs`), so a chain, a story or a hybrid run can be asked
  * about and carried on from here. One of the workspace's agents can be put in charge of it.
  *
- * The composer is the repository chat's: engine, thinking level, queue, Stop, dictation.
+ * The composer is the repository chat's: engine, thinking level, queue, Stop, dictation, images.
  */
 export function WorkspaceChat({
   tabKey,
@@ -179,6 +185,39 @@ export function WorkspaceChat({
   const dictating = useDictatingHere(boxRef);
   const textMenu = useTextMenu();
 
+  // ── Images ────────────────────────────────────────────────────────────────────────────────
+  // The repository chat's rule: offered only where the model can look at one, picked, pasted or
+  // dropped onto the composer, and sent with the next question.
+  const readsImages = useModelReadsImages(provider, model);
+  const staged = useWorkspaceChatStore((s) => s.attachments[conversationId]) ?? NO_FILES;
+  const attachPaths = async (paths: string[]) => {
+    for (const path of paths) await useWorkspaceChatStore.getState().attachImagePath(conversationId, path);
+    boxRef.current?.focus();
+  };
+  const attachImages = async () => {
+    const picked = await openDialog({ multiple: true, filters: [{ name: t("assistant.images"), extensions: IMAGE_EXTENSIONS }] });
+    await attachPaths(typeof picked === "string" ? [picked] : Array.isArray(picked) ? picked : []);
+  };
+  const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const item = Array.from(event.clipboardData.items).find((entry) => entry.type.startsWith("image/"));
+    const file = item?.getAsFile();
+    if (!file) return;
+    event.preventDefault();
+    if (!readsImages) {
+      pushErrorToast(t("assistant.imagesUnsupported"));
+      return;
+    }
+    const extension = (file.type.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
+    void file.arrayBuffer().then((buffer) =>
+      useWorkspaceChatStore.getState().attachImageBytes(conversationId, `pegado.${extension}`, new Uint8Array(buffer)),
+    );
+  };
+  const composerRef = useRef<HTMLDivElement>(null);
+  const dropOver = useImageDrop(composerRef, (paths) => {
+    if (readsImages) void attachPaths(paths);
+    else pushErrorToast(t("assistant.imagesUnsupported"));
+  });
+
   const queueKey = wsChatQueueKey(conversationId);
   const queuedMessages = useChatQueue(queueKey);
   const queueHeld = useChatQueueHold(queueKey);
@@ -288,13 +327,24 @@ export function WorkspaceChat({
         )}
         <QueuedMessages queue={queue} />
         {textMenu.menu}
-        <div className="flex flex-col gap-1.5 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1.5 focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]">
+        <div
+          ref={composerRef}
+          className={`flex flex-col gap-1.5 rounded-xl border bg-[var(--cf-surface-raised)] p-1.5 focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))] ${
+            dropOver ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)]"
+          }`}
+        >
+          <AttachmentBar
+            files={staged}
+            canSeeImages={readsImages}
+            onRemove={(id) => useWorkspaceChatStore.getState().removeAttachment(conversationId, id)}
+          />
           <textarea
             ref={boxRef}
             data-ai-input="inline"
             value={draft}
             rows={1}
             onChange={(e) => setDraft(e.target.value)}
+            onPaste={onPaste}
             onContextMenu={textMenu.onField}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
@@ -330,6 +380,17 @@ export function WorkspaceChat({
                   current={agent}
                   onPick={(id) => void useWorkspaceChatStore.getState().setAgent(conversationId, id)}
                 />
+              )}
+              {readsImages && (
+                <button
+                  type="button"
+                  onClick={() => void attachImages()}
+                  title={t("assistant.attachImage")}
+                  aria-label={t("assistant.attachImage")}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+                >
+                  <ImagePlus size={13} />
+                </button>
               )}
               <span className="flex-1" />
               {session.sending ? (

@@ -225,8 +225,7 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
               agents' work in flight — asked on click. */}
           <NewChatMenu
             workspaceId={workspaceId}
-            projectId={activeProject?.id ?? null}
-            projectName={activeProject?.name}
+            project={activeProject ?? null}
             disabled={!activeProject && projects.length === 0}
           />
           {activeProject && <ReviewPrMenu projectId={activeProject.id} variant="button" />}

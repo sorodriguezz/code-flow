@@ -483,6 +483,15 @@ pub fn list_workspace_conversations(
     rows.collect()
 }
 
+/// Every conversation the chat workspace's own lists leave out — the workspace chats, archived or
+/// not, in every workspace. What the startup sweep adds to [`list_conversations`]'s ids, or it
+/// would take a workspace chat's images for an orphan's.
+pub fn workspace_conversation_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare("SELECT id FROM chat_conversations WHERE workspace_scope = 1")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
 /// Puts an SDD/Harness agent in charge of a workspace chat, or takes it out (`""`).
 ///
 /// A change **drops the engine session**: the agent's prompt is part of what a session is told when
@@ -1216,6 +1225,9 @@ mod tests {
         let mine: Vec<String> = list_workspace_conversations(&conn, "w1").unwrap().into_iter().map(|c| c.id).collect();
         assert_eq!(mine, vec![scoped.id.clone()]);
         assert!(list_workspace_conversations(&conn, "elsewhere").unwrap().is_empty());
+
+        // The attachment sweep still knows it is alive.
+        assert_eq!(workspace_conversation_ids(&conn).unwrap(), vec![scoped.id.clone()]);
     }
 
     #[test]

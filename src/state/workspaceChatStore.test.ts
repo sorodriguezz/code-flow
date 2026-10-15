@@ -43,6 +43,10 @@ vi.mock("@tauri-apps/api/core", () => ({
         updatedAt: "t",
       };
     }
+    if (name === "chat_attach_file") {
+      const name_ = String(args.sourcePath).split("/").pop();
+      return { id: `x-${name_}`, name: name_, path: `/state/chat-attachments/${args.conversationId}/x-${name_}`, bytes: 1, isImage: true };
+    }
     if (name === "chat_send") return new Promise((resolve, reject) => backend.sends.push({ resolve, reject }));
     return /(^|_)list(_|$)/.test(name) || name === "chat_inflight_turns" ? [] : null;
   },
@@ -75,7 +79,7 @@ function reply(text: string) {
 beforeEach(() => {
   backend.calls = [];
   backend.sends = [];
-  useWorkspaceChatStore.setState({ byConversation: {}, listByWorkspace: {} });
+  useWorkspaceChatStore.setState({ byConversation: {}, listByWorkspace: {}, attachments: {} });
 });
 
 describe("workspace chat", () => {
@@ -133,5 +137,35 @@ describe("workspace chat", () => {
     const session = useWorkspaceChatStore.getState().byConversation[id];
     expect(session.messages[session.messages.length - 1]).toMatchObject({ role: "assistant", isError: true, content: "engine exploded" });
     expect(queuedMessages(wsChatQueueKey(id)).map((q) => q.text)).toEqual(["after"]);
+  });
+
+  it("sends the staged images with the question, and a queued question keeps its own", async () => {
+    const id = "44444444-4444-4444-8444-444444444444";
+    const store = useWorkspaceChatStore.getState();
+    store.prepare(id, "ws-1");
+    await store.attachImagePath(id, "/Users/me/shot.png");
+    store.submit(id, "what is this?");
+    await flush();
+    // Taken off the composer the moment it was asked, and shown on the question.
+    expect(useWorkspaceChatStore.getState().attachments[id]).toEqual([]);
+    expect(useWorkspaceChatStore.getState().byConversation[id].messages[0].attachments?.map((f) => f.name)).toEqual(["shot.png"]);
+
+    await store.attachImagePath(id, "/Users/me/next.png");
+    store.submit(id, "and this one?");
+    expect(useWorkspaceChatStore.getState().attachments[id]).toEqual([]);
+    backend.sends[0].resolve(reply("a chart"));
+    await flush();
+    const sent = backend.calls.filter((c) => c.name === "chat_send").map((c) => c.args.attachments);
+    expect(sent).toEqual([["x-shot.png"], ["x-next.png"]]);
+  });
+
+  it("removing a staged image deletes its copy", async () => {
+    const id = "55555555-5555-4555-8555-555555555555";
+    const store = useWorkspaceChatStore.getState();
+    store.prepare(id, "ws-1");
+    await store.attachImagePath(id, "/Users/me/shot.png");
+    store.removeAttachment(id, "x-shot.png");
+    expect(useWorkspaceChatStore.getState().attachments[id]).toEqual([]);
+    expect(backend.calls.find((c) => c.name === "chat_remove_attachment")?.args).toEqual({ conversationId: id, attachmentId: "x-shot.png" });
   });
 });
