@@ -24,6 +24,8 @@ import { exportMenuItems, exportRepoConversation } from "../chat/exportChat";
 import { ContextMenu } from "../common/ContextMenu";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
+import { EffortPicker } from "../chat/EffortPicker";
+import { useEffortSupported } from "../../lib/useEffortSupport";
 import { EMPTY_CHAT, engineFor, useChatStore, type ChatEngine, type ChatSkillPick } from "../../state/chatStore";
 import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activityStore";
 import { useAiRunStore } from "../../state/aiRunStore";
@@ -152,6 +154,8 @@ export function PanelChat({
   const model = engine?.model ?? routedModel;
   const account =
     picked?.account ?? resolveAccount({ accounts, taskPins, workspaceDefaults, providerDefaults }, provider, "chat", workspaceId);
+  const effort = useChatStore((s) => s.effortByConversation[conversationId] ?? "");
+  const effortSupported = useEffortSupported(provider, model);
   const pickEngine = (nextProvider: string, nextModel: string, nextAccount?: string) => {
     const next: ChatEngine = { provider: nextProvider, model: nextModel, account: nextAccount ?? picked?.account ?? null };
     useChatStore.getState().setEngine(conversationId, next);
@@ -572,6 +576,13 @@ export function PanelChat({
               chatActive={session.messages.length > 0}
               bound={{ provider, model, account }}
               onPick={pickEngine}
+            />
+            {/* How hard it thinks, per conversation — the chat workspace's dial. */}
+            <EffortPicker
+              compact
+              value={effort}
+              supported={effortSupported}
+              onPick={(level) => useChatStore.getState().setEffort(conversationId, level)}
             />
             {/* The CLI's own MCP servers, switched for this repository. */}
             <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />

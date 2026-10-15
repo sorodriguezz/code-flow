@@ -1,6 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import {
   ChevronDown,
+  FolderGit2,
   Clock,
   GitPullRequest,
   Inbox,
@@ -13,6 +14,7 @@ import {
   RotateCcw,
   ShieldCheck,
   X,
+  Layers,
   type LucideIcon,
 } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -22,7 +24,8 @@ import { popoverClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import { jobPrUrl } from "../../lib/activityEntries";
 import { workspaceActivityKey } from "../../lib/prTarget";
-import { openAnalysis, openNewChat, useChangesToAnalyze } from "../../lib/aiPanelNav";
+import { openAnalysis, openNewChat, openWorkspaceChat, useChangesToAnalyze } from "../../lib/aiPanelNav";
+import { useWorkspaceChatStore } from "../../state/workspaceChatStore";
 import { useRepoQueueStore } from "../../lib/repoQueue";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import { menuRowClass, useDismiss, useElementWidth } from "./docParts";
@@ -31,7 +34,7 @@ import { useChatStore } from "../../state/chatStore";
 import { useChatHistoryStore } from "../../state/activityStore";
 import { usePrStore } from "../../state/prStore";
 import { usePrWatchStore, EMPTY_TRACKED } from "../../state/prWatchStore";
-import { INBOX_KEY, useAiPanelStore, type PanelTab } from "../../state/aiPanelStore";
+import { INBOX_KEY, NO_WORKSPACE, useAiPanelStore, type PanelTab } from "../../state/aiPanelStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
@@ -301,7 +304,7 @@ function TabButton({ tab, workspaceId, active, compact, markId }: { tab: PanelTa
   const close = useAiPanelStore((s) => s.close);
   const mark = useAiPanelStore((s) => s.unread[tab.key] ?? null);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
-  const projectId = tab.kind === "prLink" ? null : tab.projectId;
+  const projectId = tab.kind === "prLink" || tab.kind === "wsChat" ? null : tab.projectId;
   const projectName = useWorkspaceStore((s) =>
     projectId ? (Object.values(s.projectsByWorkspace).flat().find((p) => p.id === projectId)?.name ?? "") : "",
   );
@@ -312,7 +315,15 @@ function TabButton({ tab, workspaceId, active, compact, markId }: { tab: PanelTa
   const foreign = projectId !== null && projectId !== activeProjectId && projectName;
   const title = foreign ? `${projectName} · ${base}` : base;
   const Icon: LucideIcon =
-    tab.kind === "chat" ? MessageSquare : tab.kind === "pr" ? GitPullRequest : tab.kind === "prLink" ? Link2 : ShieldCheck;
+    tab.kind === "chat"
+      ? MessageSquare
+      : tab.kind === "wsChat"
+        ? Layers
+        : tab.kind === "pr"
+          ? GitPullRequest
+          : tab.kind === "prLink"
+            ? Link2
+            : ShieldCheck;
   // The orb is the tab's icon while a model works on what it shows — the one tab that carries it.
   const icon =
     status === "running" ? (
@@ -342,6 +353,7 @@ function TabButton({ tab, workspaceId, active, compact, markId }: { tab: PanelTa
 function useTabTitle(tab: PanelTab): string {
   const t = useT();
   const liveTitle = useChatStore((s) => (tab.kind === "chat" ? s.byConversation[tab.conversationId]?.title : undefined));
+  const wsTitle = useWorkspaceChatStore((s) => (tab.kind === "wsChat" ? s.byConversation[tab.conversationId]?.title : undefined));
   const storedTitle = useChatHistoryStore((s) =>
     tab.kind === "chat" ? s.byProject[tab.projectId]?.find((c) => c.session_id === tab.conversationId)?.title : undefined,
   );
@@ -354,18 +366,26 @@ function useTabTitle(tab: PanelTab): string {
       return `#${tab.session.pr.id} ${tab.session.repoLabel} · ${tab.session.pr.title}`;
     case "analysis":
       return t("analyze.title");
+    case "wsChat":
+      return wsTitle || t("assistant.wsChat");
   }
 }
 
 /** Whether a model is working on what a tab shows, or waiting for its repository to do so. */
 function useTabStatus(tab: PanelTab): "running" | "queued" | "idle" {
   const bucket =
-    tab.kind === "prLink" ? workspaceActivityKey(tab.session.workspaceId) : tab.kind === "chat" ? null : tab.projectId;
+    tab.kind === "prLink"
+      ? workspaceActivityKey(tab.session.workspaceId)
+      : tab.kind === "chat" || tab.kind === "wsChat"
+        ? null
+        : tab.projectId;
   const jobs = useJobsStore((s) => (bucket ? (s.byProject[bucket] ?? EMPTY_JOBS) : EMPTY_JOBS));
   const chat = useChatStore((s) => (tab.kind === "chat" ? s.byConversation[tab.conversationId] : undefined));
+  const wsChat = useWorkspaceChatStore((s) => (tab.kind === "wsChat" ? s.byConversation[tab.conversationId] : undefined));
   const queued = useRepoQueueStore((s) => s.queued);
   let runId: string | null = null;
   if (tab.kind === "chat") runId = chat?.sending ? chat.runId : null;
+  else if (tab.kind === "wsChat") runId = wsChat?.sending ? wsChat.runId : null;
   else {
     const running = jobs.find(
       (job) =>
@@ -394,6 +414,10 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
   const inWorkspace = useWorkspaceStore((s) => (project ? s.workspaceOfProject(project.id) === workspaceId : false));
   const projectId = project && inWorkspace ? project.id : null;
   const changes = useChangesToAnalyze(projectId);
+  const [chatScope, setChatScope] = useState(false);
+  useEffect(() => {
+    if (!open) setChatScope(false);
+  }, [open]);
   return (
     <div ref={ref} className="relative shrink-0">
       <Tooltip label={t("assistant.openNew")} side="bottom" disabled={open}>
@@ -412,16 +436,19 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
       </Tooltip>
       {open && (
         <div role="menu" className={`absolute right-0 top-full z-40 mt-1 w-72 ${popoverClass}`}>
+          {/* One "new chat" that asks where it goes — this repository or the whole workspace (user,
+              2026-10-15: "mezcla el botón de chat y el de workspace"). */}
           <MenuItem
             icon={MessageSquare}
             label={t("assistant.newChat")}
-            detail={project?.name}
-            disabled={!projectId}
-            onClick={() => {
-              setOpen(false);
-              if (projectId) openNewChat(projectId);
-            }}
+            onClick={() => setChatScope((v) => !v)}
+            trailing={<ChevronDown size={12} className={`text-[var(--cf-text-muted)] ${chatScope ? "rotate-180" : ""}`} />}
           />
+          {chatScope && (
+            <div className="pl-4">
+              <ChatScopeOptions workspaceId={workspaceId} projectId={projectId} projectName={project?.name} onPicked={() => setOpen(false)} />
+            </div>
+          )}
           <MenuItem
             icon={ShieldCheck}
             label={t("assistant.analyze")}
@@ -468,21 +495,101 @@ function MenuItem({
   detail,
   disabled,
   onClick,
+  trailing,
 }: {
   icon: LucideIcon;
   label: string;
   detail?: string;
   disabled?: boolean;
   onClick: () => void;
+  trailing?: ReactNode;
 }) {
   return (
     <button role="menuitem" onClick={onClick} disabled={disabled} className={menuRowClass()}>
       <Icon size={15} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
-      <span className="min-w-0">
+      <span className="min-w-0 flex-1">
         <span className="block truncate text-[13px] text-[var(--cf-text)]">{label}</span>
         {detail && <span className="block truncate text-[12px] text-[var(--cf-text-muted)]">{detail}</span>}
       </span>
+      {trailing && <span className="mt-0.5 shrink-0">{trailing}</span>}
     </button>
+  );
+}
+
+/** Where a new chat goes: the repository on screen, or every repository of the workspace. */
+function ChatScopeOptions({
+  workspaceId,
+  projectId,
+  projectName,
+  onPicked,
+}: {
+  workspaceId: string;
+  projectId: string | null;
+  projectName?: string;
+  onPicked: () => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      <MenuItem
+        icon={FolderGit2}
+        label={t("assistant.chatForRepo")}
+        detail={projectName}
+        disabled={!projectId}
+        onClick={() => {
+          onPicked();
+          if (projectId) openNewChat(projectId);
+        }}
+      />
+      <MenuItem
+        icon={Layers}
+        label={t("assistant.chatForWorkspace")}
+        detail={t("assistant.wsChatDetail")}
+        disabled={workspaceId === NO_WORKSPACE}
+        onClick={() => {
+          onPicked();
+          openWorkspaceChat(workspaceId);
+        }}
+      />
+    </>
+  );
+}
+
+/** "Chat" as a button with its own menu — the Inbox's door to both chats, asking which one. */
+export function NewChatMenu({
+  workspaceId,
+  projectId,
+  projectName,
+  disabled,
+}: {
+  workspaceId: string;
+  projectId: string | null;
+  projectName?: string;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useDismiss(ref, open, () => setOpen(false));
+  return (
+    <div ref={ref} className="relative flex">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={buttonClass({ variant: "secondary", size: "sm" })}
+      >
+        <Plus size={13} />
+        {t("assistant.chat")}
+        <ChevronDown size={12} className="text-[var(--cf-text-muted)]" />
+      </button>
+      {open && (
+        <div role="menu" className={`absolute left-0 top-full z-40 mt-1 w-64 ${popoverClass}`}>
+          <ChatScopeOptions workspaceId={workspaceId} projectId={projectId} projectName={projectName} onPicked={() => setOpen(false)} />
+        </div>
+      )}
+    </div>
   );
 }
 

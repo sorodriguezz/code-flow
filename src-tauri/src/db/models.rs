@@ -1634,6 +1634,17 @@ pub struct ChatConversation {
     /// `chat_cmd::chat_continue_in_new_thread`.
     #[serde(default)]
     pub continued_from: Option<Continuation>,
+    /// A workspace chat of the assistant panel rather than a thread of the chat workspace: it talks
+    /// to every repository of `workspace_id`, and the chat workspace's list never shows it. See
+    /// `crate::workspace_chat`.
+    #[serde(default)]
+    pub workspace_scope: bool,
+    /// The SDD/Harness agent answering it (`workspace_agents.id`), `""` for none.
+    #[serde(default)]
+    pub agent_id: String,
+    /// The chain it was opened to carry on, `""` for none.
+    #[serde(default)]
+    pub focus_chain_id: String,
 }
 
 /// What a thread started from another carries of it — see [`ChatConversation::continued_from`].

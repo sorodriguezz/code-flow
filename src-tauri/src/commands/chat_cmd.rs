@@ -522,6 +522,135 @@ pub fn chat_set_engine(
     Ok(account_id)
 }
 
+// ---------- workspace chats (the assistant panel's) ----------
+
+/// Opens a **workspace chat** — see `crate::workspace_chat` — under the id the panel minted for its
+/// tab. `agent_id` puts one of the workspace's SDD/Harness agents in charge from the first turn;
+/// `focus_chain_id` names the chain it was opened to carry on.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn chat_create_workspace_conversation(
+    db: State<'_, Db>,
+    conversation_id: String,
+    workspace_id: String,
+    provider: String,
+    model: String,
+    account: Option<String>,
+    agent_id: Option<String>,
+    focus_chain_id: Option<String>,
+    effort: Option<String>,
+) -> Result<ChatConversation, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // A tab whose first send raced a second window's: the row is there, and is this tab's.
+    if let Some(existing) = chat_queries::get_conversation(&conn, &conversation_id).map_err(|e| e.to_string())? {
+        if !existing.workspace_scope || existing.workspace_id != workspace_id {
+            return Err("conversation id already in use".to_string());
+        }
+        return Ok(existing);
+    }
+    let account_id = if provider.trim().is_empty() {
+        None
+    } else {
+        ai_accounts::resolve(
+            &conn,
+            &provider,
+            Some(AiTask::Chat.key()),
+            Some(&workspace_id),
+            ai_accounts::Choice::parse(account.as_deref()),
+        )
+        .account_id
+    };
+    let created = chat_queries::create_workspace_conversation(
+        &conn,
+        &conversation_id,
+        &workspace_id,
+        &provider,
+        account_id.as_deref(),
+        &model,
+        agent_id.as_deref().unwrap_or("").trim(),
+        focus_chain_id.as_deref().unwrap_or("").trim(),
+    )
+    .map_err(|e| e.to_string())?;
+    // The level picked before the first question, applied before that question runs.
+    match effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        Some(level) => {
+            chat_queries::set_effort(&conn, &created.id, level).map_err(|e| e.to_string())?;
+            chat_queries::get_conversation(&conn, &created.id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "conversation not found".to_string())
+        }
+        None => Ok(created),
+    }
+}
+
+/// One workspace's chats, newest first — the panel's history of them.
+#[tauri::command]
+pub fn chat_list_workspace_conversations(
+    db: State<'_, Db>,
+    workspace_id: String,
+) -> Result<Vec<ChatConversation>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    chat_queries::list_workspace_conversations(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// Puts one of the workspace's SDD/Harness agents in charge of a workspace chat (`""` takes it
+/// out). The agent must be one of that workspace's; its routing and prompt are read at each turn.
+#[tauri::command]
+pub fn chat_set_workspace_agent(
+    db: State<'_, Db>,
+    conversation_id: String,
+    agent_id: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conversation = chat_queries::get_conversation(&conn, &conversation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "conversation not found".to_string())?;
+    if !conversation.workspace_scope {
+        return Err("not a workspace chat".to_string());
+    }
+    let agent_id = agent_id.trim();
+    if !agent_id.is_empty()
+        && !queries::list_workspace_agents(&conn, &conversation.workspace_id)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|agent| agent.id == agent_id)
+    {
+        return Err("agent not found in this workspace".to_string());
+    }
+    chat_queries::set_agent(&conn, &conversation_id, agent_id).map_err(|e| e.to_string())
+}
+
+/// What a workspace chat's next turn is told about the workspace — the same block `chat_send`
+/// appends — so the panel can show it (and count the work in flight) without a turn.
+#[tauri::command]
+pub fn workspace_chat_snapshot(
+    db: State<'_, Db>,
+    workspace_id: String,
+    focus_chain_id: Option<String>,
+) -> Result<WorkspaceChatSnapshot, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let repos = crate::workspace_chat::repos(&conn, &workspace_id).map_err(|e| e.to_string())?;
+    let chains = crate::workspace_chat::chains(&conn, &workspace_id, focus_chain_id.as_deref().unwrap_or(""))
+        .map_err(|e| e.to_string())?;
+    let tasks = crate::workspace_chat::tasks(&conn, &workspace_id).map_err(|e| e.to_string())?;
+    Ok(WorkspaceChatSnapshot {
+        repos: repos.len(),
+        repos_on_disk: repos.iter().filter(|r| r.on_disk).count(),
+        in_flight: chains.len() + tasks.len(),
+        text: crate::workspace_chat::live_block(&repos, &chains, &tasks).trim().to_string(),
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceChatSnapshot {
+    pub repos: usize,
+    pub repos_on_disk: usize,
+    /// Chains and tasks the block lists.
+    pub in_flight: usize,
+    pub text: String,
+}
+
 // ---------- turns in flight ----------
 
 /// A chat turn the engine is still working on, as the UI needs to rebuild it.
@@ -560,6 +689,9 @@ pub struct InflightTurn {
     /// [`record_turns_stopped_at_quit`], which files the answer the quit cut off; no window needs it.
     #[serde(skip)]
     pub turn: i64,
+    /// The workspace, for a workspace chat of the assistant panel — which the chat workspace's
+    /// windows must not adopt as one of theirs. `None` for every chat-workspace thread.
+    pub workspace_chat: Option<String>,
 }
 
 fn inflight() -> &'static std::sync::Mutex<std::collections::HashMap<String, InflightTurn>> {
@@ -1110,6 +1242,35 @@ pub async fn chat_send(
         None => None,
     };
 
+    // A workspace chat of the assistant panel: no repository of its own and every repository of the
+    // workspace in reach, answered by an SDD/Harness agent when one is in charge of it. See
+    // `crate::workspace_chat`. Read now, with the rest of what this turn is filed against.
+    let workspace_scope = conversation.workspace_scope;
+    let (ws_projects, ws_agent, ws_name) = if workspace_scope {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let projects = queries::list_projects(&conn, &conversation.workspace_id).map_err(|e| e.to_string())?;
+        let agent = if conversation.agent_id.is_empty() {
+            None
+        } else {
+            queries::list_workspace_agents(&conn, &conversation.workspace_id)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|agent| agent.id == conversation.agent_id && agent.enabled)
+        };
+        let name = queries::list_workspaces(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|w| w.id == conversation.workspace_id)
+            .map(|w| w.name)
+            .unwrap_or_default();
+        (projects, agent, name)
+    } else {
+        (Vec::new(), None, String::new())
+    };
+    // Outside the lock: every repository is opened to read its branch.
+    let ws_repos = crate::workspace_chat::repo_lines(ws_projects);
+    let ws_extra_dirs = crate::workspace_chat::extra_dirs(&ws_repos);
+
     // See the module note. One unit of exclusion: a conversation from a second turn of its own. A
     // repository, when there is one, is shared — this turn is only listed in it, and told below who
     // else is there (see `ai_locks`).
@@ -1129,6 +1290,9 @@ pub async fn chat_send(
         format!("{}{name}", ai_locks::BUSY_MARKER)
     })?;
     let presence = project.as_ref().map(|project| ai_locks::enter(&project.local_path, &ai::chat_presence_label(&message)));
+    // A workspace chat is listed in every repository it can reach, so the turns working in any of
+    // them know it is there — and it hears who else is in them.
+    let ws_presence = ai_locks::enter_all(&ws_extra_dirs, &ai::chat_presence_label(&message));
 
     // Routing, most specific first: what this turn asked for, then what the conversation was
     // opened on, then the global `chat` route. The middle step is what keeps a reopened
@@ -1139,7 +1303,19 @@ pub async fn chat_send(
     // engine and has to know which one it is before the turn's context is assembled.
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        conversation_config(&conn, &conversation, provider.as_deref(), model.as_deref())?
+        match ws_agent.as_ref() {
+            // The agent in charge answers on its own provider, model and account, whatever the
+            // conversation or this turn named — the same rule as the repository chat's roles.
+            Some(agent) => load_ai_config_as(
+                &conn,
+                &agent.provider,
+                agent.model.trim(),
+                ai_accounts::Choice::parse(agent.account_id.as_deref()),
+                Some(AiTask::Chat),
+                Some(&conversation.workspace_id),
+            )?,
+            None => conversation_config(&conn, &conversation, provider.as_deref(), model.as_deref())?,
+        }
     };
 
     // A resume token minted by a different engine — or by another account of the same one — is
@@ -1195,13 +1371,24 @@ pub async fn chat_send(
                 contexts.push(("Conversation so far".to_string(), prefix));
             }
         }
-        if project.is_some() {
+        if project.is_some() || workspace_scope {
             let workspace_contexts =
                 queries::list_review_contexts(&conn, &conversation.workspace_id)
                     .map_err(|e| e.to_string())?;
             contexts.extend(
                 workspace_contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)),
             );
+        }
+        // The agent in charge frames the whole session, so its instructions go first.
+        if let Some(agent) = ws_agent.as_ref().filter(|agent| !agent.prompt.trim().is_empty()) {
+            contexts.insert(0, (format!("Agente — {}", agent.name), agent.prompt.clone()));
+        }
+        // The chain this chat was opened to carry on: all of it, once per session. The per-turn
+        // block keeps saying where it is now.
+        if workspace_scope && !conversation.focus_chain_id.is_empty() {
+            if let Ok(Some(brief)) = crate::workspace_chat::chain_brief(&conn, &conversation.focus_chain_id) {
+                contexts.push(("Trabajo a retomar".to_string(), brief));
+            }
         }
 
         // The project's shared context files, if this conversation is filed under one. They ride
@@ -1292,6 +1479,7 @@ pub async fn chat_send(
      * capability the user configured.
      */
     let may_generate_files = project.is_none()
+        && !workspace_scope
         && db
             .0
             .lock()
@@ -1304,6 +1492,8 @@ pub async fn chat_send(
         // A repo-bound conversation keeps today's behaviour: the user's configured tool list, and
         // edits auto-approved, wrapped in a checkpoint.
         Some(_) => config.tools.clone(),
+        // A workspace chat works in its repositories exactly as the repository chat does in its one.
+        None if workspace_scope => config.tools.clone(),
         // A repo-less conversation that may generate files needs the same list, and for the
         // obvious reason: a spreadsheet is produced by writing a script and running it, so
         // stripping `Write` and `Bash` is stripping the feature. What keeps this bounded is not
@@ -1328,7 +1518,7 @@ pub async fn chat_send(
     // The user's own MCP servers, as this conversation switched them — see `crate::chat_mcp`. Not
     // for a turn that may not write: that one loads no server at all.
     let env = config.engine.account().cloned().unwrap_or_else(|| ai_accounts::AccountEnv::system(&config.provider));
-    let turn_mcp = if project.is_some() || may_generate_files {
+    let turn_mcp = if project.is_some() || may_generate_files || workspace_scope {
         mcp_plan(&db, &conversation.workspace_id, &config.provider, &config.binary, &env, &conversation.mcp_overrides).await
     } else if config.provider == "codex" {
         // Text only, on Codex: what makes that promise true is switching its own servers off too.
@@ -1344,7 +1534,7 @@ pub async fn chat_send(
     // Auto-approval, not "may write": an engine that has to ask permission it has no way to be
     // granted is an engine that stops halfway and narrates a file it never created — which is
     // exactly what this conversation's first attempt at a spreadsheet did.
-    let write_access = project.is_some() || may_generate_files;
+    let write_access = project.is_some() || may_generate_files || workspace_scope;
 
     // The turn's working directory. Created lazily, here, because this is the first moment anyone
     // needs it to exist — and if it cannot be created there is still somewhere to run: the failure
@@ -1357,6 +1547,13 @@ pub async fn chat_send(
     // `paths::chat_conversation_outputs_dir`.
     let cwd = match project.as_ref() {
         Some(project) => project.local_path.clone(),
+        None if workspace_scope => {
+            let dir = crate::workspace_chat::working_dir(&conversation.workspace_id);
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                format!("could not create the workspace chat's working directory ({}): {e}", dir.display())
+            })?;
+            dir.to_string_lossy().to_string()
+        }
         None => {
             let dir = crate::paths::chat_conversation_outputs_dir(&conversation_id);
             std::fs::create_dir_all(&dir).map_err(|e| {
@@ -1398,7 +1595,11 @@ pub async fn chat_send(
     // changes what its existing chats are told next time they run — which is what the word
     // implies, and what a snapshot would quietly fail to do.
     let system_prompt: Option<String> = {
-        let base = project.is_none().then(|| repo_less_prompt(may_generate_files, &cwd));
+        let base = if workspace_scope {
+            Some(crate::workspace_chat::system_prompt(&ws_name, &cwd, config.engine.supports_extra_dirs()))
+        } else {
+            project.is_none().then(|| repo_less_prompt(may_generate_files, &cwd))
+        };
         let project_instructions = conversation
             .group_id
             .as_deref()
@@ -1448,6 +1649,26 @@ pub async fn chat_send(
     if let Some(note) = presence.as_ref().and_then(|presence| ai::parallel_work_note(&presence.others())) {
         engine_message.push_str(&note);
     }
+    if workspace_scope {
+        let mut others: Vec<String> = ws_presence.iter().flat_map(|presence| presence.others()).collect();
+        others.sort();
+        others.dedup();
+        if let Some(note) = ai::parallel_work_note(&others) {
+            engine_message.push_str(&note);
+        }
+        // The workspace as it is right now — repositories and the agent work in flight — on every
+        // turn, since a resumed session is never sent a system prompt again. Said to the engine and
+        // never stored as the question, like the style rules above.
+        let (chains, tasks) = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            (
+                crate::workspace_chat::chains(&conn, &conversation.workspace_id, &conversation.focus_chain_id)
+                    .unwrap_or_default(),
+                crate::workspace_chat::tasks(&conn, &conversation.workspace_id).unwrap_or_default(),
+            )
+        };
+        engine_message.push_str(&crate::workspace_chat::live_block(&ws_repos, &chains, &tasks));
+    }
 
     let started = std::time::Instant::now();
 
@@ -1463,11 +1684,15 @@ pub async fn chat_send(
         provider: config.provider.clone(),
         started_at_ms: chrono::Utc::now().timestamp_millis(),
         turn,
+        workspace_chat: workspace_scope.then(|| conversation.workspace_id.clone()),
     });
 
     // Only where there is a working copy to snapshot. A repo-less turn writes nothing by design,
     // and a checkpoint of an empty scratch directory would be an undo button for nothing.
     let checkpoint = project.as_ref().and_then(|p| checkpoint_before(&p.local_path, "chat"));
+    // A workspace chat may write in any of its repositories: one restore point in each.
+    let ws_checkpoints: Vec<(String, Option<String>)> =
+        ws_extra_dirs.iter().map(|path| (path.clone(), checkpoint_before(path, "chat"))).collect();
     // Kept for the title run below; `app` moves into the run's scope.
     let title_app = app.clone();
     let (result, trace) = ai_runs::scoped_with_trace(app, run_id, async {
@@ -1494,7 +1719,7 @@ pub async fn chat_send(
                 mcp_block: turn_mcp.block.clone(),
                 app_mcp: turn_mcp.app.clone(),
                 json_schema: None,
-                extra_dirs: &[],
+                extra_dirs: &ws_extra_dirs,
             },
         )
         .await
@@ -1503,6 +1728,9 @@ pub async fn chat_send(
     let response_time_ms = started.elapsed().as_millis() as i64;
     if let Some(project) = project.as_ref() {
         checkpoint_after(&project.local_path, checkpoint);
+    }
+    for (path, checkpoint) in ws_checkpoints {
+        checkpoint_after(&path, checkpoint);
     }
     // After the run, not before: it is cached per binary, so only the first turn of an app session
     // pays for the probe and it never sits between send and the engine starting.
@@ -3453,6 +3681,7 @@ plain prose with no leading slash
             provider: "claude".into(),
             started_at_ms: chrono::Utc::now().timestamp_millis() - 1_000,
             turn: 4,
+            workspace_chat: None,
         });
         assert_eq!((row.id.as_str(), row.conversation_id.as_str(), row.turn), ("m1", "c1", 4));
         assert_eq!(row.role, "assistant");

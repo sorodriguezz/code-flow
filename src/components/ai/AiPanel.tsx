@@ -6,6 +6,7 @@ import { CheckpointsModal } from "./CheckpointsModal";
 import { PanelChat } from "./PanelChat";
 import { PanelTabStrip } from "./PanelTabStrip";
 import { PrDocument } from "./PrDocument";
+import { WorkspaceChat } from "./WorkspaceChat";
 import { useChatStore } from "../../state/chatStore";
 import { EMPTY_TABS, INBOX_KEY, NO_WORKSPACE, useAiPanelStore, type PanelTab } from "../../state/aiPanelStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -202,5 +203,16 @@ function TabBody({
       );
     case "analysis":
       return <AnalysisDocument tabKey={tab.key} projectId={tab.projectId} jobId={tab.jobId} />;
+    case "wsChat":
+      return (
+        <WorkspaceChat
+          tabKey={tab.key}
+          workspaceId={tab.workspaceId}
+          conversationId={tab.conversationId}
+          fresh={Boolean(tab.fresh)}
+          focusChainId={tab.focusChainId ?? null}
+          active={active}
+        />
+      );
   }
 }

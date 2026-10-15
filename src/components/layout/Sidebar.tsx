@@ -189,8 +189,33 @@ const SIDEBAR_COLLAPSED = 56;
 function slideSidebar(aside: HTMLElement | null, width: number, opening: boolean): EdgeSlide | null {
   if (!aside || width <= SIDEBAR_COLLAPSED) return null;
   const [from, to] = opening ? [SIDEBAR_COLLAPSED, width] : [width, SIDEBAR_COLLAPSED];
-  const settle = beginEdgeResize();
-  return { animations: [aside.animate([{ width: `${from}px` }, { width: `${to}px` }], slideTiming())], settle };
+  const landed = beginEdgeResize();
+  const timing = slideTiming();
+  const animations = [aside.animate([{ width: `${from}px` }, { width: `${to}px` }], timing)];
+  // The unfolded contents ride the whole slide at their own width, so without this the closing edge
+  // dragged a clipped copy of every row across the view and the chips only replaced it at the end
+  // (user report, 2026-10-15: "se ve visible lo anterior"). They fade out over the first half of a
+  // fold and in over the last two thirds of an unfold — a reversed slide reverses this too.
+  const contents = aside.firstElementChild as HTMLElement | null;
+  if (contents) {
+    animations.push(
+      contents.animate(
+        opening
+          ? [{ opacity: 0 }, { opacity: 0, offset: 0.3 }, { opacity: 1 }]
+          : [{ opacity: 1 }, { opacity: 0, offset: 0.45 }, { opacity: 0 }],
+        timing,
+      ),
+    );
+  }
+  const settle = () => {
+    landed();
+    // Landed folded: the chips take the place of contents that were faded out, so they come in
+    // rather than appear. Landed open, the contents are already at full opacity.
+    if (contents && aside.getBoundingClientRect().width <= SIDEBAR_COLLAPSED + 1) {
+      contents.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: "ease-out" });
+    }
+  };
+  return { animations, settle };
 }
 
 /** `defaultOpen` is the open one and only the open one: it's the group with work still in it, and

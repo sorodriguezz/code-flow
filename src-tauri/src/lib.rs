@@ -42,6 +42,7 @@ mod meetings;
 mod speech;
 mod flows;
 mod fsops;
+mod explorer_bridge;
 mod codex;
 mod gdrive;
 mod gemini;
@@ -106,6 +107,7 @@ mod updates;
 mod watcher;
 mod window_state;
 mod windows;
+mod workspace_chat;
 
 use tauri::Manager;
 use api::ApiRegistry;
@@ -818,6 +820,10 @@ pub fn run() {
             commands::chat_cmd::chat_set_unread,
             commands::chat_cmd::chat_inflight_turns,
             commands::chat_cmd::chat_set_effort,
+            commands::chat_cmd::chat_create_workspace_conversation,
+            commands::chat_cmd::chat_list_workspace_conversations,
+            commands::chat_cmd::chat_set_workspace_agent,
+            commands::chat_cmd::workspace_chat_snapshot,
             commands::chat_cmd::chat_effort_support,
             commands::chat_cmd::chat_model_effort_support,
             commands::chat_cmd::chat_model_reads_images,
@@ -1339,6 +1345,10 @@ pub fn run() {
             commands::fs_cmd::move_path,
             commands::fs_cmd::copy_into_repo,
             commands::fs_cmd::copy_path,
+            commands::fs_cmd::copy_external_path,
+            explorer_bridge::system_clipboard_files,
+            explorer_bridge::system_clipboard_stamp,
+            explorer_bridge::window_under_cursor,
             commands::fs_cmd::dir_tree,
             commands::fs_cmd::create_dir,
             commands::fs_cmd::create_file,

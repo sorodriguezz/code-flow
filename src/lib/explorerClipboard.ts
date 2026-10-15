@@ -64,16 +64,54 @@ export interface PastePlan {
  * the backend would refuse it too, but only with an English error, and this is the one mistake a
  * paste can make that deserves a sentence of its own.
  */
-export function planPaste(sources: readonly string[], target: PasteTarget): PastePlan {
+export function planPaste(sources: readonly string[], target: PasteTarget, sameRepo = true): PastePlan {
   const into = target.isDir ? target.path : parentOf(target.path);
   const steps: PasteStep[] = [];
   const refused: string[] = [];
   for (const source of sources) {
+    // From another repository a source's path says nothing about this one's rows: the same
+    // relative path here is a different file, so everything goes where the target says. A folder
+    // that really is its own destination (one physical folder in both) the backend refuses.
+    if (!sameRepo) {
+      steps.push({ source, destDir: into });
+      continue;
+    }
     const destDir = source === target.path ? parentOf(source) : into;
     if (destDir === source || destDir.startsWith(`${source}/`)) refused.push(source);
     else steps.push({ source, destDir });
   }
   return { steps, refused };
+}
+
+/** An absolute path for `rel` in the repository at `repoPath` — what a paste in another repository
+ *  (or window) hands the backend. Forward slashes, which every platform's file API accepts. */
+export function absoluteIn(repoPath: string, rel: string): string {
+  const base = repoPath.replace(/[\\/]+$/, "");
+  return rel ? `${base}/${rel}` : base;
+}
+
+/**
+ * Which clipboard a paste takes: the explorer's own (`"app"`), the files copied in the system's
+ * file manager (`"system"`), or nothing.
+ *
+ * The explorer's Copy records the system clipboard's change counter (`systemStamp`). If the counter
+ * has moved on since and the system clipboard now holds files, those were copied *after* the
+ * explorer's Copy, and the newer one wins. A counter that moved for anything else — text copied in
+ * the editor, "Copy Path" — leaves the explorer's clipboard in charge, as does a counter that is
+ * not known on either side.
+ */
+export function pickPasteSource(
+  app: { paths: readonly string[]; systemStamp: number | null },
+  system: { stamp: number | null; paths: readonly string[] } | null,
+): "app" | "system" | null {
+  const appHas = app.paths.length > 0;
+  const systemHas = !!system && system.paths.length > 0;
+  if (appHas) {
+    const unknown = app.systemStamp === null || system === null || system.stamp === null;
+    if (unknown || system.stamp === app.systemStamp || !systemHas) return "app";
+    return "system";
+  }
+  return systemHas ? "system" : null;
 }
 
 /**

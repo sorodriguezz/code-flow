@@ -613,8 +613,12 @@ fn rehome_global_rows(conn: &Connection, from: &str) -> rusqlite::Result<()> {
     // table, which is `ON DELETE SET NULL` precisely so that deleting a project *orphans* its
     // chats instead of shredding them — leaving the much coarser parent free to shred them would
     // have been the same mistake one level up.
+    //
+    // A **workspace chat** of the assistant panel is the exception, and goes with its workspace: it
+    // is about that workspace's repositories and is only ever listed in that workspace's panel, so
+    // moved anywhere else it would turn up in a panel whose repositories it never talked about.
     conn.execute(
-        "UPDATE chat_conversations SET workspace_id = ?2 WHERE workspace_id = ?1",
+        "UPDATE chat_conversations SET workspace_id = ?2 WHERE workspace_id = ?1 AND workspace_scope = 0",
         params![from, into],
     )?;
     rehome_vault_rows(conn, from)?;
@@ -5818,6 +5822,19 @@ mod tests {
     /// a workspace's shelf, there is no screen anywhere that would have warned them. All of them
     /// move, not just a `scope = 'global'` subset, because the table has no `scope` column to
     /// narrow by: every conversation is global in the only sense the user can perceive.
+    #[test]
+    fn deleting_a_workspace_takes_its_workspace_chats_with_it() {
+        let conn = two_workspaces();
+        conn.execute_batch(
+            "INSERT INTO chat_conversations (id, workspace_id, title, provider, created_at, updated_at, workspace_scope) \
+               VALUES ('k1', 'w1', 'About the repos', 'claude', 't', 't', 1);",
+        )
+        .unwrap();
+        delete_workspace(&conn, "w1").unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM chat_conversations", [], |row| row.get(0)).unwrap();
+        assert_eq!(left, 0, "a workspace chat is about that workspace's repositories, and goes with it");
+    }
+
     #[test]
     fn deleting_a_workspace_rehomes_its_chat_conversations() {
         let conn = two_workspaces();

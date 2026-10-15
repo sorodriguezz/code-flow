@@ -12,7 +12,10 @@
 //!
 //! The stream lives on a thread of its own, which owns it from open to close — a cpal stream is not
 //! `Send` on every host — and wakes every [`TICK`] to hand the levels the audio callback measured to
-//! `on_level`, so nothing that talks to the webview runs on the system's audio thread.
+//! `on_level`, so nothing that talks to the webview runs on the system's audio thread. On Windows
+//! that thread enters COM's multithreaded apartment before cpal touches it, and a default input
+//! that still refuses to open is opened by its concrete id (`super::stream_health`); stream
+//! glitches (under/overruns) are logged at most once a minute — they do not stop the recording.
 
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -22,6 +25,8 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use serde::Serialize;
+
+use super::stream_health::{self, LogGate};
 
 /// What whisper listens at.
 pub const TARGET_RATE: u32 = 16_000;
@@ -127,26 +132,49 @@ impl Meter {
     }
 }
 
+/// How often a glitch (under/overrun) may reach the log.
+const GLITCH_LOG_EVERY: Duration = Duration::from_secs(60);
+
 fn build<T>(device: &cpal::Device, config: cpal::StreamConfig, mut meter: Meter) -> Result<cpal::Stream, String>
 where
     T: SizedSample,
     f32: FromSample<T>,
 {
     let channels = usize::from(config.channels.max(1));
+    let mut glitches = LogGate::new(GLITCH_LOG_EVERY);
     device
         .build_input_stream::<T, _, _>(
             config,
             move |data: &[T], _| meter.push(data, channels),
-            // A device pulled mid-recording: what was heard so far is still transcribed on stop.
-            |error| crate::applog::warn(&format!("dictation: microphone: {error}")),
+            // A device pulled mid-recording: what was heard so far is still transcribed on stop. A
+            // glitch is only noted, now and then.
+            move |error: cpal::Error| {
+                if stream_health::is_fatal(error.kind()) {
+                    crate::applog::warn(&format!("dictation: microphone: {error}"));
+                } else if let Some(held) = glitches.allow(std::time::Instant::now()) {
+                    crate::applog::warn(&format!("dictation: microphone: {error}{} (not fatal)", stream_health::more(held)));
+                }
+            },
             None,
         )
         .map_err(describe)
 }
 
-/// Opens and starts the input; the stream and the rate it runs at.
+/// Opens and starts the input; the stream and the rate it runs at. A default input that clashes
+/// with this thread's COM apartment is opened again by its concrete id.
 fn open(device_id: &str, shared: Arc<Mutex<Shared>>) -> Result<(cpal::Stream, u32), String> {
     let device = device(device_id)?;
+    match start_on(&device, shared.clone()) {
+        Err(error) if stream_health::is_apartment_clash(&error) => {
+            let Some(concrete) = stream_health::concrete(&cpal::default_host(), &device) else { return Err(error) };
+            crate::applog::warn(&format!("dictation: microphone: {error}; opening the device by its id"));
+            start_on(&concrete, shared)
+        }
+        other => other,
+    }
+}
+
+fn start_on(device: &cpal::Device, shared: Arc<Mutex<Shared>>) -> Result<(cpal::Stream, u32), String> {
     let supported = device.default_input_config().map_err(describe)?;
     let config = supported.config();
     let rate = config.sample_rate;
@@ -158,13 +186,13 @@ fn open(device_id: &str, shared: Arc<Mutex<Shared>>) -> Result<(cpal::Stream, u3
         count: 0,
     };
     let stream = match supported.sample_format() {
-        SampleFormat::F32 => build::<f32>(&device, config, meter),
-        SampleFormat::I16 => build::<i16>(&device, config, meter),
-        SampleFormat::U16 => build::<u16>(&device, config, meter),
-        SampleFormat::I32 => build::<i32>(&device, config, meter),
-        SampleFormat::I8 => build::<i8>(&device, config, meter),
-        SampleFormat::U8 => build::<u8>(&device, config, meter),
-        SampleFormat::F64 => build::<f64>(&device, config, meter),
+        SampleFormat::F32 => build::<f32>(device, config, meter),
+        SampleFormat::I16 => build::<i16>(device, config, meter),
+        SampleFormat::U16 => build::<u16>(device, config, meter),
+        SampleFormat::I32 => build::<i32>(device, config, meter),
+        SampleFormat::I8 => build::<i8>(device, config, meter),
+        SampleFormat::U8 => build::<u8>(device, config, meter),
+        SampleFormat::F64 => build::<f64>(device, config, meter),
         other => Err(format!("The microphone delivers {other:?} samples, which dictation cannot read")),
     }?;
     stream.play().map_err(describe)?;
@@ -187,6 +215,7 @@ pub fn start(device_id: &str, on_level: impl Fn(f32) + Send + 'static, on_limit:
     let thread = std::thread::Builder::new()
         .name("dictation-mic".into())
         .spawn(move || {
+            stream_health::enter_mta();
             let shared = Arc::new(Mutex::new(Shared::default()));
             let (stream, rate) = match open(&device_id, shared.clone()) {
                 Ok(opened) => opened,

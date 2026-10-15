@@ -24,6 +24,7 @@ import {
 import { isDiagramPath } from "../../lib/dbmlBridge";
 import { isMarkdownPath } from "../../lib/notesBridge";
 import {
+  copyExternalPath,
   copyPath,
   createDir,
   createFile,
@@ -33,8 +34,14 @@ import {
   movePath,
   renamePath,
   revealInFileManager,
+  systemClipboardFiles,
+  systemClipboardStamp,
+  windowUnderCursor,
 } from "../../lib/tauri/commands";
-import { distinctParents, planPaste } from "../../lib/explorerClipboard";
+import { absoluteIn, distinctParents, pickPasteSource, planPaste } from "../../lib/explorerClipboard";
+import { startExplorerClipboardSync } from "../../lib/explorerClipboardSync";
+import { onWindowMessage, sendTo } from "../../lib/windowBus";
+import { WINDOW } from "../../lib/windowIdentity";
 import { renderFileTree, treeFileName } from "../../lib/fileTreeText";
 import { eventToChord, isTypingTarget } from "../../lib/keys";
 import { useExplorerClipboardStore, type ExplorerClipboardMode } from "../../state/explorerClipboardStore";
@@ -803,12 +810,15 @@ export function FileTree({
   const hiddenEntries = useHiddenFilesStore((s) => s.entries);
   const loadHidden = useHiddenFilesStore((s) => s.load);
   const hideEntry = useHiddenFilesStore((s) => s.hide);
-  /** What Copy or Cut left on the explorer's clipboard, and whether it belongs to this repository —
-   *  the only one it can be pasted into. See `explorerClipboardStore`. */
+  /** What Copy or Cut left on the explorer's clipboard — in this repository or another one, in this
+   *  window or another (see `explorerClipboardStore`, `lib/explorerClipboardSync`). */
   const clipboardRepo = useExplorerClipboardStore((s) => s.repoPath);
   const clipboardMode = useExplorerClipboardStore((s) => s.mode);
   const clipboardPaths = useExplorerClipboardStore((s) => s.paths);
-  const canPaste = clipboardRepo === repoPath && clipboardPaths.length > 0;
+  /** Whether the system clipboard held files (copied in Finder/Explorer) when the menu last opened —
+   *  asked then, because nothing announces a change to it. */
+  const [systemHasFiles, setSystemHasFiles] = useState(false);
+  const canPaste = clipboardPaths.length > 0 || systemHasFiles;
   /** The rows to draw dimmed. A new set only when the clipboard itself changes, so a Cut costs one
    *  pass over the rows and everything else leaves their `memo` alone. */
   const cutPaths = useMemo<ReadonlySet<string>>(
@@ -1205,6 +1215,11 @@ export function FileTree({
       entry && prev.has(entry.path) ? prev : new Set(entry ? [entry.path] : []),
     );
     setMenu({ x: e.clientX, y: e.clientY, entry });
+    // Whether Paste has files from the file manager to offer: asked as the menu opens, and the menu
+    // re-renders with the answer a moment later.
+    void systemClipboardFiles()
+      .then((files) => setSystemHasFiles(files.paths.length > 0))
+      .catch(() => setSystemHasFiles(false));
   }, []);
 
   /** Gives the keyboard to the tree — see the scroller's `onMouseDown` for why it has to be asked. */
@@ -1227,7 +1242,14 @@ export function FileTree({
     (mode: ExplorerClipboardMode) => {
       const paths = distinctParents(selectedPathsRef.current());
       if (paths.length === 0) return;
-      useExplorerClipboardStore.getState().set(repoPath, mode, paths);
+      const store = useExplorerClipboardStore.getState();
+      store.set(repoPath, mode, paths);
+      // The system clipboard's counter as of this Copy: a paste that finds it moved on and files on
+      // it pastes those instead — they were copied in the file manager after this (`pickPasteSource`).
+      const at = useExplorerClipboardStore.getState().at;
+      void systemClipboardStamp()
+        .then((stamp) => useExplorerClipboardStore.getState().stampSystem(at, stamp))
+        .catch(() => {});
     },
     [repoPath],
   );
@@ -1259,11 +1281,90 @@ export function FileTree({
    * never strands the rest. Afterwards the destinations are opened, what landed is selected, and a
    * single pasted file is opened in the editor — also VS Code's behaviour.
    */
+  /**
+   * A paste whose sources are absolute paths outside this repository's clipboard: another
+   * repository's Copy/Cut (`cutFrom` set for a cut), files copied in the file manager, or a drag
+   * released here from another window's explorer.
+   *
+   * Always a copy (`copy_external_path`), under a free ` copy` name when the name is taken. A cut
+   * from another repository is that copy and then the original sent to the **trash** — never a
+   * rename across repositories, and never a deletion that cannot be undone; an original that could
+   * not be copied is left where it is.
+   */
+  const pasteAbsolute = useCallback(
+    async (
+      sources: readonly string[],
+      destDir: string,
+      cutFrom: { repoPath: string; paths: readonly string[] } | null,
+    ) => {
+      if (sources.length === 0) return;
+      const landed: string[] = [];
+      const trashed: string[] = [];
+      const failures: string[] = [];
+      for (let index = 0; index < sources.length; index++) {
+        try {
+          landed.push(await copyExternalPath(repoPath, sources[index], destDir));
+        } catch (e) {
+          failures.push(String(e));
+          continue;
+        }
+        const original = cutFrom?.paths[index];
+        if (cutFrom && original !== undefined) {
+          try {
+            await deletePath(cutFrom.repoPath, original);
+            trashed.push(original);
+          } catch (e) {
+            failures.push(String(e));
+          }
+        }
+      }
+      if (failures.length > 0) pushErrorToast(failures[0]);
+      // A cut is spent once it has gone; whatever could not go stays cut.
+      if (cutFrom) {
+        for (const gone of trashed) useExplorerClipboardStore.getState().removed(cutFrom.repoPath, gone);
+      }
+      if (activeRepoRef.current !== repoPath || landed.length === 0) return;
+      // The kind of the first row landed, for the focus — from a fresh listing, since nothing in
+      // the cache has heard of it yet.
+      const listing = await listDir(repoPath, destDir || undefined).catch(() => null);
+      if (activeRepoRef.current !== repoPath) return;
+      revealDirRef.current(destDir);
+      void useRepoStore.getState().refreshStatus();
+      setMarked(new Set(landed));
+      anchorRef.current = landed[0];
+      const isDir = listing?.find((entry) => entry.path === landed[0])?.is_dir ?? false;
+      setFocus({ path: landed[0], isDir });
+      if (landed.length === 1 && !isDir) onOpenFile?.(landed[0]);
+    },
+    [repoPath, onOpenFile],
+  );
+  const pasteAbsoluteRef = useRef(pasteAbsolute);
+  pasteAbsoluteRef.current = pasteAbsolute;
+
   const paste = useCallback(async () => {
+    // The system clipboard first: what the file manager copied after the explorer's own Copy wins.
+    const system = await systemClipboardFiles().catch(() => null);
     const clipboard = useExplorerClipboardStore.getState();
-    if (clipboard.repoPath !== repoPath || clipboard.paths.length === 0) return;
+    const target = focusRef.current;
+    const into = target.isDir ? target.path : parentDir(target.path);
+    const source = pickPasteSource(clipboard, system);
+    if (source === "system" && system) {
+      await pasteAbsolute(system.paths, into, null);
+      return;
+    }
+    if (source !== "app" || clipboard.repoPath === null) return;
+    if (clipboard.repoPath !== repoPath) {
+      const from = clipboard.repoPath;
+      const { steps } = planPaste(clipboard.paths, target, false);
+      await pasteAbsolute(
+        steps.map((step) => absoluteIn(from, step.source)),
+        into,
+        clipboard.mode === "cut" ? { repoPath: from, paths: steps.map((step) => step.source) } : null,
+      );
+      return;
+    }
     const cut = clipboard.mode === "cut";
-    const { steps, refused } = planPaste(clipboard.paths, focusRef.current);
+    const { steps, refused } = planPaste(clipboard.paths, target);
     for (const source of refused) {
       pushErrorToast(tRef.current("editor.pasteIntoItself", { name: source.split("/").pop() ?? source }));
     }
@@ -1327,7 +1428,7 @@ export function FileTree({
     anchorRef.current = landed[0].path;
     setFocus(landed[0]);
     if (landed.length === 1 && !landed[0].isDir) onOpenFile?.(landed[0].path);
-  }, [repoPath, kindOf, loadDir, onPathMoved, onOpenFile]);
+  }, [repoPath, kindOf, loadDir, onPathMoved, onOpenFile, pasteAbsolute]);
 
   /**
    * "Generate Tree": the folder's structure in the text the VS Code extension `file-tree-generator`
@@ -1565,7 +1666,7 @@ export function FileTree({
       onOpenScratch,
       onOpenInDiagrams,
       onSendToNotes,
-      // Paste is greyed while there is nothing on the clipboard for this repository.
+      // Paste is greyed while neither clipboard — the explorer's, the file manager's — has anything.
       canPaste,
       // The menu's labels count the selection, so it has to be rebuilt when that count moves.
       marked,
@@ -1692,6 +1793,46 @@ export function FileTree({
     [repoPath, kindOf, loadDir, onPathMoved],
   );
 
+  /**
+   * A drag released outside this window's tree: if another window of the app is under the pointer
+   * (`explorer_bridge::window_under_cursor`), the dragged paths go to it, as absolute paths, and it
+   * copies them into the folder under the pointer (the `explorer-drop` handler below). A copy, never
+   * a move: the two windows may hold different repositories, and a drag between windows is how
+   * people take a copy across.
+   */
+  const dropOnAnotherWindow = useCallback(
+    async (paths: string[]) => {
+      const hit = await windowUnderCursor().catch(() => null);
+      if (!hit) return;
+      const sources = distinctParents(paths).map((path) => absoluteIn(repoPath, path));
+      await sendTo(hit.label, { kind: "explorer-drop", to: hit.label, x: hit.x, y: hit.y, sources }).catch(
+        (e) => pushErrorToast(String(e)),
+      );
+    },
+    [repoPath],
+  );
+  const dropOnAnotherWindowRef = useRef(dropOnAnotherWindow);
+  dropOnAnotherWindowRef.current = dropOnAnotherWindow;
+
+  // The other end: a drag from another window's explorer released over this one, and the clipboard
+  // kept in step with the other windows (`lib/explorerClipboardSync`).
+  useEffect(() => {
+    startExplorerClipboardSync();
+    return onWindowMessage((message) => {
+      if (message.kind !== "explorer-drop" || message.to !== WINDOW.label) return;
+      const el = document.elementFromPoint(message.x, message.y);
+      const scroller = scrollerRef.current;
+      if (!el || !scroller) return;
+      // Over the tree, or anywhere in the editor that holds it — the reach of a file manager drop.
+      const area = el.closest("[data-cf-editor-drop]");
+      if (!scroller.contains(el) && !(area && area.contains(scroller))) return;
+      const row = el.closest<HTMLElement>("[data-cf-treepath]");
+      const path = row && scroller.contains(row) ? row.dataset.cfTreepath : undefined;
+      const dir = path === undefined ? "" : row?.dataset.cfTreedir === "1" ? path : parentDir(path);
+      void pasteAbsoluteRef.current(message.sources, dir, null);
+    });
+  }, []);
+
   const beginDrag = useCallback((e: React.PointerEvent<HTMLElement>, entry: FileEntry) => {
     if (e.button !== 0) return;
     const from = { x: e.clientX, y: e.clientY };
@@ -1735,7 +1876,6 @@ export function FileTree({
       const dest = dirAt(ev.clientX, ev.clientY);
       setDragCursor(false);
       useTreeDragStore.getState().end();
-      if (dest === null) return;
       // Dragging a row that is part of a selection moves the whole selection; dragging one that is
       // not moves only it — and, above, replaced the selection with it. That is the rule every file
       // manager uses, and the alternative (a drag that silently takes rows you had picked out
@@ -1749,6 +1889,12 @@ export function FileTree({
         .current()
         .filter((path) => path === dragged.path || markedRef.current.has(path));
       const moving = batch.includes(dragged.path) ? batch : [dragged.path];
+      if (dest === null) {
+        // Released over nothing of this window's — maybe over another window of the app, which
+        // the pointer reached without this page ever losing it. That window gets a copy.
+        void dropOnAnotherWindowRef.current(moving);
+        return;
+      }
       void applyMovesRef.current(moving, dest);
       // The rows the selection named are about to be at different paths, so keeping it would leave
       // a highlight on names that have moved out from under it.

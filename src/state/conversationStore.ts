@@ -1093,7 +1093,9 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   adoptInflight: async () => {
     let turns;
     try {
-      turns = await chatInflightTurns();
+      // A workspace chat of the assistant panel is that panel's (`workspaceChatStore`), not a thread
+      // of this workspace: adopting it would give it a row here and a status-bar target in the wrong place.
+      turns = (await chatInflightTurns()).filter((turn) => !turn.workspaceChat);
     } catch {
       // A probe that failed leaves the window exactly as it was. Showing a conversation as idle
       // when it might be busy is the safe direction: the turn is still running in the process, and

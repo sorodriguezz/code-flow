@@ -44,6 +44,14 @@ export function linkSessionFromMeta(meta: Record<string, unknown>, workspaceId: 
 /** Review depth, mirroring the WF-PR-REVIEWER levels. `completo` is the default. */
 export type ReviewLevel = "basico" | "completo" | "ultra";
 
+/** The engine one review runs on, chosen beside its button — `null` follows the Review row of
+ * Settings. Held for the session only, like the level: a one-off pick, not a configuration. */
+export interface ReviewEngine {
+  provider: string;
+  model: string;
+  account?: string | null;
+}
+
 /** Translates outside of React (this store isn't a component) using whatever language is
  * currently selected — same lookup `useT()` does, just without the hook. */
 function translate(key: keyof typeof translations.en, params?: Record<string, string>): string {
@@ -135,6 +143,7 @@ interface PrState {
   /** Depth the next review runs at — shared so both the AI panel selector and the title-bar
    * shortcut launch at the same level. */
   reviewLevel: ReviewLevel;
+  reviewEngine: ReviewEngine | null;
   /**
    * Publishing in flight, and publishing done, per pull request ([`targetPrKey`]).
    *
@@ -182,6 +191,7 @@ interface PrState {
    */
   ensureProjectPr: (projectId: string, prId: number) => Promise<PullRequestSummary | null>;
   setReviewLevel: (level: ReviewLevel) => void;
+  setReviewEngine: (engine: ReviewEngine | null) => void;
   /** Fire-and-forget — the run is tracked in `jobsStore`, not here, precisely so it survives
    * switching away from this PR (or this project) before it finishes. Uses `reviewLevel` unless
    * an explicit `level` is passed. A link review passes its `session`: the row it files has to say
@@ -269,6 +279,7 @@ export const usePrStore = create<PrState>((set, get) => ({
   loadErrorByProject: {},
 
   reviewLevel: "completo",
+  reviewEngine: null,
   postingByPr: {},
   postedByPr: {},
   postedFindingsByRun: {},
@@ -338,11 +349,13 @@ export const usePrStore = create<PrState>((set, get) => ({
   },
 
   setReviewLevel: (level) => set({ reviewLevel: level }),
+  setReviewEngine: (engine) => set({ reviewEngine: engine }),
 
   reviewPr: (target, pr, opts = {}) => {
     const key = targetKey(target);
     const activeLevel = opts.level ?? get().reviewLevel;
     const force = opts.force ?? false;
+    const engine = get().reviewEngine;
     // A link review shares its bucket with every other repository reviewed from a link in this
     // workspace, so the row has to say which repo it is — and carry enough to reopen the session
     // later. The same shape the backend persists (see `link_activity_meta`), so the row reads
@@ -357,7 +370,7 @@ export const usePrStore = create<PrState>((set, get) => ({
       kind: "pr-review",
       label,
       meta: { prId: pr.id, level: activeLevel, ...linkMeta },
-      task: (jobId) => prTarget.review(target, pr.id, jobId, activeLevel, force),
+      task: (jobId) => prTarget.review(target, pr.id, jobId, activeLevel, force, engine),
     });
   },
 

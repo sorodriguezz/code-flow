@@ -9,6 +9,8 @@ import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { MorphToast, useMorphStack } from "../common/MorphToast";
+import { NoticeStack, useNoticePlacement } from "../common/NoticeDock";
+import type { NoticeAlign, NoticeEdge } from "../../state/noticePositionStore";
 
 /**
  * The small card that rises when something finishes, and takes itself away again.
@@ -66,7 +68,11 @@ function Popup({
   open,
   onHoverChange,
   onDismiss,
+  align,
+  edge,
 }: {
+  align: NoticeAlign;
+  edge: NoticeEdge;
   item: AppNotification;
   /** The workspace the click will land in, by name and colour — resolved by the parent's
    *  [`homeOf`], not read off the stamp, so the card names where it is actually going. `null` when
@@ -117,7 +123,8 @@ function Popup({
       tone={item.status}
       title={title}
       titleKey={title}
-      align="right"
+      align={align}
+      edge={edge}
       duration={dwellOf(item)}
       canExpand={open}
       leaving={leaving}
@@ -262,6 +269,7 @@ export function NotificationPopups() {
     (id: string) => setVisible((current) => current.filter((entry) => entry.id !== id)),
     [],
   );
+  const placement = useNoticePlacement("popups");
   const stack = useMorphStack(visible, {
     keyOf: (item) => item.id,
     // `visible` is oldest-first, so the newest card is the one at the end.
@@ -273,9 +281,9 @@ export function NotificationPopups() {
   if (stack.entries.length === 0) return null;
 
   return (
-    // Below the toast container's `z-50`: when both fire at once the toast — which is the more
-    // urgent of the two — stays on top.
-    <div className="pointer-events-none fixed bottom-10 right-3 z-40 flex flex-col items-end gap-3">
+    // At the spot chosen for the bell's notifications; sent to the toasts' spot, the two share one
+    // column with the toasts nearest the edge (`NoticeDock`).
+    <NoticeStack kind="popups" placement={placement}>
       {stack.entries.map(({ key, item, leaving }) => {
         const { workspace, foreign } = homeOf(item);
         return (
@@ -288,9 +296,11 @@ export function NotificationPopups() {
             open={stack.openKey === key}
             onHoverChange={stack.hoverChange(key)}
             onDismiss={() => retire(item.id)}
+            align={placement.align}
+            edge={placement.edge}
           />
         );
       })}
-    </div>
+    </NoticeStack>
   );
 }

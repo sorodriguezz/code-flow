@@ -18,8 +18,14 @@
 //! on the timeline: a pause is a cut, not a gap.
 //!
 //! **A device that goes away mid-meeting** (a headset unplugged) ends its stream with an error; the
-//! thread drops it and opens the system's default again, padding the hole with silence so nothing
-//! later shifts.
+//! thread drops it and opens the system's default again — after 1 s, then 2, 4… up to 30 — padding
+//! the hole with silence so nothing later shifts. A glitch is not a lost device: an under- or
+//! overrun (WASAPI loopback reports one whenever playback resumes after silence) is counted and
+//! noted in the log now and then, and the stream goes on (`dictation::stream_health`).
+//!
+//! **On Windows each channel's thread enters COM's multithreaded apartment** before cpal runs on
+//! it, and a default device that still refuses to open is opened by its concrete id — see
+//! `dictation::stream_health` for the `RPC_E_CHANGED_MODE` this avoids.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -31,6 +37,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 
 use super::audio::{rms, Channel, ChunkWriter, Resampler, PER_MS};
+use crate::dictation::stream_health::{self, Backoff, LogGate};
 
 /// How often a channel's thread takes what was heard.
 const TICK: Duration = Duration::from_millis(40);
@@ -38,8 +45,15 @@ const TICK: Duration = Duration::from_millis(40);
 const QUIET_PAD: Duration = Duration::from_millis(300);
 /// How far behind the clock a channel may lag before it is padded.
 const LAG_TOLERANCE_MS: i64 = 400;
-/// How often a lost device is looked for again.
-const REOPEN_EVERY: Duration = Duration::from_secs(1);
+/// The first wait before a lost device is looked for again; doubled after each failure.
+const REOPEN_FIRST: Duration = Duration::from_secs(1);
+/// The longest wait between two attempts.
+const REOPEN_MAX: Duration = Duration::from_secs(30);
+/// A stream that lived this long resets the wait: its device was fine, whatever ended it.
+const HEALTHY: Duration = Duration::from_secs(30);
+/// At most one line per this long about glitches (under/overruns), and about failed reopens.
+const GLITCH_LOG_EVERY: Duration = Duration::from_secs(60);
+const REOPEN_LOG_EVERY: Duration = Duration::from_secs(30);
 
 /// The microphone was refused — the same code «Dictar» answers with.
 pub const MIC_DENIED: &str = "MIC_DENIED";
@@ -87,7 +101,11 @@ impl Clock {
 struct Inbox {
     samples: Vec<f32>,
     last: Option<Instant>,
-    failed: bool,
+    /// Why the stream ended — a device lost, not a glitch.
+    lost: Option<String>,
+    /// Glitches since the thread last looked, and the last one's text.
+    glitches: u64,
+    glitch: Option<String>,
 }
 
 /// A meeting being recorded. Dropping it stops the recording (the pieces stay on disk).
@@ -225,22 +243,15 @@ fn describe(error: cpal::Error, channel: Channel) -> String {
 
 /// The device a channel reads: the chosen microphone (or the default input), or the default output
 /// for the system channel.
-fn device(channel: Channel, id: &str) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
-    let host = cpal::default_host();
+fn device(host: &cpal::Host, channel: Channel, id: &str) -> Result<cpal::Device, String> {
     match channel {
         Channel::Mic => {
             let chosen = (!id.is_empty())
                 .then(|| id.parse::<cpal::DeviceId>().ok().and_then(|parsed| host.device_by_id(&parsed)))
                 .flatten();
-            let device = chosen.or_else(|| host.default_input_device()).ok_or_else(|| MIC_NONE.to_string())?;
-            let config = device.default_input_config().map_err(|e| describe(e, channel))?;
-            Ok((device, config))
+            chosen.or_else(|| host.default_input_device()).ok_or_else(|| MIC_NONE.to_string())
         }
-        Channel::System => {
-            let device = host.default_output_device().ok_or_else(|| format!("{SYSTEM_DENIED}: no output device"))?;
-            let config = device.default_output_config().map_err(|e| describe(e, channel))?;
-            Ok((device, config))
-        }
+        Channel::System => host.default_output_device().ok_or_else(|| format!("{SYSTEM_DENIED}: no output device")),
     }
 }
 
@@ -250,7 +261,7 @@ where
     f32: FromSample<T>,
 {
     let channels = usize::from(config.channels.max(1));
-    let failed = inbox.clone();
+    let errors = inbox.clone();
     device
         .build_input_stream::<T, _, _>(
             config,
@@ -261,32 +272,57 @@ where
                 }
                 inbox.last = Some(Instant::now());
             },
-            move |error| {
-                crate::applog::warn(&format!("meetings: {} stream: {error}", channel.as_str()));
-                failed.lock().unwrap_or_else(|p| p.into_inner()).failed = true;
+            // Runs on the audio thread: only noted here, logged (rate-limited) by the channel's.
+            move |error: cpal::Error| {
+                let mut inbox = errors.lock().unwrap_or_else(|p| p.into_inner());
+                if stream_health::is_fatal(error.kind()) {
+                    inbox.lost.get_or_insert_with(|| error.to_string());
+                } else {
+                    inbox.glitches += 1;
+                    inbox.glitch = Some(error.to_string());
+                }
             },
             None,
         )
         .map_err(|e| describe(e, channel))
 }
 
-/// Opens a channel's device and starts it: the stream and its rate.
-fn open(channel: Channel, id: &str, inbox: Arc<Mutex<Inbox>>) -> Result<(cpal::Stream, u32), String> {
-    let (device, supported) = device(channel, id)?;
+/// Starts `device` as `channel`'s input: the stream and its rate.
+fn start_on(device: &cpal::Device, channel: Channel, inbox: Arc<Mutex<Inbox>>) -> Result<(cpal::Stream, u32), String> {
+    let supported = match channel {
+        Channel::Mic => device.default_input_config(),
+        Channel::System => device.default_output_config(),
+    }
+    .map_err(|e| describe(e, channel))?;
     let config = supported.config();
     let rate = config.sample_rate;
     let stream = match supported.sample_format() {
-        SampleFormat::F32 => build::<f32>(&device, config, inbox, channel),
-        SampleFormat::I16 => build::<i16>(&device, config, inbox, channel),
-        SampleFormat::U16 => build::<u16>(&device, config, inbox, channel),
-        SampleFormat::I32 => build::<i32>(&device, config, inbox, channel),
-        SampleFormat::I8 => build::<i8>(&device, config, inbox, channel),
-        SampleFormat::U8 => build::<u8>(&device, config, inbox, channel),
-        SampleFormat::F64 => build::<f64>(&device, config, inbox, channel),
+        SampleFormat::F32 => build::<f32>(device, config, inbox, channel),
+        SampleFormat::I16 => build::<i16>(device, config, inbox, channel),
+        SampleFormat::U16 => build::<u16>(device, config, inbox, channel),
+        SampleFormat::I32 => build::<i32>(device, config, inbox, channel),
+        SampleFormat::I8 => build::<i8>(device, config, inbox, channel),
+        SampleFormat::U8 => build::<u8>(device, config, inbox, channel),
+        SampleFormat::F64 => build::<f64>(device, config, inbox, channel),
         other => Err(format!("The {} input delivers {other:?} samples, which cannot be read", channel.as_str())),
     }?;
     stream.play().map_err(|e| describe(e, channel))?;
     Ok((stream, rate))
+}
+
+/// Opens a channel's device and starts it: the stream and its rate. A default device that clashes
+/// with this thread's COM apartment is opened again by its concrete id.
+fn open(channel: Channel, id: &str, inbox: Arc<Mutex<Inbox>>) -> Result<(cpal::Stream, u32), String> {
+    let host = cpal::default_host();
+    let device = device(&host, channel, id)?;
+    match start_on(&device, channel, inbox.clone()) {
+        Err(error) if stream_health::is_apartment_clash(&error) => {
+            let Some(concrete) = stream_health::concrete(&host, &device) else { return Err(error) };
+            crate::applog::warn(&format!("meetings: {} input: {error}; opening the device by its id", channel.as_str()));
+            start_on(&concrete, channel, inbox)
+        }
+        other => other,
+    }
 }
 
 fn run_channel(
@@ -298,6 +334,7 @@ fn run_channel(
     live: Option<Sender<LiveAudio>>,
     ready: Sender<Result<(), String>>,
 ) -> Result<usize, String> {
+    stream_health::enter_mta();
     let inbox = Arc::new(Mutex::new(Inbox::default()));
     let (opened, rate) = match open(channel, &device_id, inbox.clone()) {
         Ok(opened) => opened,
@@ -311,32 +348,70 @@ fn run_channel(
     let mut stream = Some(opened);
     let mut stream_rate = rate;
     let mut resampler = Resampler::new(rate);
-    let mut last_attempt = Instant::now();
+    let mut opened_at = Instant::now();
+    let mut backoff = Backoff::new(REOPEN_FIRST, REOPEN_MAX);
+    let mut retry_at = Instant::now();
+    let mut glitch_log = LogGate::new(GLITCH_LOG_EVERY);
+    let mut glitches_unlogged = 0u64;
+    let mut reopen_log = LogGate::new(REOPEN_LOG_EVERY);
     let mut out = Vec::with_capacity(4096);
     let mut failure: Option<String> = None;
     while !clock.stop.load(Ordering::SeqCst) {
         std::thread::sleep(TICK);
-        let (raw, last, failed) = {
+        let (raw, last, lost, glitches, glitch) = {
             let mut inbox = inbox.lock().unwrap_or_else(|p| p.into_inner());
-            let failed = std::mem::take(&mut inbox.failed);
-            (std::mem::take(&mut inbox.samples), inbox.last, failed)
+            (
+                std::mem::take(&mut inbox.samples),
+                inbox.last,
+                inbox.lost.take(),
+                std::mem::take(&mut inbox.glitches),
+                inbox.glitch.take(),
+            )
         };
-        if failed {
-            // The device went away: let the stream go; the system's default is tried below.
-            stream = None;
+        let now = Instant::now();
+        if glitches > 0 {
+            glitches_unlogged += glitches;
+            if glitch_log.allow(now).is_some() {
+                let text = glitch.unwrap_or_default();
+                crate::applog::warn(&format!("meetings: {} stream: {text} ×{glitches_unlogged} (not fatal, still recording)", channel.as_str()));
+                glitches_unlogged = 0;
+            }
         }
-        if stream.is_none() && last_attempt.elapsed() >= REOPEN_EVERY {
-            last_attempt = Instant::now();
+        if let (Some(error), true) = (lost, stream.is_some()) {
+            // The device went away: let the stream go — and anything it reported on its way out —
+            // and try the system's default after a wait.
+            stream = None;
+            inbox.lock().unwrap_or_else(|p| p.into_inner()).lost = None;
+            if opened_at.elapsed() >= HEALTHY {
+                backoff.reset();
+            }
+            let wait = backoff.next_wait();
+            retry_at = now + wait;
+            crate::applog::warn(&format!("meetings: {} input lost: {error}; reopening in {} s", channel.as_str(), wait.as_secs()));
+        }
+        if stream.is_none() && now >= retry_at {
             match open(channel, "", inbox.clone()) {
                 Ok((reopened, rate)) => {
                     crate::applog::info(&format!("meetings: {} input reopened at {rate} Hz", channel.as_str()));
                     stream = Some(reopened);
+                    opened_at = Instant::now();
                     if rate != stream_rate {
                         stream_rate = rate;
                         resampler = Resampler::new(rate);
                     }
                 }
-                Err(error) => crate::applog::warn(&format!("meetings: reopening {}: {error}", channel.as_str())),
+                Err(error) => {
+                    let wait = backoff.next_wait();
+                    retry_at = now + wait;
+                    if let Some(held) = reopen_log.allow(now) {
+                        crate::applog::warn(&format!(
+                            "meetings: reopening {}: {error}; next try in {} s{}",
+                            channel.as_str(),
+                            wait.as_secs(),
+                            stream_health::more(held)
+                        ));
+                    }
+                }
             }
         }
         out.clear();
@@ -365,6 +440,9 @@ fn run_channel(
         }
     }
     drop(stream);
+    if glitches_unlogged > 0 {
+        crate::applog::warn(&format!("meetings: {} stream: ×{glitches_unlogged} more under/overruns", channel.as_str()));
+    }
     let total = writer.finish()?;
     if let Some(error) = failure {
         crate::applog::warn(&format!("meetings: {} channel stopped: {error}", channel.as_str()));

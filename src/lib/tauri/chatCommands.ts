@@ -95,6 +95,13 @@ export interface ChatConversation {
   /** The thread this one continues, for one started with {@link chatContinueInNewThread} — all it
    *  knows of that thread is the summary in here. `null` on every other thread. */
   continuedFrom?: ChatContinuation | null;
+  /** A workspace chat of the assistant panel (it talks to every repository of `workspaceId`), never
+   *  listed here — see `workspaceChatStore`. */
+  workspaceScope?: boolean;
+  /** The SDD/Harness agent answering a workspace chat, `""` for none. */
+  agentId?: string;
+  /** The chain a workspace chat was opened to carry on, `""` for none. */
+  focusChainId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -776,6 +783,54 @@ export interface InflightTurn {
   /** Epoch milliseconds, so an adopting window's elapsed timer counts from when the turn really
    *  started rather than from when that window opened. */
   startedAtMs: number;
+  /** The workspace, for a workspace chat of the assistant panel — not one of the chat workspace's
+   *  threads, so its windows leave it alone. */
+  workspaceChat?: string | null;
 }
 
 export const chatInflightTurns = () => invoke<InflightTurn[]>("chat_inflight_turns");
+
+// ---------- workspace chats (the assistant panel's) ----------
+
+/** Opens a workspace chat under the id its panel tab was minted with — see `workspaceChatStore`. */
+export const chatCreateWorkspaceConversation = (args: {
+  conversationId: string;
+  workspaceId: string;
+  provider: string;
+  model: string;
+  account?: string | null;
+  agentId?: string | null;
+  focusChainId?: string | null;
+  effort?: string | null;
+}) =>
+  invoke<ChatConversation>("chat_create_workspace_conversation", {
+    conversationId: args.conversationId,
+    workspaceId: args.workspaceId,
+    provider: args.provider,
+    model: args.model,
+    account: args.account ?? null,
+    agentId: args.agentId ?? null,
+    focusChainId: args.focusChainId ?? null,
+    effort: args.effort ?? null,
+  });
+
+/** One workspace's chats, newest first. */
+export const chatListWorkspaceConversations = (workspaceId: string) =>
+  invoke<ChatConversation[]>("chat_list_workspace_conversations", { workspaceId });
+
+/** Puts an SDD/Harness agent of the workspace in charge of a workspace chat; `""` takes it out. */
+export const chatSetWorkspaceAgent = (conversationId: string, agentId: string) =>
+  invoke<void>("chat_set_workspace_agent", { conversationId, agentId });
+
+export interface WorkspaceChatSnapshot {
+  repos: number;
+  reposOnDisk: number;
+  /** Chains and tasks in flight the next turn is told about. */
+  inFlight: number;
+  /** The block itself, as the engine reads it. */
+  text: string;
+}
+
+/** What a workspace chat's next turn is told about the workspace. */
+export const workspaceChatSnapshot = (workspaceId: string, focusChainId?: string | null) =>
+  invoke<WorkspaceChatSnapshot>("workspace_chat_snapshot", { workspaceId, focusChainId: focusChainId ?? null });

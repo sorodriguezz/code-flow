@@ -9,7 +9,6 @@ import {
   MessageSquare,
   MessageSquareShare,
   Pencil,
-  Plus,
   Search,
   ShieldCheck,
   Square,
@@ -39,14 +38,13 @@ import {
   openAnalysis,
   openChat,
   openJob,
-  openNewChat,
   openTrackedPr,
   tabKeyForJob,
   useChangesToAnalyze,
 } from "../../lib/aiPanelNav";
 import { usePrStore } from "../../state/prStore";
 import { useRepoQueueStore } from "../../lib/repoQueue";
-import { ReviewPrMenu } from "./PanelTabStrip";
+import { NewChatMenu, ReviewPrMenu } from "./PanelTabStrip";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { EMPTY_JOBS, useJobsStore, type Job } from "../../state/jobsStore";
 import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activityStore";
@@ -223,11 +221,13 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
           />
         )}
         <div className="flex flex-wrap items-center gap-1.5">
-          <InboxAction
-            icon={Plus}
-            label={t("assistant.chat")}
-            disabled={!activeProject}
-            onClick={() => activeProject && openNewChat(activeProject.id)}
+          {/* One door to both chats: this repository, or every repository of the workspace and the
+              agents' work in flight — asked on click. */}
+          <NewChatMenu
+            workspaceId={workspaceId}
+            projectId={activeProject?.id ?? null}
+            projectName={activeProject?.name}
+            disabled={!activeProject && projects.length === 0}
           />
           {activeProject && <ReviewPrMenu projectId={activeProject.id} variant="button" />}
           {/* The run and its engine as one button, as the 🛡 in Changes is: the words analyze, the
@@ -708,33 +708,6 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
         </button>
       </span>
     </div>
-  );
-}
-
-function InboxAction({
-  icon: Icon,
-  label,
-  disabled,
-  title,
-  onClick,
-}: {
-  icon: typeof Plus;
-  label: string;
-  disabled?: boolean;
-  /** Why it is off, when it is. */
-  title?: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className={buttonClass({ variant: "secondary", size: "sm" })}
-    >
-      <Icon size={13} />
-      {label}
-    </button>
   );
 }
 

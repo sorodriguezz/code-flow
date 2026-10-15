@@ -192,12 +192,14 @@ export function review(
   jobId: string,
   level: string,
   force = false,
+  engine: { provider: string; model: string; account?: string | null } | null = null,
 ): Promise<string> {
   // A review with no clone builds no plan, so nothing there can decide to stop and ask — and saves
   // no run for another client to go stale on, which is why only the project half emits.
-  if (target.kind !== "project") return api.reviewPrFromLink(target.url, jobId, level, target.workspaceId);
+  const agent = engine ? { ...engine, prompt: "" } : null;
+  if (target.kind !== "project") return api.reviewPrFromLink(target.url, jobId, level, target.workspaceId, agent);
   const projectId = target.projectId;
-  return api.reviewPullRequest(projectId, prId, jobId, level, force).then(
+  return api.reviewPullRequest(projectId, prId, jobId, level, force, agent).then(
     (result) => {
       api.notifyStateChange("reviews", projectId);
       return result;

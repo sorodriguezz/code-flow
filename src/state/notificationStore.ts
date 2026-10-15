@@ -120,6 +120,8 @@ export interface NotificationTarget {
        *  that one addresses the assistant panel's chat, which is keyed by project and lives in a
        *  different store. A conversation here usually has no project at all. */
       | "chatAppConversation"
+      /** A workspace chat of the assistant panel: `${workspaceId}::${conversationId}`. */
+      | "workspaceChat"
       | "job"
       /** One finding of a review or an analysis: `${jobId}::${findingId}`. Opens the document the
        *  finding is in, with the finding open — where a "resolve with AI" result is read. */
@@ -523,6 +525,11 @@ export async function followTarget(
     // this workspace addresses itself by its own id and usually belongs to no repository at all.
     const { useConversationStore } = await import("./conversationStore");
     await useConversationStore.getState().open(id);
+  } else if (kind === "workspaceChat") {
+    const [workspaceId, conversationId] = id.split("::");
+    if (!workspaceId || !conversationId) return;
+    const { openWorkspaceChat } = await import("../lib/aiPanelNav");
+    openWorkspaceChat(workspaceId, { conversationId });
   } else if (kind === "job") {
     await showJobInAiPanel(id);
   } else if (kind === "finding") {

@@ -129,7 +129,9 @@ export interface MorphToastProps {
   /** What melts out of the pill. Absent, the card is a pill and nothing more. */
   body?: ReactNode;
   /** Where the pill sits along the edge the stack hangs from. */
-  align: "center" | "right";
+  align: "left" | "center" | "right";
+  /** The edge the stack hangs from: the pill sits on it and the body opens away from it. */
+  edge?: "top" | "bottom";
   /** How long the card will be on screen: the body opens 150 ms in and folds 2 s before this. */
   duration: number;
   /** Bumped when the same card is raised again: fold, blur the line back in, open again. */
@@ -153,6 +155,7 @@ export function MorphToast({
   titleKey,
   body,
   align,
+  edge = "bottom",
   duration,
   raise = 0,
   canExpand,
@@ -277,7 +280,7 @@ export function MorphToast({
   const frozen = useRef(openHeight);
   if (open) frozen.current = openHeight;
   const svgHeight = hasBody ? Math.max(open ? openHeight : frozen.current, MIN_OPEN) : PILL;
-  const pillX = align === "right" ? MORPH_WIDTH - pillWidth : (MORPH_WIDTH - pillWidth) / 2;
+  const pillX = align === "right" ? MORPH_WIDTH - pillWidth : align === "left" ? 0 : (MORPH_WIDTH - pillWidth) / 2;
   const boxHeight = leaving ? 0 : open ? openHeight : PILL;
 
   const style = {
@@ -285,7 +288,7 @@ export function MorphToast({
     "--cf-morph-h": `${boxHeight}px`,
     "--cf-morph-pw": `${pillWidth}px`,
     "--cf-morph-px": `${pillX}px`,
-    "--cf-morph-pt": open ? "translateY(-3px) scale(0.9)" : "none",
+    "--cf-morph-pt": open ? `translateY(${edge === "top" ? 3 : -3}px) scale(0.9)` : "none",
     "--cf-morph-co": open ? 1 : 0,
   } as CSSProperties;
 
@@ -343,8 +346,9 @@ export function MorphToast({
               <feMergeNode in="edge" />
               <feMergeNode in="shape" />
             </feMerge>
-            {/* `dy` is negative because the canvas is flipped: up here is down on screen. */}
-            <feDropShadow in="card" dx="0" dy="-3" stdDeviation="6" className="cf-morph-shadow" />
+            {/* `dy` is negative on the bottom edge because the canvas is flipped there: up here is
+                down on screen. Hanging from the top it is drawn the right way up. */}
+            <feDropShadow in="card" dx="0" dy={edge === "top" ? 3 : -3} stdDeviation="6" className="cf-morph-shadow" />
           </filter>
         </defs>
         <g filter={`url(#${filterId})`}>
@@ -396,6 +400,7 @@ export function MorphToast({
       data-open={open}
       data-leaving={leaving}
       data-tone={tone}
+      data-edge={edge}
       style={style}
       onPointerEnter={() => {
         setHovered(true);

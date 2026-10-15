@@ -6,6 +6,11 @@
 //! playback, opened on the thread that plays it (a cpal stream is not `Send` everywhere) and closed
 //! when it ends — a voice speaks for seconds at a time, and holding an output open in between would
 //! keep a Bluetooth headset from sleeping.
+//!
+//! **The stream lives on a thread [`play`] spawns for it**, whoever calls: on Windows that thread
+//! enters COM's multithreaded apartment before cpal touches it, a default output that still
+//! refuses to open (`RPC_E_CHANGED_MODE`) is opened by its concrete id, and under/overruns are
+//! noted at most once a minute — see `dictation::stream_health`. A glitch never ends a playback.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,6 +19,11 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use serde::Serialize;
+
+use crate::dictation::stream_health::{self, LogGate};
+
+/// How often a glitch (under/overrun) may reach the log.
+const GLITCH_LOG_EVERY: Duration = Duration::from_secs(60);
 
 /// The setting holding the chosen output's id: cpal's `host:device` string, `""` for the default.
 pub const DEVICE_KEY: &str = "audio_output_device";
@@ -60,35 +70,51 @@ struct Cursor {
 }
 
 /// Plays `samples` (mono, at `rate`) on output `device_id` at `volume` (0–1), until they end or
-/// `keep_going` says otherwise. Blocks for the length of the sound.
+/// `keep_going` says otherwise. Blocks for the length of the sound. The stream is opened, played and
+/// closed on a thread of its own; this one only asks `keep_going`.
 pub fn play(device_id: &str, samples: &[f32], rate: u32, volume: f32, keep_going: &dyn Fn() -> bool) -> Result<(), String> {
     if samples.is_empty() {
         return Ok(());
     }
+    let stop = AtomicBool::new(false);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let player = std::thread::Builder::new()
+            .name("speaker".into())
+            .spawn_scoped(scope, || {
+                let result = play_here(device_id, samples, rate, volume, &stop);
+                done.store(true, Ordering::SeqCst);
+                result
+            })
+            .map_err(|e| e.to_string())?;
+        while !done.load(Ordering::SeqCst) {
+            if !keep_going() {
+                stop.store(true, Ordering::SeqCst);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        player.join().unwrap_or_else(|_| Err("The speaker thread stopped unexpectedly".into()))
+    })
+}
+
+/// [`play`]'s thread: opens the output, plays, and closes it.
+fn play_here(device_id: &str, samples: &[f32], rate: u32, volume: f32, stop: &AtomicBool) -> Result<(), String> {
+    stream_health::enter_mta();
     let device = device(device_id)?;
-    let supported = device.default_output_config().map_err(|e| e.to_string())?;
-    let config = supported.config();
-    let out_rate = config.sample_rate;
-    let channels = usize::from(config.channels.max(1));
     let volume = volume.clamp(0.0, 1.0);
-    let cursor = Arc::new(Mutex::new(Cursor { samples: resample(samples, rate, out_rate).into_iter().map(|v| v * volume).collect(), at: 0 }));
-    let finished = Arc::new(AtomicBool::new(false));
-    let stream = match supported.sample_format() {
-        SampleFormat::F32 => build::<f32>(&device, config, channels, cursor.clone(), finished.clone()),
-        SampleFormat::I16 => build::<i16>(&device, config, channels, cursor.clone(), finished.clone()),
-        SampleFormat::U16 => build::<u16>(&device, config, channels, cursor.clone(), finished.clone()),
-        SampleFormat::I32 => build::<i32>(&device, config, channels, cursor.clone(), finished.clone()),
-        SampleFormat::F64 => build::<f64>(&device, config, channels, cursor.clone(), finished.clone()),
-        other => Err(format!("The speaker takes {other:?} samples, which CodeFlow cannot write")),
-    }?;
-    stream.play().map_err(|e| e.to_string())?;
+    let (stream, finished) = match start_on(&device, samples, rate, volume) {
+        Err(error) if stream_health::is_apartment_clash(&error) => {
+            let Some(concrete) = stream_health::concrete(&cpal::default_host(), &device) else { return Err(error) };
+            crate::applog::warn(&format!("speech: speaker: {error}; opening the device by its id"));
+            start_on(&concrete, samples, rate, volume)?
+        }
+        other => other?,
+    };
     let length = Duration::from_secs_f64(samples.len() as f64 / f64::from(rate.max(1)));
     // A device that stalls never reports the end: give up a second past the sound's own length.
     let deadline = Instant::now() + length + Duration::from_secs(1);
-    while !finished.load(Ordering::SeqCst) && Instant::now() < deadline {
-        if !keep_going() {
-            break;
-        }
+    while !finished.load(Ordering::SeqCst) && Instant::now() < deadline && !stop.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(15));
     }
     // The device's own buffer still holds the last few milliseconds.
@@ -99,10 +125,31 @@ pub fn play(device_id: &str, samples: &[f32], rate: u32, volume: f32, keep_going
     Ok(())
 }
 
+/// Opens `device` and starts it on `samples`: the stream, and the flag set when they have played.
+fn start_on(device: &cpal::Device, samples: &[f32], rate: u32, volume: f32) -> Result<(cpal::Stream, Arc<AtomicBool>), String> {
+    let supported = device.default_output_config().map_err(|e| e.to_string())?;
+    let config = supported.config();
+    let out_rate = config.sample_rate;
+    let channels = usize::from(config.channels.max(1));
+    let cursor = Arc::new(Mutex::new(Cursor { samples: resample(samples, rate, out_rate).into_iter().map(|v| v * volume).collect(), at: 0 }));
+    let finished = Arc::new(AtomicBool::new(false));
+    let stream = match supported.sample_format() {
+        SampleFormat::F32 => build::<f32>(device, config, channels, cursor, finished.clone()),
+        SampleFormat::I16 => build::<i16>(device, config, channels, cursor, finished.clone()),
+        SampleFormat::U16 => build::<u16>(device, config, channels, cursor, finished.clone()),
+        SampleFormat::I32 => build::<i32>(device, config, channels, cursor, finished.clone()),
+        SampleFormat::F64 => build::<f64>(device, config, channels, cursor, finished.clone()),
+        other => Err(format!("The speaker takes {other:?} samples, which CodeFlow cannot write")),
+    }?;
+    stream.play().map_err(|e| e.to_string())?;
+    Ok((stream, finished))
+}
+
 fn build<T>(device: &cpal::Device, config: cpal::StreamConfig, channels: usize, cursor: Arc<Mutex<Cursor>>, finished: Arc<AtomicBool>) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
+    let mut glitches = LogGate::new(GLITCH_LOG_EVERY);
     device
         .build_output_stream::<T, _, _>(
             config,
@@ -122,7 +169,14 @@ where
                     }
                 }
             },
-            |error| crate::applog::warn(&format!("speech: speaker: {error}")),
+            // A lost speaker ends the playback by the deadline; a glitch is only noted, now and then.
+            move |error: cpal::Error| {
+                if stream_health::is_fatal(error.kind()) {
+                    crate::applog::warn(&format!("speech: speaker: {error}"));
+                } else if let Some(held) = glitches.allow(Instant::now()) {
+                    crate::applog::warn(&format!("speech: speaker: {error}{} (not fatal)", stream_health::more(held)));
+                }
+            },
             None,
         )
         .map_err(|e| e.to_string())

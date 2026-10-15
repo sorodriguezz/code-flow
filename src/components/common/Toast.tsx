@@ -4,6 +4,8 @@ import { useToastStore, type Toast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { MorphToast, useMorphStack } from "./MorphToast";
+import { NoticeStack, useNoticePlacement } from "./NoticeDock";
+import type { NoticeAlign, NoticeEdge } from "../../state/noticePositionStore";
 
 /**
  * How long a toast stays: Sileo's six seconds, and eight for an error — the one kind you may need to
@@ -106,7 +108,11 @@ function ToastCard({
   open,
   onHoverChange,
   onDismiss,
+  align,
+  edge,
 }: {
+  align: NoticeAlign;
+  edge: NoticeEdge;
   group: ToastGroup;
   leaving: boolean;
   open: boolean;
@@ -129,7 +135,8 @@ function ToastCard({
           </span>
         )
       }
-      align="center"
+      align={align}
+      edge={edge}
       duration={durationOf(group)}
       raise={group.raise}
       canExpand={open}
@@ -155,6 +162,7 @@ export function ToastContainer() {
   const toasts = useToastStore((s) => s.toasts);
   const dismiss = useToastStore((s) => s.dismissToast);
   const groups = useMemo(() => groupToasts(toasts), [toasts]);
+  const placement = useNoticePlacement("toasts");
   const stack = useMorphStack(groups, {
     keyOf: (group) => group.key,
     orderOf: (group) => group.order,
@@ -166,12 +174,15 @@ export function ToastContainer() {
 
   if (stack.entries.length === 0) return null;
 
-  // Newest at the bottom, nearest the status bar; the ones before it are pushed up and fold to pills.
+  // Newest nearest the edge (the status bar, by default); the ones before it are pushed away and
+  // fold to pills.
   return (
-    <div className="pointer-events-none fixed bottom-10 left-1/2 z-50 flex -translate-x-1/2 flex-col items-center gap-3">
+    <NoticeStack kind="toasts" placement={placement}>
       {stack.entries.map(({ key, item, leaving }) => (
         <ToastCard
           key={key}
+          align={placement.align}
+          edge={placement.edge}
           group={item}
           leaving={leaving}
           open={stack.openKey === key}
@@ -179,6 +190,6 @@ export function ToastContainer() {
           onDismiss={() => item.ids.forEach(dismiss)}
         />
       ))}
-    </div>
+    </NoticeStack>
   );
 }

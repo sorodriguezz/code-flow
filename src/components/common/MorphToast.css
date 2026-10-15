@@ -330,6 +330,47 @@
   color: var(--cf-toast-ink);
 }
 
+/* ------------------------------ From the top edge ------------------------------ */
+
+/* Hanging from the top (Ajustes › Notificaciones › Posición): the same card drawn the right way up —
+   pill on the top edge, body opening downward — rising from above and handing its room back below. */
+.cf-morph[data-edge="top"] {
+  transform: translateY(-6px) scale(0.95);
+  margin-top: 0;
+  margin-bottom: calc(-1 * (var(--cf-morph-pill-h) + var(--cf-morph-gap)));
+}
+
+.cf-morph[data-edge="top"][data-ready="true"] {
+  transform: none;
+  margin-bottom: 0;
+  transition:
+    transform calc(var(--cf-morph-ms) * 0.66) var(--cf-morph-spring),
+    opacity calc(var(--cf-morph-ms) * 0.66) var(--cf-morph-spring),
+    margin-bottom calc(var(--cf-morph-ms) * 0.66) var(--cf-morph-spring),
+    height var(--cf-morph-ms) var(--cf-morph-spring);
+}
+
+.cf-morph[data-edge="top"][data-ready="true"][data-leaving="true"] {
+  transform: translateY(-6px) scale(0.95);
+  margin-top: 0;
+  margin-bottom: calc(-1 * var(--cf-morph-gap));
+}
+
+.cf-morph[data-edge="top"] .cf-morph-canvas {
+  top: 0;
+  bottom: auto;
+  transform: none;
+}
+
+.cf-morph[data-edge="top"] .cf-morph-pill {
+  top: 0;
+  bottom: auto;
+}
+
+.cf-morph[data-edge="top"] .cf-morph-body {
+  top: var(--cf-morph-pill-h);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .cf-morph,
   .cf-morph * {

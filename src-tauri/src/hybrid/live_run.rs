@@ -101,7 +101,7 @@ fn run_config(review_mode: &str, checks: Vec<PlanCheck>) -> hybrid_queries::Hybr
 /// One subscription turn, the way `send_chat_message` makes it.
 async fn cli_turn(cwd: &str, message: &str, session: Option<&str>, read_only: bool, schema: Option<&str>) -> crate::ai::AiRun {
     let engine = crate::ai::engine_for("claude");
-    crate::ai::chat_with_repo(&*engine, "claude", PLANNER_MODEL, &[], message, session, &[], cwd, None, read_only, Vec::new(), Vec::new(), &[], schema, &[])
+    crate::ai::chat_with_repo(&*engine, "claude", PLANNER_MODEL, &[], message, session, &[], cwd, None, read_only, Vec::new(), Vec::new(), &[], schema, &[], None)
         .await
         .expect("the CLI answers")
 }

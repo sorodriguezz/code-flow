@@ -7,6 +7,7 @@ const INLAY_HINTS_KEY = "editor_inlay_hints";
 const FONT_SIZE_KEY = "editor_font_size";
 const IMPORT_COST_KEY = "editor_import_cost";
 const PRISMA_HIGHLIGHT_KEY = "editor_prisma_highlight";
+const IMPLEMENTATION_LENS_KEY = "editor_implementation_lens";
 
 /** The size the editor always drew at, and the range the slider offers. */
 export const DEFAULT_EDITOR_FONT_SIZE = 13;
@@ -40,6 +41,11 @@ export const EDITOR_FONT_SIZES = { min: 10, max: 22 } as const;
  * **Prisma colours** — `schema.prisma` highlighted (`monacoPrisma`). **On unless turned off**, and
  * off draws the file plain rather than taking its language away.
  *
+ * **Implementations** — the "N implementations" / "Implements X" / "Overrides X.m" lines above types
+ * and members (`components/editor/implementationLens`, the user's ask, 2026-10-15). **On unless
+ * turned off.** Off, the provider answers nothing and asks no engine; Monaco's own `codeLens` option
+ * stays on, because the package.json lenses are drawn by it too.
+ *
  * Global rather than per file, and remembered: both were asked for as preferences of the editor, and
  * ⌥Z flips the same preference rather than a per-tab override nobody could find again.
  *
@@ -52,6 +58,7 @@ interface EditorDisplayState {
   fontSize: number;
   importCost: boolean;
   prismaHighlight: boolean;
+  implementationLens: boolean;
   init: () => Promise<void>;
   setFontSize: (px: number) => Promise<void>;
   setWordWrap: (on: boolean) => Promise<void>;
@@ -59,6 +66,7 @@ interface EditorDisplayState {
   setInlayHints: (on: boolean) => Promise<void>;
   setImportCost: (on: boolean) => Promise<void>;
   setPrismaHighlight: (on: boolean) => Promise<void>;
+  setImplementationLens: (on: boolean) => Promise<void>;
 }
 
 let loading: Promise<void> | null = null;
@@ -69,9 +77,17 @@ export const useEditorDisplayStore = create<EditorDisplayState>((set, get) => ({
   fontSize: DEFAULT_EDITOR_FONT_SIZE,
   importCost: true,
   prismaHighlight: true,
+  implementationLens: true,
 
   init: () =>
-    (loading ??= getSettings([WORD_WRAP_KEY, INLAY_HINTS_KEY, FONT_SIZE_KEY, IMPORT_COST_KEY, PRISMA_HIGHLIGHT_KEY])
+    (loading ??= getSettings([
+      WORD_WRAP_KEY,
+      INLAY_HINTS_KEY,
+      FONT_SIZE_KEY,
+      IMPORT_COST_KEY,
+      PRISMA_HIGHLIGHT_KEY,
+      IMPLEMENTATION_LENS_KEY,
+    ])
       .then((stored) =>
         set({
           wordWrap: stored[WORD_WRAP_KEY] === "true",
@@ -81,6 +97,7 @@ export const useEditorDisplayStore = create<EditorDisplayState>((set, get) => ({
           fontSize: clampFontSize(Number(stored[FONT_SIZE_KEY])),
           importCost: stored[IMPORT_COST_KEY] !== "false",
           prismaHighlight: stored[PRISMA_HIGHLIGHT_KEY] !== "false",
+          implementationLens: stored[IMPLEMENTATION_LENS_KEY] !== "false",
         }),
       )
       .catch(() => undefined)),
@@ -105,6 +122,11 @@ export const useEditorDisplayStore = create<EditorDisplayState>((set, get) => ({
   setPrismaHighlight: async (on) => {
     set({ prismaHighlight: on });
     await setSetting(PRISMA_HIGHLIGHT_KEY, String(on)).catch(() => undefined);
+  },
+
+  setImplementationLens: async (on) => {
+    set({ implementationLens: on });
+    await setSetting(IMPLEMENTATION_LENS_KEY, String(on)).catch(() => undefined);
   },
 
   setFontSize: async (px) => {
@@ -132,7 +154,7 @@ export function monacoInlayHints(on: boolean): "on" | "off" {
 
 // Switched in Settings or with ⌥Z in any window; a floating editor or a repository window repaints
 // with the main one.
-watchSettings([WORD_WRAP_KEY, INLAY_HINTS_KEY, IMPORT_COST_KEY, PRISMA_HIGHLIGHT_KEY], () => {
+watchSettings([WORD_WRAP_KEY, INLAY_HINTS_KEY, IMPORT_COST_KEY, PRISMA_HIGHLIGHT_KEY, IMPLEMENTATION_LENS_KEY], () => {
   loading = null;
   return useEditorDisplayStore.getState().init();
 });

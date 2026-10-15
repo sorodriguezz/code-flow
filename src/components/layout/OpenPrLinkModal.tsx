@@ -21,6 +21,7 @@ import { useAiPanelStore } from "../../state/aiPanelStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ReviewLevelSelector } from "../ai/ReviewLevelSelector";
+import { ReviewEngineTag } from "../ai/ReviewEngineTag";
 import { CloneRepoModal } from "./CloneRepoModal";
 import type { PrLinkResolution, PullRequestSummary } from "../../types/domain";
 import { buttonClass } from "../common/Button";
@@ -253,6 +254,7 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
         {resolution?.status === "Ready" && (
           <>
             <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={false} />
+            <ReviewEngineTag />
             <div className="flex-1" />
             <button
               onClick={() => void openPr(resolution, false)}

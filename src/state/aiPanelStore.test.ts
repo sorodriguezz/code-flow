@@ -201,3 +201,42 @@ describe("persistence", () => {
     expect(saved.tabs.map((t) => t.key)).not.toContain(blank);
   });
 });
+
+describe("workspace chat tabs", () => {
+  it("lives in the workspace it names, keeps one blank per workspace, and a chain gets its own", async () => {
+    const { panel } = await boot();
+    const open = panel.useAiPanelStore.getState().open;
+    const a = open({ kind: "wsChat", workspaceId: "ws-2" });
+    const b = open({ kind: "wsChat", workspaceId: "ws-2" });
+    expect(a).toBe(b);
+    expect(a.startsWith("wschat:")).toBe(true);
+    const forChain = open({ kind: "wsChat", workspaceId: "ws-2", focusChainId: "chain-1" });
+    expect(forChain).not.toBe(a);
+    const tabs = panel.useAiPanelStore.getState().tabsByWorkspace["ws-2"];
+    expect(tabs.map((t) => t.key)).toEqual([a, forChain]);
+    const chainTab = tabs[1];
+    expect(chainTab.kind === "wsChat" && chainTab.focusChainId).toBe("chain-1");
+    expect(panel.useAiPanelStore.getState().tabsByWorkspace["ws-1"] ?? []).toHaveLength(0);
+  });
+
+  it("reopens a conversation from its history in the same tab", async () => {
+    const { panel } = await boot();
+    const open = panel.useAiPanelStore.getState().open;
+    const first = open({ kind: "wsChat", workspaceId: "ws-1", conversationId: "c-1" });
+    const again = open({ kind: "wsChat", workspaceId: "ws-1", conversationId: "c-1" });
+    expect(first).toBe(again);
+    expect(first).toBe(panel.wsChatTabKey("c-1"));
+    expect(panel.useAiPanelStore.getState().tabsByWorkspace["ws-1"]).toHaveLength(1);
+  });
+
+  it("is restored with the strip, unless nobody wrote in it", async () => {
+    const { panel } = await boot();
+    const open = panel.useAiPanelStore.getState().open;
+    const blank = open({ kind: "wsChat", workspaceId: "ws-1" });
+    const used = open({ kind: "wsChat", workspaceId: "ws-1", conversationId: "c-9" });
+    await vi.advanceTimersByTimeAsync(1000);
+    const saved = JSON.parse(written["ai_panel_ws-1"]) as { tabs: { key: string }[] };
+    expect(saved.tabs.map((t) => t.key)).toEqual([used]);
+    expect(saved.tabs.map((t) => t.key)).not.toContain(blank);
+  });
+});

@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FolderGit2,
   GitCompare,
+  Layers,
   Link2,
   Pause,
   PauseCircle,
@@ -40,6 +41,8 @@ import { confirmAction } from "../../state/confirmStore";
 import { aiClassifyFailure, openExternalUrl, type AiFailure } from "../../lib/tauri/commands";
 import { isEnginePause, resumeInstant } from "../../lib/chainPause";
 import { pushErrorToast } from "../../state/toastStore";
+import { openWorkspaceChat } from "../../lib/aiPanelNav";
+import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useT } from "../../state/languageStore";
 import type { AgentChain, AgentChainStep, ChainRepo, ChainStepPhase, ChainStepStatus } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -195,6 +198,25 @@ export function ChainDetail({ chainId }: { chainId: string }) {
             scheduler advances the chain from the store, so a running step keeps running, its turn
             still lands, and the row in the tree keeps counting. Sitting on the open plan to keep it
             alive is exactly the thing an autonomous run should not ask of anyone. */}
+        {/* Carry this plan on in a chat with every repository of the workspace: the chat is handed
+            the whole plan once, and where it stands with every message. */}
+        <Tooltip label={t("assistant.wsChatResume")}>
+          <button
+            type="button"
+            onClick={() => {
+              const workspaceId = useWorkspaceStore.getState().workspaceOfProject(chain.project_id) ??
+                useWorkspaceStore.getState().activeWorkspaceId;
+              if (!workspaceId) return;
+              const key = openWorkspaceChat(workspaceId, { focusChainId: chain.id });
+              const panel = useAiPanelStore.getState();
+              if (!panel.drafts[key]) panel.setDraft(key, t("assistant.wsChatResumeDraft"));
+            }}
+            aria-label={t("assistant.wsChatResume")}
+            className={iconButtonClass()}
+          >
+            <Layers size={15} />
+          </button>
+        </Tooltip>
         <Tooltip label={t("agents.closeChain")}>
           <button
             type="button"

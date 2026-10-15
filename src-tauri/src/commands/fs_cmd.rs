@@ -92,6 +92,16 @@ pub fn copy_path(repo_path: String, from_rel: String, dest_dir: String) -> Resul
     fsops::copy_path(&repo_path, &from_rel, &dest_dir)
 }
 
+/// Copies a file or folder from an absolute path anywhere on disk into `dest_dir` of the project —
+/// a paste of what another repository's explorer, another window's explorer or the file manager
+/// copied. A taken name gets the ` copy` suffix. See [`fsops::copy_external`].
+///
+/// `(async)` for the reason [`copy_path`] is.
+#[tauri::command(async)]
+pub fn copy_external_path(repo_path: String, source: String, dest_dir: String) -> Result<String, String> {
+    fsops::copy_external(&repo_path, &source, &dest_dir)
+}
+
 /// The rows of the explorer's "Generate Tree" for `rel_dir` — see [`fsops::dir_tree`]. `hidden` is
 /// the explorer's hidden-entries list, so the tree leaves out what the explorer does.
 ///

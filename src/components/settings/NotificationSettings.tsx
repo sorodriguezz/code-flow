@@ -23,6 +23,9 @@ import {
 } from "../../lib/notificationSound";
 import { NOTIFICATION_SOURCE_LABEL, notify, type NotificationSource } from "../../state/notificationStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
+import { NOTICE_DEFAULTS, NOTICE_SPOTS, useNoticePositionStore, type NoticeKind, type NoticeSpot } from "../../state/noticePositionStore";
+import { useToastStore } from "../../state/toastStore";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import { useSpeechStore } from "../../state/speechStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -267,6 +270,12 @@ function DeliveryPane() {
 
   return (
     <>
+      <div className="pb-1">
+        <span className="block text-[13px] leading-snug text-[var(--cf-text)]">{t("notifications.positionLabel")}</span>
+        <PositionPicker kind="toasts" />
+        <PositionPicker kind="popups" />
+      </div>
+
       <Toggle
         label={t("notifications.systemLabel")}
         hint={t("notifications.systemHint")}
@@ -306,6 +315,70 @@ function DeliveryPane() {
         {t("notifications.testButton")}
       </button>
     </>
+  );
+}
+
+/**
+ * Where one kind of floating notice appears: a small window with its six spots. The two kinds —
+ * the app's messages and errors, and the bell's notifications — are placed apart (user, 2026-10-15).
+ */
+function PositionPicker({ kind }: { kind: NoticeKind }) {
+  const t = useT();
+  const spot = useNoticePositionStore((s) => s.spots[kind]);
+  const setSpot = useNoticePositionStore((s) => s.setSpot);
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const label = t(kind === "toasts" ? "notifications.positionToasts" : "notifications.positionPopups");
+  const pick = (next: NoticeSpot) => {
+    void setSpot(kind, next).then(() => {
+      // One of its own kind, where it will now appear.
+      if (kind === "toasts") {
+        useToastStore.getState().pushToast(t(`notifications.position.${next}` as TranslationKey), "info");
+      } else {
+        notify({ source: "chat", workspaceId, titleKey: "notifications.testTitle", detail: t(`notifications.position.${next}` as TranslationKey), status: "info" });
+      }
+    });
+  };
+  return (
+    <div className="flex items-center gap-3 py-2">
+      <div
+        role="radiogroup"
+        aria-label={label}
+        className="grid h-[60px] w-[96px] shrink-0 grid-cols-3 grid-rows-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-1"
+      >
+        {NOTICE_SPOTS.map((option) => {
+          const [edge, align] = option.split("-");
+          const selected = spot === option;
+          return (
+            <button
+              key={option}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              title={t(`notifications.position.${option}` as TranslationKey)}
+              onClick={() => pick(option)}
+              className={`group flex rounded p-1 hover:bg-[var(--cf-hover)] ${edge === "top" ? "items-start" : "items-end"} ${
+                align === "left" ? "justify-start" : align === "right" ? "justify-end" : "justify-center"
+              }`}
+            >
+              <span
+                className={`block h-[6px] w-[16px] rounded-full ${
+                  selected ? "bg-[var(--cf-accent)]" : "bg-[var(--cf-border)] group-hover:bg-[var(--cf-text-faint)]"
+                }`}
+              />
+            </button>
+          );
+        })}
+      </div>
+      <span className="min-w-0">
+        <span className="block text-[13px] leading-snug text-[var(--cf-text)]">{label}</span>
+        <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {t(kind === "toasts" ? "notifications.positionToastsHint" : "notifications.positionPopupsHint")}
+          {" · "}
+          {t(`notifications.position.${spot}` as TranslationKey)}
+          {spot === NOTICE_DEFAULTS[kind] && ` (${t("notifications.position.default").toLowerCase()})`}
+        </span>
+      </span>
+    </div>
   );
 }
 

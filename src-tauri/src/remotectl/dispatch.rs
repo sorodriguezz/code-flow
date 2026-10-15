@@ -986,6 +986,7 @@ pub async fn dispatch(
                 None,
                 None,
                 None,
+                None,
             )
             .await
             // The other durable failure. A review that dies halfway still leaves its row.
@@ -1110,6 +1111,8 @@ pub async fn dispatch(
                     // The phone has no skill picker.
                     None,
                     // Nor an attachment picker.
+                    None,
+                    // Nor a thinking dial: the CLI's own default.
                     None,
                 )
                 .await?,

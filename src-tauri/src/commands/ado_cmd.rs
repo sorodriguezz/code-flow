@@ -1106,6 +1106,8 @@ pub async fn review_pr_from_link(
     agent_provider: Option<String>,
     agent_model: Option<String>,
     agent_prompt: Option<String>,
+    // The account to run under when the review names its own engine; `None` resolves it as usual.
+    agent_account: Option<String>,
 ) -> Result<String, String> {
     let (target, credential) = link_credentials(&db, &url)?;
 
@@ -1115,7 +1117,7 @@ pub async fn review_pr_from_link(
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::Auto, Some(AiTask::Review), Some(&workspace_id))?
+                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::parse(agent_account.as_deref()), Some(AiTask::Review), Some(&workspace_id))?
             }
             _ => load_ai_config_in(&conn, AiTask::Review, Some(&workspace_id))?,
         };
@@ -2000,6 +2002,8 @@ pub async fn review_pull_request(
     agent_provider: Option<String>,
     agent_model: Option<String>,
     agent_prompt: Option<String>,
+    // The account to run under when the review names its own engine; `None` resolves it as usual.
+    agent_account: Option<String>,
 ) -> Result<String, String> {
     let project = load_project(&db, &project_id)?;
     let link = linked_repo(&project)?;
@@ -2015,7 +2019,7 @@ pub async fn review_pull_request(
         // An active agent reviews on its own provider + model; otherwise the Review task routing.
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::Auto, Some(AiTask::Review), Some(&workspace_id))?
+                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::parse(agent_account.as_deref()), Some(AiTask::Review), Some(&workspace_id))?
             }
             _ => load_ai_config_in(&conn, AiTask::Review, Some(&workspace_id))?,
         };

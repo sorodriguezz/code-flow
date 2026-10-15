@@ -1179,6 +1179,7 @@ export function PrDocument({
         ) : (
           <div className="flex items-center gap-1.5">
             <ReReviewButton disabled={Boolean(runningJob)} level={reviewLevel} onRun={(level) => runReview(level)} />
+            <ReviewEngineTag />
             <span className="flex-1" />
             {/* The title rides on a wrapper: a disabled recipe button takes no pointer events, and
                 "already on the pull request" is exactly what the disabled one has to say. */}

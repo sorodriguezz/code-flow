@@ -22,6 +22,8 @@
 pub mod capture;
 pub mod engine;
 pub mod permission;
+#[cfg(any(target_os = "macos", windows))]
+pub mod stream_health;
 
 use std::path::{Path, PathBuf};
 

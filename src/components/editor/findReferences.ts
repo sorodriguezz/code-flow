@@ -23,7 +23,7 @@ import { lspImplementations, lspReferences } from "./useLanguageServer";
  *  them all to decorate a list would cost more than the list is worth. */
 const MAX_FILES_READ = 150;
 
-interface Hit {
+export interface Hit {
   path: string;
   range: monaco.IRange;
   text?: string;
@@ -88,7 +88,7 @@ export async function findAllImplementations(
 
 /** Each hit's line, from the file's model when it has one — the buffer, which is what the server
  *  answered about — and from disk otherwise. */
-async function withLineText(hits: Hit[], project: { id: string; local_path: string }): Promise<Hit[]> {
+export async function withLineText(hits: Hit[], project: { id: string; local_path: string }): Promise<Hit[]> {
   const texts = new Map<string, string | null>();
   for (const path of new Set(hits.map((hit) => hit.path))) {
     const model = monaco.editor.getModel(monaco.Uri.parse(modelPathForId(project.id, path)));

@@ -7,8 +7,8 @@ import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useT } from "../../state/languageStore";
 
 /**
- * Settings › Editor › Display. Four switches: word wrap, inlay hints, package weights and Prisma's
- * colours. Where a line breaks is not a setting — it is the editor's own width, which is the whole of
+ * Settings › Editor › Display. Five switches: word wrap, inlay hints, implementation lenses, package
+ * weights and Prisma's colours. Where a line breaks is not a setting — it is the editor's own width, which is the whole of
  * what was asked for — so there is no column to pick, and the tip says so. Which hints a language
  * draws is its server's to decide; this only says whether they are drawn at all.
  */
@@ -23,6 +23,8 @@ export function EditorDisplaySettings() {
   const setImportCost = useEditorDisplayStore((s) => s.setImportCost);
   const prismaHighlight = useEditorDisplayStore((s) => s.prismaHighlight);
   const setPrismaHighlight = useEditorDisplayStore((s) => s.setPrismaHighlight);
+  const implementationLens = useEditorDisplayStore((s) => s.implementationLens);
+  const setImplementationLens = useEditorDisplayStore((s) => s.setImplementationLens);
   const fontSize = useEditorDisplayStore((s) => s.fontSize);
   const setFontSize = useEditorDisplayStore((s) => s.setFontSize);
   /** From the registry, so a rebound chord reads as what it is now. */
@@ -47,6 +49,12 @@ export function EditorDisplaySettings() {
         onChange={(value) => void setInlayHints(value)}
         label={t("editor.inlayHints")}
         tip={t("editor.inlayHintsTip")}
+      />
+      <Switch
+        checked={implementationLens}
+        onChange={(value) => void setImplementationLens(value)}
+        label={t("editor.implementationLens")}
+        tip={t("editor.implementationLensTip")}
       />
       <Switch
         checked={importCost}

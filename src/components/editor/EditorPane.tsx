@@ -85,6 +85,7 @@ import { CsvSeparatorPicker } from "./CsvSeparatorPicker";
 import { useTypeScript } from "./useTypeScript";
 import { formatModel, isComponentFile } from "./formatDocument";
 import { findAllImplementations, findAllReferences } from "./findReferences";
+import { installImplementationLens } from "./implementationLens";
 import { useLanguageServer } from "./useLanguageServer";
 import { useInlineCompletion } from "./useInlineCompletion";
 import { useImportCost } from "./useImportCost";
@@ -2230,6 +2231,8 @@ export function EditorPane({
   const handleMount: OnMount = (editorInstance, monacoInstance) => {
     editorRef.current = editorInstance;
     monacoRef.current = monacoInstance;
+    // "N implementations" / "Implements X" over types and members — global to Monaco, installed once.
+    installImplementationLens();
     // Typing or clicking in a pane is what makes it the active group — the same "focus follows
     // the editor you touched" rule VS Code uses to decide where the next file opens.
     editorInstance.onDidFocusEditorWidget(() => onFocusRef.current());

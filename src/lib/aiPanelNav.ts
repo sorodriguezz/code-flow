@@ -16,6 +16,7 @@ import {
   prLinkTabKey,
   prTabKey,
   useAiPanelStore,
+  wsChatTabKey,
   type PanelTarget,
 } from "../state/aiPanelStore";
 import type { TrackedPr } from "../state/prWatchStore";
@@ -104,6 +105,22 @@ export async function openChat(projectId: string, conversationId: string): Promi
 /** A blank conversation in `projectId` — the one it already has, if there is one. */
 export function openNewChat(projectId: string): string {
   return useAiPanelStore.getState().open({ kind: "chat", projectId });
+}
+
+/**
+ * A chat with every repository of `workspaceId` — a blank one (the one it already has, if any), or
+ * `conversationId` from its history. `focusChainId` opens a new one to carry that chain on.
+ */
+export function openWorkspaceChat(
+  workspaceId: string,
+  opts: { conversationId?: string | null; focusChainId?: string | null } = {},
+): string {
+  return useAiPanelStore.getState().open({
+    kind: "wsChat",
+    workspaceId,
+    conversationId: opts.conversationId ?? null,
+    focusChainId: opts.focusChainId ?? null,
+  });
 }
 
 /** One row of the Inbox's history. */
@@ -236,6 +253,8 @@ export function tabKeyForSelect(select: { kind: string; id: string }): string | 
   switch (select.kind) {
     case "chatConversation":
       return chatTabKey(select.id);
+    case "workspaceChat":
+      return wsChatTabKey(select.id.split("::")[1] ?? select.id);
     case "job": {
       const job = findJob(select.id);
       return job ? tabKeyForJob(job) : null;

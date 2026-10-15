@@ -507,6 +507,8 @@ windows = { version = "0.61", features = ["Win32_Graphics_Dxgi", "Win32_Media_Me
 # clipboard's change counter and the time since the last keystroke or click (bindings only too).
 # Power is «Evitar que el equipo se suspenda» (`keep_awake`: a power request), and Registry the
 # launch-at-login entry written with its path quoted (`autostart`) — bindings only as well.
+# Shell is `DragQueryFileW`, for the files Explorer put on the clipboard (`explorer_bridge`) —
+# bindings only.
 windows-sys = { version = "0.60", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
@@ -518,6 +520,7 @@ windows-sys = { version = "0.60", features = [
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
   "Win32_UI_Controls",
+  "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
 

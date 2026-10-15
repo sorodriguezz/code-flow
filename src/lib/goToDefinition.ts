@@ -31,6 +31,20 @@ export function setDefinitionContext(next: DefinitionContext | null) {
   if (!next || fileCache?.repoPath !== next.project.local_path) fileCache = null;
 }
 
+/** The project the editor is showing, or `null` — for the other jumps that open files the way this
+ *  one does (the implementation lenses). */
+export function definitionProject(): Project | null {
+  return context?.project ?? null;
+}
+
+/** Opens a repo file at a place in the focused editor group, the way a definition jump does. Answers
+ *  `false` when no editor is there to open it. */
+export function openDefinitionTarget(path: string, line: number, column?: number): boolean {
+  if (!context) return false;
+  context.open(path, line, column);
+  return true;
+}
+
 async function repoFiles(repoPath: string): Promise<string[]> {
   if (fileCache?.repoPath === repoPath) return fileCache.files;
   const files = await listRepoFiles(repoPath).catch(() => []);

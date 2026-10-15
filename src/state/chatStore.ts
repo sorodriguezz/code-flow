@@ -412,6 +412,10 @@ interface ChatState {
    * per-turn override `send_chat_message` already accepts.
    */
   engineByConversation: Record<string, ChatEngine>;
+  /** The thinking level picked in each conversation's composer — `""` (absent) leaves the CLI on
+   *  its own default, as in the chat workspace. Rides every turn of that conversation. */
+  effortByConversation: Record<string, string>;
+  setEffort: (conversationId: string, effort: string) => void;
   /**
    * Asks `message` in `conversationId` — the conversation the assistant tab names, created on its
    * first question.
@@ -525,6 +529,7 @@ export function engineFor(session: ChatSession | undefined, picked: ChatEngine |
 export const useChatStore = create<ChatState>((set, get) => ({
   byConversation: {},
   engineByConversation: {},
+  effortByConversation: {},
   attachments: {},
 
   attachImagePath: async (conversationId, sourcePath) => {
@@ -676,6 +681,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         true,
         skill ?? null,
         files.map((file) => file.id),
+        get().effortByConversation[conversationId] ?? null,
       ),
     )
       .then((reply) => {
@@ -1027,7 +1033,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { [conversationId]: _session, ...byConversation } = s.byConversation;
       const { [conversationId]: _engine, ...engineByConversation } = s.engineByConversation;
       const { [conversationId]: _staged, ...attachments } = s.attachments;
-      return { byConversation, engineByConversation, attachments };
+      const { [conversationId]: _effort, ...effortByConversation } = s.effortByConversation;
+      return { byConversation, engineByConversation, attachments, effortByConversation };
     });
   },
 
@@ -1043,6 +1050,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     void resetChatContext(session.projectId, conversationId)
       .then(() => notifyStateChange("chat", session.projectId, conversationId))
       .catch((error: unknown) => pushErrorToast(String(error)));
+  },
+
+  setEffort: (conversationId, effort) => {
+    set((s) => ({ effortByConversation: { ...s.effortByConversation, [conversationId]: effort } }));
   },
 
   setEngine: (conversationId, engine) => {

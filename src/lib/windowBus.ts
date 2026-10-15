@@ -5,6 +5,7 @@ import { WINDOW } from "./windowIdentity";
 import type { AiRunAbout } from "../state/aiRunStore";
 import type { UnsavedItem } from "./unsavedWork";
 import type { IslandTab } from "./editorIslands";
+import type { ExplorerClipboardSnapshot } from "../state/explorerClipboardStore";
 
 /**
  * How the windows tell each other things.
@@ -171,7 +172,22 @@ export type WindowMessage =
   | { kind: "island-reveal"; line: number; column?: number }
   /** The file a floating editor holds was moved (`movedTo`) or deleted (`null`) from the main
    *  window's explorer. */
-  | { kind: "island-recall"; movedTo: string | null };
+  | { kind: "island-recall"; movedTo: string | null }
+  /**
+   * The explorer's Copy/Cut, as it now stands in the window that changed it — see
+   * `lib/explorerClipboardSync`. Every window keeps its own copy of the store; this keeps them equal,
+   * the newest change (`at`) winning.
+   */
+  | { kind: "explorer-clipboard"; clip: ExplorerClipboardSnapshot }
+  /** A window that has just started listening, asking the others for the clipboard they hold. */
+  | { kind: "explorer-clipboard-ask" }
+  /**
+   * Files and folders dragged out of one window's explorer and released over another window
+   * (`x`/`y`, CSS pixels in the receiver's page — see `explorer_bridge::window_under_cursor`).
+   * `sources` are absolute paths; the receiver copies them into the folder under that point.
+   * Addressed: only the window the pointer was over may act on it.
+   */
+  | { kind: "explorer-drop"; to: string; x: number; y: number; sources: string[] };
 
 interface Frame {
   from: string;

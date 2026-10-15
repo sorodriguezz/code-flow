@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { distinctParents, isAtOrUnder, planPaste, remapPath } from "./explorerClipboard";
+import {
+  absoluteIn,
+  distinctParents,
+  isAtOrUnder,
+  pickPasteSource,
+  planPaste,
+  remapPath,
+} from "./explorerClipboard";
 
 describe("distinctParents", () => {
   it("drops anything whose folder is picked too", () => {
@@ -77,5 +84,59 @@ describe("isAtOrUnder", () => {
     expect(isAtOrUnder("src", "src")).toBe(true);
     expect(isAtOrUnder("src/a.ts", "src")).toBe(true);
     expect(isAtOrUnder("src-old", "src")).toBe(false);
+  });
+});
+
+describe("planPaste from another repository", () => {
+  it("lands everything in the target folder, never as a duplicate beside itself", () => {
+    // The same relative path in another repository is a different file: no "paste onto itself".
+    expect(planPaste(["src", "src/a.ts"], { path: "src", isDir: true }, false)).toEqual({
+      steps: [
+        { source: "src", destDir: "src" },
+        { source: "src/a.ts", destDir: "src" },
+      ],
+      refused: [],
+    });
+    expect(planPaste(["lib"], { path: "lib/x.ts", isDir: false }, false).steps).toEqual([
+      { source: "lib", destDir: "lib" },
+    ]);
+  });
+});
+
+describe("absoluteIn", () => {
+  it("joins a repo-relative path onto the repository", () => {
+    expect(absoluteIn("/work/app", "src/a.ts")).toBe("/work/app/src/a.ts");
+    expect(absoluteIn("/work/app/", "src")).toBe("/work/app/src");
+    expect(absoluteIn("C:\\work\\app\\", "src")).toBe("C:\\work\\app/src");
+    expect(absoluteIn("/work/app", "")).toBe("/work/app");
+  });
+});
+
+describe("pickPasteSource", () => {
+  const app = (paths: string[], systemStamp: number | null) => ({ paths, systemStamp });
+  const sys = (stamp: number | null, paths: string[]) => ({ stamp, paths });
+
+  it("takes the explorer's copy while the system clipboard has not moved on", () => {
+    expect(pickPasteSource(app(["a.ts"], 7), sys(7, ["/x/b.ts"]))).toBe("app");
+  });
+
+  it("takes files copied in the file manager after the explorer's copy", () => {
+    expect(pickPasteSource(app(["a.ts"], 7), sys(8, ["/x/b.ts"]))).toBe("system");
+  });
+
+  it("keeps the explorer's copy when what was copied since is not files", () => {
+    expect(pickPasteSource(app(["a.ts"], 7), sys(9, []))).toBe("app");
+  });
+
+  it("keeps the explorer's copy when either counter is unknown", () => {
+    expect(pickPasteSource(app(["a.ts"], null), sys(9, ["/x/b.ts"]))).toBe("app");
+    expect(pickPasteSource(app(["a.ts"], 7), sys(null, ["/x/b.ts"]))).toBe("app");
+    expect(pickPasteSource(app(["a.ts"], 7), null)).toBe("app");
+  });
+
+  it("falls back to the system clipboard, or to nothing", () => {
+    expect(pickPasteSource(app([], null), sys(3, ["/x/b.ts"]))).toBe("system");
+    expect(pickPasteSource(app([], null), sys(3, []))).toBeNull();
+    expect(pickPasteSource(app([], null), null)).toBeNull();
   });
 });

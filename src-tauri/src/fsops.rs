@@ -847,6 +847,83 @@ pub fn copy_path(repo_path: &str, from_rel: &str, dest_dir: &str) -> Result<Stri
         .replace('\\', "/"))
 }
 
+/// Copies a file or folder from **anywhere on disk** — an absolute path — into `dest_dir` of this
+/// repository (repo-relative; `""` is the root), under the next free name the way [`copy_path`]
+/// names it (`a copy.ts`). Returns the new repo-relative path.
+///
+/// What a paste reaches when what was copied is not this repository's: a Copy in another project's
+/// explorer (in this window or another one), a drag from another window's explorer, or files the
+/// user copied in Finder/Explorer. As with `copy_into`, the source is something the user picked up
+/// themselves; the destination is this app's to guard, and it gets every guard `copy_path` has:
+/// - resolved inside the repository (`..` refused, links on the way followed and required to stay
+///   inside), so nothing can be written outside it;
+/// - never overwritten — a taken name gets the next ` copy` name, reserved atomically;
+/// - a folder is refused as its own destination, directly or through a descendant.
+///
+/// The source must be absolute and must exist. It is canonicalized, so a link to a file copies the
+/// file, under the name the link had; inside a folder, links to folders are left behind
+/// (`copy_tree`), which is what keeps a link cycle from copying forever.
+pub fn copy_external(repo_path: &str, source: &str, dest_dir: &str) -> Result<String, String> {
+    let given = Path::new(source.trim_end_matches(['/', '\\']));
+    if !given.is_absolute() {
+        return Err(format!("{source} is not an absolute path"));
+    }
+    let name = given
+        .file_name()
+        .ok_or_else(|| format!("cannot copy {source}"))?
+        .to_string_lossy()
+        .into_owned();
+    let canonical = given.canonicalize().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("{source} no longer exists"),
+        _ => format!("{source}: {e}"),
+    })?;
+
+    let base = Path::new(repo_path)
+        .canonicalize()
+        .map_err(|e| format!("invalid repo path: {e}"))?;
+    let dest = if dest_dir.trim().is_empty() {
+        base.clone()
+    } else {
+        resolve_within_repo(repo_path, dest_dir)?
+    };
+    if !dest.is_dir() {
+        return Err(format!("{dest_dir} is not a folder"));
+    }
+    if !dest.starts_with(&base) {
+        return Err("path escapes the repository root".to_string());
+    }
+    let is_dir = canonical.is_dir();
+    if !is_dir && !canonical.is_file() {
+        return Err(format!("cannot copy {name}: not a file or folder"));
+    }
+    // Canonical at both ends, so a symlinked route into the subtree is caught too.
+    if is_dir && dest.starts_with(&canonical) {
+        return Err(format!("cannot copy {name} into itself"));
+    }
+
+    let target = reserve_copy_target(&dest, &name, is_dir)?;
+    let copied = if is_dir {
+        copy_tree(&canonical, &target)
+    } else {
+        std::fs::copy(&canonical, &target)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    if let Err(e) = copied {
+        let _ = if is_dir {
+            std::fs::remove_dir_all(&target)
+        } else {
+            std::fs::remove_file(&target)
+        };
+        return Err(e);
+    }
+    Ok(target
+        .strip_prefix(&base)
+        .map_err(|_| "copied outside the repository".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/"))
+}
+
 /// A ceiling on the names `reserve_copy_target` tries — only a folder already holding thousands of
 /// copies of one file could reach it, and it keeps a filesystem that misreports "exists" from
 /// turning the loop into a hang.
@@ -1433,6 +1510,76 @@ mod tests {
 
         std::fs::remove_file(&outside).ok();
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A paste whose source is outside the repository — another project, another window, Finder.
+    #[test]
+    fn copies_from_outside_with_content_under_a_free_name() {
+        let (folder, repo) = repo_in_own_folder();
+        let root = repo.to_string_lossy().to_string();
+        create_dir(&root, "assets").unwrap();
+
+        let other = folder.join("other");
+        std::fs::create_dir_all(other.join("icons/svg")).unwrap();
+        std::fs::write(other.join("icons/logo.png"), b"png").unwrap();
+        std::fs::write(other.join("icons/svg/mark.svg"), b"svg").unwrap();
+        std::fs::write(other.join("notes.txt"), b"hello").unwrap();
+        let abs = |rel: &str| other.join(rel).to_string_lossy().to_string();
+
+        // A folder copies whole, contents and all.
+        assert_eq!(copy_external(&root, &abs("icons"), "assets").unwrap(), "assets/icons");
+        assert_eq!(read_file_text(&root, "assets/icons/svg/mark.svg").unwrap(), "svg");
+        assert!(repo.join("assets/icons/logo.png").is_file());
+        // The source is left exactly as it was: this is a copy.
+        assert!(other.join("icons/svg/mark.svg").is_file());
+
+        // A taken name gets the next copy name — folder and file alike — never an overwrite.
+        assert_eq!(copy_external(&root, &abs("icons"), "assets").unwrap(), "assets/icons copy");
+        assert_eq!(copy_external(&root, &abs("notes.txt"), "").unwrap(), "notes.txt");
+        std::fs::write(repo.join("notes.txt"), "edited").unwrap();
+        assert_eq!(copy_external(&root, &abs("notes.txt"), "").unwrap(), "notes copy.txt");
+        assert_eq!(copy_external(&root, &abs("notes.txt"), "").unwrap(), "notes copy 2.txt");
+        assert_eq!(read_file_text(&root, "notes.txt").unwrap(), "edited");
+        assert_eq!(read_file_text(&root, "notes copy 2.txt").unwrap(), "hello");
+        // A trailing separator names the same folder.
+        assert_eq!(
+            copy_external(&root, &format!("{}/", abs("icons/svg")), "").unwrap(),
+            "svg"
+        );
+
+        let before = names_in(&folder);
+        // The destination never leaves the repository.
+        assert!(copy_external(&root, &abs("notes.txt"), "..").is_err());
+        assert!(copy_external(&root, &abs("notes.txt"), "../other").is_err());
+        assert!(copy_external(&root, &abs("notes.txt"), "missing").is_err());
+        assert_eq!(names_in(&folder), before);
+        assert_eq!(names_in(&other), vec!["icons", "notes.txt"]);
+        // A source that is relative, or gone, is refused.
+        assert!(copy_external(&root, "notes.txt", "").is_err());
+        assert!(copy_external(&root, &abs("gone.txt"), "").is_err());
+        // A folder of the repository into itself, by its absolute path, is refused too.
+        assert!(copy_external(&root, &repo.join("assets").to_string_lossy(), "assets/icons").is_err());
+        assert!(!repo.join("assets/icons/assets").exists());
+
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    /// Through a link in the repository that leads out of it, no paste writes outside it.
+    #[cfg(unix)]
+    #[test]
+    fn copies_from_outside_never_through_a_link_out_of_the_repo() {
+        let (folder, repo) = repo_in_own_folder();
+        let root = repo.to_string_lossy().to_string();
+        let outside = folder.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("out")).unwrap();
+        let source = folder.join("a.txt");
+        std::fs::write(&source, "a").unwrap();
+
+        assert!(copy_external(&root, &source.to_string_lossy(), "out").is_err());
+        assert!(names_in(&outside).is_empty());
+
+        std::fs::remove_dir_all(&folder).ok();
     }
 
     /// A symlink is copied as the file it names but keeps the name the tree shows, and a dangling one

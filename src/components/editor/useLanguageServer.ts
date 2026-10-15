@@ -592,6 +592,33 @@ export async function lspImplementations(
   });
 }
 
+/** Whether a running server answers `textDocument/implementation` for this model's file — what
+ *  puts the implementation lenses on the server rather than on a text search. */
+export function lspCanImplement(model: MonacoEditorNS.ITextModel): boolean {
+  const file = fileOf(model);
+  return (
+    file !== null &&
+    sessionsForLanguage(file.language).some((session) => Boolean(session.capabilities?.implementationProvider))
+  );
+}
+
+/** `lspImplementations`' twin for definitions — how the implementation lenses resolve an
+ *  `extends`/`implements` name. `null` when no server can answer for this file. */
+export async function lspDefinitions(
+  model: MonacoEditorNS.ITextModel,
+  position: Position,
+): Promise<{ path: string; range: import("monaco-editor").IRange }[] | null> {
+  const file = fileOf(model);
+  const repoPath = currentRepoPath();
+  if (!file || !repoPath) return null;
+  if (!sessionsForLanguage(file.language).some((session) => session.capabilities?.definitionProvider)) return null;
+  const answers = await askAll<unknown>(file.language, "textDocument/definition", at(file.uri, position), "definitionProvider");
+  return answers.flatMap(locationsOf).flatMap((hit) => {
+    const path = relPathFromFileUri(repoPath, hit.uri);
+    return path ? [{ path, range: toMonacoRange(hit.range) }] : [];
+  });
+}
+
 /**
  * Every open buffer, told to the servers that claim it — not just the focused one.
  *

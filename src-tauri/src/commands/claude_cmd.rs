@@ -979,6 +979,9 @@ pub async fn send_chat_message(
     stream: Option<bool>,
     skill: Option<crate::provider_skills::SkillPick>,
     attachments: Option<Vec<String>>,
+    // How hard the model thinks this turn (`low`…`max`), from the composer's dial. `None`/empty
+    // leaves the CLI on its own configured default — see `ai::effort`.
+    effort: Option<String>,
 ) -> Result<ChatReply, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -1249,6 +1252,7 @@ pub async fn send_chat_message(
                 _ => None,
             }),
             &extra_dirs,
+            effort.as_deref().map(str::trim).filter(|e| ai::effort::valid(e)),
         )
         .await
     })

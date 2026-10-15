@@ -59,7 +59,10 @@ export function EffortPicker({
   supported,
   disabled,
   onPick,
+  compact = false,
 }: {
+  /** The AI panel's composer row, whose controls are a step smaller than the chat workspace's. */
+  compact?: boolean;
   /** The conversation's level, or `""` for the CLI's own default. */
   value: string;
   /** Whether this conversation's engine accepts a level. `false` renders nothing at all. */
@@ -98,7 +101,7 @@ export function EffortPicker({
         disabled={disabled}
         onClick={() => setOpen((was) => !was)}
         title={t("chat.effortTitle")}
-        className="flex h-[26px] items-center gap-1 rounded-md px-2 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40"
+        className={`flex ${compact ? "h-6 px-1.5 text-[11px]" : "h-[26px] px-2 text-[12px]"} items-center gap-1 rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40`}
       >
         <AiBrain size={13} />
         {/* The word only when a level was actually chosen. An unchosen control that announces

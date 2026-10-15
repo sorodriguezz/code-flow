@@ -1459,6 +1459,8 @@ export const sendChatMessage = (
   skill?: { name: string; source: string; path: string | null } | null,
   /** Ids of images staged for this turn (`repoChatAttachFile`/`Bytes`) — never paths. */
   attachments?: string[] | null,
+  /** The composer's thinking level (`low`…`max`); empty or absent leaves the CLI's own default. */
+  effort?: string | null,
 ) =>
   invoke<ChatReply>("send_chat_message", {
     projectId,
@@ -1473,6 +1475,7 @@ export const sendChatMessage = (
     stream: stream ?? null,
     skill: skill ?? null,
     attachments: attachments && attachments.length > 0 ? attachments : null,
+    effort: effort || null,
   });
 
 // ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------
@@ -1703,6 +1706,7 @@ export const reviewPullRequest = (
     agentProvider: agent?.provider ?? null,
     agentModel: agent?.model ?? null,
     agentPrompt: agent?.prompt ?? null,
+    agentAccount: agent?.account ?? null,
   });
 
 /** Prefix the backend puts on a review it stopped to ask about, so the panel can offer "review
@@ -1777,15 +1781,22 @@ export const resetReviewEngineConfig = (workspaceId: string) =>
  * history: no project to file it under, but the workspace it ran in outlives the session.
  * `jobId` doubles as the run id the CLI streams on, which is what makes the live log and the
  * stop button work. */
-export const reviewPrFromLink = (url: string, jobId: string, level: string, workspaceId: string) =>
+export const reviewPrFromLink = (
+  url: string,
+  jobId: string,
+  level: string,
+  workspaceId: string,
+  agent?: ChatAgentOverride | null,
+) =>
   invoke<string>("review_pr_from_link", {
     url,
     jobId,
     level,
     workspaceId,
-    agentProvider: null,
-    agentModel: null,
-    agentPrompt: null,
+    agentProvider: agent?.provider ?? null,
+    agentModel: agent?.model ?? null,
+    agentPrompt: agent?.prompt || null,
+    agentAccount: agent?.account ?? null,
   });
 
 /** One human-selected finding to post. `id` (its `F-NNN`) is what matches it to its stored finding
@@ -1966,6 +1977,33 @@ export const copyIntoRepo = (repoPath: string, destDir: string, sources: string[
  * Returns the new repo-relative path. */
 export const copyPath = (repoPath: string, fromRel: string, destDir: string) =>
   invoke<string>("copy_path", { repoPath, fromRel, destDir });
+
+/** Copies a file or folder from an absolute path anywhere on disk — another repository, another
+ * window's explorer, the file manager's clipboard — into `destDir` (repo-relative; `""` is the
+ * root), under a free ` copy` name when the name is taken. Returns the new repo-relative path. */
+export const copyExternalPath = (repoPath: string, source: string, destDir: string) =>
+  invoke<string>("copy_external_path", { repoPath, source, destDir });
+
+/** The files on the system clipboard (copied in Finder/Explorer) and the clipboard's change
+ * counter at the time — see `explorer_bridge.rs`. `stamp` is `null` where the platform has none. */
+export interface SystemClipboardFiles {
+  stamp: number | null;
+  paths: string[];
+}
+
+export const systemClipboardFiles = () => invoke<SystemClipboardFiles>("system_clipboard_files");
+
+/** The system clipboard's change counter alone, recorded by the explorer's own Copy. */
+export const systemClipboardStamp = () => invoke<number | null>("system_clipboard_stamp");
+
+/** Which other window of the app is under the pointer, and where in its page (CSS pixels). */
+export interface WindowPoint {
+  label: string;
+  x: number;
+  y: number;
+}
+
+export const windowUnderCursor = () => invoke<WindowPoint | null>("window_under_cursor");
 
 /** One line of a generated tree. See `fsops::dir_tree`. */
 export interface TreeRow {

@@ -6859,6 +6859,7 @@ pub async fn chat_with_repo(
     attachments: &[AiAttachment],
     json_schema: Option<&str>,
     extra_dirs: &[String],
+    effort: Option<&str>,
 ) -> Result<AiRun, String> {
     let read_only_tools = if read_only { engine.read_only_tools() } else { Vec::new() };
     chat_turn(
@@ -6874,9 +6875,9 @@ pub async fn chat_with_repo(
             system_prompt: None,
             auto_approve_edits: !read_only,
             stream_deltas,
-            // The AI panel's repo chat has no per-conversation control, so it leaves every CLI on
-            // its own configured default rather than inventing a level for it.
-            effort: None,
+            // The panel composer's dial; `None` leaves every CLI on its own configured default
+            // rather than inventing a level for it.
+            effort,
             attachments,
             read_only,
             mcp_block,

@@ -698,10 +698,11 @@ async fn pr_review(host: &AppHost, args: &Value, cancel: CancellationToken) -> R
                 provider.clone(),
                 model.clone(),
                 None,
+                None,
             )
             .await
         } else {
-            ado_cmd::review_pull_request(host.app.clone(), db(host), project_id.clone(), pr_id, job_id.clone(), level.clone(), force, provider.clone(), model.clone(), None)
+            ado_cmd::review_pull_request(host.app.clone(), db(host), project_id.clone(), pr_id, job_id.clone(), level.clone(), force, provider.clone(), model.clone(), None, None)
                 .await
         }
     };

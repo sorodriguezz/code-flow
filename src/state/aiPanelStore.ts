@@ -59,7 +59,18 @@ export type PanelTab =
     }
   | { kind: "pr"; key: string; projectId: string; prId: number; pr: PullRequestSummary }
   | { kind: "prLink"; key: string; session: LinkPrSession }
-  | { kind: "analysis"; key: string; projectId: string; jobId: string | null };
+  | { kind: "analysis"; key: string; projectId: string; jobId: string | null }
+  | {
+      /** A chat with every repository of the workspace (`workspaceChatStore`). */
+      kind: "wsChat";
+      key: string;
+      workspaceId: string;
+      conversationId: string;
+      /** Nobody has written in it yet — the row is created by its first question. */
+      fresh?: boolean;
+      /** The chain it was opened to carry on, handed to the row when it is created. */
+      focusChainId?: string;
+    };
 
 /** Something to put on screen. `finding` opens that finding in the document it belongs to. */
 export type PanelTarget =
@@ -67,7 +78,8 @@ export type PanelTarget =
   | { kind: "chat"; projectId: string; conversationId?: string | null }
   | { kind: "pr"; projectId: string; pr: PullRequestSummary; finding?: string | null }
   | { kind: "prLink"; session: LinkPrSession; finding?: string | null }
-  | { kind: "analysis"; projectId: string; jobId?: string | null; finding?: string | null };
+  | { kind: "analysis"; projectId: string; jobId?: string | null; finding?: string | null }
+  | { kind: "wsChat"; workspaceId: string; conversationId?: string | null; focusChainId?: string | null };
 
 export type DocSegment = "findings" | "comments" | "summary";
 
@@ -117,6 +129,7 @@ export const chatTabKey = (conversationId: string) => `chat:${conversationId}`;
 export const prTabKey = (projectId: string, prId: number) => `pr:${projectId}:${prId}`;
 export const prLinkTabKey = (url: string) => `prlink:${url}`;
 export const analysisTabKey = (projectId: string) => `analysis:${projectId}`;
+export const wsChatTabKey = (conversationId: string) => `wschat:${conversationId}`;
 
 /** The tab key of a pull request, whichever way it is reached. */
 export function prTargetTabKey(target: PrTarget, prId: number): string {
@@ -133,11 +146,12 @@ export function workspaceForTarget(target: PanelTarget): string {
   const workspaces = useWorkspaceStore.getState();
   if (target.kind === "inbox") return target.workspaceId ?? workspaces.activeWorkspaceId ?? NO_WORKSPACE;
   if (target.kind === "prLink") return target.session.workspaceId;
+  if (target.kind === "wsChat") return target.workspaceId;
   return workspaces.workspaceOfProject(target.projectId) ?? workspaces.activeWorkspaceId ?? NO_WORKSPACE;
 }
 
 function projectOf(tab: PanelTab): string | null {
-  return tab.kind === "prLink" ? null : tab.projectId;
+  return tab.kind === "prLink" || tab.kind === "wsChat" ? null : tab.projectId;
 }
 
 interface PersistedWorkspace {
@@ -205,6 +219,8 @@ function isTab(value: unknown): value is PanelTab {
     }
     case "analysis":
       return typeof tab.projectId === "string";
+    case "wsChat":
+      return typeof tab.workspaceId === "string" && typeof tab.conversationId === "string";
     default:
       return false;
   }
@@ -235,7 +251,7 @@ function persistWorkspace(workspaceId: string): void {
     const payload: PersistedWorkspace = {
       // A brand-new chat nobody wrote in is not worth restoring: it has nothing but a blank page.
       tabs: (s.tabsByWorkspace[workspaceId] ?? []).filter(
-        (tab) => !(tab.kind === "chat" && tab.fresh && !s.drafts[tab.key]),
+        (tab) => !((tab.kind === "chat" || tab.kind === "wsChat") && tab.fresh && !s.drafts[tab.key]),
       ),
       active: s.activeByWorkspace[workspaceId] ?? INBOX_KEY,
       unread,
@@ -352,11 +368,28 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
       tab = { kind: "pr", key: prTabKey(target.projectId, target.pr.id), projectId: target.projectId, prId: target.pr.id, pr: target.pr };
     } else if (target.kind === "prLink") {
       tab = { kind: "prLink", key: prLinkTabKey(target.session.url), session: target.session };
+    } else if (target.kind === "wsChat") {
+      // "New" lands on the blank one this workspace already has — unless it is opened for a chain,
+      // which is a conversation of its own from the first word.
+      const reusable =
+        target.conversationId || target.focusChainId
+          ? undefined
+          : existing.find((t) => t.kind === "wsChat" && t.fresh && !t.focusChainId);
+      const conversationId =
+        target.conversationId ?? (reusable?.kind === "wsChat" ? reusable.conversationId : crypto.randomUUID());
+      tab = {
+        kind: "wsChat",
+        key: wsChatTabKey(conversationId),
+        workspaceId,
+        conversationId,
+        fresh: target.conversationId ? undefined : true,
+        focusChainId: target.focusChainId ?? undefined,
+      };
     } else {
       tab = { kind: "analysis", key: analysisTabKey(target.projectId), projectId: target.projectId, jobId: target.jobId ?? null };
     }
 
-    const finding = target.kind === "chat" ? null : (target.finding ?? null);
+    const finding = target.kind === "chat" || target.kind === "wsChat" ? null : (target.finding ?? null);
     set((s) => {
       const tabs = s.tabsByWorkspace[workspaceId] ?? [];
       const at = tabs.findIndex((t) => t.key === tab.key);
@@ -370,7 +403,7 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
           if (t.kind === "analysis" && tab.kind === "analysis") {
             return target.kind === "analysis" && target.jobId !== undefined ? { ...t, jobId: tab.jobId } : t;
           }
-          if (t.kind === "chat") return t;
+          if (t.kind === "chat" || t.kind === "wsChat") return t;
           return tab;
         });
       } else {
@@ -431,7 +464,7 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
         // How a document was being read goes with it. Drafts stay: they are keyed by what they
         // belong to, so reopening the conversation from the Inbox brings its unsent text back.
         view: omit(s.view, key),
-        drafts: closed.kind === "chat" && closed.fresh ? omit(s.drafts, key) : s.drafts,
+        drafts: (closed.kind === "chat" || closed.kind === "wsChat") && closed.fresh ? omit(s.drafts, key) : s.drafts,
       };
     });
     persistWorkspace(ws);
@@ -463,9 +496,11 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
     set((s) => {
       const tabsByWorkspace = { ...s.tabsByWorkspace };
       for (const [ws, tabs] of Object.entries(s.tabsByWorkspace)) {
-        if (!tabs.some((t) => t.key === key && t.kind === "chat" && t.fresh)) continue;
+        if (!tabs.some((t) => t.key === key && (t.kind === "chat" || t.kind === "wsChat") && t.fresh)) continue;
         owner = ws;
-        tabsByWorkspace[ws] = tabs.map((t) => (t.key === key && t.kind === "chat" ? { ...t, fresh: undefined } : t));
+        tabsByWorkspace[ws] = tabs.map((t) =>
+          t.key === key && (t.kind === "chat" || t.kind === "wsChat") ? { ...t, fresh: undefined } : t,
+        );
       }
       return owner ? { tabsByWorkspace } : s;
     });

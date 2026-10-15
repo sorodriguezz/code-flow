@@ -509,6 +509,39 @@ export async function tsImplementations(
 }
 
 /**
+ * Where the symbol at `position` is declared, as repo-relative places — what the implementation
+ * lenses resolve an `extends`/`implements` name with. `null` when the server does not hold the file.
+ */
+export async function tsDefinitions(
+  model: MonacoEditorNS.ITextModel,
+  position: Position,
+): Promise<{ path: string; range: IRange }[] | null> {
+  const file = fileOf(model);
+  if (!file || !running()) return null;
+  const found = await tsRequest<TsDefinitionInfo>("definitionAndBoundSpan", {
+    file,
+    line: position.lineNumber,
+    offset: position.column,
+  }).catch(() => null);
+  return (found?.definitions ?? []).flatMap((span) => {
+    const path = tsRelPath(span.file);
+    return path
+      ? [
+          {
+            path,
+            range: {
+              startLineNumber: span.start.line,
+              startColumn: span.start.offset,
+              endLineNumber: span.end.line,
+              endColumn: span.end.offset,
+            },
+          },
+        ]
+      : [];
+  });
+}
+
+/**
  * Which inlay hints the compiler computes — handed to `configure` with the rest of the preferences,
  * since `provideInlayHints` takes a span and reads what to draw from there.
  *

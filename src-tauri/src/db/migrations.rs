@@ -1992,6 +1992,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_move_to_chat_conversations(conn)?;
     add_context_resets(conn)?;
     add_continued_from_to_chat_conversations(conn)?;
+    add_workspace_scope_to_chat_conversations(conn)?;
     add_hybrid_tables(conn)?;
     add_kind_to_chain_templates(conn)?;
     add_flow_tables(conn)?;
@@ -2803,6 +2804,37 @@ fn add_continued_from_to_chat_conversations(conn: &Connection) -> rusqlite::Resu
     if table_exists(conn, "chat_conversations")? && !has_column(conn, "chat_conversations", "continued_from")? {
         conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN continued_from TEXT NOT NULL DEFAULT '';")?;
     }
+    Ok(())
+}
+
+/// The assistant panel's **workspace chat**: a `chat_conversations` row that talks to every
+/// repository of one workspace at once (see `crate::workspace_chat`).
+///
+/// - `workspace_scope` = 1 marks it. The chat workspace's flat list and its search skip these rows —
+///   they live in the panel of the workspace they belong to, and nowhere else.
+/// - `agent_id` is the SDD/Harness agent (`workspace_agents.id`) answering it, `''` for none: its
+///   provider, model, account and prompt are read live at each turn.
+/// - `focus_chain_id` is the chain (story run, hybrid run, plain chain) it was opened to carry on,
+///   `''` for none: its full brief is handed over once per engine session.
+///
+/// Defaults are what every row that existed before this was: an ordinary chat-workspace thread.
+fn add_workspace_scope_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "chat_conversations")? {
+        return Ok(());
+    }
+    for (column, ddl) in [
+        ("workspace_scope", "ALTER TABLE chat_conversations ADD COLUMN workspace_scope INTEGER NOT NULL DEFAULT 0;"),
+        ("agent_id", "ALTER TABLE chat_conversations ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';"),
+        ("focus_chain_id", "ALTER TABLE chat_conversations ADD COLUMN focus_chain_id TEXT NOT NULL DEFAULT '';"),
+    ] {
+        if !has_column(conn, "chat_conversations", column)? {
+            conn.execute_batch(ddl)?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_chat_conversations_workspace_scope
+            ON chat_conversations(workspace_id, workspace_scope, updated_at DESC);",
+    )?;
     Ok(())
 }
 
