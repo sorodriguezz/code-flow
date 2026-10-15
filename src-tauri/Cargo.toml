@@ -23,7 +23,7 @@ name = "codeflow_lib"
 #
 # They are not free extras. The 769 dependencies are built once as rlibs and shared either way —
 # that part is unchanged — but each additional crate type is another *link product*, so each adds
-# its own link, and under `lto = "thin"` below its own LTO pass, on top of the one `main.rs`
+# its own link (and, back when the profile below was `lto = "thin"`, its own LTO pass), on top of the one `main.rs`
 # actually needs. The staticlib is the expensive one by far: a ~1 GB archive written out and read
 # back on every build. The cdylib exports nothing, so the linker discards almost all of it.
 #
@@ -60,23 +60,28 @@ tauri = { version = "2", features = ["test"] }
 # point is that agent runs and terminals keep living in the tray after the window closes, means
 # silently losing the user's background work.
 [profile.release]
-# `thin`, not `fat`, and no `codegen-units = 1`. Both of those were tried on v1.14.13 and took the
-# Windows release job past 29 minutes on their own.
+# No cross-crate LTO, and measured rather than guessed (CI, 2026-10-15, `ci/lto-timing`: release
+# profile, dependencies restored from the Release workflow's own `rust-cache`, then `lib.rs`
+# touched and rebuilt — exactly what a release pays when only the app's code changed):
 #
-# The reason is the shape of this dependency graph rather than anything about the app: 757 crates,
-# several of which build C (rusqlite ships SQLite, git2 ships libgit2), plus reqwest+rustls,
-# tonic/prost, mongodb, tiberius, tokio-postgres and russh-sftp. `codegen-units = 1` removes the
-# parallelism *within* every one of those crates, and `lto = "fat"` is a single-threaded
-# whole-program pass over the lot at link time — a pass that depends on the final binary, so
-# `rust-cache` can never restore it and every release pays it again from scratch.
+#                     lto = "thin"   lto = false
+#   windows-latest    22m42s         13m38s
+#   macos-latest      22m11s         17m22s
 #
-# `thin` keeps the part that actually matters here (cross-crate inlining) while running in
-# parallel and incrementally. The measured-in-anger difference between thin and fat on a graph
-# like this one is small; the difference in build time is not.
+# The reason is where the work happens. Under cross-crate LTO Cargo builds every dependency as
+# bitcode only (`-C linker-plugin-lto`), so the machine code for all ~770 of them is generated in
+# the final link of `codeflow` — on every release, from scratch, because that link depends on the
+# app's own code and `rust-cache` can never restore it. With `lto = false` each dependency is
+# compiled to machine code once, cached, and a release only compiles and links `codeflow` itself.
+# (The default for `false` is still a thin LTO *within* each crate, so this is not "no LTO".)
+#
+# The binary came out no larger (Windows: 160.5 MB against 163.3 MB, almost all of it the embedded
+# frontend). History: `fat` and `codegen-units = 1` were tried on v1.14.13 and took the Windows job
+# past 29 minutes on their own, for the same reason in a stronger form.
 #
 # Deliberately NOT `panic = "abort"`: there are places that recover from a poisoned mutex (see
 # `terminal.rs`) and one that catches a panic while flushing, and all of them need unwinding.
-lto = "thin"
+lto = false
 strip = "symbols"
 
 [dependencies]
@@ -570,4 +575,19 @@ git2 = { version = "0.19", features = ["vendored-openssl"] }
 opt-level = 3
 
 [profile.dev.package.rquickjs-core]
+opt-level = 3
+
+# `tauri::generate_context!` brotli-compresses the whole frontend (~115 MB of `dist/`, draw.io is 61
+# of it) at quality 9 while expanding, inside the compile of `codeflow`, on every release. A proc
+# macro's dependencies are build dependencies, and those are unoptimised in a release build
+# (`build-override` defaults to opt-level 0) — measured on this `dist/`: 36.6 s at opt-level 0 against
+# 7.1 s optimised, on an M-series laptop; a CI runner's core is slower. A package override wins over
+# `build-override`, and these are cached dependencies, so it costs nothing per release.
+[profile.release.package.brotli]
+opt-level = 3
+
+[profile.release.package.alloc-no-stdlib]
+opt-level = 3
+
+[profile.release.package.alloc-stdlib]
 opt-level = 3
