@@ -309,6 +309,14 @@ jobs:
     # that would have made the retry warm was never written.
     timeout-minutes: 90
     steps:
+      # Defender scans every file the build reads and writes, and a release touches tens of
+      # thousands under `target/`. v2.3.33's Windows leg spent 13 minutes in `rust-cache`'s post step
+      # just packing `target/` into a tar (the upload itself took 7 seconds) — the same cache took
+      # 30 s on macOS. The runner is thrown away after the job, so nothing outlives this.
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
