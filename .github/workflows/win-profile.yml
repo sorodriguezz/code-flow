@@ -1,0 +1,71 @@
+name: Compile profile (temporary)
+
+# Temporary, lives only on `ci/win-profile`. Where the release compile of `codeflow` spends its
+# time: `-Z time-passes` on the lib and on the bin (link), dependencies from the Release cache.
+on:
+  push:
+    branches: [ci/win-profile]
+
+jobs:
+  profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: release
+          save-if: false
+
+      - run: mkdir -p dist && echo '<!doctype html><title>t</title>' > dist/index.html
+
+      - name: Machine
+        run: |
+          nproc 2>/dev/null || sysctl -n hw.ncpu
+          (wmic cpu get name 2>/dev/null || sysctl -n machdep.cpu.brand_string) | tr -s ' \r\n' ' '
+
+      - name: Lib with time-passes
+        working-directory: src-tauri
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: |
+          t0=$(date +%s)
+          cargo rustc --release --locked --lib -- -Z time-passes 2> ../lib-passes.txt || { tail -50 ../lib-passes.txt; exit 1; }
+          echo "lib: $(( $(date +%s) - t0 ))s"
+
+      - name: Bin with time-passes (link)
+        working-directory: src-tauri
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: |
+          t0=$(date +%s)
+          cargo rustc --release --locked --bin codeflow -- -Z time-passes 2> ../bin-passes.txt || { tail -50 ../bin-passes.txt; exit 1; }
+          echo "bin: $(( $(date +%s) - t0 ))s"
+
+      - name: Top passes
+        run: |
+          for f in lib-passes.txt bin-passes.txt; do
+            echo "== $f"
+            grep -E "^time:" $f | sort -t'(' -k1 -r | awk '{print}' | sort -k2 -n -r | head -25
+            grep -E "Compiling|Finished" $f | tail -3
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: passes-${{ matrix.platform }}
+          path: "*-passes.txt"
