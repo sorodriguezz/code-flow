@@ -56,6 +56,11 @@ pub fn samples_to_ms(samples: usize) -> i64 {
 }
 
 /// Root mean square of a block — the level the waveform draws, and the "is anybody there" test.
+/// The loudest sample, as a fraction of full scale — 1.0 is clipping.
+pub fn peak(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0f32, |most, s| most.max(s.abs()))
+}
+
 pub fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;

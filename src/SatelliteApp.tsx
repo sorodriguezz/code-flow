@@ -227,6 +227,17 @@ function AppWindow({ refId }: { refId: string }) {
     });
   }, [refId]);
 
+  /** «Tomar notas» on a call the main window noticed, when this is *the* Notes window. */
+  useEffect(() => {
+    if (refId !== "notes") return;
+    return onWindowMessage((message) => {
+      if (message.kind !== "meeting-take-notes" || message.to !== WINDOW.label) return;
+      void import("./components/notes/meetings/MeetingSuggestion")
+        .then(({ takeNotesHere }) => takeNotesHere(message.app))
+        .catch((e: unknown) => pushErrorToast(String(e)));
+    });
+  }, [refId]);
+
   /** A note sent from a repository's Markdown file, when this is *the* Notes window — the same
    *  arrangement as the diagram above. See `lib/notesBridge.ts`. */
   useEffect(() => {

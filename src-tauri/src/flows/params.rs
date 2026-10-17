@@ -2365,6 +2365,15 @@ const DOCX: &[ParamSpec] = &[
     EACH,
 ];
 
+/// «Convertir a Markdown» (anydoc): any document, page, text or image as Markdown.
+const TO_MARKDOWN: &[ParamSpec] = &[
+    p("path", file("{{ $json.path }}"), "\"\""),
+    p("scanned", select(&["scanOcr", "scanFail"]), "\"scanOcr\"").literal(),
+    p("ocrLanguages", text("es-ES, en-US"), "\"\"").when("scanned", &["scanOcr"]),
+    p("savePath", file_to_write("~/Documentos/salida.md", &["md"]), "\"\""),
+    EACH,
+];
+
 /// «Calendario .ics».
 const ICS: &[ParamSpec] = &[
     p("icsOp", select(&["icsRead", "icsCreate"]), "\"icsRead\"").literal(),
@@ -2636,6 +2645,7 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "files.media" => MEDIA,
         "files.docx" => DOCX,
         "files.ics" => ICS,
+        "files.markdown" => TO_MARKDOWN,
         "logic.businessHours" => BUSINESS_HOURS,
         "logic.assert" => ASSERT,
         "transform.validate" => VALIDATE,

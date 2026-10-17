@@ -320,7 +320,11 @@ pub(crate) fn load_ai_config_in(
     // The meetings row follows the Notes row where it says nothing — provider and model (`route_for`).
     let (provider, pinned_by) = route_for(conn, task)?;
     let account = ai_accounts::resolve(conn, &provider, Some(task.key()), workspace_id, ai_accounts::Choice::Auto);
-    let engine = ai::engine_as(&provider, account.clone());
+    // A task with no prompt of its own still takes instructions: «Tareas y prompts» → «Instrucciones»,
+    // stored per task and appended to every run of it (`ai::run`). The key mirrors
+    // `taskInstructionsKey` in `src/lib/aiPrompts.ts`.
+    let instructions = queries::get_setting(conn, &format!("task_instructions_{}", task.key())).map_err(|e| e.to_string())?;
+    let engine = ai::engine_for_task(&provider, account.clone(), instructions);
 
     let get = |suffix: &str| -> Result<Option<String>, String> {
         queries::get_setting(conn, &format!("{provider}_{suffix}")).map_err(|e| e.to_string())
@@ -1180,10 +1184,17 @@ pub async fn send_chat_message(
     };
     // Who else is working in this checkout right now — told to the engine, never stored. Read once,
     // at the start: a run that starts later is told about this one instead.
-    let engine_message = match ai::parallel_work_note(&presence.others()) {
+    let mut engine_message = match ai::parallel_work_note(&presence.others()) {
         Some(note) => format!("{engine_message}{note}"),
         None => engine_message,
     };
+    // A conversation, not a story's or a hybrid task's step: how long to answer, and how to ask the
+    // user something back — `ai::chat_turn_rules`.
+    if step.is_none() {
+        if let Ok(conn) = db.0.lock() {
+            engine_message.push_str(&ai::chat_turn_rules(&conn));
+        }
+    }
     // Claude Code denies, in `-p`, any tool nobody pre-approved, and `Skill` is the one that opens a
     // skill — so the panel's chat has it whatever the saved tool list says, as the free chat does.
     let mut tools = config.tools.clone();

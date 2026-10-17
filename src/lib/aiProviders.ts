@@ -92,7 +92,8 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     available: true,
     defaultBinary: "claude",
     usesToolAllowlist: true,
-    commitMessageModel: "claude-haiku-4-5-20251001",
+    // The newest Haiku; mirrors `COMMIT_MESSAGE_MODEL` in `src-tauri/src/claude.rs`.
+    commitMessageModel: "claude-haiku-5-5",
     // The only engine here that can type. `--include-partial-messages` on a `-p` run with
     // `--output-format stream-json --verbose` emits `content_block_delta` events carrying both
     // `text_delta` and `thinking_delta`, which is what the transcript and the reasoning block are

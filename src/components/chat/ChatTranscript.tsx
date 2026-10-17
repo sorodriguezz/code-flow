@@ -277,6 +277,7 @@ export function ChatTranscript({
                 revealing={message.id === session.revealingMessageId}
                 onSkipReveal={onSkipReveal}
                 onEditRequest={onEditRequest}
+                latest={index === session.messages.length - 1}
               />
               {/* The line the engine's memory starts at. Drawn between the turns it covers and the
                   ones sent verbatim, which is the only place it means anything — a band at the top
@@ -403,6 +404,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
   revealing,
   onSkipReveal,
   onEditRequest,
+  latest,
 }: {
   message: ConversationMessage;
   previous: ConversationMessage | undefined;
@@ -413,6 +415,8 @@ const TranscriptTurn = memo(function TranscriptTurn({
   revealing: boolean;
   onSkipReveal: () => void;
   onEditRequest: (turn: number, content: string) => void;
+  /** The last turn of the transcript: the only one whose questions can still be answered. */
+  latest: boolean;
 }) {
   const t = useT();
   const regenerate = useConversationStore((s) => s.regenerate);
@@ -470,8 +474,12 @@ const TranscriptTurn = memo(function TranscriptTurn({
         message.isError && sessionProvider
           ? (model: string) => void setEngine(conversationId, sessionProvider, model)
           : undefined,
+      onAnswer:
+        canAct && latest && message.role === "assistant"
+          ? (text: string) => useConversationStore.getState().submit(conversationId, text)
+          : undefined,
     }),
-    [canAct, message, conversationId, regenerate, branch, onEditRequest, setEngine, sessionProvider],
+    [canAct, latest, message, conversationId, regenerate, branch, onEditRequest, setEngine, sessionProvider],
   );
 
   const day = useMemo(() => dayDivider(bubble, previous && { role: previous.role, content: "", createdAt: previous.createdAt }, locale), [bubble, previous, locale]);

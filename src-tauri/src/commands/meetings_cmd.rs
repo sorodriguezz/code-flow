@@ -56,6 +56,9 @@ pub struct MeetingsState {
     current: Mutex<Option<(String, Arc<JobControl>)>>,
     install: Mutex<Option<CancellationToken>>,
     announced: Mutex<HashSet<String>>,
+    /// The meters shown before a meeting starts: the microphone, and the computer's audio for a call.
+    #[cfg(any(target_os = "macos", windows))]
+    monitor: Mutex<Vec<meetings::recorder::Monitor>>,
 }
 
 struct Active {
@@ -343,6 +346,16 @@ struct LevelEvent {
     meeting_id: String,
     channel: Channel,
     level: f32,
+    peak: f32,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MonitorEvent {
+    channel: Channel,
+    level: f32,
+    peak: f32,
+    error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -450,9 +463,12 @@ pub async fn meetings_start(
         let dir = meetings::meeting_dir(&meeting.id);
         let level_app = app.clone();
         let level_id = meeting.id.clone();
-        let on_level: Arc<dyn Fn(Channel, f32) + Send + Sync> = Arc::new(move |channel, level| {
-            let _ = level_app.emit(LEVEL_EVENT, LevelEvent { meeting_id: level_id.clone(), channel, level });
+        let on_level: meetings::recorder::OnLevel = Arc::new(move |channel, level, peak| {
+            let _ = level_app.emit(LEVEL_EVENT, LevelEvent { meeting_id: level_id.clone(), channel, level, peak });
         });
+        // The recording measures its inputs itself from here on.
+        state.monitor.lock().map_err(db_err)?.clear();
+        meetings::recorder::set_mic_gain(settings.mic_gain);
         let (live_tx, live_rx) = if mode.live() { let (tx, rx) = std::sync::mpsc::channel(); (Some(tx), Some(rx)) } else { (None, None) };
         let sources = meetings::recorder::Sources { mic_device: settings.device.clone(), system };
         let started = {
@@ -558,6 +574,64 @@ fn on_live(app: &AppHandle, meeting_id: &str, behind: &AtomicBool, event: live::
     }
 }
 
+/// Starts (`on`) or stops the meters shown before a meeting starts: the chosen microphone with its
+/// gain and, with `system`, the computer's audio (a call's other side), as `meetings:monitor` events.
+/// Asked again, it reopens what is asked — the meeting kind picked changed. Nothing to start while a
+/// meeting records — its own levels say the same.
+#[tauri::command]
+pub fn meetings_monitor(app: AppHandle, state: State<MeetingsState>, db: State<Db>, on: bool, system: Option<bool>) -> Result<(), String> {
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (app, state, db, on, system);
+        Ok(())
+    }
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        let mut slot = state.monitor.lock().map_err(db_err)?;
+        slot.clear();
+        if !on || state.active.lock().map_err(db_err)?.is_some() {
+            return Ok(());
+        }
+        let settings = meetings::load_settings(&*db.0.lock().map_err(db_err)?);
+        meetings::recorder::set_mic_gain(settings.mic_gain);
+        let mut channels = vec![(Channel::Mic, settings.device)];
+        if system.unwrap_or(false) {
+            channels.push((Channel::System, String::new()));
+        }
+        for (channel, device) in channels {
+            let app = app.clone();
+            slot.push(meetings::recorder::monitor(channel, device, move |heard| {
+                let event = match heard {
+                    Ok((level, peak)) => MonitorEvent { channel, level, peak, error: None },
+                    Err(error) => MonitorEvent { channel, level: 0.0, peak: 0.0, error: Some(error) },
+                };
+                let _ = app.emit("meetings:monitor", event);
+            }));
+        }
+        Ok(())
+    }
+}
+
+/// Silences the microphone in this app only (or lifts it): the meeting records silence on that
+/// channel, the device stays untouched. See `recorder::set_mic_muted`.
+#[tauri::command]
+pub fn meetings_set_mic_muted(muted: bool) {
+    #[cfg(any(target_os = "macos", windows))]
+    meetings::recorder::set_mic_muted(muted);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = muted;
+}
+
+/// Changes the microphone's gain at once — the meter's and the recording's. Saving it is the
+/// setting's (`meetings_mic_gain`).
+#[tauri::command]
+pub fn meetings_set_mic_gain(gain: f32) {
+    #[cfg(any(target_os = "macos", windows))]
+    meetings::recorder::set_mic_gain(gain);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = gain;
+}
+
 #[tauri::command]
 pub fn meetings_pause(app: AppHandle, state: State<MeetingsState>, meeting_id: String, paused: bool) -> Result<(), String> {
     let active = state.active.lock().map_err(db_err)?;
@@ -581,6 +655,8 @@ fn stop_active(active: Active) -> (i64, bool) {
     let elapsed = active.recording.elapsed_ms();
     #[cfg(not(any(target_os = "macos", windows)))]
     let elapsed = 0;
+    #[cfg(any(target_os = "macos", windows))]
+    meetings::recorder::set_mic_muted(false);
     #[cfg(any(target_os = "macos", windows))]
     if let Err(error) = active.recording.stop() {
         crate::applog::warn(&format!("meetings: stopping the recording: {error}"));

@@ -22,6 +22,7 @@ import {
   onMeetingDownload,
   onMeetingLag,
   onMeetingLevel,
+  onMeetingMonitor,
   onMeetingLine,
   onMeetingProgress,
   onMeetingState,
@@ -33,6 +34,7 @@ import {
   type MeetingMode,
   type MeetingsStatus,
   type ProgressEvent,
+  meetingsSetMicMuted,
 } from "../lib/tauri/meetingsCommands";
 import { dictationMicSettings } from "../lib/tauri/dictationCommands";
 import { watchSettings } from "../lib/settingsSync";
@@ -71,6 +73,7 @@ export const KEYS = {
   bench: "meetings_bench",
   vocabulary: "meetings_vocabulary",
   consent: "meetings_consent_seen",
+  micGain: "meetings_mic_gain",
 } as const;
 
 export interface MeetingSettings {
@@ -87,6 +90,8 @@ export interface MeetingSettings {
   vocabulary: string;
   bench: MeetingBench | null;
   consentSeen: boolean;
+  /** The microphone's gain, linear (1 = as the device hears it). */
+  micGain: number;
 }
 
 const DEFAULT_SETTINGS: MeetingSettings = {
@@ -102,16 +107,32 @@ const DEFAULT_SETTINGS: MeetingSettings = {
   vocabulary: "",
   bench: null,
   consentSeen: false,
+  micGain: 1,
 };
 
 /** How many levels each channel keeps for the waveform. */
 const LEVELS = 120;
+export interface MeterBlocks {
+  rms: number[];
+  peak: number[];
+}
+const EMPTY_METER: Record<"mic" | "system", MeterBlocks> = { mic: { rms: [], peak: [] }, system: { rms: [], peak: [] } };
+
+/** How many blocks a meter judges by: 2 s at the backend's 25 a second. */
+const METER = 50;
 
 interface MeetingsState {
   status: MeetingsStatus | null;
   settings: MeetingSettings;
   /** The recording's levels, newest last. */
   levels: { mic: number[]; system: number[] };
+  /** Each input's last blocks, recording or not (the meters before a meeting starts): RMS and peak. */
+  meter: Record<"mic" | "system", MeterBlocks>;
+  /** Why a meter's input did not open (`MIC_DENIED`, `MIC_NONE`, `SYSTEM_AUDIO_DENIED`…). */
+  meterError: Record<"mic" | "system", string | null>;
+  /** The microphone silenced in this app only (`meetings_set_mic_muted`) — lifted when a recording stops. */
+  micMuted: boolean;
+  setMicMuted: (muted: boolean) => void;
   lag: { ms: number; behind: boolean } | null;
   /** Meetings by note id — loaded when a note is opened. */
   byNote: Record<string, Meeting[]>;
@@ -191,6 +212,7 @@ function parseSettings(raw: Record<string, string>): MeetingSettings {
     vocabulary: raw[KEYS.vocabulary] ?? "",
     bench,
     consentSeen: raw[KEYS.consent] === "1",
+    micGain: Number.parseFloat(raw[KEYS.micGain] ?? "") || 1,
   };
 }
 
@@ -226,6 +248,13 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
   status: null,
   settings: DEFAULT_SETTINGS,
   levels: { mic: [], system: [] },
+  meter: EMPTY_METER,
+  meterError: { mic: null, system: null },
+  micMuted: false,
+  setMicMuted: (muted) => {
+    set({ micMuted: muted });
+    void meetingsSetMicMuted(muted).catch((error) => pushErrorToast(String(error)));
+  },
   lag: null,
   byNote: {},
   details: {},
@@ -342,7 +371,7 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
   stop: async (meetingId) => {
     try {
       const meeting = await meetingsStop(meetingId);
-      set((state) => ({ byNote: withMeeting(state.byNote, meeting), levels: { mic: [], system: [] }, lag: null }));
+      set((state) => ({ byNote: withMeeting(state.byNote, meeting), levels: { mic: [], system: [] }, meter: EMPTY_METER, micMuted: false, lag: null }));
       await get().refreshStatus();
     } catch (error) {
       pushErrorToast(String(error));
@@ -352,6 +381,7 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
   discard: async (meetingId) => {
     try {
       await meetingsDiscard(meetingId);
+      set({ micMuted: false });
       await get().refreshStatus();
     } catch (error) {
       pushErrorToast(String(error));
@@ -415,6 +445,10 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
     }),
 }));
 
+function pushMeter(meter: MeterBlocks, rms: number, peak: number): MeterBlocks {
+  return { rms: [...meter.rms, rms].slice(-METER), peak: [...meter.peak, peak].slice(-METER) };
+}
+
 let listening = false;
 
 /** Attaches the event listeners once per window. */
@@ -422,13 +456,20 @@ export function ensureMeetingEvents() {
   if (listening) return;
   listening = true;
   const store = useMeetingsStore;
-  void onMeetingLevel(({ meetingId, channel, level }) => {
+  void onMeetingLevel(({ meetingId, channel, level, peak }) => {
     if (store.getState().status?.recording?.meetingId !== meetingId) return;
     store.setState((state) => {
       const list = [...state.levels[channel], level];
       if (list.length > LEVELS) list.splice(0, list.length - LEVELS);
-      return { levels: { ...state.levels, [channel]: list } };
+      return { levels: { ...state.levels, [channel]: list }, meter: { ...state.meter, [channel]: pushMeter(state.meter[channel], level, peak) } };
     });
+  });
+  void onMeetingMonitor(({ channel, level, peak, error }) => {
+    if (store.getState().status?.recording) return;
+    store.setState((state) => ({
+      meterError: { ...state.meterError, [channel]: error },
+      meter: { ...state.meter, [channel]: error ? { rms: [], peak: [] } : pushMeter(state.meter[channel], level, peak) },
+    }));
   });
   void onMeetingLine(({ meetingId, line }) => {
     store.setState((state) => {
@@ -469,8 +510,17 @@ export function ensureMeetingEvents() {
       return;
     }
     void store.getState().refreshStatus();
-    // The detail is re-read when it is on screen (or about to be): a finished pass rewrites it.
-    if (store.getState().details[meetingId] || store.getState().byNote[noteId]) void store.getState().loadDetail(meetingId);
+    // A meeting this window has never seen — started in another one (an island of Notes) — over a
+    // note whose list it already holds: the list is read again, or the note keeps showing the one
+    // it read before the meeting existed until the app is restarted.
+    const known = store.getState().byNote[noteId];
+    if (known && !known.some((m) => m.id === meetingId)) {
+      void store.getState().loadNote(noteId);
+      store.setState((state) => (state.notesWith.has(noteId) ? {} : { notesWith: new Set([...state.notesWith, noteId]) }));
+    } else if (store.getState().details[meetingId] || known) {
+      // The detail is re-read when it is on screen (or about to be): a finished pass rewrites it.
+      void store.getState().loadDetail(meetingId);
+    }
     if (status === "ready" || status === "failed") {
       store.setState((state) => {
         const progress = { ...state.progress };

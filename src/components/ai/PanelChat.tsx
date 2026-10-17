@@ -25,6 +25,7 @@ import { exportMenuItems, exportRepoConversation } from "../chat/exportChat";
 import { ContextMenu } from "../common/ContextMenu";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
+import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
 import { EffortPicker } from "../chat/EffortPicker";
 import { useEffortSupported } from "../../lib/useEffortSupport";
 import { EMPTY_CHAT, engineFor, useChatStore, type ChatEngine, type ChatSkillPick } from "../../state/chatStore";
@@ -283,6 +284,12 @@ export function PanelChat({
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
+  /** What the card under a model's question sends: the answer, as the next message. */
+  const answerQuestion = (text: string) => {
+    useChatStore.getState().submit(projectId, conversationId, text, {});
+    useAiPanelStore.getState().markChatStarted(tabKey);
+    toBottom();
+  };
   // «Dictar»: stop-and-send runs the submit of the render that holds the transcript.
   const submitRef = useRef(submit);
   submitRef.current = submit;
@@ -450,7 +457,13 @@ export function PanelChat({
                 )}
                 <ChatMessageBubble
                   message={message}
-                  actions={message.isError ? { onPickModel: (next) => pickEngine(provider, next) } : undefined}
+                  actions={
+                    message.isError
+                      ? { onPickModel: (next) => pickEngine(provider, next) }
+                      : message.role === "assistant" && i === session.messages.length - 1 && !session.sending
+                        ? { onAnswer: answerQuestion }
+                        : undefined
+                  }
                   emptyText={
                     message.role === "assistant" && isCompactCommand(session.messages[i - 1])
                       ? t("chat.compactedReply")
@@ -596,6 +609,7 @@ export function PanelChat({
               supported={effortSupported}
               onPick={(level) => useChatStore.getState().setEffort(conversationId, level)}
             />
+            <AnswerLengthPicker compact />
             {/* The CLI's own MCP servers, switched for this repository. */}
             <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />
             {/* Absent, not disabled, for a model that cannot look at an image — the same rule as the

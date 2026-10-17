@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { AudioLines } from "lucide-react";
 import { Tooltip } from "../common/Tooltip";
 import { ensureMeetingEvents, useMeetingsStore } from "../../state/meetingsStore";
-import { useNotesStore } from "../../state/notesStore";
-import { useUiStore } from "../../state/uiStore";
+import { meetingsDetail } from "../../lib/tauri/meetingsCommands";
+import { revealNote } from "../../lib/notesBridge";
+import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 
 function clock(ms: number): string {
@@ -36,10 +37,11 @@ export function MeetingActivity() {
 
   if (!recording && !processing) return null;
 
-  const open = (noteId: string | null) => {
-    useUiStore.getState().setActiveView("notes");
-    if (noteId) void useNotesStore.getState().openNote(noteId);
-  };
+  // Wherever the Notes app is — its island when it has one — on the meeting's own workspace.
+  const open = (meetingId: string) =>
+    void meetingsDetail(meetingId)
+      .then(({ meeting }) => revealNote(meeting.workspaceId, meeting.noteId))
+      .catch((error: unknown) => pushErrorToast(String(error)));
 
   if (recording) {
     const elapsed = recording.paused ? recording.elapsedMs : recording.elapsedMs + Math.max(0, now - at);
@@ -47,7 +49,7 @@ export function MeetingActivity() {
       <Tooltip label={recording.paused ? t("meetings.bar.paused") : t("meetings.bar.recording")} description={t("meetings.bar.open")}>
         <button
           type="button"
-          onClick={() => open(recording.noteId)}
+          onClick={() => open(recording.meetingId)}
           className="flex h-[22px] items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         >
           <span className={`h-[7px] w-[7px] rounded-full bg-[var(--cf-danger)] ${recording.paused ? "opacity-40" : "animate-pulse"}`} aria-hidden />
@@ -61,7 +63,7 @@ export function MeetingActivity() {
     <Tooltip label={t("meetings.bar.processing")} description={queued > 0 ? t("meetings.bar.queued", { n: queued }) : undefined}>
       <button
         type="button"
-        onClick={() => open(null)}
+        onClick={() => processing && open(processing)}
         className="flex h-[22px] items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         <AudioLines size={13} className="text-[var(--cf-accent)]" />

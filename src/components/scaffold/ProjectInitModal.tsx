@@ -155,6 +155,8 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   const [sep, setSep] = useState("/");
   /** Every template's choices, kept as the user moves between templates. */
   const [optionsById, setOptionsById] = useState<Record<string, Options>>({});
+  /** The chosen release per template, by its exact version: a `next` and a `latest` can share a
+   *  line (`22.3.0-next.2` and `22.2.3` are both `22`), so the line cannot tell them apart. */
   const [lineById, setLineById] = useState<Record<string, string>>({});
   const [pm, setPm] = useState<PackageManager>("npm");
   const [spring, setSpring] = useState<SpringState | null>(null);
@@ -223,7 +225,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       .filter((line) => !template.versionFilter || template.versionFilter(line))
       .map((line) => (template.ltsLine && !line.channel && template.ltsLine(line.line) ? { ...line, channel: "lts" as const } : line));
   }, [versionLoad, template]);
-  const version = lines.find((line) => line.line === lineById[template.id]) ?? defaultLine(lines);
+  const version = lines.find((line) => line.version === lineById[template.id]) ?? defaultLine(lines);
   const enginesLoad = enginesKey ? versions[enginesKey] : undefined;
   const engines = enginesLoad?.data?.[0] ?? null;
 
@@ -358,9 +360,9 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
     if (problem === "version" && found && template.versions && req.tool !== "git") {
       const dialect = TOOLS[req.tool].dialect;
       const fits = lines.find((line) => line.channel !== "next" && line.requires && satisfies(found, line.requires, dialect));
-      if (fits && fits.line !== version?.line)
+      if (fits && fits.version !== version?.version)
         return (
-          <button type="button" onClick={() => setLineById((all) => ({ ...all, [template.id]: fits.line }))} className="text-[var(--cf-accent)] hover:underline">
+          <button type="button" onClick={() => setLineById((all) => ({ ...all, [template.id]: fits.version }))} className="text-[var(--cf-accent)] hover:underline">
             {t("scaffold.hint.useLine", { name: template.name, version: fits.version })}
           </button>
         );
@@ -681,7 +683,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   ];
 
   const versionOptions = lines.map((line) => ({
-    value: line.line,
+    value: line.version,
     label: `${line.version}${
       line.channel === "latest" ? ` · ${t("scaffold.channel.latest")}` : line.channel === "lts" ? " · LTS" : line.channel === "next" ? " · next" : ""
     }${line.eol ? ` · ${t("scaffold.eol")}` : ""}`,
@@ -783,7 +785,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                       <div className="w-[230px] shrink-0">
                         <Select
                           size="sm"
-                          value={version?.line ?? ""}
+                          value={version?.version ?? ""}
                           onChange={(line) => setLineById((all) => ({ ...all, [template.id]: line }))}
                           ariaLabel={t("scaffold.version")}
                           disabled={versionLoad?.status !== "ready" || lines.length === 0}

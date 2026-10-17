@@ -774,6 +774,7 @@ pub async fn dispatch(
                 app.clone(),
                 arg(args, "repoPath")?,
                 opt(args, "setUpstream")?.unwrap_or(false),
+                opt(args, "firstPublish")?,
             )
             .await?,
             Invalidate::Repo,

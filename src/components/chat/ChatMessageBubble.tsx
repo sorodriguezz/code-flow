@@ -20,6 +20,8 @@ import { LazyTrace } from "./LazyTrace";
 import { CostChip, formatResponseTime, parseStamp, useCopy, useLocale } from "./chatChrome";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { fenceLabelOf, highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
+import { splitQuestions } from "../../lib/chatQuestions";
+import { QuestionCard } from "./QuestionCard";
 import { bodyForBlock, fileNameForBlock } from "../../lib/codeFileName";
 import { OutputBar } from "./OutputBar";
 import type { ChatOutput } from "../../lib/tauri/chatCommands";
@@ -85,6 +87,9 @@ export interface ChatBubbleActions {
    *  have no conversation to re-point — see `AiErrorBanner`, which renders the ids as plain text
    *  when nothing can apply them. */
   onPickModel?: (model: string) => void;
+  /** Answers the questions this turn ends with (`lib/chatQuestions`) — sent as the next message.
+   *  Only on the latest answer: an earlier one's card just shows what was asked. */
+  onAnswer?: (text: string) => void;
 }
 
 /**
@@ -195,7 +200,12 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   );
   const sentFiles = message.role === "user" ? (message.attachments ?? noted?.files ?? []) : [];
   const copyText = noted?.text ?? message.content;
-  const body = streaming ? streamText : copyText;
+  // The questions a finished answer ends with, drawn as a card under it instead of as code.
+  const asked = useMemo(
+    () => (message.role === "assistant" && !message.isError && !streaming ? splitQuestions(copyText) : null),
+    [message.role, message.isError, streaming, copyText],
+  );
+  const body = streaming ? streamText : (asked?.text ?? copyText);
 
   // An answer with no text at all is what a CLI command replies with when it just *does* something —
   // Claude's `/clear` and `/compact` answer with an empty result. Said as done rather than drawn as a
@@ -458,6 +468,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
           body
         )}
       </div>
+      {asked && asked.questions.length > 0 && <QuestionCard questions={asked.questions} onAnswer={actions?.onAnswer} />}
       {/* The files the turn read or changed — its sources — then the files it wrote. Both are part
           of what this turn said; the row after them is what you *do* about it. */}
       {trace && trace.length > 0 && <RunFileChips lines={trace} density={variant} />}

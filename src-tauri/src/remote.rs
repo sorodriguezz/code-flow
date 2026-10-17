@@ -555,9 +555,19 @@ pub async fn push_branch(app: AppHandle, repo_path: String, branch: String) -> R
     run_streamed(&app, "push", Some(&repo_path), &["push", "-u", &remote, &branch]).await
 }
 
-pub async fn push(app: AppHandle, repo_path: String, set_upstream: bool) -> Result<(), String> {
+/// `first_publish` is the push right after a repository was connected to its first remote (the
+/// publish flow added it a moment ago): the branch lock does not apply, because a lock protects a
+/// branch other people share and a repository with no remote until now has nothing shared yet.
+pub async fn push(app: AppHandle, repo_path: String, set_upstream: bool, first_publish: bool) -> Result<(), String> {
+    // No remote at all is said first — before the lock — so publishing a new repository's `main`
+    // reaches the publish flow instead of being refused as a locked branch.
+    if set_upstream {
+        crate::git::remotes::default_remote(&repo_path)?;
+    }
     // `git push` publishes whatever branch is checked out, so the lock is checked against HEAD.
-    crate::git::branch::guard_head_unlocked_at(&repo_path)?;
+    if !first_publish {
+        crate::git::branch::guard_head_unlocked_at(&repo_path)?;
+    }
     if set_upstream {
         let branch = {
             let repo = crate::git::repo::open(&repo_path)?;
@@ -573,6 +583,26 @@ pub async fn push(app: AppHandle, repo_path: String, set_upstream: bool) -> Resu
     } else {
         run_streamed(&app, "push", Some(&repo_path), &["push"]).await
     }
+}
+
+/// The first push of a repository just created by the publish flow (`commands::publish_cmd`): the
+/// current branch to `origin` with `-u`, authenticated by `header` for URLs under `prefix`.
+///
+/// The header rides as an `http.<prefix>.extraHeader` handed to this one process through
+/// `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n` — never on the command line (where `ps` would show it) and
+/// never in the repository's config or its remote URL. A machine with no credential helper can
+/// still publish; later pushes use whatever the user's git normally uses, like every other remote.
+///
+/// No branch lock here: this is a repository's first publish — see [`push`]'s `first_publish`.
+pub async fn publish_push_with_header(app: AppHandle, repo_path: String, prefix: String, header: String) -> Result<(), String> {
+    let branch = {
+        let repo = crate::git::repo::open(&repo_path)?;
+        let head = repo.head().map_err(|e| e.message().to_string())?;
+        head.shorthand().ok_or("cannot push -u from a detached HEAD")?.to_string()
+    };
+    let key = format!("http.{prefix}.extraHeader");
+    let env = [("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", key.as_str()), ("GIT_CONFIG_VALUE_0", header.as_str())];
+    run_git(&app, "push", Some(&repo_path), &["push", "-u", "origin", &branch], &env).await
 }
 
 /// The force push this app offers — only ever *with lease*, never a bare `--force`.

@@ -297,6 +297,40 @@ pub async fn get_authenticated_user(host: &str, token: &str) -> Result<String, S
     Ok(user.login)
 }
 
+#[derive(Deserialize)]
+struct RawOrg {
+    login: String,
+}
+
+/// Who a repository can be published under: the signed-in user first, then the organisations the
+/// token sees (`read:org`; a token without it simply lists none).
+pub async fn publish_owners(host: &str, token: &str) -> Result<Vec<String>, String> {
+    let mut owners = vec![get_authenticated_user(host, token).await?];
+    let url = format!("{}/user/orgs?per_page=100", api_root(host));
+    if let Ok(orgs) = get_json::<Vec<RawOrg>>(&url, token).await {
+        owners.extend(orgs.into_iter().map(|org| org.login));
+    }
+    Ok(owners)
+}
+
+#[derive(Deserialize, serde::Serialize)]
+pub struct CreatedRepo {
+    pub clone_url: String,
+    pub html_url: String,
+    pub full_name: String,
+}
+
+/// Creates an empty repository — under the user (`owner == login`) or one of their organisations —
+/// to publish a local one into: no README, no licence, nothing a first push would collide with.
+pub async fn create_repository(host: &str, token: &str, owner: &str, login: &str, name: &str, private: bool) -> Result<CreatedRepo, String> {
+    let url = if owner.is_empty() || owner.eq_ignore_ascii_case(login) {
+        format!("{}/user/repos", api_root(host))
+    } else {
+        format!("{}/orgs/{owner}/repos", api_root(host))
+    };
+    post_json_returning(&url, token, &serde_json::json!({ "name": name, "private": private, "auto_init": false })).await
+}
+
 /// The open pull requests of `owner/repo` whose review is asked of the signed-in user — GitHub's own
 /// `review-requested:@me` search, one call for the whole repository rather than one per pull request.
 pub async fn review_requested_numbers(host: &str, owner: &str, repo: &str, token: &str) -> Result<Vec<i64>, String> {

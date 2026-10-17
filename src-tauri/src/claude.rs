@@ -35,8 +35,10 @@ use crate::ai::{
 };
 
 /// Commit-message generation always runs on Haiku regardless of the user's configured review
-/// model — it's a small, mechanical task that doesn't need a bigger model.
-const COMMIT_MESSAGE_MODEL: &str = "claude-haiku-4-5-20251001";
+/// model — it's a small, mechanical task that doesn't need a bigger model. The newest Haiku: this
+/// sat on 4.5 after 5.5 shipped (2026-10-07), so an inheriting commit row ran an older Haiku than a
+/// base model of Haiku 5.5. Keep it in step with `commitMessageModel` in `src/lib/aiProviders.ts`.
+const COMMIT_MESSAGE_MODEL: &str = "claude-haiku-5-5";
 
 /// Single-line, ASCII, shim-safe stand-in for an ask this engine can't put on the command line as
 /// given — mirrors `codex.rs`'s `POINTER`. The real ask rides on stdin instead, ahead of the usual

@@ -73,6 +73,8 @@ pub mod key {
     pub const DEVICE: &str = "dictation_device";
     /// Words whisper should spell right — names, products, acronyms — one prompt for every meeting.
     pub const VOCABULARY: &str = "meetings_vocabulary";
+    /// The microphone's gain, linear (`1` = as the device hears it).
+    pub const MIC_GAIN: &str = "meetings_mic_gain";
 }
 
 /// The keychain entry holding the cloud transcription API's key.
@@ -133,6 +135,7 @@ pub struct Settings {
     pub detect: bool,
     pub device: String,
     pub vocabulary: String,
+    pub mic_gain: f32,
 }
 
 pub fn load_settings(conn: &Connection) -> Settings {
@@ -148,6 +151,7 @@ pub fn load_settings(conn: &Connection) -> Settings {
         detect: get(key::DETECT).trim() != "0",
         device: get(key::DEVICE),
         vocabulary: get(key::VOCABULARY),
+        mic_gain: get(key::MIC_GAIN).trim().parse().unwrap_or(1.0),
     }
 }
 

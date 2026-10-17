@@ -22,7 +22,7 @@ const REFRESH_MS = 3000;
  * would — the whole tree, gracefully. Any other row can be freed by ending the process holding it,
  * which is the answer to "address already in use" when the culprit is an orphan from a crash.
  */
-export function PortsPanel({ onOpenService }: { onOpenService: (id: string) => void }) {
+export function PortsPanel({ onOpenService, onClose }: { onOpenService: (id: string) => void; /** Puts the ports away — and with them the reading every few seconds. */ onClose?: () => void }) {
   const t = useT();
   const stopService = useServicesStore((s) => s.stop);
   const [rows, setRows] = useState<ListeningPort[] | null>(null);
@@ -127,6 +127,17 @@ export function PortsPanel({ onOpenService }: { onOpenService: (id: string) => v
             <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
           </button>
         </Tooltip>
+        {onClose && (
+          <Tooltip label={t("services.ports.close")}>
+            <button
+              onClick={onClose}
+              aria-label={t("services.ports.close")}
+              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            >
+              <X size={13} />
+            </button>
+          </Tooltip>
+        )}
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">

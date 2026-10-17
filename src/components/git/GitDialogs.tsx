@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Download, ScrollText, UserRound } from "lucide-react";
+import { Building2, CloudUpload, Download, Globe, Lock, ScrollText, UserRound } from "lucide-react";
 import { useGitOutputStore } from "../../state/gitOutputStore";
 import { useFocusTrap } from "../../lib/useFocusTrap";
-import { getGitIdentity, setGitIdentity, setRepoGitIdentity } from "../../lib/tauri/commands";
+import { getGitIdentity, publishCreate, setGitIdentity, setRepoGitIdentity, type PublishProvider, type PublishTarget } from "../../lib/tauri/commands";
+import type { TranslationKey } from "../../lib/i18n/translations";
+import { Select } from "../common/Select";
 import { useGitDialogStore } from "../../state/gitDialogStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useT } from "../../state/languageStore";
@@ -27,8 +29,10 @@ export function GitDialogs() {
   const pullChoice = useGitDialogStore((s) => s.pullChoice);
   const identity = useGitDialogStore((s) => s.identity);
   const commitFailure = useGitOutputStore((s) => s.failure);
+  const publish = useGitDialogStore((s) => s.publish);
   return (
     <>
+      {publish && <PublishDialog targets={publish.targets} initialName={publish.name} />}
       {pullChoice && <PullStrategyDialog branch={pullChoice.branch} upstream={pullChoice.upstream} />}
       {identity && <IdentityDialog />}
       {commitFailure && <CommitOutputDialog />}
@@ -262,6 +266,148 @@ function CommitOutputDialog() {
         <button autoFocus onClick={dismiss} className={buttonClass({ variant: "primary" })}>
           {t("common.close")}
         </button>
+      </div>
+    </DialogShell>
+  );
+}
+
+/** What every host accepts in a repository name — anything else GitHub would rewrite to `-` behind
+ *  our back, and Bitbucket turns into its slug anyway. */
+function repoName(raw: string): string {
+  return raw.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+const PROVIDER_NAME: Record<PublishProvider, string> = {
+  github: "GitHub",
+  gitlab: "GitLab",
+  bitbucket: "Bitbucket",
+  azure: "Azure DevOps",
+};
+
+const VISIBILITY: Record<string, { label: TranslationKey; hint: TranslationKey; icon: typeof Lock }> = {
+  private: { label: "publish.github.private", hint: "publish.github.privateHint", icon: Lock },
+  internal: { label: "publish.internal", hint: "publish.internalHint", icon: Building2 },
+  public: { label: "publish.github.public", hint: "publish.github.publicHint", icon: Globe },
+};
+
+/**
+ * «Publicar», VS Code's way, on any connected host: the account (when there is more than one), the
+ * owner, the name and the visibility that host offers. Creates the repository here so a taken name
+ * is said in the dialog, where it can be changed, rather than after it closed; pushing is the
+ * store's (`publishToHost`). An account whose owners could not be read is listed, disabled, with why.
+ */
+function PublishDialog({ targets, initialName }: { targets: PublishTarget[]; initialName: string }) {
+  const answer = useGitDialogStore((s) => s.answerPublish);
+  const t = useT();
+  const usable = targets.filter((target) => !target.error && target.owners.length > 0);
+  const keyOf = (target: PublishTarget) => `${target.provider}:${target.account}`;
+  const [targetKey, setTargetKey] = useState(usable[0] ? keyOf(usable[0]) : "");
+  const target = usable.find((candidate) => keyOf(candidate) === targetKey) ?? null;
+  const [owner, setOwner] = useState(target?.owners[0]?.id ?? "");
+  const [name, setName] = useState(repoName(initialName));
+  const [visibility, setVisibility] = useState(target?.visibilities[0] ?? "private");
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const clean = repoName(name);
+  const ready = !!target && clean.length > 0 && !creating;
+
+  const pickTarget = (key: string) => {
+    setTargetKey(key);
+    const next = usable.find((candidate) => keyOf(candidate) === key);
+    setOwner(next?.owners[0]?.id ?? "");
+    setVisibility(next?.visibilities[0] ?? "private");
+    setError(null);
+  };
+
+  const create = async () => {
+    if (!ready || !target) return;
+    setCreating(true);
+    setError(null);
+    try {
+      const created = await publishCreate(target.provider, target.account, owner, clean, visibility);
+      answer({ cloneUrl: created.cloneUrl, provider: target.provider, account: target.account });
+    } catch (e) {
+      setError(String(e));
+      setCreating(false);
+    }
+  };
+
+  const accountLabel = (candidate: PublishTarget) => `${PROVIDER_NAME[candidate.provider]} · ${candidate.account}`;
+  const unusable = targets.filter((candidate) => !usable.includes(candidate));
+
+  return (
+    <DialogShell icon={<CloudUpload size={15} />} title={t("publish.title")} onDismiss={() => answer(null)}>
+      <div className="space-y-2">
+        {usable.length > 1 ? (
+          <Select
+            value={targetKey}
+            onChange={pickTarget}
+            options={usable.map((candidate) => ({ value: keyOf(candidate), label: accountLabel(candidate) }))}
+            ariaLabel={t("publish.account")}
+          />
+        ) : (
+          target && <p className="text-[12px] font-medium text-[var(--cf-text)]">{accountLabel(target)}</p>
+        )}
+        {target && (
+          <div className="flex items-center gap-1.5">
+            {target.owners.length > 1 ? (
+              <div className="w-[170px] shrink-0">
+                <Select value={owner} onChange={setOwner} options={target.owners.map((o) => ({ value: o.id, label: o.label }))} ariaLabel={t("publish.github.owner")} />
+              </div>
+            ) : (
+              <span className="max-w-[170px] shrink-0 truncate text-[13px] text-[var(--cf-text-muted)]">{target.owners[0]?.label}</span>
+            )}
+            <span className="text-[var(--cf-text-muted)]">/</span>
+            <input
+              autoFocus
+              value={name}
+              spellCheck={false}
+              placeholder={t("publish.github.name")}
+              aria-label={t("publish.github.name")}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void create();
+              }}
+              className={fieldClass({ className: "min-w-0 flex-1" })}
+            />
+          </div>
+        )}
+        {clean && clean !== name.trim() && <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("publish.github.willBe", { name: clean })}</p>}
+        {target && target.visibilities.length > 0 ? (
+          <Segmented<string>
+            full
+            layoutId="publish-visibility"
+            ariaLabel={t("publish.github.visibility")}
+            value={visibility}
+            onChange={setVisibility}
+            options={target.visibilities.map((value) => {
+              const shown = VISIBILITY[value] ?? VISIBILITY.private;
+              return { value, icon: shown.icon, label: t(shown.label), title: t(shown.hint) };
+            })}
+          />
+        ) : (
+          target && <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("publish.projectVisibility")}</p>
+        )}
+        {!target && <p className="text-[12px] text-[var(--cf-text-muted)]">{t("publish.noUsableAccount")}</p>}
+        {unusable.map((candidate) => (
+          <p key={keyOf(candidate)} className="text-[11.5px] text-[var(--cf-text-muted)] [overflow-wrap:anywhere]">
+            {accountLabel(candidate)}: {candidate.error === "NO_OWNERS" ? t("publish.noOwners") : candidate.error}
+          </p>
+        ))}
+        {error && <p className="text-[12px] text-[var(--cf-danger)] [overflow-wrap:anywhere]">{error}</p>}
+      </div>
+      <div className="mt-4 flex items-center justify-between gap-2">
+        <button onClick={() => answer("manual")} className={buttonClass({ variant: "ghost", size: "sm" })} disabled={creating}>
+          {t("publish.github.otherUrl")}
+        </button>
+        <div className="flex gap-2">
+          <button onClick={() => answer(null)} className={buttonClass({ variant: "ghost" })} disabled={creating}>
+            {t("common.cancel")}
+          </button>
+          <button onClick={() => void create()} disabled={!ready} className={buttonClass({ variant: "primary" })}>
+            {creating ? t("publish.github.creating") : t("publish.github.confirm")}
+          </button>
+        </div>
       </div>
     </DialogShell>
   );

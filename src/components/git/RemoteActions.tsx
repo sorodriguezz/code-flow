@@ -2,7 +2,7 @@ import { CloudUpload, Download, Loader2, RefreshCw, Upload } from "lucide-react"
 import { useRepoStore } from "../../state/repoStore";
 import { useFetchTimerStore } from "../../state/fetchTimerStore";
 import { useT } from "../../state/languageStore";
-import { canPublish, canPull, canPush, fetchNow, pullNow, pushNow } from "../../lib/gitActions";
+import { canPublishRepo, canPull, canPush, fetchNow, pullNow, pushNow } from "../../lib/gitActions";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { GitDialogs } from "./GitDialogs";
 
@@ -112,7 +112,10 @@ export function RemoteActions() {
   // the same thing can't disagree about when there's nothing to do.
   const pullEnabled = canPull(current);
   const pushEnabled = canPush(current);
-  const publishable = canPublish(current);
+  // Read for the re-render; `canPublishRepo` reads the store itself.
+  useRepoStore((s) => s.remotes.length);
+  useRepoStore((s) => s.status?.current_branch);
+  const publishable = canPublishRepo();
   /** "3 commits to pull" — the count spelled out for the tooltip, singular where it matters. */
   const commits = (n: number, one: "statusbar.commitToPull" | "statusbar.commitToPush") =>
     n === 1

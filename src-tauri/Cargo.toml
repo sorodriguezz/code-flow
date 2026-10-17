@@ -473,6 +473,9 @@ mail-parser = "0.11"
 # Flujos — message queues (the Queue node): AMQP 0.9.1 for RabbitMQ, and Kafka's own protocol.
 lapin = { version = "4.12", default-features = false, features = ["tokio", "rustls--ring", "rustls-native-certs"] }
 rskafka = { version = "0.6", default-features = false, features = ["transport-tls"] }
+# Flujos — «Convertir a Markdown»: Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV and PDF
+# with text, in-process and with no network.
+anydoc = "0.2.4"
 
 # Sending a signal to a *process group*, which is what stopping an AI run needs: `child.kill()`
 # reaches the CLI and nothing it started, and every one of these CLIs is a Node process that spawns

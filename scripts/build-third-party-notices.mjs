@@ -277,6 +277,7 @@ const LINKS_REVIEWED = [
     name: "mongocrypt-sys",
     why: "declares a link to a system libmongocrypt and compiles nothing; the driver feature that would load it is off",
   },
+  { name: "defmt", why: "its build script only writes a linker script for embedded targets; it compiles nothing" },
 ];
 
 /**

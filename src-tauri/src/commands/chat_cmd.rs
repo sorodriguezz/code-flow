@@ -1635,6 +1635,10 @@ pub async fn chat_send(
         Some(rules) => format!("{message}\n\n{rules}"),
         None => message.clone(),
     };
+    // How long to answer, and how to ask the user something back — `ai::chat_turn_rules`.
+    if let Ok(conn) = db.0.lock() {
+        engine_message.push_str(&ai::chat_turn_rules(&conn));
+    }
     // A skill picked in the composer, said to the engine and not to the transcript — the same split
     // as the style rules above. An app skill is pointed at the copy synced into this very folder,
     // under the root this engine reads (see `mirror_skills_into_workdir` above).

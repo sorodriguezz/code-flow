@@ -99,21 +99,29 @@ export async function sendToNotes(args: {
     return false;
   }
 
+  await revealNote(args.workspaceId, noteId);
+  return true;
+}
+
+/**
+ * Puts note `noteId` on screen wherever the Notes app is: its island when it has one (brought
+ * forward), this window when it is the main one or that island, the main window otherwise.
+ */
+export async function revealNote(workspaceId: string, noteId: string): Promise<void> {
   const detached = useWindowStore.getState().detachedLabel("app", "notes");
   if (detached && detached !== WINDOW.label) {
-    broadcast({ kind: "open-note", to: detached, workspaceId: args.workspaceId, noteId });
+    broadcast({ kind: "open-note", to: detached, workspaceId, noteId });
     await focusSatellite(detached).catch(() => {
       // Gone since the list was pushed: the note is filed either way, which is what had to happen.
     });
-    return true;
+    return;
   }
 
   if (isMainWindow() || detached === WINDOW.label) {
-    await showNoteHere(args.workspaceId, noteId);
-    return true;
+    await showNoteHere(workspaceId, noteId);
+    return;
   }
 
-  broadcast({ kind: "open-note", to: MAIN_LABEL, workspaceId: args.workspaceId, noteId });
+  broadcast({ kind: "open-note", to: MAIN_LABEL, workspaceId, noteId });
   broadcast({ kind: "focus-main" });
-  return true;
 }

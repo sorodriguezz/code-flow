@@ -269,6 +269,7 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("files.media", Files, "film", 12).group("filesDocuments"),
     node("files.docx", Files, "file-pen", 12).group("filesDocuments"),
     node("files.ics", Files, "calendar-days", 12).group("filesDocuments"),
+    node("files.markdown", Files, "file-down", 12).group("filesDocuments"),
     node("data.sheet", Data, "file-spreadsheet", 4).shown_in(Files).group("filesDocuments"),
     node("transform.compress", Transform, "file-archive", 4).shown_in(Files).group("filesDocuments"),
     node("net.download", Net, "download", 4).shown_in(Files).group("filesRemote"),
@@ -477,11 +478,11 @@ mod tests {
         assert_eq!(count(Messaging), 4);
         assert_eq!(count(Apps), 3);
         assert_eq!(count(Data), 10);
-        assert_eq!(count(Files), 13);
+        assert_eq!(count(Files), 14);
         assert_eq!(count(Logic), 13);
         assert_eq!(count(Transform), 20);
         assert_eq!(count(App), 16);
-        assert_eq!(CATALOG.len(), 173);
+        assert_eq!(CATALOG.len(), 174);
     }
 
     #[test]

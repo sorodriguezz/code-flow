@@ -98,7 +98,12 @@ pub struct Pairing {
 pub enum Verdict {
     /// A live, unrevoked device. Carries the id so the caller can attribute the action.
     Device(String),
+    /// The query ran and found no live device for this token: unknown, or revoked.
     Rejected,
+    /// The query itself failed — `SQLITE_BUSY`, a connection recovered from a poisoned lock. Says
+    /// nothing about the token, so it must never be answered the way [`Verdict::Rejected`] is: a 401
+    /// makes the phone delete its token, and a device nobody revoked would come back unpaired.
+    Unavailable,
 }
 
 impl Pairing {
@@ -229,14 +234,22 @@ pub fn verify(conn: &Connection, pairing: &Pairing, token: &str) -> Verdict {
         return Verdict::Rejected;
     }
     let hash = hash_token(token);
-    let found: Option<String> = conn
+    // **Only a query that succeeded and found nothing is a rejection.** This used to be
+    // `.unwrap_or(None)`, which turned "the read failed" into "this token is unknown" — a 401, on
+    // which the phone deletes its token. A paired phone that met one busy moment of the database
+    // came back unpaired while the desktop still listed it as live, and the only way out was to
+    // revoke it and pair again. `still_paired` in `server.rs` had the same bug and the same fix.
+    let found: Option<String> = match conn
         .query_row(
             "SELECT id FROM remote_devices WHERE token_hash = ?1 AND revoked = 0",
             params![hash],
             |row| row.get(0),
         )
         .optional()
-        .unwrap_or(None);
+    {
+        Ok(found) => found,
+        Err(_) => return Verdict::Unavailable,
+    };
 
     match found {
         Some(id) => {
@@ -480,6 +493,9 @@ mod tests {
         let pairing = Pairing::default();
         assert!(matches!(verify(&conn, &pairing, ""), Verdict::Rejected));
         assert!(matches!(verify(&conn, &pairing, "not-a-token"), Verdict::Rejected));
+        // A read that fails is not a rejection: no table at all stands in for a busy database.
+        let broken = Connection::open_in_memory().unwrap();
+        assert!(matches!(verify(&broken, &pairing, "not-a-token"), Verdict::Unavailable));
     }
 
     #[test]

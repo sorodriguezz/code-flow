@@ -287,7 +287,7 @@ async fn missing_bundle() -> impl IntoResponse {
 /// `axum` handler's future must be `Send`, a `std::sync::MutexGuard` is not, and holding one across
 /// the `.await` in [`rpc`] would fail to compile in a way whose error message points somewhere
 /// else entirely.
-fn device_from_bearer(ctx: &Ctx, token: &str) -> Option<(String, String)> {
+fn device_from_bearer(ctx: &Ctx, token: &str) -> Result<(String, String), Response> {
     let db = ctx.app.state::<Db>();
     let state = ctx.app.state::<RemoteCtl>();
     let conn = match db.0.lock() {
@@ -300,10 +300,18 @@ fn device_from_bearer(ctx: &Ctx, token: &str) -> Option<(String, String)> {
         // connection the verification already holds, so it costs no extra lock.
         Verdict::Device(id) => {
             let name = auth::device_name(&conn, &id);
-            Some((id, name))
+            Ok((id, name))
         }
-        Verdict::Rejected => None,
+        Verdict::Rejected => Err(refused()),
+        // 503, never `refused()`: the database could not answer, which says nothing about the
+        // token — and a 401 is what makes the phone delete it. The client retries a 503.
+        Verdict::Unavailable => Err(unavailable()),
     }
+}
+
+/// "Ask again in a moment" — for a desktop that could not check the token, not one that refused it.
+fn unavailable() -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "ok": false, "error": "busy" }))).into_response()
 }
 
 /// The workspace a chain belongs to, for the invalidation the call is about to raise.
@@ -454,8 +462,9 @@ fn idempotency_key(headers: &HeaderMap) -> Option<&str> {
 ///
 /// A call without a key — a read, or a client older than keys — runs inline as it always has.
 async fn rpc(State(ctx): State<Ctx>, headers: HeaderMap, Json(body): Json<RpcRequest>) -> Response {
-    let Some((device_id, device_name)) = device_from_bearer(&ctx, bearer(&headers)) else {
-        return refused();
+    let (device_id, device_name) = match device_from_bearer(&ctx, bearer(&headers)) {
+        Ok(device) => device,
+        Err(response) => return response,
     };
     let Some(key) = idempotency_key(&headers) else {
         return reply(execute(ctx, device_id, device_name, body).await);
@@ -613,8 +622,9 @@ async fn events(
     // The id is *kept* now, where this used to check `.is_none()` and throw it away. A stream with
     // no identity is one that cannot be revoked, cannot be counted, and cannot be told apart from
     // the phone in the next room — every symptom in this handler's history comes from that line.
-    let Some((device_id, _)) = device_from_bearer(&ctx, query.token.trim()) else {
-        return refused();
+    let device_id = match device_from_bearer(&ctx, query.token.trim()) {
+        Ok((device_id, _)) => device_id,
+        Err(response) => return response,
     };
 
     let state = ctx.app.state::<RemoteCtl>();

@@ -47,6 +47,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { TranslationKey } from "./i18n/translations";
+import { AI_TASKS } from "./aiTasks";
 import {
   defaultAnalyzeTemplate,
   defaultCommitTemplate,
@@ -106,7 +107,7 @@ const GRADES_CONTRACT: PromptContract = {
   warningKey: "prompts.contractGrades",
 };
 
-export const AI_PROMPTS: PromptDef[] = [
+const BUILT_IN_PROMPTS: PromptDef[] = [
   // ---------- global: one text for the whole installation ----------
   {
     id: "commit_template",
@@ -382,6 +383,31 @@ export const AI_PROMPTS: PromptDef[] = [
     key: "workspace_doc",
   },
 ];
+
+/** Where a task's own instructions are stored — mirrors `load_ai_config_in` in `claude_cmd.rs`. */
+export function taskInstructionsKey(task: string): string {
+  return `task_instructions_${task}`;
+}
+
+/**
+ * One editable text for every task that has no prompt of its own — chat, inline edit, notes, the
+ * flow builder… Empty until the user writes something; whatever they write is appended to the
+ * system instructions of every run of that task (`ai::run`). So every task row has a text to
+ * change, and a task's built-in behaviour is untouched until somebody does.
+ */
+const INSTRUCTION_PROMPTS: PromptDef[] = AI_TASKS.filter(
+  (task) => !BUILT_IN_PROMPTS.some((prompt) => prompt.task === task.key),
+).map((task) => ({
+  id: taskInstructionsKey(task.key),
+  task: task.key,
+  labelKey: "prompts.taskInstructions",
+  hintKey: "prompts.taskInstructionsHint",
+  icon: SquarePen,
+  scope: "global",
+  key: taskInstructionsKey(task.key),
+}));
+
+export const AI_PROMPTS: PromptDef[] = [...BUILT_IN_PROMPTS, ...INSTRUCTION_PROMPTS];
 
 /** The prompts one task sends, in declaration order. */
 export function promptsForTask(task: string): PromptDef[] {

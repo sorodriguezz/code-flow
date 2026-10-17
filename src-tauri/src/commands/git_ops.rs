@@ -565,8 +565,8 @@ pub async fn git_pull_branch(app: AppHandle, repo_path: String, branch: String) 
 }
 
 #[tauri::command]
-pub async fn git_push(app: AppHandle, repo_path: String, set_upstream: bool) -> Result<(), String> {
-    remote::push(app.clone(), repo_path.clone(), set_upstream).await?;
+pub async fn git_push(app: AppHandle, repo_path: String, set_upstream: bool, first_publish: Option<bool>) -> Result<(), String> {
+    remote::push(app.clone(), repo_path.clone(), set_upstream, first_publish.unwrap_or(false)).await?;
     pushed(&app, &repo_path, false);
     Ok(())
 }

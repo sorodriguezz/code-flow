@@ -16,8 +16,10 @@
  * 2. **Collapsed rows still say the state.** Which engine, how many prompts, how many you edited,
  *    and whether something is misrouted — all readable without opening anything, because the
  *    question this screen usually gets asked is "what is set up wrong", not "let me change one".
- * 3. **One thing open at a time.** Both levels are accordions. Several open prompts is several
- *    hundred lines of text on one scroll, and then the search box is the only way back.
+ * 3. **One task open at a time, its texts open with it.** Tasks are an accordion; inside an open
+ *    task every prompt shows its text straight away, editable, with no second click. A task with no
+ *    prompt of its own shows an empty «Instrucciones» box (see `INSTRUCTION_PROMPTS`), so every
+ *    task has a text the user can change.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -131,7 +133,6 @@ export function AiTasksSettings({ area }: { area?: AiTaskArea } = {}) {
   const [query, setQuery] = useState("");
   const [onlyCustom, setOnlyCustom] = useState(false);
   const [openTask, setOpenTask] = useState<string | null>(null);
-  const [openPrompt, setOpenPrompt] = useState<string | null>(null);
 
   // The meetings row, unset, inherits the notes row rather than the global default — see
   // `load_ai_config_in`, which runs it there.
@@ -370,21 +371,14 @@ export function AiTasksSettings({ area }: { area?: AiTaskArea } = {}) {
               {/* The pane is the area when it shows one: no heading repeating the rail. */}
               {!scoped && <h4 className={`mb-1.5 ${SECTION_LABEL}`}>{t(group.labelKey)}</h4>}
               <div className="space-y-1.5">
-                {rows.map(({ task, prompts: taskPrompts, matched }) => (
+                {rows.map(({ task, prompts: taskPrompts }) => (
                   <TaskRow
                     key={task.key}
                     task={task}
                     prompts={taskPrompts}
                     state={prompts}
                     open={openTask === task.key}
-                    onToggle={() => {
-                      setOpenTask((current) => (current === task.key ? null : task.key));
-                      // A search that matched inside a prompt opens straight onto it — otherwise
-                      // the user is told "it's in here somewhere" and has to hunt again.
-                      setOpenPrompt(matched.length > 0 ? matched[0].id : null);
-                    }}
-                    openPrompt={openPrompt}
-                    onTogglePrompt={(id) => setOpenPrompt((current) => (current === id ? null : id))}
+                    onToggle={() => setOpenTask((current) => (current === task.key ? null : task.key))}
                     savedFlash={savedFlash}
                     workspaceId={workspaceId}
                     // routing
@@ -519,8 +513,6 @@ function TaskRow({
   state,
   open,
   onToggle,
-  openPrompt,
-  onTogglePrompt,
   savedFlash,
   workspaceId,
   defaultProvider,
@@ -544,8 +536,6 @@ function TaskRow({
   state: Record<string, PromptState>;
   open: boolean;
   onToggle: () => void;
-  openPrompt: string | null;
-  onTogglePrompt: (id: string) => void;
   savedFlash: string | null;
   workspaceId: string | null;
   defaultProvider: string;
@@ -637,9 +627,6 @@ function TaskRow({
           )}
           {editedCount > 0 && (
             <span className={chipClass("accent")}>{t("settings.tasksEditedCount", { n: editedCount })}</span>
-          )}
-          {prompts.length === 0 && (
-            <span className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.tasksNoPrompt")}</span>
           )}
           {/* Misrouted reads in red *and* with the triangle — never by colour alone. */}
           <span
@@ -745,10 +732,8 @@ function TaskRow({
                     key={prompt.id}
                     prompt={prompt}
                     state={state[prompt.id]}
-                    open={openPrompt === prompt.id}
                     saved={savedFlash === prompt.id}
                     hasWorkspace={workspaceId !== null}
-                    onToggle={() => onTogglePrompt(prompt.id)}
                     onChange={(value) => onPromptChange(prompt.id, value)}
                     onBlur={() => onPromptBlur(prompt)}
                     onReset={() => onPromptReset(prompt)}
@@ -764,14 +749,13 @@ function TaskRow({
   );
 }
 
-/** One prompt: what it is, whether you changed it, and — open — the text plus a diff of your edit. */
+/** One prompt: what it is, whether you changed it, its text — always shown, always editable — and a
+ *  diff of your edit. */
 function PromptRow({
   prompt,
   state,
-  open,
   saved,
   hasWorkspace,
-  onToggle,
   onChange,
   onBlur,
   onReset,
@@ -779,10 +763,8 @@ function PromptRow({
 }: {
   prompt: PromptDef;
   state: PromptState | undefined;
-  open: boolean;
   saved: boolean;
   hasWorkspace: boolean;
-  onToggle: () => void;
   onChange: (value: string) => void;
   onBlur: () => void;
   onReset: () => void;
@@ -801,18 +783,8 @@ function PromptRow({
   }, [showDiff, state]);
 
   return (
-    <div
-      className={`rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] transition-colors duration-100 ${
-        open || unavailable ? "" : "hover:border-[var(--cf-border-strong)]"
-      }`}
-    >
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        disabled={unavailable}
-        className={`flex w-full items-start gap-2 px-2 py-1.5 text-left ${unavailable ? "opacity-50" : ""}`}
-      >
+    <div className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)]">
+      <div className={`flex w-full items-start gap-2 px-2 py-1.5 text-left ${unavailable ? "opacity-50" : ""}`}>
         {/* Top-aligned, so a name that wraps keeps its icon on the first line; the nudges centre
             that first line on the 20px chips beside it. */}
         <Icon size={13} className="mt-1 shrink-0 text-[var(--cf-text-muted)]" />
@@ -832,9 +804,9 @@ function PromptRow({
             <span className={chipClass("accent")}>{t("settings.templateCustom")}</span>
           ) : null}
         </span>
-      </button>
+      </div>
 
-      {open && state && (
+      {state && !unavailable && (
         <div className="border-t border-[var(--cf-border)] px-2 py-2">
           <p className="mb-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">{t(prompt.hintKey)}</p>
 
@@ -886,7 +858,8 @@ function PromptRow({
               value={state.value}
               onChange={(e) => onChange(e.target.value)}
               onBlur={onBlur}
-              rows={16}
+              // An empty «Instrucciones» box is an invitation, not a document: short until it is used.
+              rows={state.value.trim() || state.fallback.trim() ? 12 : 3}
               spellCheck={false}
               aria-label={t(prompt.labelKey)}
               className={fieldClass({

@@ -11,6 +11,11 @@
 //! resampled to 16 kHz, written to the channel's pieces, measured for the waveform, and copied to
 //! the live transcriber when there is one.
 //!
+//! **The microphone has a gain** ([`set_mic_gain`]) applied right after resampling, so the pieces,
+//! the live text, the final transcription and the meter all hear the same signal — clipped to full
+//! scale, as a too-high gain really would be. It changes while recording. [`monitor`] opens an input
+//! without recording, for the meters shown before a meeting starts.
+//!
 //! **Both channels keep wall-clock time.** WASAPI loopback delivers nothing at all while nothing
 //! plays — not silence, nothing — so a call with a quiet stretch would leave the system channel
 //! shorter than the microphone's and every later line misplaced. A channel that has heard nothing
@@ -27,7 +32,7 @@
 //! it, and a default device that still refuses to open is opened by its concrete id — see
 //! `dictation::stream_health` for the `RPC_E_CHANGED_MODE` this avoids.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -36,7 +41,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 
-use super::audio::{rms, Channel, ChunkWriter, Resampler, PER_MS};
+use super::audio::{peak, rms, Channel, ChunkWriter, Resampler, PER_MS};
 use crate::dictation::stream_health::{self, Backoff, LogGate};
 
 /// How often a channel's thread takes what was heard.
@@ -54,6 +59,52 @@ const HEALTHY: Duration = Duration::from_secs(30);
 /// At most one line per this long about glitches (under/overruns), and about failed reopens.
 const GLITCH_LOG_EVERY: Duration = Duration::from_secs(60);
 const REOPEN_LOG_EVERY: Duration = Duration::from_secs(30);
+
+/// The microphone's gain as `f32` bits (1.0 to start with).
+static MIC_GAIN: AtomicU32 = AtomicU32::new(0x3f80_0000);
+/// The gain's range: −12 dB to +12 dB.
+pub const GAIN_MIN: f32 = 0.25;
+pub const GAIN_MAX: f32 = 4.0;
+
+/// Sets the microphone's gain, for the recording under way and the next ones.
+pub fn set_mic_gain(gain: f32) {
+    let gain = if gain.is_finite() { gain.clamp(GAIN_MIN, GAIN_MAX) } else { 1.0 };
+    MIC_GAIN.store(gain.to_bits(), Ordering::SeqCst);
+}
+
+pub fn mic_gain() -> f32 {
+    f32::from_bits(MIC_GAIN.load(Ordering::SeqCst))
+}
+
+/// The microphone silenced in this app only — what CodeFlow captures becomes silence (the timeline
+/// goes on), the device and every other app keep hearing it. Lifted when a recording stops.
+static MIC_MUTED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_mic_muted(muted: bool) {
+    MIC_MUTED.store(muted, Ordering::SeqCst);
+}
+
+/// The microphone's samples as this app keeps them: with the gain, or silence while muted.
+fn shape_mic(samples: &mut [f32]) {
+    if MIC_MUTED.load(Ordering::SeqCst) {
+        samples.fill(0.0);
+    } else {
+        apply_gain(samples, mic_gain());
+    }
+}
+
+/// `samples` times `gain`, clipped to full scale.
+pub fn apply_gain(samples: &mut [f32], gain: f32) {
+    if (gain - 1.0).abs() < 1e-3 {
+        return;
+    }
+    for sample in samples {
+        *sample = (*sample * gain).clamp(-1.0, 1.0);
+    }
+}
+
+/// What a channel's level callback hears: the channel, its RMS and its peak (fractions of full scale).
+pub type OnLevel = Arc<dyn Fn(Channel, f32, f32) + Send + Sync>;
 
 /// The microphone was refused — the same code «Dictar» answers with.
 pub const MIC_DENIED: &str = "MIC_DENIED";
@@ -185,7 +236,7 @@ impl Drop for Recording {
 pub fn start(
     meeting: &std::path::Path,
     sources: Sources,
-    on_level: Arc<dyn Fn(Channel, f32) + Send + Sync>,
+    on_level: OnLevel,
     live: Option<Sender<LiveAudio>>,
 ) -> Result<Recording, String> {
     let clock = Arc::new(Clock {
@@ -228,6 +279,68 @@ pub fn start(
         }
     }
     Ok(Recording { clock, threads })
+}
+
+/// An input heard and measured, not recorded — a meter before a meeting starts. Stops when dropped
+/// (its thread lets the stream go within a tick).
+pub struct Monitor {
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Opens `channel` — microphone `device_id` (`""` = the default), or the computer's audio by
+/// loopback — and reports its level about 25 times a second (the microphone's with its gain), or
+/// once why it could not open (`MIC_DENIED`, `MIC_NONE`, `SYSTEM_AUDIO_DENIED`…) or was lost.
+pub fn monitor(channel: Channel, device_id: String, on_level: impl Fn(Result<(f32, f32), String>) + Send + 'static) -> Monitor {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let spawned = std::thread::Builder::new().name(format!("meeting-monitor-{}", channel.as_str())).spawn(move || {
+        if channel == Channel::Mic && crate::dictation::permission::request() == crate::dictation::permission::Permission::Denied {
+            on_level(Err(MIC_DENIED.into()));
+            return;
+        }
+        stream_health::enter_mta();
+        let inbox = Arc::new(Mutex::new(Inbox::default()));
+        let (stream, rate) = match open(channel, &device_id, inbox.clone()) {
+            Ok(opened) => opened,
+            Err(error) => {
+                on_level(Err(error));
+                return;
+            }
+        };
+        let mut resampler = Resampler::new(rate);
+        let mut out = Vec::with_capacity(4096);
+        while !flag.load(Ordering::SeqCst) {
+            std::thread::sleep(TICK);
+            let (raw, lost) = {
+                let mut inbox = inbox.lock().unwrap_or_else(|p| p.into_inner());
+                (std::mem::take(&mut inbox.samples), inbox.lost.take())
+            };
+            if let Some(error) = lost {
+                on_level(Err(error));
+                break;
+            }
+            out.clear();
+            resampler.push(&raw, &mut out);
+            if out.is_empty() {
+                continue;
+            }
+            if channel == Channel::Mic {
+                shape_mic(&mut out);
+            }
+            on_level(Ok((rms(&out), peak(&out))));
+        }
+        drop(stream);
+    });
+    if let Err(error) = spawned {
+        crate::applog::warn(&format!("meetings: the microphone meter did not start: {error}"));
+    }
+    Monitor { stop }
 }
 
 fn describe(error: cpal::Error, channel: Channel) -> String {
@@ -330,7 +443,7 @@ fn run_channel(
     device_id: String,
     mut writer: ChunkWriter,
     clock: Arc<Clock>,
-    on_level: Arc<dyn Fn(Channel, f32) + Send + Sync>,
+    on_level: OnLevel,
     live: Option<Sender<LiveAudio>>,
     ready: Sender<Result<(), String>>,
 ) -> Result<usize, String> {
@@ -416,6 +529,9 @@ fn run_channel(
         }
         out.clear();
         resampler.push(&raw, &mut out);
+        if channel == Channel::Mic {
+            shape_mic(&mut out);
+        }
         if clock.paused.load(Ordering::SeqCst) {
             continue;
         }
@@ -430,7 +546,7 @@ fn run_channel(
         if out.is_empty() {
             continue;
         }
-        on_level(channel, rms(&out));
+        on_level(channel, rms(&out), peak(&out));
         if let Err(error) = writer.push(&out) {
             failure = Some(error);
             break;
@@ -454,6 +570,21 @@ fn run_channel(
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_gain_scales_and_clips_like_a_real_one() {
+        let mut samples = vec![0.1, -0.3, 0.6, -0.9];
+        apply_gain(&mut samples, 2.0);
+        assert_eq!(samples, vec![0.2, -0.6, 1.0, -1.0]);
+        assert_eq!(peak(&samples), 1.0);
+        let mut quiet = vec![0.5];
+        apply_gain(&mut quiet, 0.25);
+        assert_eq!(quiet, vec![0.125]);
+        set_mic_gain(99.0);
+        assert_eq!(mic_gain(), GAIN_MAX);
+        set_mic_gain(f32::NAN);
+        assert_eq!(mic_gain(), 1.0);
+    }
+
     /// Records three seconds from this machine's default microphone (and the computer's audio with
     /// `CODEFLOW_TEST_RECORD=system`) into a scratch meeting folder. Only where the microphone is
     /// already granted to whatever runs the test: `CODEFLOW_TEST_RECORD=mic cargo test --lib
@@ -465,7 +596,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cf-meeting-rec-{}", uuid::Uuid::new_v4()));
         let levels = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = levels.clone();
-        let on_level: Arc<dyn Fn(Channel, f32) + Send + Sync> = Arc::new(move |_, _| {
+        let on_level: OnLevel = Arc::new(move |_, _, _| {
             counted.fetch_add(1, Ordering::Relaxed);
         });
         let recording = start(&dir, Sources { mic_device: String::new(), system: which == "system" }, on_level, None).expect("the inputs open");

@@ -676,6 +676,47 @@ const DEFAULT_CHAT_SYSTEM_PROMPT: &str =
      reporte formal — no uses el formato de hallazgos estructurados que usarías en una revisión \
      de PR a menos que el usuario lo pida explícitamente.";
 
+/// How a model in a chat asks the user something: a `pregunta` block the bubble draws as a card with
+/// options and a free answer (`src/lib/chatQuestions.ts`). Headless CLIs have no question tool —
+/// Claude's `AskUserQuestion` does not exist under `-p`, Codex refuses `request_user_input` outside
+/// Plan mode — so without this a question was buried in the prose of a finished turn.
+///
+/// Sent on every turn, like the caveman rules (`crate::caveman`): a resumed session is never sent
+/// the system prompt again, and every conversation that already exists is a resumed one.
+pub const QUESTION_RULES: &str = "\n\n[CodeFlow] Si necesitas que el usuario elija o responda algo antes de seguir, no \
+     uses herramientas para preguntar (aquí no existen): termina tu respuesta con un bloque\n\
+     ```pregunta\n{\"pregunta\": \"…\", \"opciones\": [\"…\", \"…\"], \"multiple\": false}\n```\n\
+     — uno por pregunta, de 2 a 5 opciones cortas (el usuario también puede escribir otra respuesta) — \
+     y espera su respuesta. Solo cuando de verdad la necesites.";
+
+/// The setting that says how long chat answers are: `auto` · `short` · `normal` (or unset) · `detailed`.
+/// One for both chats — the composer's chip writes it (`src/lib/answerLength.ts`).
+pub const ANSWER_LENGTH_KEY: &str = "chat_answer_length";
+
+/// The rule for an answer length, or `None` for `normal` — the model's own judgement, nothing added.
+pub fn answer_length_rules(mode: &str) -> Option<&'static str> {
+    Some(match mode.trim() {
+        "short" => "\n\n[CodeFlow] Responde corto y preciso: lo esencial en pocas frases, sin introducción, \
+             sin repetir la pregunta y sin resumen final. El código y los comandos, completos.",
+        "detailed" => "\n\n[CodeFlow] Responde en detalle, con estructura completa: el contexto en una línea, \
+             el desarrollo en secciones con encabezados, ejemplos o código donde ayuden, y un cierre con \
+             conclusiones o próximos pasos.",
+        "auto" => "\n\n[CodeFlow] Ajusta el largo a la pregunta: si se contesta en una o dos frases (un sí o \
+             un no, un dato, un comando), responde solo eso; si pide explicar, comparar o construir \
+             algo, desarrolla lo necesario y nada más.",
+        _ => return None,
+    })
+}
+
+/// What a user's chat turn carries besides the question: the answer length asked for, then the way
+/// to ask the user something. Told to the engine, never stored — like the caveman rules.
+pub fn chat_turn_rules(conn: &rusqlite::Connection) -> String {
+    let mode = crate::db::queries::get_setting(conn, ANSWER_LENGTH_KEY).ok().flatten().unwrap_or_default();
+    let mut rules = answer_length_rules(&mode).unwrap_or_default().to_string();
+    rules.push_str(QUESTION_RULES);
+    rules
+}
+
 const FIX_FINDING_SYSTEM_PROMPT: &str =
     "Eres un desarrollador senior aplicando una corrección de code review directamente en el \
      repositorio abierto. Se te entrega por stdin el hallazgo específico a corregir: su \
@@ -1419,6 +1460,13 @@ pub trait AiEngine: Send + Sync {
     fn account(&self) -> Option<&crate::ai_accounts::AccountEnv> {
         None
     }
+
+    /// What the user wrote for this task under «Tareas y prompts» → «Instrucciones», for a task with
+    /// no prompt of its own. [`run`] appends it to the run's system instructions. Only
+    /// [`AccountEngine`] answers `Some` — see [`engine_for_task`].
+    fn task_instructions(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Model families that are known **not** to reason, matched on the id rather than listed by it.
@@ -1706,13 +1754,25 @@ pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
 /// take one: a flow cannot forget to pass it, because there is nothing to pass. The system account
 /// — and a CLI that cannot hold several — is the plain engine, unchanged.
 pub fn engine_as(provider: &str, account: crate::ai_accounts::AccountEnv) -> Box<dyn AiEngine> {
-    if account.is_system() || !crate::ai_accounts::supports_accounts(provider) {
-        return engine_for(provider);
-    }
-    Box::new(AccountEngine { inner: engine_for(provider), account })
+    engine_for_task(provider, account, None)
 }
 
-/// An engine bound to one account of its CLI.
+/// [`engine_as`], carrying the task's own instructions as well (see
+/// [`AiEngine::task_instructions`]). Blank instructions are none.
+pub fn engine_for_task(
+    provider: &str,
+    account: crate::ai_accounts::AccountEnv,
+    instructions: Option<String>,
+) -> Box<dyn AiEngine> {
+    let account = (!account.is_system() && crate::ai_accounts::supports_accounts(provider)).then_some(account);
+    let instructions = instructions.filter(|text| !text.trim().is_empty());
+    if account.is_none() && instructions.is_none() {
+        return engine_for(provider);
+    }
+    Box::new(AccountEngine { inner: engine_for(provider), account, instructions })
+}
+
+/// An engine bound to one account of its CLI, and/or carrying its task's own instructions.
 ///
 /// Forwards every method, each inside [`crate::ai_accounts::with_account`] — which is what lets
 /// the few that read the CLI's state in this process (Codex's model catalogue, Claude's per-run
@@ -1720,12 +1780,17 @@ pub fn engine_as(provider: &str, account: crate::ai_accounts::AccountEnv) -> Box
 /// the process is built, in [`spawn_once`] and for the auxiliary calls.
 pub struct AccountEngine {
     inner: Box<dyn AiEngine>,
-    account: crate::ai_accounts::AccountEnv,
+    /// `None`: the CLI's system account — this wrapper exists for `instructions` alone.
+    account: Option<crate::ai_accounts::AccountEnv>,
+    instructions: Option<String>,
 }
 
 impl AccountEngine {
     fn with<T>(&self, f: impl FnOnce(&dyn AiEngine) -> T) -> T {
-        crate::ai_accounts::with_account(&self.account, || f(&*self.inner))
+        match &self.account {
+            Some(account) => crate::ai_accounts::with_account(account, || f(&*self.inner)),
+            None => f(&*self.inner),
+        }
     }
 }
 
@@ -1827,7 +1892,10 @@ impl AiEngine for AccountEngine {
         self.with(|e| e.model_reads_images(model))
     }
     fn account(&self) -> Option<&crate::ai_accounts::AccountEnv> {
-        Some(&self.account)
+        self.account.as_ref()
+    }
+    fn task_instructions(&self) -> Option<&str> {
+        self.instructions.as_deref()
     }
 }
 
@@ -2542,7 +2610,20 @@ fn skill_description(text: &str) -> Option<String> {
     crate::skill_meta::parse(text).description
 }
 
-async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> Result<AiRun, String> {
+async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Result<AiRun, String> {
+    // The task's own instructions, after whatever the flow itself asked for: here, because this is
+    // the one place every engine passes through, so no task can be left without them.
+    let instructed: String;
+    let mut inv = match engine.task_instructions() {
+        Some(extra) => {
+            instructed = match inv.system_prompt.filter(|own| !own.trim().is_empty()) {
+                Some(own) => format!("{own}\n\n{}", extra.trim()),
+                None => extra.trim().to_string(),
+            };
+            AiInvocation { system_prompt: Some(&instructed), ..inv }
+        }
+        None => inv,
+    };
     // Derived here, from the directory rather than from what a caller believes it synced: this is
     // the one place every engine passes through, so a skill added to the note is one that is
     // provably on disk, and no flow can forget to mention them.
@@ -6922,6 +7003,34 @@ pub async fn apply_finding_fix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_question_rules_show_the_block_the_bubble_reads() {
+        let start = QUESTION_RULES.find("```pregunta\n").expect("the fence");
+        let body = &QUESTION_RULES[start + "```pregunta\n".len()..];
+        let json = &body[..body.find("\n```").expect("closed")];
+        let parsed: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+        assert!(parsed["pregunta"].is_string() && parsed["opciones"].is_array(), "{json}");
+        assert_eq!(answer_length_rules("normal"), None);
+        assert_eq!(answer_length_rules(""), None);
+        assert!(answer_length_rules("short").is_some_and(|r| r.contains("corto")));
+        assert!(answer_length_rules("detailed").is_some() && answer_length_rules("auto").is_some());
+    }
+
+    #[test]
+    fn task_instructions_ride_on_the_engine_and_blank_is_none() {
+        let system = crate::ai_accounts::AccountEnv::system("claude");
+        let plain = engine_for_task("claude", system.clone(), None);
+        assert_eq!(plain.task_instructions(), None);
+        assert!(plain.account().is_none());
+        let blank = engine_for_task("claude", system.clone(), Some("  \n ".into()));
+        assert_eq!(blank.task_instructions(), None);
+        let told = engine_for_task("claude", system, Some("Responde en español.".into()));
+        assert_eq!(told.task_instructions(), Some("Responde en español."));
+        // Still the system account: the wrapper is there for the instructions alone.
+        assert!(told.account().is_none());
+        assert_eq!(told.id(), "claude");
+    }
 
     /// The rule the pump's trace suppression rests on: a *frame* is dropped from the run log, a
     /// line that merely says the words is not. The second case is not hypothetical — an agent

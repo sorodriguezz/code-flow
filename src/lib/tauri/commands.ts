@@ -699,8 +699,9 @@ export const gitFetchBranch = (repoPath: string, branch: string) =>
 export const gitPullBranch = (repoPath: string, branch: string) =>
   invoke<void>("git_pull_branch", { repoPath, branch });
 
-export const gitPush = (repoPath: string, setUpstream: boolean) =>
-  invoke<void>("git_push", { repoPath, setUpstream });
+/** `firstPublish`: the push right after the repository got its first remote — no branch lock then. */
+export const gitPush = (repoPath: string, setUpstream: boolean, firstPublish = false) =>
+  invoke<void>("git_push", { repoPath, setUpstream, firstPublish });
 
 /** Publishes one branch by name — `push -u origin <branch>` — checked out or not. `gitPush` sends
  * HEAD, which is the wrong shape wherever the branch is picked from a list rather than stood on. */
@@ -1280,6 +1281,25 @@ export const setGithubToken = (host: string, token: string) =>
   invoke<void>("set_github_token", { host, token });
 
 export const getGithubToken = (host: string) => invoke<string | null>("get_github_token", { host });
+/** A host this app connects to, as the publish dialog names it. Mirrors `publish_cmd::PublishTarget`. */
+export type PublishProvider = "github" | "gitlab" | "bitbucket" | "azure";
+export interface PublishTarget {
+  provider: PublishProvider;
+  /** The host (GitHub, GitLab), the workspace (Bitbucket) or the organisation (Azure DevOps). */
+  account: string;
+  owners: { id: string; label: string }[];
+  /** First the default; empty where the owner decides (Azure DevOps: the project's). */
+  visibilities: string[];
+  error: string | null;
+}
+/** Every connected account and where each can create a repository. */
+export const publishTargets = () => invoke<PublishTarget[]>("publish_targets");
+/** Creates an empty repository to publish into; answers where to push it. */
+export const publishCreate = (provider: PublishProvider, account: string, owner: string, name: string, visibility: string) =>
+  invoke<{ cloneUrl: string; webUrl: string }>("publish_create", { provider, account, owner, name, visibility });
+/** The first push to that new `origin`, with the account's saved credential. */
+export const publishPush = (repoPath: string, provider: PublishProvider, account: string) =>
+  invoke<void>("publish_push", { repoPath, provider, account });
 
 export const deleteGithubToken = (host: string) => invoke<void>("delete_github_token", { host });
 

@@ -245,6 +245,62 @@ describe("push", () => {
     ]);
     expect(called("git_push").map((c) => c.args.setUpstream)).toEqual([true, true]);
   });
+
+  it("publishing with no remote and a connected account creates the repository and pushes with its credential", async () => {
+    handlers.git_push = () => {
+      throw "NO_REMOTE: this repository has no remote";
+    };
+    const targets = [{ provider: "gitlab", account: "gitlab.com", owners: [{ id: "7", label: "ana" }], visibilities: ["private", "internal", "public"], error: null }];
+    handlers.publish_targets = () => targets;
+    const { useGitDialogStore } = await import("./gitDialogStore");
+    const pending = useRepoStore.getState().push(true);
+    const request = await until(() => useGitDialogStore.getState().publish);
+    expect(request.targets).toEqual(targets);
+    expect(request.name).toBe("repo");
+    useGitDialogStore.getState().answerPublish({ cloneUrl: "https://gitlab.com/ana/repo.git", provider: "gitlab", account: "gitlab.com" });
+    await pending;
+    expect(called("add_remote").map((c) => c.args)).toEqual([{ repoPath: "/repo", name: "origin", url: "https://gitlab.com/ana/repo.git" }]);
+    expect(called("publish_push").map((c) => c.args)).toEqual([{ repoPath: "/repo", provider: "gitlab", account: "gitlab.com" }]);
+  });
+
+  it("publishing a repository with no commit offers the first commit, then publishes", async () => {
+    let pushes = 0;
+    handlers.git_push = () => {
+      pushes += 1;
+      if (pushes === 1) throw "NO_REMOTE: this repository has no remote";
+      return null;
+    };
+    handlers.commit = () => "abc";
+    useRepoStore.setState({
+      status: { ...EMPTY_STATUS, head_oid: null } as never,
+      branches: [{ name: "main", is_head: true, is_remote: false, upstream: null, ahead: 0, behind: 0, target: null, tip_time: null, is_locked: false, locked_by_rule: false }] as never,
+    });
+    const pending = useRepoStore.getState().push(true);
+    const confirm = await until(() => useConfirmStore.getState().request);
+    expect(confirm.danger).toBe(false);
+    useConfirmStore.getState().respond(true);
+    const request = await until(() => usePromptStore.getState().request);
+    usePromptStore.getState().respond("https://example.com/o/r.git");
+    await pending;
+    expect(called("stage_all")).toHaveLength(1);
+    expect(called("commit").map((c) => c.args.message)).toEqual(["Initial commit"]);
+    expect(request).toBeTruthy();
+    expect(called("add_remote")).toHaveLength(1);
+  });
+
+  it("a dismissed GitHub dialog publishes nothing and says nothing", async () => {
+    handlers.git_push = () => {
+      throw "NO_REMOTE: this repository has no remote";
+    };
+    handlers.publish_targets = () => [{ provider: "github", account: "github.com", owners: [{ id: "ana", label: "ana" }], visibilities: ["private", "public"], error: null }];
+    const { useGitDialogStore } = await import("./gitDialogStore");
+    const pending = useRepoStore.getState().push(true);
+    await until(() => useGitDialogStore.getState().publish);
+    useGitDialogStore.getState().answerPublish(null);
+    await pending;
+    expect(called("add_remote")).toHaveLength(0);
+    expect(useRepoStore.getState().error).toBeNull();
+  });
 });
 
 describe("branch delete", () => {

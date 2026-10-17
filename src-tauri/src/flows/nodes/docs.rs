@@ -1,6 +1,6 @@
 //! Documents and media: audio and video by ffmpeg («Audio y video»), Word documents read, filled from
-//! a template or written from Markdown («Documento Word»), and calendars read and invitations written
-//! («Calendario .ics»).
+//! a template or written from Markdown («Documento Word»), calendars read and invitations written
+//! («Calendario .ics»), and any document turned into Markdown («Convertir a Markdown», by anydoc).
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -11,6 +11,7 @@ use serde_json::{json, Map, Value};
 
 use super::process::run_program;
 use super::{flag, number, pairs, strings, text, NodeCtx, NodeError};
+use crate::flows::engine::LogStream;
 use crate::flows::run::{Item, Ports};
 
 pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
@@ -18,6 +19,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "files.media" => media(ctx).await,
         "files.docx" => docx(ctx).await,
         "files.ics" => ics(ctx).await,
+        "files.markdown" => to_markdown(ctx).await,
         other => Err(NodeError::failed(format!("No executor for {other}"))),
     }
 }
@@ -769,6 +771,115 @@ fn docx_item(params: &Value, json: &Value) -> Result<Vec<Value>, NodeError> {
     }
 }
 
+// ------------------------------------------------------------------------------------ markdown
+
+/// Files that already are text: handed over as written.
+const AS_WRITTEN: &[&str] = &["md", "markdown", "txt", "text"];
+
+/// A document as Markdown, and what read it.
+struct Converted {
+    markdown: String,
+    format: String,
+    via: &'static str,
+}
+
+async fn to_markdown(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    // A link is downloaded into a folder of its own per item.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    per_item(ctx, |params, _| {
+        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        async move {
+            let written = text(&params, "path");
+            if written.trim().is_empty() {
+                return Err(NodeError::failed("Say which file to convert"));
+            }
+            let source = super::vision::local_file(ctx, written.trim(), index).await?;
+            let read = convert(ctx, &params, &source).await?;
+            let mut out = json!({
+                "path": source.to_string_lossy(),
+                "format": read.format,
+                "via": read.via,
+                "characters": read.markdown.chars().count(),
+            });
+            let asked = text(&params, "savePath");
+            if !asked.trim().is_empty() {
+                let target = super::expand_path(asked.trim());
+                if target == source {
+                    return Err(NodeError::failed("Write the Markdown somewhere else than the file it comes from"));
+                }
+                if let Some(dir) = target.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| NodeError::failed(format!("Could not create {}: {e}", dir.display())))?;
+                }
+                std::fs::write(&target, &read.markdown).map_err(|e| NodeError::failed(format!("Could not write {}: {e}", target.display())))?;
+                out["savedTo"] = json!(target.to_string_lossy());
+                out["file"] = crate::flows::nodes::binary::reference_of(&target);
+            }
+            out["markdown"] = json!(read.markdown);
+            Ok(vec![out])
+        }
+    })
+    .await
+}
+
+/// One file read into Markdown: text as written, a page by the «Página web» reader, an image by the
+/// system's OCR, and every office document, e-book and PDF with text by anydoc — a PDF of scanned
+/// pages falling back to the OCR when the node allows it.
+async fn convert(ctx: &NodeCtx, params: &Value, source: &Path) -> Result<Converted, NodeError> {
+    let extension = source.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    let read_text = || std::fs::read(source).map(|b| String::from_utf8_lossy(&b).into_owned()).map_err(|e| NodeError::failed(format!("Could not read {}: {e}", source.display())));
+    if AS_WRITTEN.contains(&extension.as_str()) {
+        return Ok(Converted { markdown: read_text()?, format: extension, via: "text" });
+    }
+    if matches!(extension.as_str(), "html" | "htm" | "xhtml") {
+        let page = super::utils::page_markdown(&read_text()?, None);
+        let markdown = page["markdown"].as_str().unwrap_or_default().to_string();
+        return Ok(Converted { markdown, format: "html".into(), via: "page" });
+    }
+    let ocr = text(params, "scanned") != "scanFail";
+    if super::vision::mime_of(source).is_some_and(|m| m.starts_with("image/")) {
+        if !ocr {
+            return Err(NodeError::failed(format!("{} is an image: let the node read it with the system's OCR, or describe it with «Visión»", source.display())));
+        }
+        let seen = super::vision::system_ocr(ctx, params, source).await?;
+        return Ok(Converted { markdown: seen.text, format: extension, via: "ocr" });
+    }
+    let path = source.to_path_buf();
+    let outcome = tokio::task::spawn_blocking(move || anydoc_markdown(&path)).await.map_err(|e| NodeError::failed(e.to_string()))?;
+    match outcome {
+        Ok((markdown, format)) => Ok(Converted { markdown, format, via: "anydoc" }),
+        Err(anydoc::ConvertError::NeedsOcr { pages, page_count }) if ocr => {
+            ctx.log(LogStream::Info, &format!("{} of {page_count} pages are scanned: reading the document with the system's OCR", pages.len()));
+            let seen = super::vision::system_ocr(ctx, params, source).await?;
+            Ok(Converted { markdown: seen.text, format: "pdf".into(), via: "ocr" })
+        }
+        Err(error) => Err(NodeError::failed(convert_error(source, &error))),
+    }
+}
+
+/// anydoc's reading: the format from the bytes (the extension for CSV, which has no signature).
+fn anydoc_markdown(path: &Path) -> Result<(String, String), anydoc::ConvertError> {
+    let bytes = std::fs::read(path)?;
+    let Some(format) = anydoc::Format::from_bytes(&bytes).or_else(|| anydoc::Format::from_path(path)) else {
+        return Err(anydoc::ConvertError::Unsupported(String::new()));
+    };
+    Ok((anydoc::to_markdown_bytes(&bytes, format)?, format!("{format:?}").to_ascii_lowercase()))
+}
+
+fn convert_error(source: &Path, error: &anydoc::ConvertError) -> String {
+    let name = source.display();
+    match error {
+        anydoc::ConvertError::Unsupported(_) => format!(
+            "{name} is not a format this node converts (Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, PDF, HTML, text or an image)"
+        ),
+        anydoc::ConvertError::Encrypted => format!("{name} is password-protected"),
+        anydoc::ConvertError::NeedsOcr { pages, page_count } => {
+            let listed = pages.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+            format!("{name}: pages {listed} of {page_count} are scanned — let the node read them with the system's OCR, or use «Visión»")
+        }
+        other => format!("{name}: {other}"),
+    }
+}
+
 // ----------------------------------------------------------------------------------------- ics
 
 /// The lines of an iCalendar, unfolded (a line starting with a space or a tab continues the last).
@@ -1517,6 +1628,30 @@ mod tests {
         assert!(md.contains("Texto fuerte."), "{md}");
         assert!(md.contains("| a | b |"), "{md}");
         assert!(entries.contains_key("[Content_Types].xml"));
+    }
+
+    #[test]
+    fn anydoc_reads_a_document_by_its_bytes_and_a_csv_by_its_name() {
+        let dir = std::env::temp_dir().join(format!("cf-anydoc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Named .bin: the format comes from the content, not the extension.
+        let docx = dir.join("informe.bin");
+        write_zip(&docx, &markdown_docx("# Informe\n\nTexto **fuerte**.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n")).unwrap();
+        let (md, format) = anydoc_markdown(&docx).unwrap();
+        assert_eq!(format, "docx");
+        assert!(md.contains("Informe") && md.contains("**fuerte**") && md.contains("| 1"), "{md}");
+
+        let csv = dir.join("datos.csv");
+        std::fs::write(&csv, "nombre,total\nAna,3\n").unwrap();
+        let (md, format) = anydoc_markdown(&csv).unwrap();
+        assert_eq!(format, "csv");
+        assert!(md.contains("| nombre") && md.contains("Ana"), "{md}");
+
+        let unknown = dir.join("x.bin");
+        std::fs::write(&unknown, b"no es un documento").unwrap();
+        let error = anydoc_markdown(&unknown).unwrap_err();
+        assert!(convert_error(&unknown, &error).contains("not a format this node converts"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A `.docx` written from `parts`, compressed the way Word compresses.

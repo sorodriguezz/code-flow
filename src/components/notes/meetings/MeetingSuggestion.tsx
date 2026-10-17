@@ -5,6 +5,10 @@ import { useMeetingsStore } from "../../../state/meetingsStore";
 import { useNotesStore } from "../../../state/notesStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { useUiStore } from "../../../state/uiStore";
+import { useWindowStore } from "../../../state/windowStore";
+import { broadcast } from "../../../lib/windowBus";
+import { focusSatellite } from "../../../lib/tauri/windows";
+import { isMainWindow, WINDOW } from "../../../lib/windowIdentity";
 import { useLanguageStore, useT, translate } from "../../../state/languageStore";
 
 /** How long the card waits for an answer before it goes away by itself. */
@@ -51,9 +55,21 @@ export function MeetingSuggestion() {
 /** A note in the «Reuniones» book (made when missing), opened, and recording the call. */
 async function takeNotes(app: string) {
   useMeetingsStore.getState().dismissSuggestion();
+  // With Notes on an island, the note is made and recorded there — where the user takes notes.
+  const island = useWindowStore.getState().detachedLabel("app", "notes");
+  if (island && island !== WINDOW.label) {
+    broadcast({ kind: "meeting-take-notes", to: island, app });
+    await focusSatellite(island).catch(() => {});
+    return;
+  }
+  await takeNotesHere(app);
+}
+
+/** Creates the meeting's note in this window's Notes and starts recording into it. */
+export async function takeNotesHere(app: string) {
   const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
   if (!workspaceId) return;
-  useUiStore.getState().setActiveView("notes");
+  if (isMainWindow()) useUiStore.getState().setActiveView("notes");
   const notes = useNotesStore.getState();
   if (notes.workspaceId !== workspaceId) await notes.setWorkspace(workspaceId);
   const bookName = translate("meetings.bookName");

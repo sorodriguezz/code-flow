@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { PullMode } from "../types/domain";
+import type { PublishProvider, PublishTarget } from "../lib/tauri/commands";
 
 /**
  * The two questions a git action can have to stop and ask in the middle of running.
@@ -31,7 +32,26 @@ interface IdentityRequest {
   resolve: (saved: boolean) => void;
 }
 
+/** The repository the publish dialog created: where to push it, and with which account. */
+export interface PublishedRepo {
+  cloneUrl: string;
+  provider: PublishProvider;
+  account: string;
+}
+
+/** «Publicar»: where and how, for a repository with no remote. */
+export interface PublishRequest {
+  targets: PublishTarget[];
+  /** The folder's name, the default for the repository's. */
+  name: string;
+  /** The created repository, `"manual"` to type a URL instead, `null` when dismissed. */
+  resolve: (answer: PublishedRepo | "manual" | null) => void;
+}
+
 interface GitDialogState {
+  publish: PublishRequest | null;
+  askPublish: (targets: PublishTarget[], name: string) => Promise<PublishedRepo | "manual" | null>;
+  answerPublish: (answer: PublishedRepo | "manual" | null) => void;
   pullChoice: PullChoiceRequest | null;
   identity: IdentityRequest | null;
   askPullChoice: (branch: string, upstream: string) => Promise<PullChoice | null>;
@@ -43,6 +63,18 @@ interface GitDialogState {
 export const useGitDialogStore = create<GitDialogState>((set, get) => ({
   pullChoice: null,
   identity: null,
+  publish: null,
+
+  askPublish: (targets, name) =>
+    new Promise<PublishedRepo | "manual" | null>((resolve) => {
+      get().publish?.resolve(null);
+      set({ publish: { targets, name, resolve } });
+    }),
+
+  answerPublish: (answer) => {
+    get().publish?.resolve(answer);
+    set({ publish: null });
+  },
 
   // Asking again while one is open answers the first with "no" before replacing it — a promise
   // dropped on the floor would hang whatever was awaiting it.

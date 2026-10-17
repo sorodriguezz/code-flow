@@ -9,6 +9,7 @@ import { AttachmentBar } from "./AttachmentBar";
 import { QueuedMessages, type ComposerQueue } from "./QueuedMessages";
 import { ChatCapabilities } from "./ChatCapabilities";
 import { ContextMeter, type ContextReading } from "./ContextMeter";
+import { AnswerLengthPicker } from "./AnswerLengthPicker";
 import { CavemanChip } from "./CavemanChip";
 import { McpMenu } from "./McpMenu";
 import type { ChatAttachment, SkillPick } from "../../lib/tauri/chatCommands";
@@ -452,6 +453,10 @@ export function ChatComposer({
                 onPick={onPickEffort}
               />
             )}
+
+            {/* How long the answers are — both chats, one setting. Not on the ask box, which has no
+                conversation to answer at length. */}
+            {skillScope && <AnswerLengthPicker disabled={disabled} />}
 
             {/* Beside the reasoning dial because they answer the same shape of question — what is
                 this engine going to do with my request — and because the one thing people get

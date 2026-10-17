@@ -464,7 +464,7 @@ export function ServicesDock() {
             <ContainersPane />
           ) : shown === "services" ? (
             selection?.kind === "ports" ? (
-              <PortsPanel onOpenService={setSelectedId} />
+              <PortsPanel onOpenService={setSelectedId} onClose={() => setSelection(null)} />
             ) : selectedService ? (
               <ServiceConsole
                 key={selectedService.id}

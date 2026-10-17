@@ -65,9 +65,20 @@ export function pullNow(): void {
   void useRepoStore.getState().pull();
 }
 
+/**
+ * Whether the status bar offers to publish: a branch with no upstream, or a repository with no
+ * remote at all — then even before its first commit (the publish makes it) and whatever the branch
+ * list last read, which a project generated after the repository was opened can leave empty.
+ */
+export function canPublishRepo(): boolean {
+  const { remotes, status } = useRepoStore.getState();
+  if (canPublish(headBranch())) return true;
+  return remotes.length === 0 && !!status?.current_branch && !status.is_detached;
+}
+
 export function pushNow(): void {
   const branch = headBranch();
-  if (canPublish(branch)) {
+  if (canPublishRepo()) {
     void useRepoStore.getState().push(true);
     return;
   }

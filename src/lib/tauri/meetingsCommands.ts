@@ -132,6 +132,11 @@ export const meetingsSystemAudioSettings = () => invoke<void>("meetings_system_a
 
 export const meetingsStart = (args: { noteId: string; workspaceId: string; kind: "virtual" | "room"; mode?: MeetingMode; language: string }) =>
   invoke<{ meeting: Meeting; warning: string | null; mode: MeetingMode }>("meetings_start", args);
+/** The meters before a meeting starts: the microphone, and with `system` the computer's audio too. */
+export const meetingsMonitor = (on: boolean, system = false) => invoke<void>("meetings_monitor", { on, system });
+/** Silences the microphone in this app only — the device and other apps keep hearing it. */
+export const meetingsSetMicMuted = (muted: boolean) => invoke<void>("meetings_set_mic_muted", { muted });
+export const meetingsSetMicGain = (gain: number) => invoke<void>("meetings_set_mic_gain", { gain });
 export const meetingsPause = (meetingId: string, paused: boolean) => invoke<void>("meetings_pause", { meetingId, paused });
 export const meetingsStop = (meetingId: string) => invoke<Meeting>("meetings_stop", { meetingId });
 export const meetingsDiscard = (meetingId: string) => invoke<void>("meetings_discard", { meetingId });
@@ -185,6 +190,15 @@ export interface LevelEvent {
   meetingId: string;
   channel: "mic" | "system";
   level: number;
+  /** The loudest sample of the block, 1 = clipping. */
+  peak: number;
+}
+/** The microphone meter before a meeting starts: a level, or why the microphone did not open. */
+export interface MonitorEvent {
+  channel: "mic" | "system";
+  level: number;
+  peak: number;
+  error: string | null;
 }
 export interface LineEvent {
   meetingId: string;
@@ -219,6 +233,7 @@ export interface DetectedEvent {
 }
 
 export const onMeetingLevel = (f: (e: LevelEvent) => void): Promise<UnlistenFn> => listen<LevelEvent>("meetings:level", (e) => f(e.payload));
+export const onMeetingMonitor = (f: (e: MonitorEvent) => void): Promise<UnlistenFn> => listen<MonitorEvent>("meetings:monitor", (e) => f(e.payload));
 export const onMeetingLine = (f: (e: LineEvent) => void): Promise<UnlistenFn> => listen<LineEvent>("meetings:line", (e) => f(e.payload));
 export const onMeetingState = (f: (e: StateEvent) => void): Promise<UnlistenFn> => listen<StateEvent>("meetings:state", (e) => f(e.payload));
 export const onMeetingProgress = (f: (e: ProgressEvent) => void): Promise<UnlistenFn> => listen<ProgressEvent>("meetings:progress", (e) => f(e.payload));

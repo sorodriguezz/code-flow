@@ -105,6 +105,12 @@ export type WindowMessage =
    */
   | { kind: "open-note"; to: string; workspaceId: string; noteId: string }
   /**
+   * «Tomar notas» on the suggestion that a call has started, addressed to the Notes island: the
+   * note is created and the meeting recorded there, in that window's workspace, rather than in a
+   * main window the user is not looking at. See `MeetingSuggestion`.
+   */
+  | { kind: "meeting-take-notes"; to: string; app: string }
+  /**
    * Put this conversation on screen, please.
    *
    * What "Open in CodeFlow" in the ask box actually does. Before it, that button broadcast

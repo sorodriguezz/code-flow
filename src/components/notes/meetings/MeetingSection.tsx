@@ -6,6 +6,7 @@ import {
   Copy,
   Download,
   FileAudio,
+  FileText,
   Lock,
   Mic,
   Monitor,
@@ -27,11 +28,15 @@ import { DictationWave } from "../../dictation/DictationControls";
 import { ICON_BUTTON } from "../notesChrome";
 import { MeetingPlayer, type PlayerHandle } from "./MeetingPlayer";
 import { MeetingAi } from "./MeetingAi";
+import { MicCheck } from "./MicCheck";
+import { transcriptFile, type TranscriptFormat } from "./transcriptExport";
+import { writeFileBytes } from "../../../lib/tauri/commands";
 import { channelsOf, clock, duration, speakerColor, speakerName } from "./meetingLabels";
 import {
   meetingsAddSpeaker,
   meetingsExportAudio,
   meetingsMergeSpeakers,
+  meetingsMonitor,
   meetingsRenameSpeaker,
   meetingsSaveVoice,
   meetingsSetLineSpeaker,
@@ -159,6 +164,13 @@ function StartStrip({ noteId, workspaceId }: { noteId: string; workspaceId: stri
   };
   const effective: MeetingMode = mode || recommended;
 
+  // The microphone is heard while the options are open, so its level can be set before starting.
+  // A call's other side too, for a virtual meeting: what the computer plays is the second channel.
+  useEffect(() => {
+    void meetingsMonitor(true, kind === "virtual").catch(() => {});
+  }, [kind]);
+  useEffect(() => () => void meetingsMonitor(false).catch(() => {}), []);
+
   const start = async () => {
     setBusy(true);
     const ok = await useMeetingsStore.getState().start({ noteId, workspaceId, kind, mode: mode || undefined, language: language === "auto" ? "" : language });
@@ -222,6 +234,10 @@ function StartStrip({ noteId, workspaceId }: { noteId: string; workspaceId: stri
           <span className="h-2 w-2 rounded-full bg-[var(--cf-danger)]" aria-hidden />
           {t("meetings.start")}
         </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <MicCheck />
+        {kind === "virtual" && <MicCheck channel="system" />}
       </div>
       <p className="text-[11.5px] text-[var(--cf-text-muted)]">{modeHint[effective]}</p>
       {!status?.engineInstalled && <p className="text-[11.5px] text-[var(--cf-warning)]">{t("meetings.needEngine")}</p>}
@@ -318,6 +334,11 @@ function RecordBar({ meetingId }: { meetingId: string }) {
         <button type="button" className={ICON_BUTTON} aria-label={t("notes.moreActions")} onClick={(e) => setMenu({ x: e.clientX, y: e.clientY })}>
           <MoreHorizontal size={13} />
         </button>
+      </div>
+      {/* How each input sounds to the transcription, in a row of its own so the bar above keeps still. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[var(--cf-border)] bg-[var(--cf-surface-2)] px-3 py-1">
+        <MicCheck compact />
+        {twoChannels && <MicCheck compact channel="system" />}
       </div>
       {liveMode && lines.length > 0 && (
         <div ref={list} className="max-h-[160px] overflow-y-auto px-3 py-1.5">
@@ -572,6 +593,20 @@ function MeetingPanel({
     setMenu({ x, y, items });
   };
 
+  /** The transcript as a file the user names — what was said, by whom and when. */
+  const exportTranscript = async (format: TranscriptFormat) => {
+    const base = (noteTitle || t("meetings.exportName")).replace(/[\\/:*?"<>|]/g, "-");
+    try {
+      const path = await save({ defaultPath: `${base}.${format}`, filters: [{ name: t(`meetings.exportAs.${format}`), extensions: [format] }] });
+      if (!path) return;
+      const text = transcriptFile(format, { title: noteTitle || t("meetings.exportName"), when, lines, speakers, kind: meeting.kind });
+      await writeFileBytes(path, new TextEncoder().encode(text));
+      useToastStore.getState().pushToast(t("meetings.exported"), "success");
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  };
+
   const actions = (x: number, y: number) => {
     const counts = [0, 2, 3, 4, 5, 6, 8];
     const items: MenuItem[] = [
@@ -599,6 +634,16 @@ function MeetingPanel({
           void save({ defaultPath: `${(noteTitle || "reunion").replace(/[\\/:*?"<>|]/g, "-")}.${meeting.audioFile.split(".").pop() ?? "m4a"}` })
             .then((path) => (path ? meetingsExportAudio(meeting.id, path) : undefined))
             .catch((e) => pushErrorToast(String(e))),
+      },
+      {
+        label: t("meetings.exportTranscript"),
+        icon: FileText,
+        disabled: lines.length === 0,
+        onClick: () => {},
+        children: (["md", "txt", "srt"] as TranscriptFormat[]).map((format) => ({
+          label: t(`meetings.exportAs.${format}`),
+          onClick: () => void exportTranscript(format),
+        })),
       },
       {
         label: t("meetings.delete"),

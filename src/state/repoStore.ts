@@ -624,6 +624,34 @@ async function runPull(
 type PushOutcome = "pushed" | "failed" | "cancelled";
 
 /**
+ * A repository with no remote, published the way VS Code does it — on any host this app is connected
+ * to (GitHub, GitLab, Bitbucket, Azure DevOps): a dialog asks for the account, the owner, the name
+ * and the visibility, the repository is created, added as `origin` and the branch pushed with the
+ * account's saved credential. `false` — nothing done — when no account is connected or the user
+ * chose to type a URL instead, and the caller asks for one as before. A dismissed dialog throws
+ * `PUBLISH_CANCELLED`, which `runPush` reads as such.
+ */
+async function publishToHost(get: () => RepoState, repoPath: string): Promise<boolean> {
+  let targets: api.PublishTarget[];
+  try {
+    targets = await api.publishTargets();
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(targets) || targets.length === 0) return false;
+  const folder = repoPath.split(/[\\/]/).filter(Boolean).pop() ?? "repo";
+  const answer = await useGitDialogStore.getState().askPublish(targets, folder);
+  if (answer === "manual") return false;
+  if (answer === null) throw PUBLISH_CANCELLED;
+  await api.addRemote(repoPath, "origin", answer.cloneUrl);
+  await get().refreshRemotes();
+  await api.publishPush(repoPath, answer.provider, answer.account);
+  return true;
+}
+
+const PUBLISH_CANCELLED = "PUBLISH_CANCELLED";
+
+/**
  * A push, and the two refusals it can answer instead of just reporting.
  *
  * - **No remote at all**, when publishing: the repository was never connected to anything, so the
@@ -639,12 +667,28 @@ async function runPush(
   repoPath: string,
   setUpstream: boolean,
 ): Promise<PushOutcome> {
+  // A repository with no commit yet has nothing to publish: offered the first commit, of everything
+  // in the folder, the way VS Code does it — a freshly generated project is the usual one.
+  const head = get().branches.find((b) => b.is_head);
+  if (setUpstream && (!head || head.target === null) && get().status?.current_branch && !get().status?.is_detached) {
+    const ok = await confirmAction(translate("publish.firstCommit"), false, translate("publish.firstCommitConfirm"));
+    if (!ok) return "cancelled";
+    try {
+      await api.stageAll(repoPath);
+    } catch (e) {
+      pushErrorToast(describeError(e));
+      return "failed";
+    }
+    if (!(await get().commitChanges("Initial commit"))) return "failed";
+  }
   set({ busy: true, error: null });
   try {
     try {
       await api.gitPush(repoPath, setUpstream);
     } catch (e) {
-      if (setUpstream && hasTag(e, GIT_ERROR.noRemote)) {
+      if (setUpstream && hasTag(e, GIT_ERROR.noRemote) && (await publishToHost(get, repoPath))) {
+        // Created on the host, added as origin and pushed — `publishToHost`.
+      } else if (setUpstream && hasTag(e, GIT_ERROR.noRemote)) {
         const url = await promptAction(translate("publish.remotePrompt"), {
           placeholder: "https://example.com/owner/repo.git",
           confirmLabel: translate("publish.remoteConfirm"),
@@ -653,7 +697,7 @@ async function runPush(
         if (!url) return "cancelled";
         await api.addRemote(repoPath, "origin", url);
         await get().refreshRemotes();
-        await api.gitPush(repoPath, true);
+        await api.gitPush(repoPath, true, true);
       } else if (hasTag(e, GIT_ERROR.pushRejected)) {
         const head = get().branches.find((b) => b.is_head);
         const branch = head?.name ?? get().status?.current_branch ?? "HEAD";
@@ -672,6 +716,7 @@ async function runPush(
     await Promise.all([get().refreshBranches(), get().refreshUnpushedCommits()]);
     return "pushed";
   } catch (e) {
+    if (e === PUBLISH_CANCELLED) return "cancelled";
     const message = describeError(e);
     set({ error: message });
     pushErrorToast(message);
