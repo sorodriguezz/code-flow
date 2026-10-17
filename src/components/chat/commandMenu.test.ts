@@ -107,3 +107,12 @@ describe("appCommandFor, per composer", () => {
     expect(appCommandFor("/clear", "chat")).toBeNull();
   });
 });
+
+describe("appCommandFor on the workspace chat", () => {
+  it("offers only /new and /export", () => {
+    expect(appCommandFor("/new", "workspace")).toEqual({ id: "new", args: "" });
+    expect(appCommandFor("/export", "workspace")).toEqual({ id: "export", args: "" });
+    expect(appCommandFor("/clear", "workspace")).toBeNull();
+    expect(appCommandFor("/compact", "workspace")).toBeNull();
+  });
+});

@@ -347,6 +347,7 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
         byNote: withMeeting(state.byNote, started.meeting),
         details: { ...state.details, [started.meeting.id]: { meeting: started.meeting, lines: [], speakers: [], localOnly: false } },
         levels: { mic: [], system: [] },
+        meterError: { mic: null, system: null },
         lag: null,
         notesWith: new Set([...state.notesWith, args.noteId]),
       }));
@@ -461,7 +462,13 @@ export function ensureMeetingEvents() {
     store.setState((state) => {
       const list = [...state.levels[channel], level];
       if (list.length > LEVELS) list.splice(0, list.length - LEVELS);
-      return { levels: { ...state.levels, [channel]: list }, meter: { ...state.meter, [channel]: pushMeter(state.meter[channel], level, peak) } };
+      // The recording's own level proves the channel works: a monitor's error from before it started
+      // (on Windows the meeting's loopback invalidates the monitor's stream) must not stay shown.
+      return {
+        levels: { ...state.levels, [channel]: list },
+        meter: { ...state.meter, [channel]: pushMeter(state.meter[channel], level, peak) },
+        meterError: state.meterError[channel] ? { ...state.meterError, [channel]: null } : state.meterError,
+      };
     });
   });
   void onMeetingMonitor(({ channel, level, peak, error }) => {

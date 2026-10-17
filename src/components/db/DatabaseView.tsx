@@ -28,6 +28,13 @@ import { DiagramPanel } from "./DiagramPanel";
 import { SchemaPanel } from "./SchemaPanel";
 import { ConnectionModal } from "./ConnectionModal";
 import { ImportCsvModal } from "./ImportCsvModal";
+import { ParamsModal, SnippetsModal } from "./ConsoleModals";
+import { SessionsModal } from "./SessionsModal";
+import { ObjectSearchModal } from "./ObjectSearchModal";
+import { TableDesignerModal } from "./TableDesignerModal";
+import { BackupModal } from "./BackupModal";
+import { FakeDataModal } from "./FakeDataModal";
+import { SchemaCompareModal } from "./SchemaCompareModal";
 import { ObjectFilterModal } from "./TableFilterModal";
 import { DriverMenu, menuAnchor } from "./DriverMenu";
 import { DriverDownloadDialog } from "./DriverDownloadDialog";
@@ -35,6 +42,7 @@ import { CARD, IdentityBadge, ToolbarButton, nodeIcon } from "./dbChrome";
 import { EngineBadge } from "./DbLogo";
 import {
   ensureDbStoreLoaded,
+  parseSpec,
   pendingCount,
   transactionKey,
   useDbStore,
@@ -47,8 +55,11 @@ import { useShortcutChord } from "../../lib/useShortcutHint";
 import { confirmAction } from "../../state/confirmStore";
 import { translate, useT } from "../../state/languageStore";
 import { referenceLabel } from "./ResultGrid";
+import { decodeBinary, extensionFor, hexDump, imageType, toBase64 } from "../../lib/db/binaryValue";
+import { apiSaveBinaryFile } from "../../lib/tauri/apiCommands";
+import { useToastStore } from "../../state/toastStore";
 import { fieldFacts, recordModel } from "../../lib/db/engineModel";
-import { type DbColumn, type DbForeignKey, type DbKind } from "../../types/database";
+import { ENVIRONMENT_COLOR, type DbColumn, type DbForeignKey, type DbKind } from "../../types/database";
 import { driverEngineInfo, effectiveDriver, rowDriverId } from "../../lib/db/drivers";
 import { useDriverStore } from "../../state/driverStore";
 
@@ -179,8 +190,54 @@ export function DatabaseView() {
       )}
       {modal?.kind === "records" && <RecordsModal modal={modal} onClose={closeModal} />}
       {modal?.kind === "preview" && <PreviewModal modal={modal} onClose={closeModal} />}
+      {modal?.kind === "params" && <ParamsModal params={modal.params} onRun={modal.onRun} onClose={closeModal} />}
+      {modal?.kind === "snippets" && <SnippetsModal draft={modal.draft} onClose={closeModal} />}
+      {modal?.kind === "sessions" && (
+        <SessionsModal connectionId={modal.connectionId} database={modal.database} onClose={closeModal} />
+      )}
+      {modal?.kind === "objectSearch" && <ObjectSearchModal onClose={closeModal} />}
+      {modal?.kind === "tableDesigner" && (
+        <TableDesignerModal connectionId={modal.connectionId} node={modal.node} onClose={closeModal} />
+      )}
+      {modal?.kind === "backup" && (
+        <BackupModal
+          connectionId={modal.connectionId}
+          database={modal.database}
+          kind={connectionKind(modal.connectionId)}
+          mode={modal.mode}
+          onClose={closeModal}
+        />
+      )}
+      {modal?.kind === "fakeData" && (
+        <FakeDataModal
+          connectionId={modal.connectionId}
+          node={modal.node}
+          onClose={closeModal}
+          onOpenInConsole={(sql) => {
+            useDbStore
+              .getState()
+              .newConsole(modal.connectionId, modal.node.database ?? undefined, modal.node.schema ?? undefined, sql);
+            closeModal();
+          }}
+        />
+      )}
+      {modal?.kind === "schemaCompare" && (
+        <SchemaCompareModal
+          initial={{ connectionId: modal.connectionId, database: modal.database, schema: modal.schema }}
+          onClose={closeModal}
+          onOpenInConsole={(connectionId, database, sql) => {
+            useDbStore.getState().newConsole(connectionId, database ?? undefined, undefined, sql);
+            closeModal();
+          }}
+        />
+      )}
     </>
   );
+}
+
+/** A connection's engine, for the dialogs that take it as a prop. */
+function connectionKind(connectionId: string): DbKind {
+  return useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind ?? "postgres";
 }
 
 /**
@@ -291,8 +348,16 @@ function DbTabStrip() {
               // Middle click closes, like every other tab strip in the app.
               if (e.button === 1) void closeTabSafely(tab);
             }}
-            className={docTabClass(active, `${width} cursor-default`)}
+            className={docTabClass(active, `${width} relative cursor-default`)}
           >
+            {/* The connection's environment as a hairline along the tab's top edge: production is
+                the one tab you must not mistake for another, and the strip is where you choose. */}
+            {(() => {
+              const env = connection ? parseSpec(connection)?.environment : "";
+              return env === "dev" || env === "test" || env === "prod" ? (
+                <span aria-hidden className="absolute inset-x-2 top-0 h-[2px] rounded-full" style={{ background: ENVIRONMENT_COLOR[env] }} />
+              ) : null;
+            })()}
             {connection && engine && <EngineBadge kind={connection.kind} driver={driver} label={engine.label} />}
             <Icon size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
             {/* Italic as well as the dot: unsaved is never said by a colour alone. */}
@@ -446,35 +511,67 @@ function CellModal({
   // is — readable as a value, unreadable as a structure. Indenting it is the whole reason to open a
   // big value in a window instead of squinting at the cell.
   const formatted = useMemo(() => prettyJson(modal.value), [modal.value]);
-  const [raw, setRaw] = useState(false);
-  const shown = isNull ? "NULL" : !raw && formatted ? formatted : (modal.value ?? "");
+  // Bytes — `\x…`, `0x…`, `X'…'` — are shown for what they are: an image as an image, anything else
+  // as a hex dump, and either can be saved as the file it is. See `lib/db/binaryValue`.
+  const bytes = useMemo(() => (modal.value ? decodeBinary(modal.value) : null), [modal.value]);
+  const image = bytes ? imageType(bytes) : null;
+  const imageUrl = useMemo(() => (bytes && image ? URL.createObjectURL(new Blob([bytes], { type: image })) : null), [bytes, image]);
+  useEffect(() => () => {
+    if (imageUrl) URL.revokeObjectURL(imageUrl);
+  }, [imageUrl]);
+  type View = "formatted" | "raw" | "image" | "hex";
+  const [view, setView] = useState<View>(image ? "image" : bytes ? "hex" : "formatted");
+  const shown =
+    isNull
+      ? "NULL"
+      : view === "hex" && bytes
+        ? hexDump(bytes)
+        : view === "formatted" && formatted
+          ? formatted
+          : (modal.value ?? "");
+  const options: { value: View; label: string }[] = bytes
+    ? [
+        ...(image ? [{ value: "image" as const, label: t("db.cellImage") }] : []),
+        { value: "hex", label: t("db.cellHex") },
+        { value: "raw", label: t("db.rawValue") },
+      ]
+    : formatted
+      ? [
+          { value: "formatted", label: t("db.formatJson") },
+          { value: "raw", label: t("db.rawValue") },
+        ]
+      : [];
+
+  const saveBytes = async () => {
+    if (!bytes) return;
+    const saved = await apiSaveBinaryFile(`${modal.column}.${extensionFor(bytes)}`, toBase64(bytes)).catch(() => null);
+    if (saved) useToastStore.getState().pushToast(t("db.exported", { path: saved }), "success");
+  };
 
   return (
     <ApiModal
       icon={Table2}
       title={modal.column}
-      subtitle={isNull ? "NULL" : t("db.charactersN", { n: String(modal.value?.length ?? 0) })}
+      subtitle={
+        isNull
+          ? "NULL"
+          : bytes
+            ? t("db.bytesN", { n: bytes.length.toLocaleString() })
+            : t("db.charactersN", { n: String(modal.value?.length ?? 0) })
+      }
       width="max-w-3xl"
       height="h-[78vh]"
       onClose={onClose}
       toolbar={
-        // Only where there is a choice to make: on a value that isn't JSON the pair would be two
-        // buttons that render the same text.
-        formatted ? (
-          <Segmented
-            size="sm"
-            layoutId="cf-db-cell-format"
-            value={raw ? "raw" : "formatted"}
-            onChange={(next) => setRaw(next === "raw")}
-            options={[
-              { value: "formatted", label: t("db.formatJson") },
-              { value: "raw", label: t("db.rawValue") },
-            ]}
-          />
+        // Only where there is a choice to make: on a plain value the pair would be two buttons that
+        // render the same text.
+        options.length > 0 ? (
+          <Segmented size="sm" layoutId="cf-db-cell-format" value={view} onChange={(next) => setView(next as View)} options={options} />
         ) : undefined
       }
       footer={
         <div className="flex w-full items-center justify-end gap-2">
+          {bytes && <GhostButton onClick={() => void saveBytes()}>{t("db.saveAsFile")}</GhostButton>}
           {/* What's on screen, not what was in the cell: having just asked for the indented form,
               being handed the one-liner back would be a surprise. */}
           <GhostButton onClick={() => void navigator.clipboard.writeText(shown)}>
@@ -487,13 +584,19 @@ function CellModal({
       {/* `ApiModal`'s body brings no padding or scroll of its own — see the note in
           `ConnectionModal`. Here the `<pre>` is the scroll container. */}
       <div className="min-h-0 flex-1 overflow-hidden p-4">
-        <pre
-          className={`h-full overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 py-2.5 font-mono text-[12px] leading-[1.6] ${
-            isNull ? "italic text-[var(--cf-text-faint)]" : "text-[var(--cf-text)]"
-          }`}
-        >
-          {shown}
-        </pre>
+        {view === "image" && imageUrl ? (
+          <div className="flex h-full items-center justify-center overflow-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-3">
+            <img src={imageUrl} alt={modal.column} className="max-h-full max-w-full object-contain" />
+          </div>
+        ) : (
+          <pre
+            className={`h-full overflow-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 py-2.5 font-mono text-[12px] leading-[1.6] ${
+              view === "hex" ? "whitespace-pre" : "whitespace-pre-wrap break-words"
+            } ${isNull ? "italic text-[var(--cf-text-faint)]" : "text-[var(--cf-text)]"}`}
+          >
+            {shown}
+          </pre>
+        )}
       </div>
     </ApiModal>
   );
@@ -816,7 +919,7 @@ function PreviewModal({
   modal,
   onClose,
 }: {
-  modal: { title: string; statements: string[]; onConfirm: () => void };
+  modal: { title: string; statements: string[]; onConfirm: () => void; warning?: string };
   onClose: () => void;
 }) {
   const t = useT();
@@ -842,6 +945,11 @@ function PreviewModal({
       }
     >
       <ul className="min-h-0 flex-1 space-y-1.5 overflow-auto p-4">
+        {modal.warning && (
+          <li className="rounded-md border border-[var(--cf-danger)]/50 bg-[var(--cf-danger)]/[0.08] px-2.5 py-1.5 text-[12px] font-medium text-[var(--cf-danger)]">
+            {modal.warning}
+          </li>
+        )}
         {modal.statements.map((statement, index) => (
           <li
             key={index}

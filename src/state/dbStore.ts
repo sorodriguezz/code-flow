@@ -21,6 +21,7 @@ import {
   dbDuplicateConnection,
   dbExecute,
   dbExplain,
+  dbStatementWrites,
   dbListHistory,
   dbLoadTree,
   dbForeignKeys,
@@ -51,6 +52,7 @@ import { unguardedWrites } from "../lib/db/sqlGuards";
 import { destructiveMongoCommands } from "../lib/db/mongoGuards";
 import { splitStatements } from "../lib/db/statements";
 import { confirmAction } from "./confirmStore";
+import type { ColumnLayout } from "../lib/db/gridColumns";
 import { liftUrlSecret, maskConnectionSecrets, urlCarriesPassword } from "../lib/db/connectionSecrets";
 import { isUnknownHostKeyError } from "../lib/hostKey";
 import { useHostKeyStore } from "./hostKeyStore";
@@ -95,6 +97,7 @@ import {
   type DbTransactionState,
 } from "../types/database";
 import { ownTablesOnly, type DiagramColumnMode, type DiagramDensity } from "../lib/db/erLayout";
+import { registerIslandApp } from "../lib/islandSync";
 
 /**
  * The database workspace's state.
@@ -154,6 +157,8 @@ const HISTORY_LIMIT = 300;
 export interface DbDataUi {
   /** `"record"` is the transposed read — one record down the page instead of rows across it. */
   layout: "grid" | "record";
+  /** Hidden, pinned and moved columns — see `lib/db/gridColumns`. Absent until first changed. */
+  columns?: ColumnLayout;
   docView: "documents" | "json" | "grid";
   optionsOpen: boolean;
   /** Column pixel widths by column name; a missing entry means the grid's own default. */
@@ -176,6 +181,8 @@ export const DEFAULT_DATA_UI: DbDataUi = {
 export interface DbConsoleUi {
   docView: "documents" | "json" | "grid";
   widths: Record<string, number>;
+  /** Hidden, pinned and moved columns — see `lib/db/gridColumns`. Absent until first changed. */
+  columns?: ColumnLayout;
 }
 
 export const DEFAULT_CONSOLE_UI: DbConsoleUi = { docView: "documents", widths: {} };
@@ -254,6 +261,8 @@ export interface DbConsoleTab {
   activeResult: number;
   /** An `EXPLAIN` plan, shown instead of a grid until the next run. */
   plan: string | null;
+  /** The plan was measured (`EXPLAIN ANALYZE`) rather than estimated. */
+  planAnalyzed?: boolean;
   /** The AI assistant's ask bar and its last answer. `null` until it is first opened, so a console
    * that never uses it costs nothing — and it is never persisted, like every other result here. */
   ai: DbConsoleAi | null;
@@ -640,7 +649,7 @@ interface DbState {
   renameConsole: (consoleId: string, name: string) => Promise<void>;
   deleteConsole: (consoleId: string) => Promise<void>;
   runConsole: (tabId: string, sql?: string) => Promise<void>;
-  explainConsole: (tabId: string, sql?: string) => Promise<void>;
+  explainConsole: (tabId: string, sql?: string, analyze?: boolean) => Promise<void>;
   cancelRun: (tabId: string) => Promise<void>;
 
   /**
@@ -1712,8 +1721,17 @@ export const useDbStore = create<DbState>((set, get) => ({
     // The statements that are never a typo you can recover from — a DELETE or UPDATE with no
     // WHERE, a Mongo write aimed at every document, a dropped collection — are asked about first,
     // each one by name. See `sqlGuards` and `mongoGuards`.
-    const kind = get().connections.find((c) => c.id === tab.connectionId)?.kind;
+    const row = get().connections.find((c) => c.id === tab.connectionId);
+    const kind = row?.kind;
     if (kind && !(await confirmDestructive(kind, statement))) return;
+    // A connection labelled production asks before anything that writes — every write, not only the
+    // unguarded ones above. Whether it writes is the backend's read-only rules, per engine.
+    if (row && parseSpec(row)?.environment === "prod") {
+      const writes = await dbStatementWrites(tab.connectionId, statement).catch(() => false);
+      if (writes && !(await confirmAction(translate("db.prodConfirm", { name: row.name }), true, translate("db.runAnyway")))) {
+        return;
+      }
+    }
     // Redis's equivalent, and a copy of the driver's own check — the backend refuses these too and
     // is what actually protects the server. This one only makes the refusal instant. See
     // `redisGuards`.
@@ -1787,8 +1805,10 @@ export const useDbStore = create<DbState>((set, get) => ({
           connectionName,
         );
       }
+      notifyIfAway(get, tabId, runWorkspaceId, Date.now() - started, statement, result.results.some((r) => r.error));
     } catch (e) {
       const message = driverErrorText(e);
+      if (!isCancellation(e)) notifyIfAway(get, tabId, runWorkspaceId, Date.now() - started, statement, true);
       // A cancel or a dropped session changes the transaction the run was in; the backend knows how.
       void get().refreshTransaction(tabId);
       // A tunnel that failed on an unknown host key never reached the server — nor did a driver
@@ -1833,7 +1853,7 @@ export const useDbStore = create<DbState>((set, get) => ({
     }
   },
 
-  explainConsole: async (tabId, sql) => {
+  explainConsole: async (tabId, sql, analyze = false) => {
     const tab = findTab<DbConsoleTab>(get, tabId, "console");
     if (!tab || tab.running) return;
     const statement = (sql ?? tab.body).trim();
@@ -1845,10 +1865,11 @@ export const useDbStore = create<DbState>((set, get) => ({
       runId,
     }));
     try {
-      const plan = await dbExplain(tab.connectionId, statement, contextOf(tab), runId, "console");
+      const plan = await dbExplain(tab.connectionId, statement, contextOf(tab), runId, "console", analyze);
       patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({
         ...current,
         plan,
+        planAnalyzed: analyze,
         result: null,
       }));
     } catch (e) {
@@ -3200,6 +3221,35 @@ function addTab(
   persistTabs(get);
 }
 
+/** A console statement past this long is worth a notification when it finishes out of sight. */
+const LONG_RUN_MS = 10_000;
+
+/**
+ * Tells the user a long statement finished — only when they are not looking at it: the window is
+ * hidden or unfocused, or another tab is in front. A quick query, or one watched to the end, says
+ * nothing; the grid already answered.
+ */
+function notifyIfAway(
+  get: () => DbState,
+  tabId: string,
+  workspaceId: string | null,
+  elapsedMs: number,
+  statement: string,
+  failed: boolean,
+): void {
+  if (elapsedMs < LONG_RUN_MS) return;
+  const away =
+    typeof document !== "undefined" && (document.hidden || !document.hasFocus() || get().activeTabId !== tabId);
+  if (!away) return;
+  notify({
+    source: "db",
+    workspaceId,
+    titleKey: failed ? "notifications.dbQueryFailed" : "notifications.dbQueryDone",
+    status: failed ? "error" : "success",
+    detail: statement.length > 120 ? `${statement.slice(0, 120)}…` : statement,
+  });
+}
+
 function findTab<T extends DbTab>(
   get: () => DbState,
   tabId: string,
@@ -3273,26 +3323,35 @@ function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 function persistTabs(get: () => DbState) {
   if (persistTimer) clearTimeout(persistTimer);
-  persistTimer = setTimeout(() => {
-    persistTimer = null;
-    const state = get();
-    if (!state.workspaceId) return;
-    const payload: PersistedTabs = {
-      version: 1,
-      tabs: state.tabs.map((tab) => ({
-        kind: tab.kind,
-        connectionId: tab.connectionId,
-        consoleId: tab.kind === "console" ? tab.consoleId : undefined,
-        node: tab.kind === "console" ? undefined : tab.node,
-        name: tab.name,
-        body: tab.kind === "console" ? tab.body : undefined,
-        database: tab.kind === "console" ? tab.database : undefined,
-        schema: tab.kind === "console" ? tab.schema : undefined,
-      })),
-      activeTabId: state.activeTabId,
-    };
-    void setSetting(openTabsKey(state.workspaceId), JSON.stringify(payload)).catch(() => {});
-  }, 500);
+  persistTimer = setTimeout(() => void writeTabs(get), 500);
+}
+
+/** The write `persistTabs` still owes, made now — before an island boots and reads the tabs. */
+function flushPersistTabs(): Promise<void> {
+  if (!persistTimer) return Promise.resolve();
+  return writeTabs(useDbStore.getState);
+}
+
+function writeTabs(get: () => DbState): Promise<void> {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = null;
+  const state = get();
+  if (!state.workspaceId) return Promise.resolve();
+  const payload: PersistedTabs = {
+    version: 1,
+    tabs: state.tabs.map((tab) => ({
+      kind: tab.kind,
+      connectionId: tab.connectionId,
+      consoleId: tab.kind === "console" ? tab.consoleId : undefined,
+      node: tab.kind === "console" ? undefined : tab.node,
+      name: tab.name,
+      body: tab.kind === "console" ? tab.body : undefined,
+      database: tab.kind === "console" ? tab.database : undefined,
+      schema: tab.kind === "console" ? tab.schema : undefined,
+    })),
+    activeTabId: state.activeTabId,
+  };
+  return setSetting(openTabsKey(state.workspaceId), JSON.stringify(payload)).catch(() => {});
 }
 
 function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }): DbTab {
@@ -3494,4 +3553,22 @@ useWorkspaceStore.subscribe((state, previous) => {
   const { workspaceId, loading } = useDbStore.getState();
   if (workspaceId === null && !loading) return;
   void useDbStore.getState().setWorkspace(state.activeWorkspaceId);
+});
+
+/** While the database client is in an island the island owns its tree and tabs; this window's copy
+ *  stops persisting and is read again on the way back — see `lib/islandSync`. */
+registerIslandApp(["api:database"], {
+  isLoaded: () => useDbStore.getState().workspaceId !== null || useDbStore.getState().loading,
+  flush: flushPersistTabs,
+  release: () => {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = null;
+    pendingLoad = null;
+    useDbStore.setState({ workspaceId: null, loading: false });
+  },
+  reload: () => {
+    pendingLoad = null;
+    useDbStore.setState({ workspaceId: null, loading: false });
+    return ensureDbStoreLoaded();
+  },
 });

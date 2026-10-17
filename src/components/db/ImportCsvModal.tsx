@@ -96,7 +96,9 @@ export function ImportCsvModal({
   };
 
   const choose = async () => {
-    const picked = await apiPickFile(["csv", "tsv", "txt"]).catch(() => null);
+    // A workbook or a JSON array is converted to CSV by the backend (`tabular::csv_source`) and then
+    // goes through exactly the same preview, mapping and import.
+    const picked = await apiPickFile(["csv", "tsv", "txt", "xlsx", "xlsm", "xls", "ods", "json"]).catch(() => null);
     if (!picked) return;
     setPath(picked);
     setOutcome(null);

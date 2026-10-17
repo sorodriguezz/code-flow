@@ -827,7 +827,7 @@ const WORKBOOK_MAX_UNPACKED_BYTES: u64 = 1_000_000_000;
 /// Refuses a zip-based workbook that unpacks past the limits. Measured, not trusted: every part is
 /// inflated once into nothing, counting, before calamine opens the file — a declared size can lie.
 /// An old binary .xls does not inflate, and is left to calamine.
-fn check_workbook(path: &std::path::Path) -> Result<(), String> {
+pub(crate) fn check_workbook(path: &std::path::Path) -> Result<(), String> {
     check_workbook_within(path, WORKBOOK_MAX_PARTS, WORKBOOK_MAX_PART_BYTES, WORKBOOK_MAX_UNPACKED_BYTES)
 }
 

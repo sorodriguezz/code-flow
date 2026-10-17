@@ -72,6 +72,26 @@ pub fn rename_chat_conversation(db: State<'_, Db>, project_id: String, session_i
     queries::rename_chat_conversation(&conn, &project_id, &session_id, &title).map_err(|e| e.to_string())
 }
 
+/// «Bifurcar desde aquí»: a new repository conversation, `new_session_id`, with the turns of
+/// `session_id` filed up to `through` (an answer's `created_at`) — see `queries::branch_chat_conversation`. One transaction: a half-copied branch would be
+/// a conversation missing its middle.
+#[tauri::command]
+pub fn branch_chat_conversation(
+    db: State<'_, Db>,
+    project_id: String,
+    session_id: String,
+    new_session_id: String,
+    through: String,
+    title: String,
+) -> Result<usize, String> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let copied = queries::branch_chat_conversation(&tx, &project_id, &session_id, &new_session_id, &through, &title)
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(copied)
+}
+
 /// The panel's `/clear`: the next question in this conversation starts a fresh engine session.
 ///
 /// Written down rather than held in one window's memory, so the promise is kept by whoever asks

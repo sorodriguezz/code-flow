@@ -3,6 +3,7 @@ import * as api from "../lib/tauri/commands";
 import { isOwnOrigin, onStateInvalidate } from "../lib/tauri/events";
 import { WINDOW } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
+import { DEFAULT_WORKSPACE_COLOR } from "../lib/workspaceColors";
 import type { NewProject, Project, Workspace } from "../types/domain";
 
 const LAST_WORKSPACE_KEY = "last_active_workspace_id";
@@ -66,6 +67,8 @@ interface WorkspaceState {
   addWorkspace: (name: string, icon: string, color: string) => Promise<Workspace>;
   removeWorkspace: (id: string) => Promise<void>;
   setWorkspaceColor: (id: string, color: string) => Promise<void>;
+  setWorkspaceIcon: (id: string, icon: string) => Promise<void>;
+  renameProject: (id: string, workspaceId: string, name: string) => Promise<void>;
   renameWorkspace: (id: string, name: string) => Promise<void>;
   addProject: (input: NewProject) => Promise<Project>;
   removeProject: (id: string, workspaceId: string) => Promise<void>;
@@ -138,7 +141,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       // with this load and created a duplicate default workspace on every app start.
       let workspaces = await api.listWorkspaces();
       if (workspaces.length === 0) {
-        const defaultWorkspace = await api.createWorkspace(DEFAULT_WORKSPACE_NAME, "briefcase", "#6366f1");
+        const defaultWorkspace = await api.createWorkspace(DEFAULT_WORKSPACE_NAME, "initials", DEFAULT_WORKSPACE_COLOR);
         workspaces = [defaultWorkspace];
       }
       set({ workspaces });
@@ -208,6 +211,26 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (get().activeWorkspaceId === null && get().workspaces.length > 0) {
       get().setActiveWorkspace(get().workspaces[0].id);
     }
+  },
+
+  setWorkspaceIcon: async (id, icon) => {
+    await api.updateWorkspaceIcon(id, icon);
+    set((s) => ({ workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, icon } : w)) }));
+    announce();
+  },
+
+  // Written first, as `renameWorkspace` is: the backend is what refuses a blank name.
+  renameProject: async (id, workspaceId, name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    await api.renameProject(id, trimmed);
+    set((s) => ({
+      projectsByWorkspace: {
+        ...s.projectsByWorkspace,
+        [workspaceId]: (s.projectsByWorkspace[workspaceId] ?? []).map((p) => (p.id === id ? { ...p, name: trimmed } : p)),
+      },
+    }));
+    announce();
   },
 
   setWorkspaceColor: async (id, color) => {

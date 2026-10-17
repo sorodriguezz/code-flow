@@ -491,6 +491,45 @@ pub fn move_project_to_workspace(db: State<Db>, id: String, workspace_id: String
     Ok(())
 }
 
+/// A workspace's icon: `"initials"` (its monogram, the default) or a lucide icon name the picker
+/// offers. Free text in the column; the frontend draws anything it does not know as initials.
+#[tauri::command]
+pub fn update_workspace_icon(db: State<Db>, id: String, icon: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::update_workspace_icon(&conn, &id, icon.trim()).map_err(|e| e.to_string())
+}
+
+/// The name a project is shown under. The folder on disk keeps its own — this is a label, the way
+/// a workspace's name is.
+#[tauri::command]
+pub fn rename_project(db: State<Db>, id: String, name: String) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Project name cannot be empty".into());
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::rename_project(&conn, &id, trimmed).map_err(|e| e.to_string())
+}
+
+/// One line per repository for the projects panel — branch, changed files, ahead/behind — see
+/// [`crate::git::summary`]. Read in parallel, off the UI thread; a folder that is gone answers with
+/// its error rather than failing the batch.
+#[tauri::command]
+pub async fn repo_summaries(paths: Vec<String>) -> Vec<crate::git::summary::RepoSummary> {
+    let tasks: Vec<_> = paths
+        .into_iter()
+        .take(200)
+        .map(|path| tokio::task::spawn_blocking(move || crate::git::summary::summarize(&path)))
+        .collect();
+    let mut out = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if let Ok(summary) = task.await {
+            out.push(summary);
+        }
+    }
+    out
+}
+
 #[tauri::command]
 pub fn update_project_color(db: State<Db>, id: String, color: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;

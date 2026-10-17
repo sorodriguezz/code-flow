@@ -11,6 +11,7 @@ pub mod chat_cmd;
 pub mod containers_cmd;
 pub mod containers_kube_cmd;
 pub mod checkpoint_cmd;
+pub mod tests_cmd;
 pub mod claude_cmd;
 pub mod fix_verify;
 pub mod codemap_cmd;

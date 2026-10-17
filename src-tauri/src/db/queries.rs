@@ -670,6 +670,16 @@ pub fn rename_workspace(conn: &Connection, id: &str, name: &str) -> rusqlite::Re
     Ok(())
 }
 
+pub fn update_workspace_icon(conn: &Connection, id: &str, icon: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE workspaces SET icon = ?1 WHERE id = ?2", params![icon, id])?;
+    Ok(())
+}
+
+pub fn rename_project(conn: &Connection, id: &str, name: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE projects SET name = ?1 WHERE id = ?2", params![name, id])?;
+    Ok(())
+}
+
 // ---------- projects ----------
 
 pub fn create_project(conn: &Connection, input: NewProject) -> rusqlite::Result<Project> {
@@ -3978,6 +3988,7 @@ pub fn add_activity_log(
         model: meta.model.map(str::to_string),
         engine_version: meta.engine_version.map(str::to_string),
         account_id: meta.account_id.map(str::to_string),
+        checkpoint: None,
     };
     conn.execute(
         "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id)
@@ -4002,6 +4013,13 @@ pub fn add_activity_log(
     Ok(entry)
 }
 
+/// What a chat turn changed on disk — `{"id": <checkpoint>, "paths": [...]}` — written after the row,
+/// once the turn is known to have touched files. See `claude_cmd::send_chat_message`.
+pub fn set_activity_checkpoint(conn: &Connection, id: &str, checkpoint: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE activity_log SET checkpoint = ?1 WHERE id = ?2", params![checkpoint, id])?;
+    Ok(())
+}
+
 /// The column list every read that returns a whole [`ActivityLogEntry`] shares, so the row indices
 /// in [`read_activity_row`] can't drift apart from it.
 ///
@@ -4009,7 +4027,7 @@ pub fn add_activity_log(
 /// go through [`conversation_turns`] instead, because `trace` is the heaviest column in the
 /// database and reading it to build a list of titles is pure waste.
 const ACTIVITY_COLUMNS: &str =
-    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id";
+    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint";
 
 /// [`ACTIVITY_COLUMNS`] with `trace` replaced by [`TRACE_PRESENCE`], so [`read_activity_row`] can
 /// read it unchanged and the turn comes back with `trace: Some("")` when it has one, `None` when not.
@@ -4020,7 +4038,7 @@ const ACTIVITY_COLUMNS: &str =
 const ACTIVITY_COLUMNS_NO_TRACE: &str =
     "id, project_id, session_id, engine_session_id, question, answer, \
      CASE WHEN trace IS NULL OR trace = '' OR trace = '[]' THEN NULL ELSE '' END, \
-     created_at, response_time_ms, is_error, provider, model, engine_version, account_id";
+     created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint";
 
 fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> {
     Ok(ActivityLogEntry {
@@ -4038,6 +4056,7 @@ fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> 
         model: row.get(11)?,
         engine_version: row.get(12)?,
         account_id: row.get(13)?,
+        checkpoint: row.get(14)?,
     })
 }
 
@@ -4328,6 +4347,59 @@ pub fn delete_chat_conversation(conn: &Connection, project_id: &str, session_id:
         params![project_id, session_id],
     )?;
     Ok(())
+}
+
+/// «Bifurcar desde aquí» in a repository conversation: a new conversation `to` holding the turns of
+/// `from` filed up to `through` (an answer's `created_at`, which is what the transcript holds — a
+/// count would not do, a stopped turn is on screen and not on disk), with the `/clear`s that fell
+/// among them, titled `title`.
+///
+/// The copies keep their dates (the transcript reads the same) and lose what belonged to the
+/// original run: the engine's resume token — a session holds the turns *after* the fork too, so the
+/// branch starts a fresh one and is re-told its transcript (`claude_cmd::panel_transcript`) — and the
+/// turn's checkpoint, whose undo is the original's. Returns how many turns were copied.
+pub fn branch_chat_conversation(
+    conn: &Connection,
+    project_id: &str,
+    from: &str,
+    to: &str,
+    through: &str,
+    title: &str,
+) -> rusqlite::Result<usize> {
+    let turns = get_conversation_messages(conn, project_id, from)?;
+    let kept: Vec<&ActivityLogEntry> = turns.iter().filter(|turn| turn.created_at.as_str() <= through).collect();
+    let Some(last) = kept.last() else { return Ok(0) };
+    for turn in &kept {
+        conn.execute(
+            "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id,
+                to,
+                turn.question,
+                turn.answer,
+                turn.trace,
+                turn.created_at,
+                turn.response_time_ms,
+                turn.is_error,
+                turn.provider,
+                turn.model,
+                turn.engine_version,
+                turn.account_id
+            ],
+        )?;
+    }
+    for reset in conversation_resets(conn, from)?.into_iter().filter(|at| at.as_str() <= last.created_at.as_str()) {
+        conn.execute(
+            "INSERT INTO conversation_resets (id, session_id, project_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![Uuid::new_v4().to_string(), to, project_id, reset],
+        )?;
+    }
+    if !title.trim().is_empty() {
+        rename_chat_conversation(conn, project_id, to, title.trim())?;
+    }
+    Ok(kept.len())
 }
 
 // ---------- the assistant panel's `/clear` ----------
@@ -5653,6 +5725,7 @@ mod tests {
             model: None,
             engine_version: None,
             account_id: account.map(str::to_string),
+            checkpoint: None,
         }
     }
 
@@ -5700,6 +5773,25 @@ mod tests {
 
         delete_chat_conversation(&conn, &project, "conv").unwrap();
         assert!(conversation_resets(&conn, "conv").unwrap().is_empty(), "deleted with its conversation");
+    }
+
+    #[test]
+    fn a_branch_copies_the_first_turns_without_their_session_or_checkpoint() {
+        let (conn, project) = fixture();
+        let mut filed = Vec::new();
+        for (q, session) in [("q1", "s1"), ("q2", "s1"), ("q3", "s1")] {
+            let row = add_activity_log(&conn, &project, "conv", Some(session), q, "a", None, TurnMeta::default(), false).unwrap();
+            set_activity_checkpoint(&conn, &row.id, r#"{"id":"c","paths":["a.txt"]}"#).unwrap();
+            filed.push(row);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(branch_chat_conversation(&conn, &project, "conv", "fork", &filed[1].created_at, "Mi rama").unwrap(), 2);
+        let copied = get_conversation_messages(&conn, &project, "fork").unwrap();
+        assert_eq!(copied.iter().map(|t| t.question.as_str()).collect::<Vec<_>>(), vec!["q1", "q2"]);
+        assert!(copied.iter().all(|t| t.engine_session_id.is_none() && t.checkpoint.is_none()));
+        assert_eq!(conversation_title(&conn, "fork").unwrap().as_deref(), Some("Mi rama"));
+        assert_eq!(get_conversation_messages(&conn, &project, "conv").unwrap().len(), 3, "the original is untouched");
+        assert_eq!(branch_chat_conversation(&conn, &project, "missing", "x", &filed[2].created_at, "").unwrap(), 0);
     }
 
     /// The same rule the panel draws its account line by: same provider, another account, a session

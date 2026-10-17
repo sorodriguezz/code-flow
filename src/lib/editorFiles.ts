@@ -19,6 +19,14 @@ export const CHANGED_ON_DISK = "changed-on-disk";
  *  "open anyway", which is read-only. */
 export const MAX_EDITOR_READ_BYTES = 20 * 1024 * 1024;
 
+/** Mirrors `fsops::UNMAPPABLE`: a save in the file's own encoding refused because the text holds a
+ *  character that encoding cannot represent. */
+export const UNMAPPABLE = "unmappable-characters";
+
+export function isUnmappable(error: unknown): boolean {
+  return String(error).includes(`${UNMAPPABLE}: `);
+}
+
 /** Whether a save failed because the file changed under the buffer — which is a question for the
  *  user, not an error to report. Matched anywhere in the text, so an `Error` wrapped around the
  *  backend's string ("Error: changed-on-disk: …") is still recognised. */
@@ -39,12 +47,12 @@ export type FileNotice =
   | { kind: "tooLarge"; size: number; canForce: boolean };
 
 /**
- * Why a tab shows text it will not save. `encoding`: decoded from something other than UTF-8, and
- * the editor only writes UTF-8 — a save would re-encode every accent. `large`: opened past the read
- * cap on request, where Monaco is at its limits and an accidental keystroke-and-save of a
- * hundred-megabyte log is not a thing to make easy.
+ * Why a tab shows text it will not save. `large`: opened past the read cap on request, where Monaco
+ * is at its limits and an accidental keystroke-and-save of a hundred-megabyte log is not a thing to
+ * make easy. (A file in another encoding used to be read-only too; it is now saved back in its own
+ * encoding — see `LoadedFile.encoding`.)
  */
-export type ReadOnlyReason = { kind: "encoding"; encoding: string } | { kind: "large" };
+export type ReadOnlyReason = { kind: "large" };
 
 /** A read, as the tab fields it sets. */
 export interface LoadedFile {
@@ -53,6 +61,8 @@ export interface LoadedFile {
   version: DiskVersion | null;
   notice: FileNotice | null;
   readOnly: ReadOnlyReason | null;
+  /** The encoding the text was decoded from and is saved back in; `null` for UTF-8. */
+  encoding: string | null;
 }
 
 export function loadedFrom(file: EditorFile): LoadedFile {
@@ -63,13 +73,15 @@ export function loadedFrom(file: EditorFile): LoadedFile {
         version: file.version,
         notice: null,
         readOnly: file.version.size > MAX_EDITOR_READ_BYTES ? { kind: "large" } : null,
+        encoding: null,
       };
     case "legacy":
       return {
         content: file.text,
         version: file.version,
         notice: null,
-        readOnly: { kind: "encoding", encoding: file.encoding },
+        readOnly: null,
+        encoding: file.encoding,
       };
     case "image":
       return {
@@ -77,22 +89,24 @@ export function loadedFrom(file: EditorFile): LoadedFile {
         version: file.version,
         notice: { kind: "image", src: `data:${file.mime};base64,${file.base64}`, mime: file.mime, size: file.version.size },
         readOnly: null,
+        encoding: null,
       };
     case "binary":
-      return { content: "", version: file.version, notice: { kind: "binary", size: file.size }, readOnly: null };
+      return { content: "", version: file.version, notice: { kind: "binary", size: file.size }, readOnly: null, encoding: null };
     case "tooLarge":
       return {
         content: "",
         version: file.version,
         notice: { kind: "tooLarge", size: file.size, canForce: file.can_force },
         readOnly: null,
+        encoding: null,
       };
   }
 }
 
 /** A read that failed, as a tab: the error is something to look at and retry, never a buffer. */
 export function failedLoad(error: unknown): LoadedFile {
-  return { content: "", version: null, notice: { kind: "error", message: String(error) }, readOnly: null };
+  return { content: "", version: null, notice: { kind: "error", message: String(error) }, readOnly: null, encoding: null };
 }
 
 /** Whether a tab holds a buffer that saving would write — not a notice, not read-only text. */
@@ -121,10 +135,11 @@ export function sameDiskContent(a: DiskVersion | null, b: DiskVersion | null): b
  * sweep that rebuilt it for a file that came back the same re-rendered all of them for nothing.
  */
 export function sameLoadedState(
-  tab: { version: DiskVersion | null; notice: FileNotice | null; readOnly: ReadOnlyReason | null },
+  tab: { version: DiskVersion | null; notice: FileNotice | null; readOnly: ReadOnlyReason | null; encoding?: string | null },
   loaded: LoadedFile,
 ): boolean {
   return (
+    (tab.encoding ?? null) === loaded.encoding &&
     sameDiskContent(tab.version, loaded.version) &&
     tab.notice?.kind === loaded.notice?.kind &&
     (tab.notice?.kind !== "error" ||

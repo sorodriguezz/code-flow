@@ -251,15 +251,34 @@ impl MysqlSession {
 
     /// MySQL's own tree rendering where the server has it (8.0.16 and later), MariaDB's JSON, and the
     /// classic table as the last resort — each is the most readable plan that server will give.
-    pub async fn explain(&self, sql: &str, _ctx: &DbExecContext) -> Result<String, String> {
+    /// With `analyze`, `EXPLAIN ANALYZE` (MySQL 8.0.18 and later, reads only — `Session::explain`
+    /// checked); on MariaDB or an older MySQL the estimated plan, with a line saying why.
+    pub async fn explain(&self, sql: &str, _ctx: &DbExecContext, analyze: bool) -> Result<String, String> {
         let statement = split_statements(sql, Some(self.dialect))
             .into_iter()
             .next()
             .ok_or_else(|| "There is no statement to explain.".to_string())?;
+        let mut note = None;
+        if analyze {
+            if !self.mariadb && supports_explain_analyze(&self.version) {
+                let rows = self.rows(&format!("EXPLAIN ANALYZE {statement}")).await?;
+                return Ok(rows.iter().filter_map(|row| row.first().cloned().flatten()).collect::<Vec<_>>().join("\n"));
+            }
+            note = Some(format!(
+                "-- EXPLAIN ANALYZE needs MySQL 8.0.18 or later ({}); showing the estimated plan.",
+                if self.version.is_empty() { "unknown server" } else { self.version.as_str() }
+            ));
+        }
+        let with_note = |plan: String| match &note {
+            Some(note) => format!("{note}\n{plan}"),
+            None => plan,
+        };
         let formats: &[&str] = if self.mariadb { &["FORMAT=JSON "] } else { &["FORMAT=TREE ", "FORMAT=JSON "] };
         for format in formats {
             if let Ok(rows) = self.rows(&format!("EXPLAIN {format}{statement}")).await {
-                return Ok(rows.iter().filter_map(|row| row.first().cloned().flatten()).collect::<Vec<_>>().join("\n"));
+                return Ok(with_note(
+                    rows.iter().filter_map(|row| row.first().cloned().flatten()).collect::<Vec<_>>().join("\n"),
+                ));
             }
         }
         let mut conn = self.conn.lock().await;
@@ -267,7 +286,7 @@ impl MysqlSession {
         if let Some(error) = result.error {
             return Err(error);
         }
-        Ok(render_table(&result))
+        Ok(with_note(render_table(&result)))
     }
 
     // ------------------------------------------------------------ introspect
@@ -939,6 +958,17 @@ fn used_database(statement: &str) -> Option<String> {
 }
 
 /// A classic `EXPLAIN` table as aligned text, for servers with nothing better.
+/// `EXPLAIN ANALYZE` arrived in MySQL 8.0.18. The version string leads with `major.minor.patch`
+/// (`8.0.36`, `8.4.0-commercial`); one that doesn't parse is taken as too old.
+fn supports_explain_analyze(version: &str) -> bool {
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .take(3)
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let (major, minor, patch) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor, patch) >= (8, 0, 18)
+}
+
 fn render_table(result: &DbStatementResult) -> String {
     let headers: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
     let rows: Vec<Vec<String>> = result
@@ -1055,6 +1085,16 @@ fn ssl_opts(config: &DbConnectionConfig) -> Result<Option<SslOpts>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explain_analyze_needs_mysql_8_0_18() {
+        assert!(supports_explain_analyze("8.0.18"));
+        assert!(supports_explain_analyze("8.4.0-commercial"));
+        assert!(supports_explain_analyze("9.1.0"));
+        assert!(!supports_explain_analyze("8.0.17"));
+        assert!(!supports_explain_analyze("5.7.44-log"));
+        assert!(!supports_explain_analyze(""));
+    }
 
     #[test]
     fn a_use_statement_names_where_the_session_went() {
@@ -1186,7 +1226,7 @@ mod tests {
         assert_eq!(session.row_count(&orders, "total > 100").await.unwrap(), 1);
         let ddl = session.object_ddl(&orders).await.unwrap();
         assert!(ddl.starts_with("CREATE TABLE `orders`"), "{ddl}");
-        assert!(!session.explain("SELECT * FROM orders WHERE id = 1", &ctx).await.unwrap().is_empty());
+        assert!(!session.explain("SELECT * FROM orders WHERE id = 1", &ctx, false).await.unwrap().is_empty());
 
         // A procedure through DELIMITER, then called.
         let procedure = session

@@ -17,7 +17,9 @@
 
 pub mod grpc;
 pub mod http;
+pub mod load;
 pub mod mqtt;
+pub mod routes;
 pub mod socketio;
 pub mod stream;
 pub mod tls;

@@ -286,6 +286,26 @@ export const updateWorkspaceColor = (id: string, color: string) =>
 
 export const renameWorkspace = (id: string, name: string) => invoke<void>("rename_workspace", { id, name });
 
+/** `"initials"` or one of `WORKSPACE_ICONS` — see `WorkspaceGlyph`. */
+export const updateWorkspaceIcon = (id: string, icon: string) => invoke<void>("update_workspace_icon", { id, icon });
+
+/** The name a project is shown under; the folder keeps its own. */
+export const renameProject = (id: string, name: string) => invoke<void>("rename_project", { id, name });
+
+/** One line per repository for the projects panel — `git::summary`. */
+export interface RepoSummary {
+  path: string;
+  branch: string | null;
+  detached: boolean;
+  changed: number;
+  conflicted: number;
+  ahead: number | null;
+  behind: number | null;
+  error: string | null;
+}
+
+export const repoSummaries = (paths: string[]) => invoke<RepoSummary[]>("repo_summaries", { paths });
+
 export const createProject = (input: NewProject) => invoke<Project>("create_project", { input });
 
 export const listProjects = (workspaceId: string) =>
@@ -313,8 +333,40 @@ export const getStatus = (repoPath: string) => invoke<RepoStatusInfo>("get_statu
  * One page of history, and whether there is more behind it — a hard cap with no "load more" is a
  * history that silently stops.
  */
-export const listCommitsPage = (repoPath: string, allRefs: boolean, skip: number, limit: number) =>
-  invoke<CommitPage>("list_commits_page", { repoPath, allRefs, skip, limit });
+export const listCommitsPage = (
+  repoPath: string,
+  allRefs: boolean,
+  skip: number,
+  limit: number,
+  filter: import("../commitFilter").LogFilter | null = null,
+) => invoke<CommitPage>("list_commits_page", { repoPath, allRefs, skip, limit, filter });
+
+/** Two revisions compared tree to tree; with `file`, that path alone at full context. */
+export const getRevisionsDiff = (repoPath: string, from: string, to: string, file: string | null = null) =>
+  invoke<FileDiffInfo[]>("get_revisions_diff", { repoPath, from, to, file });
+
+/** One commit as a `git am`-able patch (`git format-patch -1 --stdout`). */
+export const formatPatch = (repoPath: string, oid: string) => invoke<string>("format_patch", { repoPath, oid });
+
+export const renameBranch = (repoPath: string, name: string, newName: string) =>
+  invoke<void>("rename_branch", { repoPath, name, newName });
+
+/** One line of an interactive rebase, oldest commit first. */
+export interface RebaseStep {
+  action: "pick" | "reword" | "squash" | "fixup" | "drop";
+  oid: string;
+  message?: string | null;
+}
+
+/** The commits a rebase from `base` would replay (`base..HEAD`), oldest first. */
+export const rebasePlan = (repoPath: string, base: string) =>
+  invoke<(CommitInfo & { message: string })[]>("rebase_plan", { repoPath, base });
+
+export const rebaseInteractive = (repoPath: string, base: string, steps: RebaseStep[]) =>
+  invoke<void>("rebase_interactive", { repoPath, base, steps });
+
+/** `git rebase <upstream>` on the checked-out branch. */
+export const rebaseOnto = (repoPath: string, upstream: string) => invoke<void>("rebase_onto", { repoPath, upstream });
 
 /** Commits that touched one path, newest first. The complement of blame. */
 export const fileHistory = (repoPath: string, relPath: string, limit: number) =>
@@ -393,8 +445,13 @@ export const getStagedDiff = (repoPath: string, contextLines?: number) =>
  * file being looked at instead of paying it for the entire changeset on every watcher tick.
  * Resolves to `null` when the path has no diff on that side.
  */
-export const getFileDiff = (repoPath: string, path: string, staged: boolean) =>
-  invoke<FileDiffInfo | null>("get_file_diff", { repoPath, path, staged });
+/** `ignoreWhitespace`: `git diff -w` — a diff to read, not to stage lines from. */
+export const getFileDiff = (repoPath: string, path: string, staged: boolean, ignoreWhitespace = false) =>
+  invoke<FileDiffInfo | null>("get_file_diff", { repoPath, path, staged, ignoreWhitespace });
+
+/** A file at a revision (`HEAD`, a branch, a commit), or `null` when it is not there. */
+export const fileAtRevision = (repoPath: string, revision: string, path: string) =>
+  invoke<string | null>("file_at_revision", { repoPath, revision, path });
 
 export const getCommitDiff = (repoPath: string, oid: string) =>
   invoke<FileDiffInfo[]>("get_commit_diff", { repoPath, oid });
@@ -1425,6 +1482,10 @@ export interface ChatReply {
   /** The thread had a session and this turn started a fresh one because the account changed —
    * this chat does not replay history, so the panel says so. */
   account_changed?: boolean;
+  /** What the turn changed on disk, as JSON `{"id", "paths"}` — see `parseTurnChanges`. */
+  checkpoint?: string | null;
+  /** What the engine held in context on the last step of this turn, when it reports it (Claude). */
+  context_tokens?: number | null;
 }
 
 /** `sessionId` is the engine's resume token; `conversationId` is *our* identity for the chat and
@@ -1457,6 +1518,8 @@ export const sendChatMessage = (
   attachments?: string[] | null,
   /** The composer's thinking level (`low`…`max`); empty or absent leaves the CLI's own default. */
   effort?: string | null,
+  /** Plan mode: the turn runs read-only and answers with a plan. */
+  plan?: boolean,
 ) =>
   invoke<ChatReply>("send_chat_message", {
     projectId,
@@ -1472,6 +1535,7 @@ export const sendChatMessage = (
     skill: skill ?? null,
     attachments: attachments && attachments.length > 0 ? attachments : null,
     effort: effort || null,
+    plan: plan ?? null,
   });
 
 // ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------
@@ -1901,6 +1965,10 @@ export const readFileText = (repoPath: string, relPath: string) =>
 export const quickDiffBase = (repoPath: string, filePath: string, staged: boolean) =>
   invoke<string | null>("quick_diff_base", { repoPath, filePath, staged });
 
+/** One page of a file's bytes — the editor's hex view. `total` is the whole file's size. */
+export const readFileBytes = (repoPath: string, relPath: string, offset: number, len: number) =>
+  invoke<{ bytes: number[]; total: number }>("read_file_bytes", { repoPath, relPath, offset, len });
+
 export const writeFileText = (repoPath: string, relPath: string, content: string) =>
   invoke<void>("write_file_text", { repoPath, relPath, content });
 
@@ -1916,16 +1984,17 @@ export interface DiskVersion {
 /** A file as the editor opens it — only `text` is an editable buffer. See `fsops::EditorFile`. */
 export type EditorFile =
   | { kind: "text"; text: string; version: DiskVersion }
-  /** Another encoding, decoded to be read — never written back. */
+  /** Another encoding, decoded to be edited and saved back in it (`encoding` on the write). */
   | { kind: "legacy"; text: string; encoding: string; version: DiskVersion }
   | { kind: "image"; mime: string; base64: string; version: DiskVersion }
   | { kind: "binary"; size: number; version: DiskVersion }
   /** Nothing read. `can_force`: "open anyway" is on offer. */
   | { kind: "tooLarge"; size: number; can_force: boolean; version: DiskVersion };
 
-/** The editor's read. `allowLarge` is a tab's "open anyway", which raises the read cap. */
-export const readEditorFile = (repoPath: string, relPath: string, allowLarge = false) =>
-  invoke<EditorFile>("read_editor_file", { repoPath, relPath, allowLarge });
+/** The editor's read. `allowLarge` is a tab's "open anyway", which raises the read cap. `encoding`
+ *  is «Reopen with encoding»: the text read as that instead of what the bytes suggest. */
+export const readEditorFile = (repoPath: string, relPath: string, allowLarge = false, encoding?: string | null) =>
+  invoke<EditorFile>("read_editor_file", { repoPath, relPath, allowLarge, encoding: encoding ?? null });
 
 /** The disk version of an open tab's file now, or `null` when nothing is there. `known` comes
  *  straight back, unread, while the file's timestamp and size still match it. */
@@ -1934,11 +2003,21 @@ export const statEditorFile = (repoPath: string, relPath: string, known: DiskVer
 
 /** The editor's save: refuses (see `isChangedOnDisk` in `lib/editorFiles`) when the file is no
  *  longer the one `expected` describes; `expected: null` overwrites. Returns the version written. */
-export const writeEditorFile = (repoPath: string, relPath: string, content: string, expected: DiskVersion | null) =>
-  invoke<DiskVersion>("write_editor_file", { repoPath, relPath, content, expected });
+export const writeEditorFile = (
+  repoPath: string,
+  relPath: string,
+  content: string,
+  expected: DiskVersion | null,
+  /** The file's encoding when it is not UTF-8 — `null` writes UTF-8. Refused with
+   *  `unmappable-characters` when the text does not fit it. */
+  encoding: string | null = null,
+) => invoke<DiskVersion>("write_editor_file", { repoPath, relPath, content, expected, encoding });
 
 /** Writes an exported binary to an absolute path — the one the user picked in a native save
  * dialog, which is what authorises writing outside the repo. */
+/** A `.json` the user picked in the native open dialog (≤ 5 MB) — see `read_picked_json`. */
+export const readPickedJson = (path: string) => invoke<string>("read_picked_json", { path });
+
 export const writeFileBytes = (path: string, contents: Uint8Array) =>
   invoke<void>("write_file_bytes", { path, contents: Array.from(contents) });
 
@@ -2034,6 +2113,33 @@ export const renamePath = (repoPath: string, fromRel: string, newName: string) =
   invoke<string>("rename_path", { repoPath, fromRel, newName });
 
 /** Sends a file or folder to the OS trash, so a mis-aimed click is recoverable from Finder. */
+/** One file of a chat turn: the checkpoint's copy and the one on disk (`null` = absent), or
+ *  `binary` when either is not text. See `checkpoint_cmd::ai_checkpoint_file`. */
+export interface TurnFile {
+  before: string | null;
+  after: string | null;
+  binary: boolean;
+}
+
+export const aiCheckpointFile = (repoPath: string, checkpointId: string, path: string) =>
+  invoke<TurnFile>("ai_checkpoint_file", { repoPath, checkpointId, path });
+
+export const restoreAiCheckpointPaths = (repoPath: string, checkpointId: string, paths: string[]) =>
+  invoke<string[]>("restore_ai_checkpoint_paths", { repoPath, checkpointId, paths });
+
+/** A version of a file in the editor's local history (`local_history.rs`); `savedAt` in unix ms. */
+export interface LocalVersion {
+  id: string;
+  savedAt: number;
+  bytes: number;
+}
+
+export const localHistoryList = (repoPath: string, relPath: string) =>
+  invoke<LocalVersion[]>("local_history_list", { repoPath, relPath });
+
+export const localHistoryRead = (repoPath: string, relPath: string, id: string) =>
+  invoke<string>("local_history_read", { repoPath, relPath, id });
+
 export const deletePath = (repoPath: string, relPath: string) =>
   invoke<void>("delete_path", { repoPath, relPath });
 
@@ -2137,6 +2243,11 @@ export const deleteChatConversation = (projectId: string, sessionId: string) =>
 
 export const renameChatConversation = (projectId: string, sessionId: string, title: string) =>
   invoke<void>("rename_chat_conversation", { projectId, sessionId, title });
+
+/** «Bifurcar desde aquí»: a new repository conversation, `newSessionId`, holding the turns of
+ *  `sessionId` filed up to `through` (an answer's `created_at`). Returns how many were copied. */
+export const branchChatConversation = (projectId: string, sessionId: string, newSessionId: string, through: string, title: string) =>
+  invoke<number>("branch_chat_conversation", { projectId, sessionId, newSessionId, through, title });
 
 /** The panel's `/clear`, written down: the next question in this conversation starts a fresh engine
  *  session — whichever window or phone asks it, after a restart too, and in the chat workspace if

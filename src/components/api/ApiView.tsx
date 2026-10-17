@@ -15,6 +15,9 @@ import { CookieModal } from "./CookieModal";
 import { CollabModal } from "./CollabModal";
 import { ConflictModal } from "./ConflictModal";
 import { ScriptTrustHost } from "./ScriptTrustModal";
+import { AiRequestModal } from "./AiRequestModal";
+import { RepoRoutesModal } from "./RepoRoutesModal";
+import { LoadTestModal } from "./LoadTestModal";
 import { tabActions } from "./tabActions";
 import { CARD } from "./panelChrome";
 import { buttonClass } from "../common/Button";
@@ -211,6 +214,9 @@ export function ApiView() {
       )}
       {modal?.kind === "collab" && <CollabModal onClose={closeModal} />}
       {modal?.kind === "conflicts" && <ConflictModal onClose={closeModal} />}
+      {modal?.kind === "aiRequest" && <AiRequestModal onClose={closeModal} />}
+      {modal?.kind === "repoRoutes" && <RepoRoutesModal onClose={closeModal} />}
+      {modal?.kind === "loadTest" && <LoadTestModal tabId={modal.tabId} onClose={closeModal} />}
       {/* Outside the `modal` switch: the runner asks it while its own dialog stays open. */}
       <ScriptTrustHost />
     </>

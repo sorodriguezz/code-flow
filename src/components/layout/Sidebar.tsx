@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
 import { ActiveMarker, ActivePill, useSlide } from "../common/ActivePill";
 import {
@@ -29,6 +29,7 @@ import {
   Plus,
   RefreshCw,
   Rocket,
+  Search,
   Settings,
   TerminalSquare,
   Trash2,
@@ -96,6 +97,16 @@ import { SubmodulesSection, TagsSection, WorktreesSection } from "../git/RepoSec
 import { useGitToolsStore } from "../../state/gitToolsStore";
 import { projectMenuItems } from "./projectMenu";
 import { MoveProjectModal } from "./MoveProjectModal";
+import {
+  GroupHeader,
+  MoveDropStrip,
+  PinnedHeader,
+  ProjectBadges,
+  moveProjectByDrop,
+  useProjectArrangement,
+} from "./sidebarExtras";
+import { useRepoSummaryPolling, useRepoSummaryStore } from "../../state/repoSummaryStore";
+import { sectionsOf, useSidebarLayout, useSidebarLayoutStore } from "../../state/sidebarLayoutStore";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
 import { ConnectGitlabModal } from "./ConnectGitlabModal";
@@ -235,11 +246,23 @@ const PR_SECTIONS: { key: string; labelKey: TranslationKey; defaultOpen?: boolea
  * action on a name, and there is no name to hover. Adding a repository stays because a folded
  * panel with no projects in it would otherwise be a dead end.
  */
-function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: () => void }) {
+function CollapsedProjects({
+  projects,
+  onAdd,
+  onReorder,
+  onDropAt,
+}: {
+  /** In panel order — pinned first, then each group, then the rest. */
+  projects: Project[];
+  onAdd: () => void;
+  onReorder: (from: number, to: number) => void;
+  /** Let go over another workspace: moves the repository there instead of reordering. */
+  onDropAt: (from: number, event: PointerEvent) => boolean;
+}) {
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const reorderProject = useWorkspaceStore((s) => s.reorderProject);
+  const listElement = useRef<HTMLElement | null>(null);
   const openProjectInit = useUiStore((s) => s.openProjectInit);
   const openCloneModal = useUiStore((s) => s.openCloneModal);
   const t = useT();
@@ -247,15 +270,24 @@ function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: ()
   // The same hold as the unfolded rows, writing the same `sort_order` — folding the panel changes
   // how the repositories are drawn, not what can be done to them. Folded they *are* equal squares,
   // so this one previews the way the app rail does, by sliding the chips it passes out of the way.
-  const reorder = useHoldReorder((from, to) => {
-    const moved = projects[from];
-    if (!moved || !activeWorkspaceId) return;
-    void reorderProject(activeWorkspaceId, moved.id, from < to ? to + 1 : to);
-  });
+  const reorder = useHoldReorder(onReorder, { onDropAt });
   const drag = reorder.drag;
 
   return (
-    <div ref={reorder.listRef} className="flex flex-col items-center gap-1.5">
+    <div
+      ref={(el) => {
+        reorder.listRef(el);
+        listElement.current = el;
+      }}
+      className="flex flex-col items-center gap-1.5"
+    >
+      {/* The other workspaces, standing ready beside the rail while a chip is held. */}
+      {drag && activeWorkspaceId && (
+        <MoveDropStrip
+          projectWorkspaceId={activeWorkspaceId}
+          anchor={listElement.current?.closest("aside")?.getBoundingClientRect() ?? null}
+        />
+      )}
       {/* The chip's own colour, repeated in the tooltip. Folded down to 24px squares the projects
           are told apart by colour alone, so the label that names one should be carrying the same
           colour the eye followed to ask. */}
@@ -386,6 +418,11 @@ function CollapsedProjectChip({
   const { initializing, init } = useInitRepo(project);
   const [removing, setRemoving] = useState(false);
   const t = useT();
+  const arrangement = useProjectArrangement(project);
+  const detachRepo = useWindowStore((s) => s.detach);
+  const openSettings = useUiStore((s) => s.openSettings);
+  /** The chip's right-click — the unfolded row's menu, so folding the panel takes no verb away. */
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const held = drag?.key === project.id;
   const offset = drag ? (held ? drag.dy : slotShift(at, drag)) : 0;
@@ -486,6 +523,10 @@ function CollapsedProjectChip({
         <button
           data-reorder={project.id}
           onPointerDown={(e) => reorder.beginHold(e, at, project.id)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setMenu({ x: event.clientX, y: event.clientY });
+          }}
           onClick={() => {
             if (reorder.swallowsClick()) return;
             if (detachedTo) {
@@ -544,6 +585,39 @@ function CollapsedProjectChip({
           )}
         </button>
       </Tooltip>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          heading={project.name}
+          items={projectMenuItems({
+            project,
+            broken: false,
+            detached: detachedTo !== null,
+            t,
+            onOpen: () => onSelect(project.id),
+            onDetach: () => {
+              void detachRepo("repo", project.id, project.name).then((moved) => {
+                if (moved && marked) onSelect("");
+              });
+            },
+            onFocusWindow: () => detachedTo && void focusWindow(detachedTo),
+            onReveal: () =>
+              void revealInFileManager(project.local_path).catch((e: unknown) => pushErrorToast(String(e))),
+            onCopyPath: () => {
+              void navigator.clipboard
+                .writeText(project.local_path)
+                .then(() => pushSuccessToast(t("common.copied")))
+                .catch((e: unknown) => pushErrorToast(String(e)));
+            },
+            onSettings: () => openSettings("projects"),
+            onRemove: () => void removeMissing(),
+            ...arrangement.extras,
+          })}
+          onClose={() => setMenu(null)}
+        />
+      )}
+      {arrangement.moveOpen && <MoveProjectModal project={project} onClose={arrangement.closeMove} />}
     </div>
   );
 }
@@ -1055,6 +1129,13 @@ interface HostingState {
 function PullRequestsSection({ project }: { project: Project }) {
   const fold = useSectionFold("pullRequests");
   const t = useT();
+  /** What the panel's five-minute poll found open on the host (`repoSummaryStore`) — the heading's
+   *  count while the section is folded, so a pull request opened elsewhere is announced by
+   *  something; unfolding the section is "seen". */
+  const polled = useRepoSummaryStore((s) => s.prsByProject[project.id]);
+  useEffect(() => {
+    if (fold.open) useRepoSummaryStore.getState().markPrsSeen(project.id);
+  }, [fold.open, project.id, polled?.count]);
   const prs = usePrStore((s) => s.prsByProject[project.id] ?? EMPTY_PRS);
   const loading = usePrStore((s) => s.loadingProjectId === project.id);
   const loadError = usePrStore((s) => s.loadErrorByProject[project.id]);
@@ -1453,7 +1534,11 @@ function PullRequestsSection({ project }: { project: Project }) {
   return (
     <CollapsibleSection
       icon={GitPullRequest}
-      title={t("sidebar.pullRequests")}
+      title={
+        !fold.open && polled && polled.count > 0
+          ? `${t("sidebar.pullRequests")} (${polled.count}${polled.more ? "+" : ""}${polled.fresh > 0 ? ` · ${t("sidebar.prsNew", { n: polled.fresh })}` : ""})`
+          : t("sidebar.pullRequests")
+      }
       // Unfolding it is what fetches the list — see `activated` — so the "open" group inside starts
       // unfolded in turn: asking for pull requests should land on the ones waiting on you, not on
       // another chevron. The other status groups stay folded, which is what keeps this from filling
@@ -1595,12 +1680,16 @@ function ProjectRow({
   project,
   at,
   reorder,
+  canReorder = true,
 }: {
   project: Project;
   at: number;
   reorder: HoldReorder;
+  /** Off while the list is filtered: a position among the matches is not a position in the list. */
+  canReorder?: boolean;
 }) {
   const localBranchesFold = useSectionFold("localBranches");
+  const arrangement = useProjectArrangement(project);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const removeProject = useWorkspaceStore((s) => s.removeProject);
@@ -1740,7 +1829,7 @@ function ProjectRow({
         data-reorder={project.id}
         // A repository that is not on disk is not something to pick up and rearrange either. The
         // hold comes off with the click, so the row has exactly one gesture left on it — the bin.
-        onPointerDown={broken ? undefined : (e) => reorder.beginHold(e, at, project.id)}
+        onPointerDown={broken || !canReorder ? undefined : (e) => reorder.beginHold(e, at, project.id)}
         onClick={() => {
           if (broken || reorder.swallowsClick()) return;
           select();
@@ -1903,10 +1992,16 @@ function ProjectRow({
                 if (reorder.swallowsClick()) return;
                 select();
               }}
+              // The name shown is a label, not the folder's: double-click renames it in place.
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                void arrangement.extras.onRename?.();
+              }}
               className="relative flex min-w-0 flex-1 items-center gap-2 self-stretch text-left"
             >
               <span className="min-w-0 flex-1 truncate font-medium">{project.name}</span>
             </button>
+            <ProjectBadges project={project} isActive={isActive} />
           </>
         )}
         {broken ? (
@@ -2009,7 +2104,15 @@ function ProjectRow({
         )}
       </div>
 
-      {showMoveModal && <MoveProjectModal project={project} onClose={() => setShowMoveModal(false)} />}
+      {(showMoveModal || arrangement.moveOpen) && (
+        <MoveProjectModal
+          project={project}
+          onClose={() => {
+            setShowMoveModal(false);
+            arrangement.closeMove();
+          }}
+        />
+      )}
 
       {/* The whole branch/stash/PR tree unfolds under the row you picked while the one under the row
           you left folds away, both at once — one movement rather than two panels swapping. Nothing
@@ -2236,9 +2339,10 @@ function ProjectRow({
                 .then(() => pushSuccessToast(t("common.copied")))
                 .catch((e: unknown) => pushErrorToast(String(e)));
             },
-            onNewBranch: () => setShowCreateBranch(true),
+            onNewBranch: isActive ? () => setShowCreateBranch(true) : undefined,
             onSettings: () => openSettings("projects"),
             onRemove: () => void removeMissing(),
+            ...arrangement.extras,
           })}
           onClose={() => setMenu(null)}
         />
@@ -2453,6 +2557,71 @@ export function Sidebar() {
 
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
 
+  /** Pinned repositories and named groups — `sidebarLayoutStore`, one settings row per workspace. */
+  const layout = useSidebarLayout(activeWorkspaceId);
+  useEffect(() => {
+    if (activeWorkspaceId) void useSidebarLayoutStore.getState().load(activeWorkspaceId);
+  }, [activeWorkspaceId]);
+  const sections = useMemo(() => sectionsOf(projects, layout), [projects, layout]);
+
+  /** The list's own filter — name or path — for a workspace with more repositories than fit. */
+  const [filter, setFilter] = useState("");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const needle = filter.trim().toLowerCase();
+  const matches = (p: Project) => !needle || p.name.toLowerCase().includes(needle) || p.local_path.toLowerCase().includes(needle);
+
+  /**
+   * The rows as drawn, top to bottom — what the hold's slot indices count. A folded group's rows are
+   * not drawn and so not counted; filtered, every match is drawn whatever its group's fold says.
+   */
+  const visible = useMemo(
+    () =>
+      sections.flatMap((section) =>
+        section.kind === "group" && section.group.collapsed && !needle ? [] : section.projects.filter(matches),
+      ),
+    // `matches` reads `needle`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sections, needle],
+  );
+  /** Every repository in panel order, folded groups included — what the folded rail shows. */
+  const ordered = useMemo(() => sections.flatMap((section) => section.projects), [sections]);
+
+  // Branch, changes, ahead/behind and open pull requests for every row — see `repoSummaryStore`.
+  useRepoSummaryPolling(projects, (p) => {
+    const health = useMissingProjectsStore.getState();
+    return health.missing.has(p.local_path) || health.notARepo.has(p.local_path);
+  });
+
+  /**
+   * A drop from position `from` onto position `to` of `list` (a panel order), written into the one
+   * `sort_order` the workspace has. Dropped among another section's rows, the repository joins that
+   * section too — pinned, or filed in that group — since that is where it was put.
+   */
+  const moveInList = (list: Project[], from: number, to: number) => {
+    const moved = list[from];
+    const target = list[to];
+    if (!moved || !target || !activeWorkspaceId) return;
+    const base = projects.indexOf(target);
+    void reorderProject(activeWorkspaceId, moved.id, projects.indexOf(moved) < base ? base + 1 : base);
+    const store = useSidebarLayoutStore.getState();
+    const targetPinned = layout.pinned.includes(target.id);
+    if (targetPinned !== layout.pinned.includes(moved.id)) store.setPinned(activeWorkspaceId, moved.id, targetPinned);
+    if (!targetPinned && (layout.groupOf[target.id] ?? null) !== (layout.groupOf[moved.id] ?? null)) {
+      store.setGroup(activeWorkspaceId, moved.id, layout.groupOf[target.id] ?? null);
+    }
+  };
+
+  /** Let go over another workspace (`MoveDropStrip`): the repository moves there instead. */
+  const dropOnWorkspace = (list: Project[]) => (from: number, event: PointerEvent) => {
+    const target = document
+      .elementFromPoint(event.clientX, event.clientY)
+      ?.closest<HTMLElement>("[data-drop-workspace]")?.dataset.dropWorkspace;
+    const moved = list[from];
+    if (!target || !moved) return false;
+    void moveProjectByDrop(moved, target);
+    return true;
+  };
+
   /**
    * Hold a repository down and it can be dragged into a new position.
    *
@@ -2465,14 +2634,10 @@ export function Sidebar() {
    * these rows are not the same height — the open one is unfolded to its branches, stashes and
    * pull requests — and sliding a block that size around says far less than a line does.
    */
-  const reorder = useHoldReorder((from, to) => {
-    const moved = projects[from];
-    if (!moved || !activeWorkspaceId) return;
-    // `reorderProject` takes a gap in the list *as it stands*, with the dragged row still in it;
-    // the hold gesture reports a final position. Dragging down, the gap that lands the row after
-    // its target is the one past it — see the note in `workspaceStore.reorderProject`.
-    void reorderProject(activeWorkspaceId, moved.id, from < to ? to + 1 : to);
-  });
+  // `reorderProject` takes a gap in the list *as it stands*, with the dragged row still in it; the
+  // hold gesture reports a final position — `moveInList` does that conversion against the panel's
+  // own order, which since pinning and groups is no longer `projects`.
+  const reorder = useHoldReorder((from, to) => moveInList(visible, from, to), { onDropAt: dropOnWorkspace(visible) });
 
   /** Registers one repository. The path is always a verified repository root by the time it gets
    *  here — see `handleAddProject`.
@@ -2690,7 +2855,12 @@ export function Sidebar() {
             // so the ring still closes once enough projects bring the scrollbar in and take 10px of
             // the 50px with it.
             <div className="cf-panel-in min-h-0 flex-1 overflow-y-auto px-0.5 pb-3 pt-1">
-              <CollapsedProjects projects={projects} onAdd={handleAddProject} />
+              <CollapsedProjects
+                projects={ordered}
+                onAdd={handleAddProject}
+                onReorder={(from, to) => moveInList(ordered, from, to)}
+                onDropAt={dropOnWorkspace(ordered)}
+              />
             </div>
           ) : (
             // `layoutScroll`: the rows' slides are measured against this scroller, so a list scrolled
@@ -2711,6 +2881,19 @@ export function Sidebar() {
                   {t("sidebar.projects")}
                 </span>
                 <div data-tour="projects-actions" className="flex items-center gap-0.5">
+                  <button
+                    onClick={() => {
+                      if (filterOpen) setFilter("");
+                      setFilterOpen((v) => !v);
+                    }}
+                    aria-pressed={filterOpen}
+                    className={`flex h-[22px] w-[22px] items-center justify-center rounded-md hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] ${
+                      filterOpen || needle ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+                    }`}
+                    title={t("sidebar.filterProjects")}
+                  >
+                    <Search size={13} />
+                  </button>
                   {/* The three ways a repository gets here, left to right: made from a template,
                       cloned, or found on disk. The first took the place of "review a PR from its
                       link" (the user's call, 2026-09-26) — that one lives on in the assistant's "+"
@@ -2743,16 +2926,60 @@ export function Sidebar() {
                 </div>
               </div>
 
+              {filterOpen && (
+                <div className="mb-1.5 px-1">
+                  <input
+                    autoFocus
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        setFilter("");
+                        setFilterOpen(false);
+                      }
+                    }}
+                    placeholder={t("sidebar.filterProjects")}
+                    aria-label={t("sidebar.filterProjects")}
+                    className={fieldClass({ size: "sm", className: "w-full" })}
+                  />
+                </div>
+              )}
               <div ref={reorder.listRef} className="space-y-0.5">
                 {/* One group, so a row whose own render did not change still slides when a tree
                     above it opens or closes. */}
                 <LayoutGroup>
-                  {projects.map((project, at) => (
-                    <ProjectRow key={project.id} project={project} at={at} reorder={reorder} />
-                  ))}
+                  {(() => {
+                    // Slot indices run over the drawn rows only, in drawing order — `visible`.
+                    let slot = 0;
+                    return sections.map((section) => {
+                      const rows = section.projects.filter(matches);
+                      const folded = section.kind === "group" && section.group.collapsed && !needle;
+                      if (needle && rows.length === 0) return null;
+                      const key = section.kind === "group" ? section.group.id : section.kind;
+                      return (
+                        <div key={key} className="space-y-0.5">
+                          {section.kind === "pinned" && <PinnedHeader />}
+                          {section.kind === "group" && activeWorkspaceId && (
+                            <GroupHeader workspaceId={activeWorkspaceId} group={section.group} count={section.projects.length} />
+                          )}
+                          {/* The ungrouped rest gets a rule, not a heading, once anything sits above it. */}
+                          {section.kind === "rest" && rows.length > 0 && sections.length > 1 && (
+                            <div className="mx-1 my-1.5 h-px bg-[var(--cf-border)]" />
+                          )}
+                          {!folded &&
+                            rows.map((project) => (
+                              <ProjectRow key={project.id} project={project} at={slot++} reorder={reorder} canReorder={!needle} />
+                            ))}
+                        </div>
+                      );
+                    });
+                  })()}
                 </LayoutGroup>
                 {projects.length === 0 && (
                   <p className="px-1.5 py-1 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noProjects")}</p>
+                )}
+                {projects.length > 0 && needle && visible.length === 0 && (
+                  <p className="px-1.5 py-1 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.filterNoMatch")}</p>
                 )}
               </div>
             </motion.div>
@@ -2760,6 +2987,9 @@ export function Sidebar() {
 
           <SidebarFoot collapsed={chips} />
         </div>
+        {reorder.drag && activeWorkspaceId && (
+          <MoveDropStrip projectWorkspaceId={activeWorkspaceId} anchor={asideRef.current?.getBoundingClientRect() ?? null} />
+        )}
 
         {folderScan && (
           <ImportReposModal

@@ -24,3 +24,16 @@ pub async fn format_with_prettier(
 pub fn create_editor_checkpoint(repo_path: String) -> Result<String, String> {
     crate::git::checkpoint::create(&repo_path, "rename-symbol")
 }
+
+/// SchemaStore's catalogue — which schema each JSON file name gets. See [`crate::json_schemas`].
+#[tauri::command]
+pub async fn json_schema_catalog() -> Result<String, String> {
+    crate::json_schemas::fetch(crate::json_schemas::CATALOG_URL).await
+}
+
+/// One schema's text, by its URL — a catalogue entry, a file's own `$schema`, or a `$ref` inside
+/// another schema. Public web addresses only.
+#[tauri::command]
+pub async fn json_schema_fetch(url: String) -> Result<String, String> {
+    crate::json_schemas::fetch(&url).await
+}

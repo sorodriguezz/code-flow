@@ -307,7 +307,13 @@ export function installIslandHost(): void {
         returned.map(async (entry) => {
           if (!dirty(entry.tab)) return entry;
           try {
-            const version = await writeEditorFile(entry.repoPath, entry.tab.path, entry.tab.content, entry.tab.version);
+            const version = await writeEditorFile(
+              entry.repoPath,
+              entry.tab.path,
+              entry.tab.content,
+              entry.tab.version,
+              entry.tab.encoding ?? null,
+            );
             return { ...entry, tab: { ...entry.tab, originalContent: entry.tab.content, version } };
           } catch {
             failed.push(entry.tab.path);

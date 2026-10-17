@@ -128,15 +128,23 @@ export function splitGroups(
    * shortcut mean "this file", while the tab menu means the tab it was opened on, which needn't
    * be the one on top. */
   path?: string,
+  /** `right` (the default) opens a new column beside the source; `down` stacks the new group under
+   *  it, in the source's own column — VS Code's "Split Down". */
+  direction: "right" | "down" = "right",
 ): { groups: EditorGroup[]; focusId: string } | null {
   const index = groups.findIndex((g) => g.id === groupId);
   const source = groups[index];
   const moving = path ?? source?.activePath;
   if (!source || !moving || !source.paths.includes(moving)) return null;
+  const next = [...groups];
+  if (direction === "down") {
+    const created = newGroup([moving], moving, source.column);
+    next.splice(index + 1, 0, created);
+    return { groups: next, focusId: created.id };
+  }
   // Its own column, so the new group lands *beside* the source rather than under it — which is what
   // the split button and its shortcut have always meant.
   const created = newGroup([moving], moving);
-  const next = [...groups];
   next.splice(lastIndexOfColumn(groups, source.column) + 1, 0, created);
   return { groups: next, focusId: created.id };
 }
@@ -195,6 +203,28 @@ export function closeAllInGroups(groups: EditorGroup[], groupId: string): Editor
     };
   });
   return emptied.length > 1 ? emptied.filter((group) => group.paths.length > 0) : emptied;
+}
+
+/**
+ * Closes the named tabs of one group — «Cerrar otras», «Cerrar a la derecha», «Cerrar guardadas».
+ * The active tab stays active if it survives; otherwise its nearest survivor takes over, as when one
+ * tab is closed. A group left empty is dropped unless it is the only one.
+ */
+export function closePathsInGroup(groups: EditorGroup[], groupId: string, closing: string[]): EditorGroup[] {
+  const gone = new Set(closing);
+  const next = groups.map((group) => {
+    if (group.id !== groupId) return group;
+    const paths = group.paths.filter((p) => !gone.has(p));
+    const at = group.activePath ? group.paths.indexOf(group.activePath) : 0;
+    const before = group.paths.slice(0, Math.max(0, at)).filter((p) => !gone.has(p)).length;
+    return {
+      ...group,
+      paths,
+      pinned: group.pinned.filter((p) => !gone.has(p)),
+      activePath: group.activePath && paths.includes(group.activePath) ? group.activePath : neighbourOf(paths, before),
+    };
+  });
+  return next.length > 1 ? next.filter((group) => group.paths.length > 0) : next;
 }
 
 /**

@@ -70,6 +70,7 @@ export type ShortcutId =
   | "db.filter"
   | "db.apply"
   | "db.askAi"
+  | "db.objectSearch"
   | "api.send"
   | "vault.lock"
   | "view.next"
@@ -82,6 +83,10 @@ export type ShortcutId =
   | "editor.debug"
   | "editor.bookmarkToggle"
   | "editor.splitRight"
+  | "editor.splitDown"
+  | "editor.goToSymbol"
+  | "editor.openRecent"
+  | "editor.reopenClosed"
   | "editor.codeSnap"
   | "editor.pasteJsonAsCode"
   | "editor.nextChange"
@@ -96,6 +101,7 @@ export type ShortcutId =
   | "editor.nextTab"
   | "editor.prevTab"
   | "editor.inlineEdit"
+  | "editor.askChat"
   | "editor.find"
   | "editor.goToLine"
   | "editor.toggleComment"
@@ -608,6 +614,15 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     run: () => useEditorCommandStore.getState().send("goToFile"),
   },
   {
+    // VS Code's «Open Recent» for files: the files last opened in this repository. Not ⌘E (Monaco's
+    // "find with selection" on a Mac) nor Ctrl+R (the webview's reload).
+    id: "editor.openRecent",
+    group: "editor",
+    labelKey: "editor.openRecent",
+    defaultChord: "Mod+Alt+E",
+    run: () => useEditorCommandStore.getState().send("openRecent"),
+  },
+  {
     id: "editor.explorer",
     group: "editor",
     labelKey: "editor.explorer",
@@ -659,6 +674,30 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "editor.splitRight",
     defaultChord: "Mod+\\",
     run: () => useEditorCommandStore.getState().send("splitRight"),
+  },
+  // Under, in the same column. ⌘⌥J: ⌘⇧\ would be a Shift on a symbol (`|` on most layouts), and the
+  // arrows with ⌘⌥ are Monaco's add-cursor and, on some Windows machines, the screen rotation.
+  {
+    id: "editor.splitDown",
+    group: "editor",
+    labelKey: "editor.splitDown",
+    defaultChord: "Mod+Alt+J",
+    run: () => useEditorCommandStore.getState().send("splitDown"),
+  },
+  // VS Code's own two: a symbol of the whole repository by name, and the tab closed last.
+  {
+    id: "editor.goToSymbol",
+    group: "editor",
+    labelKey: "editor.goToSymbol",
+    defaultChord: "Mod+T",
+    run: () => useEditorCommandStore.getState().send("goToSymbol"),
+  },
+  {
+    id: "editor.reopenClosed",
+    group: "editor",
+    labelKey: "editor.reopenClosed",
+    defaultChord: "Mod+Shift+T",
+    run: () => useEditorCommandStore.getState().send("reopenClosed"),
   },
   {
     id: "editor.codeSnap",
@@ -887,6 +926,15 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     defaultChord: "Mod+I",
     monacoCommand: "cf-inline-edit",
   },
+  // The selection to the repository's chat as an `@path:lines` mention. ⌘⌥A ("ask"): free in this
+  // registry and in Monaco's table, and typeable on every layout (no symbol under it).
+  {
+    id: "editor.askChat",
+    group: "editor",
+    labelKey: "editor.askChat",
+    defaultChord: "Mod+Alt+A",
+    monacoCommand: "cf-ask-chat",
+  },
   /**
    * Paste JSON as Code — the clipboard's JSON as types for the file's language (see
    * `components/editor/pasteJsonAsCode`).
@@ -959,6 +1007,17 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     run: () => {
       useUiStore.getState().openApiWorkspace("database");
       useDbModalStore.getState().openDbModal({ kind: "connections" });
+    },
+  },
+  {
+    id: "db.objectSearch",
+    group: "database",
+    labelKey: "db.objectSearch",
+    // T for table — O is the code map's.
+    defaultChord: "Mod+Alt+T",
+    run: () => {
+      useUiStore.getState().openApiWorkspace("database");
+      useDbModalStore.getState().openDbModal({ kind: "objectSearch" });
     },
   },
   {

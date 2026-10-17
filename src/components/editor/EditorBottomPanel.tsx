@@ -8,6 +8,9 @@ import { countProblems, groupProblems, useProblemsStore, type ProblemSeverity } 
 import { useEditorPanelStore, type EditorPanelTab } from "../../state/editorPanelStore";
 import { useT } from "../../state/languageStore";
 import { checkTsProject } from "./useTypeScript";
+import { HierarchyView } from "./HierarchyView";
+import { TestsView } from "./TestsView";
+import { TasksView } from "./TasksView";
 
 /**
  * The panel under the editor groups: **Problemas** — every diagnostic every language server and
@@ -169,7 +172,18 @@ function ResultsList({ onOpen }: { onOpen: (path: string, line: number, column?:
   );
 }
 
-export function EditorBottomPanel({ onOpen }: { onOpen: (path: string, line: number, column?: number) => void }) {
+export function EditorBottomPanel({
+  onOpen,
+  repoPath,
+  projectId,
+  activeFile,
+}: {
+  onOpen: (path: string, line: number, column?: number) => void;
+  repoPath: string;
+  projectId: string;
+  /** The file in front — what a task's `${file}` names. */
+  activeFile: string | null;
+}) {
   const t = useT();
   const tab = useEditorPanelStore((s) => s.tab);
   const show = useEditorPanelStore((s) => s.show);
@@ -197,6 +211,9 @@ export function EditorBottomPanel({ onOpen }: { onOpen: (path: string, line: num
           options={[
             { value: "problems", label: total > 0 ? `${t("editor.problems")} ${total}` : t("editor.problems") },
             { value: "results", label: t("editor.results") },
+            { value: "hierarchy", label: t("hierarchy.tab") },
+            { value: "tests", label: t("tests.tab") },
+            { value: "tasks", label: t("tasks.tab") },
           ]}
         />
         <div className="ml-auto flex items-center gap-0.5">
@@ -245,9 +262,24 @@ export function EditorBottomPanel({ onOpen }: { onOpen: (path: string, line: num
           </Tooltip>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto px-1 pb-1.5">
-        {tab === "problems" ? <ProblemsList onOpen={onOpen} /> : <ResultsList onOpen={onOpen} />}
-      </div>
+      {tab === "tests" ? (
+        // Its own scrolling: the list and the output beside it scroll apart.
+        <div className="min-h-0 flex-1 px-1 pb-1.5">
+          <TestsView repoPath={repoPath} onOpen={onOpen} />
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto px-1 pb-1.5">
+          {tab === "problems" ? (
+            <ProblemsList onOpen={onOpen} />
+          ) : tab === "results" ? (
+            <ResultsList onOpen={onOpen} />
+          ) : tab === "hierarchy" ? (
+            <HierarchyView repoPath={repoPath} onOpen={onOpen} />
+          ) : (
+            <TasksView repoPath={repoPath} projectId={projectId} activeFile={activeFile} onOpen={onOpen} />
+          )}
+        </div>
+      )}
     </div>
   );
 }

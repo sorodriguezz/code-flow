@@ -20,6 +20,7 @@ import { gateScripts, type GateResult, type ScriptRef } from "../../lib/api/scri
 import { askScriptTrust, useScriptTrustPrompt } from "./ScriptTrustModal";
 import type { VariableContext } from "../../lib/api/variables";
 import { apiPickFile, apiReadTextFile, apiSaveFile } from "../../lib/tauri/apiCommands";
+import { evaluateAssertions } from "../../lib/api/assertions";
 import { defaultRequestSpec } from "../../types/api";
 import type {
   ApiFolder,
@@ -611,6 +612,9 @@ export function RunnerModal({
       // A body cut short (the deadline, a dropped connection) still gets its tests run on what
       // arrived — but the row says it was cut short, rather than passing as a complete exchange.
       if (http.interrupted) item.error = http.interrupted;
+
+      // The no-code asserts read the response alone, so they hold whatever the scripts do next.
+      item.tests = [...item.tests, ...evaluateAssertions(spec.assertions, http)];
 
       capture.statusText = http.status_text;
       capture.responseHeaders = http.headers;

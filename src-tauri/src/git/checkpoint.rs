@@ -258,6 +258,51 @@ pub fn restore(path: &str, id: &str) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
+/// One file as the checkpoint has it — `None` when it did not exist then (the run created it). What
+/// the chat's per-turn review diffs the file on disk against.
+pub fn file_at(path: &str, id: &str, rel: &str) -> Result<Option<Vec<u8>>, String> {
+    let repo = open(path)?;
+    let commit = read_checkpoint(&repo, id)?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    match tree.get_path(Path::new(rel)) {
+        Ok(entry) => {
+            let blob = repo.find_blob(entry.id()).map_err(|e| format!("{rel}: {}", e.message()))?;
+            Ok(Some(blob.content().to_vec()))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// [`restore`] for the named paths only — "discard this file" in the per-turn review. A path the
+/// checkpoint does not have is deleted, as there; a path outside the repository is refused.
+pub fn restore_paths(path: &str, id: &str, rels: &[String]) -> Result<Vec<String>, String> {
+    let repo = open(path)?;
+    let commit = read_checkpoint(&repo, id)?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let workdir = repo.workdir().ok_or_else(|| "bare repository".to_string())?.to_path_buf();
+    let mut done = Vec::new();
+    for rel in rels {
+        if Path::new(rel).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err(format!("{rel}: invalid path"));
+        }
+        let target = workdir.join(rel);
+        match tree.get_path(Path::new(rel)) {
+            Ok(entry) => {
+                let blob = repo.find_blob(entry.id()).map_err(|e| format!("{rel}: {}", e.message()))?;
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("{rel}: {e}"))?;
+                }
+                std::fs::write(&target, blob.content()).map_err(|e| format!("{rel}: {e}"))?;
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(&target);
+            }
+        }
+        done.push(rel.clone());
+    }
+    Ok(done)
+}
+
 /// Forgets a checkpoint. Its objects stay in the odb until git's own gc reaps them.
 pub fn remove(path: &str, id: &str) -> Result<(), String> {
     let repo = open(path)?;

@@ -58,6 +58,7 @@ export const GIT_ERROR = {
   worktreeDirty: "WORKTREE_DIRTY: ",
   bisectActive: "BISECT_ACTIVE: ",
   conflictGone: "CONFLICT_GONE: ",
+  rebaseMerges: "REBASE_MERGES: ",
 } as const;
 
 export type Translate = (key: TranslationKey, params?: Record<string, string>) => string;
@@ -163,6 +164,8 @@ export function describeGitError(error: unknown, t: Translate): string {
   if (hasTag(raw, GIT_ERROR.worktreeDirty)) return t("worktrees.dirty");
   if (hasTag(raw, GIT_ERROR.bisectActive)) return t("bisect.activeBlocks");
   if (hasTag(raw, GIT_ERROR.conflictGone)) return t("conflictEditor.gone");
+  const merge = tagTail(raw, GIT_ERROR.rebaseMerges);
+  if (merge !== null) return t("rebase.mergesInRange", { id: merge });
 
   // The tail is the list of files in the way when libgit2 named them, and empty when it did not.
   const blocked = tagTail(raw, GIT_ERROR.mergeBlocked);

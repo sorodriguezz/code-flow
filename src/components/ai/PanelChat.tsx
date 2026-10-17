@@ -1,9 +1,11 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ImagePlus, ListPlus, MessageSquareShare, Square, Users, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ImagePlus, ListChecks, ListPlus, MessageSquareShare, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
 import { SkillChip } from "../chat/ChatComposer";
 import { AttachmentBar } from "../chat/AttachmentBar";
+import { MentionMenu, useMentions } from "../chat/MentionMenu";
+import { TurnReview } from "./TurnReview";
 import { useTextMenu } from "../common/TextMenu";
 import { useModelReadsImages } from "../../lib/useModelReadsImages";
 import { IMAGE_EXTENSIONS, useImageDrop } from "../../lib/useImageDrop";
@@ -12,7 +14,7 @@ import type { ChatAttachment } from "../../lib/tauri/chatCommands";
 import { McpMenu } from "../chat/McpMenu";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
 import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
-import { openNewChat } from "../../lib/aiPanelNav";
+import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openChat, openNewChat, takePendingSend } from "../../lib/aiPanelNav";
 import { moveChatToApp } from "../../lib/moveChatToApp";
 import { openTerminal } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
@@ -20,7 +22,15 @@ import { registerDictationSend } from "../../state/dictationStore";
 import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
 import { useIsQueued, repoHolder } from "../../lib/repoQueue";
 import { resolveAccount } from "../../lib/aiAccounts";
-import { ChatMessageBubble, dayDivider } from "../chat/ChatMessageBubble";
+import { ChatMessageBubble, dayDivider, type ChatBubbleActions, type CodeBlockTarget } from "../chat/ChatMessageBubble";
+import { ChatFindBar, useChatFind } from "../chat/ChatFind";
+import { ContextMeter, type ContextReading } from "../chat/ContextMeter";
+import { ApplyCodeModal } from "./ApplyCodeModal";
+import { insertCodeAtCaret, useApplyCodeStore } from "../../lib/codeToEditor";
+import { estimateTokens } from "../../lib/contextWindow";
+import { providerCapabilities } from "../../lib/aiProviders";
+import { branchChatConversation } from "../../lib/tauri/commands";
+import { useConversationStore } from "../../state/conversationStore";
 import { exportMenuItems, exportRepoConversation } from "../chat/exportChat";
 import { ContextMenu } from "../common/ContextMenu";
 import { AiRunLog } from "./AiRunLog";
@@ -239,6 +249,48 @@ export function PanelChat({
   // ── Composer ──────────────────────────────────────────────────────────────────────────────
   const boxRef = useRef<HTMLTextAreaElement>(null);
   useAutosizeTextarea(boxRef, draft, MAX_COMPOSER_HEIGHT);
+  /** Where the caret is in the box — what the `@` menu reads the mention being typed from. */
+  const [caret, setCaret] = useState(0);
+  const mentions = useMentions({
+    repoPath: project?.local_path ?? null,
+    text: draft,
+    caret,
+    onInsert: (next) => {
+      setDraft(next.text);
+      setCaret(next.caret);
+      requestAnimationFrame(() => {
+        boxRef.current?.focus();
+        boxRef.current?.setSelectionRange(next.caret, next.caret);
+      });
+    },
+  });
+  // The editor's «Preguntar en el chat» put a mention in this tab's draft: the box takes focus, the
+  // caret after it, for the question to be typed.
+  useEffect(() => {
+    const onFocus = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== tabKey) return;
+      const box = boxRef.current;
+      if (!box) return;
+      box.focus();
+      const end = box.value.length;
+      box.setSelectionRange(end, end);
+      setCaret(end);
+    };
+    // The graph's «Explicar con IA» filled the draft and wants it sent as it stands.
+    const onSend = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === tabKey && takePendingSend(tabKey)) submitRef.current();
+    };
+    // Opened for it, and mounted after the event went out.
+    if (takePendingSend(tabKey)) requestAnimationFrame(() => submitRef.current());
+    window.addEventListener(FOCUS_CHAT_EVENT, onFocus);
+    window.addEventListener(SEND_CHAT_EVENT, onSend);
+    return () => {
+      window.removeEventListener(FOCUS_CHAT_EVENT, onFocus);
+      window.removeEventListener(SEND_CHAT_EVENT, onSend);
+    };
+  }, [tabKey]);
+  /** Plan mode: each turn runs read-only and answers with a plan (see `ai::PLAN_MODE_NOTE`). */
+  const planMode = useChatStore((s) => s.planByConversation[conversationId] ?? false);
   // The skill staged for the next question — dropped when the engine changes, since a skill is one
   // CLI's and the next engine may not have it.
   const [skill, setSkill] = useState<ChatSkillPick | null>(null);
@@ -267,7 +319,8 @@ export function PanelChat({
   };
 
   const submit = () => {
-    const text = draft.trim();
+    // From the store, not the render: a send asked for from outside can land before the re-render.
+    const text = (useAiPanelStore.getState().drafts[tabKey] ?? draft).trim();
     // No `sending` guard any more: a message sent while a turn runs is queued by the store.
     if (!text) return;
     // A typed app command runs instead of being sent — `/clear` must not reach a model as seven
@@ -281,6 +334,14 @@ export function PanelChat({
     useChatStore.getState().submit(projectId, conversationId, text, { skill });
     setDraft("");
     setSkill(null);
+    useAiPanelStore.getState().markChatStarted(tabKey);
+    toBottom();
+  };
+  /** «Ejecutar el plan»: plan mode off, and the go-ahead as the next question — the engine resumes
+   *  its own session, so the plan it wrote is what it carries out. */
+  const runPlan = () => {
+    useChatStore.getState().setPlan(conversationId, false);
+    useChatStore.getState().submit(projectId, conversationId, t("assistant.runPlanMessage"), {});
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
@@ -369,23 +430,164 @@ export function PanelChat({
   const repoName = project?.name ?? "";
   const lastUser = session.messages.map((m) => m.role).lastIndexOf("user");
 
+  // ── Turn actions ──────────────────────────────────────────────────────────────────────────
+  /** The question whose text is in the box for a second attempt — only so the line above the box
+   *  can say which. The send is an ordinary one: no engine can unsay a turn, so the original and its
+   *  answer stay, and this asks again with them in context (the Chat app's «Editar y reenviar»). */
+  const [editing, setEditing] = useState<number | null>(null);
+  useEffect(() => {
+    if (!draft.trim()) setEditing(null);
+  }, [draft]);
+  /** «Bifurcar desde aquí»: a new conversation with the turns up to this answer, in its own tab.
+   *  It starts a fresh engine session, which is told the transcript (`claude_cmd::panel_transcript`). */
+  const branchAt = async (createdAt: string) => {
+    const fresh = crypto.randomUUID();
+    const title = session.title || session.messages[0]?.content.slice(0, 60) || "";
+    try {
+      const copied = await branchChatConversation(projectId, conversationId, fresh, createdAt, t("assistant.branchTitle", { title }));
+      if (copied === 0) return;
+      await openChat(projectId, fresh);
+    } catch (e) {
+      pushErrorToast(t("assistant.branchFailed", { error: String(e) }));
+    }
+  };
+  /** The handlers the bubbles' actions call — read through a ref, so the actions themselves can be
+   *  memoised on the transcript: `ChatMessageBubble` compares its props by reference, and a fresh
+   *  object per render would re-draw every turn on every token of the one being written. */
+  const handlers = useRef({ setDraft, pickEngine, answerQuestion, branchAt, provider });
+  handlers.current = { setDraft, pickEngine, answerQuestion, branchAt, provider };
+  const actions = useMemo(
+    () =>
+      session.messages.map((message, index): ChatBubbleActions | undefined => {
+        const canAct = !session.sending;
+        if (message.isError) return { onPickModel: (next) => handlers.current.pickEngine(handlers.current.provider, next) };
+        if (message.role === "user") {
+          return canAct
+            ? {
+                onEdit: () => {
+                  handlers.current.setDraft(message.content);
+                  setEditing(Math.floor(index / 2) + 1);
+                  requestAnimationFrame(() => boxRef.current?.focus());
+                },
+              }
+            : undefined;
+        }
+        const latest = index === session.messages.length - 1;
+        const question = session.messages[index - 1];
+        const at = message.createdAt;
+        return {
+          onRegenerate:
+            canAct && question?.role === "user"
+              ? () => {
+                  useChatStore.getState().submit(projectId, conversationId, question.content, {});
+                  useAiPanelStore.getState().markChatStarted(tabKey);
+                  toBottom();
+                }
+              : undefined,
+          onBranch: canAct && session.persisted && !message.isCancelled && at ? () => void handlers.current.branchAt(at) : undefined,
+          onAnswer: latest && canAct ? (text: string) => handlers.current.answerQuestion(text) : undefined,
+        };
+      }),
+    // `toBottom` only touches refs and setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session.messages, session.sending, session.persisted, projectId, conversationId, tabKey],
+  );
+
+  // ── Code blocks → editor ──────────────────────────────────────────────────────────────────
+  const codeTarget = useMemo<CodeBlockTarget>(
+    () => ({
+      insert: (code) => insertCodeAtCaret(projectId, code),
+      apply: (code, path) => useApplyCodeStore.getState().open({ tabKey, projectId, code, path }),
+    }),
+    [projectId, tabKey],
+  );
+  const applyRequest = useApplyCodeStore((s) => (s.request?.tabKey === tabKey ? s.request : null));
+
+  // ── Context ───────────────────────────────────────────────────────────────────────────────
+  const windowByModel = useConversationStore((s) => s.windowByModel);
+  const meterModel = session.model ?? model;
+  useEffect(() => {
+    if (meterModel) useConversationStore.getState().ensureContextWindow(meterModel);
+  }, [meterModel]);
+  const wasSending = useRef(session.sending);
+  useEffect(() => {
+    if (wasSending.current && !session.sending && meterModel) useConversationStore.getState().ensureContextWindow(meterModel, true);
+    wasSending.current = session.sending;
+  }, [session.sending, meterModel]);
+  /** How full the engine's context is — measured when the engine said (Claude), else counted from
+   *  the turns since the last `/clear`, which is what a fresh session is told again. */
+  const contextReading = useMemo<ContextReading | undefined>(() => {
+    if (session.messages.length === 0) return undefined;
+    const since = session.messages.map((m) => !!m.contextReset).lastIndexOf(true);
+    const counted = (since < 0 ? session.messages : session.messages.slice(since)).map((m) => m.content).join("\n\n");
+    const measured = session.resetPending ? null : session.contextTokens;
+    return {
+      tokens: measured ?? estimateTokens(counted),
+      measured: measured !== null,
+      window: meterModel ? (windowByModel[meterModel] ?? null) : null,
+      resumes: providerCapabilities(provider).resumesSessions && Boolean(session.sessionId) && !session.resetPending,
+      compactedTurns: 0,
+      autoCompacts: false,
+      summary: "",
+      compacting: false,
+      // Claude's own `/compact`, sent as the next turn; the other engines have none to send.
+      onCompact:
+        provider === "claude"
+          ? () => {
+              useChatStore.getState().submit(projectId, conversationId, "/compact", {});
+              toBottom();
+            }
+          : undefined,
+      onUncompact: () => {},
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.messages, session.contextTokens, session.resetPending, session.sessionId, provider, meterModel, windowByModel, projectId, conversationId]);
+
+  // ── Find ──────────────────────────────────────────────────────────────────────────────────
+  const rootRef = useRef<HTMLDivElement>(null);
+  const find = useChatFind({ rootRef, contentRef, scrollRef });
+
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div ref={rootRef} className="flex h-full min-h-0 flex-col">
+      <ChatFindBar find={find} />
       <div
         ref={scrollRef}
         onScroll={onScroll}
+        // Focusable, so a click in the transcript puts the focus here and ⌘F finds in this chat.
+        tabIndex={-1}
         onContextMenu={textMenu.onText}
-        className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5"
+        className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none"
       >
         <div className="mb-2.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
           <span className="min-w-0 truncate">{repoName}</span>
-          <span
-            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-warning)]"
-            title={t("assistant.canEditHint", { repo: repoName })}
-          >
-            <FilePen size={9} />
-            {t("assistant.canEdit")}
-          </span>
+          {planMode ? (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
+              title={t("assistant.planModeHint")}
+            >
+              <ListChecks size={9} />
+              {t("assistant.planModeBadge")}
+            </span>
+          ) : (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-warning)]"
+              title={t("assistant.canEditHint", { repo: repoName })}
+            >
+              <FilePen size={9} />
+              {t("assistant.canEdit")}
+            </span>
+          )}
+          {session.messages.length > 0 && (
+            <button
+              type="button"
+              onClick={find.show}
+              title={t("chat.find")}
+              aria-label={t("chat.find")}
+              className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            >
+              <Search size={12} />
+            </button>
+          )}
           {/* Out as a file, once there is a conversation on disk to write out — the export reads
               what was recorded, not what this tab happens to be holding. */}
           {session.persisted && session.messages.length > 0 && (
@@ -398,7 +600,7 @@ export function PanelChat({
               title={t("chat.export")}
               aria-label={t("chat.export")}
               aria-haspopup="menu"
-              className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
             >
               <Download size={12} />
             </button>
@@ -457,19 +659,31 @@ export function PanelChat({
                 )}
                 <ChatMessageBubble
                   message={message}
-                  actions={
-                    message.isError
-                      ? { onPickModel: (next) => pickEngine(provider, next) }
-                      : message.role === "assistant" && i === session.messages.length - 1 && !session.sending
-                        ? { onAnswer: answerQuestion }
-                        : undefined
-                  }
+                  actions={actions[i]}
+                  codeTarget={project ? codeTarget : undefined}
                   emptyText={
                     message.role === "assistant" && isCompactCommand(session.messages[i - 1])
                       ? t("chat.compactedReply")
                       : undefined
                   }
                 />
+                {message.role === "assistant" && message.changes && project && (
+                  <TurnReview repoPath={project.local_path} changes={message.changes} />
+                )}
+                {message.role === "assistant" &&
+                  message.plan &&
+                  !message.isError &&
+                  i === session.messages.length - 1 &&
+                  !session.sending && (
+                    <button
+                      type="button"
+                      onClick={runPlan}
+                      className="flex items-center gap-1.5 rounded-lg border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                    >
+                      <Play size={11} />
+                      {t("assistant.runPlan")}
+                    </button>
+                  )}
                 {queued && i === lastUser && (
                   <p className="flex items-center justify-end gap-1 text-[10.5px] text-[var(--cf-warning)]">
                     <Clock size={10} className="shrink-0" />
@@ -525,6 +739,24 @@ export function PanelChat({
             <span className="min-w-0 truncate">{t("assistant.contextCleared")}</span>
           </p>
         )}
+        {editing !== null && (
+          // Said out loud: the box looks the same either way, and nothing is replaced — the original
+          // turn and its answer stay, and this asks again with them in context.
+          <p className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11px] text-[var(--cf-text-muted)]">
+            <Pencil size={10} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate">{t("chat.reAskingTurn", { n: editing })}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setEditing(null);
+                setDraft("");
+              }}
+              className="shrink-0 text-[var(--cf-accent)] hover:underline"
+            >
+              {t("common.cancel")}
+            </button>
+          </p>
+        )}
         {menuOpen && (
           <CommandMenu
             query={slash ?? ""}
@@ -556,6 +788,7 @@ export function PanelChat({
             }
           />
         )}
+        {mentions.open && !menuOpen && <MentionMenu items={mentions.items} index={mentions.index} onPick={mentions.pick} />}
         <QueuedMessages queue={queue} />
         {textMenu.menu}
         <div
@@ -575,10 +808,16 @@ export function PanelChat({
             data-ai-input="inline"
             value={draft}
             rows={1}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setCaret(e.target.selectionStart);
+            }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onPaste={onPaste}
             onContextMenu={textMenu.onField}
             onKeyDown={(e) => {
+              // The `@` menu takes its keys first: arrows walk it, Enter/Tab pick, Escape hides it.
+              if (mentions.onKeyDown(e)) return;
               // Enter sends; Shift+Enter breaks the line. Never mid-composition: an input method
               // uses Enter to accept a candidate, and sending then posts half a sentence.
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
@@ -586,7 +825,13 @@ export function PanelChat({
                 submit();
               }
             }}
-            placeholder={session.sending ? t("chat.queuePlaceholder") : t("assistant.askPlaceholder", { repo: repoName })}
+            placeholder={
+              session.sending
+                ? t("chat.queuePlaceholder")
+                : planMode
+                  ? t("assistant.planPlaceholder")
+                  : t("assistant.askPlaceholder", { repo: repoName })
+            }
             aria-label={t("assistant.askPlaceholder", { repo: repoName })}
             className="max-h-[180px] resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
           />
@@ -610,6 +855,22 @@ export function PanelChat({
               onPick={(level) => useChatStore.getState().setEffort(conversationId, level)}
             />
             <AnswerLengthPicker compact />
+            {contextReading && <ContextMeter reading={contextReading} />}
+            {/* Plan mode: read-only turns that answer with a plan, then «Ejecutar el plan». */}
+            <button
+              type="button"
+              onClick={() => useChatStore.getState().setPlan(conversationId, !planMode)}
+              aria-pressed={planMode}
+              title={t("assistant.planModeHint")}
+              className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] ${
+                planMode
+                  ? "bg-[color-mix(in_oklab,var(--cf-accent)_14%,transparent)] text-[var(--cf-accent)]"
+                  : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+              }`}
+            >
+              <ListChecks size={13} />
+              {t("assistant.planMode")}
+            </button>
             {/* The CLI's own MCP servers, switched for this repository. */}
             <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />
             {/* Absent, not disabled, for a model that cannot look at an image — the same rule as the
@@ -667,6 +928,7 @@ export function PanelChat({
           )}
         </div>
       </div>
+      {applyRequest && project && <ApplyCodeModal request={applyRequest} repoPath={project.local_path} />}
     </div>
   );
 }

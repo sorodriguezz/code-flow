@@ -36,6 +36,8 @@ import { documentWithoutId } from "../../lib/db/mongoDocument";
 import { DocumentList, type DocumentActions, type DocumentState } from "./DocumentList";
 import { QueryOptionsPanel } from "./QueryOptionsPanel";
 import { RecordGrid } from "./RecordGrid";
+import { copyFormats, xlsxItem } from "./resultCopy";
+import { EnvironmentChip, EnvironmentStripe, useConnectionEnvironment } from "./EnvironmentChip";
 import { ResultGrid, type GridRowAction } from "./ResultGrid";
 import { cellMenuItems } from "./cellMenu";
 import { nodeLabel } from "./SqlConsolePanel";
@@ -110,6 +112,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   const t = useT();
   const chord = useShortcutChord();
   const connection = useDbStore((s) => s.connections.find((c) => c.id === tab.connectionId));
+  const environment = useConnectionEnvironment(tab.connectionId);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const store = useDbStore.getState();
   const [menu, setMenu] = useState<PanelMenu | null>(null);
@@ -570,8 +573,9 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   };
 
   /** Saves rows in a format. `rows` empty means the page. */
-  const exportRows = async (format: ExportFormat, rows: number[]) => {
-    if (!tab.result) return;
+  /** The rows picked — or the whole page — as a result of their own, for the exports and copies. */
+  const pickedResult = (rows: number[]) => {
+    if (!tab.result) return null;
     const picked =
       rows.length > 0 ? rows.map((index) => tab.result?.rows[index] ?? []) : tab.result.rows;
     // Mongo's own documents are picked the same way: exporting three selected documents as JSON
@@ -580,11 +584,13 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
       rows.length > 0
         ? rows.map((index) => tab.result?.documents[index]).filter((doc): doc is string => doc !== undefined)
         : tab.result.documents;
-    const contents = formatResult(
-      { ...tab.result, rows: picked, documents },
-      format,
-      nodeLabel(tab.node),
-    );
+    return { ...tab.result, rows: picked, documents };
+  };
+
+  const exportRows = async (format: ExportFormat, rows: number[]) => {
+    const result = pickedResult(rows);
+    if (!result) return;
+    const contents = formatResult(result, format, nodeLabel(tab.node));
     const saved = await apiSaveFile(
       `${tab.node.name ?? "rows"}.${EXPORT_EXTENSIONS[format]}`,
       contents,
@@ -631,6 +637,10 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
         describeEdit(edit.kind, edit.values.length, edit.keys.length, edit.document !== undefined),
       ),
       onConfirm: () => void store.applyEdits(tab.id),
+      warning:
+        connection && parseSpec(connection)?.environment === "prod"
+          ? t("db.prodApplyWarning", { name: connection.name })
+          : undefined,
     });
   };
 
@@ -803,6 +813,10 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
       icon: Download,
       onClick: () => void exportRows(format, rows),
     })),
+    ...(pickedResult(rows) ? [xlsxItem(pickedResult(rows)!, tab.node.name ?? "rows")] : []),
+    ...(pickedResult(rows)
+      ? copyFormats(pickedResult(rows)!, nodeLabel(tab.node)).map((item, index) => ({ ...item, separated: index === 0 }))
+      : []),
     // Every row under this filter and sort — not the page on screen — read by the backend straight
     // into the file, so a table far bigger than a grid can hold still exports whole.
     ...(["csv", "json"] as const).map((format, index) => ({
@@ -815,6 +829,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <EnvironmentStripe environment={environment} />
       {/* Toolbar. 44px like every surface's, and allowed to wrap: on a narrow panel the Discard and
           Apply pair drops to a second line rather than being clipped off the right edge. */}
       <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-b border-[var(--cf-border)] py-[7px] pl-3.5 pr-3">
@@ -830,6 +845,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           >
             {connection?.name ?? t("db.connectionGone")}
           </span>
+          <EnvironmentChip environment={environment} />
           <span className="shrink-0 text-[var(--cf-text-faint)]">/</span>
           {/* The schema faint, the relation in full: the name you opened is the one to read. */}
           <span className="min-w-0 max-w-[280px] truncate" title={nodeLabel(tab.node)}>
@@ -1101,6 +1117,8 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
                 // Dragged widths belong to this tab: one `DataTabPanel` serves every data tab, so
                 // grid-local widths were applied by column *name* to whatever table opened next.
                 widths={tab.ui.widths}
+                columnLayout={tab.ui.columns}
+                onColumnLayout={(columns) => setUi(tab.id, { columns })}
                 onWidths={(widths) => setUi(tab.id, { widths })}
               />
             );

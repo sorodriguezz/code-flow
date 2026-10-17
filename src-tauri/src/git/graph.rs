@@ -63,7 +63,7 @@ fn ref_rank(kind: RefKind) -> u8 {
     }
 }
 
-fn build_ref_map(repo: &Repository) -> HashMap<String, Vec<CommitRef>> {
+pub(crate) fn build_ref_map(repo: &Repository) -> HashMap<String, Vec<CommitRef>> {
     let mut map: HashMap<String, Vec<CommitRef>> = HashMap::new();
     if let Ok(refs) = repo.references() {
         for r in refs.flatten() {
@@ -111,7 +111,7 @@ fn head_is_unborn(repo: &Repository) -> bool {
     }
 }
 
-fn build_commit_info(repo: &Repository, oid: Oid, ref_map: &HashMap<String, Vec<CommitRef>>) -> Result<CommitInfo, String> {
+pub(crate) fn build_commit_info(repo: &Repository, oid: Oid, ref_map: &HashMap<String, Vec<CommitRef>>) -> Result<CommitInfo, String> {
     let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
     let author = commit.author();
     let id_str = oid.to_string();
@@ -180,11 +180,88 @@ pub fn list_commits_page(
     skip: usize,
     limit: usize,
 ) -> Result<CommitPage, String> {
+    list_commits_page_filtered(path, all_refs, skip, limit, &LogFilter::default())
+}
+
+/// What the graph's filters narrow the walk to. Every field is optional and they combine with
+/// "and". Applied *in* the walk rather than to a loaded page: a filter over the commits already on
+/// screen would answer "which of these five hundred", and the question is "which in the history".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogFilter {
+    /// `git log --first-parent`: each branch's own line, the merged-in work folded into its merge.
+    pub first_parent: bool,
+    /// A repository-relative file or folder: only commits that changed something under it.
+    pub path: Option<String>,
+    /// Matched case-insensitively against the author's name and e-mail.
+    pub author: Option<String>,
+    /// Seconds since the epoch, inclusive at both ends.
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+}
+
+impl LogFilter {
+    fn narrows(&self) -> bool {
+        self.path.as_deref().is_some_and(|p| !p.trim().is_empty())
+            || self.author.as_deref().is_some_and(|a| !a.trim().is_empty())
+            || self.since.is_some()
+            || self.until.is_some()
+    }
+
+    fn keeps(&self, commit: &git2::Commit) -> bool {
+        let when = commit.time().seconds();
+        if self.since.is_some_and(|since| when < since) || self.until.is_some_and(|until| when > until) {
+            return false;
+        }
+        if let Some(author) = self.author.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            let wanted = author.to_lowercase();
+            let sig = commit.author();
+            let name = sig.name().unwrap_or("").to_lowercase();
+            let email = sig.email().unwrap_or("").to_lowercase();
+            if !name.contains(&wanted) && !email.contains(&wanted) {
+                return false;
+            }
+        }
+        if let Some(path) = self.path.as_deref().map(|p| p.trim().trim_matches('/')).filter(|p| !p.is_empty()) {
+            if !touches_path(commit, std::path::Path::new(path)) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Whether `commit` changed what sits at `target` — a file's blob or a folder's tree differing from
+/// every parent's (the first parent's only, on a merge, would hide what the merge brought in). A
+/// root commit counts when it has the path at all.
+fn touches_path(commit: &git2::Commit, target: &std::path::Path) -> bool {
+    let entry = commit.tree().ok().and_then(|t| t.get_path(target).ok().map(|e| e.id()));
+    if commit.parent_count() == 0 {
+        return entry.is_some();
+    }
+    commit.parents().any(|parent| {
+        let parent_entry = parent.tree().ok().and_then(|t| t.get_path(target).ok().map(|e| e.id()));
+        entry != parent_entry
+    })
+}
+
+/// [`list_commits_page`] narrowed by `filter`. `skip` counts the commits the filter kept, so the
+/// next page of a filtered history follows on from the last one.
+pub fn list_commits_page_filtered(
+    path: &str,
+    all_refs: bool,
+    skip: usize,
+    limit: usize,
+    filter: &LogFilter,
+) -> Result<CommitPage, String> {
     let repo = open(path)?;
     let ref_map = build_ref_map(&repo);
 
     let mut walk = repo.revwalk().map_err(|e| e.message().to_string())?;
     walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME).map_err(|e| e.message().to_string())?;
+    if filter.first_parent {
+        walk.simplify_first_parent().map_err(|e| e.message().to_string())?;
+    }
     if all_refs {
         walk.push_glob("refs/heads/*").map_err(|e| e.message().to_string())?;
         walk.push_glob("refs/remotes/*").map_err(|e| e.message().to_string())?;
@@ -194,13 +271,25 @@ pub fn list_commits_page(
         walk.push_head().map_err(|e| e.message().to_string())?;
     }
 
+    let narrows = filter.narrows();
     let mut commits = Vec::with_capacity(limit.min(1024));
     let mut has_more = false;
-    // `limit + 1` and stop: the extra one is never built into a `CommitInfo`, it only answers
-    // whether the walk had anything left.
-    for (index, oid) in walk.skip(skip).take(limit + 1).enumerate() {
+    let mut kept = 0usize;
+    for oid in walk {
         let oid = oid.map_err(|e| e.message().to_string())?;
-        if index == limit {
+        if narrows {
+            let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
+            if !filter.keeps(&commit) {
+                continue;
+            }
+        }
+        kept += 1;
+        if kept <= skip {
+            continue;
+        }
+        // One past the page and stop: the extra one is never built into a `CommitInfo`, it only
+        // answers whether the walk had anything left.
+        if commits.len() == limit {
             has_more = true;
             break;
         }
@@ -237,24 +326,7 @@ pub fn file_history(path: &str, rel_path: &str, limit: usize) -> Result<Vec<Comm
         }
         let oid = oid.map_err(|e| e.message().to_string())?;
         let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
-        let tree = commit.tree().map_err(|e| e.message().to_string())?;
-        let entry = tree.get_path(target).ok();
-
-        // A commit counts when the blob at that path differs from every parent's — which is also
-        // what makes the *first* commit of a file count, since it has no parent holding it.
-        let changed = if commit.parent_count() == 0 {
-            entry.is_some()
-        } else {
-            let mut differs = false;
-            for parent in commit.parents() {
-                let parent_entry = parent.tree().ok().and_then(|t| t.get_path(target).ok());
-                if entry.as_ref().map(|e| e.id()) != parent_entry.as_ref().map(|e| e.id()) {
-                    differs = true;
-                    break;
-                }
-            }
-            differs
-        };
+        let changed = touches_path(&commit, target);
 
         if changed {
             out.push(build_commit_info(&repo, oid, &ref_map)?);
@@ -332,6 +404,61 @@ mod tests {
         // none yet, so it never had the same problem and must not acquire one.
         let commits = list_commits(dir.to_str().unwrap(), true, 500).unwrap();
         assert!(commits.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Each filter narrows the walk itself, and `skip` counts what the filter kept.
+    #[test]
+    fn the_filtered_walk_narrows_by_path_author_date_and_first_parent() {
+        let dir = std::env::temp_dir().join(format!("cf-graph-filter-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("src")).unwrap();
+        let repo = Repository::init(&dir).unwrap();
+        let commit = |files: &[(&str, &str)], who: &str, when: i64, message: &str, extra: Option<Oid>| -> Oid {
+            let mut index = repo.index().unwrap();
+            for (name, body) in files {
+                fs::write(dir.join(name), body).unwrap();
+                index.add_path(std::path::Path::new(name)).unwrap();
+            }
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = git2::Signature::new(who, &format!("{}@example.com", who.to_lowercase()), &git2::Time::new(when, 0)).unwrap();
+            let mut parents = Vec::new();
+            if let Ok(head) = repo.head() {
+                parents.push(head.peel_to_commit().unwrap());
+            }
+            if let Some(oid) = extra {
+                parents.push(repo.find_commit(oid).unwrap());
+            }
+            let refs: Vec<&git2::Commit> = parents.iter().collect();
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &refs).unwrap()
+        };
+        let first = commit(&[("a.txt", "1")], "Ana", 1_000, "first", None);
+        commit(&[("src/b.txt", "1")], "Ben", 2_000, "second", None);
+        // A side commit off `first`, merged back in: first-parent hides it.
+        let side = {
+            let tree = repo.find_commit(first).unwrap().tree().unwrap();
+            let sig = git2::Signature::new("Ana", "ana@example.com", &git2::Time::new(2_500, 0)).unwrap();
+            let parent = repo.find_commit(first).unwrap();
+            repo.commit(None, &sig, &sig, "side", &tree, &[&parent]).unwrap()
+        };
+        commit(&[("src/b.txt", "2")], "Ana", 3_000, "merge", Some(side));
+        let path = dir.to_str().unwrap();
+        let summaries = |filter: LogFilter, skip: usize| -> Vec<String> {
+            list_commits_page_filtered(path, false, skip, 10, &filter)
+                .unwrap()
+                .commits
+                .into_iter()
+                .map(|c| c.summary)
+                .collect()
+        };
+
+        assert_eq!(summaries(LogFilter { path: Some("src".into()), ..Default::default() }, 0), vec!["merge", "second"]);
+        assert_eq!(summaries(LogFilter { author: Some("BEN".into()), ..Default::default() }, 0), vec!["second"]);
+        assert_eq!(summaries(LogFilter { since: Some(1_500), until: Some(2_600), ..Default::default() }, 0).len(), 2);
+        assert!(!summaries(LogFilter { first_parent: true, ..Default::default() }, 0).contains(&"side".to_string()));
+        assert!(summaries(LogFilter::default(), 0).contains(&"side".to_string()));
+        assert_eq!(summaries(LogFilter { path: Some("src".into()), ..Default::default() }, 1), vec!["second"]);
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -60,6 +60,7 @@ import type {
   NoteTrashRow,
   NoteViewMode,
 } from "../types/notes";
+import { registerIslandApp } from "../lib/islandSync";
 
 /**
  * The Notes workspace's state.
@@ -1972,6 +1973,24 @@ useWorkspaceStore.subscribe((state, previous) => {
   const { workspaceId, loading } = useNotesStore.getState();
   if (workspaceId === null && !loading) return;
   void useNotesStore.getState().setWorkspace(state.activeWorkspaceId);
+});
+
+/** While Notes is in an island the island owns the shelf; this window's copy is dropped and read
+ *  again on the way back — see `lib/islandSync`. */
+registerIslandApp(["notes"], {
+  isLoaded: () => useNotesStore.getState().workspaceId !== null || useNotesStore.getState().loading,
+  flush: () => useNotesStore.getState().flush({ interactive: false }),
+  release: () => {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchToken++;
+    pendingLoad = null;
+    useNotesStore.setState({ workspaceId: null, loading: false, ...clearedWorkspaceState() });
+  },
+  reload: () => {
+    pendingLoad = null;
+    useNotesStore.setState({ workspaceId: null, loading: false });
+    return ensureNotesStoreLoaded();
+  },
 });
 
 /**

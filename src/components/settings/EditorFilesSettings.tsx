@@ -8,6 +8,8 @@ import { CsvSettings } from "./CsvSettings";
 import { PaneBlock } from "./settingsNav";
 import { useLanguageOverrideStore } from "../../state/languageOverrideStore";
 import { useFileNestingStore } from "../../state/fileNestingStore";
+import { useEditorDisplayStore, type EditorAutoSave } from "../../state/editorDisplayStore";
+import { Switch } from "./EditorDisplaySettings";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -16,10 +18,84 @@ import { useT } from "../../state/languageStore";
  * archivos .x» in the status line) and the explorer's nesting (its context menu) — and the third is
  * the CSV pane that had a rail entry of its own.
  */
+/** VS Code's `files.autoSave`: off, a second after typing stops, or when the file loses focus. */
+function AutoSave() {
+  const t = useT();
+  const autoSave = useEditorDisplayStore((s) => s.autoSave);
+  useEffect(() => {
+    void useEditorDisplayStore.getState().init();
+  }, []);
+  const options: SelectOption[] = [
+    { value: "off", label: t("editor.autoSaveOff") },
+    { value: "afterDelay", label: t("editor.autoSaveDelay") },
+    { value: "onFocusChange", label: t("editor.autoSaveFocus") },
+  ];
+  return (
+    <div className="w-[260px]">
+      <Select
+        size="sm"
+        value={autoSave}
+        onChange={(value) => void useEditorDisplayStore.getState().setAutoSave(value as EditorAutoSave)}
+        options={options}
+        ariaLabel={t("editor.autoSave")}
+      />
+    </div>
+  );
+}
+
+/** What a save does to the text — VS Code's two `files.*` switches, and `.editorconfig`. */
+function OnSave() {
+  const t = useT();
+  const display = useEditorDisplayStore();
+  useEffect(() => {
+    void useEditorDisplayStore.getState().init();
+  }, []);
+  return (
+    <div className="space-y-3">
+      <Switch
+        checked={display.trimTrailingWhitespace}
+        onChange={(value) => void display.setTrimTrailingWhitespace(value)}
+        label={t("editor.trimTrailing")}
+        tip={t("editor.trimTrailingTip")}
+      />
+      <Switch
+        checked={display.insertFinalNewline}
+        onChange={(value) => void display.setInsertFinalNewline(value)}
+        label={t("editor.finalNewline")}
+        tip={t("editor.finalNewlineTip")}
+      />
+      <Switch
+        checked={display.editorConfig}
+        onChange={(value) => void display.setEditorConfig(value)}
+        label={t("editor.editorConfig")}
+        tip={t("editor.editorConfigTip")}
+      />
+      <Switch
+        checked={display.vscodeSettings}
+        onChange={(value) => void display.setVscodeSettings(value)}
+        label={t("editor.vscodeSettings")}
+        tip={t("editor.vscodeSettingsTip")}
+      />
+      <Switch
+        checked={display.jsonSchemas}
+        onChange={(value) => void display.setJsonSchemas(value)}
+        label={t("editor.jsonSchemas")}
+        tip={t("editor.jsonSchemasTip")}
+      />
+    </div>
+  );
+}
+
 export function EditorFilesSettings() {
   const t = useT();
   return (
     <div>
+      <PaneBlock title={t("editor.autoSave")} hint={t("editor.autoSaveHint")}>
+        <AutoSave />
+      </PaneBlock>
+      <PaneBlock title={t("editor.onSave")}>
+        <OnSave />
+      </PaneBlock>
       <PaneBlock title={t("editor.files.languages")} hint={t("editor.files.languagesHint")}>
         <ExtensionLanguages />
       </PaneBlock>

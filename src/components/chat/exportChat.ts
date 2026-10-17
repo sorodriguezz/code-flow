@@ -67,8 +67,9 @@ export async function saveConversationExport(conversation: ExportConversation, f
   useToastStore.getState().pushToast(translate("chat.exported", { name }), "success");
 }
 
-/** A chat-workspace conversation, read from disk, attachments referenced by path. */
-export async function exportChatConversation(conversationId: string, format: ExportFormat, traces: boolean) {
+/** A chat-workspace conversation, read from disk, attachments referenced by path. `title` for one
+ *  the chat workspace does not list — the assistant's workspace chats. */
+export async function exportChatConversation(conversationId: string, format: ExportFormat, traces: boolean, title?: string) {
   try {
     const [rows, attachments] = await Promise.all([
       chatGetConversation(conversationId, traces),
@@ -88,7 +89,7 @@ export async function exportChatConversation(conversationId: string, format: Exp
     }));
     await saveConversationExport(
       {
-        title: meta?.title ?? "",
+        title: title ?? meta?.title ?? "",
         exportedAt: new Date().toISOString(),
         attachments: attachments.map((file) => ({ name: file.name, path: file.path, bytes: file.bytes })),
         turns,

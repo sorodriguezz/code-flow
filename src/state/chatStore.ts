@@ -107,6 +107,33 @@ export interface ChatMessage {
   /** On a question: the images sent with it. Live only too — a reopened question names them in its
    *  own text, and the bubble reads them back out of that (`lib/attachmentNote`). */
   attachments?: ChatAttachment[];
+  /** On a question asked in plan mode, and on its answer: the turn ran read-only and answered with a
+   *  plan, which the panel offers to carry out. Live only. */
+  plan?: boolean;
+  /** On an answer: the files the turn changed and the checkpoint taken before it — the per-turn
+   *  review under the bubble. Read back from the row, so a reopened conversation keeps it. */
+  changes?: TurnChanges;
+}
+
+/** What a chat turn changed on disk: the checkpoint from before it, and the files that differed
+ *  from it when it ended. */
+export interface TurnChanges {
+  checkpointId: string;
+  paths: string[];
+}
+
+/** `ChatReply.checkpoint` / `ActivityLogEntry.checkpoint` — `{"id", "paths"}` as the backend stores
+ *  it — or `undefined` for a turn that changed nothing or is too old to say. */
+export function parseTurnChanges(json: string | null | undefined): TurnChanges | undefined {
+  if (!json) return undefined;
+  try {
+    const value = JSON.parse(json) as { id?: unknown; paths?: unknown };
+    if (typeof value.id !== "string" || !Array.isArray(value.paths)) return undefined;
+    const paths = value.paths.filter((path): path is string => typeof path === "string");
+    return paths.length > 0 ? { checkpointId: value.id, paths } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** One conversation, live in memory for as long as the app runs.
@@ -168,6 +195,9 @@ export interface ChatSession {
    *  session and draws the line above it. Read back from disk, so it survives a restart and is the
    *  same in every window. */
   resetPending: boolean;
+  /** What the engine reported holding in context on the last turn — the composer's meter. `null`
+   *  until an engine that reports it (Claude) answers here, and after a `/clear`. */
+  contextTokens: number | null;
 }
 
 /** A skill picked for one turn — `chat_send`'s `SkillPick` itself rather than a copy of its shape:
@@ -200,6 +230,7 @@ function newSession(projectId: string, conversationId: string): ChatSession {
     streamText: "",
     restored: null,
     resetPending: false,
+    contextTokens: null,
   };
 }
 
@@ -270,6 +301,7 @@ export function turnsToMessages(entries: ActivityLogEntry[], cleared: readonly n
         isError: e.is_error,
         trace: parseTrace(e.trace),
         traceId: traceIdOf(e.trace, e.id),
+        changes: parseTurnChanges(e.checkpoint),
       },
     ];
   });
@@ -416,6 +448,9 @@ interface ChatState {
    *  its own default, as in the chat workspace. Rides every turn of that conversation. */
   effortByConversation: Record<string, string>;
   setEffort: (conversationId: string, effort: string) => void;
+  /** Plan mode, per conversation: while on, each turn runs read-only and answers with a plan. */
+  planByConversation: Record<string, boolean>;
+  setPlan: (conversationId: string, on: boolean) => void;
   /**
    * Asks `message` in `conversationId` — the conversation the assistant tab names, created on its
    * first question.
@@ -530,6 +565,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   byConversation: {},
   engineByConversation: {},
   effortByConversation: {},
+  planByConversation: {},
   attachments: {},
 
   attachImagePath: async (conversationId, sourcePath) => {
@@ -600,6 +636,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     touchConversation(conversationId);
     const base = existing ?? newSession(projectId, conversationId);
     const runId = newRunId("chat");
+    // Read when the turn goes out, not when it was typed: a queued question takes the mode the
+    // composer is in by the time its turn comes.
+    const plan = get().planByConversation[conversationId] ?? false;
     // The repository's own workspace, read once here and carried by everything this turn raises —
     // the status-bar row, and both notifications below. Deliberately not re-derived when the reply
     // lands: this store is built around an answer arriving while the user is looking somewhere
@@ -637,6 +676,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               contextReset: base.resetPending && base.messages.length > 0 ? true : undefined,
               skill: skill?.name,
               attachments: files.length > 0 ? files : undefined,
+              plan: plan || undefined,
             },
           ],
           resetPending: false,
@@ -682,6 +722,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         skill ?? null,
         files.map((file) => file.id),
         get().effortByConversation[conversationId] ?? null,
+        plan,
       ),
     )
       .then((reply) => {
@@ -702,10 +743,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
               model: reply.model ?? undefined,
               engineVersion: reply.engine_version ?? undefined,
               trace: trace.length > 0 ? trace : undefined,
+              plan: plan || undefined,
+              changes: parseTurnChanges(reply.checkpoint),
             },
           ],
           sessionId: reply.session_id,
           model: reply.model ?? session.model,
+          contextTokens: reply.context_tokens ?? null,
           sending: false,
           runId: null,
           runStartedAt: null,
@@ -1054,6 +1098,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setEffort: (conversationId, effort) => {
     set((s) => ({ effortByConversation: { ...s.effortByConversation, [conversationId]: effort } }));
+  },
+
+  setPlan: (conversationId, on) => {
+    set((s) => ({ planByConversation: { ...s.planByConversation, [conversationId]: on } }));
   },
 
   setEngine: (conversationId, engine) => {

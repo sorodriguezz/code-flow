@@ -28,6 +28,7 @@ import { pushErrorToast } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type { AgentProject, AgentTask, AgentTaskStatus, WorkspaceAgent } from "../types/domain";
+import { registerIslandApp } from "../lib/islandSync";
 
 /** The repository name the backend put after its busy marker, for the "not now" message. */
 function busyRepoName(error: string): string {
@@ -907,3 +908,15 @@ function pruneLive(): void {
     return { live: next };
   });
 }
+
+/** Tasks and agents the island added while Agentes was out, read again on the way back — see
+ *  `lib/islandSync`. Through `setWorkspace`, which keeps the turns still in flight. */
+registerIslandApp(["agents"], {
+  isLoaded: () => useAgentsStore.getState().workspaceId !== null,
+  reload: async () => {
+    const { workspaceId: id, selectedId: selected } = useAgentsStore.getState();
+    await useAgentsStore.getState().setWorkspace(null);
+    await useAgentsStore.getState().setWorkspace(id);
+    if (selected && useAgentsStore.getState().tasks.some((task) => task.id === selected)) useAgentsStore.setState({ selectedId: selected });
+  },
+});

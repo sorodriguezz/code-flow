@@ -82,6 +82,7 @@ function tab(path: string, content = "text", originalContent = "text") {
     version: null,
     notice: null,
     readOnly: null,
+    encoding: null,
     diskChanged: false,
     diskText: null,
   };

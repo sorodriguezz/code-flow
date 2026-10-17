@@ -3,6 +3,8 @@ import {
   CaseSensitive,
   ChevronDown,
   ChevronRight,
+  Eye,
+  FileText,
   Loader2,
   MoreHorizontal,
   Regex,
@@ -11,7 +13,10 @@ import {
   Search,
   WholeWord,
 } from "lucide-react";
-import { replaceInRepo, searchRepo, type SearchHit, type SearchOptions } from "../../lib/tauri/commands";
+import { readFileText, replaceInRepo, searchRepo, type SearchHit, type SearchOptions } from "../../lib/tauri/commands";
+import { formatSearchResults, previewReplace } from "../../lib/searchEditor";
+import { useCompareStore } from "../../state/compareStore";
+import { useVscodeExcludes } from "../../lib/vscodeSettings";
 import { FileGlyph } from "../common/FileGlyph";
 import { Tooltip } from "../common/Tooltip";
 import { iconButtonClass, Kbd } from "../common/Button";
@@ -164,6 +169,7 @@ export function SearchPanel({
   fsNonce,
   dirtyBuffers,
   onOpenHit,
+  onOpenEditor,
   onClose,
 }: {
   repoPath: string;
@@ -177,6 +183,8 @@ export function SearchPanel({
   /** The open files with unsaved edits, matched here because the backend only ever sees disk. */
   dirtyBuffers: { path: string; content: string }[];
   onOpenHit: (path: string, line: number) => void;
+  /** Opens a scratch tab holding `text` — the results as a search editor. */
+  onOpenEditor: (name: string, text: string) => void;
   onClose: () => void;
 }) {
   const t = useT();
@@ -216,9 +224,17 @@ export function SearchPanel({
   const busy = searching || refreshing;
   const stale = searchedNonce !== fsNonce && Boolean(query.trim());
 
+  /** `files.exclude` and `search.exclude` from `.vscode/settings.json`, after whatever is typed. */
+  const repoExcludes = useVscodeExcludes(repoPath, "search");
   const options: SearchOptions = useMemo(
-    () => ({ caseSensitive, wholeWord, regex: useRegex, include, exclude }),
-    [caseSensitive, wholeWord, useRegex, include, exclude],
+    () => ({
+      caseSensitive,
+      wholeWord,
+      regex: useRegex,
+      include,
+      exclude: [exclude.trim(), ...repoExcludes].filter(Boolean).join(", "),
+    }),
+    [caseSensitive, wholeWord, useRegex, include, exclude, repoExcludes],
   );
 
   /**
@@ -378,6 +394,49 @@ export function SearchPanel({
    * the two genuinely differ, and the number under the box has to be the number of rows above it. */
   const shownCount = useMemo(() => grouped.reduce((n, [, fileHits]) => n + fileHits.length, 0), [grouped]);
 
+  /**
+   * «Abrir en el editor»: the results as a `.code-search` tab, with a line of context around each
+   * hit (`lib/searchEditor`). The files are read for the context — an unsaved buffer as it is now —
+   * up to a cap past which the hits alone are listed.
+   */
+  const openInEditor = async () => {
+    const CONTEXT_FILES = 200;
+    const texts = new Map<string, string | null>();
+    const buffers = new Map(dirtyBuffers.map((buffer) => [buffer.path, buffer.content]));
+    await Promise.all(
+      grouped.slice(0, CONTEXT_FILES).map(async ([path]) => {
+        texts.set(path, buffers.get(path) ?? (await readFileText(repoPath, path).catch(() => null)));
+      }),
+    );
+    const text = formatSearchResults({
+      query,
+      flags: { caseSensitive, wholeWord, regex: useRegex },
+      include,
+      exclude,
+      files: grouped,
+      textOf: (path) => texts.get(path) ?? null,
+      context: 1,
+      truncated,
+    });
+    const name = query.trim().replace(/[\\/:*?"<>|]+/g, " ").slice(0, 40).trim() || "search";
+    onOpenEditor(`${name}.code-search`, text);
+  };
+
+  /** The file as the replace would leave it, beside it as it is — before anything is written. */
+  const previewFile = async (path: string) => {
+    try {
+      const text = await readFileText(repoPath, path);
+      const after = previewReplace(text, query, replacement, { caseSensitive, wholeWord, regex: useRegex });
+      if (after === null) {
+        pushErrorToast(t("editor.replacePreviewUnsupported"));
+        return;
+      }
+      useCompareStore.getState().compareWithSaved(path, after, t("editor.replacePreviewTitle", { path }));
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
   const replace = async (onlyPath?: string) => {
     const scope = onlyPath ?? null;
     // Replace writes to disk, and `syncOpenTabs` deliberately leaves dirty tabs alone — so a file
@@ -433,6 +492,16 @@ export function SearchPanel({
           <span className="truncate">{t("editor.searchInProject")}</span>
           {openChord && <Kbd>{openChord}</Kbd>}
         </span>
+        <Tooltip side="bottom" label={t("editor.openSearchEditor")}>
+          <button
+            onClick={() => void openInEditor()}
+            disabled={grouped.length === 0}
+            aria-label={t("editor.openSearchEditor")}
+            className={iconButtonClass({ size: "sm" })}
+          >
+            <FileText size={14} />
+          </button>
+        </Tooltip>
         <Tooltip side="bottom" label={t("editor.toggleFilters")}>
           <button
             onClick={() => setShowFilters((v) => !v)}
@@ -597,6 +666,21 @@ export function SearchPanel({
                     {fileHits.length}
                   </span>
                 </button>
+                {showReplace && (
+                  <Tooltip side="right" label={t("editor.replacePreview")}>
+                    <button
+                      onClick={() => void previewFile(path)}
+                      disabled={!query}
+                      aria-label={t("editor.replacePreview")}
+                      className={iconButtonClass({
+                        size: "xs",
+                        className: "opacity-0 focus-visible:opacity-100 group-hover/file:opacity-100",
+                      })}
+                    >
+                      <Eye size={13} />
+                    </button>
+                  </Tooltip>
+                )}
                 {showReplace && (
                   <Tooltip
                     side="right"

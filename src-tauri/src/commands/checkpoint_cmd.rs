@@ -37,3 +37,34 @@ pub fn restore_ai_checkpoint(repo_path: String, checkpoint_id: String) -> Result
 pub fn delete_ai_checkpoint(repo_path: String, checkpoint_id: String) -> Result<(), String> {
     checkpoint::remove(&repo_path, &checkpoint_id)
 }
+
+/// One file of a turn, before and now: the checkpoint's copy and the one on disk, as text — for the
+/// chat's per-turn review. `binary` when either side is not UTF-8 text (the review then offers the
+/// whole file back, not its hunks).
+#[derive(serde::Serialize)]
+pub struct TurnFile {
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub binary: bool,
+}
+
+#[tauri::command(async)]
+pub fn ai_checkpoint_file(repo_path: String, checkpoint_id: String, path: String) -> Result<TurnFile, String> {
+    let before = checkpoint::file_at(&repo_path, &checkpoint_id, &path)?;
+    let after = crate::fsops::read_bytes_in_repo(&repo_path, &path)?;
+    let text = |bytes: Option<Vec<u8>>| match bytes {
+        None => Ok(None),
+        Some(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| ()),
+    };
+    match (text(before), text(after)) {
+        (Ok(before), Ok(after)) => Ok(TurnFile { before, after, binary: false }),
+        _ => Ok(TurnFile { before: None, after: None, binary: true }),
+    }
+}
+
+/// Puts the named files back as the checkpoint has them — "discard" on a file of the per-turn
+/// review. Sync, like [`restore_ai_checkpoint`]: a write.
+#[tauri::command]
+pub fn restore_ai_checkpoint_paths(repo_path: String, checkpoint_id: String, paths: Vec<String>) -> Result<Vec<String>, String> {
+    checkpoint::restore_paths(&repo_path, &checkpoint_id, &paths)
+}

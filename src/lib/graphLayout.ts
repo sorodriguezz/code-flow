@@ -46,8 +46,12 @@ export const LANE_COLORS = [
  * Assigns each commit a lane so the graph can be drawn like `git log --graph --all`.
  * Expects commits pre-ordered topologically + chronologically (children before parents),
  * which is what the backend's `list_commits` returns.
+ *
+ * `side` names rows that hang off the history without being part of it — the stashes. They take a
+ * free lane for their own row and hold none for their parent, so the line into the commit they
+ * were made on is a short branch and never a lane that runs on below it.
  */
-export function computeGraphLayout(commits: CommitInfo[]): GraphLayout {
+export function computeGraphLayout(commits: CommitInfo[], side: ReadonlySet<string> = new Set()): GraphLayout {
   const indexById = new Map<string, number>();
   commits.forEach((c, i) => indexById.set(c.id, i));
 
@@ -68,6 +72,10 @@ export function computeGraphLayout(commits: CommitInfo[]): GraphLayout {
     }
     activeLanes[lane] = null;
 
+    if (side.has(commit.id)) {
+      rows[row] = { commit, row, lane };
+      return;
+    }
     commit.parent_ids.forEach((parentId, parentIdx) => {
       if (parentIdx === 0) {
         activeLanes[lane] = parentId;

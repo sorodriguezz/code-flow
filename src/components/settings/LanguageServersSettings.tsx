@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, RotateCcw } from "lucide-react";
 import { LANGUAGE_SERVERS, type LanguageServer } from "../../lib/lsp/servers";
-import { refreshProbes, serverStatuses } from "../../lib/lsp/client";
+import { currentRepoPath, refreshProbes, serverStatuses } from "../../lib/lsp/client";
+import { repoRecommendedServers } from "../../lib/vscodeExtensions";
 import { useT } from "../../state/languageStore";
 import { Skeleton } from "../common/Skeleton";
 
@@ -45,7 +46,8 @@ function InstallCommand({ command }: { command: string }) {
   );
 }
 
-function Row({ status }: { status: Status }) {
+function Row({ status, recommended }: { status: Status; recommended: boolean }) {
+  const t = useT();
   const { server, version } = status;
   return (
     <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2 last:border-b-0">
@@ -58,7 +60,15 @@ function Row({ status }: { status: Status }) {
       {/* The label and the binary are short and known; the install command is neither, and making it
           the only elastic cell is what truncated the one actionable string on a "not found" row to
           `npm i -g dockerfile-lang…`. They shrink first now, and the command wraps instead. */}
-      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{server.label}</span>
+      <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
+        <span className="truncate">{server.label}</span>
+        {/* The open repository's `.vscode/extensions.json` names this server's extension. */}
+        {recommended && (
+          <span className="shrink-0 rounded bg-[var(--cf-accent)]/12 px-1 text-[10px] text-[var(--cf-accent)]">
+            {t("settings.lspRecommended")}
+          </span>
+        )}
+      </span>
       <span className="hidden min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)] sm:block">
         {server.command}
       </span>
@@ -89,6 +99,11 @@ export function LanguageServersSettings() {
    *  wrong for the flow this panel exists to start: read "not found", copy the install command, run
    *  it, come back. Without this the panel keeps reporting what was true before the install. */
   const [asked, setAsked] = useState(0);
+  const [recommended, setRecommended] = useState<string[]>([]);
+  useEffect(() => {
+    const repoPath = currentRepoPath();
+    if (repoPath) void repoRecommendedServers(repoPath).then(setRecommended);
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -137,7 +152,7 @@ export function LanguageServersSettings() {
                 {statuses
                   .filter((status) => status.server.tier === tier)
                   .map((status) => (
-                    <Row key={status.server.id} status={status} />
+                    <Row key={status.server.id} status={status} recommended={recommended.includes(status.server.id)} />
                   ))}
               </div>
             </div>

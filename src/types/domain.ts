@@ -199,6 +199,10 @@ export interface StashInfo {
   index: number;
   message: string;
   oid: string;
+  /** The commit it was made on — where the graph hangs it. */
+  base_id?: string | null;
+  /** Seconds since the epoch. */
+  timestamp?: number;
 }
 
 export interface RemoteInfo {
@@ -892,6 +896,8 @@ export interface ActivityLogEntry {
   /** The account the turn ran as — `null` for the CLI's system account and for older turns. Where
    * it changes between two turns is where the engine lost the conversation (see `turnsToMessages`). */
   account_id?: string | null;
+  /** What the turn changed on disk, as JSON `{"id", "paths"}` — see `parseTurnChanges`. */
+  checkpoint?: string | null;
 }
 
 export interface JobHistoryEntry {

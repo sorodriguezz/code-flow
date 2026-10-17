@@ -254,16 +254,33 @@ pub fn get_uncommitted_diff(path: &str, context_lines: Option<u32>) -> Result<Ve
 ///
 /// `Ok(None)` when that path has no diff on the requested side — the file was staged, discarded or
 /// committed between the list being drawn and the row being opened, which is a race, not a failure.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn get_file_diff(
     path: &str,
     file_path: &str,
     staged: bool,
     context_lines: Option<u32>,
 ) -> Result<Option<FileDiffInfo>, String> {
+    get_file_diff_with(path, file_path, staged, context_lines, false)
+}
+
+/// [`get_file_diff`], optionally blind to whitespace — `git diff -w`, the Changes view's switch. A
+/// diff read that way is for looking at only: its hunks are not the change on disk, so nothing may
+/// stage or discard lines from it.
+pub fn get_file_diff_with(
+    path: &str,
+    file_path: &str,
+    staged: bool,
+    context_lines: Option<u32>,
+    ignore_whitespace: bool,
+) -> Result<Option<FileDiffInfo>, String> {
     let repo = open(path)?;
     let mut opts = DiffOptions::new();
     opts.context_lines(context_lines.unwrap_or(FULL_FILE_CONTEXT_LINES));
     opts.pathspec(file_path);
+    if ignore_whitespace {
+        opts.ignore_whitespace(true);
+    }
 
     let diff = if staged {
         let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
@@ -361,6 +378,38 @@ pub fn get_commit_file_diff(
     Ok(files.into_iter().nth(wanted))
 }
 
+/// Two revisions compared directly, `from`'s tree to `to`'s — not from their merge base, which is
+/// [`get_branch_diff`]'s question. What the graph's "compare these two commits" shows. With `file`,
+/// only that path, at full context (the side-by-side view needs it — see [`get_commit_file_diff`]).
+pub fn get_revisions_diff(path: &str, from: &str, to: &str, file: Option<&str>) -> Result<Vec<FileDiffInfo>, String> {
+    let repo = open(path)?;
+    let tree_of = |rev: &str| -> Result<git2::Tree, String> {
+        repo.revparse_single(rev)
+            .and_then(|object| object.peel_to_tree())
+            .map_err(|e| e.message().to_string())
+    };
+    let from_tree = tree_of(from)?;
+    let to_tree = tree_of(to)?;
+    let mut opts = DiffOptions::new();
+    if let Some(file) = file {
+        opts.context_lines(FULL_FILE_CONTEXT_LINES);
+        opts.pathspec(file);
+    }
+    let diff = repo
+        .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), Some(&mut opts))
+        .map_err(|e| e.message().to_string())?;
+    let files = collect_diff(&diff)?;
+    match file {
+        // The pathspec can match both halves of a rename: keep the delta that names the path.
+        Some(file) => Ok(files
+            .into_iter()
+            .filter(|f| f.new_path.as_deref() == Some(file) || f.old_path.as_deref() == Some(file))
+            .take(1)
+            .collect()),
+        None => Ok(files),
+    }
+}
+
 /// Resolves a PR's base/head to a commit. Since those are branch names as they exist on the
 /// remote, the remote-tracking ref (`origin/<name>`) is preferred over a same-named local
 /// branch that may be stale — a stale local branch is exactly what makes an up-to-date PR diff
@@ -446,6 +495,25 @@ pub fn file_at_ref(path: &str, refname: &str, file_path: &str) -> Result<String,
     Ok(String::from_utf8_lossy(blob.content()).into_owned())
 }
 
+/// A file as it is at `revision` — anything `git rev-parse` takes: `HEAD`, a branch, `origin/main`, a
+/// commit. `Ok(None)` when the file is not there at that revision; `Err` for a revision that does not
+/// exist, or a file there that is binary. The Changes view's «Comparar con…».
+pub fn file_at_revision(path: &str, revision: &str, file_path: &str) -> Result<Option<String>, String> {
+    let repo = open(path)?;
+    let commit = repo
+        .revparse_single(revision)
+        .and_then(|object| object.peel_to_commit())
+        .map_err(|e| e.message().to_string())?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let Ok(entry) = tree.get_path(Path::new(file_path)) else { return Ok(None) };
+    let object = entry.to_object(&repo).map_err(|e| e.message().to_string())?;
+    let Some(blob) = object.as_blob() else { return Ok(None) };
+    if blob.is_binary() {
+        return Err(format!("'{file_path}' is binary at {revision}"));
+    }
+    Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
+}
+
 /// What the editor's gutter compares the buffer against, as text — VS Code's "quick diff" base.
 ///
 /// The index copy of the file, which is what `git diff` (index → working tree) measures from, or —
@@ -480,6 +548,23 @@ pub fn quick_diff_base(path: &str, file_path: &str, staged: bool) -> Result<Opti
         return Ok(None);
     }
     Ok(std::str::from_utf8(blob.content()).ok().map(str::to_owned))
+}
+
+/// The branch work in this repository is measured against: what `origin/HEAD` points at, else the
+/// first of `main`, `master`, `develop` that exists — locally or on `origin`. `None` when none does.
+pub fn default_base_branch(path: &str) -> Option<String> {
+    let repo = open(path).ok()?;
+    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Some(target) = reference.symbolic_target() {
+            if let Some(name) = target.strip_prefix("refs/remotes/origin/") {
+                return Some(name.to_string());
+            }
+        }
+    }
+    ["main", "master", "develop"]
+        .into_iter()
+        .find(|name| resolve_branch_commit(&repo, name).is_ok())
+        .map(str::to_string)
 }
 
 /// Flattens file diffs into plain unified-diff-ish text suitable for a Claude prompt.
@@ -869,6 +954,55 @@ mod tests {
             repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
         (dir, repo)
+    }
+
+    /// `-w` sees no change in a file that only moved its whitespace, and the plain diff still does.
+    #[test]
+    fn a_whitespace_only_edit_vanishes_when_whitespace_is_ignored() {
+        let (dir, _repo) = fixture();
+        let root = dir.to_str().unwrap();
+        fs::write(dir.join("tracked.txt"), "  original   \n").unwrap();
+        let plain = get_file_diff_with(root, "tracked.txt", false, None, false).unwrap().expect("a change");
+        assert!(plain.hunks.iter().any(|h| h.lines.iter().any(|l| l.origin == "+")));
+        let blind = get_file_diff_with(root, "tracked.txt", false, None, true).unwrap();
+        assert!(blind.map_or(true, |f| f.hunks.iter().all(|h| h.lines.iter().all(|l| l.origin == " "))));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file at a revision: the committed text, `None` where it is not, an error for no such revision.
+    #[test]
+    fn a_file_is_read_at_a_revision() {
+        let (dir, _repo) = fixture();
+        let root = dir.to_str().unwrap();
+        fs::write(dir.join("tracked.txt"), "edited\n").unwrap();
+        assert_eq!(file_at_revision(root, "HEAD", "tracked.txt").unwrap().as_deref(), Some("original\n"));
+        assert!(file_at_revision(root, "HEAD", "missing.txt").unwrap().is_none());
+        assert!(file_at_revision(root, "no-such-branch", "tracked.txt").is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two commits compared tree to tree, whole or one path at a time.
+    #[test]
+    fn two_revisions_are_compared_directly() {
+        let (dir, repo) = fixture();
+        let root = dir.to_str().unwrap();
+        let first = repo.head().unwrap().target().unwrap().to_string();
+        fs::write(dir.join("tracked.txt"), "second\n").unwrap();
+        fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.add_path(Path::new("new.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = Signature::now("Test", "test@example.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "second", &tree, &[&parent]).unwrap();
+
+        assert_eq!(get_revisions_diff(root, &first, "HEAD", None).unwrap().len(), 2);
+        let one = get_revisions_diff(root, &first, "HEAD", Some("tracked.txt")).unwrap();
+        assert_eq!(one.len(), 1);
+        assert!(get_revisions_diff(root, "HEAD", "HEAD", None).unwrap().is_empty());
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// The gutter's base is the index copy: an unsaved or unstaged edit is measured from it, and

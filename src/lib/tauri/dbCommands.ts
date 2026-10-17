@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   DbAiAnswer,
   DbAiHistoryTurn,
+  DbColumn,
   DbRunOutcome,
   DbConnectionConfig,
   DbConnectionRow,
@@ -14,6 +15,7 @@ import type {
   DbExecContext,
   DbExecuteResult,
   DbGroupRow,
+  DbKind,
   DbLane,
   DbTransactionState,
   DbNode,
@@ -212,7 +214,9 @@ export const dbExplain = (
   ctx: DbExecContext,
   runId: string,
   lane: DbLane = "work",
-) => invoke<string>("db_explain", { connectionId, sql, ctx, runId, lane });
+  // Measured plan (Postgres, MySQL 8.0.18+); refused by the backend for anything but a read.
+  analyze = false,
+) => invoke<string>("db_explain", { connectionId, sql, ctx, runId, lane, analyze });
 
 /** Whether a console's session is inside a transaction right now. */
 export const dbTransactionState = (connectionId: string, database: string | null) =>
@@ -255,6 +259,12 @@ export const dbSchemaObjects = (connectionId: string, node: DbNodeRef, runId: st
   invoke<DbObjectInfo[]>("db_schema_objects", { connectionId, node, runId });
 
 export const dbCancel = (runId: string) => invoke<void>("db_cancel", { runId });
+/** Whether a console statement would write — what a `prod` connection asks about first. */
+/** A result as an `.xlsx`, through a save dialog; `null` when it was cancelled. */
+export const dbSaveXlsx = (defaultName: string, columns: DbColumn[], rows: (string | null)[][]) =>
+  invoke<string | null>("db_save_xlsx", { defaultName, columns, rows });
+export const dbStatementWrites = (connectionId: string, sql: string) =>
+  invoke<boolean>("db_statement_writes", { connectionId, sql });
 
 /** Where an "export everything" reads from: a table under the grid's filter and sort, or one
  * statement from a console (run again on the console's own session — so it has to be a read). */
@@ -318,6 +328,46 @@ export interface DbImportOutcome {
  * events; `dbCancel(runId)` stops it and rolls everything back. */
 export const dbImportCsv = (connectionId: string, request: DbImportRequest, runId: string) =>
   invoke<DbImportOutcome>("db_import_csv", { connectionId, request, runId });
+
+/** A tool a backup or restore needs that this machine lacks: its name, a command that installs it
+ * on this OS, and the vendor's download page. */
+export interface DbBackupMissingTool {
+  tool: string;
+  install: string;
+  docs: string;
+}
+
+export interface DbBackupOutcome {
+  path: string;
+  bytes: number;
+  durationMs: number;
+}
+
+/** One output line of a running backup or restore, as the `db:backup-progress` event. */
+export interface DbBackupProgress {
+  runId: string;
+  line: string;
+}
+
+/** `null` when every tool the operation needs is installed (SQLite needs none). */
+export const dbBackupCheck = (kind: DbKind, mode: "backup" | "restore") =>
+  invoke<DbBackupMissingTool | null>("db_backup_check", { kind, mode });
+
+/** Backs a database up to `path` with the engine's own tool. `format` is Postgres' `plain` or
+ * `custom`. Output streams as `db:backup-progress`; `dbBackupCancel(runId)` stops it. */
+export const dbBackupRun = (
+  connectionId: string,
+  database: string | null,
+  path: string,
+  format: "plain" | "custom" | null,
+  runId: string,
+) => invoke<DbBackupOutcome>("db_backup_run", { connectionId, database, path, format, runId });
+
+/** Restores a backup file into a database. Refused on a read-only connection. */
+export const dbRestoreRun = (connectionId: string, database: string | null, path: string, runId: string) =>
+  invoke<DbBackupOutcome>("db_restore_run", { connectionId, database, path, runId });
+
+export const dbBackupCancel = (runId: string) => invoke<void>("db_backup_cancel", { runId });
 
 /**
  * Asks the console's AI assistant about the connected database.

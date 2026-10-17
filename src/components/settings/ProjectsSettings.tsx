@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Briefcase,
   Check,
+  Download,
+  Upload,
   ChevronDown,
   ChevronRight,
   GitBranchPlus,
@@ -29,6 +31,77 @@ import { ThisWorkspaceSettings } from "./ThisWorkspaceSettings";
 import { riseDelay } from "../../lib/rise";
 import type { Project, Workspace } from "../../types/domain";
 import { fieldClass } from "../common/recipes";
+import { promptAction } from "../../state/promptStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
+import { listProjects, readPickedJson, writeFileBytes } from "../../lib/tauri/commands";
+import { applyImport, buildExport, parseExport } from "../../lib/workspaceTransfer";
+import { useSidebarLayoutStore } from "../../state/sidebarLayoutStore";
+import { INITIALS_ICON } from "../layout/WorkspaceGlyph";
+
+/** «Exportar…»: every workspace, its repositories and the panel's arrangement, to a JSON file. */
+async function exportWorkspaces(t: ReturnType<typeof useT>) {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const path = await save({ defaultPath: "codeflow-workspaces.json", filters: [{ name: "JSON", extensions: ["json"] }] });
+  if (!path) return;
+  try {
+    const workspaces = useWorkspaceStore.getState().workspaces;
+    const layouts = useSidebarLayoutStore.getState();
+    const projects = new Map<string, Project[]>();
+    await Promise.all(
+      workspaces.map(async (ws) => {
+        projects.set(ws.id, await listProjects(ws.id));
+        await layouts.load(ws.id);
+      }),
+    );
+    const data = buildExport(
+      workspaces,
+      (id) => projects.get(id) ?? [],
+      (id) => useSidebarLayoutStore.getState().byWorkspace[id] ?? { pinned: [], groups: [], groupOf: {} },
+    );
+    await writeFileBytes(path, new TextEncoder().encode(`${JSON.stringify(data, null, 2)}\n`));
+    pushSuccessToast(t("settings.workspacesExported", { n: workspaces.length }));
+  } catch (e) {
+    pushErrorToast(String(e));
+  }
+}
+
+/** «Importar…»: adds what the file has and this machine does not — see `workspaceTransfer`. */
+async function importWorkspaces(t: ReturnType<typeof useT>) {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const path = await open({ multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
+  if (typeof path !== "string") return;
+  try {
+    const data = parseExport(await readPickedJson(path));
+    const store = useWorkspaceStore.getState();
+    const existing = (await Promise.all(store.workspaces.map((ws) => listProjects(ws.id)))).flat();
+    const outcome = await applyImport(data, store.workspaces, existing);
+    // The arrangement, merged into what each workspace already has: groups matched by name.
+    const layouts = useSidebarLayoutStore.getState();
+    for (const [workspaceId, layout] of outcome.layouts) {
+      await layouts.load(workspaceId);
+      for (const id of layout.pinned) layouts.setPinned(workspaceId, id, true);
+      for (const group of layout.groups) {
+        const current = useSidebarLayoutStore.getState().byWorkspace[workspaceId];
+        const groupId =
+          current?.groups.find((g) => g.name.toLowerCase() === group.name.toLowerCase())?.id ??
+          layouts.createGroup(workspaceId, group.name);
+        for (const id of group.ids) layouts.setGroup(workspaceId, id, groupId);
+      }
+    }
+    await store.loadWorkspaces();
+    const active = useWorkspaceStore.getState().activeWorkspaceId;
+    if (active) await useWorkspaceStore.getState().loadProjects(active);
+    pushSuccessToast(
+      t("settings.workspacesImported", {
+        workspaces: outcome.workspacesCreated,
+        added: outcome.projectsAdded,
+        skipped: outcome.projectsSkipped,
+      }),
+    );
+  } catch (e) {
+    pushErrorToast(t("settings.workspacesImportFailed", { error: e instanceof Error ? e.message : String(e) }));
+  }
+}
 
 /**
  * The row being dragged, and where it would land if the pointer were released now.
@@ -312,7 +385,7 @@ export function ProjectsSettings({ bare = false }: { bare?: boolean } = {}) {
   const addNewWorkspace = async () => {
     const name = newName.trim();
     if (!name) return;
-    await addWorkspace(name, "briefcase", DEFAULT_WORKSPACE_COLOR);
+    await addWorkspace(name, INITIALS_ICON, DEFAULT_WORKSPACE_COLOR);
     setNewName("");
   };
 
@@ -396,6 +469,25 @@ export function ProjectsSettings({ bare = false }: { bare?: boolean } = {}) {
         >
           <Plus size={13} />
           {t("settings.addWorkspace")}
+        </button>
+      </div>
+      {/* The list as a file, to carry to another machine — added to, never replaced, on import. */}
+      <div className="-mt-2 mb-4 flex items-center gap-1.5">
+        <button
+          onClick={() => void exportWorkspaces(t)}
+          className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
+          title={t("settings.exportWorkspacesHint")}
+        >
+          <Download size={13} />
+          {t("settings.exportWorkspaces")}
+        </button>
+        <button
+          onClick={() => void importWorkspaces(t)}
+          className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
+          title={t("settings.importWorkspacesHint")}
+        >
+          <Upload size={13} />
+          {t("settings.importWorkspaces")}
         </button>
       </div>
 
@@ -580,7 +672,17 @@ export function ProjectsSettings({ bare = false }: { bare?: boolean } = {}) {
                                 ? t("settings.projectNotARepoHint")
                                 : undefined
                           }
-                          className={`flex-1 truncate font-medium ${
+                          // The name shown is a label — double-click renames it; the folder keeps its own.
+                          onDoubleClick={async () => {
+                            const name = await promptAction(t("sidebar.renameProjectPrompt"), { initial: p.name });
+                            if (name && name !== p.name) {
+                              await useWorkspaceStore
+                                .getState()
+                                .renameProject(p.id, ws.id, name)
+                                .catch((e: unknown) => pushErrorToast(String(e)));
+                            }
+                          }}
+                          className={`flex-1 cursor-text truncate font-medium ${
                             broken ? "text-[var(--cf-text-muted)]" : ""
                           } ${gone ? "line-through decoration-[1.5px]" : ""}`}
                         >

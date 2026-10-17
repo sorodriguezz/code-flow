@@ -42,6 +42,13 @@ pub struct ChatReply {
     /// does not replay history into a fresh session, so the panel says so rather than letting the
     /// engine seem to have forgotten.
     account_changed: bool,
+    /// What this turn changed on disk, as stored on its row — `{"id", "paths"}`, the checkpoint taken
+    /// before it and the files that differ from it — for the per-turn review. `None` when it changed
+    /// nothing.
+    checkpoint: Option<String>,
+    /// What the engine held in context on the last step of this turn, when it reports it (Claude)
+    /// — the composer's meter. See `AiRun::context_tokens`.
+    context_tokens: Option<i64>,
 }
 
 /// The active AI provider id, from the `ai_provider` setting. Falls back to Claude when unset or
@@ -161,6 +168,10 @@ pub(crate) enum AiTask {
     /// engine's fast model unless its row names another — it runs behind the user's back, after
     /// every answer they asked to hear.
     SpokenSummary,
+    /// The API client's assistant — «Explicar con IA» on a response, «Generar tests», and a request
+    /// written from a description. Text-only: the request and its response go on stdin with their
+    /// credentials masked, and nothing else is opened, so it routes anywhere, a local model included.
+    Api,
 }
 
 impl AiTask {
@@ -170,7 +181,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 24] = [
+    pub(crate) const ALL: [AiTask; 25] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -195,6 +206,7 @@ impl AiTask {
         AiTask::Logs,
         AiTask::Meetings,
         AiTask::SpokenSummary,
+        AiTask::Api,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -226,6 +238,7 @@ impl AiTask {
             AiTask::Logs => "logs",
             AiTask::Meetings => "meetings",
             AiTask::SpokenSummary => "spoken_summary",
+            AiTask::Api => "api",
         }
     }
 }
@@ -918,6 +931,54 @@ fn session_for_engine(
     }
 }
 
+/// `@cambios` / `@rama` in a question: the diffs they name, read now and appended for the engine —
+/// see `ai::special_mentions`. Empty when the question names neither.
+fn special_mention_notes(asked: &str, repo: &str) -> String {
+    let (changes, branch) = ai::special_mentions(asked);
+    let mut out = String::new();
+    for sha in ai::commit_mentions(asked).into_iter().take(3) {
+        let found = git2::Repository::open(repo).ok().and_then(|r| {
+            let commit = r.revparse_single(&sha).ok()?.peel_to_commit().ok()?;
+            let author = commit.author().name().unwrap_or("").to_string();
+            Some((commit.id().to_string(), commit.message().unwrap_or("").trim().to_string(), author))
+        });
+        match found {
+            Some((id, message, author)) => {
+                let diff = git::diff::get_commit_diff(repo, &id)
+                    .map(|files| git::diff::render_diff_for_prompt(&files))
+                    .unwrap_or_default();
+                let title = format!("El commit {} de {author} (@commit), con el mensaje:\n{message}\n\nSu diff contra el primer padre", &id[..7]);
+                out.push_str(&ai::diff_mention_note(&title, &diff));
+            }
+            None => out.push_str(&format!("\n\n---\n@commit:{sha}: no existe en este repositorio.")),
+        }
+    }
+    if changes {
+        let diff = git::diff::get_uncommitted_diff(repo, None)
+            .map(|files| git::diff::render_diff_for_prompt(&files))
+            .unwrap_or_default();
+        out.push_str(&ai::diff_mention_note("Cambios sin commit del repositorio (@cambios)", &diff));
+    }
+    if branch {
+        let current = git2::Repository::open(repo)
+            .ok()
+            .and_then(|r| r.head().ok().and_then(|h| h.shorthand().map(str::to_string)))
+            .unwrap_or_default();
+        match git::diff::default_base_branch(repo).filter(|base| !current.is_empty() && base != &current) {
+            Some(base) => {
+                // The local branch by its full ref: by its bare name the remote-tracking copy wins,
+                // and that is the branch as last pushed, not as it is here.
+                let diff = git::diff::get_branch_diff(repo, &base, &format!("refs/heads/{current}"))
+                    .map(|files| git::diff::render_diff_for_prompt(&files))
+                    .unwrap_or_default();
+                out.push_str(&ai::diff_mention_note(&format!("Lo que la rama {current} añade sobre {base} (@rama)"), &diff));
+            }
+            None => out.push_str("\n\n---\n@rama: la rama actual es la base del repositorio (o no se pudo leer), así que no hay diff de rama."),
+        }
+    }
+    out
+}
+
 /// Characters of transcript a sessionless engine is re-sent each panel turn: the newest turns win.
 const PANEL_REPLAY_CHARS: usize = 16_000;
 
@@ -986,7 +1047,11 @@ pub async fn send_chat_message(
     // How hard the model thinks this turn (`low`…`max`), from the composer's dial. `None`/empty
     // leaves the CLI on its own configured default — see `ai::effort`.
     effort: Option<String>,
+    // The composer's plan mode: this turn is read-only and answers with a plan — see
+    // `ai::PLAN_MODE_NOTE`.
+    plan: Option<bool>,
 ) -> Result<ChatReply, String> {
+    let plan = plan.unwrap_or(false);
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         // Moved to the chat workspace (`chat_cmd::chat_move_from_panel`): it lives there now, and a
@@ -1118,7 +1183,8 @@ pub async fn send_chat_message(
             &config.provider,
             config.account_id(),
         );
-        (contexts, skills, config, (session_id, account_changed), analysis)
+        // Plan mode is the same promise to write nothing, asked for by the user.
+        (contexts, skills, config, (session_id, account_changed), analysis || plan)
     };
     let (session_id, account_changed) = session_id;
 
@@ -1135,8 +1201,11 @@ pub async fn send_chat_message(
     }
     // An engine that keeps no session of its own (Cline, CodeFlow's) hears the conversation again on
     // every turn, as the chat workspace already does for it — otherwise every question asked in the
-    // panel reaches it as the first one.
-    if !config.engine.resumes_sessions() {
+    // panel reaches it as the first one. So does a turn with no session to resume in a conversation
+    // that has turns already — a branch («Bifurcar desde aquí») starts that way. Not a change of
+    // account: the transcript draws that line as "nothing above this is in context", and it stays
+    // true. After a `/clear` there is nothing to replay, since the transcript starts there.
+    if !config.engine.resumes_sessions() || (session_id.is_none() && !account_changed) {
         let replay = conversation_id.as_deref().and_then(|id| {
             db.0.lock().ok().and_then(|conn| panel_transcript(&conn, &project_id, id))
         });
@@ -1193,6 +1262,13 @@ pub async fn send_chat_message(
     if step.is_none() {
         if let Ok(conn) = db.0.lock() {
             engine_message.push_str(&ai::chat_turn_rules(&conn));
+        }
+        if let Some(note) = ai::mention_note(&ai::mentioned_paths(&asked, &project.local_path)) {
+            engine_message.push_str(&note);
+        }
+        engine_message.push_str(&special_mention_notes(&asked, &project.local_path));
+        if plan {
+            engine_message.push_str(ai::PLAN_MODE_NOTE);
         }
     }
     // Claude Code denies, in `-p`, any tool nobody pre-approved, and `Skill` is the one that opens a
@@ -1269,7 +1345,17 @@ pub async fn send_chat_message(
     })
     .await;
     let response_time_ms = started.elapsed().as_millis() as i64;
-    checkpoint_after(&project.local_path, checkpoint);
+    // Kept, with the files it differs in, when the turn changed something — the per-turn review
+    // reads it from the row. Otherwise dropped, as every run's is.
+    let turn_checkpoint = checkpoint.and_then(|id| {
+        let paths = crate::git::checkpoint::changed_paths(&project.local_path, &id).unwrap_or_default();
+        if paths.is_empty() {
+            let _ = crate::git::checkpoint::remove(&project.local_path, &id);
+            None
+        } else {
+            Some(serde_json::json!({ "id": id, "paths": paths }).to_string())
+        }
+    });
     // Read after the run, not before: it's cached per binary, so only the very first turn of an
     // app session pays for the probe, and it never sits between the user pressing send and the
     // engine starting.
@@ -1352,7 +1438,12 @@ pub async fn send_chat_message(
             },
             false,
         )
-        .map(|entry| entry.created_at)
+        .map(|entry| {
+            if let Some(checkpoint) = turn_checkpoint.as_deref() {
+                let _ = queries::set_activity_checkpoint(&conn, &entry.id, checkpoint);
+            }
+            entry.created_at
+        })
         // The reply is already in hand; a failed *write* shouldn't cost the user their answer, so
         // the turn is still returned — just stamped with the time it arrived rather than the time
         // it was filed.
@@ -1384,6 +1475,8 @@ pub async fn send_chat_message(
         response_time_ms,
         account_id,
         account_changed,
+        checkpoint: turn_checkpoint,
+        context_tokens: run.context_tokens,
     })
 }
 
@@ -1490,6 +1583,8 @@ async fn run_hybrid_execute(
                 response_time_ms,
                 account_id: None,
                 account_changed: false,
+                checkpoint: None,
+                context_tokens: None,
             })
         }
     }

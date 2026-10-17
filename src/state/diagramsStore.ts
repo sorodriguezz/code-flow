@@ -73,6 +73,7 @@ import type {
   DiagramTemplate,
   DiagramTemplateRow,
 } from "../types/diagrams";
+import { registerIslandApp } from "../lib/islandSync";
 
 /**
  * The diagram being edited, before it is saved.
@@ -1749,6 +1750,23 @@ useWorkspaceStore.subscribe((state, previous) => {
   const { workspaceId, loading } = useDiagramsStore.getState();
   if (workspaceId === null && !loading) return;
   void useDiagramsStore.getState().setWorkspace(state.activeWorkspaceId);
+});
+
+/** While Diagramas is in an island the island owns the board; this window's copy is dropped and
+ *  read again on the way back — see `lib/islandSync`. */
+registerIslandApp(["diagrams"], {
+  isLoaded: () => useDiagramsStore.getState().workspaceId !== null || useDiagramsStore.getState().loading,
+  flush: () => useDiagramsStore.getState().flush({ interactive: false }),
+  release: () => {
+    pendingLoad = null;
+    requestedThumbnails = new Set();
+    useDiagramsStore.setState({ workspaceId: null, loading: false, ...clearedWorkspaceState() });
+  },
+  reload: () => {
+    pendingLoad = null;
+    useDiagramsStore.setState({ workspaceId: null, loading: false });
+    return ensureDiagramsStoreLoaded();
+  },
 });
 
 /**

@@ -22,7 +22,7 @@ import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { fenceLabelOf, highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
 import { splitQuestions } from "../../lib/chatQuestions";
 import { QuestionCard } from "./QuestionCard";
-import { bodyForBlock, fileNameForBlock } from "../../lib/codeFileName";
+import { bodyForBlock, fileNameForBlock, pathFromFirstLine } from "../../lib/codeFileName";
 import { OutputBar } from "./OutputBar";
 import type { ChatOutput } from "../../lib/tauri/chatCommands";
 import { writeFileBytes } from "../../lib/tauri/commands";
@@ -106,6 +106,17 @@ export interface ChatBubbleActions {
  */
 export type ChatBubbleVariant = "panel" | "reading";
 
+/**
+ * Where a code block in an answer can go besides the clipboard — the repository chat's editor. Two
+ * more buttons on the block's bar when given: the block at the editor's caret, and the block as a
+ * file of the repository (`path` is the one its naming line gives, when it gives a path). Memoised
+ * by the caller, like every object this bubble takes.
+ */
+export interface CodeBlockTarget {
+  insert: (code: string) => void;
+  apply: (code: string, path: string | null) => void;
+}
+
 /** How much the stamp under a turn says. `full` is the AI panel's (duration, engine, model, CLI
  *  version, time); `compact` is the agent console's (engine, model, time) — the difference is
  *  preserved deliberately, because the agent console shows the same facts in its own header and a
@@ -135,6 +146,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   actions,
   outputs,
   emptyText,
+  codeTarget,
 }: {
   message: ChatBubbleMessage;
   variant?: ChatBubbleVariant;
@@ -161,6 +173,8 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   /** What an answer with no text says instead of the generic "done" — the caller knows which
    *  command it answered (`/compact`), this bubble does not. */
   emptyText?: string;
+  /** The editor a code block can be sent to — the repository chat's. See `CodeBlockTarget`. */
+  codeTarget?: CodeBlockTarget;
 }) {
   const t = useT();
   const [copied, copy] = useCopy();
@@ -255,7 +269,9 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     copyFailed: t("chat.copyFailed"),
     save: t("chat.saveCode"),
     fileStem: t("chat.codeFileStem"),
-  });
+    insert: t("chat.insertCode"),
+    apply: t("chat.applyCode"),
+  }, codeTarget);
 
   const stampRow = <ChatStamp message={message} detail={stamp} />;
   const isUser = message.role === "user";
@@ -603,6 +619,9 @@ interface CodeBlockLabels {
   save: string;
   /** The generic stem a saved block falls back to — "snippet", "fragmento". */
   fileStem: string;
+  /** «Insertar en el editor» and «Aplicar al archivo…», drawn only with a `CodeBlockTarget`. */
+  insert: string;
+  apply: string;
 }
 
 /**
@@ -617,6 +636,19 @@ const COPY_ICON: readonly IconShape[] = [
   ["path", { d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" }],
 ];
 const CHECK_ICON: readonly IconShape[] = [["path", { d: "M20 6 9 17l-5-5" }]];
+const INSERT_ICON: readonly IconShape[] = [
+  ["path", { d: "M12 20h-1a2 2 0 0 1-2-2 2 2 0 0 1-2 2H6" }],
+  ["path", { d: "M13 8h7a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-7" }],
+  ["path", { d: "M5 16H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h1" }],
+  ["path", { d: "M6 4h1a2 2 0 0 1 2 2 2 2 0 0 1 2-2h1" }],
+  ["path", { d: "M9 6v12" }],
+];
+const APPLY_ICON: readonly IconShape[] = [
+  ["path", { d: "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" }],
+  ["path", { d: "M9 10h6" }],
+  ["path", { d: "M12 13V7" }],
+  ["path", { d: "M9 17h6" }],
+];
 const DOWNLOAD_ICON: readonly IconShape[] = [
   ["path", { d: "M12 15V3" }],
   ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }],
@@ -707,8 +739,8 @@ function barButton(shapes: readonly IconShape[], title: string, text?: string): 
  * prop, an inline `{{ __html: html }}`, is precisely the one that brings it back. With the observer
  * such a rewrite costs a redraw, not the colours.
  */
-function useCodeBlockActions(markup: { __html: string } | null, labels: CodeBlockLabels) {
-  const { copy: copyLabel, copyShort, copied, copyFailed, save: saveLabel, fileStem } = labels;
+function useCodeBlockActions(markup: { __html: string } | null, labels: CodeBlockLabels, target?: CodeBlockTarget) {
+  const { copy: copyLabel, copyShort, copied, copyFailed, save: saveLabel, fileStem, insert: insertLabel, apply: applyLabel } = labels;
   const ref = useRef<HTMLDivElement>(null);
 
   // The active code scheme, so a block in an answer is coloured exactly like the same code in the
@@ -853,7 +885,19 @@ function useCodeBlockActions(markup: { __html: string } | null, labels: CodeBloc
         })();
       });
 
-      bar.append(name, save, copy);
+      bar.append(name);
+      // To the editor, where the chat has one: at the caret, or as a file — whose path the block's
+      // naming line gives when it gives one (`// src/app.ts`). Read from the raw text, like Save.
+      if (target) {
+        const insert = barButton(INSERT_ICON, insertLabel);
+        insert.addEventListener("click", () => target.insert(sourceOf()));
+        const apply = barButton(APPLY_ICON, applyLabel);
+        apply.addEventListener("click", () =>
+          target.apply(sourceOf(), pathFromFirstLine((pre.querySelector("code") ?? pre).textContent ?? "")),
+        );
+        bar.append(insert, apply);
+      }
+      bar.append(save, copy);
       frame.prepend(bar);
     };
 
@@ -871,7 +915,7 @@ function useCodeBlockActions(markup: { __html: string } | null, labels: CodeBloc
         if (pre) frame.replaceWith(pre);
       });
     };
-  }, [markup, copyLabel, copyShort, copied, copyFailed, saveLabel, fileStem]);
+  }, [markup, copyLabel, copyShort, copied, copyFailed, saveLabel, fileStem, insertLabel, applyLabel, target]);
   return ref;
 }
 

@@ -6,6 +6,7 @@ import {
   Code2,
   Columns2,
   FileText,
+  Files,
   FolderTree,
   GitCommitHorizontal,
   List,
@@ -24,7 +25,26 @@ import {
   Check,
   Boxes,
   GitMerge,
+  EyeOff,
+  GitCompareArrows,
+  Search,
+  Space,
+  UploadCloud,
+  UserPlus,
+  X,
 } from "lucide-react";
+import { Checkbox } from "../common/Checkbox";
+import {
+  extensionPatternFor,
+  ignorePatternFor,
+  messageHistory,
+  person,
+  readMessageHistory,
+  rememberMessage,
+  withIgnored,
+  withTrailer,
+} from "../../lib/commitMessage";
+import { useRevisionCompareStore } from "../../state/revisionCompareStore";
 import { AiSparkles } from "../common/AiGlyph";
 import type { LucideIcon } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
@@ -36,7 +56,16 @@ import { FileGlyph } from "../common/FileGlyph";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { BouncingDots } from "../common/BouncingDots";
-import { generateCommitMessage, getFileDiff, getStagedDiff, scanStagedSecrets } from "../../lib/tauri/commands";
+import {
+  generateCommitMessage,
+  getEffectiveIdentity,
+  getFileDiff,
+  getStagedDiff,
+  headCommitMessage,
+  readFileText,
+  scanStagedSecrets,
+  writeFileText,
+} from "../../lib/tauri/commands";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { diffToText } from "../../lib/diffText";
 import { parseClaudeError, quotaRetryText, type ClaudeErrorInfo } from "../../lib/claudeError";
@@ -65,6 +94,7 @@ import { actionButtonClass } from "./actionButton";
 import type { DiffStaging } from "./StagingDiff";
 import type { SubmoduleInfo } from "../../lib/tauri/gitCommands";
 import type { FileDiffInfo, FileStatusEntry, SecretHit } from "../../types/domain";
+import { useMultiDiffStore } from "../../state/multiDiffStore";
 
 const LIST_MIN = 220;
 const LIST_MAX = 520;
@@ -461,6 +491,15 @@ export function ChangesPanel({
   const [refreshing, runRefreshing] = useMinimumSpin();
   const openInEditor = useUiStore((s) => s.openInEditor);
   const [message, setMessage] = useState("");
+  /** The list's filter (VS Code's Source Control filter): rows whose path contains it, either list. */
+  const [filter, setFilter] = useState("");
+  /** «Enmendar el último commit»: the button replaces HEAD with the index and the message. */
+  const [amend, setAmend] = useState(false);
+  /** `git diff -w` in the pane beside the list — read only: nothing is staged by line from it. */
+  const [ignoreWhitespace, setIgnoreWhitespace] = useState(false);
+  /** Where ↑ is in the message history; `-1` is the box's own text. */
+  const historyAt = useRef(-1);
+  const [commitMenu, setCommitMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<ClaudeErrorInfo | null>(null);
   /** The right-click menu on a changed file, and where to draw it. */
@@ -527,11 +566,12 @@ export function ChangesPanel({
    */
   const staging = useMemo<DiffStaging | undefined>(
     () =>
-      selected
+      // A whitespace-blind diff is not the change on disk: its hunks cannot be staged or discarded.
+      selected && !ignoreWhitespace
         ? { staged: selected.staged, path: selected.path, narrow: selectedNarrow, pickable: !selectedIsSubmodule }
         : undefined,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, selectedSignature, selectedIsSubmodule],
+    [selected, selectedSignature, selectedIsSubmodule, ignoreWhitespace],
   );
 
   /** The selected file at full file context, straight from git — `null` while it is on its way,
@@ -607,7 +647,7 @@ export function ChangesPanel({
     let cancelled = false;
     // One file, at the whole-file context this pane has always been fed — the cost that used to be
     // paid for every changed file on every refresh is now paid for the one being looked at.
-    getFileDiff(repoPath, path, staged)
+    getFileDiff(repoPath, path, staged, ignoreWhitespace)
       .then((file) => {
         if (!cancelled) setSelectedDiff(file ? [file] : []);
       })
@@ -622,7 +662,28 @@ export function ChangesPanel({
     };
     // `diffNonce` is deliberately here and *not* on the blanking effect above: adding it there
     // would make the refresh button flash this pane empty for the length of a round trip.
-  }, [repoPath, selected, selectedSignature, diffNonce]);
+  }, [repoPath, selected, selectedSignature, diffNonce, ignoreWhitespace]);
+  /** The diff pane's own switch for it, beside its view mode — memoised, as `DiffView` asks. */
+  const diffToolbar = useMemo(
+    () => (
+      <button
+        type="button"
+        onClick={() => setIgnoreWhitespace((v) => !v)}
+        aria-pressed={ignoreWhitespace}
+        title={t(ignoreWhitespace ? "changes.whitespaceShown" : "changes.whitespaceIgnored")}
+        aria-label={t("changes.ignoreWhitespace")}
+        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
+          ignoreWhitespace
+            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+            : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        }`}
+      >
+        <Space size={13} />
+      </button>
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ignoreWhitespace],
+  );
 
   // Open the file in the app's own Editor tab (at the first changed line) instead of handing it
   // to the OS default app — the point is to inspect the change in place, not to leave the app.
@@ -654,6 +715,11 @@ export function ChangesPanel({
   if (!status) {
     return <EmptyState icon={FileText} title={t("changes.noRepo")} />;
   }
+
+  const needle = filter.trim().toLowerCase();
+  const matchesFilter = (entry: FileStatusEntry) => !needle || entry.path.toLowerCase().includes(needle);
+  const stagedShown = needle ? status.staged.filter(matchesFilter) : status.staged;
+  const workingShown = needle ? unstagedAndUntracked.filter(matchesFilter) : unstagedAndUntracked;
 
   const buildStagedActions = (entry: FileStatusEntry): RowAction[] => {
     const isPending = pending?.path === entry.path;
@@ -747,6 +813,22 @@ export function ChangesPanel({
         separated: true,
         onClick: () => setHistoryPath(entry.path),
       },
+      // VS Code's "Open Changes with…": the file on disk against HEAD, or against a branch picked
+      // in the dialog. Not for one deleted from disk, which has no "now" side to show.
+      ...(repoPath && entry.status !== "deleted"
+        ? [
+            {
+              label: t("changes.compareHead"),
+              icon: GitCompareArrows,
+              onClick: () => useRevisionCompareStore.getState().open(repoPath, entry.path, "HEAD"),
+            },
+            {
+              label: t("changes.compareBranch"),
+              icon: GitCompareArrows,
+              onClick: () => useRevisionCompareStore.getState().open(repoPath, entry.path, null),
+            },
+          ]
+        : []),
       {
         label: t("changes.menuCopyPath"),
         icon: Copy,
@@ -777,7 +859,39 @@ export function ChangesPanel({
       });
     }
 
+    // An untracked file can be ignored instead: itself, or every file with its extension.
+    if (!staged && entry.status === "untracked") {
+      const byExtension = extensionPatternFor(entry.path);
+      items.push({
+        label: t("changes.ignoreFile"),
+        icon: EyeOff,
+        separated: true,
+        onClick: () => void addToGitignore(ignorePatternFor(entry.path)),
+      });
+      if (byExtension) {
+        items.push({
+          label: t("changes.ignoreExtension", { pattern: byExtension }),
+          icon: EyeOff,
+          onClick: () => void addToGitignore(byExtension),
+        });
+      }
+    }
+
     setFileMenu({ x: event.clientX, y: event.clientY, items });
+  };
+
+  /** One line more in the repository's root `.gitignore` (created if there is none). */
+  const addToGitignore = async (pattern: string) => {
+    if (!repoPath) return;
+    try {
+      const current = await readFileText(repoPath, ".gitignore").catch(() => "");
+      const next = withIgnored(current, pattern);
+      if (next !== current) await writeFileText(repoPath, ".gitignore", next);
+      await useRepoStore.getState().refreshStatus();
+      pushSuccessToast(t("changes.ignored", { pattern }));
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
   };
 
   const generateWithAi = async () => {
@@ -846,15 +960,108 @@ export function ChangesPanel({
   /** Clears the box only when the commit landed. It used to clear it unconditionally, so a commit
    * that failed — a hook, a missing identity, a conflict still in the index — took the message the
    * user had just written down with it. */
+  /** What runs after the commit, picked in the button's menu: nothing, or a push of the branch. */
+  const afterCommit = useRef<"none" | "push">("none");
   const performCommit = async () => {
-    const committed = await commitChanges(message.trim());
-    if (committed) setMessage("");
+    const text = message.trim();
+    const committed = await commitChanges(text, { amend });
+    if (!committed) return;
+    if (repoPath && text) rememberMessage(repoPath, text);
+    setMessage("");
+    setAmend(false);
+    historyAt.current = -1;
+    if (afterCommit.current === "push") {
+      afterCommit.current = "none";
+      const repo = useRepoStore.getState();
+      const head = repo.branches.find((branch) => branch.is_head && !branch.is_remote);
+      // A branch with no upstream is published — the first push sets it, as VS Code's does.
+      await repo.push(!head?.upstream);
+    }
+  };
+
+  /** «Enmendar»: the box takes the last commit's message when it is empty, so the amend corrects it
+   *  rather than retyping it. An amend of a pushed commit is said before it happens. */
+  const toggleAmend = async (on: boolean) => {
+    setAmend(on);
+    if (!on || !repoPath) return;
+    if (!message.trim()) {
+      const last = await headCommitMessage(repoPath).catch(() => "");
+      setMessage(last.trim());
+    }
+  };
+  const confirmPushedAmend = async (): Promise<boolean> => {
+    const repo = useRepoStore.getState();
+    const head = repo.branches.find((branch) => branch.is_head && !branch.is_remote);
+    const headId = repo.status?.head_oid ?? null;
+    const pushed = !!head?.upstream && !!headId && !repo.unpushedCommits.some((c) => c.id === headId);
+    if (!pushed) return true;
+    return confirmAction(t("graph.amendPushedConfirm", { upstream: head?.upstream ?? "" }), true, t("graph.menuAmend"));
+  };
+
+  /** ↑ / ↓ in the message box walk the messages committed before — VS Code's input history. Only
+   *  from an empty box or one still showing a history entry, so ↑ inside a message moves the caret. */
+  const history = useMemo(
+    () =>
+      repoPath
+        ? messageHistory(
+            readMessageHistory(repoPath),
+            useRepoStore.getState().commits.slice(0, 50).map((commit) => commit.summary),
+          )
+        : [],
+    // Re-read whenever the box empties — a commit just landed and added one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [repoPath, message === ""],
+  );
+  const onMessageKey = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.key !== "ArrowUp" && event.key !== "ArrowDown") || event.altKey || event.metaKey || event.ctrlKey) return;
+    const showing = historyAt.current >= 0 ? history[historyAt.current] : null;
+    if (message.trim() && message !== showing) return;
+    const box = event.currentTarget;
+    // Inside a multi-line entry, the arrows move between its lines until they reach its edge.
+    if (event.key === "ArrowUp" && box.value.slice(0, box.selectionStart).includes("\n")) return;
+    if (event.key === "ArrowDown" && box.value.slice(box.selectionEnd).includes("\n")) return;
+    const next = historyAt.current + (event.key === "ArrowUp" ? 1 : -1);
+    if (next >= history.length || next < -1) return;
+    event.preventDefault();
+    historyAt.current = next;
+    setMessage(next < 0 ? "" : history[next]);
+  };
+
+  /** The trailers menu: Signed-off-by as you, Co-authored-by any recent author of the repository. */
+  const openTrailers = async (event: React.MouseEvent) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!repoPath) return;
+    const me = await getEffectiveIdentity(repoPath).catch(() => null);
+    const mine = me?.email?.toLowerCase() ?? "";
+    const authors = new Map<string, string>();
+    for (const commit of useRepoStore.getState().commits) {
+      const email = commit.author_email.trim();
+      if (!email || email.toLowerCase() === mine || authors.has(email.toLowerCase())) continue;
+      authors.set(email.toLowerCase(), person(commit.author_name, email));
+      if (authors.size >= 15) break;
+    }
+    const items: MenuItem[] = [];
+    if (me?.name && me.email) {
+      const line = `Signed-off-by: ${person(me.name, me.email)}`;
+      items.push({ label: t("changes.signOff"), icon: Check, onClick: () => setMessage((m) => withTrailer(m, line)) });
+    }
+    [...authors.values()].forEach((who, i) =>
+      items.push({
+        label: t("changes.coAuthor", { who }),
+        icon: UserPlus,
+        separated: i === 0 && items.length > 0,
+        onClick: () => setMessage((m) => withTrailer(m, `Co-authored-by: ${who}`)),
+      }),
+    );
+    if (items.length === 0) items.push({ label: t("changes.noAuthors"), disabled: true, onClick: () => {} });
+    setCommitMenu({ x: rect.left, y: rect.top - 4, items });
   };
 
   // Commit entry point: run the pre-commit secret scan first (when enabled). If it finds
   // credential-looking content, hold the commit and surface the SecretScanModal instead. A scan
   // that itself errors must not block committing — fall through to the commit in that case.
   const handleCommit = async () => {
+    if (amend && !(await confirmPushedAmend())) return;
     if (secretScanEnabled && repoPath) {
       setScanning(true);
       try {
@@ -903,6 +1110,17 @@ export function ChangesPanel({
                 In any of those the panel is showing a repository that has moved on with no way to
                 say so, which is exactly the state a manual refresh exists for. */}
             <button
+              onClick={() => {
+                if (repoPath) useMultiDiffStore.getState().open({ kind: "working", repoPath });
+              }}
+              disabled={!repoPath || !status || status.staged.length + unstagedAndUntracked.length === 0}
+              title={t("changes.openAll")}
+              aria-label={t("changes.openAll")}
+              className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40"
+            >
+              <Files size={12} />
+            </button>
+            <button
               onClick={() => void forceRefresh()}
               disabled={refreshing}
               title={`${t("changes.refresh")} — ${t("changes.refreshHint")}`}
@@ -941,6 +1159,33 @@ export function ChangesPanel({
           </div>
         </div>
 
+        {(status.staged.length + unstagedAndUntracked.length > 0 || filter) && (
+          <div className="border-b border-[var(--cf-border)] px-2 py-1.5">
+            <div className="flex h-[24px] items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 focus-within:border-[var(--cf-accent)]">
+              <Search size={11} className="shrink-0 text-[var(--cf-text-faint)]" />
+              <input
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && filter) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setFilter("");
+                  }
+                }}
+                placeholder={t("changes.filter")}
+                aria-label={t("changes.filter")}
+                spellCheck={false}
+                className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-[var(--cf-text-faint)]"
+              />
+              {filter && (
+                <button type="button" onClick={() => setFilter("")} aria-label={t("common.close")} className="shrink-0 text-[var(--cf-text-faint)] hover:text-[var(--cf-text)]">
+                  <X size={11} />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         <div className="flex-1 overflow-auto p-2">
           <UnpushedCommitsSection />
 
@@ -968,7 +1213,7 @@ export function ChangesPanel({
             </div>
             {viewMode === "tree" ? (
               <FileTreeSection
-                entries={status.staged}
+                entries={stagedShown}
                 isSelected={(entry) => selected?.path === entry.path && !!selected.staged}
                 onSelectEntry={(entry) => selectRow(entry, true)}
                 buildActions={(entry) => buildStagedActions(entry)}
@@ -976,7 +1221,7 @@ export function ChangesPanel({
                 submoduleOf={submoduleOf}
               />
             ) : (
-              status.staged.map((entry, at) => (
+              stagedShown.map((entry, at) => (
                 <FileRow
                   key={entry.path}
                   entry={entry}
@@ -1071,7 +1316,7 @@ export function ChangesPanel({
             </div>
             {viewMode === "tree" ? (
               <FileTreeSection
-                entries={unstagedAndUntracked}
+                entries={workingShown}
                 isSelected={(entry) => selected?.path === entry.path && !selected.staged}
                 onSelectEntry={(entry) => selectRow(entry, false)}
                 buildActions={(entry) => buildUnstagedActions(entry)}
@@ -1079,7 +1324,7 @@ export function ChangesPanel({
                 submoduleOf={submoduleOf}
               />
             ) : (
-              unstagedAndUntracked.map((entry, at) => (
+              workingShown.map((entry, at) => (
                 <FileRow
                   key={entry.path}
                   entry={entry}
@@ -1099,8 +1344,12 @@ export function ChangesPanel({
           <div className="relative">
             <textarea
               value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              placeholder={t("changes.commitMessage")}
+              onChange={(e) => {
+                setMessage(e.target.value);
+                historyAt.current = -1;
+              }}
+              onKeyDown={onMessageKey}
+              placeholder={amend ? t("changes.amendPlaceholder") : t("changes.commitMessage")}
               rows={3}
               disabled={aiBusy}
               className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 pr-12 text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
@@ -1141,16 +1390,76 @@ export function ChangesPanel({
             ) : (
               <p className="mt-1 text-[11px] text-[var(--cf-danger)]">{aiError.message}</p>
             ))}
-          {/* Commit alone on its row: the model the ✨ writes with is chosen on the ✨ itself. */}
-          <button
-            disabled={busy || aiBusy || scanning || !message.trim() || status.staged.length === 0}
-            onClick={handleCommit}
-            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent-fill)] py-1.5 text-[13px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
-          >
-            {scanning && <Loader2 size={13} className="animate-spin" />}
-            {scanning ? t("secrets.scanning") : t("changes.commit")}{" "}
-            {!scanning && status.staged.length > 0 ? `(${status.staged.length})` : ""}
-          </button>
+          <div className="mt-1.5 flex items-center gap-2 px-0.5">
+            <label className="flex cursor-pointer items-center gap-1.5 text-[11.5px] text-[var(--cf-text-muted)]" title={t("changes.amendHint")}>
+              <Checkbox checked={amend} onChange={(on) => void toggleAmend(on)} />
+              {t("changes.amend")}
+            </label>
+            <span className="flex-1" />
+            <button
+              type="button"
+              onClick={(e) => void openTrailers(e)}
+              title={t("changes.trailers")}
+              aria-label={t("changes.trailers")}
+              aria-haspopup="menu"
+              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            >
+              <UserPlus size={13} />
+            </button>
+          </div>
+          {/* Commit, and beside it the rest of VS Code's commit menu: commit and push, amend. An amend
+              may run with nothing staged — then it rewrites the message alone. */}
+          {(() => {
+            const canCommit = !busy && !aiBusy && !scanning && (amend ? true : !!message.trim() && status.staged.length > 0);
+            return (
+              <div className="mt-2 flex">
+                <button
+                  disabled={!canCommit}
+                  onClick={() => {
+                    afterCommit.current = "none";
+                    void handleCommit();
+                  }}
+                  className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-l-md bg-[var(--cf-accent-fill)] py-1.5 text-[13px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
+                >
+                  {scanning && <Loader2 size={13} className="animate-spin" />}
+                  {scanning ? t("secrets.scanning") : amend ? t("changes.amendCommit") : t("changes.commit")}{" "}
+                  {!scanning && status.staged.length > 0 ? `(${status.staged.length})` : ""}
+                </button>
+                <button
+                  type="button"
+                  disabled={!canCommit}
+                  onClick={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    setCommitMenu({
+                      x: rect.right - 220,
+                      y: rect.top - 4,
+                      items: [
+                        {
+                          label: amend ? t("changes.amendAndPush") : t("changes.commitAndPush"),
+                          icon: UploadCloud,
+                          onClick: () => {
+                            afterCommit.current = "push";
+                            void handleCommit();
+                          },
+                        },
+                        {
+                          label: amend ? t("changes.amendOff") : t("changes.amendLast"),
+                          icon: GitCommitHorizontal,
+                          onClick: () => void toggleAmend(!amend),
+                        },
+                      ],
+                    });
+                  }}
+                  aria-label={t("changes.commitMore")}
+                  title={t("changes.commitMore")}
+                  aria-haspopup="menu"
+                  className="flex w-7 shrink-0 items-center justify-center rounded-r-md border-l border-[color-mix(in_oklab,var(--cf-on-accent)_25%,transparent)] bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] disabled:opacity-40"
+                >
+                  <ChevronDown size={13} />
+                </button>
+              </div>
+            );
+          })()}
         </div>
       </div>
 
@@ -1171,7 +1480,7 @@ export function ChangesPanel({
                 pane that blanks for it would read as broken. `null` is "on its way", `[]` is
                 "nothing to show", which `DiffView` draws as its own empty state. */}
             {selectedDiff ? (
-              <DiffView files={selectedDiff} onClose={clearSelection} staging={staging} />
+              <DiffView files={selectedDiff} onClose={clearSelection} staging={staging} toolbarExtra={diffToolbar} />
             ) : (
               <div className="flex h-full items-center justify-center">
                 <BouncingDots />
@@ -1194,6 +1503,9 @@ export function ChangesPanel({
 
       {fileMenu && (
         <ContextMenu x={fileMenu.x} y={fileMenu.y} items={fileMenu.items} onClose={() => setFileMenu(null)} />
+      )}
+      {commitMenu && (
+        <ContextMenu x={commitMenu.x} y={commitMenu.y} items={commitMenu.items} onClose={() => setCommitMenu(null)} />
       )}
 
       {historyPath && <FileHistoryModal path={historyPath} onClose={() => setHistoryPath(null)} />}

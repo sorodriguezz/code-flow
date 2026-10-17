@@ -532,6 +532,9 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   "flow-build": "usage.task.flowBuild",
   "repo-diagram": "usage.task.repoDiagram",
   "logs-analyze": "usage.task.logsAnalyze",
+  "api-explain": "usage.task.apiExplain",
+  "api-tests": "usage.task.apiTests",
+  "api-request": "usage.task.apiRequest",
   other: "usage.task.other",
 };
 

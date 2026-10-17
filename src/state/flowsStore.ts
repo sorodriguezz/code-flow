@@ -40,6 +40,7 @@ import { translate, useLanguageStore } from "./languageStore";
 import { notify } from "./notificationStore";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { registerIslandApp } from "../lib/islandSync";
 
 /**
  * The Flujos workspace: the tree of flows and folders, and the one flow open on the canvas.
@@ -1008,6 +1009,23 @@ useWorkspaceStore.subscribe((state, previous) => {
   const { workspaceId, loading } = useFlowsStore.getState();
   if (workspaceId === null && !loading) return;
   void useFlowsStore.getState().setWorkspace(state.activeWorkspaceId);
+});
+
+/** While Flujos is in an island the island owns the flows; this window's copy is dropped and read
+ *  again on the way back — see `lib/islandSync`. */
+registerIslandApp(["flows"], {
+  isLoaded: () => useFlowsStore.getState().workspaceId !== null || useFlowsStore.getState().loading,
+  flush: () => useFlowsStore.getState().flush({ interactive: false }),
+  release: () => {
+    cancelSave();
+    pendingLoad = null;
+    useFlowsStore.setState({ workspaceId: null, loading: false, ...clearedWorkspaceState() });
+  },
+  reload: () => {
+    pendingLoad = null;
+    useFlowsStore.setState({ workspaceId: null, loading: false });
+    return ensureFlowsStoreLoaded();
+  },
 });
 
 function unsavedFlow(state: FlowsState): { id: string; label: string } | null {

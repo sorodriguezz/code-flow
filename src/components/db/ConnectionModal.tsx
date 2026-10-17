@@ -64,6 +64,8 @@ import {
   type DbConnectionConfig,
   type DbConnectionRow,
   type DbDriverSettings,
+  type DbEnvironment,
+  ENVIRONMENT_COLOR,
   type DbKind,
   type DbSchemaGroup,
   type DbServerInfo,
@@ -162,6 +164,7 @@ function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
     a.url === b.url &&
     a.ssl === b.ssl &&
     a.read_only === b.read_only &&
+    a.environment === b.environment &&
     a.connect_timeout_ms === b.connect_timeout_ms &&
     a.show_all_databases === b.show_all_databases &&
     a.object_filter === b.object_filter &&
@@ -390,6 +393,7 @@ export function ConnectionModal({
       url: current.url,
       options: current.options,
       read_only: current.read_only,
+      environment: current.environment,
       show_all_databases: current.show_all_databases,
       // How you reach the host and how long you hold it are true of the network and the machine,
       // not of the engine listening on it — a tunnel to a bastion survives realising you meant
@@ -1147,6 +1151,34 @@ export function ConnectionModal({
                         label={t("db.readOnly")}
                         hint={t("db.readOnlyHint")}
                       />
+                      {/* Not `Row`: that is a <label>, and a click on its caption would press the
+                          first button of the group. */}
+                      <div>
+                        <span className="mb-[5px] block text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+                          {t("db.environment")}
+                        </span>
+                        <Segmented
+                          size="sm"
+                          layoutId="cf-db-environment"
+                          value={config.environment || "none"}
+                          onChange={(value) => patch({ environment: (value === "none" ? "" : value) as DbEnvironment })}
+                          options={[
+                            { value: "none", label: t("db.envNone") },
+                            ...(["dev", "test", "prod"] as const).map((env) => ({
+                              value: env,
+                              label: (
+                                <span className="flex items-center gap-1.5">
+                                  <span className="h-2 w-2 rounded-full" style={{ background: ENVIRONMENT_COLOR[env] }} />
+                                  {t(`db.env.${env}`)}
+                                </span>
+                              ),
+                            })),
+                          ]}
+                        />
+                        <span className="mt-1 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                          {t("db.environmentHint")}
+                        </span>
+                      </div>
                       <Toggle
                         checked={config.show_all_databases}
                         onChange={(show_all_databases) => patch({ show_all_databases })}

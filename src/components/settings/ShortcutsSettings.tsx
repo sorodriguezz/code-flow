@@ -21,32 +21,6 @@ import { Kbd, buttonClass, iconButtonClass } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
 import { RailSection } from "./settingsNav";
 
-// TEMP-TRACE: what a press looks like while a row is recording. Remove after the diagnosis.
-function tempTrace(message: string) {
-  void import("@tauri-apps/api/core").then(({ invoke }) =>
-    invoke("log_frontend_error", { kind: "shortcut-trace", message: `${Date.now()} ${message}`, detail: null }).catch(() => {}),
-  );
-}
-window.addEventListener(
-  "keydown",
-  (e) => {
-    if (!useShortcutsStore.getState().recordingId) return;
-    const target = e.target as HTMLElement | null;
-    tempTrace(
-      `key=${JSON.stringify(e.key)} code=${e.code} meta=${e.metaKey} alt=${e.altKey} shift=${e.shiftKey} ctrl=${e.ctrlKey} altgr=${e.getModifierState("AltGraph")} chord=${eventToChord(e)} bindable=${(() => { const c = eventToChord(e); return c ? isBindable(c) : null; })()} prevented=${e.defaultPrevented} target=${target?.tagName}.${String(target?.className ?? "").slice(0, 40)} active=${document.activeElement?.tagName}`,
-    );
-  },
-  true,
-);
-window.addEventListener("focusin", (e) => {
-  if (!useShortcutsStore.getState().recordingId) return;
-  tempTrace(`focusin ${(e.target as HTMLElement)?.tagName} role=${(e.target as HTMLElement)?.getAttribute?.("role")}`);
-});
-useShortcutsStore.subscribe((s, prev) => {
-  if (s.recordingId !== prev.recordingId) tempTrace(`recording ${prev.recordingId} -> ${s.recordingId}`);
-  if (s.overrides !== prev.overrides) tempTrace(`overrides ${JSON.stringify(s.overrides)}`);
-});
-
 /**
  * Captures the next chord the user presses and hands it back.
  *

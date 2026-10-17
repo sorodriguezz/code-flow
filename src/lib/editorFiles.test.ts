@@ -23,15 +23,16 @@ const version = (hash: string, size = 3, mtime_ms = 1): DiskVersion => ({ hash, 
 describe("loadedFrom", () => {
   it("makes text an editable buffer that remembers the version it was read at", () => {
     const loaded = loadedFrom({ kind: "text", text: "abc", version: version("h1") });
-    expect(loaded).toEqual({ content: "abc", version: version("h1"), notice: null, readOnly: null });
+    expect(loaded).toEqual({ content: "abc", version: version("h1"), notice: null, readOnly: null, encoding: null });
     expect(isWritable(loaded)).toBe(true);
   });
 
-  it("shows another encoding decoded, and never as something a save would write", () => {
+  it("edits another encoding decoded, remembering it so a save writes it back the same way", () => {
     const loaded = loadedFrom({ kind: "legacy", text: "café", encoding: "windows-1252", version: version("h") });
     expect(loaded.content).toBe("café");
-    expect(loaded.readOnly).toEqual({ kind: "encoding", encoding: "windows-1252" });
-    expect(isWritable(loaded)).toBe(false);
+    expect(loaded.readOnly).toBeNull();
+    expect(loaded.encoding).toBe("windows-1252");
+    expect(isWritable(loaded)).toBe(true);
   });
 
   it("keeps text past the read cap read-only — it can only have been opened anyway", () => {

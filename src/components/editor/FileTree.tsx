@@ -20,6 +20,7 @@ import {
   TerminalSquare,
   Trash2,
   Workflow,
+  GitCompareArrows,
 } from "lucide-react";
 import { isDiagramPath } from "../../lib/dbmlBridge";
 import { isMarkdownPath } from "../../lib/notesBridge";
@@ -63,6 +64,7 @@ import {
 import { confirmAction } from "../../state/confirmStore";
 import { useFileNestingStore } from "../../state/fileNestingStore";
 import { useHiddenFilesStore } from "../../state/hiddenFilesStore";
+import { excludeMatcher, useVscodeExcludes } from "../../lib/vscodeSettings";
 import { usePackageManagerStore } from "../../state/packageManagerStore";
 import { SkeletonRows } from "../common/Skeleton";
 import type { FileEntry } from "../../types/domain";
@@ -80,6 +82,7 @@ import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
 import { lockWheelAxis } from "../../lib/axisLockedWheel";
 import { useMinimumSpin } from "../../lib/useMinimumSpin";
+import { useCompareStore } from "../../state/compareStore";
 
 /** Repo-relative path of the directory holding `path` ("" for a top-level entry). */
 export function parentDir(path: string): string {
@@ -808,6 +811,8 @@ export function FileTree({
   // every write compares against this before touching state.
   const activeRepoRef = useRef(repoPath);
   const hiddenEntries = useHiddenFilesStore((s) => s.entries);
+  /** `files.exclude` from the repository's `.vscode/settings.json` — gone from the tree, as in VS Code. */
+  const excludes = useVscodeExcludes(repoPath, "files");
   const loadHidden = useHiddenFilesStore((s) => s.load);
   const hideEntry = useHiddenFilesStore((s) => s.hide);
   /** What Copy or Cut left on the explorer's clipboard — in this repository or another one, in this
@@ -1620,6 +1625,34 @@ export function FileTree({
           },
         );
       }
+      // «Seleccionar para comparar» / «Comparar con …», VS Code's pair — or the two files selected.
+      if (entry && !entry.is_dir) {
+        const picked = selectedPathsRef.current();
+        const compare = useCompareStore.getState();
+        const name = (path: string) => path.split("/").pop() ?? path;
+        if (picked.length === 2 && picked.includes(entry.path)) {
+          items.push({
+            label: t("compare.selected"),
+            icon: GitCompareArrows,
+            separated: true,
+            onClick: () => compare.compare(picked[0], picked[1]),
+          });
+        } else {
+          items.push({
+            label: t("compare.select"),
+            icon: GitCompareArrows,
+            separated: true,
+            onClick: () => compare.select(entry.path),
+          });
+          if (compare.selected && compare.selected !== entry.path) {
+            const left = compare.selected;
+            items.push({
+              label: t("compare.with", { name: name(left) }),
+              onClick: () => compare.compareWith(entry.path),
+            });
+          }
+        }
+      }
       // What active flows offer here («Menú contextual» triggers) — the file or folder as their item.
       if (entry) {
         const relative = entry.path;
@@ -2050,18 +2083,22 @@ export function FileTree({
    */
   const { visibleByDir, hiddenCountByDir } = useMemo(() => {
     const hidden = new Set(hiddenEntries.map((entry) => entry.path));
-    if (hidden.size === 0) {
+    const excluded = excludeMatcher(excludes);
+    if (hidden.size === 0 && !excluded) {
       return { visibleByDir: childrenByDir, hiddenCountByDir: new Map<string, number>() };
     }
     const visible = new Map<string, FileEntry[]>();
     const counts = new Map<string, number>();
     for (const [dir, entries] of childrenByDir) {
-      const kept = entries.filter((entry) => !hidden.has(entry.path));
+      // Excluded by the repository's settings: simply not there, uncounted — the count is for what
+      // the user hid by hand and can bring back from the section below.
+      const listed = excluded ? entries.filter((entry) => !excluded(entry.path)) : entries;
+      const kept = listed.filter((entry) => !hidden.has(entry.path));
       visible.set(dir, kept);
-      if (kept.length !== entries.length) counts.set(dir, entries.length - kept.length);
+      if (kept.length !== listed.length) counts.set(dir, listed.length - kept.length);
     }
     return { visibleByDir: visible, hiddenCountByDir: counts };
-  }, [childrenByDir, hiddenEntries]);
+  }, [childrenByDir, hiddenEntries, excludes]);
 
   /**
    * The same listings again, with derived files lifted out of their directory and onto their parent.

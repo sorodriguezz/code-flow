@@ -1,13 +1,33 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Briefcase, Check, ChevronsUpDown, Plus } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronsUpDown, Palette, Pencil, Plus, Shapes, Trash2 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useAiRunStore } from "../../state/aiRunStore";
 import { useT } from "../../state/languageStore";
+import type { TranslationKey } from "../../lib/i18n/translations";
+import { confirmAction } from "../../state/confirmStore";
+import { pushErrorToast } from "../../state/toastStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
-import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
+import { DEFAULT_WORKSPACE_COLOR, WORKSPACE_COLORS } from "../../lib/workspaceColors";
+import { listProjects } from "../../lib/tauri/commands";
 import { Tooltip } from "../common/Tooltip";
-import { monogramStyle } from "../../lib/monogram";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { fieldClass } from "../common/recipes";
+import { INITIALS_ICON, WORKSPACE_ICONS, WorkspaceGlyph } from "./WorkspaceGlyph";
+
+/** The workspaces with a model running in them right now — the dot on their row. */
+function useBusyWorkspaces(): Set<string> {
+  const active = useAiRunStore((s) => s.active);
+  const about = useAiRunStore((s) => s.aboutByRun);
+  return useMemo(() => {
+    const busy = new Set<string>();
+    for (const [runId, running] of Object.entries(active)) {
+      const workspaceId = running ? about[runId]?.workspaceId : null;
+      if (workspaceId) busy.add(workspaceId);
+    }
+    return busy;
+  }, [active, about]);
+}
 
 /** Fixed, so the list doesn't change width with whatever the workspaces happen to be called — and
  *  so it can be positioned before it has been measured. */
@@ -37,7 +57,16 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const setActiveWorkspace = useWorkspaceStore((s) => s.setActiveWorkspace);
   const addWorkspace = useWorkspaceStore((s) => s.addWorkspace);
+  const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
+  const busy = useBusyWorkspaces();
   const [open, setOpen] = useState(false);
+  /** Repositories per workspace, read when the menu opens — the store only holds the ones whose
+   *  workspace has been visited. */
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  /** The workspace being renamed in place, and the name being typed. */
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  /** Where a row's right-click menu was opened, and for which workspace. */
+  const [rowMenu, setRowMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [at, setAt] = useState<{ left: number; top: number } | null>(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
@@ -46,6 +75,8 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
   const active = workspaces.find((w) => w.id === activeWorkspaceId);
   const color = active?.color ?? DEFAULT_WORKSPACE_COLOR;
   const name = active?.name ?? "CodeFlow";
+  const icon = active?.icon ?? INITIALS_ICON;
+  const countOf = (id: string) => projectsByWorkspace[id]?.length ?? counts[id];
 
   /**
    * Clicking anywhere else puts it away — it was staying open over whatever you clicked next.
@@ -59,6 +90,7 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
     setOpen(false);
     setCreating(false);
     setNewName("");
+    setRenaming(null);
   }, []);
   // The menu is a portal, so it is not inside `rootRef` — without its own ref here every click on a
   // row would be an outside click, and the list would close before the row it landed on could act.
@@ -78,6 +110,10 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
       top: rect.bottom + 4,
     });
     setOpen(true);
+    // Read fresh each time it opens: a repository moved or added from another window since.
+    void Promise.all(
+      workspaces.map(async (ws) => [ws.id, (await listProjects(ws.id).catch(() => [])).length] as const),
+    ).then((pairs) => setCounts(Object.fromEntries(pairs)));
   };
 
   // Anything that moves the trigger takes its menu with it, and the coordinates above were read
@@ -99,21 +135,109 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
 
   const create = async () => {
     if (!newName.trim()) return;
-    await addWorkspace(newName.trim(), "briefcase", "#6366f1");
+    // The same colour Settings gives a new workspace, and its initials rather than a briefcase —
+    // the icon is the menu's to change.
+    await addWorkspace(newName.trim(), INITIALS_ICON, DEFAULT_WORKSPACE_COLOR);
     setNewName("");
     setCreating(false);
   };
 
+  const commitRename = async () => {
+    if (!renaming) return;
+    const next = renaming.name.trim();
+    const current = workspaces.find((ws) => ws.id === renaming.id);
+    setRenaming(null);
+    if (!next || next === current?.name) return;
+    await useWorkspaceStore.getState().renameWorkspace(renaming.id, next).catch((e: unknown) => pushErrorToast(String(e)));
+  };
+
+  /**
+   * The row's right-click: everything Settings › Projects does to a workspace, where the workspace
+   * is. Delete keeps Settings' two rules — never the last one, never one still holding repositories
+   * — and says which applies instead of hiding the entry.
+   */
+  const rowMenuItems = (id: string): MenuItem[] => {
+    const ws = workspaces.find((item) => item.id === id);
+    if (!ws) return [];
+    const store = useWorkspaceStore.getState();
+    const index = workspaces.findIndex((item) => item.id === id);
+    const held = countOf(id) ?? 0;
+    const blocked = workspaces.length <= 1 ? t("sidebar.wsDeleteLast") : held > 0 ? t("sidebar.wsDeleteNotEmpty", { n: held }) : null;
+    return [
+      { label: t("sidebar.wsRename"), icon: Pencil, onClick: () => setRenaming({ id, name: ws.name }) },
+      {
+        label: t("sidebar.wsColor"),
+        icon: Palette,
+        onClick: () => {},
+        children: WORKSPACE_COLORS.map((swatch) => ({
+          label: swatch,
+          swatch,
+          checked: swatch.toLowerCase() === ws.color.toLowerCase(),
+          onClick: () => void store.setWorkspaceColor(id, swatch).catch((e: unknown) => pushErrorToast(String(e))),
+        })),
+      },
+      {
+        label: t("sidebar.wsIcon"),
+        icon: Shapes,
+        onClick: () => {},
+        children: [
+          {
+            label: t("sidebar.wsIconInitials"),
+            leading: <WorkspaceGlyph name={ws.name} icon={INITIALS_ICON} color={ws.color} size={16} />,
+            onClick: () => void store.setWorkspaceIcon(id, INITIALS_ICON).catch((e: unknown) => pushErrorToast(String(e))),
+          },
+          ...Object.keys(WORKSPACE_ICONS).map((key) => ({
+            label: t(`sidebar.wsIcons.${key}` as TranslationKey),
+            leading: <WorkspaceGlyph name={ws.name} icon={key} color={ws.color} size={16} />,
+            onClick: () => void store.setWorkspaceIcon(id, key).catch((e: unknown) => pushErrorToast(String(e))),
+          })),
+        ],
+      },
+      {
+        label: t("sidebar.wsMoveUp"),
+        icon: ArrowUp,
+        separated: true,
+        disabled: index <= 0,
+        onClick: () => void store.reorderWorkspace(id, index - 1),
+      },
+      {
+        label: t("sidebar.wsMoveDown"),
+        icon: ArrowDown,
+        disabled: index >= workspaces.length - 1,
+        onClick: () => void store.reorderWorkspace(id, index + 2),
+      },
+      {
+        label: blocked ?? t("sidebar.wsDelete"),
+        icon: Trash2,
+        danger: blocked === null,
+        separated: true,
+        disabled: blocked !== null,
+        onClick: async () => {
+          if (!(await confirmAction(t("settings.removeWorkspaceConfirm", { name: ws.name })))) return;
+          await store.removeWorkspace(id).catch((e: unknown) => pushErrorToast(String(e)));
+        },
+      },
+    ];
+  };
+
+  /**
+   * Folded, the tile is the whole switcher — and a scroll over it walks the workspaces, one per
+   * notch, the way the switcher lock's chord does. Throttled so a trackpad's burst is one step.
+   */
+  const wheelAt = useRef(0);
+  const onWheel = (event: React.WheelEvent) => {
+    if (!collapsed || workspaces.length < 2 || Math.abs(event.deltaY) < 4) return;
+    const now = Date.now();
+    if (now - wheelAt.current < 350) return;
+    wheelAt.current = now;
+    const at = workspaces.findIndex((ws) => ws.id === activeWorkspaceId);
+    const next = workspaces[(at + (event.deltaY > 0 ? 1 : -1) + workspaces.length) % workspaces.length];
+    if (next) setActiveWorkspace(next.id);
+  };
+
   /** The workspace's own tile. The only thing left of the trigger once the panel is folded, and the
    *  same square the project chips below it are — a rail reads as a column of one kind of thing. */
-  const tile = (
-    <span
-      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px]"
-      style={monogramStyle(color)}
-    >
-      <Briefcase size={14} />
-    </span>
-  );
+  const tile = <WorkspaceGlyph name={name} icon={icon} color={color} size={28} />;
 
   return (
     <div ref={rootRef} data-tour="workspace-switcher" className={collapsed ? "" : "w-full"}>
@@ -125,9 +249,10 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
         <Tooltip
           side="right"
           label={name}
+          description={workspaces.length > 1 ? t("sidebar.wsWheelHint") : undefined}
           leading={<span className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />}
         >
-          <button onClick={toggle} aria-label={name} aria-expanded={open} className="flex">
+          <button onClick={toggle} onWheel={onWheel} aria-label={name} aria-expanded={open} className="flex">
             {tile}
           </button>
         </Tooltip>
@@ -151,23 +276,59 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
             style={{ left: at.left, top: at.top, width: MENU_WIDTH }}
             className="cf-fade-in fixed z-40 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1.5 shadow-[var(--cf-shadow)]"
           >
-            {workspaces.map((ws) => (
-              <button
-                key={ws.id}
-                onClick={() => {
-                  setActiveWorkspace(ws.id);
-                  dismiss();
-                }}
-                className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] ${
-                  ws.id === activeWorkspaceId
-                    ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                    : "hover:bg-[var(--cf-hover)]"
-                }`}
-              >
-                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: ws.color }} />
-                <span className="truncate">{ws.name}</span>
-              </button>
-            ))}
+            {workspaces.map((ws) =>
+              renaming?.id === ws.id ? (
+                <div key={ws.id} className="flex items-center gap-1.5 px-1 py-1">
+                  <WorkspaceGlyph name={renaming.name || ws.name} icon={ws.icon} color={ws.color} size={20} />
+                  <input
+                    autoFocus
+                    value={renaming.name}
+                    onChange={(e) => setRenaming({ id: ws.id, name: e.target.value })}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onBlur={() => void commitRename()}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void commitRename();
+                      else if (e.key === "Escape") setRenaming(null);
+                    }}
+                    aria-label={t("sidebar.wsRename")}
+                    className={fieldClass({ size: "sm", className: "flex-1" })}
+                  />
+                </div>
+              ) : (
+                <button
+                  key={ws.id}
+                  data-drop-workspace={ws.id}
+                  onClick={() => {
+                    setActiveWorkspace(ws.id);
+                    dismiss();
+                  }}
+                  // Renaming where the name is, as a file manager does.
+                  onDoubleClick={() => setRenaming({ id: ws.id, name: ws.name })}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setRowMenu({ id: ws.id, x: event.clientX, y: event.clientY });
+                  }}
+                  className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] ${
+                    ws.id === activeWorkspaceId
+                      ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                      : "hover:bg-[var(--cf-hover)]"
+                  }`}
+                >
+                  <WorkspaceGlyph name={ws.name} icon={ws.icon} color={ws.color} size={20} />
+                  <span className="min-w-0 flex-1 truncate">{ws.name}</span>
+                  {/* A model running in it: work that outlives the screen it was started from has
+                      to stay findable from here too. */}
+                  {busy.has(ws.id) && (
+                    <span title={t("sidebar.wsBusy")} className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--cf-accent-fill)]" />
+                  )}
+                  {countOf(ws.id) !== undefined && (
+                    <span title={t("sidebar.wsRepoCount", { n: countOf(ws.id) ?? 0 })} className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+                      {countOf(ws.id)}
+                    </span>
+                  )}
+                </button>
+              ),
+            )}
 
             {creating ? (
               <div className="flex items-center gap-1.5 px-1 py-1">
@@ -203,6 +364,15 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
           </div>,
           document.body,
         )}
+      {rowMenu && (
+        <ContextMenu
+          x={rowMenu.x}
+          y={rowMenu.y}
+          heading={workspaces.find((ws) => ws.id === rowMenu.id)?.name}
+          items={rowMenuItems(rowMenu.id)}
+          onClose={() => setRowMenu(null)}
+        />
+      )}
     </div>
   );
 }

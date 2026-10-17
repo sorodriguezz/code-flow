@@ -83,6 +83,7 @@ import {
   type VaultSecret,
   type VaultSort,
 } from "../types/vault";
+import { registerIslandApp } from "../lib/islandSync";
 
 /** How often real activity is allowed to poke the backend's idle clock. */
 const TOUCH_THROTTLE_MS = 30_000;
@@ -1025,6 +1026,13 @@ export function ensureVaultStoreLoaded(): void {
       if (useVaultStore.getState().statusError) loaded = false;
     });
 }
+
+/** Entries the island added while the keyring was out, read again on the way back — see
+ *  `lib/islandSync`. Only when this window has opened it and it is unlocked: the read needs the key. */
+registerIslandApp(["vault"], {
+  isLoaded: () => loaded && useVaultStore.getState().unlocked,
+  reload: () => useVaultStore.getState().refresh(),
+});
 
 // The backend locked the vault — because the idle window passed, or because another window asked
 // it to. Told rather than polled, so every view drops what it is showing at the same moment.

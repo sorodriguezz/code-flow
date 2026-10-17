@@ -384,6 +384,56 @@ export interface ApiRequestSpec {
   grpc: GrpcSettings;
   /** Saved example responses — the seed for docs and (future) mocking. */
   examples: SavedExample[];
+  /**
+   * Checks written as rows instead of code — «status = 200», «$.id existe». Evaluated after the
+   * post-response scripts and reported beside their `pm.test`s. Absent from requests saved before
+   * they existed: read with `?? []`.
+   */
+  assertions?: ApiAssertion[];
+  /**
+   * Payloads kept to send again with one click from a WebSocket, Socket.IO or MQTT composer. Absent
+   * from requests saved before they existed: read with `?? []`.
+   */
+  savedMessages?: SavedStreamMessage[];
+}
+
+export type AssertionSource = "status" | "time" | "size" | "header" | "body" | "jsonpath";
+
+export type AssertionOperator =
+  | "eq"
+  | "neq"
+  | "lt"
+  | "lte"
+  | "gt"
+  | "gte"
+  | "contains"
+  | "notContains"
+  | "exists"
+  | "notExists"
+  | "matches"
+  | "isType";
+
+export interface ApiAssertion {
+  id: string;
+  enabled: boolean;
+  source: AssertionSource;
+  /** The header's name for `header`, the path for `jsonpath`; unused otherwise. */
+  property: string;
+  operator: AssertionOperator;
+  /** As typed. `eq`/`neq` read it as JSON when it parses (`1`, `true`, `"a"`), as text otherwise. */
+  expected: string;
+}
+
+export interface SavedStreamMessage {
+  id: string;
+  name: string;
+  payload: string;
+  /** Socket.IO: the event it is emitted as. */
+  event?: string;
+  /** MQTT: where it is published, and how. */
+  topic?: string;
+  qos?: 0 | 1 | 2;
+  retain?: boolean;
 }
 
 export interface SavedExample {
@@ -1107,7 +1157,7 @@ export interface RunnerReport {
 // Import / export
 // ---------------------------------------------------------------------------
 
-export type ImportFormat = "postman" | "openapi" | "curl" | "har" | "insomnia" | "bruno" | "codeflow";
+export type ImportFormat = "postman" | "openapi" | "curl" | "har" | "insomnia" | "bruno" | "http" | "codeflow";
 
 export interface ImportResult {
   format: ImportFormat;

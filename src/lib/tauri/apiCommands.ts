@@ -565,3 +565,83 @@ export const supabaseAnonKey = (url: string) =>
 /** Adopts a project for every share that predates per-share projects. Returns how many it filled. */
 export const apiBackfillShareProjects = (url: string) =>
   invoke<number>("api_backfill_share_projects", { url });
+
+// ---------- load test ----------
+
+export interface LoadPlan {
+  users: number;
+  durationMs: number;
+  rampMs: number;
+}
+
+export interface LoadPercentiles {
+  min: number;
+  avg: number;
+  p50: number;
+  p90: number;
+  p95: number;
+  p99: number;
+  max: number;
+}
+
+export interface LoadSecond {
+  second: number;
+  requests: number;
+  failures: number;
+  avgMs: number;
+  p95Ms: number;
+  users: number;
+}
+
+export interface LoadReport {
+  elapsedMs: number;
+  finished: boolean;
+  stopped: boolean;
+  requests: number;
+  /** Transport errors plus 4xx/5xx answers. */
+  failures: number;
+  bytes: number;
+  rps: number;
+  latency: LoadPercentiles;
+  statuses: [number, number][];
+  errors: [string, number][];
+  series: LoadSecond[];
+  activeUsers: number;
+}
+
+/** «Prueba de carga»: `request` sent by `plan.users` users for `plan.durationMs`; progress arrives
+ *  on `onLoadProgress` under `id`, the final report as the result. */
+export const apiLoadTest = (id: string, request: HttpSendRequest, plan: LoadPlan) =>
+  invoke<LoadReport>("api_load_test", { id, request, plan });
+
+export const apiLoadStop = (id: string) => invoke<void>("api_load_stop", { id });
+
+export const onLoadProgress = async (handler: (event: { id: string; report: LoadReport }) => void) => {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<{ id: string; report: LoadReport }>("api:load-progress", (event) => handler(event.payload));
+};
+
+// ---------- the repository's endpoints ----------
+
+export interface RouteHit {
+  method: string;
+  /** Starts with `/`; parameters as `:name`. */
+  path: string;
+  file: string;
+  line: number;
+  framework: string;
+}
+
+export const apiScanRoutes = (path: string) => invoke<RouteHit[]>("api_scan_routes", { path });
+
+// ---------- the assistant ----------
+
+/** The API client's assistant on the `api` task's engine: `explain` → Markdown, `tests` → a
+ *  `pm.test` script, `request` → a request as JSON. */
+export const apiAi = (args: {
+  kind: "explain" | "tests" | "request";
+  payload: string;
+  language: string;
+  runId: string;
+  workspaceId: string | null;
+}) => invoke<string>("api_ai", args);

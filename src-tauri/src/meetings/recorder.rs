@@ -309,7 +309,9 @@ pub fn monitor(channel: Channel, device_id: String, on_level: impl Fn(Result<(f3
         let (stream, rate) = match open(channel, &device_id, inbox.clone()) {
             Ok(opened) => opened,
             Err(error) => {
-                on_level(Err(error));
+                if !flag.load(Ordering::SeqCst) {
+                    on_level(Err(error));
+                }
                 return;
             }
         };
@@ -317,6 +319,12 @@ pub fn monitor(channel: Channel, device_id: String, on_level: impl Fn(Result<(f3
         let mut out = Vec::with_capacity(4096);
         while !flag.load(Ordering::SeqCst) {
             std::thread::sleep(TICK);
+            // Stopped while asleep: say nothing more. A meeting starting is what stops a monitor, and
+            // on Windows its own loopback invalidates this one's stream — a "lost" reported now would
+            // be read as the meeting's system audio failing while it records fine.
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
             let (raw, lost) = {
                 let mut inbox = inbox.lock().unwrap_or_else(|p| p.into_inner());
                 (std::mem::take(&mut inbox.samples), inbox.lost.take())

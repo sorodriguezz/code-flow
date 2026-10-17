@@ -37,6 +37,16 @@ export type DbKind =
 
 export type DbSslMode = "disable" | "require" | "verify_full";
 
+/** What a connection's server is — see `DbConnectionConfig.environment`. */
+export type DbEnvironment = "" | "dev" | "test" | "prod";
+
+/** Each environment's colour, as a theme token; `""` draws nothing. */
+export const ENVIRONMENT_COLOR: Record<Exclude<DbEnvironment, "">, string> = {
+  dev: "var(--cf-success)",
+  test: "var(--cf-warning)",
+  prod: "var(--cf-danger)",
+};
+
 /**
  * Who the server is being asked to believe we are — a separate axis from the engine.
  *
@@ -133,6 +143,9 @@ export interface DbConnectionConfig {
   /** Driver extras (`application_name`, `authSource`, `path`, …) as ordered pairs. */
   options: [string, string][];
   read_only: boolean;
+  /** `""` (unsaid), `dev`, `test` or `prod` — a colour on everything run against it, and `prod`
+   *  asks before a statement that writes. A label; `read_only` is the guard. */
+  environment: DbEnvironment;
   connect_timeout_ms: number;
   /**
    * Whether the tree's root lists every database on the server or only the one this connection is
@@ -921,6 +934,7 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     ssl: engine.defaultSsl,
     options: [],
     read_only: false,
+    environment: "",
     connect_timeout_ms: 15000,
     show_all_databases: false,
     visible_schemas: [],

@@ -37,7 +37,13 @@ export type ApiModal =
   /** Accept an invitation to a shared collection. Sharing one lives in the settings pane. */
   | { kind: "collab" }
   /** The records frozen by a three-way merge, and the choice for each. */
-  | { kind: "conflicts" };
+  | { kind: "conflicts" }
+  /** «Crear con IA»: a request written from a description. */
+  | { kind: "aiRequest" }
+  /** «Desde el código del repositorio»: the routes a workspace repository declares. */
+  | { kind: "repoRoutes" }
+  /** «Prueba de carga» of one request tab. */
+  | { kind: "loadTest"; tabId: string };
 
 interface ApiModalState {
   modal: ApiModal | null;

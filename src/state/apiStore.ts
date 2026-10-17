@@ -74,6 +74,7 @@ import {
   tokenNetworkOptions,
   type OAuth2Token,
 } from "../lib/api/auth";
+import { registerIslandApp } from "../lib/islandSync";
 
 /** Global on purpose: timeouts, proxy and certificates are transport configuration, not content. */
 const SETTINGS_KEY = "api_settings";
@@ -1457,13 +1458,13 @@ function copyName(name: string): string {
   return name ? `${name} copy` : "";
 }
 
-function persistTabs(get: () => ApiState) {
+function persistTabs(get: () => ApiState): Promise<void> {
   if (persistTimer !== null) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
   const { workspaceId, openTabs, entityTabs, tabOrder, activeTabId } = get();
-  if (workspaceId === null) return;
+  if (workspaceId === null) return Promise.resolve();
   const payload: PersistedTabs = {
     version: 2,
     tabs: openTabs,
@@ -1473,7 +1474,10 @@ function persistTabs(get: () => ApiState) {
   };
   // Through the command that moves each draft's credentials into the OS credential store: a tab
   // holds the same token its request does, and an unsaved one may hold a token nothing else does.
-  void apiSaveOpenTabs(workspaceId, JSON.stringify(payload)).catch(() => {});
+  return apiSaveOpenTabs(workspaceId, JSON.stringify(payload)).then(
+    () => {},
+    () => {},
+  );
 }
 
 function schedulePersistTabs(get: () => ApiState) {
@@ -1992,6 +1996,26 @@ useWorkspaceStore.subscribe((state, previous) => {
   const { workspaceId, loading } = useApiStore.getState();
   if (workspaceId === null && !loading) return;
   void useApiStore.getState().setWorkspace(state.activeWorkspaceId);
+});
+
+/** While the API client is in an island the island owns its tree and tabs; this window's copy stops
+ *  persisting, lets go of its tabs and is read again on the way back — see `lib/islandSync`. */
+registerIslandApp(["api:requests"], {
+  isLoaded: () => useApiStore.getState().workspaceId !== null || useApiStore.getState().loading,
+  flush: () => persistTabs(useApiStore.getState),
+  release: () => {
+    if (persistTimer !== null) clearTimeout(persistTimer);
+    persistTimer = null;
+    for (const tab of useApiStore.getState().openTabs) releaseTab(tab.id);
+    useApiModalStore.getState().closeApiModal();
+    pendingLoad = null;
+    useApiStore.setState({ workspaceId: null, loading: false, openTabs: [], entityTabs: [], tabOrder: [], activeTabId: null });
+  },
+  reload: () => {
+    pendingLoad = null;
+    useApiStore.setState({ workspaceId: null, loading: false });
+    return ensureApiStoreLoaded();
+  },
 });
 
 /**

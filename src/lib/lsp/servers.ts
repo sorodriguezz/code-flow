@@ -21,13 +21,13 @@
  *   would be a second, worse answer competing with it in the same completion list.
  * - **JSON, CSS, SCSS, HTML.** Monaco bundles real language services for these and `monacoSetup.ts`
  *   already wires up their workers. A server would be work to draw even.
- * - **Vue, Svelte, Astro, Terraform, TOML.** Their servers are good and their entries would be two
- *   lines each — but Monaco registers no grammar for any of them, so a `.vue` or `.toml` model's
- *   `getLanguageId()` is `plaintext` and nothing would ever be routed to the server. `taplo` was in
- *   here until it was noticed that `monacoLanguage.ts` maps `toml` to an id Monaco does not have.
- *   They are waiting on TextMate grammars, not on this file.
- * - **Java (`jdtls`), Kotlin, Scala.** They need a JVM to be installed and configured before the
- *   server will even start, which is a different install story than "a binary on `PATH`".
+ * - **Vue, Svelte, Astro, Terraform** share a Monaco language with plainer files (`html`, `hcl`),
+ *   so their servers are routed by *extension* — see [`lspLanguageOf`]: the file is `vue` to the
+ *   server and `html` to Monaco. TOML has a grammar of its own (`monacoToml`) and needs no mapping.
+ * - **Scala.** Metals is installed through Coursier and bootstraps itself on first run, which is a
+ *   different install story than "a binary on `PATH`". Java and Kotlin are in (tier 1): `jdtls`'s
+ *   wrapper finds the JVM itself, and keeps its index under the temp dir keyed by the folder it is
+ *   started in — which `lsp.rs` makes the repository.
  * - **SQL.** `sqlCompletion.ts` completes from the *live connection's* tables. No generic SQL
  *   server knows that, so one here would be a downgrade.
  */
@@ -59,6 +59,54 @@ export interface LanguageServer {
   settings: Record<string, unknown>;
   /** What to install when it isn't found — shown verbatim, the same as a debug adapter's. */
   install: string;
+}
+
+/**
+ * The language a file is to its servers, where that is not what Monaco calls it.
+ *
+ * `.vue`, `.svelte` and `.astro` open as `html` (`monacoLanguage`) — that is what colours their
+ * markup and brings tag completion and Emmet — and `.tf` as `hcl`. A server is told the real thing:
+ * the language id in `didOpen` is what Volar, the Svelte server and `terraform-ls` key on, and an
+ * HTML file must not be sent to any of them.
+ */
+const LSP_LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  vue: "vue",
+  svelte: "svelte",
+  astro: "astro",
+  tf: "terraform",
+  tfvars: "terraform-vars",
+};
+
+/** Monaco's id for each language above — what providers are registered against. */
+const MONACO_LANGUAGE_OF: Record<string, string> = {
+  vue: "html",
+  svelte: "html",
+  astro: "html",
+  terraform: "hcl",
+  "terraform-vars": "hcl",
+};
+
+export function lspLanguageOf(path: string, monacoLanguage: string): string {
+  const extension = path.includes(".") ? path.split(".").pop()!.toLowerCase() : "";
+  return LSP_LANGUAGE_BY_EXTENSION[extension] ?? monacoLanguage;
+}
+
+export function monacoLanguageOf(lspLanguage: string): string {
+  return MONACO_LANGUAGE_OF[lspLanguage] ?? lspLanguage;
+}
+
+/**
+ * `initializationOptions` and `settings` with `${repo}` replaced by the repository's path — Volar
+ * and the Astro server must be told where the project's own TypeScript lives, and refuse to start
+ * without it.
+ */
+export function withRepoPath<T>(value: T, repoPath: string): T {
+  if (typeof value === "string") return value.split("${repo}").join(repoPath) as T;
+  if (Array.isArray(value)) return value.map((item) => withRepoPath(item, repoPath)) as T;
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, withRepoPath(inner, repoPath)])) as T;
+  }
+  return value;
 }
 
 export const LANGUAGE_SERVERS: LanguageServer[] = [
@@ -101,7 +149,16 @@ export const LANGUAGE_SERVERS: LanguageServer[] = [
     settings: {
       // Schema association by filename is what turns this from a linter into the thing that
       // completes a GitHub Actions step or a compose service.
-      yaml: { schemas: {}, validate: true, completion: true, hover: true, format: { enable: true } },
+      // `schemaStore` is the catalogue the JSON side reads too (`lib/jsonSchemas`): workflows,
+      // compose files, Kubernetes manifests and the rest are matched by file name, as in VS Code.
+      yaml: {
+        schemas: {},
+        schemaStore: { enable: true, url: "https://www.schemastore.org/api/json/catalog.json" },
+        validate: true,
+        completion: true,
+        hover: true,
+        format: { enable: true },
+      },
     },
     install: "npm i -g yaml-language-server",
   },
@@ -125,7 +182,7 @@ export const LANGUAGE_SERVERS: LanguageServer[] = [
     tier: 0,
     // Claims the languages a class attribute appears in, which is why it sits beside the other
     // servers rather than replacing one.
-    languages: ["css", "scss", "html", "typescript", "javascript"],
+    languages: ["css", "scss", "html", "typescript", "javascript", "vue", "svelte", "astro"],
     command: "tailwindcss-language-server",
     args: ["--stdio"],
     npm: "@tailwindcss/language-server",
@@ -166,6 +223,55 @@ export const LANGUAGE_SERVERS: LanguageServer[] = [
     initializationOptions: {},
     settings: {},
     install: "npm i -g intelephense",
+  },
+
+  {
+    id: "vue",
+    label: "Vue (Volar)",
+    tier: 0,
+    languages: ["vue"],
+    command: "vue-language-server",
+    args: ["--stdio"],
+    // Pinned to 2: from 3 on the server only answers through a TypeScript plugin inside VS Code's
+    // own tsserver, and talks to nothing else. 2 still runs on its own (`hybridMode: false`).
+    npm: "@vue/language-server@2",
+    versionArgs: ["--version"],
+    rootFiles: ["vite.config.ts", "vite.config.js", "nuxt.config.ts", "nuxt.config.js", "vue.config.js"],
+    initializationOptions: {
+      typescript: { tsdk: "${repo}/node_modules/typescript/lib" },
+      vue: { hybridMode: false },
+    },
+    settings: {},
+    install: "npm i -g @vue/language-server@2 typescript",
+  },
+  {
+    id: "svelte",
+    label: "Svelte",
+    tier: 0,
+    languages: ["svelte"],
+    command: "svelteserver",
+    args: ["--stdio"],
+    npm: "svelte-language-server",
+    // Prints nothing and exits 0 — enough for the probe, which reads the exit status.
+    versionArgs: ["--version"],
+    rootFiles: ["svelte.config.js", "svelte.config.mjs", "svelte.config.ts"],
+    initializationOptions: {},
+    settings: {},
+    install: "npm i -g svelte-language-server",
+  },
+  {
+    id: "astro",
+    label: "Astro",
+    tier: 0,
+    languages: ["astro"],
+    command: "astro-ls",
+    args: ["--stdio"],
+    npm: "@astrojs/language-server",
+    versionArgs: ["--version"],
+    rootFiles: ["astro.config.mjs", "astro.config.ts", "astro.config.js"],
+    initializationOptions: { typescript: { tsdk: "${repo}/node_modules/typescript/lib" } },
+    settings: {},
+    install: "npm i -g @astrojs/language-server typescript",
   },
 
   // ── Tier 1 ────────────────────────────────────────────────────────────────────────────────
@@ -296,6 +402,70 @@ export const LANGUAGE_SERVERS: LanguageServer[] = [
     initializationOptions: {},
     settings: {},
     install: "gem install ruby-lsp",
+  },
+  {
+    id: "taplo",
+    label: "TOML (Taplo)",
+    tier: 1,
+    languages: ["toml"],
+    command: "taplo",
+    args: ["lsp", "stdio"],
+    // Not the npm build: `@taplo/cli` 0.9 exits 1 on every command and never answers `initialize`.
+    npm: null,
+    versionArgs: ["--version"],
+    rootFiles: [],
+    initializationOptions: {},
+    settings: {},
+    install: "brew install taplo  ·  cargo install taplo-cli --locked --features lsp",
+  },
+  {
+    id: "terraform",
+    label: "Terraform",
+    tier: 1,
+    languages: ["terraform", "terraform-vars"],
+    command: "terraform-ls",
+    args: ["serve"],
+    npm: null,
+    versionArgs: ["version"],
+    rootFiles: [],
+    initializationOptions: {},
+    settings: {},
+    install: "brew install hashicorp/tap/terraform-ls",
+  },
+  {
+    id: "jdtls",
+    label: "Java (Eclipse JDT LS)",
+    tier: 1,
+    languages: ["java"],
+    command: "jdtls",
+    args: [],
+    npm: null,
+    // The wrapper has no version flag of its own; `--help` exits 0 once Python and the JVM are found.
+    versionArgs: ["--help"],
+    rootFiles: ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", ".project"],
+    initializationOptions: {},
+    settings: {
+      java: {
+        inlayHints: { parameterNames: { enabled: "literals" } },
+        signatureHelp: { enabled: true },
+        format: { enabled: true },
+      },
+    },
+    install: "brew install jdtls  ·  needs a JDK 21+ on PATH",
+  },
+  {
+    id: "kotlin",
+    label: "Kotlin",
+    tier: 1,
+    languages: ["kotlin"],
+    command: "kotlin-language-server",
+    args: [],
+    npm: null,
+    versionArgs: ["--version"],
+    rootFiles: ["build.gradle.kts", "settings.gradle.kts", "build.gradle", "pom.xml"],
+    initializationOptions: {},
+    settings: {},
+    install: "brew install kotlin-language-server",
   },
 ];
 

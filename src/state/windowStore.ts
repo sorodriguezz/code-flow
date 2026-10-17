@@ -10,6 +10,7 @@ import { WINDOW, type DetachableKind } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
 import { translate } from "./languageStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { islandOpened, islandReturned } from "../lib/islandSync";
 
 /**
  * Which apps and repositories are open in windows of their own.
@@ -128,6 +129,14 @@ export const useWindowStore = create<WindowState>((set, get) => ({
       // was closed, it lands on the main window's rail or projects panel, and that is where the
       // eye is sent. Only the main window keeps these — it is the one those icons live in.
       if (!WINDOW.main) return;
+      // The main window's own copy of an app is dropped while an island holds it and read again when
+      // it comes back — otherwise the return shows the tree as it was before the island touched it.
+      for (const s of event.payload) {
+        if (s.kind === "app" && !before.some((was) => was.label === s.label)) islandOpened(s.ref_id);
+      }
+      for (const s of before) {
+        if (s.kind === "app" && !event.payload.some((now) => now.label === s.label)) islandReturned(s.ref_id);
+      }
       const back = before.filter(
         (s): s is SatelliteInfo & { kind: DetachableKind } =>
           (s.kind === "app" || s.kind === "repo") && !event.payload.some((now) => now.label === s.label),

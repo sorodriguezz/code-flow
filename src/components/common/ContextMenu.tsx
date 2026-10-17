@@ -48,6 +48,14 @@ export interface MenuItem {
    * submenu is a corridor, and nothing in this app has that shape.
    */
   children?: MenuItem[];
+  /**
+   * A colour this entry *is*. A submenu whose entries all carry one is drawn as a grid of swatches
+   * rather than a list — thirty colours as rows were taller than the window and had to be scrolled.
+   * The label becomes the swatch's tooltip.
+   */
+  swatch?: string;
+  /** Marks the swatch currently in use. */
+  checked?: boolean;
 }
 
 /** A floating menu at a point, portalled so no scroll container can clip it. Positioned after
@@ -162,11 +170,18 @@ export function ContextMenu({
   useEffect(() => {
     window.addEventListener("resize", onClose);
     // Capture phase: the scroll that matters happens inside the sidebar, not on the window, and
-    // a menu left floating over rows that have moved on points at the wrong node.
-    window.addEventListener("scroll", onClose, true);
+    // a menu left floating over rows that have moved on points at the wrong node. Except the
+    // menu's own: a long submenu scrolled — by the wheel or by its scrollbar — is the menu being
+    // used, and closing on it made the list impossible to reach the end of.
+    const onScroll = (event: Event) => {
+      const target = event.target as Node | null;
+      if (target && (ref.current?.contains(target) || subRef.current?.contains(target))) return;
+      onClose();
+    };
+    window.addEventListener("scroll", onScroll, true);
     return () => {
       window.removeEventListener("resize", onClose);
-      window.removeEventListener("scroll", onClose, true);
+      window.removeEventListener("scroll", onScroll, true);
     };
   }, [onClose]);
 
@@ -337,9 +352,30 @@ function Submenu({
         top: pos?.top ?? 0,
         visibility: pos ? "visible" : "hidden",
       }}
-      className="z-[10000] max-h-[60vh] min-w-[160px] overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)]"
+      // `overscroll-contain`: the end of a long list is not a reason to start scrolling the page
+      // under it.
+      className="z-[10000] max-h-[60vh] min-w-[160px] overflow-y-auto overscroll-contain rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)]"
     >
-      {items.length === 0 ? (
+      {items.length > 0 && items.every((item) => item.swatch) ? (
+        <div className="grid grid-cols-6 gap-1.5 p-1">
+          {items.map((item, i) => (
+            <button
+              key={`${item.label}-${i}`}
+              role="menuitem"
+              title={item.label}
+              aria-label={item.label}
+              onClick={() => {
+                onPick();
+                item.onClick();
+              }}
+              style={{ background: item.swatch }}
+              className={`h-6 w-6 rounded-full transition-transform hover:scale-110 ${
+                item.checked ? "ring-2 ring-[var(--cf-text)] ring-offset-2 ring-offset-[var(--cf-surface-raised)]" : ""
+              }`}
+            />
+          ))}
+        </div>
+      ) : items.length === 0 ? (
         // A verb with nothing to apply it to still has to say so: an empty box that opens and
         // shows nothing reads as a bug rather than as an answer.
         <p className="px-2.5 py-1.5 text-[13px] text-[var(--cf-text-muted)]">—</p>

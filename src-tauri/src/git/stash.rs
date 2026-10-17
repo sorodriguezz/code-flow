@@ -8,6 +8,12 @@ pub struct StashInfo {
     pub index: usize,
     pub message: String,
     pub oid: String,
+    /// The commit the stash was made on (its first parent) — where the graph hangs it.
+    #[serde(default)]
+    pub base_id: Option<String>,
+    /// When it was made, seconds since the epoch.
+    #[serde(default)]
+    pub timestamp: i64,
 }
 
 pub fn list_stashes(path: &str) -> Result<Vec<StashInfo>, String> {
@@ -18,10 +24,17 @@ pub fn list_stashes(path: &str) -> Result<Vec<StashInfo>, String> {
             index,
             message: message.to_string(),
             oid: oid.to_string(),
+            base_id: None,
+            timestamp: 0,
         });
         true
     })
     .map_err(|e| e.message().to_string())?;
+    for stash in &mut result {
+        let Ok(commit) = git2::Oid::from_str(&stash.oid).and_then(|oid| repo.find_commit(oid)) else { continue };
+        stash.base_id = commit.parent_id(0).ok().map(|id| id.to_string());
+        stash.timestamp = commit.time().seconds();
+    }
     Ok(result)
 }
 

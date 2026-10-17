@@ -12,6 +12,7 @@ import { chainScripts, folderChain, runScriptChain, type ChainOwner } from "./sc
 import { gateScripts } from "./scriptTrust";
 import type { SandboxScopes } from "./sandbox";
 import type { VariableContext } from "./variables";
+import { evaluateAssertions } from "./assertions";
 import {
   activeEnvironmentKey,
   ancestorAuthIn,
@@ -175,7 +176,7 @@ async function runRow(
     signal?.removeEventListener("abort", stop);
   }
 
-  const tests = [...before.tests];
+  const tests = [...before.tests, ...evaluateAssertions(spec.assertions, http)];
   const runnablePost = post.filter(allows);
   if (runnablePost.length > 0) {
     const response: ApiResponse = { ...http, tests: [], consoleLines: [], visualizer: null, error: null };

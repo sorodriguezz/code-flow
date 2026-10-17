@@ -400,6 +400,26 @@ pub fn delete_branch(path: &str, name: &str, is_remote: bool) -> Result<(), Stri
     Ok(())
 }
 
+/// Renames a local branch. Its upstream comes along (git keeps `branch.<name>.*` with it), and so
+/// does its padlock: a branch locked here stays locked under its new name.
+pub fn rename_branch(path: &str, name: &str, new_name: &str) -> Result<(), String> {
+    let repo = open(path)?;
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err("The branch needs a name".to_string());
+    }
+    let config = repo.config().map_err(|e| e.message().to_string())?;
+    let pinned = read_override(&config, name);
+    let mut branch = repo
+        .find_branch(name, BranchType::Local)
+        .map_err(|e| e.message().to_string())?;
+    branch.rename(new_name, false).map_err(|e| e.message().to_string())?;
+    if pinned.is_some() {
+        write_override(&repo, new_name, pinned)?;
+    }
+    Ok(())
+}
+
 /// Checks out an existing local branch (fast-forward-free "switch").
 pub fn checkout_local_branch(path: &str, name: &str) -> Result<(), String> {
     let repo = open(path)?;
@@ -602,6 +622,21 @@ mod tests {
         create_branch(path, name, None).unwrap();
         assert!(list_branches(path).unwrap().iter().any(|b| b.name == name && !b.is_locked));
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A rename keeps the branch's padlock under its new name.
+    #[test]
+    fn a_renamed_branch_keeps_its_lock() {
+        let _pinned = lock_rules::pin_for_test(&[]);
+        let (dir, _base) = fixture();
+        let path = dir.to_str().unwrap();
+        set_branch_locked(path, "feature", true).unwrap();
+        rename_branch(path, "feature", "feature/renamed").unwrap();
+        let listed = list_branches(path).unwrap();
+        assert!(listed.iter().all(|b| b.name != "feature"));
+        assert!(listed.iter().any(|b| b.name == "feature/renamed" && b.is_locked));
+        assert!(rename_branch(path, "feature/renamed", "  ").is_err());
         fs::remove_dir_all(&dir).ok();
     }
 

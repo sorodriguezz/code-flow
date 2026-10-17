@@ -357,17 +357,17 @@ impl PgSession {
         })
     }
 
-    pub async fn explain(&self, sql: &str, ctx: &DbExecContext) -> Result<String, String> {
+    pub async fn explain(&self, sql: &str, ctx: &DbExecContext, analyze: bool) -> Result<String, String> {
         let statement = split_statements(sql, Some(DIALECT))
             .into_iter()
             .next()
             .ok_or_else(|| "There is no statement to explain.".to_string())?;
         self.apply_search_path(ctx).await;
-        // `ANALYZE false`: explaining must never *run* the statement. A plan for a `DELETE` is
-        // information; executing one to get it is not what the user asked for.
-        let rows = self
-            .text_rows(&format!("EXPLAIN (VERBOSE, COSTS, FORMAT TEXT) {statement}"))
-            .await?;
+        // Without `analyze`, explaining must never *run* the statement. A plan for a `DELETE` is
+        // information; executing one to get it is not what the user asked for. With it, the
+        // caller (`Session::explain`) has already refused anything that isn't a read.
+        let options = if analyze { "ANALYZE, VERBOSE, COSTS, BUFFERS, FORMAT TEXT" } else { "VERBOSE, COSTS, FORMAT TEXT" };
+        let rows = self.text_rows(&format!("EXPLAIN ({options}) {statement}")).await?;
         Ok(rows
             .iter()
             .filter_map(|row| row.first().cloned().flatten())
@@ -1779,6 +1779,7 @@ mod tests {
             ssl: DbSslMode::VerifyFull,
             options: Vec::new(),
             read_only: false,
+            environment: String::new(),
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),

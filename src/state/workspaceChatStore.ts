@@ -15,12 +15,14 @@ import {
   chatSetEngine,
   chatSetUnread,
   chatSetWorkspaceAgent,
+  chatTurnCheckpoints,
   type ChatAttachment,
   type ChatConversation,
   type ChatMessageRow,
 } from "../lib/tauri/chatCommands";
 import { traceIdOf } from "../lib/turnTrace";
 import type { ChatBubbleMessage } from "../components/chat/ChatMessageBubble";
+import type { SkillPick } from "../lib/tauri/chatCommands";
 import { onAiChatDelta, onAiDone, onChatTitled } from "../lib/tauri/events";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore } from "./aiRunStore";
 import {
@@ -86,6 +88,9 @@ export interface WsChatSession {
   streamText: string;
   /** A question taken back out of the transcript (refused before reaching an engine), for the box. */
   restored: string | null;
+  /** Plan mode: each turn runs read-only and answers with a plan. Kept in memory, like the
+   *  repository chat's. */
+  plan: boolean;
 }
 
 interface WsChatState {
@@ -104,10 +109,11 @@ interface WsChatState {
   setEngine: (conversationId: string, provider: string, model: string, account?: string | null) => Promise<void>;
   setEffort: (conversationId: string, effort: string) => Promise<void>;
   setAgent: (conversationId: string, agentId: string) => Promise<void>;
+  setPlan: (conversationId: string, on: boolean) => void;
   /** Sends now, or queues behind the turn that is running. */
-  submit: (conversationId: string, text: string) => void;
+  submit: (conversationId: string, text: string, opts?: { skill?: SkillPick | null }) => void;
   /** `files` are a queued question's own images; absent, the composer's staged ones go. */
-  send: (conversationId: string, text: string, files?: ChatAttachment[]) => void;
+  send: (conversationId: string, text: string, files?: ChatAttachment[], skill?: SkillPick | null) => void;
   drainQueue: (conversationId: string) => void;
   resumeQueue: (conversationId: string) => void;
   discardQueued: (conversationId: string, itemId: string) => void;
@@ -136,6 +142,7 @@ export const EMPTY_WS_CHAT: WsChatSession = {
   runStartedAt: null,
   streamText: "",
   restored: null,
+  plan: false,
 };
 
 export const EMPTY_WS_LIST: ChatConversation[] = [];
@@ -144,6 +151,36 @@ export const EMPTY_WS_LIST: ChatConversation[] = [];
 export interface WsChatMessage extends ChatBubbleMessage {
   id: string;
   turn: number;
+  /** On a question asked in plan mode, and on its answer — the panel offers to carry it out. Live only. */
+  plan?: boolean;
+  /** On an answer: what the turn changed, one entry per repository — the per-turn review. */
+  changes?: WsTurnChanges[];
+}
+
+/** One repository's part of what a workspace chat's turn changed. */
+export interface WsTurnChanges {
+  repo: string;
+  repoPath: string;
+  checkpointId: string;
+  paths: string[];
+}
+
+/** `ChatReply.checkpoints` / `chat_turn_checkpoints` — `[{repo, path, id, paths}]` — or `undefined`. */
+export function parseWsTurnChanges(json: string | null | undefined): WsTurnChanges[] | undefined {
+  if (!json) return undefined;
+  try {
+    const value = JSON.parse(json) as unknown;
+    if (!Array.isArray(value)) return undefined;
+    const out: WsTurnChanges[] = [];
+    for (const entry of value as { repo?: unknown; path?: unknown; id?: unknown; paths?: unknown }[]) {
+      if (typeof entry.path !== "string" || typeof entry.id !== "string" || !Array.isArray(entry.paths)) continue;
+      const paths = entry.paths.filter((path): path is string => typeof path === "string");
+      if (paths.length > 0) out.push({ repo: typeof entry.repo === "string" ? entry.repo : "", repoPath: entry.path, checkpointId: entry.id, paths });
+    }
+    return out.length > 0 ? out : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function messageFromRow(row: ChatMessageRow): WsChatMessage {
@@ -297,10 +334,11 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
     ensureLoaded: async (conversationId, workspaceId) => {
       listen();
       get().prepare(conversationId, workspaceId);
-      const [rows, list, inflight] = await Promise.all([
+      const [rows, list, inflight, checkpoints] = await Promise.all([
         chatGetConversation(conversationId, false).catch(() => null),
         chatListWorkspaceConversations(workspaceId).catch(() => null),
         chatInflightTurns().catch(() => []),
+        chatTurnCheckpoints(conversationId).catch(() => ({}) as Record<string, string>),
       ]);
       if (list) set((s) => ({ listByWorkspace: { ...s.listByWorkspace, [workspaceId]: list } }));
       const row = list?.find((c) => c.id === conversationId);
@@ -318,7 +356,14 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             ...s.byConversation,
             [conversationId]: {
               ...base,
-              messages: rows ? rows.map(messageFromRow) : (live?.messages ?? []),
+              messages: rows
+                ? rows.map((row) => {
+                    const message = messageFromRow(row);
+                    const changes = parseWsTurnChanges(checkpoints[row.id]);
+                    return changes ? { ...message, changes } : message;
+                  })
+                : (live?.messages ?? []),
+              plan: live?.plan ?? false,
               loaded: true,
               ...(running
                 ? { sending: true, adopted: true, runId: running.runId, runStartedAt: running.startedAtMs }
@@ -368,6 +413,8 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       if (session.persisted) await chatSetEffort(conversationId, effort).catch((e: unknown) => pushErrorToast(String(e)));
     },
 
+    setPlan: (conversationId, on) => patch(conversationId, (s) => ({ ...s, plan: on })),
+
     setAgent: async (conversationId, agentId) => {
       const session = get().byConversation[conversationId];
       if (!session) return;
@@ -379,19 +426,20 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       });
     },
 
-    submit: (conversationId, text) => {
+    submit: (conversationId, text, opts) => {
       const trimmed = text.trim();
       const session = get().byConversation[conversationId];
       if (!trimmed || !session) return;
       const key = wsChatQueueKey(conversationId);
+      const skill = opts?.skill ?? null;
       if (!session.sending && queuedMessages(key).length === 0) {
-        get().send(conversationId, trimmed);
+        get().send(conversationId, trimmed, undefined, skill);
         return;
       }
       // A queued question takes the staged images with it: the box is free for the next one.
       const files = get().attachments[conversationId] ?? [];
       if (files.length > 0) set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
-      enqueueChatMessage(key, { text: trimmed, attachments: files.length > 0 ? files : undefined });
+      enqueueChatMessage(key, { text: trimmed, attachments: files.length > 0 ? files : undefined, skill: skill ?? undefined });
       get().drainQueue(conversationId);
     },
 
@@ -399,7 +447,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       const session = get().byConversation[conversationId];
       if (!session || session.sending) return;
       const next = shiftChatQueue(wsChatQueueKey(conversationId));
-      if (next) get().send(conversationId, next.text, next.attachments ?? []);
+      if (next) get().send(conversationId, next.text, next.attachments ?? [], next.skill ?? null);
     },
 
     resumeQueue: (conversationId) => {
@@ -442,7 +490,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       });
     },
 
-    send: (conversationId, text, filesArg) => {
+    send: (conversationId, text, filesArg, skill) => {
       listen();
       const trimmed = text.trim();
       const session = get().byConversation[conversationId];
@@ -462,6 +510,9 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       runToConversation.set(runId, conversationId);
 
       const lastTurn = session.messages.length > 0 ? session.messages[session.messages.length - 1].turn : -1;
+      // Read when the turn goes out, as the repository chat does: a queued question takes the mode
+      // the composer is in by the time its turn comes.
+      const plan = session.plan;
       const questionId = `pending-user-${crypto.randomUUID()}`;
       patch(conversationId, (s) => ({
         ...s,
@@ -482,6 +533,8 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             isError: false,
             isCancelled: false,
             attachments: files.length > 0 ? files : undefined,
+            skill: skill?.name,
+            plan: plan || undefined,
           },
         ],
       }));
@@ -509,7 +562,8 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
           null,
           true,
           files.map((file) => file.id),
-          null,
+          skill ?? null,
+          plan,
         );
       };
 
@@ -529,6 +583,8 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             isError: false,
             isCancelled: false,
             trace: trace.length > 0 ? trace : undefined,
+            plan: plan || undefined,
+            changes: parseWsTurnChanges(reply.checkpoints),
           };
           patch(conversationId, (s) => ({
             ...s,
@@ -568,6 +624,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             requeueChatMessageFirst(wsChatQueueKey(conversationId), {
               text: trimmed,
               attachments: files.length > 0 ? files : undefined,
+              skill: skill ?? undefined,
             });
             holdChatQueue(wsChatQueueKey(conversationId), "error");
             pushErrorToast(translate("assistant.wsChatBusy"));

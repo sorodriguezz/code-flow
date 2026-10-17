@@ -278,6 +278,8 @@ export interface ChatReply extends EngineReply {
   outputs: string[];
   /** The account that answered — `null` for the system account. */
   account_id?: string | null;
+  /** What a workspace chat's turn changed, per repository — JSON `[{repo, path, id, paths}]`. */
+  checkpoints?: string | null;
 }
 
 // ---------- conversations ----------
@@ -514,6 +516,8 @@ export const chatSend = (
   attachments?: string[],
   /** A skill picked in the composer: told to the engine for this turn, never stored as the question. */
   skill?: SkillPick | null,
+  /** The workspace chat's plan mode: this turn runs read-only and answers with a plan. */
+  plan?: boolean,
 ) =>
   invoke<ChatReply>("chat_send", {
     conversationId,
@@ -524,7 +528,13 @@ export const chatSend = (
     model: model ?? null,
     stream: stream ?? null,
     skill: skill ?? null,
+    plan: plan ?? null,
   });
+
+/** What each turn of a workspace chat changed, per repository: message id → the checkpoints JSON
+ *  (`[{repo, path, id, paths}]`). Turns that changed nothing are absent. */
+export const chatTurnCheckpoints = (conversationId: string) =>
+  invoke<Record<string, string>>("chat_turn_checkpoints", { conversationId });
 
 // ---------- provider surface ----------
 

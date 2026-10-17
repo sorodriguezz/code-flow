@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
-import type { DbColumn, DbFilterTarget, DbForeignKey, DbKind, DbNodeRef } from "../types/database";
+import type { DbColumn, DbFilterTarget, DbForeignKey, DbKind, DbNode, DbNodeRef } from "../types/database";
+import type { ParamValue, QueryParam } from "../lib/db/queryParams";
 
 /**
  * Which of the database workspace's modals is on screen.
@@ -73,9 +74,30 @@ export type DbModal =
       onSave: (text: string) => void;
     }
   /** The statements a pending batch of edits would run, before it runs them. */
-  | { kind: "preview"; title: string; statements: string[]; onConfirm: () => void }
+  | { kind: "preview"; title: string; statements: string[]; onConfirm: () => void; warning?: string }
   /** A CSV file into the table a data tab shows; the tab reloads when rows were kept. */
-  | { kind: "importCsv"; connectionId: string; node: DbNodeRef; tabId: string };
+  | { kind: "importCsv"; connectionId: string; node: DbNodeRef; tabId: string }
+  /** The values for a console statement's placeholders (`:name`, `${name}`, `?`), before it runs. */
+  | {
+      kind: "params";
+      params: QueryParam[];
+      language: "sql" | "javascript" | "redis";
+      onRun: (values: Record<string, ParamValue>) => void;
+    }
+  /** The console's snippets — with `draft` filled in when "save selection as snippet" opened it. */
+  | { kind: "snippets"; draft?: { body: string; language: "sql" | "javascript" | "redis" } }
+  /** What is running on the server right now, and what is blocking what. */
+  | { kind: "sessions"; connectionId: string; database: string | null }
+  /** Go to any table, view or routine of the connected servers by name — ⌘O. */
+  | { kind: "objectSearch" }
+  /** A table's columns, keys and indexes as a form that writes the `CREATE`/`ALTER` for you. */
+  | { kind: "tableDesigner"; connectionId: string; node: DbNodeRef }
+  /** Backup or restore through the engine's own tools. */
+  | { kind: "backup"; connectionId: string; database: string | null; mode: "backup" | "restore" }
+  /** Plausible rows for a table, as INSERTs to run or to open in a console. */
+  | { kind: "fakeData"; connectionId: string; node: DbNode }
+  /** Two schemas side by side, and the script that makes one look like the other. */
+  | { kind: "schemaCompare"; connectionId: string; database: string | null; schema: string | null };
 
 interface DbModalState {
   modal: DbModal | null;

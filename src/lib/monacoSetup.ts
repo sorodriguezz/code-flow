@@ -11,6 +11,10 @@ import { registerTomlLanguage } from "./monacoToml";
 import { registerPrismaLanguage } from "./monacoPrisma";
 import { teachLangAttribute } from "./monacoSfc";
 import { installIsolatedTsFallback } from "./tsWorkerFallback";
+import { installEmmet } from "./monacoEmmet";
+import { installJsonSchemas } from "./jsonSchemas";
+import { installSearchEditor } from "./searchEditor";
+import { installLinkedTags } from "./linkedTags";
 // Subpaths go through the package's own `exports` map (`./*` → `./esm/vs/*.js`), so these are
 // the mapped specifiers, not the on-disk paths.
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -256,6 +260,9 @@ registerCsvLanguages();
 registerTomlLanguage();
 // `.prisma`, the same way — and its colours can be switched off in Settings. See `monacoPrisma.ts`.
 registerPrismaLanguage();
+// Search results as a tab (`.code-search`), above the definition installer so ⌘/Ctrl+click on a
+// result line is offered there too. See `searchEditor.ts`.
+installSearchEditor(monaco);
 
 // Ctrl/Cmd+click to jump to a definition. Registered here, once, because both halves of it (the
 // definition provider and the editor opener) are global to Monaco rather than per-instance —
@@ -272,6 +279,15 @@ installSnippets();
 // a pane means it is missing until that pane has been opened. The provider declines every model
 // that is not one of the three, and declines all of them while the feature is off.
 installInlineCompletion(monaco);
+
+// Emmet, and linked editing of tags beyond HTML — VS Code built-ins, global to Monaco like the two
+// above. Both answer nothing while their switch in Settings › Editor is off.
+installEmmet(monaco);
+installLinkedTags(monaco);
+
+// SchemaStore's schemas (and each file's own `$schema`) for the editor's JSON files, fetched by the
+// backend and cached — see `jsonSchemas.ts`. Answers nothing while its switch is off.
+installJsonSchemas(monaco);
 
 /**
  * Options every embedded editor needs so its overlay widgets aren't clipped.

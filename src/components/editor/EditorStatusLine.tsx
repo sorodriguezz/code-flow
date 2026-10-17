@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Check, CircleX, GitCommitHorizontal, TextWrap, TriangleAlert } from "lucide-react";
+import { Check, CircleX, Download, FlaskConical, GitCommitHorizontal, ListVideo, TextWrap, TriangleAlert } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { LanguagePicker } from "./LanguagePicker";
 import { FileGlyph } from "../common/FileGlyph";
@@ -14,6 +14,8 @@ import { useT } from "../../state/languageStore";
 import { NotebookStatusItem } from "./notebook/kernelStatus";
 import { countProblems, useProblemsStore } from "../../state/problemsStore";
 import { useEditorPanelStore } from "../../state/editorPanelStore";
+import { useRecommendedServer } from "./useRecommendedServer";
+import { pushSuccessToast } from "../../state/toastStore";
 
 /**
  * The Editor's own status line: who last changed the caret's line, where the caret is, how the file
@@ -56,8 +58,11 @@ export function EditorStatusLine() {
   const problemsByOwner = useProblemsStore((s) => s.byOwner);
   const problems = useMemo(() => countProblems(problemsByOwner), [problemsByOwner]);
   const problemsOpen = useEditorPanelStore((s) => s.open && s.tab === "problems");
+  const panelTab = useEditorPanelStore((s) => (s.open ? s.tab : null));
   const wordWrap = useEditorDisplayStore((s) => s.wordWrap);
   const wrapKeys = useShortcutChord()("editor.toggleWordWrap");
+  /** The repository's `.vscode/extensions.json` recommends a server for this file that is not here. */
+  const missingServer = useRecommendedServer(status?.path ?? null, status?.languageId ?? null);
 
   return (
     <div className="flex h-6 shrink-0 items-center justify-end gap-0.5 border-t border-[var(--cf-border)] px-2 text-[12px] text-[var(--cf-text-muted)]">
@@ -72,7 +77,7 @@ export function EditorStatusLine() {
           onClick={() => useEditorPanelStore.getState().toggle("problems")}
           aria-pressed={problemsOpen}
           aria-label={t("editor.problems")}
-          className={`${itemClass} mr-auto gap-2 tabular-nums`}
+          className={`${itemClass} gap-2 tabular-nums`}
         >
           <span className="flex items-center gap-1">
             <CircleX size={13} className={problems.error > 0 ? "text-[var(--cf-danger)]" : ""} />
@@ -82,6 +87,27 @@ export function EditorStatusLine() {
             <TriangleAlert size={13} className={problems.warning > 0 ? "text-[var(--cf-warning)]" : ""} />
             {problems.warning}
           </span>
+        </button>
+      </Tooltip>
+      {/* Beside Problems, as in VS Code's panel: the repository's tests and its tasks.json. */}
+      <Tooltip side="top" label={t("tests.tab")}>
+        <button
+          onClick={() => useEditorPanelStore.getState().toggle("tests")}
+          aria-pressed={panelTab === "tests"}
+          aria-label={t("tests.tab")}
+          className={itemClass}
+        >
+          <FlaskConical size={13} />
+        </button>
+      </Tooltip>
+      <Tooltip side="top" label={t("tasks.tab")}>
+        <button
+          onClick={() => useEditorPanelStore.getState().toggle("tasks")}
+          aria-pressed={panelTab === "tasks"}
+          aria-label={t("tasks.tab")}
+          className={`${itemClass} mr-auto`}
+        >
+          <ListVideo size={13} />
         </button>
       </Tooltip>
       {blame && (
@@ -147,12 +173,38 @@ export function EditorStatusLine() {
               : t("editor.status.tabs", { size: status.tabSize })}
           </button>
 
-          {/* Not a control: the app writes files as UTF-8 and nothing else, so there is nothing to
-              choose — the label says what is true, and the tooltip why it cannot change. A file in
-              another encoding is shown decoded and read-only, and this names what it was read as. */}
-          <span className={staticClass} title={t("editor.status.encoding")}>
+          {/* VS Code's encoding item: reopen the file read as another encoding, or save it as one. A
+              file not in UTF-8 is saved back in its own (`fsops::encode_as`). */}
+          <button
+            className={itemClass}
+            aria-haspopup="menu"
+            title={t("editor.status.encoding")}
+            onClick={(event) => {
+              const file = useEditorStatusStore.getState().fileActions;
+              if (!file) return;
+              const current = status.encoding.toLowerCase();
+              const list = (pick: (encoding: string) => void) =>
+                ENCODINGS.map(([id, label]) => ({
+                  label: `${label} · ${id.toUpperCase()}`,
+                  leading: mark(current === id),
+                  onClick: () => pick(id),
+                }));
+              openMenu(event, t("editor.status.encodingMenu"), [
+                {
+                  label: t("editor.status.reopenWithEncoding"),
+                  onClick: () => {},
+                  children: list((id) => file.reopenWithEncoding(status.path, id)),
+                },
+                {
+                  label: t("editor.status.saveWithEncoding"),
+                  onClick: () => {},
+                  children: list((id) => file.saveWithEncoding(status.path, id)),
+                },
+              ]);
+            }}
+          >
             {status.encoding}
-          </span>
+          </button>
 
           <button
             className={itemClass}
@@ -193,6 +245,26 @@ export function EditorStatusLine() {
               <TextWrap size={13} />
             </button>
           </Tooltip>
+
+          {missingServer && (
+            <Tooltip
+              side="top"
+              label={t("editor.status.recommendedServer", { name: missingServer.label })}
+              description={missingServer.install}
+            >
+              <button
+                onClick={() => {
+                  const command = missingServer.install.split("·")[0].trim();
+                  void navigator.clipboard.writeText(command).then(() => pushSuccessToast(t("editor.status.installCopied", { command })));
+                }}
+                aria-label={t("editor.status.recommendedServer", { name: missingServer.label })}
+                className={`${itemClass} gap-1 text-[var(--cf-warning)]`}
+              >
+                <Download size={12} />
+                {missingServer.label}
+              </button>
+            </Tooltip>
+          )}
 
           {/* Chosen by hand from here (`LanguagePicker`), or detected — and the tooltip says which. The
               mousedown is kept from the picker's outside-click while it is open, so a second press on
@@ -253,6 +325,26 @@ export function EditorStatusLine() {
   );
 }
 
+/** What the encoding menu offers — WHATWG names, as `encoding_rs` reads them, and what each is for. */
+const ENCODINGS: [string, string][] = [
+  ["utf-8", "Unicode"],
+  ["utf-16le", "Unicode"],
+  ["utf-16be", "Unicode"],
+  ["windows-1252", "Western"],
+  ["iso-8859-1", "Western"],
+  ["iso-8859-15", "Western"],
+  ["windows-1250", "Central European"],
+  ["iso-8859-2", "Central European"],
+  ["windows-1251", "Cyrillic"],
+  ["koi8-r", "Cyrillic"],
+  ["windows-1253", "Greek"],
+  ["windows-1254", "Turkish"],
+  ["shift_jis", "Japanese"],
+  ["euc-jp", "Japanese"],
+  ["gbk", "Simplified Chinese"],
+  ["big5", "Traditional Chinese"],
+  ["euc-kr", "Korean"],
+];
+
 const itemClass =
   "flex h-5 shrink-0 items-center whitespace-nowrap rounded-[4px] px-1.5 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]";
-const staticClass = "flex h-5 shrink-0 items-center whitespace-nowrap px-1.5";

@@ -135,6 +135,9 @@ pub struct ChatReply {
     /// differs only when that account was deleted and the turn fell back to resolution, which the
     /// row has now been re-stamped with.
     account_id: Option<String>,
+    /// What a workspace chat's turn changed, per repository — JSON `[{"repo", "path", "id",
+    /// "paths"}]`, as filed in `chat_turn_checkpoints`. `None` for every other turn.
+    checkpoints: Option<String>,
 }
 
 /// A slash command the composer's `/` menu can offer for a provider. See
@@ -1131,6 +1134,17 @@ pub fn chat_branch_conversation(
 
 // ===================== one turn =====================
 
+/// What each turn of a workspace chat changed, per repository: message id → the checkpoints JSON
+/// `chat_send` filed (`[{"repo", "path", "id", "paths"}]`). Turns that changed nothing are absent.
+#[tauri::command]
+pub fn chat_turn_checkpoints(
+    db: State<'_, Db>,
+    conversation_id: String,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    Ok(chat_queries::turn_checkpoints(&conn, &conversation_id).map_err(|e| e.to_string())?.into_iter().collect())
+}
+
 /// Runs one turn of a conversation and resolves when it is over.
 ///
 /// The ordering here is the whole design, and each step is where it is for a reason:
@@ -1168,7 +1182,11 @@ pub async fn chat_send(
     stream: Option<bool>,
     attachments: Option<Vec<String>>,
     skill: Option<crate::provider_skills::SkillPick>,
+    // The workspace chat's plan mode: this turn is read-only and answers with a plan — see
+    // `ai::PLAN_MODE_NOTE`.
+    plan: Option<bool>,
 ) -> Result<ChatReply, String> {
+    let plan = plan.unwrap_or(false);
     let conversation = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         chat_queries::get_conversation(&conn, &conversation_id)
@@ -1488,7 +1506,9 @@ pub async fn chat_send(
             .map(|raw| raw != "false")
             .unwrap_or(true);
 
-    let allowed_tools: Vec<String> = match project.as_ref() {
+    // Whether this turn may write at all: plan mode is the promise not to, asked for by the user.
+    let may_write = (project.is_some() || may_generate_files || workspace_scope) && !plan;
+    let allowed_tools: Vec<String> = if plan { config.engine.read_only_tools() } else { match project.as_ref() {
         // A repo-bound conversation keeps today's behaviour: the user's configured tool list, and
         // edits auto-approved, wrapped in a checkpoint.
         Some(_) => config.tools.clone(),
@@ -1505,7 +1525,7 @@ pub async fn chat_send(
         // received nothing it recognised and ran a read-only conversation with its full agent
         // profile, `write_file` and `bash` included.
         None => config.engine.read_only_tools(),
-    };
+    } };
     // Claude Code denies, in `-p`, any tool nobody pre-approved — and `Skill` is the tool that opens
     // one. Every chat turn gets it, in both modes: with no shell and no writer in a read-only tool
     // set, all a skill can do there is guide the answer. Added here and not in the engine's generic
@@ -1518,7 +1538,7 @@ pub async fn chat_send(
     // The user's own MCP servers, as this conversation switched them — see `crate::chat_mcp`. Not
     // for a turn that may not write: that one loads no server at all.
     let env = config.engine.account().cloned().unwrap_or_else(|| ai_accounts::AccountEnv::system(&config.provider));
-    let turn_mcp = if project.is_some() || may_generate_files || workspace_scope {
+    let turn_mcp = if may_write {
         mcp_plan(&db, &conversation.workspace_id, &config.provider, &config.binary, &env, &conversation.mcp_overrides).await
     } else if config.provider == "codex" {
         // Text only, on Codex: what makes that promise true is switching its own servers off too.
@@ -1534,7 +1554,7 @@ pub async fn chat_send(
     // Auto-approval, not "may write": an engine that has to ask permission it has no way to be
     // granted is an engine that stops halfway and narrates a file it never created — which is
     // exactly what this conversation's first attempt at a spreadsheet did.
-    let write_access = project.is_some() || may_generate_files || workspace_scope;
+    let write_access = may_write;
 
     // The turn's working directory. Created lazily, here, because this is the first moment anyone
     // needs it to exist — and if it cannot be created there is still somewhere to run: the failure
@@ -1672,6 +1692,15 @@ pub async fn chat_send(
             )
         };
         engine_message.push_str(&crate::workspace_chat::live_block(&ws_repos, &chains, &tasks));
+        // `@repo/path` in the question: the engine is told to read them, as the repository chat's.
+        let named: Vec<(String, String)> =
+            ws_repos.iter().filter(|repo| repo.on_disk).map(|repo| (repo.name.clone(), repo.path.clone())).collect();
+        if let Some(note) = ai::workspace_mention_note(&ai::workspace_mentioned_paths(&asked, &named)) {
+            engine_message.push_str(&note);
+        }
+    }
+    if plan {
+        engine_message.push_str(ai::PLAN_MODE_NOTE);
     }
 
     let started = std::time::Instant::now();
@@ -1733,9 +1762,20 @@ pub async fn chat_send(
     if let Some(project) = project.as_ref() {
         checkpoint_after(&project.local_path, checkpoint);
     }
+    // Each repository's restore point is kept, with the files it differs in, when the turn changed
+    // something there — the per-turn review under the answer reads them. The rest are dropped.
+    let mut ws_changes: Vec<serde_json::Value> = Vec::new();
     for (path, checkpoint) in ws_checkpoints {
-        checkpoint_after(&path, checkpoint);
+        let Some(id) = checkpoint else { continue };
+        let paths = crate::git::checkpoint::changed_paths(&path, &id).unwrap_or_default();
+        if paths.is_empty() {
+            let _ = crate::git::checkpoint::remove(&path, &id);
+            continue;
+        }
+        let repo = ws_repos.iter().find(|repo| repo.path == path).map(|repo| repo.name.clone()).unwrap_or_default();
+        ws_changes.push(serde_json::json!({ "repo": repo, "path": path, "id": id, "paths": paths }));
     }
+    let turn_checkpoints = (!ws_changes.is_empty()).then(|| serde_json::Value::Array(ws_changes).to_string());
     // After the run, not before: it is cached per binary, so only the first turn of an app session
     // pays for the probe and it never sits between send and the engine starting.
     let engine_version = ai::engine_version(&config.binary).await;
@@ -1797,6 +1837,10 @@ pub async fn chat_send(
                         created_at: String::new(),
                     },
                 );
+                // A turn that failed halfway may have changed files all the same.
+                if let Some(checkpoints) = turn_checkpoints.as_deref() {
+                    let _ = chat_queries::set_turn_checkpoints(&conn, &assistant_message_id, &conversation_id, checkpoints);
+                }
             }
             return Err(e);
         }
@@ -1822,6 +1866,9 @@ pub async fn chat_send(
         };
         match chat_queries::append_message(&conn, &row) {
             Ok(()) => {
+                if let Some(checkpoints) = turn_checkpoints.as_deref() {
+                    let _ = chat_queries::set_turn_checkpoints(&conn, &assistant_message_id, &conversation_id, checkpoints);
+                }
                 // An answer has landed. Marked unread here rather than left to the frontend,
                 // because the window that asked the question is not necessarily the one looking at
                 // it — a turn started in the quick-ask box, or in a detached window, lands in a
@@ -1882,6 +1929,7 @@ pub async fn chat_send(
         // Re-derived from the JSON that was stored, so the reply and the row can never disagree
         // about what this turn made.
         outputs: produced_paths,
+        checkpoints: turn_checkpoints,
     })
 }
 
@@ -2019,6 +2067,7 @@ async fn flow_turn(
         message_id: assistant_message_id,
         compacted: false,
         outputs: Vec::new(),
+        checkpoints: None,
     })
 }
 

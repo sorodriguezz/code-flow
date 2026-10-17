@@ -16,6 +16,7 @@ import {
   Layers,
   List,
   Loader2,
+  MoreHorizontal,
   Play,
   Rows3,
   Save,
@@ -24,6 +25,7 @@ import {
   Undo2,
   Waypoints,
   X,
+  BarChart3,
 } from "lucide-react";
 import { Tooltip } from "../common/Tooltip";
 import { AiSparkles } from "../common/AiGlyph";
@@ -31,7 +33,17 @@ import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { installSqlCompletions } from "../../lib/db/sqlCompletion";
 import { formatLanguage, formatSql } from "../../lib/db/sqlFormat";
 import { rowDriverId } from "../../lib/db/drivers";
-import { firstStatement, type ConsoleLanguage } from "../../lib/db/statements";
+import { firstStatement, statementAt, type ConsoleLanguage } from "../../lib/db/statements";
+import { errorLocation, locateStatement } from "../../lib/db/errorLocation";
+import { fillParams, findParams } from "../../lib/db/queryParams";
+import { installSnippetCompletions } from "../../lib/db/snippetCompletion";
+import { escapeSnippetBody } from "../../lib/db/snippets";
+import { ensureDbPrefsLoaded, useDbPrefsStore } from "../../state/dbPrefsStore";
+import { EnvironmentChip, EnvironmentStripe, useConnectionEnvironment } from "./EnvironmentChip";
+import { PlanView } from "./PlanView";
+import type { PlanEngine } from "../../lib/db/planTree";
+import { ResultChart } from "./ResultChart";
+import { copyFormats, xlsxItem } from "./resultCopy";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
@@ -110,6 +122,16 @@ const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
 // The provider is global to Monaco rather than per-editor, so it is installed once on import
 // — the same shape as the GraphQL and script panels.
 installSqlCompletions();
+installSnippetCompletions();
+
+/**
+ * Where each console's last run started in its buffer, by tab — what the error underline is placed
+ * from. Module state: one panel instance serves every console tab, and a ref would be the wrong
+ * console's after a switch.
+ */
+const runOrigins = new Map<string, number>();
+/** The marker owner for those underlines, so clearing them never touches another source's. */
+const ERROR_OWNER = "cf-db-run";
 
 const ROW_LIMITS = [100, 500, 1000, 5000, 0];
 
@@ -144,6 +166,8 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
   }, [tab.id, tab.connectionId, tab.database]);
 
   const { driver: connectionDriver, engine } = useConnectionDriver(connection);
+  const environment = useConnectionEnvironment(tab.connectionId);
+  const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
   const isSql = engine?.sql ?? true;
   /**
    * Which Monaco language the console gets.
@@ -203,29 +227,110 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
    * Nothing is sent for an empty console, or for one holding only comments: `firstStatement`
    * answers `null` there rather than pretending the first blank line is a statement.
    */
-  const run = (mode: "one" | "all") => {
+  const runMode = useDbPrefsStore((s) => s.runMode);
+  useEffect(() => ensureDbPrefsLoaded(), []);
+  const openModal = useDbModalStore((s) => s.openDbModal);
+
+  /**
+   * The text Run would act on right now, and where it starts in the buffer: the selection, or the
+   * statement under the caret (or the first one, per the preference), or — for `"all"` — the buffer.
+   * `null` when there is nothing to run.
+   */
+  const target = (mode: "one" | "all"): { text: string; offset: number } | null => {
     const editor = editorRef.current;
+    const model = editor?.getModel();
     // Read at call time rather than through the render's captured `store`: this also runs from a
     // Monaco chord registered once for the life of the panel — see `commandsRef`.
     const live = useDbStore.getState();
     const selection = editor?.getSelection();
-    const selected =
-      selection && !selection.isEmpty() ? editor?.getModel()?.getValueInRange(selection) ?? "" : "";
-    if (selected.trim()) {
-      void live.runConsole(tab.id, selected);
-      return;
-    }
-    if (mode === "all") {
-      void live.runConsole(tab.id);
-      return;
+    if (model && selection && !selection.isEmpty()) {
+      const text = model.getValueInRange(selection);
+      if (text.trim()) return { text, offset: model.getOffsetAt(selection.getStartPosition()) };
     }
     // Read off the store, not off the render's `tab`: the ⌘↵ chord is registered once for the life
     // of the panel and fires long after this closure was built — the same staleness `commandsRef`
     // exists for. Monaco's `onChange` writes straight into the tab, so this is the live text.
     const current = live.tabs.find((entry) => entry.id === tab.id);
     const body = current?.kind === "console" ? current.body : tab.body;
+    if (mode === "all") return body.trim() ? { text: body, offset: 0 } : null;
+    if (useDbPrefsStore.getState().runMode === "cursor" && model && editor?.getPosition()) {
+      const at = statementAt(body, model.getOffsetAt(editor.getPosition()!), consoleLanguage);
+      if (!at) return null;
+      flash(at.start, at.end);
+      return { text: at.text, offset: at.start };
+    }
     const first = firstStatement(body, consoleLanguage);
-    if (first) void live.runConsole(tab.id, first);
+    return first ? { text: first, offset: Math.max(0, body.indexOf(first)) } : null;
+  };
+
+  /** Briefly marks the statement about to run, so "which one did ⌘↵ pick" is never a guess. */
+  const flash = (start: number, end: number) => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (!editor || !model) return;
+    const from = model.getPositionAt(start);
+    const to = model.getPositionAt(end);
+    const decorations = editor.createDecorationsCollection([
+      {
+        range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column },
+        options: { className: "cf-db-run-flash", isWholeLine: false },
+      },
+    ]);
+    window.setTimeout(() => decorations.clear(), 650);
+  };
+
+  /** Sends `text`, asking for its placeholders' values first when it has any. */
+  const send = (text: string, offset: number, how: "run" | "explain" | "analyze") => {
+    const go = (sql: string) => {
+      runOrigins.set(tab.id, offset);
+      const live = useDbStore.getState();
+      if (how === "run") void live.runConsole(tab.id, sql);
+      else void live.explainConsole(tab.id, sql, how === "analyze");
+    };
+    const params = findParams(text, consoleLanguage);
+    if (params.length === 0) {
+      go(text);
+      return;
+    }
+    openModal({
+      kind: "params",
+      params,
+      language: consoleLanguage,
+      onRun: (values) => go(fillParams(text, values, consoleLanguage)),
+    });
+  };
+
+  /**
+   * What the two run buttons do, and the one rule they share.
+   *
+   * **A selection always wins.** Highlighting a fragment is the most explicit thing a console
+   * offers, and it means the same on both buttons — so the difference between them is only what
+   * happens when nothing is highlighted:
+   *
+   * - `"one"` (Run, ⌘↵) runs the statement under the caret — or, with the preference set to it, the
+   *   **first** statement in the buffer, for those who build a script up and re-run its top.
+   * - `"all"` (⇧⌘↵) runs the buffer end to end, in order. That is the deliberate act, so it is the
+   *   one on the button you have to go and find.
+   *
+   * Nothing is sent for an empty console, or for one holding only comments.
+   */
+  const run = (mode: "one" | "all") => {
+    const picked = target(mode);
+    if (picked) send(picked.text, picked.offset, "run");
+  };
+
+  const explain = (analyze: boolean) => {
+    const picked = target("one");
+    if (picked) send(picked.text, picked.offset, analyze ? "analyze" : "explain");
+  };
+
+  /** The selection — or the statement under the caret — offered as a new snippet. */
+  const saveAsSnippet = () => {
+    const picked = target("one");
+    openModal({
+      kind: "snippets",
+      draft: { body: escapeSnippetBody(picked?.text ?? ""), language: consoleLanguage },
+    });
   };
 
   /**
@@ -396,8 +501,16 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
     format: () => void format(),
   };
 
+  const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
+    monacoRef.current = monaco;
+    // An underline belongs to the text it was placed on: the first edit after a failed run clears it
+    // rather than leaving it to drift over whatever is typed there.
+    editor.onDidChangeModelContent(() => {
+      const model = editor.getModel();
+      if (model) monaco.editor.setModelMarkers(model, ERROR_OWNER, []);
+    });
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () =>
       commandsRef.current.run("one"),
     );
@@ -410,6 +523,48 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
       commandsRef.current.format(),
     );
   };
+
+  /**
+   * Underlines where a failed statement broke, from what the server said about it — see
+   * `lib/db/errorLocation`. Each result is found in the buffer from where the run began, in order,
+   * so the second of two identical statements is underlined as the second. A failure that names no
+   * place underlines its statement's first line, which still says *which* statement broke.
+   */
+  useEffect(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    const model = editor?.getModel();
+    if (!editor || !monaco || !model) return;
+    if (!model.uri.path.includes(tab.id)) return;
+    const markers: Parameters<typeof monaco.editor.setModelMarkers>[2] = [];
+    const buffer = model.getValue();
+    let cursor = runOrigins.get(tab.id) ?? 0;
+    for (const entry of tab.result?.results ?? []) {
+      const at = locateStatement(buffer, entry.statement, cursor);
+      if (at < 0) continue;
+      cursor = at + entry.statement.length;
+      if (!entry.error) continue;
+      const start = model.getPositionAt(at);
+      const spot = errorLocation(entry.statement, entry.error);
+      const firstLine = entry.statement.split("\n")[0] ?? "";
+      const line = start.lineNumber + (spot ? spot.line - 1 : 0);
+      const column = spot ? (spot.line === 1 ? start.column + spot.column - 1 : spot.column) : start.column;
+      const endColumn = spot
+        ? spot.endLine === 1
+          ? start.column + spot.endColumn - 1
+          : spot.endColumn
+        : start.column + firstLine.length;
+      markers.push({
+        severity: monaco.MarkerSeverity.Error,
+        message: entry.error,
+        startLineNumber: line,
+        startColumn: column,
+        endLineNumber: line,
+        endColumn: Math.max(column + 1, endColumn),
+      });
+    }
+    monaco.editor.setModelMarkers(model, ERROR_OWNER, markers);
+  }, [tab.result, tab.id]);
 
   /**
    * The keyboard's way into the assistant, through the shortcut registry rather than a chord bound
@@ -432,6 +587,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <EnvironmentStripe environment={environment} />
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
         {connection && <EngineBadge kind={connection.kind} driver={connectionDriver} label={engine?.label ?? ""} />}
@@ -453,6 +609,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
         <span className="max-w-[160px] truncate text-[12px] font-medium text-[var(--cf-text)]">
           {connection?.name ?? t("db.connectionGone")}
         </span>
+        <EnvironmentChip environment={environment} />
 
         <span className="mx-0.5 h-4 w-px bg-[var(--cf-border)]" />
 
@@ -542,11 +699,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
           >
             <Waypoints size={13} />
           </ToolbarButton>
-          <ToolbarButton
-            onClick={() => void store.explainConsole(tab.id)}
-            disabled={tab.running}
-            title={t("db.explain")}
-          >
+          <ToolbarButton onClick={() => explain(false)} disabled={tab.running} title={t("db.explain")}>
             <span className="text-[10.5px] font-bold">EX</span>
           </ToolbarButton>
           {isSql && (
@@ -572,7 +725,54 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
           >
             {tab.dirty ? <Save size={13} /> : <Check size={13} />}
           </ToolbarButton>
+          <ToolbarButton
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setMoreMenu({ x: rect.right - 240, y: rect.bottom + 2 });
+            }}
+            title={t("db.moreActions")}
+          >
+            <MoreHorizontal size={13} />
+          </ToolbarButton>
         </div>
+        {moreMenu && (
+          <ContextMenu
+            x={moreMenu.x}
+            y={moreMenu.y}
+            onClose={() => setMoreMenu(null)}
+            items={[
+              {
+                label: t("db.runModeCursor"),
+                icon: runMode === "cursor" ? Check : undefined,
+                onClick: () => useDbPrefsStore.getState().setRunMode("cursor"),
+              },
+              {
+                label: t("db.runModeFirst"),
+                icon: runMode === "first" ? Check : undefined,
+                onClick: () => useDbPrefsStore.getState().setRunMode("first"),
+              },
+              ...(isSql
+                ? [
+                    {
+                      label: t("db.explainAnalyze"),
+                      icon: Play,
+                      separated: true,
+                      disabled: tab.running,
+                      onClick: () => explain(true),
+                    },
+                  ]
+                : []),
+              { label: t("db.snippets"), icon: FolderCode, separated: !isSql, onClick: () => openModal({ kind: "snippets" }) },
+              { label: t("db.saveAsSnippet"), icon: Save, onClick: saveAsSnippet },
+              {
+                label: t("db.sessions"),
+                icon: Rows3,
+                separated: true,
+                onClick: () => openModal({ kind: "sessions", connectionId: tab.connectionId, database: tab.database || null }),
+              },
+            ]}
+          />
+        )}
       </div>
 
       {/* The console proper and, beside it, the assistant.
@@ -1038,11 +1238,14 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
    * read a wide one down the page. Read-only here — a console result has no row to delete. */
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const anchor = useRef<number | null>(null);
+  /** The result drawn as a chart instead of a grid. Per result: a new one starts as a grid. */
+  const [chart, setChart] = useState(false);
 
   // New rows, new indexes — a selection made against the previous result means nothing here.
   useEffect(() => {
     setSelected(new Set());
     anchor.current = null;
+    setChart(false);
   }, [tab.result, tab.activeResult]);
 
   const selectRow = (row: number, mods: { range: boolean; toggle: boolean }) => {
@@ -1074,24 +1277,7 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
   }
 
   if (tab.plan !== null) {
-    return (
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1">
-          <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {t("db.queryPlan")}
-          </span>
-          <ToolbarButton
-            onClick={() => void navigator.clipboard.writeText(tab.plan ?? "")}
-            title={t("db.copy")}
-          >
-            <Copy size={12} />
-          </ToolbarButton>
-        </div>
-        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-2 font-mono text-[12px] text-[var(--cf-text)]">
-          {tab.plan}
-        </pre>
-      </div>
-    );
+    return <PlanView text={tab.plan} engine={planEngine(kind)} analyzed={tab.planAnalyzed ?? false} />;
   }
 
   const result = tab.result;
@@ -1144,12 +1330,17 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
       }
     },
   }));
-  exportItems.unshift({
-    label: t("db.copyAsCsv"),
-    icon: Copy,
-    onClick: () => void navigator.clipboard.writeText(formatResult(scoped, "csv")),
-    separated: false,
-  });
+  exportItems.push(xlsxItem(scoped, "result"));
+  exportItems.unshift(
+    {
+      label: t("db.copyAsCsv"),
+      icon: Copy,
+      onClick: () => void navigator.clipboard.writeText(formatResult(scoped, "csv")),
+      separated: false,
+    },
+    ...copyFormats(scoped, "table"),
+  );
+  if (exportItems[5]) exportItems[5] = { ...exportItems[5], separated: true };
   // The whole result, not the rows the limit let through: the statement runs again on this
   // console's session and every row goes straight to the file. Only for a result that has columns —
   // and the backend refuses a statement that would write, since exporting runs it a second time.
@@ -1276,6 +1467,16 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
               </ToolbarButton>
             </>
           )}
+          {active.columns.length > 0 && !active.error && (
+            <ToolbarButton
+              onClick={() => setChart((current) => !current)}
+              active={chart}
+              disabled={active.rows.length === 0}
+              title={t("db.chart.toggle")}
+            >
+              <BarChart3 size={12} />
+            </ToolbarButton>
+          )}
           <ToolbarButton
             onClick={openRecords}
             disabled={active.rows.length === 0}
@@ -1333,6 +1534,10 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
             {t("db.statementOkHint")}
           </p>
         </div>
+      ) : chart ? (
+        <div className="min-h-0 flex-1">
+          <ResultChart columns={active.columns} rows={scoped.rows} />
+        </div>
       ) : (
         <div className="min-h-0 flex-1">
           <ResultGrid
@@ -1342,6 +1547,8 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
             // Per tab, for the same reason the data tab's are — one panel instance serves every
             // console, so widths held in the grid were applied by column name across all of them.
             widths={tab.ui.widths}
+            columnLayout={tab.ui.columns}
+            onColumnLayout={(columns) => setUi(tab.id, { columns })}
             onWidths={(widths) => setUi(tab.id, { widths })}
             // A console result is read-only — it is whatever the statement returned, not a table
             // with a primary key to write back through — so `onSet` is null and the menu comes out
@@ -1451,4 +1658,24 @@ function TransactionChip({
       </ToolbarButton>
     </span>
   );
+}
+
+/** Which plan format `PlanView` should read for an engine — see `lib/db/planTree`. */
+function planEngine(kind: DbKind): PlanEngine {
+  switch (kind) {
+    case "postgres":
+    case "supabase":
+      return "postgres";
+    case "mysql":
+    case "mariadb":
+      return "mysql";
+    case "sqlite":
+      return "sqlite";
+    case "sqlserver":
+      return "mssql";
+    case "oracle":
+      return "oracle";
+    default:
+      return "other";
+  }
 }

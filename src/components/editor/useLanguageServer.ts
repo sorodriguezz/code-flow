@@ -11,7 +11,7 @@ import type { Monaco } from "@monaco-editor/react";
 import { listDir } from "../../lib/tauri/commands";
 import { onLspDiagnostics, onLspExited, onLspRefresh } from "../../lib/tauri/events";
 import { relPathFromModelUri } from "../../lib/editorModel";
-import { LANGUAGE_SERVERS } from "../../lib/lsp/servers";
+import { LANGUAGE_SERVERS, lspLanguageOf, monacoLanguageOf } from "../../lib/lsp/servers";
 import {
   askAll,
   currentProjectId,
@@ -82,7 +82,9 @@ import { applyRename } from "./renameFlow";
 
 /** Every language any catalogued server claims. Providers register for all of them once, and each
  *  returns nothing when no session is running for the file in front of it. */
-const CLAIMED_LANGUAGES = [...new Set(LANGUAGE_SERVERS.flatMap((server) => server.languages))];
+const CLAIMED_LANGUAGES = [
+  ...new Set(LANGUAGE_SERVERS.flatMap((server) => server.languages.map(monacoLanguageOf))),
+];
 
 let installed = false;
 
@@ -100,7 +102,7 @@ function fileOf(model: MonacoEditorNS.ITextModel): { relPath: string; uri: strin
   if (!relPath || !lspKnows(relPath)) return null;
   const uri = uriFor(relPath);
   if (!uri) return null;
-  return { relPath, uri, language: model.getLanguageId() };
+  return { relPath, uri, language: lspLanguageOf(relPath, model.getLanguageId()) };
 }
 
 /** The `textDocument`/`position` pair that opens almost every LSP request. */
@@ -648,7 +650,7 @@ function installDocumentSync(monaco: Monaco): void {
     if (!projectId) return;
     const relPath = relPathFromModelUri(model.uri, projectId);
     if (!relPath || perModel.has(model.uri.toString())) return;
-    const language = model.getLanguageId();
+    const language = lspLanguageOf(relPath, model.getLanguageId());
     if (sessionsForLanguage(language).length === 0) return;
     syncOpen(relPath, language, model.getValue());
     perModel.set(

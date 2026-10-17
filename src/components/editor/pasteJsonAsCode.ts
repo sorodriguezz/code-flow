@@ -184,6 +184,13 @@ export function offerPasteTarget(get: () => CodeEditor | null): () => void {
   };
 }
 
+/** The focused pane's editor, when it has a file — what the repository chat's «Insertar en el editor»
+ *  types into. */
+export function focusedCodeEditor(): CodeEditor | null {
+  const editor = focusedEditor?.() ?? null;
+  return editor?.getModel() ? editor : null;
+}
+
 /** Whether there is a file on screen to paste into — the palette lists the command only then. */
 export function canPasteJsonHere(): boolean {
   return Boolean(focusedEditor?.()?.getModel());

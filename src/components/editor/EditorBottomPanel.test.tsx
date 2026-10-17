@@ -50,7 +50,7 @@ const problem = (line: number, severity: string, message: string, code?: string)
   source: "ts",
 });
 
-const render = () => renderToStaticMarkup(<EditorBottomPanel onOpen={() => {}} />);
+const render = () => renderToStaticMarkup(<EditorBottomPanel onOpen={() => {}} repoPath="/repo" projectId="p" activeFile={null} />);
 
 describe("EditorBottomPanel", () => {
   it("lists problems grouped by file, each with where it is and who said so", () => {

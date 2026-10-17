@@ -19,6 +19,7 @@ import {
   stoppedOperation,
 } from "../lib/gitErrors";
 import * as gitApi from "../lib/tauri/gitCommands";
+import { commitFilterActive, logFilterOf, NO_COMMIT_FILTER, type CommitFilter } from "../lib/commitFilter";
 import type { LineSelection } from "../lib/tauri/gitCommands";
 import type {
   BranchInfo,
@@ -61,6 +62,12 @@ interface RepoState {
    * broken. Matched against the message, the author and the hash — see `matchesCommit`.
    */
   commitQuery: string;
+  /**
+   * The graph's scope and filters, applied by the backend's walk (see `list_commits_page`'s
+   * `filter`) — unlike `commitQuery`, which narrows what is loaded. Session state, and reset when
+   * the repository changes: a path or an author belongs to the repository it was typed for.
+   */
+  commitFilter: CommitFilter;
   /** True while a *further* page is arriving, so the button can say so without the whole table
    *  going back to skeletons. */
   commitsLoadingMore: boolean;
@@ -152,6 +159,7 @@ interface RepoState {
   refreshCommits: (options?: RefreshOptions) => Promise<void>;
   loadMoreCommits: () => Promise<void>;
   setCommitQuery: (query: string) => void;
+  setCommitFilter: (filter: CommitFilter) => Promise<void>;
   refreshUnpushedCommits: () => Promise<void>;
   refreshStashes: () => Promise<void>;
   refreshRemotes: () => Promise<void>;
@@ -201,7 +209,8 @@ interface RepoState {
    * Resolves whether the commit landed — the message box is only cleared when it did. A commit that
    * failed for want of a name and email opens the identity form and retries once it is filled in.
    */
-  commitChanges: (message: string) => Promise<boolean>;
+  /** `amend`: replace the last commit with the index and this message (an empty one keeps the old). */
+  commitChanges: (message: string, opts?: { amend?: boolean }) => Promise<boolean>;
 
   checkoutBranch: (name: string) => Promise<void>;
   checkoutDetached: (refname: string) => Promise<void>;
@@ -781,6 +790,9 @@ const UNREAD: RepoSnapshot = {
 function rememberRepo(state: RepoState): void {
   const path = state.repoPath;
   if (!path || state.projectLoading || state.commitsLoading || !state.status) return;
+  // A filtered history is not this repository's history: coming back (filters reset) must not
+  // show it as if it were.
+  if (commitFilterActive(state.commitFilter)) return;
   snapshots.delete(path);
   snapshots.set(path, {
     status: state.status,
@@ -810,6 +822,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   commits: [],
   commitsHasMore: false,
   commitQuery: "",
+  commitFilter: NO_COMMIT_FILTER,
   commitsLoadingMore: false,
   unpushedCommits: [],
   stashes: [],
@@ -847,6 +860,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       // The repository being left owned these; whatever it still had in flight lands nowhere now.
       commitsLoading: false,
       commitsLoadingMore: false,
+      commitFilter: NO_COMMIT_FILTER,
       selectedCommitId: null,
       commitDiff: [],
       commitDiffLoading: false,
@@ -955,7 +969,9 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       // tick must not silently throw away four pages the user scrolled to, and must not re-fetch
       // ten thousand commits either.
       const shown = Math.max(get().commits.length, COMMIT_PAGE);
-      const page = await api.listCommitsPage(repoPath, true, 0, shown);
+      const filter = get().commitFilter;
+      const page = await api.listCommitsPage(repoPath, filter.scope !== "current", 0, shown, logFilterOf(filter));
+      if (get().commitFilter !== filter) return;
       // `commitsLoading` is the next repository's now (the switch reset it), so it is left alone.
       if (get().repoPath !== repoPath) return;
       const commits = page.commits;
@@ -979,12 +995,22 @@ export const useRepoStore = create<RepoState>((set, get) => ({
    * easy to hit twice, and two pages arriving for the same `skip` would duplicate every row.
    */
   loadMoreCommits: async () => {
-    const { repoPath, commits, commitsLoadingMore, commitsHasMore } = get();
+    const { repoPath, commits, commitsLoadingMore, commitsHasMore, commitFilter } = get();
     if (!repoPath || commitsLoadingMore || !commitsHasMore) return;
     set({ commitsLoadingMore: true });
     try {
-      const page = await api.listCommitsPage(repoPath, true, commits.length, COMMIT_PAGE);
+      const page = await api.listCommitsPage(
+        repoPath,
+        commitFilter.scope !== "current",
+        commits.length,
+        COMMIT_PAGE,
+        logFilterOf(commitFilter),
+      );
       if (get().repoPath !== repoPath) return;
+      if (get().commitFilter !== commitFilter) {
+        set({ commitsLoadingMore: false });
+        return;
+      }
       set((state) => ({
         // Re-read from the store rather than closing over `commits`: a watcher refresh may have
         // replaced the list while this page was in flight, and concatenating onto the stale copy
@@ -1000,6 +1026,12 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   },
 
   setCommitQuery: (commitQuery) => set({ commitQuery }),
+
+  setCommitFilter: async (commitFilter) => {
+    // From the top: the pages already loaded belong to the old filter.
+    set({ commitFilter, commits: [], commitsHasMore: false, selectedCommitId: null, commitDiff: [], selectedCommitPath: null, commitFileDiff: null });
+    await get().refreshCommits();
+  },
 
   refreshUnpushedCommits: async () => {
     const { repoPath } = get();
@@ -1306,7 +1338,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     });
   },
 
-  commitChanges: async (message) => {
+  commitChanges: async (message, opts) => {
     const { repoPath } = get();
     if (!repoPath) return false;
     // Not `guarded`: that swallows the outcome, and the caller clears the message box on it — a
@@ -1314,14 +1346,15 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     let committed = false;
     set({ busy: true, error: null });
     try {
+      const run = () => (opts?.amend ? api.amendCommit(repoPath, message) : api.commitChanges(repoPath, message));
       try {
-        await api.commitChanges(repoPath, message);
+        await run();
       } catch (e) {
         if (!hasTag(e, GIT_ERROR.identityMissing)) throw e;
         // git has no name or email to sign with. Ask for them — the message is still in the box —
         // and retry once they are saved, instead of showing libgit2's sentence about a config key.
         if (!(await useGitDialogStore.getState().askIdentity())) return false;
-        await api.commitChanges(repoPath, message);
+        await run();
       }
       committed = true;
       await get().refreshAll();

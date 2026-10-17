@@ -8,6 +8,8 @@ import "../../lib/monacoSetup";
 import {
   AlertTriangle,
   ArrowDown,
+  Bookmark,
+  BookmarkPlus,
   ArrowDownToLine,
   ArrowUp,
   ChevronDown,
@@ -31,6 +33,8 @@ import { chipClass, fieldClass, type ChipTone } from "../common/recipes";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
 import { Tooltip } from "../common/Tooltip";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { promptAction } from "../../state/promptStore";
 import { useApiStore } from "../../state/apiStore";
 import { DEFAULT_TAB_VIEW, useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useThemeStore } from "../../state/themeStore";
@@ -48,7 +52,7 @@ import {
   apiWsConnect,
   apiWsSend,
 } from "../../lib/tauri/apiCommands";
-import type { MqttSubscription, StreamMessage } from "../../types/api";
+import type { MqttSubscription, SavedStreamMessage, StreamMessage } from "../../types/api";
 
 /**
  * The workbench for the three long-lived protocols — WebSocket, Socket.IO and MQTT.
@@ -643,18 +647,18 @@ function WebsocketComposer({ tabId, connectionId }: { tabId: string; connectionI
 
   const jsonError = settings.messageFormat === "json" && !isJson(settings.draftMessage);
 
-  const send = async () => {
+  const send = async (payload = settings.draftMessage) => {
     if (!connectionId) return;
     const binary = settings.messageFormat === "binary";
     try {
-      await apiWsSend(connectionId, settings.draftMessage, binary);
+      await apiWsSend(connectionId, payload, binary);
       // The transports only report what arrives; without a local echo the log would show half
       // of the conversation.
       appendMessage(tabId, {
         connection_id: connectionId,
         direction: "sent",
         channel: "",
-        payload: settings.draftMessage,
+        payload,
         binary,
         at: Date.now(),
       });
@@ -686,6 +690,13 @@ function WebsocketComposer({ tabId, connectionId }: { tabId: string; connectionI
         )}
         {jsonError && <InvalidJson t={t} />}
         <div className="flex-1" />
+        <SavedMessages
+          tabId={tabId}
+          draft={{ payload: settings.draftMessage }}
+          canSend={!!connectionId}
+          onLoad={(message) => updateDraft(tabId, { websocket: { ...settings, draftMessage: message.payload } })}
+          onSend={(message) => void send(message.payload)}
+        />
         <button
           onClick={() => void send()}
           disabled={!connectionId || jsonError}
@@ -849,15 +860,15 @@ function SocketIoComposer({ tabId, connectionId }: { tabId: string; connectionId
 
   const jsonError = !isJson(settings.draftPayload);
 
-  const emit = async () => {
+  const emit = async (event = settings.draftEvent, payload = settings.draftPayload) => {
     if (!connectionId) return;
     try {
-      await apiSocketioEmit(connectionId, settings.draftEvent, settings.draftPayload);
+      await apiSocketioEmit(connectionId, event, payload);
       appendMessage(tabId, {
         connection_id: connectionId,
         direction: "sent",
-        channel: settings.draftEvent,
-        payload: settings.draftPayload,
+        channel: event,
+        payload,
         binary: false,
         at: Date.now(),
       });
@@ -877,6 +888,15 @@ function SocketIoComposer({ tabId, connectionId }: { tabId: string; connectionId
         />
         {jsonError && <InvalidJson t={t} />}
         <div className="flex-1" />
+        <SavedMessages
+          tabId={tabId}
+          draft={{ payload: settings.draftPayload, event: settings.draftEvent }}
+          canSend={!!connectionId}
+          onLoad={(message) =>
+            updateDraft(tabId, { socketio: { ...settings, draftPayload: message.payload, draftEvent: message.event ?? settings.draftEvent } })
+          }
+          onSend={(message) => void emit(message.event ?? settings.draftEvent, message.payload)}
+        />
         <button
           onClick={() => void emit()}
           disabled={!connectionId || jsonError || settings.draftEvent.trim() === ""}
@@ -1129,25 +1149,24 @@ function MqttComposer({ tabId, connectionId }: { tabId: string; connectionId: st
 
   const patch = (next: Partial<typeof settings>) => updateDraft(tabId, { mqtt: { ...settings, ...next } });
 
-  const publish = async () => {
+  const publish = async (
+    topic = settings.publishTopic,
+    payload = settings.publishPayload,
+    qos = settings.publishQos,
+    retain = settings.publishRetain,
+  ) => {
     if (!connectionId) return;
     try {
-      await apiMqttPublish(
-        connectionId,
-        settings.publishTopic,
-        settings.publishPayload,
-        settings.publishQos,
-        settings.publishRetain,
-      );
+      await apiMqttPublish(connectionId, topic, payload, qos, retain);
       appendMessage(tabId, {
         connection_id: connectionId,
         direction: "sent",
-        channel: settings.publishTopic,
-        payload: settings.publishPayload,
+        channel: topic,
+        payload,
         binary: false,
         at: Date.now(),
-        qos: settings.publishQos,
-        retain: settings.publishRetain,
+        qos,
+        retain,
       });
     } catch (e) {
       pushErrorToast(String(e));
@@ -1177,6 +1196,22 @@ function MqttComposer({ tabId, connectionId }: { tabId: string; connectionId: st
           {t("api.mqtt.retain")}
         </label>
         <div className="flex-1" />
+        <SavedMessages
+          tabId={tabId}
+          draft={{ payload: settings.publishPayload, topic: settings.publishTopic, qos: settings.publishQos, retain: settings.publishRetain }}
+          canSend={!!connectionId}
+          onLoad={(message) =>
+            patch({
+              publishPayload: message.payload,
+              publishTopic: message.topic ?? settings.publishTopic,
+              publishQos: message.qos ?? settings.publishQos,
+              publishRetain: message.retain ?? settings.publishRetain,
+            })
+          }
+          onSend={(message) =>
+            void publish(message.topic ?? settings.publishTopic, message.payload, message.qos ?? settings.publishQos, message.retain ?? settings.publishRetain)
+          }
+        />
         <button
           onClick={() => void publish()}
           disabled={!connectionId || settings.publishTopic.trim() === ""}
@@ -1200,6 +1235,81 @@ function MqttComposer({ tabId, connectionId }: { tabId: string; connectionId: st
 // ---------------------------------------------------------------------------
 // Shared bits
 // ---------------------------------------------------------------------------
+
+/**
+ * The payloads kept with the request (`spec.savedMessages`) to send again with one click: «Guardar»
+ * keeps the composer's draft under a name, and the list sends one, loads it into the composer, or
+ * forgets it. One list per request — what is saved carries its own event (Socket.IO) or topic, QoS
+ * and retain (MQTT), so sending it does not depend on what the composer holds now.
+ */
+function SavedMessages({
+  tabId,
+  draft,
+  canSend,
+  onLoad,
+  onSend,
+}: {
+  tabId: string;
+  draft: Omit<SavedStreamMessage, "id" | "name">;
+  canSend: boolean;
+  onLoad: (message: SavedStreamMessage) => void;
+  onSend: (message: SavedStreamMessage) => void;
+}) {
+  const t = useT();
+  const saved = useApiStore((s) => s.openTabs.find((tab) => tab.id === tabId)?.draft.savedMessages) ?? [];
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const write = (next: SavedStreamMessage[]) => useApiStore.getState().updateDraft(tabId, { savedMessages: next });
+
+  const save = async () => {
+    if (draft.payload.trim() === "") return;
+    const suggested = (draft.event ?? draft.topic ?? firstLine(draft.payload)).slice(0, 40) || t("api.saved.untitled");
+    const name = await promptAction(t("api.saved.namePrompt"), { initial: suggested, confirmLabel: t("api.saved.save") });
+    if (name === null || name.trim() === "") return;
+    write([...saved, { id: newRowId(), name: name.trim(), ...draft }]);
+  };
+
+  const items: MenuItem[] = saved.map((message) => ({
+    label: message.name,
+    onClick: () => {},
+    children: [
+      { label: t("api.saved.send"), icon: Send, disabled: !canSend, onClick: () => onSend(message) },
+      { label: t("api.saved.load"), icon: ArrowDownToLine, onClick: () => onLoad(message) },
+      { label: t("api.saved.remove"), icon: Trash2, danger: true, separated: true, onClick: () => write(saved.filter((m) => m.id !== message.id)) },
+    ],
+  }));
+
+  return (
+    <>
+      <Tooltip label={t("api.saved.saveHint")}>
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={draft.payload.trim() === ""}
+          aria-label={t("api.saved.saveHint")}
+          className={iconButtonClass({ size: "sm" })}
+        >
+          <BookmarkPlus size={14} />
+        </button>
+      </Tooltip>
+      {saved.length > 0 && (
+        <button
+          type="button"
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setMenu({ x: rect.left, y: rect.bottom + 2 });
+          }}
+          className={buttonClass({ variant: "ghost", size: "sm" })}
+        >
+          <Bookmark size={13} />
+          {t("api.saved.list", { n: saved.length })}
+          <ChevronDown size={12} />
+        </button>
+      )}
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={items} heading={t("api.saved.heading")} onClose={() => setMenu(null)} />}
+    </>
+  );
+}
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (

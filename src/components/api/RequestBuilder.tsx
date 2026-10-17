@@ -5,6 +5,7 @@ import {
   Code2,
   Download,
   FileQuestion,
+  Gauge,
   Loader2,
   Save,
   Send,
@@ -34,6 +35,8 @@ import { AuthPanel } from "./AuthPanel";
 import { BodyPanel } from "./BodyPanel";
 import { GraphqlPanel } from "./GraphqlPanel";
 import { ScriptsPanel } from "./ScriptsPanel";
+import { TestsPanel } from "./TestsPanel";
+import { evaluateAssertions } from "../../lib/api/assertions";
 import { RequestSettingsPanel } from "./RequestSettingsPanel";
 import { ResponsePanel } from "./ResponsePanel";
 import { StreamPanel } from "./StreamPanel";
@@ -49,6 +52,7 @@ import { looksLikeCurl, parseCurl } from "../../lib/api/importers";
 import { PROTOCOL_NAMES, switchProtocol } from "../../lib/api/protocol";
 import { apiCancelHttp, apiSaveFile } from "../../lib/tauri/apiCommands";
 import { useApiStore } from "../../state/apiStore";
+import { useApiModalStore } from "../../state/apiModalStore";
 import { DEFAULT_TAB_VIEW, useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
@@ -708,6 +712,9 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
           visualizer: post.visualizer,
         };
       }
+      // The no-code asserts, after the scripts and beside their `pm.test`s.
+      const asserted = evaluateAssertions(current.draft.assertions, http);
+      if (asserted.length > 0) response = { ...response, tests: [...response.tests, ...asserted] };
 
       useApiRuntimeStore.getState().setResponse(tabId, response);
       for (const line of response.consoleLines) useApiRuntimeStore.getState().pushConsole(line);
@@ -834,7 +841,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
       case "pre":
         return spec.preScript.trim() !== "";
       case "tests":
-        return spec.postScript.trim() !== "";
+        return spec.postScript.trim() !== "" || (spec.assertions?.length ?? 0) > 0;
       case "settings":
         return hasOverrides(spec);
       case "docs":
@@ -1160,11 +1167,11 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                       {t("api.send")}
                     </button>
                   </Tooltip>
-                  <Tooltip label={t("api.sendAndDownload")} side="bottom">
+                  <Tooltip label={t("api.sendOptions")} side="bottom">
                     <button
                       type="button"
                       onClick={() => setMenuOpen((open) => !open)}
-                      aria-label={t("api.sendAndDownload")}
+                      aria-label={t("api.sendOptions")}
                       aria-haspopup="menu"
                       aria-expanded={menuOpen}
                       disabled={spec.url.trim() === ""}
@@ -1189,6 +1196,18 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                   >
                     <Download size={15} className="shrink-0 text-[var(--cf-text-muted)]" />
                     {t("api.sendAndDownload")}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      useApiModalStore.getState().openApiModal({ kind: "loadTest", tabId });
+                    }}
+                    className={menuItemClass()}
+                  >
+                    <Gauge size={15} className="shrink-0 text-[var(--cf-text-muted)]" />
+                    {t("api.load.menu")}
                   </button>
                 </div>
               )}
@@ -1364,7 +1383,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                 (protocol === "graphql" ? <GraphqlPanel tabId={tabId} /> : <BodyPanel tabId={tabId} />)}
 
               {panel === "pre" && <ScriptsPanel tabId={tabId} kind="pre" />}
-              {panel === "tests" && <ScriptsPanel tabId={tabId} kind="post" />}
+              {panel === "tests" && <TestsPanel tabId={tabId} />}
               {panel === "settings" && <RequestSettingsPanel tabId={tabId} />}
 
               {panel === "docs" && (

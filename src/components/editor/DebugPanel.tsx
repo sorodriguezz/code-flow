@@ -1,13 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import { CornerDownRight, CornerRightUp, Play, Redo2, Square, Trash2 } from "lucide-react";
+import { CornerDownRight, CornerRightUp, FileJson, FilePlus2, Play, Redo2, Square, Trash2 } from "lucide-react";
 import { Select } from "../common/Select";
 import { Tooltip } from "../common/Tooltip";
 import { iconButtonClass } from "../common/Button";
 import { explorerHeadClass, explorerTitleClass, fieldClass, rowClass } from "../common/recipes";
 import { useDebugStore } from "../../state/debugStore";
 import { DEBUG_ADAPTERS, adapterById, adapterForFile } from "../../lib/debugAdapters";
+import { launchTemplate, parseLaunch, type LaunchEntry } from "../../lib/vscodeLaunch";
+import { currentPlatform } from "../../lib/platform";
+import { createFile, readFileText, writeFileText } from "../../lib/tauri/commands";
+import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { BreakpointsSection, SectionHead, VariableRow, WatchSection } from "./DebugSections";
+
+const LAUNCH_FILE = ".vscode/launch.json";
 
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
@@ -24,11 +30,14 @@ export function DebugPanel({
   repoPath,
   suggestedProgram,
   onOpenFrame,
+  onOpenFile,
 }: {
   repoPath: string;
   /** The active editor file, offered as the thing to run when it's a script. */
   suggestedProgram: string | null;
   onOpenFrame: (file: string, line: number) => void;
+  /** Opens a repo-relative file — `.vscode/launch.json`. */
+  onOpenFile: (path: string, line: number) => void;
 }) {
   const t = useT();
   const status = useDebugStore((s) => s.status);
@@ -46,6 +55,65 @@ export function DebugPanel({
   const [adapterCommand, setAdapterCommand] = useState("");
   const [expression, setExpression] = useState("");
   const consoleRef = useRef<HTMLDivElement>(null);
+  /** `.vscode/launch.json`'s configurations; `null` while reading, `[]` with `launchMissing` when
+   *  there is no file. */
+  const [configs, setConfigs] = useState<LaunchEntry[] | null>(null);
+  const [launchMissing, setLaunchMissing] = useState(false);
+  const [launchVersion, setLaunchVersion] = useState(0);
+  /** The configuration picked, by name; `""` is the program typed by hand. */
+  const [configName, setConfigName] = useState("");
+  const config = configs?.find((entry) => entry.name === configName) ?? null;
+
+  const relativeFile = (() => {
+    if (!suggestedProgram) return null;
+    const root = repoPath.replace(/[\\/]+$/, "").replace(/\\/g, "/");
+    const file = suggestedProgram.replace(/\\/g, "/");
+    return file.startsWith(`${root}/`) ? file.slice(root.length + 1) : null;
+  })();
+
+  useEffect(() => {
+    let live = true;
+    readFileText(repoPath, LAUNCH_FILE)
+      .then((text) => {
+        if (!live) return;
+        setLaunchMissing(false);
+        const entries = parseLaunch(text, { repoPath, file: relativeFile, platform: currentPlatform() });
+        setConfigs(entries);
+        // The first configuration that can start here is the default, as VS Code's picker opens on
+        // the first entry — but never over one the user picked.
+        setConfigName((current) =>
+          current && entries.some((entry) => entry.name === current) ? current : (entries.find((entry) => !entry.unsupported)?.name ?? ""),
+        );
+      })
+      .catch(() => {
+        if (!live) return;
+        setLaunchMissing(true);
+        setConfigs([]);
+        setConfigName("");
+      });
+    return () => {
+      live = false;
+    };
+  }, [repoPath, relativeFile, launchVersion]);
+
+  const createLaunch = async () => {
+    try {
+      await createFile(repoPath, LAUNCH_FILE);
+      await writeFileText(repoPath, LAUNCH_FILE, launchTemplate(suggestedProgram ? (adapterForFile(suggestedProgram)?.id ?? null) : null));
+      setLaunchVersion((v) => v + 1);
+      onOpenFile(LAUNCH_FILE, 1);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
+  const startConfig = (entry: LaunchEntry) => {
+    if (entry.unsupported || !entry.adapterId) return;
+    const adapter = adapterById(entry.adapterId);
+    void useDebugStore
+      .getState()
+      .start(entry.cwd, entry.program, adapter, adapter.command ?? undefined, { args: entry.args, launch: entry.launch });
+  };
 
   useEffect(() => {
     useDebugStore.getState().init();
@@ -85,6 +153,67 @@ export function DebugPanel({
       </div>
 
       <div className="shrink-0 border-b border-[var(--cf-border)] px-3 pb-3">
+        {/* `.vscode/launch.json`: its configurations by name, or a button that writes one. */}
+        <div className="mb-1.5 flex items-center gap-1">
+          {configs && configs.length > 0 ? (
+            <div className="min-w-0 flex-1">
+              <Select
+                size="compact"
+                ariaLabel={t("debug.config")}
+                value={configName}
+                onChange={setConfigName}
+                disabled={running}
+                options={[
+                  { value: "", label: t("debug.configManual") },
+                  ...configs.map((entry) => ({
+                    value: entry.name,
+                    label: entry.unsupported ? `${entry.name} — ${t("debug.configUnsupported", { reason: entry.unsupported })}` : entry.name,
+                  })),
+                ]}
+              />
+            </div>
+          ) : (
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-faint)]">{LAUNCH_FILE}</span>
+          )}
+          {launchMissing ? (
+            <Tooltip side="bottom" label={t("debug.createLaunch")}>
+              <button type="button" onClick={() => void createLaunch()} aria-label={t("debug.createLaunch")} className={iconButtonClass({ size: "xs" })}>
+                <FilePlus2 size={13} />
+              </button>
+            </Tooltip>
+          ) : (
+            <Tooltip side="bottom" label={t("debug.openLaunch")}>
+              <button type="button" onClick={() => onOpenFile(LAUNCH_FILE, 1)} aria-label={t("debug.openLaunch")} className={iconButtonClass({ size: "xs" })}>
+                <FileJson size={13} />
+              </button>
+            </Tooltip>
+          )}
+        </div>
+        {config ? (
+          <div className="flex items-center gap-1">
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]" title={config.program || config.cwd}>
+              {config.program ? fileName(config.program) : String(config.launch.module ?? config.cwd)}
+            </span>
+            {running ? (
+              <Tooltip side="bottom" label={t("debug.stop")}>
+                <button onClick={() => void store.stop()} aria-label={t("debug.stop")} className={iconButtonClass({ size: "sm" })}>
+                  <Square size={13} className="fill-current text-[var(--cf-danger)]" />
+                </button>
+              </Tooltip>
+            ) : (
+              <Tooltip side="bottom" label={t("debug.start")}>
+                <button
+                  onClick={() => startConfig(config)}
+                  disabled={Boolean(config.unsupported)}
+                  aria-label={t("debug.start")}
+                  className={iconButtonClass({ size: "sm" })}
+                >
+                  <Play size={14} className="fill-current text-[var(--cf-success)]" />
+                </button>
+              </Tooltip>
+            )}
+          </div>
+        ) : (
         <div className="flex items-center gap-1">
           <input
             value={program}
@@ -138,6 +267,10 @@ export function DebugPanel({
             </Tooltip>
           )}
         </div>
+        )}
+        {config?.preLaunchTask && !running && (
+          <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-faint)]">{t("debug.preLaunchTask", { task: config.preLaunchTask })}</p>
+        )}
 
         {running && (
           <div className="mt-2 flex items-center gap-0.5">
@@ -186,7 +319,7 @@ export function DebugPanel({
           </div>
         )}
 
-        {!running && adapterById(adapterId).command !== null && (
+        {!running && !config && adapterById(adapterId).command !== null && (
           <div className="mt-2">
             <input
               value={adapterCommand}

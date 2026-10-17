@@ -1,5 +1,34 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ExternalLink, Maximize2, type LucideIcon } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  Maximize2,
+  Pin,
+  PinOff,
+  X,
+  type LucideIcon,
+} from "lucide-react";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { isViewFind } from "../../lib/useFindShortcut";
+import { isMac } from "../../lib/platform";
+import {
+  arrangeColumns,
+  EMPTY_LAYOUT,
+  findCells,
+  moveColumn,
+  summarize,
+  toggleHidden,
+  togglePinned,
+  type ColumnLayout,
+} from "../../lib/db/gridColumns";
 import { Checkbox } from "../common/Checkbox";
 import { ColumnResizer, MIN_COLUMN_WIDTH, useRowSweep } from "../common/gridBits";
 import { useDbModalStore } from "../../state/dbModalStore";
@@ -211,6 +240,12 @@ export interface ResultGridProps {
   onFieldWidth?: (next: number) => void;
   recordWidth?: number | null;
   onRecordWidth?: (next: number) => void;
+  /**
+   * Hidden, pinned and reordered columns (see `lib/db/gridColumns`), controlled like `widths` so a
+   * tab can remember them; self-managed when not passed.
+   */
+  columnLayout?: ColumnLayout;
+  onColumnLayout?: (next: ColumnLayout) => void;
 }
 
 export function ResultGrid({
@@ -240,6 +275,8 @@ export function ResultGrid({
   keepClear = null,
   widths: widthsProp,
   onWidths,
+  columnLayout,
+  onColumnLayout,
 }: ResultGridProps) {
   const t = useT();
   const model = recordModel(engine);
@@ -251,6 +288,17 @@ export function ResultGrid({
   // Controlled when the caller supplies them, self-managed otherwise — see `widths` on the props.
   const [localWidths, setLocalWidths] = useState<Record<string, number>>({});
   const widths = widthsProp ?? localWidths;
+  const [localLayout, setLocalLayout] = useState<ColumnLayout>(EMPTY_LAYOUT);
+  const layout = columnLayout ?? localLayout;
+  const applyLayout = (next: ColumnLayout) => (onColumnLayout ? onColumnLayout(next) : setLocalLayout(next));
+  /** The cell last clicked — what the footer summarises, and where ⌘F's matches are counted from. */
+  const [active, setActive] = useState<{ row: number; column: number } | null>(null);
+  const [headerMenu, setHeaderMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  /** ⌘F inside the grid: the bar, what is typed in it, and which match is current. */
+  const [find, setFind] = useState<{ text: string; at: number } | null>(null);
+  const findRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const hovered = useRef(false);
   const applyWidth = (column: string, width: number) => {
     if (onWidths) onWidths({ ...widths, [column]: width });
     else setLocalWidths((current) => ({ ...current, [column]: width }));
@@ -348,23 +396,47 @@ export function ResultGrid({
     scrollRef.current?.scrollTo({ top: 0 });
     setScrollTop(0);
     setEditing(null);
+    setActive(null);
   }, [columns, rows]);
 
+  // ⌘F / Ctrl+F while the grid has focus or the pointer — the result's own search instead of the
+  // webview's, which only sees the rows that happen to be rendered.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const root = rootRef.current;
+      if (!root || root.offsetParent === null || !isViewFind(event, isMac())) return;
+      if (!hovered.current && !root.contains(document.activeElement)) return;
+      event.preventDefault();
+      setFind((current) => current ?? { text: "", at: 0 });
+      requestAnimationFrame(() => {
+        findRef.current?.focus();
+        findRef.current?.select();
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const widthOf = (column: string) => widths[column] ?? DEFAULT_COLUMN_WIDTH;
+  // Which columns are drawn, and where — see `lib/db/gridColumns`. `restColumns` scroll and are
+  // windowed; `pinnedColumns` stay beside the row numbers.
+  const names = useMemo(() => columns.map((column) => column.name), [columns]);
+  const { pinned: pinnedColumns, rest: restColumns } = useMemo(() => arrangeColumns(names, layout), [names, layout]);
   // Prefix sum of the column widths: `offsets[i]` is where column `i` starts, `offsets[length]` is
   // the whole run. Recomputed only when the columns or a dragged width change — the horizontal
   // window is derived from it on every scroll frame, and doing it by summing the widths there would
   // be the O(n²) this exists to avoid.
   const { offsets, columnsWidth } = useMemo(() => {
-    const acc = new Array<number>(columns.length + 1);
+    const acc = new Array<number>(restColumns.length + 1);
     let total = 0;
-    for (let index = 0; index < columns.length; index += 1) {
+    for (let index = 0; index < restColumns.length; index += 1) {
       acc[index] = total;
-      total += widths[columns[index].name] ?? DEFAULT_COLUMN_WIDTH;
+      total += widths[columns[restColumns[index]].name] ?? DEFAULT_COLUMN_WIDTH;
     }
-    acc[columns.length] = total;
+    acc[restColumns.length] = total;
     return { offsets: acc, columnsWidth: total };
-  }, [columns, widths]);
+  }, [columns, restColumns, widths]);
+  const pinnedWidth = pinnedColumns.reduce((sum, index) => sum + widthOf(columns[index].name), 0);
   const totalRows = rows.length + insertedRows.length;
   // Server rows only: an inserted row exists nowhere yet, so "select everything" can't include one.
   const allSelected = rows.length > 0 && (selectedRows?.size ?? 0) >= rows.length;
@@ -392,17 +464,18 @@ export function ResultGrid({
    */
   const { firstColumn, lastColumn, leftSpacer, rightSpacer } = useMemo(() => {
     const viewLeft = scrollLeft - GUTTER_WIDTH;
-    const viewRight = viewLeft + viewportWidth;
+    const viewRight = viewLeft + viewportWidth - pinnedWidth;
+    const count = restColumns.length;
     let start = 0;
-    while (start < columns.length - 1 && offsets[start + 1] <= viewLeft) start += 1;
+    while (start < count - 1 && offsets[start + 1] <= viewLeft) start += 1;
     let end = start;
-    while (end < columns.length && offsets[end] < viewRight) end += 1;
+    while (end < count && offsets[end] < viewRight) end += 1;
     start = Math.max(0, start - COLUMN_OVERSCAN);
-    end = Math.min(columns.length, Math.max(end + COLUMN_OVERSCAN, start + 1));
+    end = Math.min(count, Math.max(end + COLUMN_OVERSCAN, Math.min(count, start + 1)));
     // A cell being edited stays mounted even if the user scrolls its column out of the window:
     // unmounting the input blurs it, and blur commits the draft. Scrolling sideways must not save.
     if (editing) {
-      const index = columns.findIndex((column) => column.name === editing.column);
+      const index = restColumns.findIndex((column) => columns[column].name === editing.column);
       if (index >= 0) {
         start = Math.min(start, index);
         end = Math.max(end, index + 1);
@@ -414,8 +487,8 @@ export function ResultGrid({
       leftSpacer: offsets[start],
       rightSpacer: columnsWidth - offsets[end],
     };
-  }, [columns, offsets, columnsWidth, scrollLeft, viewportWidth, editing]);
-  const windowColumns = columns.slice(firstColumn, lastColumn);
+  }, [columns, restColumns, offsets, columnsWidth, scrollLeft, viewportWidth, pinnedWidth, editing]);
+  const windowColumns = restColumns.slice(firstColumn, lastColumn);
 
   if (columns.length === 0) {
     return (
@@ -440,58 +513,79 @@ export function ResultGrid({
     setEditing(null);
   };
 
-  return (
-    // `isolate` keeps the grid's own layers — the sticky header, the pinned row-number gutter —
-    // inside the grid. They are ordered against each other, not against the rest of the app, and
-    // left un-isolated they climb into the page's stacking context and paint over whatever chrome
-    // sits alongside the panel, the resize seams included.
-    <div className="isolate flex h-full min-h-0 flex-col overflow-hidden">
-      {/* The sweep's move/up land here rather than on the row that was pressed: capture is held by
-          this element, because it is the one that survives the windowing. */}
-      <div
-        ref={scrollRef}
-        className="min-h-0 flex-1 overflow-auto"
-        onScroll={handleScroll}
-        onPointerDownCapture={() => {
-          pressing.current = true;
-        }}
-        onPointerMove={sweep.move}
-        onPointerUp={endPress}
-        onPointerCancel={endPress}
-      >
-        <div style={{ minWidth: "100%", width: "max-content" }}>
-          {/* Sticky so the column names survive scrolling a thousand rows — the single most useful
-              thing a grid can do for a wide table. */}
-          <div
-            className="sticky top-0 z-10 flex border-b border-[var(--cf-border)] bg-[var(--cf-surface)]"
-            style={{ height: HEADER_HEIGHT }}
-          >
-            {/* The corner over the row numbers: all or none, the way the gutter's own header
-                behaves in every grid that lets you select rows.
+  const drawn = [...pinnedColumns, ...restColumns];
+  const matches = find && find.text ? findCells(totalRows, drawn, valueAt, find.text) : [];
+  const current = matches.length > 0 && find ? matches[((find.at % matches.length) + matches.length) % matches.length] : null;
+  const matchKeys = new Set(matches.map((match) => `${match.row}:${match.column}`));
 
-                From a *partial* selection it clears instead of completing. Someone who has picked
-                three rows and reaches for this box is undoing that pick — the one who wanted every
-                row would have hit the box while it was still empty. It also makes the control
-                reversible: none → all → none returns you where you started, where
-                some → all → none has quietly thrown the three rows away. */}
-            <div
-              className="sticky left-0 z-10 flex shrink-0 items-center justify-center border-r border-[var(--cf-border)] bg-[var(--cf-surface)]"
-              style={{ width: GUTTER_WIDTH }}
-            >
-              {onSelectAllRows && rows.length > 0 && (
-                <Checkbox
-                  checked={allSelected}
-                  indeterminate={!allSelected && (selectedRows?.size ?? 0) > 0}
-                  onChange={(on) =>
-                    onSelectAllRows(!allSelected && (selectedRows?.size ?? 0) > 0 ? false : on)
-                  }
-                />
-              )}
-            </div>
-            {/* Stands in for the columns scrolled off the left — see the horizontal window. */}
-            {leftSpacer > 0 && <div className="shrink-0" style={{ width: leftSpacer }} />}
-            {windowColumns.map((column, windowIndex) => {
-              const columnIndex = firstColumn + windowIndex;
+  /** Brings a cell into view: vertically centred, and horizontally only when it scrolls at all. */
+  const reveal = (row: number, columnIndex: number) => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const top = HEADER_HEIGHT + row * ROW_HEIGHT;
+    if (top < element.scrollTop + HEADER_HEIGHT || top + ROW_HEIGHT > element.scrollTop + element.clientHeight) {
+      element.scrollTop = Math.max(0, top - element.clientHeight / 2);
+    }
+    const at = restColumns.indexOf(columnIndex);
+    if (at >= 0) {
+      const left = offsets[at];
+      const right = left + widthOf(columns[columnIndex].name);
+      const visibleLeft = element.scrollLeft;
+      const visibleRight = element.scrollLeft + element.clientWidth - GUTTER_WIDTH - pinnedWidth;
+      if (left < visibleLeft || right > visibleRight) element.scrollLeft = Math.max(0, left - 40);
+    }
+  };
+  const step = (direction: 1 | -1) => {
+    if (!find || matches.length === 0) return;
+    const at = find.at + direction;
+    setFind({ ...find, at });
+    const match = matches[((at % matches.length) + matches.length) % matches.length];
+    setActive(match);
+    reveal(match.row, match.column);
+  };
+
+  const headerMenuFor = (columnIndex: number): MenuItem[] => {
+    const name = columns[columnIndex].name;
+    const isPinned = layout.pinned.includes(name);
+    const hiddenCount = layout.hidden.filter((entry) => names.includes(entry)).length;
+    return [
+      { label: t("db.grid.hideColumn"), icon: EyeOff, onClick: () => applyLayout(toggleHidden(layout, name)) },
+      {
+        label: isPinned ? t("db.grid.unpinColumn") : t("db.grid.pinColumn"),
+        icon: isPinned ? PinOff : Pin,
+        onClick: () => applyLayout(togglePinned(layout, name)),
+      },
+      ...(!isPinned
+        ? [
+            { label: t("db.grid.moveLeft"), icon: ArrowLeft, onClick: () => applyLayout(moveColumn(names, layout, name, -1)) },
+            { label: t("db.grid.moveRight"), icon: ArrowRight, onClick: () => applyLayout(moveColumn(names, layout, name, 1)) },
+          ]
+        : []),
+      {
+        label: t("db.grid.showColumns"),
+        icon: Eye,
+        separated: true,
+        disabled: hiddenCount === 0,
+        onClick: () => {},
+        children:
+          hiddenCount === 0
+            ? undefined
+            : [
+                { label: t("db.grid.showAll", { n: String(hiddenCount) }), onClick: () => applyLayout({ ...layout, hidden: [] }) },
+                ...layout.hidden
+                  .filter((entry) => names.includes(entry))
+                  .map((entry) => ({ label: entry, onClick: () => applyLayout(toggleHidden(layout, entry)) })),
+              ],
+      },
+      ...(layout.order.length > 0 || layout.pinned.length > 0
+        ? [{ label: t("db.grid.resetLayout"), onClick: () => applyLayout(EMPTY_LAYOUT) }]
+        : []),
+      { label: t("db.copyName"), icon: Copy, separated: true, onClick: () => void navigator.clipboard.writeText(name) },
+    ];
+  };
+
+  const headerCell = (columnIndex: number) => {
+    const column = columns[columnIndex];
               const sortIndex = sort?.findIndex((key) => key.column === column.name) ?? -1;
               const sortKey = sortIndex >= 0 ? sort?.[sortIndex] : undefined;
               const facts = fieldFacts(model, column, { primaryKeys, foreignKeys });
@@ -500,6 +594,10 @@ export function ResultGrid({
                 key={`${column.name}-${columnIndex}`}
                 style={{ width: widthOf(column.name) }}
                 className="relative flex shrink-0 flex-col justify-center border-r border-[var(--cf-border)]"
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setHeaderMenu({ x: e.clientX, y: e.clientY, items: headerMenuFor(columnIndex) });
+                }}
               >
                 {/*
                   The sort button *is* the cell — full width, full height.
@@ -587,7 +685,227 @@ export function ResultGrid({
                 />
               </div>
               );
-            })}
+  };
+
+  const bodyCell = (row: number, columnIndex: number, inserted: boolean, deleted: boolean) => {
+    const column = columns[columnIndex];
+                    const value = valueAt(row, columnIndex);
+                    const isChanged =
+                      inserted || (changed?.has(`${row}:${column.name}`) ?? false);
+                    const isEditing =
+                      editing?.row === row && editing.column === column.name;
+                    const editable = inserted ? Boolean(onEditInserted) : Boolean(onEdit);
+                    return (
+                      <div
+                        key={`${column.name}-${columnIndex}`}
+                        style={{ width: widthOf(column.name) }}
+                        onContextMenu={(e) => {
+                          // Claimed unconditionally, before anything is decided about menus. A cell
+                          // being edited is a real `<input>`, and `contextMenuGuard` stands down on
+                          // text fields so the OS editing menu survives in ordinary form boxes — so
+                          // without this the webview's own menu opens over the grid. `preventDefault`
+                          // is what tells the guard this right-click has an owner.
+                          e.preventDefault();
+                          // No cell menu wired: let it bubble, so a grid whose caller only built a
+                          // row menu still gets that row menu.
+                          if (!onCellContextMenu) return;
+                          e.stopPropagation();
+                          onCellContextMenu(row, column.name, e);
+                        }}
+                        onDoubleClick={() =>
+                          editable && setEditing({ row, column: column.name, inserted })
+                        }
+                        onClick={(e) => {
+                          setActive({ row, column: columnIndex });
+                          // The shortcut for a click that would otherwise only select the cell.
+                          // Plain clicks are left alone — see `onFollowForeignKey`.
+                          const key = foreignKeys?.get(column.name);
+                          if (!key || !onFollowForeignKey || !(e.metaKey || e.ctrlKey)) return;
+                          e.preventDefault();
+                          onFollowForeignKey(key, value);
+                        }}
+                        className={`group/cell relative flex shrink-0 items-center border-r border-[var(--cf-border)] px-2 ${
+                          isChanged && !inserted ? "bg-[var(--cf-warning)]/[0.12]" : ""
+                        } ${deleted ? "line-through decoration-[var(--cf-danger)] opacity-70" : ""} ${
+                          current && current.row === row && current.column === columnIndex
+                            ? "bg-[color-mix(in_oklab,var(--cf-warning)_45%,transparent)]"
+                            : matchKeys.has(`${row}:${columnIndex}`)
+                              ? "bg-[color-mix(in_oklab,var(--cf-warning)_18%,transparent)]"
+                              : ""
+                        } ${
+                          active && active.row === row && active.column === columnIndex
+                            ? "outline outline-1 -outline-offset-1 outline-[var(--cf-accent)]"
+                            : ""
+                        }`}
+                      >
+                        {isEditing ? (
+                          <CellEditor
+                            value={value}
+                            onCommit={(next) => commit(row, columnIndex, next)}
+                            onCancel={() => setEditing(null)}
+                          />
+                        ) : (
+                          <>
+                            <span
+                              className={`min-w-0 flex-1 truncate font-mono text-[12px] ${
+                                value === null
+                                  ? "italic text-[var(--cf-text-muted)]"
+                                  : "text-[var(--cf-text)]"
+                              }`}
+                            >
+                              {value === null ? "NULL" : preview(value)}
+                            </span>
+                            {/* On every value that has one, not only on the ones past
+                                `CELL_PREVIEW_LIMIT`. What makes a cell unreadable is the column
+                                being narrower than its contents, and that is a width the user drags
+                                — an 80-character JSON in a 200px column is cut off just as
+                                thoroughly as a 4000-character one, and used to offer no way in. The
+                                button costs nothing when it isn't needed: it takes no width until
+                                the cell is hovered — see `CELL_ACTION`. */}
+                            {value !== null && (
+                              <button
+                                onClick={() =>
+                                  openModal({
+                                    kind: "cell",
+                                    column: column.name,
+                                    value,
+                                    editable,
+                                    onSave: editable
+                                      ? (next) => commit(row, columnIndex, next)
+                                      : undefined,
+                                  })
+                                }
+                                title={t("db.expandCell")}
+                                className={CELL_ACTION}
+                              >
+                                <Maximize2 size={10} />
+                              </button>
+                            )}
+                            {/* On hover rather than always: one arrow per foreign-key cell, on
+                                every row, would be a column of arrows competing with the data. */}
+                            {foreignKeys?.get(column.name) && onFollowForeignKey && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onFollowForeignKey(foreignKeys.get(column.name)!, value);
+                                }}
+                                title={t("db.followForeignKey", {
+                                  table: referenceLabel(foreignKeys.get(column.name)!),
+                                })}
+                                className={CELL_ACTION}
+                              >
+                                <ExternalLink size={10} />
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    );
+  };
+
+  return (
+    // `isolate` keeps the grid's own layers — the sticky header, the pinned row-number gutter —
+    // inside the grid. They are ordered against each other, not against the rest of the app, and
+    // left un-isolated they climb into the page's stacking context and paint over whatever chrome
+    // sits alongside the panel, the resize seams included.
+    <div
+      ref={rootRef}
+      className="relative isolate flex h-full min-h-0 flex-col overflow-hidden"
+      onPointerEnter={() => {
+        hovered.current = true;
+      }}
+      onPointerLeave={() => {
+        hovered.current = false;
+      }}
+    >
+      {find && (
+        <div className="absolute right-3 top-[44px] z-20 flex items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-1.5 py-1 shadow-[var(--cf-shadow)]">
+          <input
+            ref={findRef}
+            value={find.text}
+            placeholder={t("db.grid.find")}
+            spellCheck={false}
+            onChange={(e) => setFind({ text: e.target.value, at: 0 })}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                step(e.shiftKey ? -1 : 1);
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setFind(null);
+              }
+            }}
+            className="w-[180px] bg-transparent text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
+          />
+          <span className="min-w-[52px] text-right text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+            {find.text
+              ? matches.length === 0
+                ? t("db.grid.noMatches")
+                : `${(((find.at % matches.length) + matches.length) % matches.length) + 1}/${matches.length}${matches.length >= 5000 ? "+" : ""}`
+              : ""}
+          </span>
+          <button type="button" onClick={() => step(-1)} title={t("db.grid.previous")} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
+            <ChevronUp size={13} />
+          </button>
+          <button type="button" onClick={() => step(1)} title={t("db.grid.next")} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
+            <ChevronDown size={13} />
+          </button>
+          <button type="button" onClick={() => setFind(null)} title={t("common.close")} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
+            <X size={13} />
+          </button>
+        </div>
+      )}
+      {/* The sweep's move/up land here rather than on the row that was pressed: capture is held by
+          this element, because it is the one that survives the windowing. */}
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 overflow-auto"
+        onScroll={handleScroll}
+        onPointerDownCapture={() => {
+          pressing.current = true;
+        }}
+        onPointerMove={sweep.move}
+        onPointerUp={endPress}
+        onPointerCancel={endPress}
+      >
+        <div style={{ minWidth: "100%", width: "max-content" }}>
+          {/* Sticky so the column names survive scrolling a thousand rows — the single most useful
+              thing a grid can do for a wide table. */}
+          <div
+            className="sticky top-0 z-10 flex border-b border-[var(--cf-border)] bg-[var(--cf-surface)]"
+            style={{ height: HEADER_HEIGHT }}
+          >
+            {/* The corner over the row numbers: all or none, the way the gutter's own header
+                behaves in every grid that lets you select rows.
+
+                From a *partial* selection it clears instead of completing. Someone who has picked
+                three rows and reaches for this box is undoing that pick — the one who wanted every
+                row would have hit the box while it was still empty. It also makes the control
+                reversible: none → all → none returns you where you started, where
+                some → all → none has quietly thrown the three rows away. */}
+            <div
+              className="sticky left-0 z-10 flex shrink-0 items-center justify-center border-r border-[var(--cf-border)] bg-[var(--cf-surface)]"
+              style={{ width: GUTTER_WIDTH }}
+            >
+              {onSelectAllRows && rows.length > 0 && (
+                <Checkbox
+                  checked={allSelected}
+                  indeterminate={!allSelected && (selectedRows?.size ?? 0) > 0}
+                  onChange={(on) =>
+                    onSelectAllRows(!allSelected && (selectedRows?.size ?? 0) > 0 ? false : on)
+                  }
+                />
+              )}
+            </div>
+            {/* Pinned columns, then the one that stands in for the columns scrolled off the left — see
+                the horizontal window. */}
+            {pinnedColumns.length > 0 && (
+              <div className="sticky z-[9] flex shrink-0 bg-[var(--cf-surface)] shadow-[1px_0_0_var(--cf-border)]" style={{ left: GUTTER_WIDTH }}>
+                {pinnedColumns.map((columnIndex) => headerCell(columnIndex))}
+              </div>
+            )}
+            {leftSpacer > 0 && <div className="shrink-0" style={{ width: leftSpacer }} />}
+            {windowColumns.map((columnIndex) => headerCell(columnIndex))}
             {/* …and for the ones off the right, so the header is exactly as wide as the rows. */}
             {rightSpacer > 0 && <div className="shrink-0" style={{ width: rightSpacer }} />}
           </div>
@@ -675,111 +993,20 @@ export function ResultGrid({
                       </button>
                     )}
                   </div>
+                  {pinnedColumns.length > 0 && (
+                    <div
+                      className={`sticky z-[4] flex shrink-0 shadow-[1px_0_0_var(--cf-border)] ${
+                        selected
+                          ? "bg-[color-mix(in_oklab,var(--cf-accent)_13%,var(--cf-surface))]"
+                          : "bg-[var(--cf-surface)]"
+                      }`}
+                      style={{ left: GUTTER_WIDTH }}
+                    >
+                      {pinnedColumns.map((columnIndex) => bodyCell(row, columnIndex, inserted, deleted))}
+                    </div>
+                  )}
                   {leftSpacer > 0 && <div className="shrink-0" style={{ width: leftSpacer }} />}
-                  {windowColumns.map((column, windowIndex) => {
-                    const columnIndex = firstColumn + windowIndex;
-                    const value = valueAt(row, columnIndex);
-                    const isChanged =
-                      inserted || (changed?.has(`${row}:${column.name}`) ?? false);
-                    const isEditing =
-                      editing?.row === row && editing.column === column.name;
-                    const editable = inserted ? Boolean(onEditInserted) : Boolean(onEdit);
-                    return (
-                      <div
-                        key={`${column.name}-${columnIndex}`}
-                        style={{ width: widthOf(column.name) }}
-                        onContextMenu={(e) => {
-                          // Claimed unconditionally, before anything is decided about menus. A cell
-                          // being edited is a real `<input>`, and `contextMenuGuard` stands down on
-                          // text fields so the OS editing menu survives in ordinary form boxes — so
-                          // without this the webview's own menu opens over the grid. `preventDefault`
-                          // is what tells the guard this right-click has an owner.
-                          e.preventDefault();
-                          // No cell menu wired: let it bubble, so a grid whose caller only built a
-                          // row menu still gets that row menu.
-                          if (!onCellContextMenu) return;
-                          e.stopPropagation();
-                          onCellContextMenu(row, column.name, e);
-                        }}
-                        onDoubleClick={() =>
-                          editable && setEditing({ row, column: column.name, inserted })
-                        }
-                        onClick={(e) => {
-                          // The shortcut for a click that would otherwise only select the cell.
-                          // Plain clicks are left alone — see `onFollowForeignKey`.
-                          const key = foreignKeys?.get(column.name);
-                          if (!key || !onFollowForeignKey || !(e.metaKey || e.ctrlKey)) return;
-                          e.preventDefault();
-                          onFollowForeignKey(key, value);
-                        }}
-                        className={`group/cell relative flex shrink-0 items-center border-r border-[var(--cf-border)] px-2 ${
-                          isChanged && !inserted ? "bg-[var(--cf-warning)]/[0.12]" : ""
-                        } ${deleted ? "line-through decoration-[var(--cf-danger)] opacity-70" : ""}`}
-                      >
-                        {isEditing ? (
-                          <CellEditor
-                            value={value}
-                            onCommit={(next) => commit(row, columnIndex, next)}
-                            onCancel={() => setEditing(null)}
-                          />
-                        ) : (
-                          <>
-                            <span
-                              className={`min-w-0 flex-1 truncate font-mono text-[12px] ${
-                                value === null
-                                  ? "italic text-[var(--cf-text-muted)]"
-                                  : "text-[var(--cf-text)]"
-                              }`}
-                            >
-                              {value === null ? "NULL" : preview(value)}
-                            </span>
-                            {/* On every value that has one, not only on the ones past
-                                `CELL_PREVIEW_LIMIT`. What makes a cell unreadable is the column
-                                being narrower than its contents, and that is a width the user drags
-                                — an 80-character JSON in a 200px column is cut off just as
-                                thoroughly as a 4000-character one, and used to offer no way in. The
-                                button costs nothing when it isn't needed: it takes no width until
-                                the cell is hovered — see `CELL_ACTION`. */}
-                            {value !== null && (
-                              <button
-                                onClick={() =>
-                                  openModal({
-                                    kind: "cell",
-                                    column: column.name,
-                                    value,
-                                    editable,
-                                    onSave: editable
-                                      ? (next) => commit(row, columnIndex, next)
-                                      : undefined,
-                                  })
-                                }
-                                title={t("db.expandCell")}
-                                className={CELL_ACTION}
-                              >
-                                <Maximize2 size={10} />
-                              </button>
-                            )}
-                            {/* On hover rather than always: one arrow per foreign-key cell, on
-                                every row, would be a column of arrows competing with the data. */}
-                            {foreignKeys?.get(column.name) && onFollowForeignKey && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onFollowForeignKey(foreignKeys.get(column.name)!, value);
-                                }}
-                                title={t("db.followForeignKey", {
-                                  table: referenceLabel(foreignKeys.get(column.name)!),
-                                })}
-                                className={CELL_ACTION}
-                              >
-                                <ExternalLink size={10} />
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
+                  {windowColumns.map((columnIndex) => bodyCell(row, columnIndex, inserted, deleted))}
                   {rightSpacer > 0 && <div className="shrink-0" style={{ width: rightSpacer }} />}
                   {/* Pinned to the right edge and revealed on hover, so a hundred rows of buttons
                       never compete with the data — and pinned rather than trailing the last column,
@@ -823,6 +1050,74 @@ export function ResultGrid({
           </div>
         </div>
       </div>
+      {active && active.column < columns.length && !editing && (
+        <SummaryBar
+          column={columns[active.column].name}
+          values={(selectedRows && selectedRows.size > 0 ? [...selectedRows] : Array.from({ length: totalRows }, (_, i) => i)).map(
+            (row) => valueAt(row, active.column),
+          )}
+          scoped={(selectedRows?.size ?? 0) > 0}
+          onClose={() => setActive(null)}
+        />
+      )}
+      {headerMenu && (
+        <ContextMenu x={headerMenu.x} y={headerMenu.y} items={headerMenu.items} onClose={() => setHeaderMenu(null)} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * What the active column adds up to — over the selected rows when there are any, every row on the
+ * page otherwise. Numbers get sum, average and the extremes; text gets the extremes alphabetically.
+ * Each figure copies itself on click, which is what a figure in a footer is usually wanted for.
+ */
+function SummaryBar({
+  column,
+  values,
+  scoped,
+  onClose,
+}: {
+  column: string;
+  values: (string | null)[];
+  scoped: boolean;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const summary = useMemo(() => summarize(values), [values]);
+  const figures: [string, string | number | null][] = [
+    [t("db.grid.count"), summary.count],
+    [t("db.grid.nulls"), summary.nulls],
+    [t("db.grid.distinct"), summary.distinct],
+    [t("db.grid.sum"), summary.sum],
+    [t("db.grid.avg"), summary.avg],
+    [t("db.grid.min"), summary.min],
+    [t("db.grid.max"), summary.max],
+  ];
+  return (
+    <div className="flex shrink-0 items-center gap-3 overflow-x-auto border-t border-[var(--cf-border)] px-2 py-[3px] text-[11px] text-[var(--cf-text-muted)]">
+      <span className="shrink-0 font-semibold text-[var(--cf-text)]" title={scoped ? t("db.grid.overSelection") : t("db.grid.overPage")}>
+        {column}
+        {scoped ? " ·" : ""}
+        {scoped && <span className="ml-1 font-normal text-[var(--cf-text-muted)]">{t("db.grid.selection")}</span>}
+      </span>
+      {figures
+        .filter(([, value]) => value !== null)
+        .map(([label, value]) => (
+          <button
+            key={label}
+            type="button"
+            onClick={() => void navigator.clipboard.writeText(String(value))}
+            title={t("db.copy")}
+            className="flex shrink-0 items-center gap-1 rounded px-1 hover:bg-[var(--cf-hover)]"
+          >
+            <span>{label}</span>
+            <span className="max-w-[180px] truncate font-mono tabular-nums text-[var(--cf-text)]">{String(value)}</span>
+          </button>
+        ))}
+      <button type="button" onClick={onClose} title={t("common.close")} className="ml-auto shrink-0 hover:text-[var(--cf-text)]">
+        <X size={11} />
+      </button>
     </div>
   );
 }

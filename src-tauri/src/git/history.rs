@@ -5,11 +5,10 @@
 //! doing anything to one that already exists. "Fix the message on the commit I just made" is
 //! probably the single most common thing anybody wants from a git UI, and it required a terminal.
 //!
-//! **What is deliberately not here: rebase.** An interactive rebase is not one operation, it is a
-//! session with a state machine, a conflict at every step and an editor in the middle. Half of one
-//! is worse than none — a UI that starts a rebase and cannot finish it leaves the repository in a
-//! state the user has to leave the app to escape. Revert and cherry-pick below are each a single
-//! commit applied to the working tree, which is a promise this module can keep.
+//! **What is not here: rebase.** An interactive rebase is not one operation, it is a session with a
+//! state machine, a conflict at every step and an editor in the middle — so it is git's own, run
+//! from `rebase.rs` with the conflicts banner finishing it. Revert and cherry-pick below are each a
+//! single commit applied to the working tree, which is a promise this module can keep itself.
 //!
 //! Every function refuses rather than guesses when the tree is dirty, for the same reason: an
 //! operation that half-applies over uncommitted work leaves nothing to undo it with.
@@ -33,7 +32,7 @@ use super::repo::open;
 /// Untracked files are deliberately not counted: they cannot conflict with a patch being applied,
 /// and refusing a cherry-pick because there is a stray `notes.txt` in the folder is refusing for no
 /// reason.
-fn is_dirty(repo: &Repository) -> Result<bool, String> {
+pub(crate) fn is_dirty(repo: &Repository) -> Result<bool, String> {
     let mut options = git2::StatusOptions::new();
     options.include_untracked(false).include_ignored(false);
     let statuses = repo
@@ -122,6 +121,20 @@ pub fn head_commit_message(path: &str) -> Result<String, String> {
         .map_err(|_| "There is no commit yet".to_string())?;
     let commit = head.peel_to_commit().map_err(|e| e.message().to_string())?;
     Ok(commit.message().unwrap_or_default().to_string())
+}
+
+/// One commit as a mail-formatted patch — `git format-patch -1 --stdout`, which `git am` applies
+/// back with the author, date and message intact. Through the CLI because that format (and its
+/// binary-diff encoding) is git's own.
+pub fn format_patch(path: &str, oid: &str) -> Result<String, String> {
+    if oid.len() < 7 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("not a commit id: {oid}"));
+    }
+    let output = super::cli::run_in(path, &["format-patch", "-1", "--stdout", "--binary", oid], &[])?;
+    if !output.success {
+        return Err(output.stderr.trim().to_string());
+    }
+    Ok(output.stdout)
 }
 
 /// A libgit2 failure while applying a revert or cherry-pick. Its checkout is a safe one, so the

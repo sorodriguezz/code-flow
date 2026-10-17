@@ -6,14 +6,20 @@ import {
   AlertTriangle,
   Bookmark,
   BookmarkPlus,
+  Braces,
   Check,
   CheckCircle2,
   Copy,
   Download,
   Eraser,
   FileWarning,
+  Filter,
+  GitCompareArrows,
   Inbox,
+  ListChecks,
+  Route,
   Search,
+  Variable,
   WrapText,
   X,
   XCircle,
@@ -26,6 +32,20 @@ import { useT } from "../../state/languageStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { renderVisualizerTemplate } from "../../lib/api/visualizer";
+import { JsonPathError, pathToJsonPath, queryJsonPath } from "../../lib/api/jsonPath";
+import { jsonValueAt, type JsonHit } from "../../lib/api/jsonAt";
+import { exchangeForAi, secretValues } from "../../lib/api/aiPayload";
+import { newAssertion } from "../../lib/api/assertions";
+import { explanationRunning, useApiAiStore } from "../../state/apiAiStore";
+import { AiSparkles } from "../common/AiGlyph";
+import { ContextMenu } from "../common/ContextMenu";
+import { Markdown } from "../common/Markdown";
+import { ThinkingOrb } from "../common/ThinkingOrb";
+import { AiRunLog } from "../ai/AiRunLog";
+import { ChatModelPicker } from "../ai/ChatModelPicker";
+import { SaveVariableModal, variableText } from "./SaveVariableModal";
+import { CompareResponsesModal } from "./CompareResponsesModal";
+import { ResponseTypesModal } from "./ResponseTypesModal";
 import { EmptyState } from "../common/EmptyState";
 import { SkeletonRows } from "../common/Skeleton";
 import { statusColor } from "./methodStyle";
@@ -106,6 +126,15 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
   // rendering, and only until the next response — see the reset below.
   const [pickedBodyView, setPickedBodyView] = useState<BodyView | null>(null);
   const [copied, markCopied] = useCopyFlag();
+  // Per request tab, like the sub-tab: this one panel serves every open request.
+  const [filters, setFilters] = useState<Record<string, string>>({});
+  const filter = filters[tabId] ?? "";
+  const setFilter = (next: string) => setFilters((all) => ({ ...all, [tabId]: next }));
+  const [valueMenu, setValueMenu] = useState<{ x: number; y: number; hit: JsonHit } | null>(null);
+  const [savingVariable, setSavingVariable] = useState<JsonHit | null>(null);
+  const [comparing, setComparing] = useState(false);
+  const [typing, setTyping] = useState(false);
+  const explanation = useApiAiStore((s) => s.explanations[tabId]);
 
   const contentType = response ? headerValue(response.headers, "content-type") : "";
   const binary = response?.body_base64 != null && response.body_base64 !== "";
@@ -184,6 +213,35 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
     }
   };
 
+  const isJson = !binary && languageForContentType(contentType) === "json" && looksLikeJson(bodyText);
+  const requestName = () => useApiStore.getState().openTabs.find((candidate) => candidate.id === tabId)?.name || response.sent.url;
+
+  const explain = () => {
+    const store = useApiStore.getState();
+    const tab = store.openTabs.find((candidate) => candidate.id === tabId);
+    const ctx = store.variableContext(tab?.collectionId ?? null);
+    const payload = exchangeForAi(response, secretValues([ctx.environment, ctx.collection, ctx.global]), {
+      name: tab?.name,
+      description: tab?.draft.description,
+    });
+    void useApiAiStore.getState().explain(tabId, payload, tab?.name || `${response.sent.method} ${response.sent.url}`);
+  };
+
+  /** «Añadir assert» from a value: equal to it when it is a plain value, present when it is not. */
+  const addAssertion = (hit: JsonHit) => {
+    const tab = useApiStore.getState().openTabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    const plain = hit.value === null || typeof hit.value !== "object";
+    const row = {
+      ...newAssertion(newId("assert"), "jsonpath"),
+      property: pathToJsonPath(hit.path),
+      operator: plain ? ("eq" as const) : ("exists" as const),
+      expected: plain ? JSON.stringify(hit.value) : "",
+    };
+    updateDraft(tabId, { assertions: [...(tab.draft.assertions ?? []), row] });
+    useToastStore.getState().pushToast(t("api.assert.added", { name: row.property }), "success");
+  };
+
   const truncated = wasTruncated(response, maxResponseBytes);
   const sse = response.stream?.sse === true;
   // Events are remembered per request tab; on a response that isn't an event stream the tab it
@@ -238,10 +296,12 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
             active={copied}
           />
           <IconButton icon={Download} title={t("api.response.save")} onClick={() => void saveToFile()} />
+          {isJson && <IconButton icon={Braces} title={t("api.types.title")} onClick={() => setTyping(true)} />}
           {/* Capturing and clearing act on the live response; neither means anything while an
               example is what's on screen, and the banner's own button is the way out. */}
           {!exampleView && (
             <>
+              <IconButton icon={GitCompareArrows} title={t("api.compare.title")} onClick={() => setComparing(true)} />
               <IconButton
                 icon={BookmarkPlus}
                 title={t("api.response.saveAsExample")}
@@ -252,6 +312,22 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
                 title={t("api.response.clear")}
                 onClick={() => setResponse(tabId, null)}
               />
+              <span className="ml-1">
+                <ChatModelPicker
+                  task="api"
+                  variant="split"
+                  liveModel={null}
+                  chatActive={false}
+                  title={t("api.ai.explainHint")}
+                  action={{
+                    // The orb, not a spinner: a model is reading the exchange.
+                    icon: explanationRunning(explanation) ? <ThinkingOrb size="sm" /> : <AiSparkles size={13} />,
+                    label: t("api.ai.explain"),
+                    onClick: explain,
+                    disabled: explanationRunning(explanation),
+                  }}
+                />
+              </span>
             </>
           )}
         </div>
@@ -281,6 +357,8 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
         </div>
       )}
 
+      <div className="flex min-h-0 flex-1">
+      <div className="flex min-w-0 flex-1 flex-col">
       {response.error ? (
         <ErrorView response={response} />
       ) : (
@@ -329,6 +407,9 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
                           ? [t("api.response.prettySkipped", { size: formatBytes(bodyText.length) })]
                           : []
                       }
+                      filter={isJson ? filter : undefined}
+                      onFilterChange={isJson ? setFilter : undefined}
+                      onValueMenu={isJson ? (hit, x, y) => setValueMenu({ hit, x, y }) : undefined}
                     />
                   ))}
 
@@ -356,11 +437,93 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
             {tab === "cookies" && <CookiesView response={response} />}
             {tab === "tests" && <TestsView response={response} />}
             {tab === "console" && <ConsoleView response={response} />}
-            {tab === "timeline" && <TimelineView timings={response.timings} />}
+            {tab === "timeline" && (
+              <TimelineView timings={response.timings} tls={/^https:/i.test(response.sent.url)} />
+            )}
           </div>
         </>
       )}
+      </div>
+      {explanation && <ExplanationPanel tabId={tabId} />}
+      </div>
+
+      {valueMenu && (
+        <ContextMenu
+          x={valueMenu.x}
+          y={valueMenu.y}
+          heading={pathToJsonPath(valueMenu.hit.path)}
+          onClose={() => setValueMenu(null)}
+          items={[
+            {
+              label: t("api.value.copy"),
+              icon: Copy,
+              onClick: () => void navigator.clipboard.writeText(variableText(valueMenu.hit.value)),
+            },
+            {
+              label: t("api.value.copyPath"),
+              icon: Route,
+              onClick: () => void navigator.clipboard.writeText(pathToJsonPath(valueMenu.hit.path)),
+            },
+            { label: t("api.value.filter"), icon: Filter, onClick: () => setFilter(pathToJsonPath(valueMenu.hit.path)) },
+            {
+              label: t("api.value.saveVariable"),
+              icon: Variable,
+              separated: true,
+              onClick: () => setSavingVariable(valueMenu.hit),
+            },
+            { label: t("api.value.addAssert"), icon: ListChecks, onClick: () => addAssertion(valueMenu.hit) },
+          ]}
+        />
+      )}
+      {savingVariable && (
+        <SaveVariableModal
+          tabId={tabId}
+          path={savingVariable.path}
+          value={savingVariable.value}
+          onClose={() => setSavingVariable(null)}
+        />
+      )}
+      {comparing && <CompareResponsesModal tabId={tabId} response={response} onClose={() => setComparing(false)} />}
+      {typing && <ResponseTypesModal json={bodyText} requestName={requestName()} onClose={() => setTyping(false)} />}
     </div>
+  );
+}
+
+/**
+ * «Explicar con IA»'s answer, beside the response it is about — a column rather than a drawer: the
+ * response pane is short, and the body the answer quotes stays on screen while it is read. While it
+ * runs it shows the engine's trace; closing stops a run still going.
+ */
+function ExplanationPanel({ tabId }: { tabId: string }) {
+  const t = useT();
+  const explanation = useApiAiStore((s) => s.explanations[tabId]);
+  const close = useApiAiStore((s) => s.closeExplanation);
+  if (!explanation) return null;
+  const running = explanationRunning(explanation);
+  return (
+    <aside className="flex w-[min(420px,45%)] min-w-[240px] shrink-0 flex-col border-l border-[var(--cf-border)] bg-[var(--cf-surface)]">
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-3 pr-1.5">
+        {running ? <ThinkingOrb size="sm" /> : <AiSparkles size={12} />}
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-[var(--cf-text)]">{t("api.ai.explainTitle")}</span>
+        {explanation.text && (
+          <IconButton icon={Copy} title={t("api.ai.copyAnswer")} onClick={() => void navigator.clipboard.writeText(explanation.text ?? "")} />
+        )}
+        <IconButton icon={X} title={running ? t("api.ai.stop") : t("common.close")} onClick={() => close(tabId)} />
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        {running && (
+          <div className="p-2">
+            <AiRunLog runId={explanation.runId} running startedAt={explanation.startedAt} />
+          </div>
+        )}
+        {explanation.error && <p className="p-3 text-[12px] text-[var(--cf-danger)]">{explanation.error}</p>}
+        {explanation.text && (
+          <div className="select-text p-3 text-[12.5px]">
+            <Markdown source={explanation.text} />
+          </div>
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -563,26 +726,64 @@ function BodyEditor({
   language,
   notices,
   defaultWrap = false,
+  filter,
+  onFilterChange,
+  onValueMenu,
 }: {
   path: string;
   text: string;
   language: string;
   notices: string[];
   defaultWrap?: boolean;
+  /** A JSON body's JSONPath filter, when it can have one; `undefined` hides the field. */
+  filter?: string;
+  onFilterChange?: (next: string) => void;
+  /** Right-click on a value of the (unfiltered) JSON: what it is, and where the pointer was. */
+  onValueMenu?: (hit: JsonHit, x: number, y: number) => void;
 }) {
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
   const t = useT();
   const [wrap, setWrap] = useState(defaultWrap);
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
 
-  const capped = text.length > DISPLAY_LIMIT;
-  const shown = capped ? text.slice(0, DISPLAY_LIMIT) : text;
+  // The filter's result replaces the text; a malformed path says why instead.
+  const filtered = useMemo(() => {
+    const query = filter?.trim() ?? "";
+    if (query === "") return null;
+    try {
+      const matches = queryJsonPath(JSON.parse(text), query);
+      if (matches.length === 0) return { text: "", notice: t("api.filter.none"), error: false };
+      const shownValue = matches.length === 1 ? matches[0] : matches;
+      return { text: JSON.stringify(shownValue, null, 2), notice: t("api.filter.matches", { n: matches.length }), error: false };
+    } catch (e) {
+      return { text, notice: e instanceof JsonPathError ? e.message : t("api.filter.invalid"), error: true };
+    }
+  }, [filter, text, t]);
+  const source = filtered && !filtered.error ? filtered.text : text;
+
+  const capped = source.length > DISPLAY_LIMIT;
+  const shown = capped ? source.slice(0, DISPLAY_LIMIT) : source;
   const allNotices = capped
     ? [...notices, t("api.response.truncated", { size: formatBytes(DISPLAY_LIMIT) })]
     : notices;
 
+  // Read through a ref: Monaco keeps the listener registered at mount, and the menu must act on
+  // what is on screen now — the filtered text has no paths into the body.
+  const menuRef = useRef({ onValueMenu, active: filtered !== null && !filtered.error });
+  menuRef.current = { onValueMenu, active: filtered !== null && !filtered.error };
+
   const handleMount: OnMount = (editor) => {
     editorRef.current = editor;
+    editor.onContextMenu((event) => {
+      const { onValueMenu: open, active } = menuRef.current;
+      const model = editor.getModel();
+      const position = event.target.position;
+      if (!open || active || !model || !position) return;
+      const hit = jsonValueAt(model.getValue(), model.getOffsetAt(position));
+      if (!hit) return;
+      event.event.preventDefault();
+      open(hit, event.event.browserEvent.clientX, event.event.browserEvent.clientY);
+    });
   };
 
   // Monaco owns ⌘F once it has focus; the button is for the mouse-driven path into the same widget.
@@ -615,6 +816,33 @@ function BodyEditor({
         >
           <WrapText size={13} />
         </button>
+        {onFilterChange && (
+          <label className="ml-1 flex min-w-0 max-w-[340px] flex-1 items-center gap-1.5 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-1.5 focus-within:border-[var(--cf-accent)]">
+            <Filter size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <input
+              value={filter ?? ""}
+              spellCheck={false}
+              onChange={(e) => onFilterChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") onFilterChange("");
+              }}
+              placeholder={t("api.filter.placeholder")}
+              aria-label={t("api.filter.label")}
+              title={t("api.filter.hint")}
+              className="h-[22px] min-w-0 flex-1 bg-transparent font-mono text-[11px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)]"
+            />
+            {filter && (
+              <button type="button" onClick={() => onFilterChange("")} aria-label={t("api.filter.clear")} className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
+                <X size={11} />
+              </button>
+            )}
+          </label>
+        )}
+        {filtered && (
+          <span className={`ml-1 shrink-0 truncate text-[11px] ${filtered.error ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-muted)]"}`} title={filtered.notice}>
+            {filtered.notice}
+          </span>
+        )}
         {allNotices.length > 0 && (
           <span className="ml-1 truncate text-[11px] text-[var(--cf-warning)]" title={allNotices.join(" · ")}>
             {allNotices.join(" · ")}
@@ -624,7 +852,7 @@ function BodyEditor({
       <div className="min-h-0 flex-1">
         <Editor
           height="100%"
-          path={path}
+          path={filtered && !filtered.error ? `${path}/filtered` : path}
           language={language}
           value={shown}
           theme={monacoTheme}
@@ -925,8 +1153,13 @@ const TIMING_PHASES: { key: keyof ResponseTimings; labelKey: TranslationKey; col
 const HATCH =
   "repeating-linear-gradient(45deg, var(--cf-border) 0 4px, color-mix(in oklab, var(--cf-border) 40%, transparent) 4px 8px)";
 
-function TimelineView({ timings }: { timings: ResponseTimings }) {
+function TimelineView({ timings, tls }: { timings: ResponseTimings; tls: boolean }) {
   const t = useT();
+  // On https the handshake happens inside the connector and is measured as part of the connection
+  // (see `api/http.rs`); the rows say so instead of showing TLS as missing.
+  const tlsInConnect = tls && timings.tls_ms < 0 && timings.connect_ms >= 0;
+  const label = (phase: (typeof TIMING_PHASES)[number]) =>
+    tlsInConnect && phase.key === "connect_ms" ? t("api.timings.connectTls") : t(phase.labelKey);
 
   const measured = TIMING_PHASES.filter((phase) => timings[phase.key] >= 0);
   const sum = measured.reduce((total, phase) => total + timings[phase.key], 0);
@@ -941,7 +1174,7 @@ function TimelineView({ timings }: { timings: ResponseTimings }) {
         {measured.map((phase) => (
           <div
             key={phase.key}
-            title={`${t(phase.labelKey)} · ${formatDuration(timings[phase.key])}`}
+            title={`${label(phase)} · ${formatDuration(timings[phase.key])}`}
             style={{ width: `${(timings[phase.key] / scale) * 100}%`, background: phase.color }}
           />
         ))}
@@ -957,13 +1190,22 @@ function TimelineView({ timings }: { timings: ResponseTimings }) {
         {TIMING_PHASES.map((phase) => {
           const value = timings[phase.key];
           const available = value >= 0;
+          if (tlsInConnect && phase.key === "tls_ms") {
+            return (
+              <div key={phase.key} className="flex items-center gap-2 text-[12px]">
+                <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: HATCH }} />
+                <span className="flex-1 text-[var(--cf-text-muted)]">{t(phase.labelKey)}</span>
+                <span className="italic text-[var(--cf-text-muted)]">{t("api.timings.tlsIncluded")}</span>
+              </div>
+            );
+          }
           return (
             <div key={phase.key} className="flex items-center gap-2 text-[12px]">
               <span
                 className="h-2.5 w-2.5 shrink-0 rounded-sm"
                 style={{ background: available ? phase.color : HATCH }}
               />
-              <span className="flex-1 text-[var(--cf-text-muted)]">{t(phase.labelKey)}</span>
+              <span className="flex-1 text-[var(--cf-text-muted)]">{label(phase)}</span>
               <span
                 className={
                   available ? "font-medium text-[var(--cf-text)]" : "italic text-[var(--cf-text-muted)]"
@@ -1078,6 +1320,19 @@ function defaultFileName(contentType: string, binary: boolean): string {
   // Base64 is what actually lands on disk for a binary body, and the name should say so.
   if (binary) return "response.b64";
   return `response.${EXTENSIONS[languageForContentType(contentType)] ?? "txt"}`;
+}
+
+/** Cheap enough for every render: the first character, then a parse only when it could be JSON. */
+function looksLikeJson(text: string): boolean {
+  const head = text.trimStart()[0];
+  if (head !== "{" && head !== "[") return false;
+  if (text.length > PRETTY_LIMIT) return true;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Leaves a body that isn't valid JSON exactly as it arrived — the server's bytes are the truth. */

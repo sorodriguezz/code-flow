@@ -24,6 +24,10 @@ import {
 import { FileTree, parentDir, type ExplorerCommand } from "./FileTree";
 import { IconProfilePanel } from "./IconProfilePanel";
 import { FilePalette } from "./FilePalette";
+import { SymbolPalette } from "./SymbolPalette";
+import { CompareFilesModal } from "./CompareFilesModal";
+import { useCompareStore } from "../../state/compareStore";
+import { useEditorStatusStore } from "../../state/editorStatusStore";
 import { SearchPanel } from "./SearchPanel";
 import { AnchorsPanel } from "./AnchorsPanel";
 import { BookmarksPanel } from "./BookmarksPanel";
@@ -46,6 +50,7 @@ import { setDefinitionContext } from "../../lib/goToDefinition";
 import { syncClose, syncOpen, syncSave } from "../../lib/lsp/client";
 import {
   closeAllInGroups,
+  closePathsInGroup,
   closeGroupInGroups,
   closeTabInGroups,
   dropIntoSplit,
@@ -93,6 +98,7 @@ import {
   describePath,
   failedLoad,
   isChangedOnDisk,
+  isUnmappable,
   isWritable,
   loadedFrom,
   sameLoadedState,
@@ -106,6 +112,11 @@ import { useProblemsStore } from "../../state/problemsStore";
 import { useEditorPanelStore } from "../../state/editorPanelStore";
 import { useEditorFormatStore } from "../../state/editorFormatStore";
 import { useEditorDisplayStore } from "../../state/editorDisplayStore";
+import { useRecentFilesStore } from "../../state/recentFilesStore";
+import { applySaveRules, editorConfigFor, forgetEditorConfigs, saveRulesFor } from "../../lib/editorConfig";
+import { VSCODE_SETTINGS_FILE, useVscodeSettingsStore, vscodeSettingsForFile, type FileEditorSettings } from "../../lib/vscodeSettings";
+import { languageForPath } from "../../lib/monacoLanguage";
+import { VSCODE_EXTENSIONS_FILE, forgetRecommendedServers } from "../../lib/vscodeExtensions";
 import { isNotebookPath, registerNotebookHost } from "../../lib/notebook/host";
 import { notebookActions } from "../../state/notebookStore";
 import {
@@ -215,6 +226,7 @@ function loadingTab(path: string, preview: boolean): OpenTab {
     version: null,
     notice: null,
     readOnly: null,
+    encoding: null,
     diskChanged: false,
     diskText: null,
   };
@@ -233,6 +245,7 @@ function withLoaded(tab: OpenTab, loaded: LoadedFile): OpenTab {
     version: loaded.version,
     notice: loaded.notice,
     readOnly: loaded.readOnly,
+    encoding: loaded.encoding,
     loading: false,
     diskChanged: false,
     diskText: null,
@@ -394,6 +407,13 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
   /** Bumped when a parked editor comes back — see the effect that re-reads its unfinished tabs. */
   const [restoredParked, setRestoredParked] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  /** The palette opened as «Abrir reciente»: the files last opened here, only. */
+  const [paletteRecent, setPaletteRecent] = useState(false);
+  const [symbolPaletteOpen, setSymbolPaletteOpen] = useState(false);
+  const comparePair = useCompareStore((s) => s.pair);
+  /** Files whose last tab was closed, newest last — what ⌘⇧T opens again. Session-only, per window,
+   *  and capped: nobody reopens the thirtieth tab back. */
+  const closedRef = useRef<string[]>([]);
   const [sidePanel, setSidePanel] = useState<SidePanel>("files");
   /**
    * Whether the panel column is put away — the activity bar's own gesture in VS Code (user ask,
@@ -482,6 +502,10 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     [groups, activeGroupId],
   );
   const activePath = activeGroup?.activePath ?? null;
+  // The file in front is the most recent one opened — what «Abrir reciente» and ⌘P list first.
+  useEffect(() => {
+    if (project && activePath && !isScratchPath(activePath)) useRecentFilesStore.getState().touch(project.local_path, activePath);
+  }, [project, activePath]);
   const activeTab = useMemo(() => tabs.find((tab) => tab.path === activePath) ?? null, [tabs, activePath]);
   const activeContent = activeTab?.content ?? "";
 
@@ -723,7 +747,10 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     setGroups(next);
     if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
     // Out of every group means out of the registry — which is also what disposes its model.
-    if (!next.some((g) => g.paths.includes(path))) setTabs((prev) => prev.filter((item) => item.path !== path));
+    if (!next.some((g) => g.paths.includes(path))) {
+      setTabs((prev) => prev.filter((item) => item.path !== path));
+      if (!isScratchPath(path)) closedRef.current = [...closedRef.current.filter((p) => p !== path), path].slice(-30);
+    }
   }, []);
 
   /**
@@ -746,8 +773,8 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
 
   /** Splits a group's current file into a new group to its right and focuses it — see
    * `splitGroups` for why only the active file crosses over. */
-  const splitGroup = useCallback((groupId?: string, path?: string) => {
-    const outcome = splitGroups(groupsRef.current, groupId ?? activeGroupIdRef.current, path);
+  const splitGroup = useCallback((groupId?: string, path?: string, direction: "right" | "down" = "right") => {
+    const outcome = splitGroups(groupsRef.current, groupId ?? activeGroupIdRef.current, path, direction);
     if (!outcome) return;
     setGroups(outcome.groups);
     setActiveGroupId(outcome.focusId);
@@ -785,6 +812,28 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     }
     // Re-read after the (awaited) confirm, exactly as `closeTab` does.
     const next = closeAllInGroups(groupsRef.current, groupId);
+    setGroups(next);
+    if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
+    setTabs((prev) => prev.filter((tab) => next.some((g) => g.paths.includes(tab.path))));
+  }, []);
+
+  /**
+   * Closes some of one group's tabs — the strip's «Cerrar otras / a la derecha / guardadas». Pinned
+   * tabs sit out every one of them, as they do «Cerrar todas»; unsaved work only this group shows is
+   * asked about first, the same question `closeAllTabs` asks.
+   */
+  const closeTabsWhere = useCallback(async (groupId: string, pick: (paths: string[], dirty: (p: string) => boolean) => string[]) => {
+    const group = groupsRef.current.find((g) => g.id === groupId);
+    if (!group) return;
+    const dirty = (p: string) => tabsRef.current.some((tab) => tab.path === p && tab.content !== tab.originalContent);
+    const closing = pick(group.paths, dirty).filter((p) => !group.pinned.includes(p));
+    if (closing.length === 0) return;
+    const unsaved = closing.filter((p) => groupsRef.current.filter((g) => g.paths.includes(p)).length <= 1 && dirty(p));
+    if (unsaved.length > 0) {
+      const ok = await confirmAction(tRef.current("editor.closeAllDirtyConfirm", { n: unsaved.length }), true);
+      if (!ok) return;
+    }
+    const next = closePathsInGroup(groupsRef.current, groupId, closing);
     setGroups(next);
     if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
     setTabs((prev) => prev.filter((tab) => next.some((g) => g.paths.includes(tab.path))));
@@ -1237,7 +1286,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       try {
         // Checked against the version the buffer started from, so a file an agent, a pull or a
         // replace rewrote meanwhile is not silently overwritten. `force` is the user's "overwrite".
-        const version = await writeEditorFile(project.local_path, path, text, force ? null : tab.version);
+        const version = await writeEditorFile(project.local_path, path, text, force ? null : tab.version, tab.encoding);
         // The language servers are told too. `client_capabilities` asks for `didSave` and this is
         // the only place that can send it — without it `checkOnSave`, which the rust-analyzer entry
         // declares twice, never fires: the user gets one round of real cargo errors on workspace
@@ -1272,7 +1321,11 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
         // Said out loud, and the buffer stays dirty: a save that failed quietly — a full disk, a
         // permission, a folder deleted under the file — looked exactly like one that worked.
         if (interactive) {
-          pushErrorToast(tRef.current("editor.saveFailed", { name: describePath(path).name, error: String(e) }));
+          pushErrorToast(
+            isUnmappable(e)
+              ? tRef.current("editor.saveUnmappable", { name: describePath(path).name, encoding: (tab.encoding ?? "").toUpperCase() })
+              : tRef.current("editor.saveFailed", { name: describePath(path).name, error: String(e) }),
+          );
         }
         return "failed";
       } finally {
@@ -1290,13 +1343,16 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
    */
   const formatBeforeSave = useCallback(
     async (path: string) => {
-      if (!useEditorFormatStore.getState().formatOnSave) return;
       const current = projectRef.current;
       const tab = tabsRef.current.find((item) => item.path === path);
       if (!current || !tab || tab.loading || !isWritable(tab) || !isDirtyTab(tab)) return;
       // A scratch buffer is no file to be formatted as, and a notebook is written in Jupyter's own
       // layout (see `lib/notebook`), which a JSON formatter would rewrite on every save.
       if (isScratchPath(path) || isNotebookPath(path)) return;
+      // The repository's `.vscode/settings.json` decides first, for this file's language included.
+      const language = monaco.editor.getModel(monaco.Uri.parse(modelPathFor(current, path)))?.getLanguageId() ?? languageForPath(path);
+      const own = await vscodeSettingsForFile(current.local_path, path, language).catch((): FileEditorSettings => ({}));
+      if (!(own.formatOnSave ?? useEditorFormatStore.getState().formatOnSave)) return;
       try {
         const model = monaco.editor.getModel(monaco.Uri.parse(modelPathFor(current, path)));
         let text: string | null = null;
@@ -1326,6 +1382,65 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     [commitTabs],
   );
 
+  /**
+   * VS Code's `files.trimTrailingWhitespace` / `files.insertFinalNewline`, and `.editorconfig`'s
+   * `end_of_line` and the same two — editorconfig's word winning (`lib/editorConfig`). Applied to the
+   * model as edits, so the caret stays put and one ⌘Z undoes them; a tab with no model gets the
+   * text. Same reach as the format pass above: a dirty, writable file of the project.
+   */
+  const normalizeBeforeSave = useCallback(
+    async (path: string) => {
+      const current = projectRef.current;
+      const tab = tabsRef.current.find((item) => item.path === path);
+      if (!current || !tab || tab.loading || !isWritable(tab) || !isDirtyTab(tab)) return;
+      if (isScratchPath(path) || isNotebookPath(path)) return;
+      const display = useEditorDisplayStore.getState();
+      const config = display.editorConfig ? await editorConfigFor(current.local_path, path).catch(() => ({})) : {};
+      // `.vscode/settings.json` over the preferences, `.editorconfig` over both.
+      const language = monaco.editor.getModel(monaco.Uri.parse(modelPathFor(current, path)))?.getLanguageId() ?? languageForPath(path);
+      const own = await vscodeSettingsForFile(current.local_path, path, language).catch((): FileEditorSettings => ({}));
+      const rules = saveRulesFor(
+        path,
+        {
+          trimTrailingWhitespace: own.trimTrailingWhitespace ?? display.trimTrailingWhitespace,
+          insertFinalNewline: own.insertFinalNewline ?? display.insertFinalNewline,
+        },
+        config,
+      );
+      if (rules.eol === null && own.eol) rules.eol = own.eol;
+      if (!rules.trimTrailingWhitespace && !rules.insertFinalNewline && rules.eol === null) return;
+      if (projectRef.current?.local_path !== current.local_path) return;
+      const model = monaco.editor.getModel(monaco.Uri.parse(modelPathFor(current, path)));
+      let text: string;
+      if (model && !model.isDisposed()) {
+        const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
+        if (rules.trimTrailingWhitespace) {
+          for (let line = 1; line <= model.getLineCount(); line++) {
+            const content = model.getLineContent(line);
+            const kept = content.replace(/[ \t]+$/, "").length;
+            if (kept < content.length) edits.push({ range: new monaco.Range(line, kept + 1, line, content.length + 1), text: "" });
+          }
+        }
+        const last = model.getLineCount();
+        if (rules.insertFinalNewline && model.getValueLength() > 0 && model.getLineContent(last).length > 0) {
+          const end = model.getLineMaxColumn(last);
+          edits.push({ range: new monaco.Range(last, end, last, end), text: model.getEOL() });
+        }
+        if (edits.length > 0) model.pushEditOperations([], edits, () => null);
+        if (rules.eol !== null && rules.eol !== "\r") {
+          const wanted = rules.eol === "\r\n" ? monaco.editor.EndOfLineSequence.CRLF : monaco.editor.EndOfLineSequence.LF;
+          if (model.getEOL() !== rules.eol) model.pushEOL(wanted);
+        }
+        text = model.getValue();
+      } else {
+        text = applySaveRules(tab.content, rules);
+      }
+      if (text === tab.content) return;
+      commitTabs((prev) => prev.map((item) => (item.path === path && isWritable(item) ? { ...item, content: text } : item)));
+    },
+    [commitTabs],
+  );
+
   /** Saves one file — after any save of it already running, see `savesInFlight`. `interactive:
    *  false` is a save nobody is watching (the quit's "save all"): it reports, it never asks.
    *  `format` defaults to `interactive`: the quit's save writes what is there, and an overwrite of a
@@ -1339,8 +1454,19 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       const interactive = opts.interactive ?? true;
       const run = (async () => {
         if (before) await before.catch(() => "failed");
-        if (!opts.force && (opts.format ?? interactive)) await formatBeforeSave(path);
-        return saveNow(path, opts.force ?? false, interactive);
+        // Not on auto save (`format: false`), as in VS Code: trimming under a caret that is still
+        // typing would eat the space just typed.
+        if (!opts.force && (opts.format ?? interactive)) {
+          await formatBeforeSave(path);
+          await normalizeBeforeSave(path);
+        }
+        const outcome = await saveNow(path, opts.force ?? false, interactive);
+        // A rule just changed: the next file opened or saved reads it again.
+        if (outcome === "saved" && /(^|\/)\.editorconfig$/.test(path)) forgetEditorConfigs();
+        const repo = projectRef.current?.local_path;
+        if (outcome === "saved" && path === VSCODE_SETTINGS_FILE && repo) void useVscodeSettingsStore.getState().reload(repo);
+        if (outcome === "saved" && path === VSCODE_EXTENSIONS_FILE && repo) forgetRecommendedServers(repo);
+        return outcome;
       })();
       savesInFlight.current.set(path, run);
       try {
@@ -1349,7 +1475,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
         if (savesInFlight.current.get(path) === run) savesInFlight.current.delete(path);
       }
     },
-    [saveNow, formatBeforeSave],
+    [saveNow, formatBeforeSave, normalizeBeforeSave],
   );
 
   /**
@@ -1393,6 +1519,70 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     },
     [patchTab, commitTabs],
   );
+
+  /**
+   * The encoding item of the status line (`EditorFileActions`). Reopening reads the file again as
+   * the encoding asked for — the buffer's unsaved changes are asked about first, since they are
+   * thrown away. Saving writes the buffer in it now, whether or not it is dirty, and the tab keeps
+   * it for every save after.
+   */
+  const reopenWithEncoding = useCallback(
+    async (path: string, encoding: string) => {
+      const current = projectRef.current;
+      const tab = tabsRef.current.find((item) => item.path === path);
+      if (!current || !tab || isScratchPath(path)) return;
+      if (isDirtyTab(tab)) {
+        const ok = await confirmAction(tRef.current("editor.status.reopenDirtyConfirm", { name: describePath(path).name }), true);
+        if (!ok) return;
+      }
+      try {
+        const loaded = loadedFrom(await readEditorFile(current.local_path, path, false, encoding));
+        if (projectRef.current?.local_path !== current.local_path) return;
+        commitTabs((prev) => prev.map((item) => (item.path === path ? withLoaded(item, loaded) : item)));
+      } catch (e) {
+        pushErrorToast(String(e));
+      }
+    },
+    [commitTabs],
+  );
+
+  const saveWithEncoding = useCallback(
+    async (path: string, encoding: string) => {
+      const current = projectRef.current;
+      const tab = tabsRef.current.find((item) => item.path === path);
+      if (!current || !tab || tab.loading || !isWritable(tab) || isScratchPath(path)) return;
+      const target = encoding === "utf-8" ? null : encoding;
+      try {
+        const version = await writeEditorFile(current.local_path, path, tab.content, tab.version, target);
+        syncSave(path, tab.content);
+        commitTabs((prev) =>
+          prev.map((item) =>
+            item.path === path ? { ...item, encoding: target, originalContent: tab.content, version, diskChanged: false } : item,
+          ),
+        );
+        void useRepoStore.getState().refreshStatus();
+      } catch (e) {
+        if (isChangedOnDisk(e)) {
+          diskQuestionRef.current(path);
+          return;
+        }
+        pushErrorToast(
+          isUnmappable(e)
+            ? tRef.current("editor.saveUnmappable", { name: describePath(path).name, encoding: encoding.toUpperCase() })
+            : tRef.current("editor.saveFailed", { name: describePath(path).name, error: String(e) }),
+        );
+      }
+    },
+    [commitTabs],
+  );
+
+  useEffect(() => {
+    useEditorStatusStore.getState().setFileActions({
+      reopenWithEncoding: (path, encoding) => void reopenWithEncoding(path, encoding),
+      saveWithEncoding: (path, encoding) => void saveWithEncoding(path, encoding),
+    });
+    return () => useEditorStatusStore.getState().setFileActions(null);
+  }, [reopenWithEncoding, saveWithEncoding]);
 
   /** "Compare": the file as it is on disk now, beside the buffer, in the diff view. */
   const compareWithDisk = useCallback(
@@ -1496,6 +1686,46 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     if (answer === "review") void openFile(conflicts[0], { pin: true });
     else if (answer === "overwrite") for (const path of conflicts) await save(path, { force: true, interactive: false });
   }, [save, openFile]);
+
+  /**
+   * Auto save (Settings › Editor › Archivos), VS Code's `files.autoSave` without the window variant:
+   * `afterDelay` writes every dirty file a second after typing stops; `onFocusChange` writes a file
+   * when its tab stops being the one in front, and everything when the window loses focus.
+   *
+   * Through the same checked save as ⌘S, never interactive: a file changed on disk keeps its strip
+   * (Comparar / Recargar / Sobrescribir) instead of being overwritten or asking. No formatting —
+   * reformatting under the caret a second after each pause would move the text being typed.
+   */
+  const autoSave = useEditorDisplayStore((s) => s.autoSave);
+  const autoSaveDirty = useCallback(
+    async (only?: string) => {
+      const dirty = tabsRef.current.filter(
+        (tab) => isDirtyTab(tab) && isWritable(tab) && !isScratchPath(tab.path) && (only === undefined || tab.path === only),
+      );
+      for (const tab of dirty) await save(tab.path, { interactive: false, format: false });
+    },
+    [save],
+  );
+  useEffect(() => {
+    if (autoSave !== "afterDelay" || !tabs.some((tab) => isDirtyTab(tab) && isWritable(tab) && !isScratchPath(tab.path))) return;
+    const timer = setTimeout(() => void autoSaveDirty(), 1000);
+    return () => clearTimeout(timer);
+  }, [autoSave, tabs, autoSaveDirty]);
+  const leftPathRef = useRef<string | null>(null);
+  useEffect(() => {
+    const left = leftPathRef.current;
+    leftPathRef.current = activePath;
+    if (autoSave === "onFocusChange" && left && left !== activePath) void autoSaveDirty(left);
+  }, [autoSave, activePath, autoSaveDirty]);
+  useEffect(() => {
+    if (autoSave === "off") return;
+    const onBlur = () => void autoSaveDirty();
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, [autoSave, autoSaveDirty]);
+  useEffect(() => {
+    void useEditorDisplayStore.getState().init();
+  }, []);
 
   /**
    * Hands a `.dbml` file to the Diagrams app as a diagram that stays in step with it.
@@ -1655,7 +1885,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
         continue;
       }
       try {
-        const version = await writeEditorFile(repoPath, tab.path, tab.content, tab.version);
+        const version = await writeEditorFile(repoPath, tab.path, tab.content, tab.version, tab.encoding);
         saved.set(tab.path, { text: tab.content, version });
       } catch (e) {
         if (isChangedOnDisk(e)) changed.add(tab.path);
@@ -2116,6 +2346,11 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     useEditorCommandStore.getState().consume();
     switch (editorCommand.command) {
       case "goToFile":
+        setPaletteRecent(false);
+        setPaletteOpen(true);
+        break;
+      case "openRecent":
+        setPaletteRecent(true);
         setPaletteOpen(true);
         break;
       case "explorer":
@@ -2136,6 +2371,21 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       case "splitRight":
         splitGroup();
         break;
+      case "splitDown":
+        splitGroup(undefined, undefined, "down");
+        break;
+      case "goToSymbol":
+        setSymbolPaletteOpen(true);
+        break;
+      case "reopenClosed": {
+        // The newest closed file that is not open again already.
+        const open = new Set(groupsRef.current.flatMap((g) => g.paths));
+        const stack = closedRef.current.filter((p) => !open.has(p));
+        const path = stack.pop();
+        closedRef.current = stack;
+        if (path) void openFile(path, { pin: true });
+        break;
+      }
       // The explorer's own commands: show the tree, then hand the request straight down. Nothing
       // up here knows which row is focused, and nothing up here should.
       case "newFile":
@@ -2506,7 +2756,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       // Always available — VS Code lets you keep splitting, and each press splits *this* group
       // rather than whichever one happens to hold focus. Not in a floating editor, which is its one
       // file and nothing beside it.
-      onSplit={group.activePath && islandPath === null ? () => splitGroup(group.id) : null}
+      onSplit={group.activePath && islandPath === null ? (down) => splitGroup(group.id, undefined, down ? "down" : "right") : null}
       onCloseGroup={groups.length > 1 ? () => closeGroup(group.id) : null}
       onNewUntitled={islandPath === null ? () => newUntitled(group.id) : null}
       // Dragged out of the window, a tab becomes a floating editor where it was let go — the main
@@ -2517,10 +2767,19 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       tabMenu={{
         togglePinned: (path) => togglePinned(group.id, path),
         closeAll: () => void closeAllTabs(group.id),
+        closeOthers: (path) => void closeTabsWhere(group.id, (paths) => paths.filter((p) => p !== path)),
+        closeToRight: (path) => void closeTabsWhere(group.id, (paths) => paths.slice(paths.indexOf(path) + 1)),
+        closeSaved: () => void closeTabsWhere(group.id, (paths, dirty) => paths.filter((p) => !dirty(p))),
+        compareWithSaved: (path) => {
+          const tab = tabsRef.current.find((item) => item.path === path);
+          if (tab) useCompareStore.getState().compareWithSaved(path, tab.content);
+        },
+        isDirty: (path) => tabsRef.current.some((tab) => tab.path === path && tab.content !== tab.originalContent),
         copyPath,
         // A floating editor has no explorer to show the file in, and no room to split it into.
         revealInTree: islandPath === null ? revealInTree : undefined,
         splitRight: islandPath === null ? (path) => splitGroup(group.id, path) : undefined,
+        splitDown: islandPath === null ? (path) => splitGroup(group.id, path, "down") : undefined,
         saveAll: () => void saveAll(),
         moveToWindow: canDetach ? (path, screen) => void detachTab(path, screen) : undefined,
         returnToMain:
@@ -2676,6 +2935,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
               fsNonce={fsNonce}
               dirtyBuffers={dirtyBuffers}
               onOpenHit={openHit}
+              onOpenEditor={openScratch}
               onClose={() => showSidePanel("files")}
             />
           ) : sidePanel === "anchors" ? (
@@ -2693,6 +2953,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
             <DebugPanel
               repoPath={project.local_path}
               suggestedProgram={activeAbsolutePath}
+              onOpenFile={openHit}
               onOpenFrame={(file, line) => {
                 // Frames carry absolute paths; the editor opens repo-relative ones.
                 const root = normalizePath(`${project.local_path}/`);
@@ -2816,7 +3077,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
                 onCommit={(h) => commitSize("editorPanelHeight", h)}
               />
               <div style={{ height: panelHeight }} className="flex min-h-0 shrink-0 flex-col">
-                <EditorBottomPanel onOpen={openHit} />
+                <EditorBottomPanel onOpen={openHit} repoPath={project.local_path} projectId={project.id} activeFile={activePath} />
               </div>
             </>
           )}
@@ -2912,11 +3173,24 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
           </div>
         </div>
       )}
+      {comparePair && (
+        <CompareFilesModal
+          repoPath={project.local_path}
+          left={comparePair.left}
+          right={comparePair.right}
+          buffer={comparePair.buffer}
+          label={comparePair.label}
+        />
+      )}
+      {symbolPaletteOpen && (
+        <SymbolPalette repoPath={project.local_path} onPick={(path, line) => openHit(path, line)} onClose={() => setSymbolPaletteOpen(false)} />
+      )}
       {paletteOpen && (
         <FilePalette
           repoPath={project.local_path}
           onPick={(path) => void openFile(path, { pin: true })}
           onClose={() => setPaletteOpen(false)}
+          recentOnly={paletteRecent}
         />
       )}
       {codeSnap && (

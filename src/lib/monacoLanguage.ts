@@ -46,6 +46,8 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   toml: "toml",
   // Registered by `monacoPrisma`, the same way: `schema.prisma` used to open as plain text.
   prisma: "prisma",
+  // VS Code's saved search editor — registered by `searchEditor`.
+  "code-search": "search-result",
   // Single-file components are markup around a script and a style block, which is what Monaco's
   // HTML grammar tokenizes — `lang="ts"` / `lang="scss"` included, see `monacoSfc`. They used to
   // open as plain text.

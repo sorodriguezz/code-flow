@@ -1335,6 +1335,7 @@ dependencies = [
  "dirs 5.0.1",
  "dom_query",
  "dunce",
+ "encoding_rs",
  "flate2",
  "futures-util",
  "git2",

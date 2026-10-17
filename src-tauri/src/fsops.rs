@@ -290,6 +290,30 @@ pub fn read_file_text(repo_path: &str, rel_path: &str) -> Result<String, String>
     std::fs::read_to_string(&full).map_err(|e| e.to_string())
 }
 
+/// A file's bytes, or `None` when nothing is there — for a reader that compares it with another
+/// copy (the chat's per-turn review) and has to tell "deleted" from "unreadable".
+pub fn read_bytes_in_repo(repo_path: &str, rel_path: &str) -> Result<Option<Vec<u8>>, String> {
+    let full = resolve_within_repo(repo_path, rel_path)?;
+    match std::fs::read(&full) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// At most `len` bytes of a file from `offset`, and the file's whole size — the editor's hex view,
+/// which reads a binary a page at a time rather than all of it.
+pub fn read_byte_range(repo_path: &str, rel_path: &str, offset: u64, len: usize) -> Result<(Vec<u8>, u64), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let full = resolve_within_repo(repo_path, rel_path)?;
+    let mut file = std::fs::File::open(&full).map_err(|e| e.to_string())?;
+    let total = file.metadata().map_err(|e| e.to_string())?.len();
+    file.seek(SeekFrom::Start(offset.min(total))).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::with_capacity(len.min(total.saturating_sub(offset) as usize));
+    file.take(len as u64).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    Ok((bytes, total))
+}
+
 pub fn write_file_text(repo_path: &str, rel_path: &str, content: &str) -> Result<(), String> {
     let full = resolve_within_repo(repo_path, rel_path)?;
     std::fs::write(&full, content).map_err(|e| e.to_string())
@@ -337,8 +361,8 @@ pub const MAX_FORCED_READ_BYTES: u64 = 100 * 1024 * 1024;
 pub enum EditorFile {
     /// UTF-8 text: the one kind the editor edits and writes back.
     Text { text: String, version: DiskVersion },
-    /// Text in another encoding, decoded so it can be read. Never written back: the editor writes
-    /// UTF-8, so a save would re-encode every non-ASCII byte in the file.
+    /// Text in another encoding, decoded to be edited — and saved back in that same encoding
+    /// ([`encode_as`]), so an accent stays the byte it was.
     Legacy {
         text: String,
         /// `windows-1252`, `utf-16le` or `utf-16be`.
@@ -572,6 +596,16 @@ pub fn write_file_text_checked(
     content: &str,
     expected: Option<&DiskVersion>,
 ) -> Result<DiskVersion, String> {
+    write_bytes_checked(repo_path, rel_path, content.as_bytes(), expected)
+}
+
+/// [`write_file_text_checked`] for bytes already encoded — a file saved in its own encoding.
+pub fn write_bytes_checked(
+    repo_path: &str,
+    rel_path: &str,
+    content: &[u8],
+    expected: Option<&DiskVersion>,
+) -> Result<DiskVersion, String> {
     let full = resolve_within_repo(repo_path, rel_path)?;
     if let Some(expected) = expected {
         if changed_since(&full, expected)? {
@@ -582,7 +616,76 @@ pub fn write_file_text_checked(
     }
     std::fs::write(&full, content).map_err(|e| e.to_string())?;
     let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
-    Ok(version_of(&meta, content.as_bytes()))
+    Ok(version_of(&meta, content))
+}
+
+/// The canonical lower-case name of an encoding label (`latin1` → `windows-1252`, `UTF8` →
+/// `utf-8`), or an error naming the label nobody knows.
+pub fn encoding_name(label: &str) -> Result<String, String> {
+    encoding_rs::Encoding::for_label(label.trim().as_bytes())
+        .map(|encoding| encoding.name().to_ascii_lowercase())
+        .ok_or_else(|| format!("unknown encoding: {label}"))
+}
+
+/// `bytes` read as `encoding` — the editor's «Reopen with encoding». A byte-order mark is dropped;
+/// a byte the encoding has no character for becomes U+FFFD, which the tab shows rather than hides.
+pub fn decode_as(bytes: &[u8], encoding: &str) -> Result<String, String> {
+    let name = encoding_name(encoding)?;
+    let encoding = encoding_rs::Encoding::for_label(name.as_bytes()).ok_or_else(|| format!("unknown encoding: {name}"))?;
+    let (text, _, _) = encoding.decode(bytes);
+    Ok(text.into_owned())
+}
+
+/// `text` as the bytes of `encoding` — what a save writes for a file that is not UTF-8.
+///
+/// Refused, rather than written, when the text holds a character the encoding cannot represent:
+/// `encoding_rs` would put an HTML numeric reference (`&#128512;`) in its place, which is a file
+/// changed in a way nobody asked for. UTF-16 is encoded here with its byte-order mark — the WHATWG
+/// encoders `encoding_rs` implements write UTF-8 for it.
+pub fn encode_as(text: &str, encoding: &str) -> Result<Vec<u8>, String> {
+    let name = encoding_name(encoding)?;
+    match name.as_str() {
+        "utf-8" => Ok(text.as_bytes().to_vec()),
+        "utf-16le" | "utf-16be" => {
+            let big_endian = name == "utf-16be";
+            let mut out = if big_endian { vec![0xFE, 0xFF] } else { vec![0xFF, 0xFE] };
+            for unit in text.encode_utf16() {
+                out.extend_from_slice(&if big_endian { unit.to_be_bytes() } else { unit.to_le_bytes() });
+            }
+            Ok(out)
+        }
+        _ => {
+            let encoding = encoding_rs::Encoding::for_label(name.as_bytes()).ok_or_else(|| format!("unknown encoding: {name}"))?;
+            let (bytes, _, unmappable) = encoding.encode(text);
+            if unmappable {
+                return Err(format!("{UNMAPPABLE}: the text has characters {name} cannot hold"));
+            }
+            Ok(bytes.into_owned())
+        }
+    }
+}
+
+/// The error a save in another encoding refuses with when the text does not fit it. The editor
+/// matches on it to offer saving as UTF-8 instead.
+pub const UNMAPPABLE: &str = "unmappable-characters";
+
+/// [`read_editor_file`], with the text read as `encoding` instead of whatever the bytes suggest.
+/// Only text comes back this way: an image or a file past the read cap is what it is regardless.
+pub fn read_editor_file_as(repo_path: &str, rel_path: &str, encoding: &str) -> Result<EditorFile, String> {
+    let full = resolve_within_repo(repo_path, rel_path)?;
+    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_EDITOR_READ_BYTES {
+        return read_editor_file(repo_path, rel_path, false);
+    }
+    let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
+    let version = version_of(&meta, &bytes);
+    let name = encoding_name(encoding)?;
+    let text = decode_as(&bytes, &name)?;
+    Ok(if name == "utf-8" {
+        EditorFile::Text { text, version }
+    } else {
+        EditorFile::Legacy { text, encoding: name, version }
+    })
 }
 
 /// Whether the file at `full` is no longer the one `expected` describes. The check and the write
@@ -1234,6 +1337,44 @@ pub fn open_in_vscode(path: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_file_round_trips_through_its_own_encoding() {
+        let latin = encode_as("café — ñandú", "latin1").unwrap();
+        assert_eq!(latin, b"caf\xe9 \x97 \xf1and\xfa".to_vec());
+        assert_eq!(decode_as(&latin, "windows-1252").unwrap(), "café — ñandú");
+
+        let utf16 = encode_as("añ", "utf-16le").unwrap();
+        assert_eq!(utf16, vec![0xFF, 0xFE, b'a', 0, 0xF1, 0]);
+        assert_eq!(decode_as(&utf16, "utf-16le").unwrap(), "añ");
+        assert_eq!(encode_as("a", "utf-16be").unwrap(), vec![0xFE, 0xFF, 0, b'a']);
+
+        assert_eq!(decode_as("é".as_bytes(), "utf8").unwrap(), "é");
+        assert_eq!(encoding_name("Latin1").unwrap(), "windows-1252");
+        assert!(encoding_name("klingon").is_err());
+    }
+
+    #[test]
+    fn a_character_the_encoding_cannot_hold_refuses_the_save() {
+        let error = encode_as("price: 😀", "windows-1252").unwrap_err();
+        assert!(error.starts_with(UNMAPPABLE), "{error}");
+    }
+
+    #[test]
+    fn a_file_reopens_as_the_encoding_asked_for() {
+        let dir = temp_repo();
+        let repo = dir.to_str().unwrap();
+        std::fs::write(dir.join("a.txt"), "señal".as_bytes()).unwrap();
+        // UTF-8 bytes read as Latin-1: the mojibake the user asked to see.
+        match read_editor_file_as(repo, "a.txt", "windows-1252").unwrap() {
+            EditorFile::Legacy { text, encoding, .. } => {
+                assert_eq!(text, "seÃ±al");
+                assert_eq!(encoding, "windows-1252");
+            }
+            other => panic!("expected legacy text, got {other:?}"),
+        }
+        assert!(matches!(read_editor_file_as(repo, "a.txt", "utf-8").unwrap(), EditorFile::Text { .. }));
+    }
+
     use super::*;
 
     fn temp_repo() -> PathBuf {

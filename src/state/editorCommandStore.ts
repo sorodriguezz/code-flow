@@ -21,6 +21,11 @@ export type EditorCommand =
   | "debug"
   | "bookmarkToggle"
   | "splitRight"
+  | "splitDown"
+  // ⌘T over the repo map's index, and ⌘⇧T for the last tab closed.
+  | "goToSymbol"
+  | "openRecent"
+  | "reopenClosed"
   | "codeSnap"
   // The explorer's own four. They act on whichever row the tree has focused, so `EditorView` does
   // nothing with them but show the explorer and hand them down to `FileTree`.
@@ -53,6 +58,9 @@ export type EditorCommand =
  */
 const REVEALS_EDITOR = new Set<EditorCommand>([
   "goToFile",
+  "goToSymbol",
+  "openRecent",
+  "reopenClosed",
   "explorer",
   "findInProject",
   "anchors",

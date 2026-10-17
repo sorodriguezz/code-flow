@@ -27,7 +27,7 @@ export interface EditorStatus {
   tabSize: number;
   insertSpaces: boolean;
   eol: LineEnding;
-  /** How the file was decoded: `UTF-8`, or the encoding of one shown read-only (`WINDOWS-1252`). */
+  /** How the file was decoded and is saved: `UTF-8`, or its own (`WINDOWS-1252`). */
   encoding: string;
   languageId: string;
   /** Monaco's display name for it — "TypeScript", "HTML" — or the id when it has none. */
@@ -50,9 +50,20 @@ export interface EditorStatusActions {
   convertIndentation: (toSpaces: boolean) => void;
 }
 
+/** What the editor does to a *file* (not to a buffer) from the encoding item — `EditorView`'s, since
+ *  it owns reading and saving. */
+export interface EditorFileActions {
+  /** Read the file again as `encoding` — asks first when the tab has unsaved changes. */
+  reopenWithEncoding: (path: string, encoding: string) => void;
+  /** Write the buffer as `encoding` now, and keep saving it that way. */
+  saveWithEncoding: (path: string, encoding: string) => void;
+}
+
 interface EditorStatusState {
   status: EditorStatus | null;
   actions: EditorStatusActions | null;
+  fileActions: EditorFileActions | null;
+  setFileActions: (actions: EditorFileActions | null) => void;
   publish: (status: EditorStatus, actions: EditorStatusActions) => void;
   /** Guarded: only clears if this group is the one currently showing, as `cursorBlameStore.clear`. */
   clear: (groupId: string) => void;
@@ -79,6 +90,8 @@ function sameStatus(a: EditorStatus, b: EditorStatus): boolean {
 export const useEditorStatusStore = create<EditorStatusState>((set, get) => ({
   status: null,
   actions: null,
+  fileActions: null,
+  setFileActions: (fileActions) => set({ fileActions }),
 
   publish: (status, actions) => {
     const current = get();

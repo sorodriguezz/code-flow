@@ -49,6 +49,7 @@ import {
   type RemoteSnippet,
   type ScreenLaunch,
 } from "../types/remote";
+import { registerIslandApp } from "../lib/islandSync";
 
 /**
  * The Remote workspace's state.
@@ -1629,4 +1630,11 @@ useWorkspaceStore.subscribe((state, previous) => {
   const { workspaceId, loading } = useRemoteStore.getState();
   if (workspaceId === null && !loading) return;
   void useRemoteStore.getState().setWorkspace(state.activeWorkspaceId);
+});
+
+/** Hosts, groups and snippets the island added while Remoto was out, read again on the way back —
+ *  see `lib/islandSync`. Not released: this window's sessions keep running while the app is out. */
+registerIslandApp(["remote"], {
+  isLoaded: () => useRemoteStore.getState().workspaceId !== null,
+  reload: () => useRemoteStore.getState().refresh(),
 });

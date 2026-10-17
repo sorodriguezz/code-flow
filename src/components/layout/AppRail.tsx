@@ -31,6 +31,9 @@ import { useAiRunStore } from "../../state/aiRunStore";
 const AGENT_RUN_KINDS = new Set<string>(["agents.liveKindAgent", "agents.liveKindChain"]);
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { ReturnBurst } from "./ReturnBurst";
+import { flushBeforeIsland } from "../../lib/islandSync";
+import { WORKSPACE_ICONS } from "./WorkspaceGlyph";
+import { monogram } from "../../lib/monogram";
 
 export interface WorkspaceApp {
   id: MainView;
@@ -299,6 +302,8 @@ export function AppRail() {
 
   /** Sends the app out to a window of its own, and takes it off this one. */
   const sendOut = async (app: WorkspaceApp) => {
+    // What this window still owes the database goes first, so the island boots onto it.
+    await flushBeforeIsland(appKey(app));
     const moved = await detach("app", appKey(app), t(app.labelKey));
     // Only once the window actually exists: refused (the limit is reached, the backend said no) the
     // app stays exactly where it was, rather than leaving this window on an empty view.
@@ -345,7 +350,19 @@ export function AppRail() {
             className="mb-0.5 flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-[8px] border transition-[filter,transform] hover:brightness-105 active:scale-95"
             style={{ backgroundColor: wash(wsColor, 16), borderColor: wash(wsColor, 40) }}
           >
-            <Layers size={14} style={{ color: ink(wsColor) }} />
+            {/* The workspace's own mark — the icon picked for it in its menu, else its initials. */}
+            {workspace && WORKSPACE_ICONS[workspace.icon] ? (
+              (() => {
+                const Icon = WORKSPACE_ICONS[workspace.icon];
+                return <Icon size={14} style={{ color: ink(wsColor) }} />;
+              })()
+            ) : workspace ? (
+              <span className="text-[11px] font-bold tracking-[0.02em]" style={{ color: ink(wsColor) }}>
+                {monogram(workspace.name)}
+              </span>
+            ) : (
+              <Layers size={14} style={{ color: ink(wsColor) }} />
+            )}
           </button>
         </Tooltip>
 

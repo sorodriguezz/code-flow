@@ -31,7 +31,9 @@ export interface ContextReading {
    *  engine will be told their conversation said. */
   summary: string;
   compacting: boolean;
-  onCompact: () => void;
+  /** Absent where the surface has no way to compact — the repository chat on an engine without a
+   *  `/compact` of its own. The button and its hint are left out rather than shown dead. */
+  onCompact?: () => void;
   onUncompact: () => void;
 }
 
@@ -233,27 +235,31 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={() => reading.onCompact()}
-            disabled={reading.compacting}
-            className="flex w-full items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[12px] transition-colors hover:border-[var(--cf-accent)] disabled:opacity-50"
-          >
-            {reading.compacting ? (
-              <Loader2 size={12} className="shrink-0 animate-spin" />
-            ) : (
-              <Shrink size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-            )}
-            <span className="flex-1">
-              {t(reading.compacting ? "chat.contextCompacting" : "chat.contextCompact")}
-            </span>
-            {/* The same coin the regenerate and branch buttons carry, and for the same reason:
-                this one looks like a local tidy-up and is in fact a full turn against the engine. */}
-            {!reading.compacting && <Coins size={10} className="shrink-0 text-[var(--cf-text-muted)]" />}
-          </button>
-          <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
-            {t("chat.contextCompactHint")}
-          </p>
+          {reading.onCompact && (
+            <>
+              <button
+                type="button"
+                onClick={() => reading.onCompact?.()}
+                disabled={reading.compacting}
+                className="flex w-full items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[12px] transition-colors hover:border-[var(--cf-accent)] disabled:opacity-50"
+              >
+                {reading.compacting ? (
+                  <Loader2 size={12} className="shrink-0 animate-spin" />
+                ) : (
+                  <Shrink size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                )}
+                <span className="flex-1">
+                  {t(reading.compacting ? "chat.contextCompacting" : "chat.contextCompact")}
+                </span>
+                {/* The same coin the regenerate and branch buttons carry, and for the same reason:
+                    this one looks like a local tidy-up and is in fact a full turn against the engine. */}
+                {!reading.compacting && <Coins size={10} className="shrink-0 text-[var(--cf-text-muted)]" />}
+              </button>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
+                {t("chat.contextCompactHint")}
+              </p>
+            </>
+          )}
         </div>
       )}
     </div>

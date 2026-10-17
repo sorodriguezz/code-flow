@@ -775,6 +775,11 @@ pub struct ActivityLogEntry {
     /// has to be able to say so, not only the reply that happened to be on screen.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// What this turn changed on disk, as JSON `{"id", "paths"}`: the checkpoint taken before it and
+    /// the files that differed from it when it ended — the chat's per-turn review. `None` for a turn
+    /// that changed nothing, and for turns recorded before this was kept.
+    #[serde(default)]
+    pub checkpoint: Option<String>,
 }
 
 /// A finished PR review or pre-commit analysis run — `meta` is a small JSON blob (e.g.

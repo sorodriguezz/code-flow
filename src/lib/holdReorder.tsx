@@ -169,7 +169,17 @@ function nearest(slots: number[], y: number): number {
   return best;
 }
 
-export function useHoldReorder(commit: (from: number, to: number) => void): HoldReorder {
+export function useHoldReorder(
+  commit: (from: number, to: number) => void,
+  options: {
+    /**
+     * Asked first when a lifted item is let go: answers `true` when it took the drop somewhere
+     * other than the list — the projects panel moving a repository onto another workspace — and
+     * the reorder is then not made.
+     */
+    onDropAt?: (from: number, event: PointerEvent) => boolean;
+  } = {},
+): HoldReorder {
   const [arming, setArming] = useState<string | null>(null);
   const [drag, setDrag] = useState<HoldDrag | null>(null);
   const suppressClick = useRef(false);
@@ -258,11 +268,13 @@ export function useHoldReorder(commit: (from: number, to: number) => void): Hold
       setDrag((d) => (d ? { ...d, to, dy, ghost: boxes[to] ?? d.ghost } : d));
     };
 
-    const onUp = () => {
-      const rearranged = armed && to !== index;
+    const onUp = (ev: PointerEvent) => {
+      const wasArmed = armed;
       if (armed) suppressClick.current = true;
       stop();
       setDrag(null);
+      if (wasArmed && options.onDropAt?.(index, ev)) return;
+      const rearranged = wasArmed && to !== index;
       // Only when the gesture actually changed something: a hold that ends where it started is a
       // hold the user thought better of, and it should cost no write.
       if (rearranged) commit(index, to);

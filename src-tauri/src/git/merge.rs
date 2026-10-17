@@ -156,7 +156,7 @@ pub fn operation_state(path: &str) -> Result<OperationState, String> {
 
 /// Refuses to start anything while another operation is half done — git does the same, because two
 /// operations interleaved leave state files that belong to neither.
-pub(super) fn refuse_in_progress(repo: &Repository) -> Result<(), String> {
+pub(crate) fn refuse_in_progress(repo: &Repository) -> Result<(), String> {
     match OperationKind::of(repo.state()) {
         Some(kind) => Err(format!("{OPERATION_IN_PROGRESS_PREFIX}{}", kind.as_str())),
         None => Ok(()),

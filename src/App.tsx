@@ -30,6 +30,7 @@ import { TitleTooltips } from "./components/common/TitleTooltips";
 import { NotificationPopups } from "./components/layout/NotificationPopups";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
+import { RevisionCompareHost } from "./components/git/RevisionCompareHost";
 import { TourOverlay } from "./components/tour/TourOverlay";
 import { DialogSkeleton, PaletteSkeleton, SettingsSkeleton, ViewSkeleton } from "./components/common/ViewSkeleton";
 import { useThemeStore } from "./state/themeStore";
@@ -85,6 +86,7 @@ import { backgroundFetch } from "./lib/backgroundFetch";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
 import { isOwnOrigin, onAppForeground, onRepoFsChanged, onStateInvalidate } from "./lib/tauri/events";
 import { buttonClass } from "./components/common/Button";
+import { MultiDiffHost } from "./components/git/MultiDiffHost";
 
 /**
  * Everything below is split out of the entry chunk rather than compiled into it.
@@ -1314,6 +1316,7 @@ export default function App() {
           <BranchSwitcherModal onClose={closeBranchSwitcher} />
         </Suspense>
       )}
+      <MultiDiffHost />
       {prLinkModalOpen && (
         <Suspense
           fallback={<DialogSkeleton overlayClass="items-start bg-black/30 pt-24" panelClass="w-[480px] bg-[var(--cf-surface-raised)]" />}
@@ -1352,6 +1355,7 @@ export default function App() {
       <NotificationPopups />
       <ConfirmModal />
       <PromptModal />
+      <RevisionCompareHost />
       {/* Every plain `title` in the window, drawn as the app's own tooltip — see the component. */}
       <TitleTooltips />
       {/* Last, and above everything: the guided tour dims the whole window and drives the panels

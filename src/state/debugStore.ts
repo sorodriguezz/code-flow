@@ -113,7 +113,15 @@ interface DebugState {
   exceptionOptionsFor: (debuggerId: string) => ExceptionFilter[];
   enabledFiltersFor: (debuggerId: string) => string[];
   setExceptionFilter: (debuggerId: string, filter: string, on: boolean) => void;
-  start: (cwd: string, program: string, adapter: DebugAdapter, command?: string) => Promise<void>;
+  /** `config` is a `launch.json` configuration (`lib/vscodeLaunch`): its arguments for Node, its
+   *  whole launch object for an adapter — merged over the preset's. */
+  start: (
+    cwd: string,
+    program: string,
+    adapter: DebugAdapter,
+    command?: string,
+    config?: { args?: string[]; launch?: Record<string, unknown> },
+  ) => Promise<void>;
   stop: () => Promise<void>;
   resume: () => Promise<void>;
   pause: () => Promise<void>;
@@ -467,7 +475,7 @@ export const useDebugStore = create<DebugState>((set, get) => {
       }
     },
 
-    start: async (cwd, program, adapter, command) => {
+    start: async (cwd, program, adapter, command, config) => {
       get().init();
       const token = ++startToken;
       pauseSeq += 1;
@@ -478,12 +486,17 @@ export const useDebugStore = create<DebugState>((set, get) => {
         if (adapter.command === null) {
           // Node needs no adapter: the runtime is the debugger.
           set({ sessionDebugger: "node" });
-          await debugStart(cwd, program, [], breakpoints, get().enabledFiltersFor("node"));
+          await debugStart(cwd, program, config?.args ?? [], breakpoints, get().enabledFiltersFor("node"));
         } else {
           let binary = (command ?? adapter.command ?? "").trim();
-          let launch: Record<string, unknown> = { ...adapter.launch, program, cwd };
-          // The preset's own interpreter, untouched: picked for this project — its venv first.
-          if (adapter.resolve === "python" && (binary === "" || binary === adapter.command)) {
+          let launch: Record<string, unknown> = config?.launch
+            ? { ...adapter.launch, ...config.launch }
+            : { ...adapter.launch, program, cwd };
+          // A configuration that runs a module (`python -m pkg`) names no program at all.
+          if (launch.program === "") delete launch.program;
+          // The preset's own interpreter, untouched: picked for this project — its venv first. Not
+          // over a `python` the configuration names itself.
+          if (adapter.resolve === "python" && (binary === "" || binary === adapter.command) && launch.python === undefined) {
             const python = await debugPython(cwd);
             if (token !== startToken) return;
             binary = python.adapter;

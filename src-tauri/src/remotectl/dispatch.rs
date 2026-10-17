@@ -705,6 +705,7 @@ pub async fn dispatch(
             arg(args, "path")?,
             opt(args, "staged")?.unwrap_or(false),
             Some(opt::<u32>(args, "contextLines")?.unwrap_or(3)),
+            opt(args, "ignoreWhitespace")?,
         )?),
         "get_commit_diff" => ok(commands::git_ops::get_commit_diff(
             arg(args, "repoPath")?,
@@ -1114,6 +1115,8 @@ pub async fn dispatch(
                     // Nor an attachment picker.
                     None,
                     // Nor a thinking dial: the CLI's own default.
+                    None,
+                    // Nor plan mode: a phone's turn runs as the chat always has.
                     None,
                 )
                 .await?,

@@ -1,53 +1,42 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { FileSearch, Loader2 } from "lucide-react";
+import { Clock, FileSearch, Loader2 } from "lucide-react";
 import { listRepoFiles } from "../../lib/tauri/commands";
 import { FileGlyph } from "../common/FileGlyph";
 import { Kbd } from "../common/Button";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useT } from "../../state/languageStore";
+import { fuzzyScore } from "../../lib/fuzzyPath";
+import { useRecentFilesStore } from "../../state/recentFilesStore";
+
+const NO_RECENT: string[] = [];
 
 /** How many rows the list renders. Filtering happens over the whole repo; only the top slice is
  * drawn, because nobody scrolls a thousand results — they type two more letters. */
 const MAX_ROWS = 40;
 
-/** Subsequence match, the way editors' quick-open works: "edvw" finds `EditorView.tsx`. Returns
- * a score (lower is better) or `null` when the query doesn't fit at all. */
-function fuzzyScore(path: string, query: string): number | null {
-  if (!query) return 0;
-  const haystack = path.toLowerCase();
-  const name = haystack.slice(haystack.lastIndexOf("/") + 1);
-
-  // A plain substring of the *filename* is what the user almost always means, so it outranks any
-  // subsequence spread across the directories.
-  const inName = name.indexOf(query);
-  if (inName >= 0) return inName;
-  const inPath = haystack.indexOf(query);
-  if (inPath >= 0) return 100 + inPath;
-
-  let cursor = 0;
-  let gaps = 0;
-  for (const char of query) {
-    const found = haystack.indexOf(char, cursor);
-    if (found < 0) return null;
-    gaps += found - cursor;
-    cursor = found + 1;
-  }
-  return 1000 + gaps;
-}
-
-/** Quick-open: type part of a path, hit Enter, the file opens in a pinned tab. */
+/**
+ * Quick-open: type part of a path, hit Enter, the file opens in a pinned tab. With nothing typed the
+ * files opened last come first, as in VS Code; typed, a recent file wins a tie. `recentOnly` is
+ * «Abrir reciente»: only those, newest first, narrowed by what is typed.
+ */
 export function FilePalette({
   repoPath,
   onPick,
   onClose,
+  recentOnly = false,
 }: {
   repoPath: string;
   onPick: (path: string) => void;
   onClose: () => void;
+  recentOnly?: boolean;
 }) {
   const t = useT();
-  const openChord = useShortcutChord()("editor.goToFile");
+  const openChord = useShortcutChord()(recentOnly ? "editor.openRecent" : "editor.goToFile");
+  const recent = useRecentFilesStore((s) => s.byRepo[repoPath] ?? NO_RECENT);
+  useEffect(() => {
+    void useRecentFilesStore.getState().init();
+  }, []);
   const [files, setFiles] = useState<string[] | null>(null);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -72,14 +61,29 @@ export function FilePalette({
   const matches = useMemo(() => {
     if (!files) return [];
     const needle = query.trim().toLowerCase();
+    const exists = new Set(files);
+    // A recent file that is gone (deleted, renamed) is not offered.
+    const recentHere = recent.filter((path) => exists.has(path));
+    const rank = new Map(recentHere.map((path, i) => [path, i]));
+    if (recentOnly || !needle) {
+      const first = recentHere.filter((path) => !needle || fuzzyScore(path, needle) !== null);
+      if (recentOnly) return first.slice(0, MAX_ROWS);
+      return [...first, ...files.filter((path) => !rank.has(path))].slice(0, MAX_ROWS);
+    }
     const scored: { path: string; score: number }[] = [];
     for (const path of files) {
       const score = fuzzyScore(path, needle);
       if (score !== null) scored.push({ path, score });
     }
-    scored.sort((a, b) => a.score - b.score || a.path.length - b.path.length);
+    scored.sort(
+      (a, b) =>
+        a.score - b.score ||
+        (rank.get(a.path) ?? Infinity) - (rank.get(b.path) ?? Infinity) ||
+        a.path.length - b.path.length,
+    );
     return scored.slice(0, MAX_ROWS).map((s) => s.path);
-  }, [files, query]);
+  }, [files, query, recent, recentOnly]);
+  const recentSet = useMemo(() => new Set(recent), [recent]);
 
   useEffect(() => {
     setActive(0);
@@ -132,7 +136,7 @@ export function FilePalette({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={t("editor.goToFilePlaceholder")}
+            placeholder={recentOnly ? t("editor.openRecentPlaceholder") : t("editor.goToFilePlaceholder")}
             className="min-w-0 flex-1 bg-transparent text-[15px] outline-none placeholder:text-[var(--cf-text-faint)]"
           />
           {/* The key that brings this back, from the binding registry — where the placeholder
@@ -167,7 +171,8 @@ export function FilePalette({
                 >
                   <FileGlyph path={path} />
                   <span className="shrink-0 text-[13px] text-[var(--cf-text)]">{name}</span>
-                  <span className="truncate font-mono text-[11px] text-[var(--cf-text-faint)]">{dir}</span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-faint)]">{dir}</span>
+                  {recentSet.has(path) && <Clock size={11} className="shrink-0 text-[var(--cf-text-faint)]" aria-label={t("editor.recentFile")} />}
                 </button>
               );
             })

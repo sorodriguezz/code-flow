@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { ExternalLink, FileQuestion, FileWarning, HardDrive, RotateCw } from "lucide-react";
+import { Binary, ExternalLink, FileQuestion, FileWarning, HardDrive, RotateCw } from "lucide-react";
+import { HexView } from "./HexView";
 import { openInDefaultApp } from "../../lib/tauri/commands";
 import type { FileNotice } from "../../lib/editorFiles";
 import { formatBytes } from "../../state/systemLoadStore";
@@ -27,10 +28,13 @@ export function FileNoticeView({
   onOpenAnyway: () => void;
 }) {
   const t = useT();
+  /** The binary shown as a hex dump instead of the notice — VS Code's «Open With… Hex Editor». */
+  const [hex, setHex] = useState(false);
   const openExternally = () =>
     void openInDefaultApp(repoPath, path).catch((e: unknown) => pushErrorToast(String(e)));
 
   if (notice.kind === "image") return <ImageView src={notice.src} mime={notice.mime} size={notice.size} name={path} />;
+  if (hex) return <HexView repoPath={repoPath} path={path} />;
 
   const external = (
     <button onClick={openExternally} className={buttonClass({ variant: "ghost", size: "sm" })}>
@@ -60,7 +64,13 @@ export function FileNoticeView({
           <p className="text-[13px] text-[var(--cf-text-muted)]">
             {t("editor.noticeBinary", { size: formatBytes(notice.size) })}
           </p>
-          {external}
+          <div className="flex items-center gap-2">
+            <button onClick={() => setHex(true)} className={buttonClass({ variant: "secondary", size: "sm" })}>
+              <Binary size={13} />
+              {t("editor.hexOpen")}
+            </button>
+            {external}
+          </div>
         </>
       ) : (
         <>

@@ -572,13 +572,14 @@ pub async fn db_explain(
     ctx: DbExecContext,
     run_id: String,
     lane: Option<DbLane>,
+    analyze: Option<bool>,
 ) -> Result<String, String> {
     let config = resolve_config(&db, &connection_id)?;
     let lane = lane.unwrap_or_default().for_kind(config.kind);
     let session = registry.session_in(&config, ctx.database.as_deref(), lane).await?;
     let key = DbRegistry::session_key_in(&connection_id, ctx.database.as_deref(), lane);
     registry
-        .run(&run_id, &session, &key, session.explain(&sql, &ctx))
+        .run(&run_id, &session, &key, session.explain(&sql, &ctx, analyze.unwrap_or(false)))
         .await
 }
 
@@ -836,8 +837,10 @@ pub fn db_csv_inspect(
     delimiter: Option<String>,
     table_columns: Vec<String>,
 ) -> Result<CsvPreview, String> {
-    let delimiter = delimiter.and_then(|text| text.chars().next());
-    csv_import::inspect(&path, delimiter, &table_columns)
+    // A workbook or a JSON file is read through its CSV conversion — see `tabular::csv_source`.
+    let source = crate::datasource::tabular::csv_source(&path)?;
+    let delimiter = if source == path { delimiter.and_then(|text| text.chars().next()) } else { Some(',') };
+    csv_import::inspect(&source, delimiter, &table_columns)
 }
 
 /// `db:import-progress`: how many rows an import has written so far.
@@ -859,10 +862,15 @@ pub async fn db_import_csv(
     db: State<'_, Db>,
     registry: State<'_, DbRegistry>,
     connection_id: String,
-    request: ImportRequest,
+    mut request: ImportRequest,
     run_id: String,
 ) -> Result<ImportOutcome, String> {
     let config = resolve_config(&db, &connection_id)?;
+    let source = crate::datasource::tabular::csv_source(&request.path)?;
+    if source != request.path {
+        request.path = source;
+        request.delimiter = ",".to_string();
+    }
     if config.read_only {
         return Err(read_only_refusal());
     }
@@ -897,6 +905,39 @@ pub async fn db_import_csv(
 pub fn db_cancel(registry: State<DbRegistry>, run_id: String) -> Result<(), String> {
     registry.cancel(&run_id);
     Ok(())
+}
+
+/// A result as an Excel workbook, written where the user picks. `None` when the dialog was
+/// cancelled.
+#[tauri::command]
+pub async fn db_save_xlsx(
+    app: AppHandle,
+    default_name: String,
+    columns: Vec<crate::datasource::DbColumn>,
+    rows: Vec<Vec<Option<String>>>,
+) -> Result<Option<String>, String> {
+    let bytes = crate::datasource::tabular::rows_to_xlsx(&columns, &rows)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(default_name.as_str())
+        .add_filter("Excel", &["xlsx"])
+        .save_file(move |file| {
+            let _ = tx.send(file.map(|p| p.to_string()));
+        });
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
+    Ok(Some(path))
+}
+
+/// Whether a console statement would write, judged by the read-only guard's own rules for this
+/// connection's engine — what a `prod` connection asks about before it runs one.
+#[tauri::command]
+pub fn db_statement_writes(db: State<Db>, connection_id: String, sql: String) -> Result<bool, String> {
+    let config = resolve_config(&db, &connection_id)?;
+    Ok(crate::datasource::export_refusal(config.kind, &sql).is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,6 +1241,84 @@ pub fn db_driver_save_settings(settings: drivers::DriverSettings) -> Result<(), 
 pub fn db_driver_delete_settings(id: String) -> Result<(), String> {
     drivers::delete_settings(&id)
 }
+
+// ---------------------------------------------------------------------------
+// Backup and restore
+// ---------------------------------------------------------------------------
+//
+// With the engines' own tools (`pg_dump`, `mysqldump`, `mongodump`, …) — see
+// `datasource::backup`. The file is chosen in the webview's native dialog and arrives as a path;
+// output lines stream as `db:backup-progress` and `db_backup_cancel` kills the tool.
+
+/// Which tool an operation needs that this machine lacks, or `None` when nothing is missing. Asked
+/// before anything else, so a missing tool is all the dialog says.
+#[tauri::command]
+pub async fn db_backup_check(
+    kind: DbKind,
+    mode: String,
+) -> Result<Option<crate::datasource::backup::MissingTool>, String> {
+    let mode = crate::datasource::backup::Mode::parse(&mode)?;
+    crate::datasource::backup::check(kind, mode).await
+}
+
+/// Backs a database up to `path`. `format` is Postgres' `plain` or `custom`; ignored elsewhere.
+#[tauri::command]
+pub async fn db_backup_run(
+    app: AppHandle,
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    database: Option<String>,
+    path: String,
+    format: Option<String>,
+    run_id: String,
+) -> Result<crate::datasource::backup::Outcome, String> {
+    use crate::datasource::backup;
+    let config = resolve_config(&db, &connection_id)?;
+    let emitter = app.clone();
+    let progress_id = run_id.clone();
+    let on_line = move |line: String| {
+        let _ = emitter.emit("db:backup-progress", backup::Progress { run_id: progress_id.clone(), line });
+    };
+    let format = backup::PgFormat::parse(format.as_deref().unwrap_or("plain"));
+    let outcome = backup::backup(&config, database.as_deref(), &path, format, &run_id, &on_line).await;
+    registry.close_tunnel_if_unused(&config.id);
+    outcome
+}
+
+/// Restores a backup file into a database. Refused on a read-only connection.
+#[tauri::command]
+pub async fn db_restore_run(
+    app: AppHandle,
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    database: Option<String>,
+    path: String,
+    run_id: String,
+) -> Result<crate::datasource::backup::Outcome, String> {
+    use crate::datasource::backup;
+    let config = resolve_config(&db, &connection_id)?;
+    if config.read_only {
+        return Err(read_only_refusal());
+    }
+    let emitter = app.clone();
+    let progress_id = run_id.clone();
+    let on_line = move |line: String| {
+        let _ = emitter.emit("db:backup-progress", backup::Progress { run_id: progress_id.clone(), line });
+    };
+    let outcome = backup::restore(&config, database.as_deref(), &path, &run_id, &on_line).await;
+    registry.close_tunnel_if_unused(&config.id);
+    outcome
+}
+
+/// Stops a running backup or restore. Unknown ids are fine — it may have just finished.
+#[tauri::command]
+pub fn db_backup_cancel(run_id: String) -> Result<(), String> {
+    crate::datasource::backup::cancel(&run_id);
+    Ok(())
+}
+
 
 #[cfg(test)]
 mod tests {

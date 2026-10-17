@@ -722,6 +722,23 @@ pub fn delete_conversation(conn: &Connection, id: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
+/// Files what a workspace chat's turn changed — JSON `[{"repo", "path", "id", "paths"}]`, see
+/// `migrations::add_chat_turn_checkpoints`.
+pub fn set_turn_checkpoints(conn: &Connection, message_id: &str, conversation_id: &str, checkpoints: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO chat_turn_checkpoints (message_id, conversation_id, checkpoints) VALUES (?1, ?2, ?3)",
+        params![message_id, conversation_id, checkpoints],
+    )?;
+    Ok(())
+}
+
+/// Every turn of a conversation that changed something, as `(message id, checkpoints JSON)`.
+pub fn turn_checkpoints(conn: &Connection, conversation_id: &str) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT message_id, checkpoints FROM chat_turn_checkpoints WHERE conversation_id = ?1")?;
+    let rows = stmt.query_map(params![conversation_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
 /// Neither this nor [`set_archived`] touches `updated_at` — filing a thread is not working on it,
 /// and a pin that reordered the list under the user's cursor would be a surprise every time.
 pub fn set_pinned(conn: &Connection, id: &str, pinned: bool) -> rusqlite::Result<()> {

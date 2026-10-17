@@ -5,9 +5,20 @@
 //! disables SSL verification cannot share a client with one that doesn't. Building a client is
 //! cheap next to a round trip, and it keeps one request from leaking its transport settings into
 //! the next.
+//!
+//! **Timings.** reqwest hands back a `Response`, not a connection trace, so the phases are measured
+//! at the two hooks its builder offers: the DNS resolver ([`TimedResolver`]) and a layer around the
+//! connector ([`TimeConnect`]), which spans DNS + TCP + TLS. The TLS handshake happens inside the
+//! connector with no hook of its own, so on `https` it stays inside "connect" and `tls_ms` says
+//! "unavailable" (-1) rather than inventing a split. A fresh client means a fresh connection, so
+//! what is measured is the real cost of this request's connection.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -93,8 +104,31 @@ struct ResponseHead {
     sent: SentRequestSummary,
     redirects: Vec<String>,
     first_byte_ms: i64,
+    /// Of the final hop's connection; `None` when it reused one.
+    connection: Option<ConnectionTime>,
+    tls: bool,
     started: Instant,
     body_started: Instant,
+}
+
+/// The phases as the timeline draws them: each one its own span, so they add up to the total.
+/// `first_byte_ms` was measured from before the connection was made; what is left of it once the
+/// connection is taken out is the server's wait.
+fn phase_timings(head: &ResponseHead, total_ms: i64) -> ResponseTimings {
+    let (dns_ms, connect_ms) = match head.connection {
+        Some(time) => (time.dns_ms, (time.connect_ms - time.dns_ms).max(0)),
+        // A reused connection costs nothing to open.
+        None => (0, 0),
+    };
+    ResponseTimings {
+        dns_ms,
+        connect_ms,
+        // Inside `connect_ms` on https (see the module's note); there is none on plain http.
+        tls_ms: if head.tls && head.connection.is_some() { -1 } else { 0 },
+        first_byte_ms: (head.first_byte_ms - dns_ms - connect_ms).max(0),
+        download_ms: head.body_started.elapsed().as_millis() as i64,
+        total_ms,
+    }
 }
 
 /// The response as far as it got. `None` when no head ever arrived.
@@ -105,6 +139,7 @@ fn finish(progress: &Mutex<Progress>, interrupted: Option<String>) -> Option<Htt
     let size_bytes = body.len() as u64;
     let (body_text, body_base64) = decode_body(body, response_content_type(&head.headers).as_deref());
     let total_ms = head.started.elapsed().as_millis() as i64;
+    let timings = phase_timings(&head, total_ms);
     Some(HttpResponse {
         status: head.status.as_u16(),
         status_text: head.status.canonical_reason().unwrap_or("").to_string(),
@@ -116,18 +151,7 @@ fn finish(progress: &Mutex<Progress>, interrupted: Option<String>) -> Option<Htt
         truncated: progress.truncated,
         interrupted,
         duration_ms: total_ms,
-        timings: ResponseTimings {
-            // reqwest hands back a `Response`, not a connection trace: the DNS lookup, the TCP
-            // handshake and the TLS handshake all happen inside `execute` with no hook to time
-            // them separately. -1 is the contract's "unavailable", and inventing a split of
-            // `first_byte_ms` would be worse than admitting that.
-            dns_ms: -1,
-            connect_ms: -1,
-            tls_ms: -1,
-            first_byte_ms: head.first_byte_ms,
-            download_ms: head.body_started.elapsed().as_millis() as i64,
-            total_ms,
-        },
+        timings,
         redirects: head.redirects,
         set_cookies: head.set_cookies,
         sent: head.sent,
@@ -154,12 +178,13 @@ async fn send_inner(
     }
 
     let hops: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let client = build_client(&req.options, &hops)?;
+    let phases = Phases::default();
+    let client = build_client(&req.options, &hops, &phases)?;
     let limit = (req.options.timeout_ms > 0).then(|| Duration::from_millis(req.options.timeout_ms));
 
     // The head is due within the request's timeout whatever the body turns out to be; only a
     // stream's body is timed differently, below.
-    let exchange = exchange_with_auth(&client, &req, &method, &start_url, &hops);
+    let exchange = exchange_with_auth(&client, &req, &method, &start_url, &hops, &phases);
     let attempt = match limit {
         Some(limit) => tokio::time::timeout(limit, exchange).await.map_err(|_| {
             format!("{method} {start_url} timed out after {} ms with no response", limit.as_millis())
@@ -171,6 +196,7 @@ async fn send_inner(
         response,
         sent,
         first_byte_ms,
+        connection,
     } = attempt;
 
     let status = response.status();
@@ -208,8 +234,10 @@ async fn send_inner(
             headers,
             set_cookies,
             sent,
+            tls: final_url.scheme() == "https",
             redirects,
             first_byte_ms,
+            connection,
             started: total_started,
             body_started: Instant::now(),
         });
@@ -240,8 +268,9 @@ async fn exchange_with_auth(
     method: &Method,
     start_url: &Url,
     hops: &Arc<Mutex<Vec<String>>>,
+    phases: &Phases,
 ) -> Result<Exchange, String> {
-    let mut attempt = run_exchange(client, req, method, start_url, &[], hops).await?;
+    let mut attempt = run_exchange(client, req, method, start_url, &[], hops, phases).await?;
 
     // Digest is a challenge/response scheme: the first send exists only to collect the nonce, and
     // the body has to go out again with the second one (there is no 100-continue dance here).
@@ -264,6 +293,7 @@ async fn exchange_with_auth(
                 &target,
                 &[("authorization".to_string(), header)],
                 hops,
+                phases,
             )
             .await?;
         }
@@ -275,13 +305,16 @@ async fn exchange_with_auth(
 // Client
 // ---------------------------------------------------------------------------
 
-fn build_client(
+pub(crate) fn build_client(
     options: &NetworkOptions,
     hops: &Arc<Mutex<Vec<String>>>,
+    phases: &Phases,
 ) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .danger_accept_invalid_certs(!options.verify_ssl)
-        .redirect(redirect_policy(options, hops));
+        .redirect(redirect_policy(options, hops))
+        .dns_resolver(Arc::new(TimedResolver { phases: phases.clone() }))
+        .connector_layer(TimeConnect { phases: phases.clone() });
 
     if options.timeout_ms > 0 {
         // Not `timeout()`: that is a deadline on the whole body as well, which cut a server-sent
@@ -370,6 +403,123 @@ struct Exchange {
     /// The *first* request of the exchange — what the user actually asked to send.
     sent: SentRequestSummary,
     first_byte_ms: i64,
+    /// What opening the final hop's connection cost; `None` when it reused one.
+    connection: Option<ConnectionTime>,
+}
+
+// ---------------------------------------------------------------------------
+// Phase timing — the resolver and the connector, timed
+// ---------------------------------------------------------------------------
+
+/// What opening one connection cost. `connect_ms` spans the whole connector — DNS included.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConnectionTime {
+    pub dns_ms: i64,
+    pub connect_ms: i64,
+}
+
+/// Shared by a client's resolver and connector layer: what the connection opened since the last
+/// [`Phases::take`] cost. One client per send, so nothing else writes here.
+#[derive(Clone, Default)]
+pub(crate) struct Phases(Arc<Mutex<PhaseClock>>);
+
+#[derive(Default)]
+struct PhaseClock {
+    dns: Duration,
+    connect: Duration,
+    connections: u32,
+}
+
+impl Phases {
+    /// What was measured since the last call, and a clean slate for the next exchange.
+    pub(crate) fn take(&self) -> Option<ConnectionTime> {
+        let mut clock = self.0.lock().ok()?;
+        let taken = std::mem::take(&mut *clock);
+        (taken.connections > 0).then(|| ConnectionTime {
+            dns_ms: taken.dns.as_millis() as i64,
+            connect_ms: taken.connect.as_millis() as i64,
+        })
+    }
+
+    fn add(&self, f: impl FnOnce(&mut PhaseClock)) {
+        if let Ok(mut clock) = self.0.lock() {
+            f(&mut clock);
+        }
+    }
+}
+
+/// The system resolver (`getaddrinfo`, as reqwest's own default), timed.
+struct TimedResolver {
+    phases: Phases,
+}
+
+impl reqwest::dns::Resolve for TimedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let phases = self.phases.clone();
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let started = Instant::now();
+            let found: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+                .collect();
+            let took = started.elapsed();
+            phases.add(|clock| clock.dns += took);
+            Ok(Box::new(found.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// A layer around reqwest's connector: how long each new connection took to be ready to send on.
+#[derive(Clone)]
+struct TimeConnect {
+    phases: Phases,
+}
+
+impl<S> tower::Layer<S> for TimeConnect {
+    type Service = TimedConnector<S>;
+    fn layer(&self, inner: S) -> Self::Service {
+        TimedConnector { inner, phases: self.phases.clone() }
+    }
+}
+
+#[derive(Clone)]
+struct TimedConnector<S> {
+    inner: S,
+    phases: Phases,
+}
+
+impl<S, R> tower::Service<R> for TimedConnector<S>
+where
+    S: tower::Service<R>,
+    S::Future: Send + 'static,
+    S::Response: Send + 'static,
+    S::Error: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<S::Response, S::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        let started = Instant::now();
+        let connecting = self.inner.call(request);
+        let phases = self.phases.clone();
+        Box::pin(async move {
+            let connected = connecting.await;
+            if connected.is_ok() {
+                let took = started.elapsed();
+                phases.add(|clock| {
+                    clock.connect += took;
+                    clock.connections += 1;
+                });
+            }
+            connected
+        })
+    }
 }
 
 /// Sends `req` and follows whatever redirects reqwest handed back to us (see [`redirect_policy`]).
@@ -380,6 +530,7 @@ async fn run_exchange(
     url: &Url,
     extra_headers: &[(String, String)],
     hops: &Arc<Mutex<Vec<String>>>,
+    phases: &Phases,
 ) -> Result<Exchange, String> {
     let mut method = method.clone();
     let mut url = url.clone();
@@ -396,18 +547,22 @@ async fn run_exchange(
             sent = Some(summary);
         }
 
+        // Only this hop's connection counts: a redirect's earlier ones are not this response's.
+        let _ = phases.take();
         let started = Instant::now();
         let response = client
             .execute(built.request)
             .await
             .map_err(|e| transport_error(&method, &url, &e))?;
         let first_byte_ms = started.elapsed().as_millis() as i64;
+        let connection = phases.take();
 
         let Some(next) = manual_redirect_target(&current.options, &response, &url)? else {
             return Ok(Exchange {
                 response,
                 sent: sent.expect("the first iteration always records a summary"),
                 first_byte_ms,
+                connection,
             });
         };
 
@@ -493,7 +648,7 @@ fn manual_redirect_target(
     Ok(Some(target))
 }
 
-fn transport_error(method: &Method, url: &Url, err: &reqwest::Error) -> String {
+pub(crate) fn transport_error(method: &Method, url: &Url, err: &reqwest::Error) -> String {
     let cause = crate::api::root_cause(err);
 
     // A cause we recognize is worth more than the generic verb in front of it: the OS's way of
@@ -529,15 +684,15 @@ fn transport_error(method: &Method, url: &Url, err: &reqwest::Error) -> String {
 // Request construction
 // ---------------------------------------------------------------------------
 
-struct Built {
-    request: reqwest::Request,
+pub(crate) struct Built {
+    pub(crate) request: reqwest::Request,
     summary: SentRequestSummary,
 }
 
 /// Assembles one `reqwest::Request` from scratch. Everything that has to happen per attempt —
 /// re-opening a streamed file, re-signing SigV4 against the new target — lives here, which is why
 /// digest re-sends and manual redirect hops just call it again instead of cloning a request.
-async fn build_request(
+pub(crate) async fn build_request(
     client: &reqwest::Client,
     req: &HttpSendRequest,
     method: &Method,
@@ -1687,6 +1842,22 @@ mod stream_tests {
         // …and when the deadline cuts it, what arrived is still the response.
         assert!(response.body_text.contains("data: one"));
         assert!(response.interrupted.unwrap_or_default().contains("Timed out"));
+    }
+
+    #[tokio::test]
+    async fn the_connection_phases_are_measured_and_add_up() {
+        let port = serve(vec![(30, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")]).await;
+        // A name, so the resolver runs: `localhost` resolves without a network.
+        let mut req = get(port, 5_000);
+        req.url = format!("http://localhost:{port}/x");
+        let response = send(req, None, None).await.unwrap();
+        let t = &response.timings;
+        assert!(t.dns_ms >= 0 && t.connect_ms >= 0, "{t:?}");
+        // Plain http has no handshake to hide.
+        assert_eq!(t.tls_ms, 0);
+        // The server waited 30 ms before answering: that is the wait, not the connection.
+        assert!(t.first_byte_ms >= 25, "{t:?}");
+        assert!(t.dns_ms + t.connect_ms + t.first_byte_ms <= t.total_ms + 1, "{t:?}");
     }
 
     #[tokio::test]

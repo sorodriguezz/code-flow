@@ -29,6 +29,7 @@
 //! Every type below is mirrored one-for-one in `src/types/database.ts`; field names are the serde
 //! wire names, so renaming one here is a breaking change on both sides.
 
+pub mod backup;
 pub mod catalog;
 pub mod csv_import;
 pub mod drivers;
@@ -45,6 +46,7 @@ pub mod postgres;
 pub mod redis;
 pub mod sqlgen;
 pub mod sqlite;
+pub mod tabular;
 /// Expanding `mongodb+srv://` by hand when the driver's own resolver can't read the system's
 /// DNS configuration. See the module for why that happens on an ordinary Mac.
 pub mod srv;
@@ -299,6 +301,11 @@ pub struct DbConnectionConfig {
     /// role — it is a guard against a typo in a console pointed at production.
     #[serde(default)]
     pub read_only: bool,
+    /// What this server is: `""` (unsaid), `dev`, `test` or `prod`. Drawn as a colour on everything
+    /// that runs against it, and `prod` asks before a statement that writes. A label, never a guard
+    /// the backend enforces — `read_only` is the guard.
+    #[serde(default)]
+    pub environment: String,
     #[serde(default)]
     pub connect_timeout_ms: u64,
     /// Whether the tree's root lists every database on the server or only the one this connection
@@ -509,6 +516,13 @@ impl DbConnectionConfig {
 /// cannot trip it), then every statement in the text has to *start* with a read verb and contain no
 /// write verb anywhere — `updated_at` is one word, not `UPDATE`. See [`guard_refusal`] for the
 /// rules and the tests below for both directions.
+/// `EXPLAIN ANALYZE` executes what it explains: only a read may be measured. The same refusal
+/// rules as a read-only connection, with its own message.
+pub fn analyze_guard(statement: &str, dialect: SqlDialect) -> Result<(), String> {
+    read_only_guard(statement, true, dialect)
+        .map_err(|_| "EXPLAIN ANALYZE runs the statement, so it's only offered for reads.".to_string())
+}
+
 pub fn read_only_guard(statement: &str, read_only: bool, dialect: SqlDialect) -> Result<(), String> {
     if !read_only {
         return Ok(());
@@ -1986,14 +2000,23 @@ impl Session {
         }
     }
 
-    pub async fn explain(&self, sql: &str, ctx: &DbExecContext) -> Result<String, String> {
+    /// `analyze` asks for the measured plan where the engine has one (Postgres, MySQL 8.0.18+);
+    /// the rest ignore it. Measuring means running the statement, so it is refused for anything
+    /// that isn't a read — before any engine sees it.
+    pub async fn explain(&self, sql: &str, ctx: &DbExecContext, analyze: bool) -> Result<String, String> {
+        let analyze = analyze && matches!(self, Session::Postgres(_) | Session::Mysql(_));
+        if analyze {
+            if let Some(dialect) = self.dialect() {
+                analyze_guard(sql, dialect)?;
+            }
+        }
         match self {
-            Session::Postgres(s) => s.explain(sql, ctx).await,
+            Session::Postgres(s) => s.explain(sql, ctx, analyze).await,
             Session::Mssql(s) => s.explain(sql, ctx).await,
             Session::Mongo(s) => s.explain(sql, ctx).await,
             Session::Iris(s) => s.explain(sql, ctx).await,
             Session::Redis(s) => s.explain(sql, ctx).await,
-            Session::Mysql(s) => s.explain(sql, ctx).await,
+            Session::Mysql(s) => s.explain(sql, ctx, analyze).await,
             Session::Sqlite(s) => s.explain(sql, ctx).await,
             Session::Oracle(s) => s.explain(sql, ctx).await,
             Session::Jdbc(s) => s.explain(sql, ctx).await,
@@ -2838,6 +2861,7 @@ pub(crate) mod tests_support {
             ssl: DbSslMode::Disable,
             options: Vec::new(),
             read_only: false,
+            environment: String::new(),
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),
@@ -3175,6 +3199,17 @@ fn explain_tls(host: &str, raw: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn explain_analyze_is_only_offered_for_reads() {
+        let pg = SqlDialect::Postgres;
+        assert!(analyze_guard("SELECT * FROM orders WHERE id = 1", pg).is_ok());
+        assert!(analyze_guard("WITH t AS (SELECT 1) SELECT * FROM t", pg).is_ok());
+        let refused = analyze_guard("DELETE FROM orders", pg).unwrap_err();
+        assert!(refused.contains("only offered for reads"), "{refused}");
+        assert!(analyze_guard("SELECT 1; DROP TABLE orders", pg).is_err());
+        assert!(analyze_guard("UPDATE orders SET total = 0", SqlDialect::MySql { backslash_escapes: true }).is_err());
+    }
+
     const fn secs(n: u64) -> std::time::Duration {
         std::time::Duration::from_secs(n)
     }
@@ -3358,6 +3393,7 @@ mod tests {
             ssl: DbSslMode::Disable,
             options: Vec::new(),
             read_only: false,
+            environment: String::new(),
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),
@@ -3680,6 +3716,7 @@ mod tests {
             ssl: DbSslMode::Disable,
             options: Vec::new(),
             read_only: true,
+            environment: String::new(),
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),

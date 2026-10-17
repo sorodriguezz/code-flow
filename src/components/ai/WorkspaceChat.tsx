@@ -1,10 +1,19 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Bot, Check, FolderGit2, History, ImagePlus, Link2, ListPlus, SquarePen, Square, Trash2, Workflow } from "lucide-react";
+import { ArrowDown, ArrowUp, Bot, Check, Download, FolderGit2, History, ImagePlus, Link2, ListChecks, ListPlus, Play, Search, SquarePen, Square, Trash2, Workflow } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { menuRowClass, useDismiss } from "./docParts";
 import { AttachmentBar } from "../chat/AttachmentBar";
+import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
+import { ChatFindBar, useChatFind } from "../chat/ChatFind";
+import { SkillChip } from "../chat/ChatComposer";
+import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
+import { exportChatConversation, exportMenuItems } from "../chat/exportChat";
+import { McpMenu } from "../chat/McpMenu";
+import { MentionMenu, useMentions } from "../chat/MentionMenu";
+import { ContextMenu } from "../common/ContextMenu";
+import { TurnReview } from "./TurnReview";
 import { EffortPicker } from "../chat/EffortPicker";
 import { ChatMessageBubble, dayDivider } from "../chat/ChatMessageBubble";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
@@ -18,7 +27,7 @@ import { useEffortSupported } from "../../lib/useEffortSupport";
 import { IMAGE_EXTENSIONS, useImageDrop } from "../../lib/useImageDrop";
 import { useModelReadsImages } from "../../lib/useModelReadsImages";
 import { listWorkspaceAgents } from "../../lib/tauri/commands";
-import { workspaceChatSnapshot, type ChatAttachment, type WorkspaceChatSnapshot } from "../../lib/tauri/chatCommands";
+import { workspaceChatSnapshot, type ChatAttachment, type SkillPick, type WorkspaceChatSnapshot } from "../../lib/tauri/chatCommands";
 import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
 import { useAiAccountsStore } from "../../state/aiAccountsStore";
@@ -38,6 +47,7 @@ const MAX_COMPOSER_HEIGHT = 180;
 const PENDING_SHELL = { role: "assistant" as const, content: "" };
 const NO_AGENTS: WorkspaceAgent[] = [];
 const NO_FILES: ChatAttachment[] = [];
+const NO_PROJECTS: { name: string; local_path: string; id: string }[] = [];
 
 /**
  * A chat with every repository of the workspace, in its own tab of the assistant — beside, not
@@ -69,7 +79,9 @@ export function WorkspaceChat({
   const draft = useAiPanelStore((s) => s.drafts[tabKey] ?? "");
   const setDraft = (text: string) => useAiPanelStore.getState().setDraft(tabKey, text);
   const cancelling = useAiRunStore((s) => (session.runId ? (s.cancelling[session.runId] ?? false) : false));
-  const repoCount = useWorkspaceStore((s) => (s.projectsByWorkspace[workspaceId] ?? []).length);
+  const projects = useWorkspaceStore((s) => s.projectsByWorkspace[workspaceId] ?? NO_PROJECTS);
+  const repoCount = projects.length;
+  const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
 
   useEffect(() => {
     const store = useWorkspaceChatStore.getState();
@@ -171,14 +183,64 @@ export function WorkspaceChat({
   // ── Composer ───────────────────────────────────────────────────────────────────────────────
   const boxRef = useRef<HTMLTextAreaElement>(null);
   useAutosizeTextarea(boxRef, draft, MAX_COMPOSER_HEIGHT);
+  /** Where the caret is in the box — what the `@` menu reads the mention being typed from. */
+  const [caret, setCaret] = useState(0);
+  const mentionRepos = useMemo(() => projects.map((p) => ({ name: p.name, path: p.local_path })), [projects]);
+  const mentions = useMentions({
+    repos: mentionRepos,
+    text: draft,
+    caret,
+    onInsert: (next) => {
+      setDraft(next.text);
+      setCaret(next.caret);
+      requestAnimationFrame(() => {
+        boxRef.current?.focus();
+        boxRef.current?.setSelectionRange(next.caret, next.caret);
+      });
+    },
+  });
+  /** The skill staged for the next question — dropped when the engine changes, as in the repository chat. */
+  const [skill, setSkill] = useState<SkillPick | null>(null);
+  useEffect(() => {
+    setSkill(null);
+  }, [provider]);
+  const [exportMenu, setExportMenu] = useState<{ x: number; y: number } | null>(null);
+  const canExport = session.persisted && session.messages.length > 0;
+  const runAppCommand = (command: ChatAppCommand) => {
+    if (command === "new") {
+      openWorkspaceChat(workspaceId);
+    } else if (command === "export" && canExport) {
+      const rect = boxRef.current?.getBoundingClientRect();
+      setExportMenu({ x: rect ? rect.left + 8 : 16, y: rect ? rect.top - 8 : 16 });
+    }
+  };
   const submit = () => {
     const text = draft.trim();
     if (!text) return;
-    useWorkspaceChatStore.getState().submit(conversationId, text);
+    const command = appCommandFor(text, "workspace");
+    if (command) {
+      setDraft("");
+      runAppCommand(command.id);
+      return;
+    }
+    useWorkspaceChatStore.getState().submit(conversationId, text, { skill });
     setDraft("");
+    setSkill(null);
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
+  /** «Ejecutar el plan»: plan mode off, and the go-ahead as the next question. */
+  const runPlan = () => {
+    useWorkspaceChatStore.getState().setPlan(conversationId, false);
+    useWorkspaceChatStore.getState().submit(conversationId, t("assistant.runPlanMessage"));
+    useAiPanelStore.getState().markChatStarted(tabKey);
+    toBottom();
+  };
+  /** The `/` menu is open while the draft is one token that begins with a slash. */
+  const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
+  const menuOpen = slash !== null && !slash.includes(" ");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const find = useChatFind({ rootRef, contentRef, scrollRef });
   const submitRef = useRef(submit);
   submitRef.current = submit;
   useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()));
@@ -241,10 +303,12 @@ export function WorkspaceChat({
   );
 
   const workspaceName = useWorkspaceStore((s) => s.workspaces.find((w) => w.id === workspaceId)?.name ?? "");
+  const activePath = projects.find((p) => p.id === activeProjectId)?.local_path ?? null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div ref={scrollRef} onScroll={onScroll} onContextMenu={textMenu.onText} className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5">
+    <div ref={rootRef} className="flex h-full min-h-0 flex-col">
+      <ChatFindBar find={find} />
+      <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
         <div className="mb-2.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
           <span
             className="inline-flex min-w-0 items-center gap-1 truncate"
@@ -268,7 +332,42 @@ export function WorkspaceChat({
               <span className="truncate">{focusChain.title}</span>
             </span>
           )}
+          {session.plan && (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
+              title={t("assistant.planModeHint")}
+            >
+              <ListChecks size={9} />
+              {t("assistant.planModeBadge")}
+            </span>
+          )}
           <span className="ml-auto" />
+          {session.messages.length > 0 && (
+            <button
+              type="button"
+              onClick={find.show}
+              title={t("chat.find")}
+              aria-label={t("chat.find")}
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            >
+              <Search size={12} />
+            </button>
+          )}
+          {canExport && (
+            <button
+              type="button"
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                setExportMenu({ x: rect.right - 4, y: rect.bottom + 2 });
+              }}
+              title={t("chat.export")}
+              aria-label={t("chat.export")}
+              aria-haspopup="menu"
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            >
+              <Download size={12} />
+            </button>
+          )}
           <HistoryMenu workspaceId={workspaceId} current={conversationId} />
           <button
             type="button"
@@ -280,6 +379,17 @@ export function WorkspaceChat({
             <SquarePen size={12} />
           </button>
         </div>
+
+        {exportMenu && (
+          <ContextMenu
+            x={exportMenu.x}
+            y={exportMenu.y}
+            items={exportMenuItems(
+              (format, traces) => void exportChatConversation(conversationId, format, traces, session.title || workspaceName),
+            )}
+            onClose={() => setExportMenu(null)}
+          />
+        )}
 
         <div ref={contentRef} className="space-y-2.5 wrap-anywhere">
           {session.messages.map((message, i) => {
@@ -297,6 +407,30 @@ export function WorkspaceChat({
                   message={message}
                   actions={message.isError && !agent ? { onPickModel: (next) => pickEngine(provider, next) } : undefined}
                 />
+                {message.role === "assistant" &&
+                  message.changes?.map((change) => (
+                    <TurnReview
+                      key={change.repoPath}
+                      repoPath={change.repoPath}
+                      repoLabel={change.repo}
+                      changes={{ checkpointId: change.checkpointId, paths: change.paths }}
+                      canOpen={change.repoPath === activePath}
+                    />
+                  ))}
+                {message.role === "assistant" &&
+                  message.plan &&
+                  !message.isError &&
+                  i === session.messages.length - 1 &&
+                  !session.sending && (
+                    <button
+                      type="button"
+                      onClick={runPlan}
+                      className="flex items-center gap-1.5 rounded-lg border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                    >
+                      <Play size={11} />
+                      {t("assistant.runPlan")}
+                    </button>
+                  )}
               </Fragment>
             );
           })}
@@ -325,6 +459,32 @@ export function WorkspaceChat({
             <ArrowDown size={15} />
           </button>
         )}
+        {menuOpen && (
+          <CommandMenu
+            query={slash ?? ""}
+            provider={provider}
+            surface="workspace"
+            scope={{ accountId: account ?? "system", workspaceId, projectId: null, conversationId: session.persisted ? conversationId : null }}
+            onRunApp={(command) => {
+              setDraft("");
+              runAppCommand(command);
+            }}
+            onInsert={(name) => {
+              setDraft(`${name} `);
+              boxRef.current?.focus();
+            }}
+            onPickSkill={(picked) => {
+              if (!picked.model_invocable && provider === "claude") {
+                setDraft(`/${picked.name} `);
+              } else {
+                setSkill({ name: picked.name, source: picked.source, path: picked.path });
+                setDraft("");
+              }
+              boxRef.current?.focus();
+            }}
+          />
+        )}
+        {mentions.open && !menuOpen && <MentionMenu items={mentions.items} index={mentions.index} onPick={mentions.pick} />}
         <QueuedMessages queue={queue} />
         {textMenu.menu}
         <div
@@ -338,21 +498,33 @@ export function WorkspaceChat({
             canSeeImages={readsImages}
             onRemove={(id) => useWorkspaceChatStore.getState().removeAttachment(conversationId, id)}
           />
+          {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
           <textarea
             ref={boxRef}
             data-ai-input="inline"
             value={draft}
             rows={1}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setCaret(e.target.selectionStart);
+            }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onPaste={onPaste}
             onContextMenu={textMenu.onField}
             onKeyDown={(e) => {
+              if (mentions.onKeyDown(e)) return;
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 submit();
               }
             }}
-            placeholder={session.sending ? t("chat.queuePlaceholder") : t("assistant.wsChatPlaceholder", { workspace: workspaceName })}
+            placeholder={
+              session.sending
+                ? t("chat.queuePlaceholder")
+                : session.plan
+                  ? t("assistant.planPlaceholder")
+                  : t("assistant.wsChatPlaceholder", { workspace: workspaceName })
+            }
             aria-label={t("assistant.wsChatPlaceholder", { workspace: workspaceName })}
             className="max-h-[180px] resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
           />
@@ -373,6 +545,27 @@ export function WorkspaceChat({
                 value={session.effort}
                 supported={effortSupported}
                 onPick={(level) => void useWorkspaceChatStore.getState().setEffort(conversationId, level)}
+              />
+              <AnswerLengthPicker compact />
+              {/* Plan mode: read-only turns that answer with a plan, then «Ejecutar el plan». */}
+              <button
+                type="button"
+                onClick={() => useWorkspaceChatStore.getState().setPlan(conversationId, !session.plan)}
+                aria-pressed={session.plan}
+                title={t("assistant.planModeHint")}
+                className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] ${
+                  session.plan
+                    ? "bg-[color-mix(in_oklab,var(--cf-accent)_14%,transparent)] text-[var(--cf-accent)]"
+                    : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+                }`}
+              >
+                <ListChecks size={13} />
+                {t("assistant.planMode")}
+              </button>
+              {/* The CLI's own MCP servers, switched for this conversation once it exists. */}
+              <McpMenu
+                provider={provider}
+                scope={{ accountId: account ?? "system", workspaceId, conversationId: session.persisted ? conversationId : null }}
               />
               {agents.length > 0 && (
                 <AgentMenu

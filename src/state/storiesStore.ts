@@ -35,6 +35,7 @@ import type {
   StoryDraft,
   StorySourceKind,
 } from "../types/domain";
+import { registerIslandApp } from "../lib/islandSync";
 
 /** How much of the source names a batch until the user renames it. */
 const TITLE_MAX = 64;
@@ -800,3 +801,15 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
       },
     })),
 }));
+
+/** Batches the island added while Historias was out, read again on the way back — see
+ *  `lib/islandSync`. Through `setWorkspace`, which keeps the runs still in flight. */
+registerIslandApp(["stories"], {
+  isLoaded: () => useStoriesStore.getState().workspaceId !== null,
+  reload: async () => {
+    const { workspaceId: id, selectedId: selected } = useStoriesStore.getState();
+    await useStoriesStore.getState().setWorkspace(null);
+    await useStoriesStore.getState().setWorkspace(id);
+    if (selected && useStoriesStore.getState().batches.some((batch) => batch.id === selected)) void useStoriesStore.getState().select(selected);
+  },
+});

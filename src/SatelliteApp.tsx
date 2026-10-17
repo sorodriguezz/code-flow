@@ -43,6 +43,7 @@ import { showNoteHere } from "./lib/notesBridge";
 import { showChatHere } from "./lib/chatBridge";
 import { pushErrorToast } from "./state/toastStore";
 import { SwitcherLock } from "./components/layout/SwitcherLock";
+import { MultiDiffHost } from "./components/git/MultiDiffHost";
 
 /**
  * The whole of a satellite window.
@@ -613,6 +614,7 @@ export default function SatelliteApp() {
           — the palette, the settings panel, the tour, the notification cards — belongs to the shell
           this window does not have. */}
       <ToastContainer />
+      <MultiDiffHost />
       <ConfirmModal />
       <DictationOverlay shortcut />
       <PromptModal />

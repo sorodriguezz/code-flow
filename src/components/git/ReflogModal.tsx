@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ago } from "../../lib/relativeAgo";
 import { createPortal } from "react-dom";
 import { History, Loader2, RotateCcw, Undo2, X } from "lucide-react";
 import * as gitApi from "../../lib/tauri/gitCommands";
@@ -34,28 +35,6 @@ const TONE: Partial<Record<ReflogOp, ChipTone>> = {
   cherry_pick: "info",
   revert: "info",
 };
-
-const formatters = new Map<string, Intl.RelativeTimeFormat>();
-
-/** "hace 5 min" — the reflog is read for *when*, and a week-old entry by its date. */
-function ago(seconds: number, locale: string): string {
-  const delta = Math.round(seconds - Date.now() / 1000);
-  const absolute = Math.abs(delta);
-  if (absolute > 7 * 86400) return new Date(seconds * 1000).toLocaleDateString(locale, { day: "numeric", month: "short" });
-  let formatter = formatters.get(locale);
-  if (!formatter) {
-    formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
-    formatters.set(locale, formatter);
-  }
-  for (const [unit, size] of [
-    ["day", 86400],
-    ["hour", 3600],
-    ["minute", 60],
-  ] as [Intl.RelativeTimeFormatUnit, number][]) {
-    if (absolute >= size) return formatter.format(Math.round(delta / size), unit);
-  }
-  return formatter.format(0, "minute");
-}
 
 export function ReflogModal({ onClose }: { onClose: () => void }) {
   const t = useT();

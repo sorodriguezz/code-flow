@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bodyForBlock, extensionForLanguage, fileNameForBlock, fileNameFromFirstLine } from "./codeFileName";
+import { bodyForBlock, extensionForLanguage, fileNameForBlock, fileNameFromFirstLine, pathFromFirstLine } from "./codeFileName";
 
 describe("extensionForLanguage", () => {
   it("maps a language to what the file should be called", () => {
@@ -98,5 +98,20 @@ describe("bodyForBlock", () => {
     const block = "# usuarios.csv\nid,nombre";
     expect(fileNameForBlock("csv", block, "fragmento")).toBe("usuarios.csv");
     expect(bodyForBlock("csv", block)).toBe("id,nombre");
+  });
+});
+
+describe("pathFromFirstLine", () => {
+  it("keeps the whole path the naming line gives", () => {
+    expect(pathFromFirstLine("// src/components/Card.tsx\nexport {}")).toBe("src/components/Card.tsx");
+    expect(pathFromFirstLine("# scripts/run.py")).toBe("scripts/run.py");
+    expect(pathFromFirstLine("<!-- public/index.html -->")).toBe("public/index.html");
+    expect(pathFromFirstLine("// Card.tsx")).toBe("Card.tsx");
+  });
+
+  it("names nothing for prose, or for a path that climbs out", () => {
+    expect(pathFromFirstLine("const a = 1;")).toBeNull();
+    expect(pathFromFirstLine("// a/../../etc/passwd.txt")).toBeNull();
+    expect(pathFromFirstLine("// src//x.ts")).toBeNull();
   });
 });

@@ -546,12 +546,12 @@ async fn chat_turn(host: &AppHost, args: &Value, cancel: CancellationToken) -> R
         let app = host.app.clone();
         let id = conversation_id.clone();
         tokio::spawn(async move {
-            let _ = chat_cmd::chat_send(app.clone(), app.state::<Db>(), id.clone(), message, Some(run_id), provider, model, Some(false), None, None).await;
+            let _ = chat_cmd::chat_send(app.clone(), app.state::<Db>(), id.clone(), message, Some(run_id), provider, model, Some(false), None, None, None).await;
             crate::remotectl::bridge::emit_desktop_change(&app, "flows", crate::remotectl::dispatch::Invalidate::Chat, None, Some(&id));
         });
         return Ok(json!({"conversationId": conversation_id, "created": created, "sent": true}));
     }
-    let turn = chat_cmd::chat_send(host.app.clone(), db(host), conversation_id.clone(), message, Some(run_id.clone()), provider, model, Some(false), None, None);
+    let turn = chat_cmd::chat_send(host.app.clone(), db(host), conversation_id.clone(), message, Some(run_id.clone()), provider, model, Some(false), None, None, None);
     let reply = tokio::select! {
         reply = turn => reply?,
         _ = cancel.cancelled() => {

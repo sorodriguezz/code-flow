@@ -78,6 +78,7 @@ import {
   type QueuedChatMessage,
   type QueuedCommand,
 } from "./chatQueueStore";
+import { registerIslandApp } from "../lib/islandSync";
 
 /** This workspace's queue for one conversation — see `chatQueueStore`. */
 const queueOf = (conversationId: string) => chatQueueKey("chat", conversationId);
@@ -2389,3 +2390,18 @@ function prune(): void {
 }
 
 export { EMPTY_CONVERSATION };
+
+/** What the island did while Chat was out — folders, and the thread on screen here — read again on
+ *  the way back (`lib/islandSync`). The list itself `ChatView` already re-reads on every window
+ *  change. A thread still answering, or still being typed out, is the one copy and is left alone. */
+registerIslandApp(["chat"], {
+  isLoaded: () => subscribed,
+  reload: async () => {
+    const state = useConversationStore.getState();
+    await state.loadGroups();
+    const id = state.activeId;
+    const session = id ? state.byConversation[id] : undefined;
+    if (!id || session?.sending || session?.revealingMessageId) return;
+    await state.open(id);
+  },
+});

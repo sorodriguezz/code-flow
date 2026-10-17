@@ -2010,6 +2010,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_custom_data_to_flow_runs(conn)?;
     add_flow_tests(conn)?;
     add_meeting_tables(conn)?;
+    add_checkpoint_to_activity_log(conn)?;
+    add_chat_turn_checkpoints(conn)?;
     Ok(())
 }
 
@@ -4412,6 +4414,30 @@ fn add_engine_meta_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+/// What a chat turn changed on disk — see `ActivityLogEntry::checkpoint`. Rows written before stay
+/// NULL and simply offer no per-turn review.
+fn add_checkpoint_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "activity_log", "checkpoint")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE activity_log ADD COLUMN checkpoint TEXT;")
+}
+
+/// What a workspace chat's turn changed, per repository: the checkpoint taken before it in each and
+/// the files that differ from it — the per-turn review under the answer. A table of its own rather
+/// than a column on `chat_messages`, which every chat writes and only this one needs; it goes with
+/// its message.
+fn add_chat_turn_checkpoints(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS chat_turn_checkpoints (
+            message_id      TEXT PRIMARY KEY REFERENCES chat_messages(id) ON DELETE CASCADE,
+            conversation_id TEXT NOT NULL,
+            checkpoints     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_turn_checkpoints_conversation ON chat_turn_checkpoints(conversation_id);",
+    )
 }
 
 /// `job_history` originally had no `custom_label` column — for a database created before

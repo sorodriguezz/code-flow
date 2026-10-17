@@ -172,8 +172,16 @@ pub fn get_file_diff(
     path: String,
     staged: bool,
     context_lines: Option<u32>,
+    ignore_whitespace: Option<bool>,
 ) -> Result<Option<diff::FileDiffInfo>, String> {
-    diff::get_file_diff(&repo_path, &path, staged, context_lines)
+    diff::get_file_diff_with(&repo_path, &path, staged, context_lines, ignore_whitespace.unwrap_or(false))
+}
+
+/// A file at a revision — `HEAD`, a branch, a commit — for «Comparar con…». `null` when it is not
+/// there at that revision.
+#[tauri::command(async)]
+pub fn file_at_revision(repo_path: String, revision: String, path: String) -> Result<Option<String>, String> {
+    diff::file_at_revision(&repo_path, &revision, &path)
 }
 
 #[tauri::command]
@@ -349,8 +357,54 @@ pub fn list_commits_page(
     all_refs: bool,
     skip: usize,
     limit: usize,
+    filter: Option<graph::LogFilter>,
 ) -> Result<graph::CommitPage, String> {
-    graph::list_commits_page(&repo_path, all_refs, skip, limit)
+    match filter {
+        Some(filter) => graph::list_commits_page_filtered(&repo_path, all_refs, skip, limit, &filter),
+        None => graph::list_commits_page(&repo_path, all_refs, skip, limit),
+    }
+}
+
+/// Two revisions compared tree to tree — the graph's "compare with the selected commit".
+#[tauri::command(async)]
+pub fn get_revisions_diff(
+    repo_path: String,
+    from: String,
+    to: String,
+    file: Option<String>,
+) -> Result<Vec<crate::git::diff::FileDiffInfo>, String> {
+    crate::git::diff::get_revisions_diff(&repo_path, &from, &to, file.as_deref())
+}
+
+/// One commit as a `git am`-able patch.
+#[tauri::command(async)]
+pub fn format_patch(repo_path: String, oid: String) -> Result<String, String> {
+    history::format_patch(&repo_path, &oid)
+}
+
+#[tauri::command]
+pub fn rename_branch(repo_path: String, name: String, new_name: String) -> Result<(), String> {
+    branch::rename_branch(&repo_path, &name, &new_name)
+}
+
+/// The commits an interactive rebase from `base` would replay, oldest first.
+#[tauri::command(async)]
+pub fn rebase_plan(repo_path: String, base: String) -> Result<Vec<crate::git::rebase::PlanCommit>, String> {
+    crate::git::rebase::rebase_plan(&repo_path, &base)
+}
+
+#[tauri::command(async)]
+pub fn rebase_interactive(
+    repo_path: String,
+    base: String,
+    steps: Vec<crate::git::rebase::RebaseStep>,
+) -> Result<(), String> {
+    crate::git::rebase::rebase_interactive(&repo_path, &base, &steps)
+}
+
+#[tauri::command(async)]
+pub fn rebase_onto(repo_path: String, upstream: String) -> Result<(), String> {
+    crate::git::rebase::rebase_onto(&repo_path, &upstream)
 }
 
 #[tauri::command(async)]

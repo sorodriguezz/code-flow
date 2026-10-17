@@ -225,6 +225,7 @@ function DiffViewImpl({
   onClose,
   context,
   staging,
+  toolbarExtra,
 }: {
   files: FileDiffInfo[];
   /**
@@ -247,6 +248,9 @@ function DiffViewImpl({
    * screen passes it; memoise it there, for the reason `onClose` gives. See `StagingDiff`.
    */
   staging?: DiffStaging;
+  /** More controls for the toolbar, before the view switch — the Changes screen's whitespace switch.
+   *  Memoise it, for the reason `onClose` gives. */
+  toolbarExtra?: ReactNode;
 }) {
   const t = useT();
   const [mode, setMode] = useState<ViewMode>("unified");
@@ -316,6 +320,7 @@ function DiffViewImpl({
       ) : (
         <span className="flex-1" />
       )}
+      {toolbarExtra}
       {/* The one control for how a diff is laid out, the same segmented switch every "two ways to
           show one thing" in the app wears. Icons only, named by their tooltips: this pane can be
           280px wide, and two labelled options would take a third of it. */}

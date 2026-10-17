@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { ProblemSeverity } from "./problemsStore";
+import type { HierarchyMode, HierarchyNode } from "../lib/hierarchy";
 
 /**
  * The panel under the editor groups: Problems, and the results of the last "find all references"
@@ -10,7 +11,15 @@ import type { ProblemSeverity } from "./problemsStore";
  * per pane), and the rename provider (registered once for the whole app).
  */
 
-export type EditorPanelTab = "problems" | "results";
+/** VS Code's panel, as far as this editor has it: Problems, the last references/rename, the call or
+ *  type hierarchy asked for last, the repository's tests and its tasks (`.vscode/tasks.json`). */
+export type EditorPanelTab = "problems" | "results" | "hierarchy" | "tests" | "tasks";
+
+/** The tree on the Hierarchy tab: which kind, and where it starts. */
+export interface HierarchyRequest {
+  mode: HierarchyMode;
+  root: HierarchyNode;
+}
 
 export interface ResultItem {
   line: number;
@@ -37,6 +46,7 @@ interface EditorPanelState {
   open: boolean;
   tab: EditorPanelTab;
   results: ResultSet | null;
+  hierarchy: HierarchyRequest | null;
   /** Which severities the Problems list shows. */
   show: Record<ProblemSeverity, boolean>;
   /** Whether a compiler that can check the whole project is running for it — tsserver, today. */
@@ -48,6 +58,7 @@ interface EditorPanelState {
   close: () => void;
   /** Replaces the results and brings them into view. */
   showResults: (results: ResultSet) => void;
+  showHierarchy: (request: HierarchyRequest) => void;
   toggleSeverity: (severity: ProblemSeverity) => void;
   setProjectCheck: (state: { canCheckProject?: boolean; checkingProject?: boolean }) => void;
 }
@@ -56,6 +67,7 @@ export const useEditorPanelStore = create<EditorPanelState>((set) => ({
   open: false,
   tab: "problems",
   results: null,
+  hierarchy: null,
   show: { error: true, warning: true, info: true },
   canCheckProject: false,
   checkingProject: false,
@@ -63,6 +75,7 @@ export const useEditorPanelStore = create<EditorPanelState>((set) => ({
   toggle: (tab) => set((state) => (state.open && state.tab === tab ? { open: false } : { open: true, tab })),
   close: () => set({ open: false }),
   showResults: (results) => set({ results, open: true, tab: "results" }),
+  showHierarchy: (hierarchy) => set({ hierarchy, open: true, tab: "hierarchy" }),
   toggleSeverity: (severity) => set((state) => ({ show: { ...state.show, [severity]: !state.show[severity] } })),
   setProjectCheck: (state) => set(state),
 }));

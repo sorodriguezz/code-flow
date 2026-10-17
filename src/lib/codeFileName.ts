@@ -109,6 +109,22 @@ export function fileNameFromFirstLine(source: string): string | null {
 }
 
 /**
+ * The path a block's naming line gives — `// src/components/Card.tsx` — whole, where
+ * `fileNameFromFirstLine` keeps only the name: «Aplicar al archivo» offers it as the target. `null`
+ * when the line names no file, or names one that climbs out of the repository (`..`).
+ */
+export function pathFromFirstLine(source: string): string | null {
+  const first = source.split("\n", 1)[0] ?? "";
+  const match = first.match(
+    /^\s*(?:\/\/|#|--|;|\/\*|<!--)\s*([A-Za-z0-9_][\w./-]*\.[A-Za-z][A-Za-z0-9]{0,7})\s*(?:\*\/|-->)?\s*$/,
+  );
+  if (!match) return null;
+  const path = match[1].replace(/^\.\//, "");
+  if (path.split("/").some((part) => part === ".." || part === "")) return null;
+  return path;
+}
+
+/**
  * The name to put in the save dialog for one code block.
  *
  * The model's own first-line filename wins when there is one — it is the most specific thing

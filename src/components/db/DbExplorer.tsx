@@ -33,6 +33,12 @@ import {
   Wand2,
   X,
   type LucideIcon,
+  GitCompareArrows,
+  PencilRuler,
+  Dices,
+  Activity,
+  HardDriveDownload,
+  HardDriveUpload,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -62,6 +68,9 @@ import {
   useDbStore,
   type DbSidebarSection,
 } from "../../state/dbStore";
+import { sessionDialect } from "../../lib/db/sessionQueries";
+import { EnvironmentChip, useConnectionEnvironment } from "./EnvironmentChip";
+import { backupSupported } from "../../lib/db/backup";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useDbDragStore } from "../../state/dbDragStore";
 import { useDbObjectDragStore } from "../../state/dbObjectDragStore";
@@ -582,6 +591,21 @@ function NodeSubtree({
       icon: Wand2,
       onClick: () => setGenerateMenu(menu),
     });
+    // The table as a form, and rows to fill it with — SQL tables only: a view has no columns to
+    // design, and a document store has no columns at all.
+    if (generatesSql && node.kind === "table") {
+      menuItems.push({
+        label: t("db.design.open"),
+        icon: PencilRuler,
+        separated: true,
+        onClick: () => openModal({ kind: "tableDesigner", connectionId, node: nodeRef }),
+      });
+      menuItems.push({
+        label: t("db.fake.open"),
+        icon: Dices,
+        onClick: () => openModal({ kind: "fakeData", connectionId, node }),
+      });
+    }
   }
   if (isDefinition) {
     menuItems.push({ label: t("db.showDdl"), icon: FileCode2, onClick: showDdl });
@@ -606,6 +630,19 @@ function NodeSubtree({
         icon: Network,
         onClick: () => store.openDiagram(connectionId, nodeRef, diagramLabel(node)),
       });
+      if (generatesSql) {
+        menuItems.push({
+          label: t("db.compare.open"),
+          icon: GitCompareArrows,
+          onClick: () =>
+            openModal({
+              kind: "schemaCompare",
+              connectionId,
+              database: node.database,
+              schema: node.kind === "schema" ? node.name : null,
+            }),
+        });
+      }
     }
     // Creating, from the container you are pointing at. A draft in a console rather than a form:
     // a table is columns, types, keys and defaults, and a dialog that asked for all of that would
@@ -619,8 +656,12 @@ function NodeSubtree({
         label: engineInfo(engineKind).sql ? t("db.createTable") : t("db.createCollection"),
         icon: Table2,
         separated: true,
+        // On a SQL engine the designer, which writes the same CREATE TABLE from a form and shows it
+        // before it runs; the draft in a console is one click on from there.
         onClick: () =>
-          store.newConsole(
+          engineInfo(engineKind).sql
+            ? openModal({ kind: "tableDesigner", connectionId, node: nodeRef })
+            : store.newConsole(
             connectionId,
             node.database ?? undefined,
             node.schema ?? undefined,
@@ -1109,8 +1150,35 @@ function ConnectionBranch({
       icon: RefreshCw,
       onClick: () => void store.refreshNode(row.id, rootRef, key),
     },
+    // The server as a whole: what is running on it, and its data out to a file or back in.
+    ...(sessionDialect(row.kind)
+      ? [
+          {
+            label: t("db.sessions"),
+            icon: Activity,
+            separated: true,
+            onClick: () => openModal({ kind: "sessions", connectionId: row.id, database: null }),
+          },
+        ]
+      : []),
+    ...(backupSupported(row.kind)
+      ? [
+          {
+            label: t("db.backup.backup"),
+            icon: HardDriveDownload,
+            separated: !sessionDialect(row.kind),
+            onClick: () => openModal({ kind: "backup", connectionId: row.id, database: null, mode: "backup" }),
+          },
+          {
+            label: t("db.backup.restore"),
+            icon: HardDriveUpload,
+            onClick: () => openModal({ kind: "backup", connectionId: row.id, database: null, mode: "restore" }),
+          },
+        ]
+      : []),
     {
       label: t("db.editConnection"),
+      separated: true,
       icon: Pencil,
       onClick: () => openModal({ kind: "connection", connectionId: row.id }),
     },
@@ -1165,6 +1233,7 @@ function ConnectionBranch({
   // everywhere it appears.
   const driverSettings = useDriverStore((s) => s.settings);
   const driver = effectiveDriver(rowDriverId(row), driverSettings);
+  const environment = useConnectionEnvironment(row.id);
   const engineLabel = driverEngineInfo(driver, row.kind).label;
 
   return (
@@ -1203,13 +1272,18 @@ function ConnectionBranch({
         // exists for it — so "this one is on every workspace's shelf" reads identically in all
         // three trees.
         badge={
-          row.scope === "global" ? (
-            <span
-              title={t("scope.globalBadge")}
-              aria-label={t("scope.globalBadge")}
-              className="flex shrink-0 items-center text-[var(--cf-text-faint)]"
-            >
-              <Globe size={12} />
+          environment || row.scope === "global" ? (
+            <span className="flex shrink-0 items-center gap-1">
+              <EnvironmentChip environment={environment} />
+              {row.scope === "global" && (
+                <span
+                  title={t("scope.globalBadge")}
+                  aria-label={t("scope.globalBadge")}
+                  className="flex shrink-0 items-center text-[var(--cf-text-faint)]"
+                >
+                  <Globe size={12} />
+                </span>
+              )}
             </span>
           ) : undefined
         }
@@ -1957,6 +2031,16 @@ export function DbExplorer() {
             />
           </div>
           <div data-tour="db-explorer-actions" className="flex shrink-0 items-center gap-0.5">
+            {/* Any object on any connected server, by name — the tree's own filter only sees what
+                is already expanded. */}
+            <ToolbarButton
+              size="sm"
+              onClick={() => openModal({ kind: "objectSearch" })}
+              title={t("db.objectSearch")}
+              shortcut={chord("db.objectSearch")}
+            >
+              <Search size={15} />
+            </ToolbarButton>
             {/* The whole set, not one connection: the way into "set my databases up" that doesn't
                 require having a connection to right-click first. Arranging the order is not in
                 there — that is this tree's own job, by dragging a row. */}

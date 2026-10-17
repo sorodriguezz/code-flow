@@ -1,5 +1,5 @@
 import { lspCapabilities, lspNotify, lspProbe, lspRequest, lspStart, lspStopProject } from "../tauri/commands";
-import { LANGUAGE_SERVERS, serversForRepo, spawnFor, type LanguageServer } from "./servers";
+import { LANGUAGE_SERVERS, monacoLanguageOf, serversForRepo, spawnFor, withRepoPath, type LanguageServer } from "./servers";
 import { fileUriFor, type LspFileOperationFilter, type LspWorkspaceEdit } from "./protocol";
 import { renameWanted } from "./fileOperations";
 import { WINDOW } from "../windowIdentity";
@@ -125,7 +125,8 @@ export function languagesServedWith(capability: string): string[] {
   const languages = new Set<string>();
   for (const session of sessions.values()) {
     if (!session.capabilities?.[capability]) continue;
-    for (const language of session.server.languages) languages.add(language);
+    // Monaco's ids: these are what providers are registered against (a `vue` server formats `html`).
+    for (const language of session.server.languages) languages.add(monacoLanguageOf(language));
   }
   return [...languages].sort();
 }
@@ -244,8 +245,8 @@ export async function startForProject(projectId: string, repoPath: string, rootE
           repoPath,
           launch.command,
           launch.args,
-          server.initializationOptions,
-          server.settings,
+          withRepoPath(server.initializationOptions, repoPath),
+          withRepoPath(server.settings, repoPath),
         ).then(
           (capabilities) => ({ ok: true as const, capabilities }),
           () => ({ ok: false as const, capabilities: null }),
@@ -445,6 +446,11 @@ export function didRenameFiles(renames: readonly PathRename[]): void {
  * open of the panel spawned fourteen `--version` processes while the comment above it claimed the
  * answers were cached. Call `refreshProbes` first to deliberately ask again.
  */
+/** One server's version, or `null` when it is not installed — cached like every probe. */
+export async function serverVersion(server: LanguageServer): Promise<string | null> {
+  return (await probe(server)).version;
+}
+
 export async function serverStatuses(): Promise<{ server: LanguageServer; version: string | null }[]> {
   return Promise.all(
     LANGUAGE_SERVERS.map(async (server) => ({ server, version: (await probe(server)).version })),

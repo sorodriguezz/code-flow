@@ -9,7 +9,9 @@ import {
   PinOff,
   SaveAll,
   SplitSquareHorizontal,
+  SplitSquareVertical,
   X,
+  GitCompareArrows,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { FileGlyph } from "../common/FileGlyph";
@@ -22,6 +24,9 @@ import { useRowHoverStore } from "../../state/rowHoverStore";
 import { useTabDragStore, type TabDrag, type TabDropTarget } from "../../state/tabDragStore";
 import { useT } from "../../state/languageStore";
 import { isScratchPath, scratchName } from "../../lib/scratchTabs";
+import { useCompareStore } from "../../state/compareStore";
+import { useRevisionCompareStore } from "../../state/revisionCompareStore";
+import { useRepoStore } from "../../state/repoStore";
 
 export interface EditorTabItem {
   path: string;
@@ -43,9 +48,17 @@ export interface EditorTabItem {
 export interface TabMenuActions {
   togglePinned: (path: string) => void;
   closeAll: () => void;
+  /** VS Code's «Close Others», «Close to the Right» and «Close Saved» — pinned tabs stay. */
+  closeOthers?: (path: string) => void;
+  closeToRight?: (path: string) => void;
+  closeSaved?: () => void;
+  /** The file on disk against this tab's unsaved text. Offered only while it has unsaved changes. */
+  compareWithSaved?: (path: string) => void;
+  isDirty?: (path: string) => boolean;
   copyPath: (path: string) => void;
   /** Absent in a floating editor, which is one file with nothing to split it beside. */
   splitRight?: (path: string) => void;
+  splitDown?: (path: string) => void;
   /** Show this file's row in the explorer beside the editor: open every folder above it and scroll
    *  it into view. Distinct from the tree's own "Reveal in file manager", which opens Finder. Absent
    *  where there is no explorer — a floating editor. */
@@ -311,7 +324,7 @@ export function EditorTabs({
   /** `at` is where the menu was opened, in screen pixels — where a floating window asked for from
    *  it opens. */
   const menuItems = (tab: EditorTabItem, at: { x: number; y: number }): MenuItem[] => {
-    const { revealInTree, splitRight, moveToWindow, returnToMain } = menu;
+    const { revealInTree, splitRight, splitDown, moveToWindow, returnToMain } = menu;
     // Neither for a scratch tab (`lib/scratchTabs`): it lives nowhere, so there is no path to copy,
     // no row to reveal, and no file a floating window could read back.
     const scratch = isScratchPath(tab.path);
@@ -330,6 +343,35 @@ export function EditorTabs({
       ...(splitRight
         ? [{ label: t("editor.splitRight"), icon: SplitSquareHorizontal, onClick: () => splitRight(tab.path) }]
         : []),
+      ...(splitDown
+        ? [{ label: t("editor.splitDown"), icon: SplitSquareVertical, onClick: () => splitDown(tab.path) }]
+        : []),
+      ...(scratch
+        ? []
+        : [
+            {
+              label: t("compare.select"),
+              icon: GitCompareArrows,
+              separated: true,
+              onClick: () => useCompareStore.getState().select(tab.path),
+            },
+            ...(() => {
+              const left = useCompareStore.getState().selected;
+              return left && left !== tab.path
+                ? [{ label: t("compare.with", { name: left.split("/").pop() ?? left }), onClick: () => useCompareStore.getState().compareWith(tab.path) }]
+                : [];
+            })(),
+            // Against git: the file as committed, or as it is on another branch.
+            ...(() => {
+              const repoPath = useRepoStore.getState().repoPath;
+              return repoPath
+                ? [
+                    { label: t("changes.compareHead"), onClick: () => useRevisionCompareStore.getState().open(repoPath, tab.path, "HEAD") },
+                    { label: t("changes.compareBranch"), onClick: () => useRevisionCompareStore.getState().open(repoPath, tab.path, null) },
+                  ]
+                : [];
+            })(),
+          ]),
       // The menu's way to what dragging the tab out of the window does — the only way at all when
       // the window is maximized and there is no "outside" to drag it to.
       ...(!scratch && moveToWindow
@@ -338,7 +380,13 @@ export function EditorTabs({
       ...(returnToMain ? [{ label: t("editor.island.return"), icon: CornerUpLeft, onClick: returnToMain }] : []),
       // Here because this is where the files are — and the one menu every platform has: the macOS
       // menu bar is not drawn on Windows and Linux. The chord is the registry's (⌘⌥S by default).
+      ...(!scratch && menu.compareWithSaved && menu.isDirty?.(tab.path)
+        ? [{ label: t("editor.compareWithSaved"), icon: GitCompareArrows, onClick: () => menu.compareWithSaved?.(tab.path) }]
+        : []),
       { label: t("editor.saveAll"), icon: SaveAll, separated: true, onClick: menu.saveAll },
+      ...(menu.closeOthers ? [{ label: t("editor.closeOthers"), onClick: () => menu.closeOthers?.(tab.path) }] : []),
+      ...(menu.closeToRight ? [{ label: t("editor.closeToRight"), onClick: () => menu.closeToRight?.(tab.path) }] : []),
+      ...(menu.closeSaved ? [{ label: t("editor.closeSaved"), onClick: () => menu.closeSaved?.() }] : []),
       { label: t("editor.closeAllTabs"), icon: X, onClick: menu.closeAll },
     ];
   };

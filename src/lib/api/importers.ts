@@ -218,6 +218,7 @@ export function detectFormat(text: string): ImportFormat | null {
   if (!trimmed) return null;
   if (looksLikeCurl(trimmed)) return "curl";
   if (looksLikeBru(trimmed)) return "bruno";
+  if (looksLikeHttpFile(trimmed)) return "http";
 
   const doc = parseJsonSafe(trimmed);
   if (!isObj(doc)) {
@@ -313,6 +314,7 @@ async function runImport(
   });
 
   if (format === "curl") return importCurl(text, warnings);
+  if (format === "http") return importHttpFile(text, warnings);
   if (format === null) {
     warnings.push(
       "Unrecognized format — expected a Postman, OpenAPI/Swagger, HAR, Insomnia, Bruno or CodeFlow export, or a cURL command.",
@@ -1171,6 +1173,179 @@ function importCurl(text: string, warnings: string[]): ImportResult {
     environments: [],
     warnings,
   };
+}
+
+// ---------------------------------------------------------------------------
+// .http / .rest files (VS Code's REST Client, JetBrains' HTTP Client)
+// ---------------------------------------------------------------------------
+
+const HTTP_FILE_METHODS = "GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT";
+const HTTP_REQUEST_LINE = new RegExp(`^(?:(${HTTP_FILE_METHODS})\\s+)?(\\S+?)(?:\\s+HTTP\\/[\\d.]+)?\\s*$`);
+const HTTP_FILE_VARIABLE = /^@([A-Za-z_][\w.-]*)\s*=\s*(.*)$/;
+
+/** Comment lines: `#` and `//`, but not the `###` that separates requests. */
+function isHttpComment(line: string): boolean {
+  return (line.startsWith("#") && !line.startsWith("###")) || line.startsWith("//");
+}
+
+/** Whether `line` opens a request: a method and a URL, or a bare absolute URL (an implicit GET). */
+function httpRequestLine(line: string): { method: string; url: string } | null {
+  const trimmed = line.trim();
+  const withMethod = new RegExp(`^(${HTTP_FILE_METHODS})\\s+\\S`).test(trimmed);
+  if (!withMethod && !/^https?:\/\/\S+/i.test(trimmed) && !/^\{\{[^}]+\}\}\S*$/.test(trimmed)) return null;
+  const match = HTTP_REQUEST_LINE.exec(trimmed);
+  if (!match) return null;
+  return { method: match[1] ?? "GET", url: match[2] };
+}
+
+/** The first meaningful line opens a request — what both clients' files look like. */
+function looksLikeHttpFile(text: string): boolean {
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("###") || isHttpComment(line) || HTTP_FILE_VARIABLE.test(line)) continue;
+    return new RegExp(`^(${HTTP_FILE_METHODS})\\s+\\S`).test(line) || /^https?:\/\/\S+$/i.test(line);
+  }
+  return false;
+}
+
+/** One request of a `.http` file, as written: where it starts, and what it says. */
+export interface HttpFileRequest {
+  /** 0-based line of the request line — where the editor puts its «Enviar». */
+  line: number;
+  name: string;
+  spec: ApiRequestSpec;
+}
+
+/**
+ * Every request in a `.http`/`.rest` file, and the file's `@name = value` variables.
+ *
+ * The two clients share the shape this reads: blocks split by `###` (whatever follows names the
+ * block), a request line (`METHOD url [HTTP/1.1]`, or a bare URL meaning GET) with `?`/`&`
+ * continuation lines, headers up to the first blank line, then the body. `# @name x` names a
+ * request. What only one client understands — JetBrains' `> {% handler %}` scripts, a body read
+ * from `< ./file` — is reported, not guessed at. Both clients write variables as `{{name}}`, which
+ * is this app's syntax too, so they pass through untouched.
+ */
+export function parseHttpFile(text: string, warnings: string[] = []): { requests: HttpFileRequest[]; variables: ApiVariable[] } {
+  const lines = text.split(/\r?\n/);
+  const variables: ApiVariable[] = [];
+  const requests: HttpFileRequest[] = [];
+  let blockName = "";
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index].trim();
+    if (line.startsWith("###")) {
+      blockName = line.replace(/^#+/, "").trim();
+      index += 1;
+      continue;
+    }
+    const variableMatch = HTTP_FILE_VARIABLE.exec(line);
+    if (variableMatch) {
+      if (!variables.some((v) => v.key === variableMatch[1])) variables.push(variable(variableMatch[1], variableMatch[2].trim()));
+      index += 1;
+      continue;
+    }
+    const nameMatch = /^(?:#|\/\/)\s*@name\s+(.+)$/.exec(line);
+    if (nameMatch) {
+      blockName = nameMatch[1].trim();
+      index += 1;
+      continue;
+    }
+    if (line === "" || isHttpComment(line)) {
+      index += 1;
+      continue;
+    }
+    const opened = httpRequestLine(line);
+    if (!opened) {
+      warnings.push(`Skipped a line that is not a request: ${line.slice(0, 60)}`);
+      index += 1;
+      continue;
+    }
+    const start = index;
+    let url = opened.url;
+    index += 1;
+    // REST Client's multi-line query: lines starting with `?` or `&` right after the request line.
+    while (index < lines.length && /^\s*[?&]/.test(lines[index])) {
+      url += lines[index].trim();
+      index += 1;
+    }
+    const headers: KeyValue[] = [];
+    while (index < lines.length && lines[index].trim() !== "" && !lines[index].trim().startsWith("###")) {
+      const header = lines[index].trim();
+      index += 1;
+      if (isHttpComment(header)) continue;
+      const colon = header.indexOf(":");
+      if (colon > 0) headers.push(kv(header.slice(0, colon).trim(), header.slice(colon + 1).trim()));
+    }
+    const bodyLines: string[] = [];
+    while (index < lines.length && !lines[index].trim().startsWith("###")) {
+      bodyLines.push(lines[index]);
+      index += 1;
+    }
+    let body = bodyLines.join("\n");
+    // JetBrains' response handler and output redirection end the body.
+    const handlerAt = body.search(/^\s*>\s*(?:\{%|>|\S+\.js)/m);
+    if (handlerAt >= 0) {
+      warnings.push("Response handler scripts (`> {% ... %}`) are not imported.");
+      body = body.slice(0, handlerAt);
+    }
+    body = body.replace(/\s+$/, "");
+    const spec = defaultRequestSpec("http");
+    spec.method = opened.method.toUpperCase();
+    const split = splitQuery(url);
+    spec.url = split.url;
+    spec.params = split.params;
+    spec.headers = headers;
+    if (body.trim() !== "") {
+      if (/^<\s+\S/.test(body.trim())) {
+        warnings.push(`A body read from a file (${body.trim().slice(0, 60)}) is not imported.`);
+      } else {
+        const contentType = headerValue(headers, "content-type");
+        if (contentType.toLowerCase().includes("x-www-form-urlencoded") && looksLikeFormBody(body.replace(/\s*\n\s*/g, ""))) {
+          spec.body = { ...spec.body, mode: "urlencoded", urlencoded: formRows(body.replace(/\s*\n\s*/g, "")) };
+        } else {
+          spec.body = { ...spec.body, mode: "raw", raw: body, rawLanguage: languageFor(contentType, body) };
+        }
+      }
+    }
+    requests.push({ line: start, name: blockName || nameFromUrl(spec.method, spec.url), spec });
+    blockName = "";
+  }
+  return { requests, variables };
+}
+
+/**
+ * A request of a `.http` file with the file's own `@name = value` variables written into it — what
+ * «Enviar» from the editor opens, since those variables live in the file and not in any environment.
+ * Variables the file does not define (`{{token}}` from an environment) are left for the API client.
+ */
+export function inlineFileVariables(spec: ApiRequestSpec, variables: ApiVariable[]): ApiRequestSpec {
+  if (variables.length === 0) return spec;
+  const values = new Map(variables.map((v) => [v.key, v.currentValue]));
+  const expand = (text: string): string => {
+    let out = text;
+    // Twice, for a variable defined from another (`@url = {{host}}/v1`).
+    for (let pass = 0; pass < 2; pass += 1) {
+      out = out.replace(/\{\{\s*([A-Za-z_][\w.-]*)\s*\}\}/g, (whole, name: string) => values.get(name) ?? whole);
+    }
+    return out;
+  };
+  const rows = (list: KeyValue[]) => list.map((row) => ({ ...row, key: expand(row.key), value: expand(row.value) }));
+  return {
+    ...spec,
+    url: expand(spec.url),
+    params: rows(spec.params),
+    headers: rows(spec.headers),
+    body: { ...spec.body, raw: expand(spec.body.raw), urlencoded: rows(spec.body.urlencoded) },
+  };
+}
+
+function importHttpFile(text: string, warnings: string[]): ImportResult {
+  const { requests, variables } = parseHttpFile(text, warnings);
+  const collection = emptyCollection("HTTP file");
+  collection.variables = variables;
+  for (const request of requests) collection.items.push(requestItem(request.name, request.spec));
+  return { format: "http", collections: collection.items.length ? [collection] : [], environments: [], warnings };
 }
 
 // ---------------------------------------------------------------------------

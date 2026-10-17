@@ -107,6 +107,43 @@ export function openNewChat(projectId: string): string {
   return useAiPanelStore.getState().open({ kind: "chat", projectId });
 }
 
+/** Asks the composer of the panel chat tab `key` to take focus, caret at the end — sent once the
+ *  tab is on screen. `PanelChat` listens. */
+export const FOCUS_CHAT_EVENT = "cf:focus-panel-chat";
+/** Asks the panel chat tab `key` to send what its draft holds — the graph's «Explicar con IA». */
+export const SEND_CHAT_EVENT = "cf:send-panel-chat";
+/** Tabs with a send still owed — taken by the tab when the event reaches it, or when it mounts if
+ *  it was not on screen yet to hear it. */
+const pendingSends = new Set<string>();
+export function takePendingSend(key: string): boolean {
+  return pendingSends.delete(key);
+}
+
+/**
+ * The editor's «Preguntar en el chat»: the repository's chat on screen — the one already in front,
+ * else the last one opened, else a new one — with `text` added to the end of its draft.
+ */
+export function askInRepoChat(projectId: string, text: string, opts: { send?: boolean } = {}): void {
+  const panel = useAiPanelStore.getState();
+  const workspaces = useWorkspaceStore.getState();
+  const workspaceId = workspaces.workspaceOfProject(projectId) ?? workspaces.activeWorkspaceId;
+  const chats = (workspaceId ? (panel.tabsByWorkspace[workspaceId] ?? []) : []).filter(
+    (tab): tab is Extract<typeof tab, { kind: "chat" }> => tab.kind === "chat" && tab.projectId === projectId,
+  );
+  const active = workspaceId ? panel.activeByWorkspace[workspaceId] : undefined;
+  const reuse = chats.find((tab) => tab.key === active) ?? chats[chats.length - 1];
+  const key = reuse ? panel.open({ kind: "chat", projectId, conversationId: reuse.conversationId }) : openNewChat(projectId);
+  const draft = useAiPanelStore.getState().drafts[key] ?? "";
+  useAiPanelStore.getState().setDraft(key, draft.trim() ? `${draft.trimEnd()} ${text}` : text);
+  if (opts.send) pendingSends.add(key);
+  // Two frames: one for the panel to open, one for the tab to be shown.
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() =>
+      window.dispatchEvent(new CustomEvent(opts.send ? SEND_CHAT_EVENT : FOCUS_CHAT_EVENT, { detail: key })),
+    ),
+  );
+}
+
 /**
  * A chat with every repository of `workspaceId` — a blank one (the one it already has, if any), or
  * `conversationId` from its history. `focusChainId` opens a new one to carry that chain on.

@@ -1,4 +1,6 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { create } from "zustand";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { computeGraphLayout, laneColor } from "../../lib/graphLayout";
 import { useRepoStore } from "../../state/repoStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -15,30 +17,45 @@ import { Tooltip } from "../common/Tooltip";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { fieldClass, toolbarClass } from "../common/recipes";
 import {
+  Archive,
   ChevronsDown,
   Cloud,
+  Crosshair,
   GitBranch,
   History,
   Loader2,
+  Pencil,
+  Play,
   RotateCcw,
   Search,
   Tag,
+  Trash2,
   Undo2,
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useT } from "../../state/languageStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
+import { askInRepoChat, uncommittedFileCount } from "../../lib/aiPanelNav";
+import { commitWebUrl, preferredRemoteUrl } from "../../lib/remoteWeb";
+import { ago } from "../../lib/relativeAgo";
+import { authorHue, initials } from "../../lib/authorMark";
+import { narrowingCount } from "../../lib/commitFilter";
+import { stashCommit, WORKING_ROW_ID, withPseudoRows, type PseudoRow } from "../../lib/graphRows";
+import { CommitCompareModal } from "./CommitCompareModal";
+import { InteractiveRebaseModal } from "./InteractiveRebaseModal";
+import { GraphFilterButton, GraphScopePicker } from "./GraphFilters";
 import { ContextMenu } from "../common/ContextMenu";
 import { ensureFlowContextEntries, flowMenuItems } from "../../state/flowContextStore";
 import { matchesCommit } from "../../lib/gitActions";
-import { commitMenuItems } from "./commitMenu";
+import { commitMenuItems, refMenuItems } from "./commitMenu";
 import { useGitToolsStore } from "../../state/gitToolsStore";
 import { reportCommitFailure } from "../../state/gitOutputStore";
 import { BisectBanner } from "./BisectBanner";
 import { ReflogModal } from "./ReflogModal";
 import { reflogOpKey } from "../../lib/undoPlan";
 import type { BisectState } from "../../lib/tauri/gitCommands";
-import type { CommitInfo } from "../../types/domain";
+import type { CommitInfo, StashInfo } from "../../types/domain";
 import { Skeleton, SkeletonRows } from "../common/Skeleton";
 import {
   FILE_STATUS_LETTER_CLASS,
@@ -48,6 +65,7 @@ import {
 } from "../../lib/fileStatus";
 import type { CommitRef, FileDiffInfo, RefKind } from "../../types/domain";
 import { useFrameThrottle } from "../../lib/frameThrottle";
+import { useMultiDiffStore } from "../../state/multiDiffStore";
 
 const ROW_HEIGHT = 30;
 const LANE_WIDTH = 16;
@@ -104,7 +122,8 @@ const COLUMN_HEADING =
 const OVERSCAN = 12;
 
 /**
- * The two date formats this table draws, built once for the module.
+ * The full date format of the date column's tooltip, built once for the module (the cell itself is
+ * relative — "hace 2 h" — see `ago`).
  *
  * `toLocaleDateString(undefined, {…})` reads like it costs nothing and does not: every call hands
  * the engine a *fresh* options object, which it has to resolve into an `Intl.DateTimeFormat` from
@@ -116,12 +135,7 @@ const OVERSCAN = 12;
  * app's `languageStore`. Hoisting preserves that exactly; "fixing" it to the app language would be
  * a behaviour change nobody asked for.
  */
-const SHORT_DATE = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 const FULL_DATE_TIME = new Intl.DateTimeFormat(undefined, { dateStyle: "full", timeStyle: "short" });
-
-function formatDate(ts: number): string {
-  return SHORT_DATE.format(new Date(ts * 1000));
-}
 
 function formatFullDateTime(ts: number): string {
   return FULL_DATE_TIME.format(new Date(ts * 1000));
@@ -182,10 +196,12 @@ function RefChip({
   commitRef,
   isCurrent,
   display,
+  onMenu,
 }: {
   commitRef: CommitRef;
   isCurrent: boolean;
   display: string;
+  onMenu: RefMenuOpener;
 }) {
   const Icon = REF_GLYPH[commitRef.kind];
   const hue = REF_HUE[commitRef.kind];
@@ -193,6 +209,7 @@ function RefChip({
   return (
     <span
       title={commitRef.name}
+      onContextMenu={(event) => onMenu(commitRef, event)}
       className={`${display} h-[19px] min-w-0 max-w-[160px] shrink items-center gap-1 border px-1.5 font-mono text-[11px] ${
         commitRef.kind === "tag" ? "rounded-full" : "rounded-[4px]"
       } ${isCurrent ? "font-semibold" : "font-medium"}`}
@@ -244,7 +261,18 @@ function RefOverflow({ refs, display }: { refs: CommitRef[]; display: string }) 
  * for its own case — drawn in both, drawn only while roomy, drawn only while narrow — and each
  * layout gets its own counter, so "+N" is always the number actually hidden.
  */
-function RefChips({ refs, currentBranch }: { refs: CommitRef[]; currentBranch: string | null }) {
+/** Opens the chip's own menu, in place of the row's. */
+type RefMenuOpener = (ref: CommitRef, event: ReactMouseEvent) => void;
+
+function RefChips({
+  refs,
+  currentBranch,
+  onMenu,
+}: {
+  refs: CommitRef[];
+  currentBranch: string | null;
+  onMenu: RefMenuOpener;
+}) {
   if (refs.length === 0) return null;
   const narrowShown = refs.filter((ref) => ref.kind !== "tag").slice(0, MAX_REF_CHIPS);
   const roomyHidden = refs.slice(MAX_REF_CHIPS);
@@ -260,6 +288,7 @@ function RefChips({ refs, currentBranch }: { refs: CommitRef[]; currentBranch: s
             key={`${ref.kind}:${ref.name}`}
             commitRef={ref}
             isCurrent={ref.kind === "branch" && ref.name === currentBranch}
+            onMenu={onMenu}
             display={
               roomy && narrow
                 ? "inline-flex"
@@ -389,6 +418,28 @@ function CommitFileRow({
   );
 }
 
+/** An author's initials on their own colour — see `authorMark`. */
+function AuthorMark({ name, email }: { name: string; email: string }) {
+  const hue = authorHue(name, email);
+  return (
+    <span
+      aria-hidden
+      className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full text-[8.5px] font-semibold tracking-[0.02em] text-white"
+      style={{ background: `oklch(0.6 0.12 ${hue})` }}
+    >
+      {initials(name, email)}
+    </span>
+  );
+}
+
+/** «Ir a HEAD» from the toolbar, which sits outside the table: a request the table answers by
+ *  selecting and scrolling to the commit. `nonce` so the same commit can be asked for twice. */
+const useGraphJump = create<{ id: string | null; nonce: number; jumpTo: (id: string) => void }>((set) => ({
+  id: null,
+  nonce: 0,
+  jumpTo: (id) => set((s) => ({ id, nonce: s.nonce + 1 })),
+}));
+
 /** Everything left of the diff panel: sticky column headers + the commit rows/graph SVG.
  * Memoized (and reading its own store slices rather than taking props) so dragging the diff
  * panel's resize handle — which only touches `graphDiffWidth` — doesn't force this
@@ -425,6 +476,11 @@ const CommitTable = memo(function CommitTable() {
   // harmless — nothing else is keyed on it, so there is nothing to migrate.
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
+  const stashes = useRepoStore((s) => s.stashes);
+  const remotes = useRepoStore((s) => s.remotes);
+  const commitFilter = useRepoStore((s) => s.commitFilter);
+  const language = useLanguageStore((s) => s.language);
+  const jumpNonce = useGraphJump((s) => s.nonce);
   const t = useT();
 
   /**
@@ -444,6 +500,18 @@ const CommitTable = memo(function CommitTable() {
 
   /** The row the context menu was opened on, and where to draw it. */
   const [menu, setMenu] = useState<{ commit: CommitInfo; x: number; y: number } | null>(null);
+  /** A ref chip's menu, and a stash row's. */
+  const [refMenu, setRefMenu] = useState<{ ref: CommitRef; x: number; y: number } | null>(null);
+  const [stashMenu, setStashMenu] = useState<{ stash: StashInfo; x: number; y: number } | null>(null);
+  /** Two commits being compared, older first. */
+  const [compare, setCompare] = useState<{ from: CommitInfo; to: CommitInfo } | null>(null);
+  /** The commit an interactive rebase starts after. */
+  const [rebaseBase, setRebaseBase] = useState<CommitInfo | null>(null);
+  const openRefMenu = useCallback<RefMenuOpener>((ref, event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setRefMenu({ ref, x: event.clientX, y: event.clientY });
+  }, []);
 
   /**
    * Anything staged or modified. Revert and cherry-pick refuse it — the backend does too, and this
@@ -585,6 +653,95 @@ const CommitTable = memo(function CommitTable() {
     );
   };
 
+  const resetHere = async (commit: CommitInfo, mode: "soft" | "mixed" | "hard") => {
+    const repoPath = useRepoStore.getState().repoPath;
+    if (!repoPath) return;
+    const message = t(`graph.resetConfirm.${mode}` as Parameters<typeof t>[0], { id: commit.short_id });
+    if (!(await confirmAction(message, mode === "hard", t("graph.menuReset")))) return;
+    await runAndRefresh(() => api.resetToCommit(repoPath, commit.id, mode), t("graph.resetDone", { id: commit.short_id }));
+  };
+
+  /** The web page of a commit on the repository's remote — `null` when no remote reads as one. */
+  const webUrlOf = (commit: CommitInfo) => {
+    const remote = preferredRemoteUrl(remotes);
+    return remote ? commitWebUrl(remote, commit.id) : null;
+  };
+
+  /** The project this repository is, for the chat — only when the graph shows the active one. */
+  const chatProject = () => {
+    const project = useWorkspaceStore.getState().activeProject();
+    return project && project.local_path === useRepoStore.getState().repoPath ? project : null;
+  };
+
+  const withPatch = async (commit: CommitInfo, use: (patch: string) => Promise<void>) => {
+    const repoPath = useRepoStore.getState().repoPath;
+    if (!repoPath) return;
+    try {
+      await use(await api.formatPatch(repoPath, commit.id));
+    } catch (e) {
+      pushErrorToast(describeGitError(e, t));
+    }
+  };
+  const savePatch = (commit: CommitInfo) =>
+    withPatch(commit, async (patch) => {
+      const slug = commit.summary.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 50);
+      const path = await saveDialog({
+        defaultPath: `${commit.short_id}${slug ? `-${slug}` : ""}.patch`,
+        filters: [{ name: "Patch", extensions: ["patch", "diff"] }],
+      });
+      if (!path) return;
+      await api.writeFileBytes(path, new TextEncoder().encode(patch));
+      pushSuccessToast(t("graph.patchSaved"));
+    });
+
+  /** The verbs of a ref chip. Merge and rebase act on the checked-out branch. */
+  const refActions = {
+    checkout: (ref: CommitRef) => {
+      const repo = useRepoStore.getState();
+      if (ref.kind === "branch") void repo.checkoutBranch(ref.name);
+      else if (ref.kind === "remote") void repo.checkoutRemoteBranch(ref.name);
+      else void repo.checkoutDetached(`refs/tags/${ref.name}`);
+    },
+    merge: async (ref: CommitRef) => {
+      const outcome = await useRepoStore.getState().mergeBranch(ref.name);
+      if (outcome?.status === "conflicts") useUiStore.getState().setActiveView("changes");
+    },
+    rebaseOnto: async (ref: CommitRef) => {
+      const repoPath = useRepoStore.getState().repoPath;
+      if (!repoPath || !currentBranch) return;
+      const ask = t("graph.rebaseOntoConfirm", { name: ref.name, current: currentBranch });
+      if (!(await confirmAction(ask, false, t("graph.refRebaseShort")))) return;
+      await runAndRefresh(() => api.rebaseOnto(repoPath, ref.name), t("rebase.done"));
+    },
+    rename: async (name: string) => {
+      const repoPath = useRepoStore.getState().repoPath;
+      if (!repoPath) return;
+      const next = await promptAction(t("graph.renamePrompt", { name }), {
+        initial: name,
+        confirmLabel: t("graph.refRename"),
+        validate: (value) => (value.trim() && value.trim() !== name ? null : t("graph.branchHereEmpty")),
+      });
+      if (!next) return;
+      await runAndRefresh(() => api.renameBranch(repoPath, name, next.trim()), t("graph.renameDone", { name: next.trim() }));
+    },
+    push: async (ref: CommitRef) => {
+      const repo = useRepoStore.getState();
+      if (!repo.repoPath) return;
+      if (ref.kind === "tag") return void useGitToolsStore.getState().pushTag(ref.name);
+      if (ref.name === currentBranch) {
+        const branch = repo.branches.find((b) => b.is_head);
+        return void repo.push(!branch?.upstream);
+      }
+      const repoPath = repo.repoPath;
+      await runAndRefresh(() => api.gitPushBranch(repoPath, ref.name), t("graph.pushDone", { name: ref.name }));
+    },
+    remove: (ref: CommitRef) => {
+      if (ref.kind === "branch") void useRepoStore.getState().deleteBranch(ref.name, false);
+      else if (ref.kind === "remote") void useGitToolsStore.getState().deleteRemoteBranch(ref.name);
+      else void useGitToolsStore.getState().deleteTag(ref.name);
+    },
+  };
+
   /** Clipboard, with the same toast every other copy in the app uses. */
   const copyText = async (text: string) => {
     try {
@@ -595,7 +752,23 @@ const CommitTable = memo(function CommitTable() {
     }
   };
 
-  const layout = useMemo(() => computeGraphLayout(commits), [commits]);
+  /**
+   * The rows actually drawn: the history, plus the working tree's changes on top of HEAD and the
+   * stashes on the commits they were made on (`withPseudoRows`). Left out while anything narrows the
+   * list — a filtered history has no "on top of HEAD" to speak of.
+   */
+  const headId = status?.head_oid ?? null;
+  const workingCount = status ? uncommittedFileCount(status) + status.conflicted.length : 0;
+  const narrowed = filtering || narrowingCount(commitFilter) > 0;
+  const shaped = useMemo(
+    () =>
+      narrowed
+        ? { commits, pseudo: new Map<string, PseudoRow>(), side: new Set<string>() }
+        : withPseudoRows(commits, { headId, workingCount, stashes }),
+    [commits, narrowed, headId, workingCount, stashes],
+  );
+  const pseudo = shaped.pseudo;
+  const layout = useMemo(() => computeGraphLayout(shaped.commits, shaped.side), [shaped]);
 
   /**
    * Which row is open, and how much room its files take under it.
@@ -805,6 +978,66 @@ const CommitTable = memo(function CommitTable() {
     [layout.edges, firstRow, lastRow],
   );
 
+  /** Keeps row `index` on screen, under the sticky header — for selection moved by keyboard. */
+  const revealRow = (index: number, middle = false) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const top = index * ROW_HEIGHT;
+    const header = ROW_HEIGHT;
+    if (middle) el.scrollTop = Math.max(0, top - el.clientHeight / 3);
+    else if (top < el.scrollTop) el.scrollTop = top;
+    else if (top + ROW_HEIGHT + header > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW_HEIGHT + header - el.clientHeight;
+  };
+
+  // «Ir a HEAD» from the toolbar: select it and bring it to the upper third.
+  const jumpHandled = useRef(jumpNonce);
+  useEffect(() => {
+    if (jumpNonce === jumpHandled.current) return;
+    jumpHandled.current = jumpNonce;
+    const id = useGraphJump.getState().id;
+    const index = layout.rows.findIndex((r) => r.commit.id === id);
+    if (index === -1) {
+      useToastStore.getState().pushToast(t("graph.headNotListed"), "info");
+      return;
+    }
+    if (id !== selectedCommitId) void selectCommit(id);
+    requestAnimationFrame(() => revealRow(index, true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpNonce]);
+
+  /**
+   * ↑/↓ walk the commits (the working-tree row is not one), Enter opens the selected commit's first
+   * file, Escape closes it. On the scroll container, so it works from wherever focus is in the table.
+   */
+  const onTableKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const rows = layout.rows;
+    const at = selectedCommitId ? rows.findIndex((r) => r.commit.id === selectedCommitId) : -1;
+    const step = (from: number, by: number) => {
+      for (let i = from + by; i >= 0 && i < rows.length; i += by) {
+        if (rows[i].commit.id !== WORKING_ROW_ID) return i;
+      }
+      return -1;
+    };
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const next = at === -1 ? step(-1, 1) : step(at, event.key === "ArrowDown" ? 1 : -1);
+      if (next === -1) return;
+      void selectCommit(rows[next].commit.id);
+      revealRow(next);
+      // The row that had focus may scroll out of the window and unmount; the table keeps it.
+      scrollRef.current?.focus({ preventScroll: true });
+    } else if (event.key === "Enter" && at !== -1) {
+      event.preventDefault();
+      const first = commitDiff[0];
+      if (first) void selectCommitFile(first.new_path ?? first.old_path ?? null);
+    } else if (event.key === "Escape" && selectedCommitId) {
+      event.preventDefault();
+      event.stopPropagation();
+      void selectCommit(null);
+    }
+  };
+
   if (commits.length === 0 && commitsLoading) {
     return <SkeletonRows count={12} className="cf-fade-in" />;
   }
@@ -818,6 +1051,8 @@ const CommitTable = memo(function CommitTable() {
         title={t("graph.noMatches", { query: commitQuery.trim() })}
         subtitle={t("graph.noMatchesHint")}
       />
+    ) : narrowed ? (
+      <EmptyState icon={Search} title={t("graph.noFilterMatches")} subtitle={t("graph.noFilterMatchesHint")} />
     ) : (
       <EmptyState icon={History} title={t("graph.noCommits")} subtitle={t("graph.noCommitsHint")} />
     );
@@ -866,7 +1101,9 @@ const CommitTable = memo(function CommitTable() {
       ref={scrollRef}
       // `group/graph` is what the ref chips' `group-data-[narrow]/graph:` classes key on; the
       // attribute itself is set by the width observer above.
-      className="group/graph flex-1 overflow-auto"
+      className="group/graph flex-1 overflow-auto outline-none"
+      tabIndex={-1}
+      onKeyDown={onTableKey}
       // One state write per painted frame rather than one per scroll event. `scrollTop` drives the
       // row windowing below, so an unthrottled fling asked React for two or three renders per frame
       // and threw all but the last away before anything reached the screen.
@@ -966,7 +1203,32 @@ const CommitTable = memo(function CommitTable() {
             );
           })}
           {visibleRows.map((r) =>
-            // HEAD as a ring filled with the sheet, so it reads as "you are here" rather than as one
+            // The working tree: a dashed ring, work that is not a commit yet.
+            pseudo.get(r.commit.id)?.kind === "working" ? (
+              <circle
+                key={r.commit.id}
+                cx={laneX(r.lane)}
+                cy={rowY(r.row)}
+                r={HEAD_RADIUS}
+                fill="var(--cf-surface)"
+                stroke={laneColor(r.lane)}
+                strokeWidth={1.5}
+                strokeDasharray="2 2"
+              />
+            ) : pseudo.get(r.commit.id)?.kind === "stash" ? (
+              // A stash: a square, set aside rather than on the line.
+              <rect
+                key={r.commit.id}
+                x={laneX(r.lane) - DOT_RADIUS}
+                y={rowY(r.row) - DOT_RADIUS}
+                width={DOT_RADIUS * 2}
+                height={DOT_RADIUS * 2}
+                rx={1.5}
+                fill="var(--cf-surface)"
+                stroke="var(--cf-text-faint)"
+                strokeWidth={1.5}
+              />
+            ) : // HEAD as a ring filled with the sheet, so it reads as "you are here" rather than as one
             // more commit — and it stays a ring on a selected row, where the wash shows around it.
             r.commit.id === headCommitId ? (
               <circle
@@ -1003,6 +1265,30 @@ const CommitTable = memo(function CommitTable() {
           {visibleRows.map((r) => {
             const isSelected = r.commit.id === selectedCommitId;
             const isHead = r.commit.id === headCommitId;
+            const kind = pseudo.get(r.commit.id);
+            const rowStyle = { position: "absolute" as const, left: 0, right: 0, top: rowTop(r.row), height: ROW_HEIGHT };
+            // The working tree: one line saying how much is waiting, and a way to it.
+            if (kind?.kind === "working") {
+              return (
+                <div key={r.commit.id} style={rowStyle} className="group transition-colors duration-100 hover:bg-[var(--cf-hover)]">
+                  <button
+                    type="button"
+                    onClick={() => useUiStore.getState().setActiveView("changes")}
+                    title={t("graph.workingOpen")}
+                    className="flex h-full w-full items-center gap-2.5 pr-3 text-left text-[13px]"
+                  >
+                    <span style={{ width: graphWidth }} className="shrink-0" aria-hidden />
+                    <span style={{ width: messageWidth }} className="flex min-w-0 shrink-0 items-center gap-2">
+                      <span className="min-w-0 truncate italic text-[var(--cf-text-muted)]">{t("graph.workingRow")}</span>
+                      <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+                        {t("graph.workingCount", { count: kind.count })}
+                      </span>
+                    </span>
+                  </button>
+                </div>
+              );
+            }
+            const stash = kind?.kind === "stash" ? kind.stash : null;
             return (
               <div
                 key={r.commit.id}
@@ -1010,9 +1296,13 @@ const CommitTable = memo(function CommitTable() {
                 // rows either side of the window are not built at all — the parent already reserves
                 // the full `contentHeight`, so the scrollbar is the same length it has always been
                 // and the row lands on its own dot in the SVG layer above.
-                style={{ position: "absolute", left: 0, right: 0, top: rowTop(r.row), height: ROW_HEIGHT }}
+                style={rowStyle}
                 onContextMenu={(event) => {
                   event.preventDefault();
+                  if (stash) {
+                    setStashMenu({ stash, x: event.clientX, y: event.clientY });
+                    return;
+                  }
                   ensureFlowContextEntries();
                   setMenu({ commit: r.commit, x: event.clientX, y: event.clientY });
                 }}
@@ -1028,9 +1318,18 @@ const CommitTable = memo(function CommitTable() {
                 {/* The hit area is the row, not the text: the highlight says "this whole strip is
                     one commit", so the whole strip is the target — a few pixels below a line, or
                     past the last column, still lands on it. The graph's column is part of it too,
-                    under the lanes (`pointer-events-none`), so clicking a dot opens its commit. */}
+                    under the lanes (`pointer-events-none`), so clicking a dot opens its commit.
+                    ⌘/Ctrl+click on another commit while one is open compares the two. */}
                 <button
-                  onClick={() => selectCommit(isSelected ? null : r.commit.id)}
+                  onClick={(event) => {
+                    const open = selectedCommitId ? layout.rows.find((row) => row.commit.id === selectedCommitId) : null;
+                    if ((event.metaKey || event.ctrlKey) && open && !isSelected && !stash && !pseudo.has(open.commit.id)) {
+                      // Older first: the row further down the table.
+                      setCompare(open.row > r.row ? { from: open.commit, to: r.commit } : { from: r.commit, to: open.commit });
+                      return;
+                    }
+                    void selectCommit(isSelected ? null : r.commit.id);
+                  }}
                   // The row *is* the disclosure control, so it is the thing that has to announce
                   // itself as one — not a second button with its own tab stop and its own small hit
                   // area beside a target that already does the same job across the whole row.
@@ -1039,19 +1338,32 @@ const CommitTable = memo(function CommitTable() {
                 >
                   <span style={{ width: graphWidth }} className="shrink-0" aria-hidden />
                   <span style={{ width: messageWidth }} className="flex min-w-0 shrink-0 items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate text-[var(--cf-text)]">{r.commit.summary}</span>
+                    {stash && (
+                      <span className="inline-flex h-[19px] shrink-0 items-center gap-1 rounded-[4px] border border-[var(--cf-border)] px-1.5 font-mono text-[11px] text-[var(--cf-text-muted)]">
+                        <Archive size={11} />
+                        {`stash@{${stash.index}}`}
+                      </span>
+                    )}
+                    <span className={`min-w-0 flex-1 truncate ${stash ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"}`}>
+                      {r.commit.summary}
+                    </span>
                     {marks.has(r.commit.id) && <BisectChip mark={marks.get(r.commit.id) as BisectMark} t={t} />}
-                    <RefChips refs={r.commit.refs} currentBranch={currentBranch} />
+                    <RefChips refs={r.commit.refs} currentBranch={currentBranch} onMenu={openRefMenu} />
                   </span>
-                  <span style={{ width: colAuthor }} className="shrink-0 truncate text-[12px] text-[var(--cf-text-muted)]">
-                    {r.commit.author_name}
+                  <span
+                    style={{ width: colAuthor }}
+                    className="flex min-w-0 shrink-0 items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]"
+                    title={r.commit.author_email ? `${r.commit.author_name} <${r.commit.author_email}>` : undefined}
+                  >
+                    {!stash && <AuthorMark name={r.commit.author_name} email={r.commit.author_email} />}
+                    <span className="min-w-0 truncate">{r.commit.author_name}</span>
                   </span>
                   <span
                     style={{ width: colDate }}
                     className="shrink-0 truncate text-[12px] tabular-nums text-[var(--cf-text-faint)]"
-                    title={formatFullDateTime(r.commit.timestamp)}
+                    title={r.commit.timestamp ? formatFullDateTime(r.commit.timestamp) : undefined}
                   >
-                    {formatDate(r.commit.timestamp)}
+                    {r.commit.timestamp ? ago(r.commit.timestamp, language) : ""}
                   </span>
                   <span style={{ width: colHash }} className="shrink-0 truncate font-mono text-[12px] text-[var(--cf-text-faint)]">
                     {r.commit.short_id}
@@ -1174,12 +1486,42 @@ const CommitTable = memo(function CommitTable() {
             dirty,
             t,
             onCopyHash: (commit) => void copyText(commit.id),
+            onOpenAllChanges: (commit) => {
+              const repoPath = useRepoStore.getState().repoPath;
+              if (repoPath) useMultiDiffStore.getState().open({ kind: "commit", repoPath, oid: commit.id, summary: commit.summary });
+            },
             onCopyMessage: (commit) => void copyText(commit.summary),
             onBranchHere: (commit) => openCreateBranch(commit.id),
             onTag: (commit) => openTagModal(commit.id),
             onAmend: openAmend,
             onRevert: (commit) => void revertHere(commit),
             onCherryPick: (commit) => void cherryPickHere(commit),
+            onReset: (commit, mode) => void resetHere(commit, mode),
+            onCheckout: (commit) => void useRepoStore.getState().checkoutDetached(commit.id),
+            onOpenOnRemote: webUrlOf(menu.commit)
+              ? (commit) => {
+                  const url = webUrlOf(commit);
+                  if (url) void api.openExternalUrl(url).catch((e: unknown) => pushErrorToast(String(e)));
+                }
+              : undefined,
+            onCopyLink: webUrlOf(menu.commit) ? (commit) => void copyText(webUrlOf(commit) ?? "") : undefined,
+            onExplain: chatProject()
+              ? (commit) => {
+                  const project = chatProject();
+                  if (project) askInRepoChat(project.id, t("graph.explainPrompt", { mention: `@commit:${commit.id}` }), { send: true });
+                }
+              : undefined,
+            onSavePatch: (commit) => void savePatch(commit),
+            onCopyPatch: (commit) => void withPatch(commit, (patch) => copyText(patch)),
+            onRebaseFrom: (commit) => setRebaseBase(commit),
+            compareWith:
+              selectedCommitId && !pseudo.has(selectedCommitId)
+                ? (layout.rows.find((row) => row.commit.id === selectedCommitId)?.commit ?? null)
+                : null,
+            onCompare: (a, b) => {
+              const rowOf = (c: CommitInfo) => layout.rows.find((row) => row.commit.id === c.id)?.row ?? 0;
+              setCompare(rowOf(a) > rowOf(b) ? { from: a, to: b } : { from: b, to: a });
+            },
             bisectActive: bisect?.active ?? false,
             onBisect: (commit, verdict) => {
               if (bisect?.active) void bisectMark(verdict, commit.id);
@@ -1200,6 +1542,61 @@ const CommitTable = memo(function CommitTable() {
           onClose={() => setMenu(null)}
         />
       )}
+      {refMenu && (
+        <ContextMenu
+          x={refMenu.x}
+          y={refMenu.y}
+          items={refMenuItems({
+            commitRef: refMenu.ref,
+            currentBranch,
+            t,
+            onCopyName: (name) => void copyText(name),
+            onCheckout: refActions.checkout,
+            onMerge: (ref) => void refActions.merge(ref),
+            onRebaseOnto: (ref) => void refActions.rebaseOnto(ref),
+            onRename: (name) => void refActions.rename(name),
+            onPush: (ref) => void refActions.push(ref),
+            onDelete: refActions.remove,
+          })}
+          onClose={() => setRefMenu(null)}
+        />
+      )}
+      {stashMenu && (
+        <ContextMenu
+          x={stashMenu.x}
+          y={stashMenu.y}
+          items={[
+            { label: t("graph.stashApply"), icon: Play, onClick: () => void useRepoStore.getState().stashApply(stashMenu.stash.index) },
+            { label: t("graph.stashPop"), icon: Archive, onClick: () => void useRepoStore.getState().stashPop(stashMenu.stash.index) },
+            {
+              label: t("graph.stashRename"),
+              icon: Pencil,
+              onClick: () =>
+                void (async () => {
+                  const next = await promptAction(t("graph.stashRename"), { initial: stashMenu.stash.message });
+                  if (next?.trim()) void useRepoStore.getState().renameStash(stashMenu.stash.index, next.trim());
+                })(),
+            },
+            {
+              label: t("graph.stashDrop"),
+              icon: Trash2,
+              danger: true,
+              separated: true,
+              onClick: () => void useRepoStore.getState().stashDrop(stashMenu.stash.index),
+            },
+          ]}
+          onClose={() => setStashMenu(null)}
+        />
+      )}
+      {compare && useRepoStore.getState().repoPath && (
+        <CommitCompareModal
+          repoPath={useRepoStore.getState().repoPath as string}
+          from={compare.from}
+          to={compare.to}
+          onClose={() => setCompare(null)}
+        />
+      )}
+      {rebaseBase && <InteractiveRebaseModal base={rebaseBase} onClose={() => setRebaseBase(null)} />}
     </div>
   );
 });
@@ -1230,6 +1627,7 @@ function GraphToolbar() {
   const undoLast = useGitToolsStore((s) => s.undoLast);
   const pending = useGitToolsStore((s) => s.pending);
   const [reflogOpen, setReflogOpen] = useState(false);
+  const headId = useRepoStore((s) => s.status?.head_oid ?? null);
   const query = useRepoStore((s) => s.commitQuery);
   const setQuery = useRepoStore((s) => s.setCommitQuery);
   const total = useRepoStore((s) => s.commits.length);
@@ -1281,6 +1679,19 @@ function GraphToolbar() {
         </span>
       )}
       <span className="flex-1" />
+      <GraphScopePicker />
+      <GraphFilterButton />
+      <Tooltip label={t("graph.jumpHead")}>
+        <button
+          type="button"
+          disabled={!headId}
+          onClick={() => headId && useGraphJump.getState().jumpTo(headId)}
+          aria-label={t("graph.jumpHead")}
+          className={iconButtonClass({ size: "sm" })}
+        >
+          <Crosshair size={14} />
+        </button>
+      </Tooltip>
       {/* Undo whatever moved HEAD last, explained before it runs — and the record it reads from. */}
       <Tooltip label={undoPlan ? t("undo.buttonHint", { op: t(reflogOpKey(undoPlan.op)) }) : t("undo.nothing")}>
         <button
@@ -1320,7 +1731,14 @@ export function GraphView() {
   const commitSize = useLayoutStore((s) => s.commitSize);
   const t = useT();
 
-  const selectedCommit = commits.find((c) => c.id === selectedCommitId) ?? null;
+  const stashes = useRepoStore((s) => s.stashes);
+  // A stash row opens like a commit (git stores one): its diff is against the commit it was made on.
+  const selectedCommit = useMemo(() => {
+    const commit = commits.find((c) => c.id === selectedCommitId);
+    if (commit) return commit;
+    const stash = stashes.find((st) => st.oid === selectedCommitId);
+    return stash ? stashCommit(stash) : null;
+  }, [commits, stashes, selectedCommitId]);
   const open = selectedCommit !== null && selectedCommitPath !== null;
 
   // Both handed to the memoised `DiffView`, so both have to keep their identity across the renders

@@ -310,6 +310,7 @@ mod tests {
             ssl: DbSslMode::Disable,
             options: Vec::new(),
             read_only: false,
+            environment: String::new(),
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),

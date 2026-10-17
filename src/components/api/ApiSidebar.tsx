@@ -5,6 +5,7 @@ import {
   Boxes,
   Download,
   FileCode2,
+  FolderCode,
   Globe,
   MoreHorizontal,
   Play,
@@ -30,6 +31,7 @@ import {
 } from "../common/recipes";
 import { CollectionTree, MethodBadge } from "./CollectionTree";
 import { ContextMenu, type MenuItem} from "../common/ContextMenu";
+import { AiWand } from "../common/AiGlyph";
 import { EnvironmentBar } from "./EnvironmentBar";
 import { HistoryList } from "./HistoryList";
 import { useApiStore } from "../../state/apiStore";
@@ -368,8 +370,19 @@ export function ApiSidebar() {
                       onClick: () => useApiStore.getState().openScratchTab(),
                     },
                     {
+                      label: t("api.ai.requestMenu"),
+                      icon: AiWand,
+                      onClick: () => openModal({ kind: "aiRequest" }),
+                    },
+                    {
+                      label: t("api.routes.menu"),
+                      icon: FolderCode,
+                      onClick: () => openModal({ kind: "repoRoutes" }),
+                    },
+                    {
                       label: t("api.newCollection"),
                       icon: Boxes,
+                      separated: true,
                       onClick: () => void newCollection(),
                     },
                   ],

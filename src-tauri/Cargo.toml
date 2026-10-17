@@ -193,6 +193,9 @@ tree-sitter-python = "0.23.6"
 # requests itself (Digest and AWS SigV4 are challenge/canonical-form schemes that can't be
 # expressed as a static header, so they can't be done in the webview).
 url = "2"
+# Already in the tree through reqwest: the editor's "reopen / save with encoding" decodes and encodes
+# with it (`fsops::decode_as` / `encode_as`).
+encoding_rs = "0.8"
 percent-encoding = "2"
 bytes = "1"
 tokio-stream = "0.1"

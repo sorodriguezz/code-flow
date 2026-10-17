@@ -17,7 +17,7 @@ component's own licence wins — which is what section 6 says.
 
 | What ships | Count |
 |---|---|
-| npm packages (production tree) | 343 resolved versions of 314 packages |
+| npm packages (production tree) | 348 resolved versions of 319 packages |
 | Rust crates (resolved for macOS and Windows) | 878 resolved versions of 772 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
@@ -255,13 +255,16 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### MIT — 233 packages
+### MIT — 238 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `@antfu/install-pkg` | 2.1.0 | MIT | <https://github.com/antfu-collective/install-pkg> |
 | `@babel/runtime` | 7.29.7 | MIT | <https://babel.dev/docs/en/next/babel-runtime> |
 | `@braintree/sanitize-url` | 6.0.2, 7.1.2 | MIT | <https://github.com/braintree/sanitize-url> |
+| `@emmetio/abbreviation` | 2.3.3 | MIT | <https://github.com/emmetio/emmet> |
+| `@emmetio/css-abbreviation` | 2.1.8 | MIT | <https://github.com/emmetio/emmet> |
+| `@emmetio/scanner` | 1.0.4 | MIT | <https://github.com/emmetio/emmet> |
 | `@excalidraw/excalidraw` | 0.18.1 | MIT | <https://github.com/excalidraw/excalidraw/tree/master/packages/excalidraw> |
 | `@excalidraw/laser-pointer` | 1.3.1 | MIT | <https://www.npmjs.com/package/@excalidraw/laser-pointer> |
 | `@excalidraw/markdown-to-text` | 0.1.2 | MIT | <https://github.com/danestves/markdown-to-text> |
@@ -379,6 +382,8 @@ because there the order carries meaning.
 | `detect-node-es` | 1.1.0 | MIT | <https://github.com/thekashey/detect-node> |
 | `dfa` | 1.2.0 | MIT | <https://github.com/devongovett/dfa> |
 | `discontinuous-range` | 1.0.0 | MIT | <https://github.com/dtudury/discontinuous-range> |
+| `emmet` | 2.4.11 | MIT | <https://github.com/emmetio/emmet> |
+| `emmet-monaco-es` | 5.7.0 | MIT | <https://github.com/troy351/emmet-monaco-es> |
 | `es-toolkit` | 1.52.0 | MIT | <https://es-toolkit.dev> |
 | `es6-promise-pool` | 2.5.0 | MIT | <https://github.com/timdp/es6-promise-pool> |
 | `event-target-shim` | 5.0.1 | MIT | <https://github.com/mysticatea/event-target-shim> |

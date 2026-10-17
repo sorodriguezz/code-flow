@@ -58,6 +58,7 @@ import { acceleratorKeycaps } from "../../lib/globalHotkey";
 import { isMac } from "../../lib/platform";
 import { useQuickAskHotkeyStore } from "../../state/quickAskHotkeyStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { WORKSPACE_ICONS } from "./WorkspaceGlyph";
 
 /** Folded for matching: case and accents both ignored, so "configuracion" finds "Configuración". */
 function fold(text: string): string {
@@ -180,7 +181,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const items = useMemo<PaletteItem[]>(() => {
     const workspaceItems: PaletteItem[] = workspaces.map((w) => ({
       key: `workspace:${w.id}`,
-      icon: Briefcase,
+      icon: WORKSPACE_ICONS[w.icon] ?? Briefcase,
       label: w.name,
       group: "workspaces",
       onSelect: () => setActiveWorkspace(w.id),

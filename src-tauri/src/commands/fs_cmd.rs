@@ -11,6 +11,20 @@ pub fn read_file_text(repo_path: String, rel_path: String) -> Result<String, Str
     fsops::read_file_text(&repo_path, &rel_path)
 }
 
+/// One page of a file's bytes for the editor's hex view — see `fsops::read_byte_range`. Capped at
+/// 1 MiB a call, whatever is asked.
+#[derive(serde::Serialize)]
+pub struct FileBytes {
+    bytes: Vec<u8>,
+    total: u64,
+}
+
+#[tauri::command(async)]
+pub fn read_file_bytes(repo_path: String, rel_path: String, offset: u64, len: usize) -> Result<FileBytes, String> {
+    let (bytes, total) = fsops::read_byte_range(&repo_path, &rel_path, offset, len.min(1 << 20))?;
+    Ok(FileBytes { bytes, total })
+}
+
 #[tauri::command]
 pub fn write_file_text(repo_path: String, rel_path: String, content: String) -> Result<(), String> {
     fsops::write_file_text(&repo_path, &rel_path, &content)
@@ -25,7 +39,12 @@ pub fn read_editor_file(
     repo_path: String,
     rel_path: String,
     allow_large: Option<bool>,
+    encoding: Option<String>,
 ) -> Result<fsops::EditorFile, String> {
+    // «Reopen with encoding»: read as the one asked for instead of the one the bytes suggest.
+    if let Some(encoding) = encoding.filter(|e| !e.is_empty()) {
+        return fsops::read_editor_file_as(&repo_path, &rel_path, &encoding);
+    }
     fsops::read_editor_file(&repo_path, &rel_path, allow_large.unwrap_or(false))
 }
 
@@ -50,8 +69,32 @@ pub fn write_editor_file(
     rel_path: String,
     content: String,
     expected: Option<fsops::DiskVersion>,
+    encoding: Option<String>,
 ) -> Result<fsops::DiskVersion, String> {
-    fsops::write_file_text_checked(&repo_path, &rel_path, &content, expected.as_ref())
+    // The file's own encoding when it is not UTF-8 — refused, not mangled, when the text no longer
+    // fits it (see `fsops::encode_as`).
+    let bytes = match encoding.as_deref().filter(|e| !e.is_empty()) {
+        Some(encoding) => fsops::encode_as(&content, encoding)?,
+        None => content.into_bytes(),
+    };
+    // What was there, for the local history's first version of a file — read before the write
+    // replaces it, kept only once the write (and its path checks) succeeded.
+    let previous = std::fs::read(std::path::Path::new(&repo_path).join(&rel_path)).ok();
+    let written = fsops::write_bytes_checked(&repo_path, &rel_path, &bytes, expected.as_ref())?;
+    let _ = crate::local_history::record(&repo_path, &rel_path, previous.as_deref(), &bytes);
+    Ok(written)
+}
+
+/// The editor's local history of one file, newest first — see [`crate::local_history`].
+#[tauri::command(async)]
+pub fn local_history_list(repo_path: String, rel_path: String) -> Vec<crate::local_history::LocalVersion> {
+    crate::local_history::list(&repo_path, &rel_path)
+}
+
+/// One version's text from the local history.
+#[tauri::command(async)]
+pub fn local_history_read(repo_path: String, rel_path: String, id: String) -> Result<String, String> {
+    crate::local_history::read(&repo_path, &rel_path, &id)
 }
 
 /// Saves an exported binary (today: a code snapshot PNG) to the absolute path the user picked in
@@ -59,6 +102,26 @@ pub fn write_editor_file(
 #[tauri::command]
 pub fn write_file_bytes(path: String, contents: Vec<u8>) -> Result<(), String> {
     fsops::write_file_bytes(&path, &contents)
+}
+
+/// Reads a JSON file the user picked in the native open dialog — an exported workspace list being
+/// imported. The dialog is the authorisation, as it is for [`write_file_bytes`]; the extension and a
+/// size cap keep this from being a general "read any file" door.
+#[tauri::command(async)]
+pub fn read_picked_json(path: String) -> Result<String, String> {
+    const MAX_BYTES: u64 = 5 * 1024 * 1024;
+    let target = std::path::Path::new(&path);
+    if !target.is_absolute() {
+        return Err(format!("expected an absolute path, got: {path}"));
+    }
+    if !target.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+        return Err("only .json files can be read here".into());
+    }
+    let size = std::fs::metadata(target).map_err(|e| e.to_string())?.len();
+    if size > MAX_BYTES {
+        return Err(format!("{path} is too large ({size} bytes)"));
+    }
+    std::fs::read_to_string(target).map_err(|e| e.to_string())
 }
 
 /// Moves a file or folder into `dest_dir` (repo-relative, `""` for the root) — the explorer's

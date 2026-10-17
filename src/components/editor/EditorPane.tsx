@@ -66,7 +66,7 @@ import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useBlameStore } from "../../state/blameStore";
 import { useCursorBlameStore } from "../../state/cursorBlameStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
-import { monacoInlayHints, monacoWordWrap, useEditorDisplayStore } from "../../state/editorDisplayStore";
+import { editorFontFamily, monacoInlayHints, monacoWordWrap, useEditorDisplayStore } from "../../state/editorDisplayStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useTabDragStore, type TabDrag, type TabDropTarget } from "../../state/tabDragStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -86,6 +86,7 @@ import { useTypeScript } from "./useTypeScript";
 import { formatModel, isComponentFile } from "./formatDocument";
 import { findAllImplementations, findAllReferences } from "./findReferences";
 import { installImplementationLens } from "./implementationLens";
+import { installHttpFileLens } from "./httpFileLens";
 import { useLanguageServer } from "./useLanguageServer";
 import { useInlineCompletion } from "./useInlineCompletion";
 import { useImportCost } from "./useImportCost";
@@ -101,6 +102,17 @@ import { useTerminalStore } from "../../state/terminalStore";
 import { useNpmInstallStore } from "../../state/npmInstallStore";
 import { ensureFlowContextEntries, pickAndRunFlow } from "../../state/flowContextStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { askInRepoChat } from "../../lib/aiPanelNav";
+import { testCommand, testLanguageOf } from "../../lib/testCommand";
+import { findTestManifest } from "../../lib/testRun";
+import { currentPlatform } from "../../lib/platform";
+import { LocalHistoryModal } from "./LocalHistoryModal";
+import { editorConfigFor } from "../../lib/editorConfig";
+import { settingsForFile, useVscodeSettingsStore, type FileEditorSettings } from "../../lib/vscodeSettings";
+import { languageForPath } from "../../lib/monacoLanguage";
+import { fileCoverage, useCoverageStore } from "../../lib/coverage";
+import { hierarchyRoot, type HierarchyMode } from "../../lib/hierarchy";
+import { useEditorPanelStore } from "../../state/editorPanelStore";
 import { isNotebookPath, notebookKey } from "../../lib/notebook/host";
 import { notebookActions, useNotebookStore } from "../../state/notebookStore";
 
@@ -276,6 +288,8 @@ export interface OpenTab {
   notice: FileNotice | null;
   /** Text shown and never saved — see `ReadOnlyReason`. */
   readOnly: ReadOnlyReason | null;
+  /** The encoding the file is read and saved in; `null` for UTF-8 (`LoadedFile.encoding`). */
+  encoding: string | null;
   /** A dirty buffer whose file changed on disk after it was read. Set by the disk sweep and by a
    *  save the disk refused; cleared by a save, a reload, or the disk changing back. */
   diskChanged: boolean;
@@ -763,7 +777,8 @@ export function EditorPane({
    *  because the peek is, so two splits on one file can be parked on different hunks. */
   registerChangeNav: (nav: (delta: number) => void) => void;
   /** `null` hides the split button — there's already a second group. */
-  onSplit: (() => void) | null;
+  /** `down`: Alt/⌥ held — VS Code's "split down" on the same button. */
+  onSplit: ((down: boolean) => void) | null;
   /** `null` for the only group; a group you can't close is one without a close button. */
   onCloseGroup: (() => void) | null;
   /** A double-click on the empty group opens a blank tab here. `null` where that has no meaning — a
@@ -1066,7 +1081,7 @@ export function EditorPane({
         ? activeTab.path
         : null,
     fileKey: activeModelPath ?? null,
-    encoding: activeTab?.readOnly?.kind === "encoding" ? activeTab.readOnly.encoding.toUpperCase() : "UTF-8",
+    encoding: activeTab?.encoding ? activeTab.encoding.toUpperCase() : "UTF-8",
   });
 
   /**
@@ -1150,11 +1165,39 @@ export function EditorPane({
 
   /** Word wrap at the pane's own width — see `editorDisplayStore`. Applied to the code and to the
    *  diff alike: a long line read side by side runs off just as far. */
-  const wordWrap = monacoWordWrap(useEditorDisplayStore((s) => s.wordWrap));
+  const wordWrapPref = useEditorDisplayStore((s) => s.wordWrap);
   /** Inlay hints on or off — see `editorDisplayStore`. The code only: a diff is read for what
    *  changed, and hints there would be text that is in neither side. */
   const inlayHints = monacoInlayHints(useEditorDisplayStore((s) => s.inlayHints));
   const fontSize = useEditorDisplayStore((s) => s.fontSize);
+  /** The rest of Settings › Editor › Visualización — the VS Code basics. */
+  const fontFamily = editorFontFamily(useEditorDisplayStore((s) => s.fontFamily), CODE_FONT_FAMILY);
+  const ligatures = useEditorDisplayStore((s) => s.ligatures);
+  const minimapOn = useEditorDisplayStore((s) => s.minimap);
+  const whitespace = useEditorDisplayStore((s) => s.whitespace);
+  const rulersPref = useEditorDisplayStore((s) => s.rulers);
+  const stickyScroll = useEditorDisplayStore((s) => s.stickyScroll);
+  const indent = useEditorDisplayStore((s) => s.indent);
+  const editorConfigOn = useEditorDisplayStore((s) => s.editorConfig);
+  const linkedEditing = useEditorDisplayStore((s) => s.linkedEditing);
+  /**
+   * The repository's `.vscode/settings.json` for the open file (`lib/vscodeSettings`) — over the
+   * preferences above where it says anything: rulers, word wrap and, in `applyIndent`, indentation.
+   */
+  const vscodeOn = useEditorDisplayStore((s) => s.vscodeSettings);
+  const vscodeParsed = useVscodeSettingsStore((s) => s.byRepo[project.local_path]);
+  useEffect(() => {
+    if (vscodeOn && vscodeParsed === undefined) void useVscodeSettingsStore.getState().load(project.local_path);
+  }, [vscodeOn, vscodeParsed, project.local_path]);
+  const fileSettings = useMemo<FileEditorSettings>(() => {
+    if (!vscodeOn || !vscodeParsed || !activePath || isScratchPath(activePath)) return {};
+    const model = editorRef.current?.getModel();
+    return settingsForFile(vscodeParsed, activePath, model?.getLanguageId() ?? languageForPath(activePath));
+  }, [vscodeOn, vscodeParsed, activePath]);
+  const fileSettingsRef = useRef(fileSettings);
+  fileSettingsRef.current = fileSettings;
+  const wordWrap = monacoWordWrap(fileSettings.wordWrap ?? wordWrapPref);
+  const rulers = fileSettings.rulers ?? rulersPref;
 
   const activeAbsolutePath = useMemo(
     () => (activePath ? normalizePath(`${project.local_path}/${activePath}`) : null),
@@ -1657,6 +1700,40 @@ export function EditorPane({
     bookmarkDecorationsRef.current = ed.deltaDecorations(bookmarkDecorationsRef.current, decorations);
   }, [bookmarks, activePath, editorReady, activeTab?.loading]);
 
+  /**
+   * Test coverage over the open file (`lib/coverage`), while the Tests view has it switched on: a
+   * tint per line plus a mark in the overview ruler for each line never run, which is what makes the
+   * gaps in a long file findable.
+   */
+  const coverageShown = useCoverageStore((s) => s.shown);
+  const coverageReport = useCoverageStore((s) => (s.repoPath === project.local_path ? s.report : null));
+  const coverageDecorationsRef = useRef<string[]>([]);
+  useEffect(() => {
+    const ed = editorRef.current;
+    const mon = monacoRef.current;
+    if (!ed || !mon || !ed.getModel()) return;
+    const file = coverageShown && coverageReport && activePath ? fileCoverage(coverageReport, activePath) : null;
+    const hit = new Set(file?.hit ?? []);
+    const lines = ed.getModel()?.getLineCount() ?? 0;
+    const decorations: MonacoEditorNS.IModelDeltaDecoration[] = [];
+    for (const line of hit) {
+      if (line > lines) continue;
+      decorations.push({ range: new mon.Range(line, 1, line, 1), options: { isWholeLine: true, className: "cf-cov-hit" } });
+    }
+    for (const line of new Set(file?.missed ?? [])) {
+      if (hit.has(line) || line > lines) continue;
+      decorations.push({
+        range: new mon.Range(line, 1, line, 1),
+        options: {
+          isWholeLine: true,
+          className: "cf-cov-miss",
+          overviewRuler: { color: "#ef444499", position: mon.editor.OverviewRulerLane.Left },
+        },
+      });
+    }
+    coverageDecorationsRef.current = ed.deltaDecorations(coverageDecorationsRef.current, decorations);
+  }, [coverageShown, coverageReport, activePath, editorReady, activeTab?.loading]);
+
   // Tagged comments in the open buffer — recomputed as you type, so an anchor you just wrote is
   // navigable before the file is even saved.
   const fileAnchors = useMemo(() => parseAnchors(content), [content]);
@@ -2108,6 +2185,92 @@ export function EditorPane({
 
   const captureRef = useRef(captureSnapshot);
   captureRef.current = captureSnapshot;
+
+  /**
+   * «Ejecutar tests» from the editor: the open test file — or only the test around the caret — in the
+   * terminal dock, with the runner its ecosystem uses (`lib/testCommand`). The manifest that decides
+   * it is looked for from the file's folder up to the repository root.
+   */
+  const runTests = async (atCaret: boolean) => {
+    const path = activePathRef.current;
+    const model = editorRef.current?.getModel();
+    if (!path || !model) return;
+    const text = model.getValue();
+    const language = testLanguageOf(path, text);
+    if (!language) return;
+    const manifest = await findTestManifest(project.local_path, path, language);
+    const run = testCommand({
+      language,
+      path,
+      text,
+      manifest,
+      packageManager: rootManager.manager ?? "npm",
+      windows: currentPlatform() === "windows",
+      line: atCaret ? editorRef.current?.getPosition()?.lineNumber : undefined,
+    });
+    if (!run) {
+      pushErrorToast(t("tests.noRunner"));
+      return;
+    }
+    const root = project.local_path.replace(/[\\/]+$/, "");
+    await useTerminalStore
+      .getState()
+      .runCommand(project.id, {
+        cwd: run.cwd ? `${root}/${run.cwd}` : root,
+        command: run.command,
+        reuseKey: `tests:${path}`,
+        title: run.title,
+      })
+      .catch((e: unknown) => pushErrorToast(String(e)));
+  };
+  const runTestsRef = useRef(runTests);
+  runTestsRef.current = runTests;
+  /** The local history dialog of the open file (`LocalHistoryModal`). */
+  const [historyFor, setHistoryFor] = useState<{ path: string; current: string } | null>(null);
+  /** Whether the open file is a test file — what shows the two «Ejecutar» rows in the menu. */
+  const testFileKeyRef = useRef<MonacoEditorNS.IContextKey<boolean> | null>(null);
+  /**
+   * The indentation setting on the open file's model — a *model* option, which the editor's options
+   * never reach. `auto` reads it off the file the way Monaco does when it opens one.
+   */
+  const applyIndent = () => {
+    const model = editorRef.current?.getModel();
+    if (!model) return;
+    if (indent === "auto") model.detectIndentation(true, 4);
+    else if (indent === "tab") model.updateOptions({ insertSpaces: false, tabSize: 4 });
+    else model.updateOptions({ insertSpaces: true, tabSize: Number(indent), indentSize: Number(indent) });
+    // `.vscode/settings.json` next, as VS Code reads it: with `detectIndentation` on (its default)
+    // the file's own indentation wins and the two values are only the fallback.
+    const vs = fileSettingsRef.current;
+    if (vs.tabSize !== undefined || vs.insertSpaces !== undefined || vs.detectIndentation !== undefined) {
+      const insertSpaces = vs.insertSpaces ?? model.getOptions().insertSpaces;
+      const tabSize = vs.tabSize ?? model.getOptions().tabSize;
+      if (vs.detectIndentation === false) model.updateOptions({ insertSpaces, tabSize, indentSize: tabSize });
+      else model.detectIndentation(insertSpaces, tabSize);
+    }
+    // The repository's `.editorconfig` over the setting, for whatever it says about this file.
+    const path = activePathRef.current;
+    if (!editorConfigOn || !path || isScratchPath(path)) return;
+    void editorConfigFor(project.local_path, path).then((config) => {
+      if (model.isDisposed() || editorRef.current?.getModel() !== model) return;
+      const width = config.tab_width ?? (typeof config.indent_size === "number" ? config.indent_size : undefined);
+      const size = config.indent_size === "tab" ? width : config.indent_size;
+      const options: MonacoEditorNS.ITextModelUpdateOptions = {};
+      if (config.indent_style) options.insertSpaces = config.indent_style === "space";
+      if (width) options.tabSize = width;
+      if (size) options.indentSize = size;
+      if (Object.keys(options).length > 0) model.updateOptions(options);
+    });
+  };
+  const applyIndentRef = useRef(applyIndent);
+  applyIndentRef.current = applyIndent;
+  useEffect(() => {
+    applyIndentRef.current();
+  }, [indent, activePath, editorConfigOn, fileSettings]);
+  useEffect(() => {
+    const model = editorRef.current?.getModel();
+    testFileKeyRef.current?.set(!!activePath && testLanguageOf(activePath, model?.getValue() ?? "") !== null);
+  }, [activePath]);
   // Re-registered whenever focus moves here, so the parent's shortcut always reaches the group
   // the user is actually looking at.
   useEffect(() => {
@@ -2232,6 +2395,8 @@ export function EditorPane({
     monacoRef.current = monacoInstance;
     // "N implementations" / "Implements X" over types and members — global to Monaco, installed once.
     installImplementationLens();
+    // «▶ Enviar» over the requests of a `.http`/`.rest` file.
+    installHttpFileLens();
     // Typing or clicking in a pane is what makes it the active group — the same "focus follows
     // the editor you touched" rule VS Code uses to decide where the next file opens.
     editorInstance.onDidFocusEditorWidget(() => onFocusRef.current());
@@ -2398,6 +2563,80 @@ export function EditorPane({
           ],
         );
         openInlineEdit({ path, modelUri: model.uri.toString(), selection: text, decorationId });
+      },
+    });
+    // The selection (or the caret's line) to the repository's chat, as an `@path:lines` mention the
+    // backend points the engine at — the box gets it, the question is the user's to write.
+    editorInstance.addAction({
+      id: "cf-ask-chat",
+      label: tRef.current("editor.askChat"),
+      contextMenuGroupId: "1_ai",
+      contextMenuOrder: 1,
+      run: (ed) => {
+        const selection = ed.getSelection();
+        const path = activePathRef.current;
+        if (!selection || !path) return;
+        const from = selection.startLineNumber;
+        // A selection ending at the start of a line does not take that line.
+        const to = !selection.isEmpty() && selection.endColumn === 1 && selection.endLineNumber > from ? selection.endLineNumber - 1 : selection.endLineNumber;
+        askInRepoChat(projectRef.current.id, `@${path}:${from === to ? from : `${from}-${to}`} `);
+      },
+    });
+    applyIndentRef.current();
+    editorInstance.onDidChangeModel(() => applyIndentRef.current());
+    testFileKeyRef.current = editorInstance.createContextKey<boolean>("cfTestFile", false);
+    testFileKeyRef.current.set(!!activePathRef.current && testLanguageOf(activePathRef.current, editorInstance.getModel()?.getValue() ?? "") !== null);
+    editorInstance.addAction({
+      id: "cf-run-test-at",
+      label: tRef.current("tests.runAtCaret"),
+      precondition: "cfTestFile",
+      contextMenuGroupId: "1_ai",
+      contextMenuOrder: 2,
+      run: () => void runTestsRef.current(true),
+    });
+    editorInstance.addAction({
+      id: "cf-run-test-file",
+      label: tRef.current("tests.runFile"),
+      precondition: "cfTestFile",
+      contextMenuGroupId: "1_ai",
+      contextMenuOrder: 3,
+      run: () => void runTestsRef.current(false),
+    });
+    // Call and type hierarchies of the word under the caret, in the panel under the groups — see
+    // `lib/hierarchy` for how they are worked out without a language server.
+    const showHierarchy = (mode: HierarchyMode) => (ed: MonacoEditorNS.ICodeEditor) => {
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      const path = activePathRef.current;
+      const word = model && position ? model.getWordAtPosition(position)?.word : undefined;
+      if (!path || !position || !word) return;
+      void hierarchyRoot(projectRef.current.local_path, word, path, position.lineNumber).then((root) =>
+        useEditorPanelStore.getState().showHierarchy({ mode, root }),
+      );
+    };
+    editorInstance.addAction({
+      id: "cf-call-hierarchy",
+      label: tRef.current("hierarchy.showCalls"),
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 4.1,
+      run: showHierarchy("incoming"),
+    });
+    editorInstance.addAction({
+      id: "cf-type-hierarchy",
+      label: tRef.current("hierarchy.showTypes"),
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 4.2,
+      run: showHierarchy("supertypes"),
+    });
+    editorInstance.addAction({
+      id: "cf-local-history",
+      label: tRef.current("localHistory.action"),
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 6,
+      run: (ed) => {
+        const path = activePathRef.current;
+        const model = ed.getModel();
+        if (path && model) setHistoryFor({ path, current: model.getValue() });
       },
     });
     // Registered as a Monaco action rather than a plain command so it also appears in the
@@ -2705,10 +2944,16 @@ export function EditorPane({
         onChange={(value) => onChange(activeTab.path, value ?? "")}
         onMount={handleMount}
         options={{
-          minimap: { enabled: true },
+          minimap: { enabled: minimapOn },
           // Settings › Editor › Visualización.
           fontSize,
-          fontFamily: CODE_FONT_FAMILY,
+          fontFamily,
+          fontLigatures: ligatures,
+          renderWhitespace: whitespace,
+          rulers,
+          stickyScroll: { enabled: stickyScroll },
+          // Renaming a tag renames its pair — Monaco's own for HTML, `linkedTags` for JSX and XML.
+          linkedEditing,
           automaticLayout: true,
           // At the viewport, never at a column: where a line breaks is the pane's width, so it
           // re-wraps as a split or the explorer changes it. Continuation lines keep the indentation
@@ -2894,8 +3139,13 @@ export function EditorPane({
                   </button>
                 </Tooltip>
                 {onSplit && (
-                  <Tooltip side="bottom" label={t("editor.splitRight")} trailing={keyCap("editor.splitRight")}>
-                    <button onClick={onSplit} aria-label={t("editor.splitRight")} className={iconButtonClass({ size: "sm" })}>
+                  <Tooltip
+                    side="bottom"
+                    label={t("editor.splitRight")}
+                    trailing={keyCap("editor.splitRight")}
+                    description={t("editor.splitAltHint")}
+                  >
+                    <button onClick={(e) => onSplit(e.altKey)} aria-label={t("editor.splitRight")} className={iconButtonClass({ size: "sm" })}>
                       <SplitSquareHorizontal size={14} />
                     </button>
                   </Tooltip>
@@ -2965,16 +3215,8 @@ export function EditorPane({
             <PaneNotice
               tone="muted"
               icon={<Lock size={12} />}
-              label={
-                activeTab.readOnly.kind === "encoding"
-                  ? t("editor.readOnlyEncoding", { encoding: activeTab.readOnly.encoding })
-                  : t("editor.readOnlyLarge")
-              }
-              hint={
-                activeTab.readOnly.kind === "encoding"
-                  ? t("editor.readOnlyEncodingHint")
-                  : t("editor.readOnlyLargeHint")
-              }
+              label={t("editor.readOnlyLarge")}
+              hint={t("editor.readOnlyLargeHint")}
             />
           )}
           {/* `relative` anchors the inline-edit widget over the code, the way an editor
@@ -3007,7 +3249,8 @@ export function EditorPane({
                   options={{
                     readOnly: true,
                     fontSize,
-                    fontFamily: CODE_FONT_FAMILY,
+                    fontFamily,
+                    fontLigatures: ligatures,
                     // Both sides, so a changed line wraps the same way before and after.
                     wordWrap,
                     renderSideBySide: true,
@@ -3073,6 +3316,24 @@ export function EditorPane({
                 so for exactly one frame `inlineEdit` still names the file that just left while
                 `content` is already the new one's. One frame is enough to hand the widget a
                 mismatched path/content pair, which is the pair it would submit. */}
+            {historyFor && (
+              <LocalHistoryModal
+                repoPath={project.local_path}
+                path={historyFor.path}
+                current={historyFor.current}
+                onRestore={(text) => {
+                  const ed = editorRef.current;
+                  const model = ed?.getModel();
+                  // Only into the file it was opened for: a tab switch meanwhile leaves it alone.
+                  if (!ed || !model || activePathRef.current !== historyFor.path) return;
+                  // One edit, so ⌘Z takes the whole restore back.
+                  ed.pushUndoStop();
+                  ed.executeEdits("local-history", [{ range: model.getFullModelRange(), text }]);
+                  ed.pushUndoStop();
+                }}
+                onClose={() => setHistoryFor(null)}
+              />
+            )}
             {inlineEdit && inlineEdit.path === activeTab.path && (
               <InlineEditWidget
                 // A press is a new widget, not the old one re-pointed. Without this, pressing Ctrl+I

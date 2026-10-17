@@ -35,7 +35,7 @@ import type { ImportFormat, ImportResult, ImportedItem } from "../../types/api";
 /** Parsing a 5 MB OpenAPI document on every keystroke would make the textarea unusable. */
 const PARSE_DEBOUNCE_MS = 250;
 
-const FILE_EXTENSIONS = ["json", "yaml", "yml", "har", "bru", "txt", "sh", "curl"];
+const FILE_EXTENSIONS = ["json", "yaml", "yml", "har", "bru", "http", "rest", "txt", "sh", "curl"];
 
 /** Format names are product names, not UI copy — they read the same in every language. */
 const FORMAT_LABELS: Record<ImportFormat, string> = {
@@ -45,6 +45,7 @@ const FORMAT_LABELS: Record<ImportFormat, string> = {
   har: "HAR",
   insomnia: "Insomnia",
   bruno: "Bruno",
+  http: ".http / .rest",
   codeflow: "CodeFlow",
 };
 

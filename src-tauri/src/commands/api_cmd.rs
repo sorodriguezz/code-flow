@@ -616,6 +616,72 @@ pub async fn api_send_http_tracked(
     result
 }
 
+/// «Prueba de carga»: `request` sent by `plan.users` concurrent users for `plan.duration_ms`,
+/// reported on `api:load-progress` (`{ id, report }`) twice a second and returned when done.
+#[tauri::command]
+pub async fn api_load_test(
+    app: AppHandle,
+    id: String,
+    request: HttpSendRequest,
+    plan: crate::api::load::LoadPlan,
+) -> Result<crate::api::load::LoadReport, String> {
+    #[derive(Clone, Serialize)]
+    struct Progress {
+        id: String,
+        report: crate::api::load::LoadReport,
+    }
+    let progress_id = id.clone();
+    crate::api::load::run(&id, request, plan, move |report| {
+        let _ = app.emit("api:load-progress", Progress { id: progress_id.clone(), report });
+    })
+    .await
+}
+
+/// The API client's assistant (`ai::api_assist`) on the engine the `api` task is routed to — the
+/// picker beside each button writes that route. `workspace_id` is the window's, so the account it
+/// runs as is the one the picker names. Cancellable through `run_id`.
+#[tauri::command]
+pub async fn api_ai(
+    app: AppHandle,
+    db: State<'_, Db>,
+    kind: String,
+    payload: String,
+    language: Option<String>,
+    run_id: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<String, String> {
+    let config = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::commands::claude_cmd::load_ai_config_in(&conn, crate::commands::claude_cmd::AiTask::Api, workspace_id.as_deref())?
+    };
+    let language = language.unwrap_or_else(|| "es".to_string());
+    crate::ai_runs::scoped(app, run_id, async {
+        crate::ai::api_assist(&*config.engine, &config.binary, &config.model, &kind, &payload, &language).await
+    })
+    .await
+}
+
+/// «Endpoints del repositorio»: the HTTP routes the code under `path` declares (see `api::routes`).
+#[tauri::command]
+pub async fn api_scan_routes(path: String) -> Result<Vec<crate::api::routes::RouteHit>, String> {
+    tokio::task::spawn_blocking(move || {
+        let root = std::path::PathBuf::from(&path);
+        if !root.is_dir() {
+            return Err(format!("'{path}' is not a folder"));
+        }
+        let files = crate::search::list_files(&path).unwrap_or_else(|_| crate::local_agent::tools::plain_walk(&root, 20_000));
+        Ok(crate::api::routes::scan(&root, &files))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Ends a load test early; its report so far is what `api_load_test` returns.
+#[tauri::command]
+pub fn api_load_stop(id: String) {
+    crate::api::load::stop(&id);
+}
+
 #[tauri::command]
 pub fn api_cancel_http(registry: State<ApiRegistry>, id: String) -> Result<(), String> {
     if let Some(tx) = registry.take_cancel(&id) {
