@@ -246,7 +246,7 @@ export function TourOverlay() {
   const isFirst = index === 0;
   const isLast = index === total - 1;
 
-  // Re-measure the anchor, and the window, on every frame the tour is up. `staleFrames` is what
+  // Re-measure the anchor, and the window, on every frame the tour is up. `STALE_FRAMES` is what
   // stops the spotlight blinking out while a panel this step just asked for is still mounting:
   // the previous rectangle is held briefly rather than cleared the instant the selector misses.
   const staleRef = useRef(0);

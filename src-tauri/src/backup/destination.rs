@@ -223,31 +223,6 @@ pub fn list_in_folder(folder: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// The most recent backup in a folder — the current file if it is there, otherwise the newest
-/// rotated copy. What "restore from my synced folder" resolves to without making the user browse.
-pub fn newest_in_folder(folder: &Path) -> Option<PathBuf> {
-    let current = folder.join(current_file_name());
-    if current.is_file() {
-        return Some(current);
-    }
-    let mut dated: Vec<PathBuf> = std::fs::read_dir(folder)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("codeflow-backup-") && name.ends_with(FILE_EXTENSION)
-                    })
-        })
-        .collect();
-    dated.sort();
-    dated.pop()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,14 +262,6 @@ mod tests {
         assert!(names.contains(&current_file_name()));
         let rotated = names.iter().filter(|n| **n != current_file_name()).count();
         assert_eq!(rotated, 2, "expected two rotated copies, saw {names:?}");
-    }
-
-    #[test]
-    fn the_newest_backup_is_the_current_one_when_it_exists() {
-        let dir = scratch("newest");
-        assert!(newest_in_folder(&dir).is_none());
-        let written = write_into_folder(&dir, b"payload", 1).unwrap();
-        assert_eq!(newest_in_folder(&dir), Some(written));
     }
 
     /// Half-written files must not be mistaken for a backup — restoring one would fail the magic

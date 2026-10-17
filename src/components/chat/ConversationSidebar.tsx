@@ -102,15 +102,6 @@ export function ConversationSidebar() {
     };
   }, [trimmed, search]);
 
-  /**
-   * How many *other* conversations sit on the same provider.
-   *
-   * Only meaningful for an engine whose resume is ambiguous — `agy` hands back a fixed sentinel and
-   * continues from whatever it ran last, so with two Gemini conversations in this list the second
-   * one silently inherits the first one's context. That was a latent defect when the AI panel had
-   * one chat per repository; a flat sidebar where both are visibly open at once makes it a daily
-   * one, which is why the warning lives on the row rather than in a release note.
-   */
   const allGroups = useConversationStore((s) => s.groups);
   const activeGroupId = useConversationStore((s) => s.activeGroupId);
 
@@ -945,14 +936,6 @@ function GroupHeading({ text }: { text: string }) {
  * Memoised on primitives plus the row object, because this list is the thing on screen during every
  * token of every reply: the active conversation's `updated_at` changes when a turn lands, and
  * without this every other row in a list of two hundred re-renders with it.
- *
- * The triangle on the right is the honest mark and it is deliberately not decoration: it appears
- * only on an engine whose resume is ambiguous *and* only when a second conversation on that engine
- * exists — the exact condition under which opening this row can pull in another chat's context.
- * (The other honest hazard, an engine that cannot resume at all and therefore re-sends the whole
- * transcript every turn, is shown under the composer instead, where the real turn count lives; a
- * row in this list only knows how many turns a conversation has if it happens to be one of the five
- * the store is holding.)
  */
 const ConversationRow = memo(function ConversationRow({
   conversation,

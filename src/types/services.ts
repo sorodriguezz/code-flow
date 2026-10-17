@@ -174,8 +174,6 @@ export const serviceDeps = (service: ServiceRow): string[] => parseJson<string[]
 export const servicePorts = (service: ServiceRow): number[] => parseJson<number[]>(service.ports, []);
 export const serviceDetectedPorts = (service: ServiceRow): number[] =>
   parseJson<number[]>(service.detected_ports ?? "[]", []);
-export const serviceEnv = (service: ServiceRow): Record<string, string> =>
-  parseJson<Record<string, string>>(service.env, {});
 export const serviceEnvFiles = (service: ServiceRow): string[] => {
   const files = parseJson<unknown>(service.env_files ?? "[]", []);
   return Array.isArray(files) ? files.filter((file): file is string => typeof file === "string") : [];

@@ -86,7 +86,7 @@ function locationOf(
  * because the stored projection deliberately drops `por_que`, `sugerencia` and `ejemplo_*`.
  *
  * The tempting fallback, posting `subtitulo` on its own, is the bug this replaced: it produced a
- * bare one-line comment with no anchor, and `apply_post_outcome` then wrote that thread's id back
+ * bare one-line comment with no anchor, and `record_published` then wrote that thread's id back
  * onto the finding — so every *future* publish from the desktop, with the full body, would reply
  * into the canned thread instead of opening a proper one. One tap from a phone permanently
  * downgraded the finding. So an old run offers no publish button at all, and says why.

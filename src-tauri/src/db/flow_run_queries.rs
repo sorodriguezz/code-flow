@@ -720,32 +720,6 @@ pub fn state_delete(conn: &Connection, flow_id: &str, key: &str) -> rusqlite::Re
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct FlowStateEntry {
-    pub key: String,
-    pub value: Value,
-    pub updated_at: String,
-}
-
-pub fn state_list(conn: &Connection, flow_id: &str) -> rusqlite::Result<Vec<FlowStateEntry>> {
-    let mut statement = conn.prepare("SELECT key, value, updated_at FROM flow_state WHERE flow_id = ?1 ORDER BY key")?;
-    let rows = statement.query_map(params![flow_id], |row| {
-        let text: String = row.get(1)?;
-        Ok(FlowStateEntry {
-            key: row.get(0)?,
-            value: serde_json::from_str(&text).unwrap_or(Value::Null),
-            updated_at: row.get(2)?,
-        })
-    })?;
-    rows.collect()
-}
-
-pub fn state_clear(conn: &Connection, flow_id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM flow_state WHERE flow_id = ?1", params![flow_id])?;
-    Ok(())
-}
-
 // ------------------------------------------------------------------------------------- variables
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1219,7 +1193,7 @@ mod tests {
         assert_eq!(state_get(&conn, "f1", "lastId").unwrap(), Some(serde_json::json!(41)));
         conn.execute("DELETE FROM flows WHERE id = 'f1'", []).unwrap();
         assert!(list_pins(&conn, "f1").unwrap().is_empty());
-        assert!(state_list(&conn, "f1").unwrap().is_empty());
+        assert_eq!(state_get(&conn, "f1", "lastId").unwrap(), None);
     }
 
     #[test]

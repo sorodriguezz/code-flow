@@ -23,8 +23,6 @@ export interface FilterTerms {
   exclude: string[];
 }
 
-export const EMPTY_TERMS: FilterTerms = { include: [], exclude: [] };
-
 /** Splits a stored pattern into the two lists. Blank terms are dropped, so a trailing comma left
  * behind while typing doesn't become an entry nobody can see. */
 export function parseFilterTerms(pattern: string): FilterTerms {
@@ -48,12 +46,6 @@ export function parseFilterTerms(pattern: string): FilterTerms {
 export function formatFilterTerms(terms: FilterTerms): string {
   const clean = (list: string[]) => list.map((term) => term.trim()).filter(Boolean);
   return [...clean(terms.include), ...clean(terms.exclude).map((term) => `!${term}`)].join(", ");
-}
-
-/** Whether a set of terms would filter anything at all — what decides between "no filter" and one
- * the user has written but left empty. */
-export function hasTerms(terms: FilterTerms): boolean {
-  return formatFilterTerms(terms) !== "";
 }
 
 // ---------------------------------------------------------------------------

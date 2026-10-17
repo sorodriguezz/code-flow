@@ -87,11 +87,6 @@ const handlers: Record<string, Handler> = {
   },
 };
 
-/** Registers another kind of question — the API client's requests register theirs from their own module. */
-export function answerFlowQuestions(kind: string, handler: Handler): void {
-  handlers[kind] = handler;
-}
-
 const running = new Map<string, AbortController>();
 let started = false;
 

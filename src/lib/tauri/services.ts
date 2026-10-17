@@ -34,9 +34,6 @@ export const renameServiceGroup = (id: string, name: string) =>
 
 export const deleteServiceGroup = (id: string) => invoke<void>("delete_service_group", { id });
 
-export const reorderServices = (workspaceId: string, ids: string[]) =>
-  invoke<void>("reorder_services", { workspaceId, ids });
-
 /** Starts `ids` and everything they wait for, in dependency order. Resolves once queued; progress
  *  arrives through {@link onServiceRuntime}. */
 export const startServices = (workspaceId: string, ids: string[]) =>

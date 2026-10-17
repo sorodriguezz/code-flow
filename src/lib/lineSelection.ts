@@ -72,12 +72,6 @@ export function selectionCounts(file: FileDiffInfo, selected: ReadonlySet<string
   return { added, removed };
 }
 
-/** A row's position in the drawn diff, for anchoring things next to it. */
-export interface RowRef {
-  hunk: number;
-  line: number;
-}
-
 function sameRow(a: DiffLine, b: DiffLine): boolean {
   return a.origin === b.origin && a.old_lineno === b.old_lineno && a.new_lineno === b.new_lineno && a.content === b.content;
 }

@@ -84,7 +84,7 @@ pub const SETTING_TLS: &str = "remotectl_tls";
 ///
 /// Two things read it: the terminal arms in `dispatch.rs`, and — just as importantly — the event
 /// bridge, which must not forward `terminal:output` to a device that is not allowed terminals. See
-/// `bridge::forwarded_events`.
+/// `bridge::TERMINAL_EVENTS`.
 pub const SETTING_ALLOW_TERMINAL: &str = "remotectl_allow_terminal";
 
 /// Where the server listens when the setting has never been written.

@@ -233,17 +233,6 @@ pub fn delete_group(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Writes a new order for a workspace's services, in the order given.
-pub fn reorder_services(conn: &Connection, workspace_id: &str, ids: &[String]) -> rusqlite::Result<()> {
-    for (index, id) in ids.iter().enumerate() {
-        conn.execute(
-            "UPDATE services SET sort_order = ?3, updated_at = ?4 WHERE id = ?1 AND workspace_id = ?2",
-            params![id, workspace_id, index as i64, now()],
-        )?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

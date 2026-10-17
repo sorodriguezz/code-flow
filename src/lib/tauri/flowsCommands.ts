@@ -85,16 +85,6 @@ export interface FlowEngineChoice {
   account: string;
 }
 
-/** One field of an AI node's answer — `schema::from_fields`. */
-export interface FlowAnswerField {
-  name: string;
-  type: "string" | "number" | "integer" | "boolean" | "list" | "enum";
-  description: string;
-  required: boolean;
-  /** `enum` only: the choices, comma separated. */
-  options?: string;
-}
-
 /** `params::ParamSpec`. Its label is the translation `flows.param.<name>`. */
 export interface FlowParamSpec {
   name: string;
@@ -326,9 +316,6 @@ export const flowsBuildWithAi = (args: {
 
 export const flowsRenameFlow = (id: string, name: string) =>
   invoke<FlowMetaRow | null>("flows_rename_flow", { id, name });
-
-export const flowsSetDescription = (id: string, description: string) =>
-  invoke<FlowMetaRow | null>("flows_set_description", { id, description });
 
 export const flowsMoveFlow = (id: string, folderId: string | null) =>
   invoke<FlowMetaRow | null>("flows_move_flow", { id, folderId });
@@ -711,16 +698,6 @@ export const flowsPinNode = (flowId: string, nodeId: string, ports: unknown[][])
 
 export const flowsUnpinNode = (flowId: string, nodeId: string) => invoke<void>("flows_unpin_node", { flowId, nodeId });
 
-export interface FlowStateEntry {
-  key: string;
-  value: unknown;
-  updatedAt: string;
-}
-
-export const flowsStateList = (flowId: string) => invoke<FlowStateEntry[]>("flows_state_list", { flowId });
-
-export const flowsStateClear = (flowId: string) => invoke<void>("flows_state_clear", { flowId });
-
 // ---------- variables and credentials ----------
 
 export interface FlowVariable {
@@ -1000,8 +977,6 @@ export const flowsTablePutRow = (tableId: string, key: string, data: Record<stri
   invoke<FlowTableRow | null>("flows_table_put_row", { tableId, key, data, previousKey });
 export const flowsTableDeleteRows = (tableId: string, keys: string[]) => invoke<number>("flows_table_delete_rows", { tableId, keys });
 export const flowsTableClear = (tableId: string) => invoke<number>("flows_table_clear", { tableId });
-export const flowsTableDropColumn = (tableId: string, column: string) => invoke<void>("flows_table_drop_column", { tableId, column });
-export const flowsTableSetColumns = (tableId: string, columns: string[]) => invoke<void>("flows_table_set_columns", { tableId, columns });
 export const flowsTableImport = (tableId: string, rows: Record<string, unknown>[], keyField: string | null) =>
   invoke<number>("flows_table_import", { tableId, rows, keyField });
 
@@ -1085,5 +1060,3 @@ export interface FlowChatAssistant {
 
 export const flowsChatAssistants = (workspaceId: string) => invoke<FlowChatAssistant[]>("flows_chat_assistants", { workspaceId });
 
-export const flowsChatTurn = (flowId: string, message: string, history: { role: string; text: string }[], conversationId: string | null) =>
-  invoke<{ text: string; runId: string | null; name: string }>("flows_chat_turn", { flowId, message, history, conversationId });

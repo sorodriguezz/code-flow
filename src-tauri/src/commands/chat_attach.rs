@@ -22,7 +22,7 @@
 //! confident guess, and neither is worth the megabyte.
 //!
 //! So a copy lives as long as its conversation. It goes when the conversation goes, and
-//! [`sweep_orphan_attachments`] collects whatever a crash or an out-of-process deletion left behind.
+//! [`chat_sweep_attachments`] collects whatever a crash or an out-of-process deletion left behind.
 //!
 //! # What is enforced here
 //!

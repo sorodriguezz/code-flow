@@ -54,27 +54,6 @@ export const LOCKFILE: Record<PackageManager, string> = {
 
 export const PACKAGE_JSON = "package.json";
 
-/** Exact name, not a suffix match: `package.json.bak` and `old-package.json` are not manifests, and
- *  offering to run scripts out of them would be offering to run something that isn't there. */
-export function isPackageJson(entry: FileEntry): boolean {
-  return !entry.is_dir && entry.name === PACKAGE_JSON;
-}
-
-export interface PackageScript {
-  name: string;
-  /** The body declared in the JSON. Shown, dimmed, so the row says what it will actually do — but
-   *  never typed anywhere: see this module's header. */
-  command: string;
-  /** Whether `name` cleared the whitelist. False rows are still drawn, just inert. */
-  runnable: boolean;
-}
-
-export type PackageScriptsState =
-  | { status: "loading" }
-  | { status: "ok"; scripts: PackageScript[] }
-  | { status: "invalid" }
-  | { status: "unreadable"; error: string };
-
 /**
  * The whitelist.
  *
@@ -101,69 +80,17 @@ export function isRunnableScriptName(name: string): boolean {
 }
 
 /**
- * `package.json` text to rows.
- *
- * The three failure shapes are kept apart because they mean different things to the person looking
- * at the tree: a file that is not JSON is something they can go and fix, a file with no `scripts`
- * block is fine and simply has nothing to offer, and neither should read as the app having broken.
- *
- * Declaration order is preserved rather than sorted. The order in a manifest is written by hand and
- * carries intent — `dev`, `build`, `test` at the top, the twelve `ci:*` entries at the bottom — and
- * alphabetising it would bury the two scripts anyone actually clicks under the ones nobody does.
- *
- * A non-string value is dropped rather than failing the parse, the same call `hiddenFilesStore.parse`
- * makes about a malformed row: one bad entry costs its own row, not the whole list.
- */
-export function parsePackageScripts(raw: string): PackageScriptsState {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { status: "invalid" };
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { status: "invalid" };
-  const scripts = (parsed as { scripts?: unknown }).scripts;
-  if (typeof scripts !== "object" || scripts === null || Array.isArray(scripts)) {
-    return { status: "ok", scripts: [] };
-  }
-  const rows: PackageScript[] = [];
-  for (const [name, command] of Object.entries(scripts as Record<string, unknown>)) {
-    if (typeof command !== "string") continue;
-    rows.push({ name, command, runnable: isRunnableScriptName(name) });
-  }
-  return { status: "ok", scripts: rows };
-}
-
-/**
- * Which manager this `package.json` belongs to, going by the nearest lockfile at or above it.
+ * **Every** manager whose lockfile sits at the nearest level that has one.
  *
  * **No backend call, by construction.** `listings` is the tree's own `listDir` cache, and for a
  * `package.json` row to be on screen at all the explorer must already have listed the directory it
- * sits in and every directory above it — that is what the user clicked through to get there. So the
- * walk up to the root is a handful of `Map` lookups against listings that are already in memory, and
- * clicking a chevron never turns into a burst of filesystem round trips.
+ * sits in and every directory above it. So the walk up to the root is a handful of `Map` lookups,
+ * and clicking a chevron never turns into a burst of filesystem round trips. It must be handed the
+ * **unfiltered** cache: a lockfile is precisely the kind of row people hide, and hiding it must not
+ * silently switch the buttons over to npm.
  *
- * It must be handed the **unfiltered** cache, not the one the explorer draws from. A lockfile is
- * precisely the kind of row people hide — it is noise they never open — and hiding a row is a
- * statement about what the tree draws, not about which package manager the repository uses. Passing
- * the filtered map would make `pnpm-lock.yaml` disappearing from view silently switch the buttons
- * over to npm.
- *
- * Nearest wins over the root: a workspace package with its own lockfile has genuinely opted out of
- * the monorepo's manager, and it is the one standing closest to the file.
- */
-export function detectPackageManager(
-  dir: string,
-  listings: Map<string, FileEntry[]>,
-): PackageManager | null {
-  return detectPackageManagers(dir, listings)[0] ?? null;
-}
-
-/**
- * **Every** manager whose lockfile sits at the nearest level that has one.
- *
- * The singular version above answers with the first of these and says nothing about the rest, which
- * is wrong whenever a repository carries more than one lockfile — and that happens: somebody runs
+ * All of them, not just the first: answering with one is wrong whenever a repository carries more
+ * than one lockfile — and that happens: somebody runs
  * `npm install` in a pnpm project, a migration leaves the old file behind, a template ships with
  * two. Picking one silently means the play button runs a different manager from the one the person
  * pressing it expects, and the failure is quiet — a lockfile gets rewritten by the wrong tool.
@@ -299,11 +226,3 @@ export function addCommandLine(
   return `${manager} add ${name}${flag}`;
 }
 
-/**
- * How many script rows a manifest gets before the rest go behind a "show the others" row.
- *
- * The tree is not virtualised: every row it draws is a live DOM node. A generated manifest with two
- * hundred `ci:*` entries would put two hundred nodes into a tree that may already be drawing several
- * hundred, in one click, and the interesting scripts are always near the top anyway.
- */
-export const SCRIPT_ROW_CAP = 40;

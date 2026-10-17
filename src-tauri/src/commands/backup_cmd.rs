@@ -245,24 +245,6 @@ pub async fn backup_pick_and_inspect(app: AppHandle) -> Result<Option<backup::Ba
     backup::inspect(&bytes, &path).map(Some)
 }
 
-/// The newest backup already sitting in the configured folder, so restoring from a synced folder
-/// on a fresh machine doesn't start with browsing for a file whose name nobody remembers.
-#[tauri::command]
-pub fn backup_inspect_configured(db: State<Db>) -> Result<Option<backup::BackupInfo>, String> {
-    let folder = {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        backup::load_settings(&conn).folder
-    };
-    if folder.trim().is_empty() {
-        return Ok(None);
-    }
-    let Some(path) = destination::newest_in_folder(std::path::Path::new(&folder)) else {
-        return Ok(None);
-    };
-    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    backup::inspect(&bytes, &path.to_string_lossy()).map(Some)
-}
-
 /// Every backup at the configured destination, newest first — what the restore pane lists so the
 /// choice of *which* one is the user's.
 ///
@@ -310,7 +292,6 @@ pub async fn backup_list_at_destination(app: AppHandle) -> Result<Vec<backup::Ba
 }
 
 /// The backup in the connected Drive account, if there is one.
-#[tauri::command]
 pub async fn backup_inspect_drive(app: AppHandle) -> Result<Option<backup::BackupInfo>, String> {
     let (client_id, known_id) = {
         let db = app.state::<Db>();
@@ -337,7 +318,6 @@ pub async fn backup_inspect_drive(app: AppHandle) -> Result<Option<backup::Backu
 ///
 /// One request, not two: the app folder is addressed by path, so there is nothing to look up first
 /// and a missing file comes back as `None` from the download itself.
-#[tauri::command]
 pub async fn backup_inspect_onedrive(app: AppHandle) -> Result<Option<backup::BackupInfo>, String> {
     let client_id = {
         let db = app.state::<Db>();

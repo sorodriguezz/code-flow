@@ -18,14 +18,6 @@ export interface LatestVersion {
   error: string;
 }
 
-export interface PackageVersions {
-  name: string;
-  latest: string;
-  /** Every published version, in the registry's order. Sort with `bySemverDesc` before showing. */
-  versions: string[];
-  description: string;
-}
-
 export interface SearchHit {
   name: string;
   version: string;
@@ -51,9 +43,6 @@ export function npmPackageUrl(name: string): string {
 
 export const npmLatestVersions = (names: string[]) =>
   invoke<LatestVersion[]>("npm_latest_versions", { names });
-
-export const npmPackageVersions = (name: string) =>
-  invoke<PackageVersions>("npm_package_versions", { name });
 
 export const npmSearch = (text: string, limit?: number) =>
   invoke<SearchHit[]>("npm_search", { text, limit });
@@ -113,30 +102,6 @@ function parts(version: string): { nums: number[]; pre: string } | null {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(version.trim());
   if (!match) return null;
   return { nums: [Number(match[1]), Number(match[2]), Number(match[3])], pre: match[4] ?? "" };
-}
-
-/**
- * Semver order: newest first.
- *
- * String order is not version order — `1.10.0` sorts before `1.9.0`, which would put a nine-month-old
- * release at the top of the picker. A release beats a prerelease of the same numbers, which is
- * semver's own rule and also the one a person picking a version to install expects.
- */
-export function bySemverDesc(a: string, b: string): number {
-  const left = parts(a);
-  const right = parts(b);
-  // Anything unparseable sorts last rather than throwing the comparison off; the registry does
-  // publish the occasional oddity.
-  if (!left && !right) return a.localeCompare(b);
-  if (!left) return 1;
-  if (!right) return -1;
-  for (let at = 0; at < 3; at++) {
-    if (left.nums[at] !== right.nums[at]) return right.nums[at] - left.nums[at];
-  }
-  if (left.pre === right.pre) return 0;
-  if (!left.pre) return -1;
-  if (!right.pre) return 1;
-  return right.pre.localeCompare(left.pre);
 }
 
 /**

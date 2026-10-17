@@ -848,7 +848,7 @@ async fn assignee(org: &str, pat: &str) -> Option<String> {
 
 /// Why a create came back without a work item.
 ///
-/// The distinction exists for exactly one caller — [`create_assigned`] retries, and a retry is only
+/// The distinction exists for exactly one caller — [`create_item`] retries, and a retry is only
 /// safe when nothing was created the first time.
 struct CreateFailed {
     message: String,

@@ -46,28 +46,6 @@ export type RemoteKind =
   | "azure_table";
 
 /**
- * Every kind that exists on the wire, legacy included. Mirrors the Rust enum.
- *
- * Not what the Type select offers — see `SELECTABLE_KINDS`. The four single-service Azure kinds are
- * still read and still work, but nothing creates them any more.
- */
-export const REMOTE_KINDS: RemoteKind[] = [
-  "ssh",
-  "sftp",
-  "ftp",
-  "ftps",
-  "smb",
-  "vnc",
-  "rdp",
-  "s3",
-  "azure",
-  "azure_blob",
-  "azure_files",
-  "azure_queue",
-  "azure_table",
-];
-
-/**
  * What the Type select offers, which is deliberately shorter than the list above.
  *
  * An Azure account is one row now — `azure` — because that is what an account is: one name, one
@@ -186,14 +164,6 @@ export const KIND_CAPABILITIES: Record<
   azure_queue: { shell: false, files: true, forwards: false, screen: false },
   azure_table: { shell: false, files: true, forwards: false, screen: false },
 };
-
-/** Which protocol a kind *is*, when it is a screen. The kind is the protocol — there is no second
- *  field that could disagree with it. Mirrors `RemoteKind::screen_protocol`. */
-export function screenProtocolOf(kind: RemoteKind): ScreenProtocol | null {
-  if (kind === "vnc") return "vnc";
-  if (kind === "rdp") return "rdp";
-  return null;
-}
 
 /** What a kind is called in the UI. */
 export const KIND_LABEL: Record<RemoteKind, string> = {

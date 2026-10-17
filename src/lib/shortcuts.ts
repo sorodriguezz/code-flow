@@ -133,7 +133,7 @@ export interface ShortcutCommand {
    *
    * These used to be `EDITOR_RESERVED`: a list of chords the settings screen could only *warn*
    * about, because the actions behind them are Monaco's and the app had no way to move them. It
-   * does now — `applyEditorKeybindings` rewrites Monaco's own keybinding table from this registry —
+   * does now — `installEditorShortcuts` rewrites Monaco's own keybinding table from this registry —
    * so they are ordinary rebindable commands, and the special case they needed is gone. That also
    * means collisions between an editor chord and an app chord are caught by the same duplicate
    * check as every other pair, instead of by a second mechanism that only knew about a fixed list.
@@ -743,7 +743,7 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
    * documented. The first four were hard-coded `keydown` listeners inside `EditorView` comparing
    * `e.key` to literals — the same shape this file already replaced once for the file-tree actions,
    * and the same fix: they send through `editorCommandStore` like every other editor action. The
-   * rest are **Monaco's**, and are carried by `monacoCommand` into `applyEditorKeybindings`, which
+   * rest are **Monaco's**, and are carried by `monacoCommand` into `installEditorShortcuts`, which
    * rewrites the editor's own keybinding table to match whatever the user set here.
    *
    * The defaults are unchanged, and deliberately: they are VS Code's, which is the point of them.

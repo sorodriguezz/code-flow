@@ -943,7 +943,6 @@ pub fn delete_review_context(conn: &Connection, id: &str) -> rusqlite::Result<()
     Ok(())
 }
 
-
 // ---------- workspace skills ----------
 
 pub fn add_workspace_skill(
@@ -1185,18 +1184,6 @@ pub fn delete_agent_project(conn: &Connection, id: &str) -> rusqlite::Result<()>
         params![id],
     )?;
     tx.execute("DELETE FROM agent_projects WHERE id = ?1", params![id])?;
-    tx.commit()
-}
-
-/// `ids` is the section's full order, top to bottom.
-pub fn reorder_agent_projects(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    for (index, id) in ids.iter().enumerate() {
-        tx.execute(
-            "UPDATE agent_projects SET sort_order = ?2 WHERE id = ?1",
-            params![id, index as i64],
-        )?;
-    }
     tx.commit()
 }
 
@@ -3947,9 +3934,6 @@ pub fn delete_chain_template(conn: &Connection, id: &str) -> rusqlite::Result<()
 
 // ---------- workspace MCP servers ----------
 
-
-
-
 // ---------- activity log (AI chat history / conversations) ----------
 
 /// Who answered a chat turn, on what, and how long it took — the facts stamped under the reply.
@@ -4300,13 +4284,12 @@ pub fn get_turn_trace(conn: &Connection, id: &str) -> rusqlite::Result<Option<St
     .map(Option::flatten)
 }
 
-/// Provider id that answered the most recent turn of a conversation, when one was recorded.
-/// `None` for a conversation with no turns yet, or whose turns predate provider tracking.
+/// The provider and account the conversation's last recorded turn ran as — the pair a resume token
+/// belongs to. `None` for the account is the system account; `None` overall for a conversation with
+/// no turns yet, or whose turns predate provider tracking.
 ///
 /// This is how the chat command tells whether a stored resume token still belongs to the engine
-/// about to run — see `claude_cmd::session_for_provider`.
-/// The provider and account the conversation's last recorded turn ran as — the pair a resume token
-/// belongs to. `None` for the account is the system account.
+/// about to run — see `claude_cmd::session_for_engine`.
 pub fn last_turn_engine(
     conn: &Connection,
     project_id: &str,
@@ -5623,7 +5606,6 @@ mod tests {
         .unwrap();
         (conn, project.id)
     }
-
 
     /// A repository conversation is titled once, at its first answer, and never over a title it
     /// already has — typed or written.
@@ -7139,7 +7121,6 @@ ok", "").unwrap().unwrap();
         resume_chain(conn, &detail.chain.id).unwrap();
         detail
     }
-
 
     fn gate_cleared_of(conn: &Connection, step_id: &str) -> i64 {
         conn.query_row(

@@ -179,23 +179,3 @@ pub fn ai_account_set_workspace_default(
     Ok(())
 }
 
-/// The account a run of `provider` for `task` in `workspace_id` would use right now — what the
-/// read-only engine chips name, so they agree with what will actually run. `None` in the answer's
-/// `account_id` is the system account.
-#[tauri::command]
-pub fn ai_account_resolve(
-    db: State<'_, Db>,
-    provider: String,
-    task: Option<String>,
-    workspace_id: Option<String>,
-) -> Result<Option<String>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    Ok(ai_accounts::resolve(
-        &conn,
-        &provider,
-        task.as_deref(),
-        workspace_id.as_deref(),
-        ai_accounts::Choice::Auto,
-    )
-    .account_id)
-}

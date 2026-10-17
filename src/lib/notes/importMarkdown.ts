@@ -12,9 +12,6 @@ export interface ImportedMarkdown {
   tags: string[];
 }
 
-/** The largest file the importer reads, mirrored from `notes_cmd::MAX_IMPORT_BYTES`. */
-export const MAX_MARKDOWN_IMPORT_BYTES = 5 * 1024 * 1024;
-
 /** What the file picker offers. `.txt` because plenty of Markdown lives under that name. */
 export const MARKDOWN_EXTENSIONS = ["md", "markdown", "mdown", "txt"];
 

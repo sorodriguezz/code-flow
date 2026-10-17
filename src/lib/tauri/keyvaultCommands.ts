@@ -153,9 +153,6 @@ export const keyvaultAddBlob = (itemId: string, name: string, mime: string, byte
  *  an image reaches the screen without writing a decrypted copy to disk. */
 export const keyvaultReadBlob = (id: string) => invoke<string>("keyvault_read_blob", { id });
 
-export const keyvaultSaveBlob = (id: string, path: string) =>
-  invoke<void>("keyvault_save_blob", { id, path });
-
 export const keyvaultDeleteBlob = (id: string) => invoke<void>("keyvault_delete_blob", { id });
 
 // ---------- tools ----------

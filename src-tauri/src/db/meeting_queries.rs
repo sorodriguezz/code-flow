@@ -2,7 +2,7 @@
 //! saved, and the voices the user named — see `crate::meetings`.
 //!
 //! **A meeting belongs to a note** (`note_id`, cascading): purge the note and the meeting goes with
-//! it; the audio folder it leaves behind is swept at boot (`orphan_audio`). It carries the note's
+//! it; the audio folder it leaves behind is swept at boot (`meetings_cmd::start`). It carries the note's
 //! workspace so the per-workspace reads stay one statement, and `rehome_global_rows` moves it with
 //! a note in a global book.
 //!

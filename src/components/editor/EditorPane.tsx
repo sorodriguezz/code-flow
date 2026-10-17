@@ -1879,8 +1879,7 @@ export function EditorPane({
       return;
     }
     // No blame to give: a file HEAD has never seen, a repository with no commits, or an empty file.
-    // Every line of it reads the same, and that is a more useful thing to say than nothing — it is the
-    // case `changedLineRanges` cannot see at all, since an untracked file has no working-diff entry.
+    // Every line of it reads the same, and that is a more useful thing to say than nothing.
     const statusText = hunk ? blameStatusText(hunk, t) : t("blame.notCommitted");
     if (focusedRef.current) useCursorBlameStore.getState().set(groupId, statusText);
 
@@ -2239,7 +2238,7 @@ export function EditorPane({
     // An action with an id rather than `addCommand` with a chord baked in. Still registered on the
     // editor, so it only ever fires with the caret in the code and Monaco swallows it before the
     // browser or another panel sees it — but the *key* now comes from the shortcut registry via
-    // `applyEditorKeybindings`, which is what makes it rebindable like everything else.
+    // `installEditorShortcuts`, which is what makes it rebindable like everything else.
     /**
      * Save, as an action on this editor.
      *

@@ -252,19 +252,6 @@ pub fn list_satellites(registry: tauri::State<SatelliteRegistry>) -> Vec<Satelli
         .unwrap_or_default()
 }
 
-/// What this window is, asked by the window itself at boot.
-///
-/// The satellite already receives its identity in the query string it was opened with, which is
-/// what it paints its first frame from. This exists for the restore path and for anything that
-/// wants to re-read it later without parsing a URL.
-#[tauri::command]
-pub fn satellite_spec(
-    registry: tauri::State<SatelliteRegistry>,
-    label: String,
-) -> Option<SatelliteInfo> {
-    registry.open.lock().ok()?.get(&label).cloned()
-}
-
 /// Opens the window for one app or one repository, or focuses the one already showing it.
 ///
 /// `title` is what the OS window is called — the task bar, the window menu, ⌘` — so it is passed in

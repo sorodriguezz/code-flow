@@ -345,11 +345,6 @@ pub fn remote_close_forward(id: String) {
     remotes::forward::close(&id);
 }
 
-#[tauri::command]
-pub fn remote_close_host_forwards(host_id: String) {
-    remotes::forward::close_host(&host_id);
-}
-
 /// Every live forward, across every host.
 ///
 /// Polled by the status bar rather than pushed, because the interesting change — the far end

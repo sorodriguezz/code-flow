@@ -40,11 +40,6 @@ pub struct MergeOutcome {
     pub conflicts: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConflictFile {
-    pub path: String,
-}
-
 /// The operations git can leave half done, waiting for the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -343,17 +338,6 @@ pub fn fast_forward_only(path: &str, upstream: &str) -> Result<bool, String> {
     Err(format!("The checked-out branch and {upstream} have diverged — bring it up to date first (a rebase or a merge), then run this again"))
 }
 
-pub fn is_merging(path: &str) -> Result<bool, String> {
-    let repo = open(path)?;
-    Ok(repo.state() == RepositoryState::Merge)
-}
-
-pub fn list_conflicts(path: &str) -> Result<Vec<ConflictFile>, String> {
-    let repo = open(path)?;
-    let index = repo.index().map_err(|e| e.message().to_string())?;
-    Ok(conflict_paths(&index)?.into_iter().map(|path| ConflictFile { path }).collect())
-}
-
 /// The three conflicting versions of a single file, decoded to text from the merge index stages.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConflictVersions {
@@ -546,21 +530,6 @@ pub(super) fn commit_in_progress(
     Ok(oid.to_string())
 }
 
-pub fn complete_merge(path: &str, message: &str) -> Result<String, String> {
-    let repo = open(path)?;
-    // The lock is checked in `commit_in_progress`. Aborting stays available, so a merge locked
-    // mid-flight still has a way out.
-    if repo.state() != RepositoryState::Merge {
-        return Err("no merge in progress".to_string());
-    }
-    // Hooks or signing: `git commit` concludes the merge instead — see `features.rs`.
-    if super::features::detect_repo(&repo)?.commits_via_cli() {
-        return super::features::commit_via_cli(path, Some(message), super::features::CliCommit::New, None);
-    }
-    let sig = repo_signature(&repo)?;
-    commit_in_progress(&repo, OperationKind::Merge, Some(message), sig)
-}
-
 /// "Continue" on the conflicts banner, for the operations this module finishes itself: commits the
 /// resolution of a merge, revert or cherry-pick with `message` (or the prepared one).
 pub fn continue_operation(path: &str, message: Option<&str>) -> Result<String, String> {
@@ -750,10 +719,6 @@ pub fn abort_operation(path: &str) -> Result<(), String> {
     }
     repo.cleanup_state().map_err(|e| e.message().to_string())?;
     Ok(())
-}
-
-pub fn abort_merge(path: &str) -> Result<(), String> {
-    abort_operation(path)
 }
 
 #[cfg(test)]
@@ -1012,7 +977,7 @@ mod tests {
         assert!(state.message.as_deref().unwrap_or("").starts_with("Merge branch"), "{state:?}");
         assert!(!state.message.unwrap().contains('#'), "comment lines are dropped");
 
-        abort_merge(path).unwrap();
+        abort_operation(path).unwrap();
 
         assert_eq!(read(&dir, "a.txt"), "ours\n", "the conflicted file is back to HEAD");
         assert_eq!(read(&dir, "b.txt"), "unrelated local edit\n", "the unrelated edit survived");
@@ -1053,7 +1018,7 @@ mod tests {
         assert!(dir.join("added/by/feature.txt").exists());
         assert!(!dir.join("b.txt").exists());
 
-        abort_merge(path).unwrap();
+        abort_operation(path).unwrap();
 
         assert!(!dir.join("added/by/feature.txt").exists(), "the merge's new file is gone");
         assert!(!dir.join("added").exists(), "and the folders it made for it");

@@ -124,9 +124,6 @@ export interface ContainerSummary {
   stats?: { cpu: string; memory: string; memoryPercent: string; network: string; disk: string; processes: string };
 }
 
-/** What an engine lists. */
-export type EngineList = "containers" | "images" | "volumes" | "networks";
-
 /** The Kubernetes kinds the panel lists, in its order (`kube::KINDS`). */
 export const KUBE_KINDS = [
   "pods",
@@ -145,8 +142,6 @@ export const KUBE_KINDS = [
   "namespaces",
 ] as const;
 export type KubeKind = (typeof KUBE_KINDS)[number];
-
-export const CLUSTER_KINDS: ReadonlySet<string> = new Set(["nodes", "namespaces"]);
 
 /** What a selection points at: a row of an engine list, a Compose project, or a Kubernetes object. */
 export interface ContainerSelection {

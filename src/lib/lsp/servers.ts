@@ -299,15 +299,6 @@ export const LANGUAGE_SERVERS: LanguageServer[] = [
   },
 ];
 
-export function serverById(id: string): LanguageServer | null {
-  return LANGUAGE_SERVERS.find((server) => server.id === id) ?? null;
-}
-
-/** Every server that claims this Monaco language — more than one is normal. */
-export function serversForLanguage(language: string): LanguageServer[] {
-  return LANGUAGE_SERVERS.filter((server) => server.languages.includes(language));
-}
-
 /** The servers worth starting for a repo whose root contains `rootEntries`.
  *
  * A server with no `rootFiles` claims everything: YAML and shell files turn up in any repo, and

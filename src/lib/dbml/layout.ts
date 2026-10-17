@@ -7,7 +7,7 @@ import {
 } from "../db/erLayout";
 import type { DiagramNode } from "../db/erLayout";
 import type { DbDiagramColumn, DbSchemaDiagram } from "../../types/database";
-import { qualify, type DbmlSchema } from "./types";
+import type { DbmlSchema } from "./types";
 
 /**
  * Where the boxes go — by handing the schema to the layout engine the Database workspace already
@@ -439,11 +439,6 @@ function namePartOf(id: string): string {
   return dot === -1 ? id : id.slice(dot + 1);
 }
 
-/** The id `erLayout` will give this table's node, which is the same one `qualify` produced. */
-export function nodeIdOf(schema: string, name: string): string {
-  return qualify(schema, name);
-}
-
 // ---------------------------------------------------------------------------
 // Dragged positions
 // ---------------------------------------------------------------------------
@@ -715,7 +710,6 @@ function parse(payload: string | undefined, take: (id: string, value: unknown) =
     // their arrangement rather than cost the user their schema.
   }
 }
-
 
 /**
  * Puts a document back together for storage.

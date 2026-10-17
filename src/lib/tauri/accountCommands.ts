@@ -70,6 +70,3 @@ export const aiAccountLogout = (provider: string, accountId: string | null) =>
 export const aiAccountSetWorkspaceDefault = (workspaceId: string, provider: string, account: string) =>
   invoke<void>("ai_account_set_workspace_default", { workspaceId, provider, account });
 
-/** The account an automatic run would use right now — `null` is the system account. */
-export const aiAccountResolve = (provider: string, task?: string | null, workspaceId?: string | null) =>
-  invoke<string | null>("ai_account_resolve", { provider, task: task ?? null, workspaceId: workspaceId ?? null });

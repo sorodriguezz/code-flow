@@ -125,9 +125,6 @@ export const remoteOpenForward = (hostId: string, forward: ForwardSpec) =>
 
 export const remoteCloseForward = (id: string) => invoke<void>("remote_close_forward", { id });
 
-export const remoteCloseHostForwards = (hostId: string) =>
-  invoke<void>("remote_close_host_forwards", { hostId });
-
 /** Polled rather than pushed: the interesting change — the far end dying — produces no event, and
  *  is noticed by the backend finding the child gone when something asks. */
 export const remoteListForwards = () => invoke<ActiveForward[]>("remote_list_forwards");

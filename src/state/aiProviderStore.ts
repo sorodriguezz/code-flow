@@ -11,7 +11,7 @@ const KEY = "ai_provider";
 const modelKey = (providerId: string) => `${providerId}_model`;
 
 /** Per-task routing overrides. Blank/unset means the task inherits the global provider — the same
- * fallback chain as `provider_for()` on the Rust side. */
+ * fallback chain as `route_for()` on the Rust side. */
 const taskProviderKey = (task: string) => `ai_provider_${task}`;
 const taskModelKey = (providerId: string, task: string) => `${providerId}_${task}_model`;
 

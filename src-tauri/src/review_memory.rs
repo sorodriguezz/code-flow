@@ -51,7 +51,7 @@ pub struct MemoryFinding {
     /// The one field here that is not a projection of something smaller. It exists because the rest
     /// of this struct deliberately drops `por_que`, `sugerencia` and `ejemplo_*`, and those are what
     /// a comment is made of: a client that holds only the stored findings (the mobile one) could
-    /// otherwise publish nothing better than the subtitle — and because `apply_post_outcome` records
+    /// otherwise publish nothing better than the subtitle — and because `record_published` records
     /// the thread id, that one-line comment would become the thread every later desktop publish
     /// replies to. Written once, at save time, from the same findings the report was rendered from.
     ///

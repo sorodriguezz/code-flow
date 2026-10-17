@@ -37,7 +37,6 @@ export const HTTP_METHODS = [
   "OPTIONS",
   "TRACE",
 ] as const;
-export type HttpMethod = (typeof HTTP_METHODS)[number];
 
 // ---------------------------------------------------------------------------
 // Key/value rows — query params, headers, form fields, path variables
@@ -798,8 +797,6 @@ export type ResolvedBody =
 // ---------------------------------------------------------------------------
 // Streaming protocols — connection handles and events
 // ---------------------------------------------------------------------------
-
-export type StreamKind = "websocket" | "socketio" | "mqtt" | "grpc";
 
 export interface WsConnectRequest {
   url: string;

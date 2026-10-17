@@ -302,13 +302,6 @@ pub async fn ts_notify(command: String, arguments: Value) -> Result<i64, String>
     Ok(seq)
 }
 
-/// Whether a server is up, and for which repository — what the editor asks before wiring providers.
-#[tauri::command]
-pub fn ts_status() -> Option<String> {
-    current().map(|session| session.root.clone())
-}
-
-#[tauri::command]
 pub async fn ts_stop() {
     let session = { slot().lock().ok().and_then(|mut guard| guard.take()) };
     let Some(session) = session else { return };

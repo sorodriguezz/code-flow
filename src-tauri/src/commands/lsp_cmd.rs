@@ -28,12 +28,6 @@ pub async fn lsp_start(
     crate::lsp::start(app, &session_id, &root, &command, &args, initialization_options, settings).await
 }
 
-#[tauri::command]
-pub async fn lsp_stop(session_id: String) -> Result<(), String> {
-    crate::lsp::stop(&session_id).await;
-    Ok(())
-}
-
 /// Every server this project started — what closing the repo calls.
 #[tauri::command]
 pub async fn lsp_stop_project(project_id: String) -> Result<(), String> {
@@ -54,11 +48,6 @@ pub async fn lsp_request(session_id: String, method: String, params: Value) -> R
 #[tauri::command]
 pub fn lsp_notify(session_id: String, method: String, params: Value) -> Result<(), String> {
     crate::lsp::notify(&session_id, &method, params)
-}
-
-#[tauri::command]
-pub fn lsp_running(session_id: String) -> bool {
-    crate::lsp::is_running(&session_id)
 }
 
 /// A running server's capabilities, for a window that joins it rather than starting its own —

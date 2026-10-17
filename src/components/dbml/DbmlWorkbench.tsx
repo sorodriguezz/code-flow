@@ -547,8 +547,7 @@ export function DbmlWorkbench({
   /**
    * The sidecar as it stands, in a ref.
    *
-   * `writeSource` is called by Monaco's own `onChange`, which fires *during* the edit that changed
-   * the text — before React has re-rendered with a new `marks` or `positions`. An operation that
+   * `commitSource` reads it in the same handler that made the edit — before React has re-rendered with a new `marks` or `positions`. An operation that
    * has to change both halves at once (renaming a table also renames the key its mark and its
    * pinned position are filed under) can therefore not do it by setting state: the write would
    * carry the values from the render it started in, and the migration would be lost.
@@ -619,8 +618,8 @@ export function DbmlWorkbench({
    * Called from inside `applyEdit`'s callback, never before it. `applyEdit` has two early exits —
    * a document that does not parse, and an edit that changed nothing — and running ahead of them
    * meant a *refused* rename still moved the mark and the pinned position. Inside the callback the
-   * ordering still works, because `applyEdit` computes the new text before it hands it to Monaco,
-   * so the ref is mutated before `writeSource` reads it from `onChange`.
+   * ordering still works, because `applyEdit` computes the new text before it hands it to
+   * `commitSource`, so the ref is mutated before `commitSource` reads it.
    */
   const moveSidecarKey = (from: string, to: string | null) => {
     const { positions: at, marks: mark } = sidecar.current;
@@ -669,14 +668,14 @@ export function DbmlWorkbench({
    *
    * # Through Monaco, not around it
    *
-   * The edit is applied with `executeEdits` whenever the text pane is mounted, and only falls back
-   * to `writeSource` when it is folded away. That is not a detail: `executeEdits` puts the change on
+   * The edit goes through `commitDoc`, which hands it to Monaco with `executeEdits` whenever the
+   * text pane is mounted. That is not a detail: `executeEdits` puts the change on
    * Monaco's undo stack, so ⌘Z takes back "add a column" exactly as it takes back a keystroke, and
    * the two kinds of edit share one history instead of the visual ones being unreachable from the
    * keyboard. Assigning through the `value` prop instead would reset that stack.
    *
-   * The write still lands in the store the same way, because Monaco's own `onChange` calls
-   * `writeSource` — so there is one path out of here regardless of which branch ran.
+   * The write still lands in the store the same way, because `commitDoc` writes it first — so there
+   * is one path out of here whether or not the text pane is on screen.
    *
    * # Refused while the document does not parse
    *
@@ -721,8 +720,7 @@ export function DbmlWorkbench({
    * A mark used to change no character the editor was showing, so it went straight to `editDoc`
    * with nothing for Monaco to undo. Now it usually does change one, and that change belongs on the
    * same undo stack as every other visual edit — hence `executeEdits`, and the sidecar mutation
-   * before it, because the write comes back out through Monaco's `onChange` → `writeSource`, which
-   * reads the marks from `sidecar.current`.
+   * before it, because `writeLayout` reads the marks from `sidecar.current`.
    *
    * # The store is written first, and unconditionally
    *
@@ -735,7 +733,7 @@ export function DbmlWorkbench({
    *
    * So the store write happens here, first, and Monaco is told afterwards purely so ⌘Z can take the
    * change back. Writing twice costs nothing: `editDoc` returns early on a document identical to the
-   * one it holds, which is what `writeSource` then hands it.
+   * one it holds, which is what Monaco's `onChange` then hands it.
    */
   const writeMark = useCallback(
     (key: string, mark: DbmlMarkKind | null, comment: (current: string) => string) => {
@@ -854,7 +852,7 @@ export function DbmlWorkbench({
    * the box an addition brings is pinned in the middle of the frame (`placeNear`).
    *
    * Called inside an `applyEdit` callback, after `moveSidecarKey` and for the same reason: it writes
-   * `sidecar.current`, which `writeSource` reads when Monaco reports the edit. Anything it cannot do
+   * `sidecar.current`, which `commitSource` reads once the callback returns. Anything it cannot do
    * exactly — the canvas is not on screen, the parser has not loaded, the result does not parse —
    * it leaves alone, and the edit lands the way it always did.
    */

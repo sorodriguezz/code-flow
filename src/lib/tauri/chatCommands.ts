@@ -354,7 +354,6 @@ export const chatSetUnread = (conversationId: string, unread: boolean) =>
  * file's.
  */
 export const CHAT_EFFORTS = ["low", "medium", "high", "max"] as const;
-export type ChatEffort = (typeof CHAT_EFFORTS)[number];
 
 /** Sets the level for every future turn of a conversation. `""` clears it. */
 export const chatSetEffort = (conversationId: string, effort: string) =>
@@ -749,7 +748,6 @@ export const chatSaveOutput = (conversationId: string, relPath: string, destPath
  *  `OUTPUT_PREVIEW_MAX_BYTES`; the chip still offers the file, only the picture is withheld. */
 export const chatReadOutput = (conversationId: string, relPath: string) =>
   invoke<number[]>("chat_read_output", { conversationId, relPath });
-
 
 export const chatSetGroupInstructions = (groupId: string, instructions: string) =>
   invoke<void>("chat_set_group_instructions", { groupId, instructions });

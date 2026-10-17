@@ -80,19 +80,6 @@ export function chainRollup(
   return { ...base, ...chainStatusOf(chain) };
 }
 
-const STEP_COLOR: Record<ChainStepStatus, string> = {
-  pending: "text-[var(--cf-text-muted)]",
-  running: "text-[var(--cf-accent)]",
-  done: "text-[var(--cf-success)]",
-  error: "text-[var(--cf-danger)]",
-  interrupted: "text-[var(--cf-warning)]",
-  skipped: "text-[var(--cf-text-muted)]",
-};
-
-export function stepColor(status: ChainStepStatus): string {
-  return STEP_COLOR[status] ?? STEP_COLOR.pending;
-}
-
 /** Every reason the backend writes as a key rather than as prose, so it can be read back in the
  * reader's language. Anything not in here is a raw engine error and is shown verbatim. */
 const REASON_KEYS = new Set<string>([

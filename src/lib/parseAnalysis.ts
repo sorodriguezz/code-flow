@@ -262,22 +262,6 @@ export function formatFindingAsComment(finding: AnalysisFinding, provider?: stri
   return lines.join("\n");
 }
 
-export interface ReviewCommentInput {
-  content: string;
-  location: FindingLocation | null;
-}
-
-/** The full set of Azure DevOps comment threads for one review: the summary first (Quality
- * Gate + grades + findings table, unanchored), then one thread per finding — anchored to its
- * file/line when the model reported one, a general comment otherwise. */
-export function buildReviewComments(parsed: ParsedAnalysis, date: string): ReviewCommentInput[] {
-  return [
-    // This helper posts every finding, so the summary describes every finding.
-    { content: formatSummaryComment(parsed, date, parsed.findings), location: null },
-    ...parsed.findings.map((f) => ({ content: formatFindingAsComment(f), location: f.location })),
-  ];
-}
-
 /** The instruction text sent to Claude for the "Resolve with AI" action — unlike
  * `formatFindingAsComment` (which omits location because the PR comment is already anchored
  * to that line), this needs the location spelled out since it's the only way Claude knows

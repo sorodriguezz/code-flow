@@ -1,5 +1,4 @@
 import { readLayout, writeLayout } from "./layout";
-import type { DbmlSchema } from "./types";
 
 /**
  * Adding generated DBML to a document that already has some.
@@ -117,7 +116,3 @@ export function mergeDbml(document: string, generated: string): string {
   return writeLayout(body, current.positions);
 }
 
-/** How much a merge would add, for the "3 tables, 2 relations" line in the preview. */
-export function generatedCounts(schema: DbmlSchema): { tables: number; refs: number; enums: number } {
-  return { tables: schema.tables.length, refs: schema.refs.length, enums: schema.enums.length };
-}

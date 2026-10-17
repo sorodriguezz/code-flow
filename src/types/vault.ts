@@ -232,11 +232,6 @@ export interface VaultFolder extends VaultFolderRow {
   children: VaultFolder[];
 }
 
-/** One row of the explorer tree. */
-export type VaultTreeRow =
-  | { kind: "folder"; id: string; depth: number; folder: VaultFolder; itemCount: number }
-  | { kind: "item"; id: string; depth: number; item: VaultItem };
-
 /** How the list is ordered. */
 export type VaultSort = "recent" | "title" | "created";
 

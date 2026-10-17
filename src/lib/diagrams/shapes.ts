@@ -176,11 +176,6 @@ export const SHAPES = {
 
 export type Kind = keyof typeof SHAPES;
 
-export const KINDS = Object.keys(SHAPES) as Kind[];
-
-/** The kinds a node's `group` may point at. */
-export const CONTAINER_KINDS = KINDS.filter((kind) => "container" in SHAPES[kind]);
-
 /**
  * The near misses, mapped rather than dropped.
  *
@@ -305,8 +300,6 @@ export const EDGE_STYLES = {
 } as const;
 
 export type EdgeKind = keyof typeof EDGE_STYLES;
-
-export const EDGE_KINDS = Object.keys(EDGE_STYLES) as EdgeKind[];
 
 const EDGE_ALIASES: Record<string, EdgeKind> = {
   arrow: "flow", default: "flow", solid: "flow", next: "flow", calls: "flow", uses: "dependency",

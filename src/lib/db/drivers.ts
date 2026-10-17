@@ -192,12 +192,6 @@ export function driverFileVersion(file: DriverFileDef): string {
   return file.maven?.split(":")[2] ?? file.name;
 }
 
-/** The driver's version as the Drivers list shows it — its first file's. */
-export function driverVersion(def: DriverDef): string | null {
-  const first = def.files?.[0];
-  return first ? driverFileVersion(first) : null;
-}
-
 /**
  * The engine metadata a connection's form and tabs read, dressed for its driver: the driver's name
  * rather than the session's, its default port, its word for "database".
@@ -215,14 +209,6 @@ export function driverEngineInfo(def: DriverDef | null, kind: DbKind): DbEngineI
     urlPlaceholder: def.engine === "jdbc" ? def.urls?.[0]?.template ?? base.urlPlaceholder : base.urlPlaceholder,
     file: def.engine === "jdbc" ? Boolean(def.file) : base.file,
   };
-}
-
-/** `driverEngineInfo` for a saved row. Custom drivers need their settings — see `useDriverStore`. */
-export function rowEngineInfo(
-  row: Pick<DbConnectionRow, "kind" | "spec">,
-  settings: readonly DbDriverSettings[] = [],
-): DbEngineInfo {
-  return driverEngineInfo(effectiveDriver(rowDriverId(row), settings), row.kind);
 }
 
 /** A blank connection for a driver: its engine's defaults, then the driver's own. */

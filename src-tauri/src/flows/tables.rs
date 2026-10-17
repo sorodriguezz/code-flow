@@ -148,16 +148,6 @@ pub fn delete(conn: &Connection, table_id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Sets the column order a person arranged in the grid; unknown names are dropped, missing ones
-/// kept at the end.
-pub fn set_columns(conn: &Connection, table_id: &str, order: &[String]) -> Result<(), String> {
-    let table = get(conn, table_id).map_err(|e| e.to_string())?.ok_or("This table no longer exists")?;
-    let mut columns: Vec<String> = order.iter().filter(|c| table.columns.contains(c)).cloned().collect();
-    let rest: Vec<String> = table.columns.iter().filter(|c| !columns.contains(c)).cloned().collect();
-    columns.extend(rest);
-    write_columns(conn, table_id, &columns).map_err(|e| e.to_string())
-}
-
 fn write_columns(conn: &Connection, table_id: &str, columns: &[String]) -> rusqlite::Result<()> {
     let text = serde_json::to_string(columns).unwrap_or_else(|_| "[]".into());
     conn.execute("UPDATE flow_data_tables SET columns = ?2, updated_at = ?3 WHERE id = ?1", params![table_id, text, now()])?;
@@ -317,32 +307,6 @@ pub fn clear(conn: &Connection, table_id: &str) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM flow_data_rows WHERE table_id = ?1", [table_id])
 }
 
-/// Removes a column: the field goes from every row and from the column list.
-pub fn drop_column(conn: &Connection, table_id: &str, column: &str) -> Result<(), String> {
-    let table = get(conn, table_id).map_err(|e| e.to_string())?.ok_or("This table no longer exists")?;
-    let (all, _) = rows(conn, table_id, 0, 10_000, None).map_err(|e| e.to_string())?;
-    let mut offset = 0;
-    let mut batch = all;
-    loop {
-        for row in &batch {
-            if let Value::Object(mut fields) = row.data.clone() {
-                if fields.remove(column).is_some() {
-                    let text = serde_json::to_string(&Value::Object(fields)).map_err(|e| e.to_string())?;
-                    conn.execute("UPDATE flow_data_rows SET data = ?3 WHERE table_id = ?1 AND row_key = ?2", params![table_id, row.key, text])
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-        }
-        if batch.len() < 10_000 {
-            break;
-        }
-        offset += 10_000;
-        batch = rows(conn, table_id, offset, 10_000, None).map_err(|e| e.to_string())?.0;
-    }
-    let columns: Vec<String> = table.columns.into_iter().filter(|c| c != column).collect();
-    write_columns(conn, table_id, &columns).map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,13 +376,10 @@ mod tests {
     }
 
     #[test]
-    fn columns_are_dropped_from_every_row() {
+    fn a_table_clears_and_deletes() {
         let conn = db();
         let t = create(&conn, "w1", "T").unwrap();
         put(&conn, &t.id, Some("a"), &json!({"x": 1, "y": 2}), Write::Upsert).unwrap();
-        drop_column(&conn, &t.id, "x").unwrap();
-        assert_eq!(row(&conn, &t.id, "a").unwrap().unwrap().data, json!({"y": 2}));
-        assert_eq!(get(&conn, &t.id).unwrap().unwrap().columns, vec!["y"]);
         assert_eq!(clear(&conn, &t.id).unwrap(), 1);
         delete(&conn, &t.id).unwrap();
         assert!(get(&conn, &t.id).unwrap().is_none());

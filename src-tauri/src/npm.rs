@@ -128,7 +128,6 @@ struct Abbreviated {
 }
 
 /// Everything published for one package.
-#[tauri::command]
 pub async fn npm_package_versions(name: String) -> Result<PackageVersions, String> {
     if !valid_package_name(&name) {
         return Err(format!("Not a package name: {name}"));

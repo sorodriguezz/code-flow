@@ -291,10 +291,6 @@ export const backupRunNow = () => invoke<RunOutcome>("backup_run_now");
 export const backupPickAndInspect = () =>
   invoke<BackupInfo | null>("backup_pick_and_inspect");
 
-/** The newest backup already in the configured folder — the fresh-machine path. */
-export const backupInspectConfigured = () =>
-  invoke<BackupInfo | null>("backup_inspect_configured");
-
 /**
  * Every backup at the configured destination, newest first, each read without its password.
  *
@@ -303,10 +299,6 @@ export const backupInspectConfigured = () =>
  */
 export const backupListAtDestination = () =>
   invoke<BackupInfo[]>("backup_list_at_destination");
-
-export const backupInspectDrive = () => invoke<BackupInfo | null>("backup_inspect_drive");
-
-export const backupInspectOneDrive = () => invoke<BackupInfo | null>("backup_inspect_onedrive");
 
 export const backupRestoreFile = (path: string, passphrase: string, replace: boolean) =>
   invoke<RestoreReport>("backup_restore_file", { path, passphrase, replace });

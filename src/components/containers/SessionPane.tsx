@@ -12,7 +12,7 @@ import { useT } from "../../state/languageStore";
  *
  * Opened when first shown and closed when unmounted or when what it shows changes (`requestKey`).
  * A session that ends — `logs -f` stops with its container, a shell exits — leaves its output on
- * screen and offers to reconnect; `autoReconnect` does it by itself when the caller says the
+ * screen and offers to reconnect, and reconnects by itself when the caller says the
  * container is back (`liveToken` changes).
  *
  * A pull, a build or a Compose command is not shown here: those run to their end as the manager's

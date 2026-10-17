@@ -47,8 +47,7 @@ import type { FileEntry } from "../types/domain";
  *
  * The same trade `rules.ts` makes: the written string is the *interface*, not the storage. It is
  * split when edited and stored split, so matching — which runs over every entry of every listing —
- * never re-parses a line. `parseChildren`/`formatChildren` are the only two places the two forms
- * meet.
+ * never re-parses a line.
  */
 
 /**
@@ -466,49 +465,3 @@ export const DEFAULT_NESTING_PATTERNS: NestingPattern[] = [
   },
 ];
 
-/** The comma-separated line the panel edits, read into the stored form. Blank entries are dropped
- *  rather than kept, so a trailing comma while typing does not become a template that expands to
- *  nothing and matches every file whose name is empty. */
-export function parseChildren(input: string): string[] {
-  return input
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
-/** The inverse, for showing a stored pattern in the field. */
-export function formatChildren(children: string[]): string {
-  return children.join(", ");
-}
-
-/**
- * The pattern read back as the sentence it means, for the line under the fields.
- *
- * The capture is the literal `example` — a neutral placeholder, never a name out of the repository
- * that happens to be open. This is the same device `rules.ts` describes: printing what was parsed
- * while it is being typed is what lets a pattern that means something other than what was intended
- * say so, instead of quietly nesting nothing.
- */
-export function previewOf(pattern: NestingPattern): { parent: string; children: string[] } {
-  const parent = pattern.parent.trim().replace("*", "example");
-  const capture = pattern.parent.includes("*") ? "example" : "";
-  return {
-    parent,
-    children: pattern.children.map((template) =>
-      expandTemplate(template.trim(), capture, parent).replace(/\*/g, "example"),
-    ),
-  };
-}
-
-/**
- * A fresh pattern id.
- *
- * The same shape as `newRuleId`, and — for the same reason that one moved out of `IconRulesPanel` —
- * next to the type it identifies rather than inside the panel: the id shape is part of what a
- * pattern *is*, and a second minter written elsewhere is a second chance to change it and only
- * remember one of them. Ids only have to be unique within one small local list, so a value off the
- * clock is enough and keeps the settings row readable when somebody opens it.
- */
-export function newNestingPatternId(): string {
-  return `n${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
-}

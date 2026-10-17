@@ -26,7 +26,7 @@ const { EMPTY_QUERY_OPTIONS } = await import("../types/database");
 const FK = { column: "profesional_id", ref_schema: "public", ref_table: "profesionales", ref_column: "id" };
 const NODE = { kind: "table" as const, database: "app", schema: "public", name: "citas" };
 
-/** A data tab as `restoreTab` builds it at start-up: nothing loaded, no columns, no keys. */
+/** A data tab as `rehydrateTab` builds it at start-up: nothing loaded, no columns, no keys. */
 function restoredTab(id: string): DbDataTab {
   return {
     id,

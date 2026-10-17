@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import type { GitDoneEvent, GitProgressEvent } from "../../types/domain";
+import type { GitProgressEvent } from "../../types/domain";
 import type {
   StreamMessage as ApiStreamMessage,
   StreamStatusEvent as ApiStreamStatusEvent,
@@ -10,9 +10,6 @@ import { WINDOW } from "../windowIdentity";
 
 export const onGitProgress = (handler: (event: GitProgressEvent) => void) =>
   listen<GitProgressEvent>("git:progress", (e) => handler(e.payload));
-
-export const onGitDone = (handler: (event: GitDoneEvent) => void) =>
-  listen<GitDoneEvent>("git:done", (e) => handler(e.payload));
 
 export interface TerminalOutputEvent {
   id: string;
@@ -194,25 +191,12 @@ export const onAppForeground = (handler: () => void) => listen("app:foreground",
 export const onBackupRunning = (handler: (running: boolean) => void) =>
   listen<boolean>("backup:running", (e) => handler(e.payload));
 
-export interface AiOutputEvent {
-  run_id: string;
-  stream: "stdout" | "stderr";
-  line: string;
-}
-
-/** One line of a running AI process's output, as it happens.
- *
- * Superseded by `onAiOutputBatch` for anything that renders the stream — see there for why. Kept
- * for callers that genuinely want a per-line callback. */
-export const onAiOutput = (handler: (event: AiOutputEvent) => void) =>
-  listen<AiOutputEvent>("ai:output", (e) => handler(e.payload));
-
 export interface AiOutputBatchEvent {
   run_id: string;
   lines: { stream: "stdout" | "stderr"; line: string }[];
 }
 
-/** The same output as `onAiOutput`, coalesced into ~100 ms batches.
+/** A run's output lines, coalesced into ~100 ms batches.
  *
  * An agentic turn with `--output-format stream-json --verbose` emits 20-60 lines a second, and a
  * per-line subscription turns each one into an IPC message, a store write and a render. The batch
@@ -354,11 +338,6 @@ export interface LspDiagnosticsEvent {
 
 export const onLspDiagnostics = (handler: (event: LspDiagnosticsEvent) => void) =>
   listen<LspDiagnosticsEvent>("lsp:diagnostics", (e) => handler(e.payload));
-
-/** Indexing. `rust-analyzer` spends its first minute here and answers nothing useful until it is
- *  done, so this is the difference between a status line and an editor that looks broken. */
-export const onLspProgress = (handler: (event: { session_id: string; params: unknown }) => void) =>
-  listen<{ session_id: string; params: unknown }>("lsp:progress", (e) => handler(e.payload));
 
 /** The server's process ended — crashed, killed, or exited. Whatever was registered against it is
  *  now answering nothing. */

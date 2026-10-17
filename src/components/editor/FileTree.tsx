@@ -737,7 +737,7 @@ export function FileTree({
   /**
    * The file rows whose nest is unfolded.
    *
-   * Its own Set for exactly the reason `openScripts` is, and the failure is worse here. `refresh()`
+   * Its own Set rather than more entries in `expanded`, and that matters. `refresh()`
    * calls `listDir` on every member of `expanded`; a *file* path in there reaches
    * `fsops::list_dir`, which calls `read_dir` on a file and fails — and the `() => null` that
    * catches it drops that entry, so the directory falls out of the listing cache entirely. On top

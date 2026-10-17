@@ -1089,7 +1089,7 @@ function PullRequestsSection({ project }: { project: Project }) {
    * The thing being avoided is one call, not four. Of what this section starts on mount, the two
    * connection reads and `autoLinkProject` are local — `getSetting` against SQLite and a libgit2
    * read of the repo's own remote URLs (see `auto_link_project`, which isn't even async). The one
-   * that leaves the machine is `listPullRequests`: a round trip to GitHub / Azure DevOps / GitLab,
+   * that leaves the machine is the pull-request listing: a round trip to GitHub / Azure DevOps / GitLab,
    * on every repository you click, whether or not anyone was going to look at the answer. That is
    * what made this the slow part of opening a repo — and on a rate-limited host, the expensive one.
    *

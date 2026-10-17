@@ -2,7 +2,6 @@ import {
   ArrowRightLeft,
   Copy,
   Download,
-  Eraser,
   ExternalLink,
   FileCode2,
   Pause,
@@ -200,21 +199,6 @@ export function engineMenu(args: {
     ];
   }
   return [];
-}
-
-/** The runtime's own menu: cleaning up what nothing uses — in `context`. */
-export function pruneMenu(runtime: RuntimeId, context: string | null, t: T, act: Act): MenuItem[] {
-  if (runtime === "ctr" || runtime === "kubernetes") return [];
-  const prune = (object: string, confirm: TranslationKey, label: TranslationKey, options?: Record<string, unknown>) => () =>
-    void confirmAction(t(confirm, { context: where(runtime, context, t) }), true, t("containers.prune.confirm")).then((ok) => {
-      if (ok) void act({ runtime, context, object, action: "prune", ids: [], label: t(label), options });
-    });
-  return [
-    { label: t("containers.prune.containers"), icon: Eraser, onClick: prune("container", "containers.prune.confirmContainers", "containers.prune.doneContainers") },
-    { label: t("containers.prune.images"), icon: Eraser, onClick: prune("image", "containers.prune.confirmImages", "containers.prune.doneImages") },
-    { label: t("containers.prune.volumes"), icon: Eraser, onClick: prune("volume", "containers.prune.confirmVolumes", "containers.prune.doneVolumes") },
-    { label: t("containers.prune.networks"), icon: Eraser, onClick: prune("network", "containers.prune.confirmNetworks", "containers.prune.doneNetworks") },
-  ];
 }
 
 /** A Kubernetes object's menu, by kind. Every action goes to `context`, the one the row was read from —

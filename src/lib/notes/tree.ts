@@ -46,7 +46,7 @@ export function buildBookTree(rows: NoteBookRow[]): NoteBook[] {
  * Notes come after subbooks within a book — the arrangement every file tree uses, and the one
  * that keeps a book's own contents from being pushed off screen by its children's.
  *
- * `visibleNotes` is already filtered (by search, by tag): a book is drawn whether or not
+ * `notes` is already filtered (by search, by tag): a book is drawn whether or not
  * anything in it survived the filter, because a book that disappears while you type is a book
  * you cannot drop a note into. What changes is its count. A caller that is *searching* passes every
  * book as expanded — see `NoteExplorer` — because a match hidden inside a shut book is a search

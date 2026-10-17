@@ -84,10 +84,6 @@ fn session(id: &str) -> Option<Arc<Session>> {
     registry().lock().ok()?.get(id).cloned()
 }
 
-pub fn is_running(id: &str) -> bool {
-    session(id).is_some()
-}
-
 /// The capabilities of a server that is already running, or `None` when there is none.
 ///
 /// For a floating editor window (`lib/editorIslands`): it holds one file of a project whose servers
@@ -400,7 +396,7 @@ pub async fn start(
         // each `rx` in `request` then resolves as `Err`, which is the arm that reports "closed
         // before replying". Without this that arm is unreachable — the `Arc<Session>` holding the
         // map outlives the stream, so nothing is dropped and every in-flight call takes the full
-        // `REQUEST_TIMEOUT` instead. The one that matters is `initialize`: `start_for_project`
+        // `REQUEST_TIMEOUT` instead. The one that matters is `initialize`: `lsp/client`'s `startForProject`
         // awaits it, so a single binary that exits on launch stalled the whole sweep for twenty
         // seconds, during which no server at all was told about an open file.
         if let Ok(mut pending) = reader_session.pending.lock() {
@@ -450,7 +446,6 @@ pub async fn start(
 
     Ok(capabilities)
 }
-
 
 /// The slice of `settings` one configuration item asked for.
 ///

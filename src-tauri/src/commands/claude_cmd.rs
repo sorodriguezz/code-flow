@@ -153,7 +153,7 @@ pub(crate) enum AiTask {
     Logs,
     /// «Reuniones»: minutes, decisions, tasks… written from a meeting's transcript, and questions
     /// about it answered. Text-only — the transcript goes on stdin — so it routes anywhere. Unset, it
-    /// takes the [`AiTask::Notes`] row's engine (see [`provider_for`]): a meeting is written into a
+    /// takes the [`AiTask::Notes`] row's engine (see [`route_for`]): a meeting is written into a
     /// note, and someone who chose an engine for their notes has chosen it for this too.
     Meetings,
     /// «Resumen hablado»: a long answer cut to two or three sentences before the thinking mark reads
@@ -274,7 +274,7 @@ pub(crate) fn routed_providers(conn: &Connection) -> Result<std::collections::Ha
         let routed = queries::get_setting(conn, &format!("ai_provider_{}", task.key()))
             .map_err(|e| e.to_string())?
             .filter(|p| !p.trim().is_empty());
-        // Blank counts as unset here for the same reason it does in `provider_for`: clearing a row
+        // Blank counts as unset here for the same reason it does in `route_for`: clearing a row
         // in the UI means "inherit", and the inherited value is already in the set.
         if let Some(provider) = routed {
             providers.insert(provider);
@@ -1642,7 +1642,7 @@ mod tests {
         );
     }
 
-    /// Blank is unset, matching `provider_for`: clearing a row in the UI means "inherit", and the
+    /// Blank is unset, matching `route_for`: clearing a row in the UI means "inherit", and the
     /// inherited value is the global default that is already in the set. Reading it literally would
     /// put an empty provider id in the set, which matches no engine and is asked for nothing — a
     /// silent no-op that is only ever confusing.

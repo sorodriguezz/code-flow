@@ -640,7 +640,7 @@ export default function App() {
         //
         // It has to be here rather than left to `DataDirsNotice`'s own effect. A blocking verdict
         // means the migration copied nothing, which means the app booted on a scratch database,
-        // which means there is no `requirements_checked` row and no `tour_seen` row — so
+        // which means there is no `requirements_checked` row and no `tour_completed` row — so
         // `initRequirements` re-runs, finds all three directories perfectly writable (they are; the
         // migration failed for some other reason), and returns `true`. Eleven hundred milliseconds
         // later the 32-step tour would open at `z-[100000]` directly over the unclosable screen the

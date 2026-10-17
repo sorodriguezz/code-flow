@@ -1062,7 +1062,7 @@ pub mod task {
     /// Working-copy analysis: the pre-commit review.
     pub const ANALYZE: &str = "analyze";
     /// A pull-request review — one chunk of a chunked one, or a whole small PR in a single pass;
-    /// both go through `review_chunk`, so both count here.
+    /// both go through `review_pass`, so both count here.
     pub const REVIEW_PR: &str = "review-pr";
     /// Applying a proposed fix to one finding.
     pub const FIX_FINDING: &str = "fix-finding";
@@ -3883,7 +3883,7 @@ pub async fn meeting_answer(
 ///
 /// Smaller than [`MAX_NOTE_CONTEXT_CHARS`] on purpose: mxGraph XML is mostly geometry and style,
 /// which tells a model nothing it can use and costs tokens by the thousand. What is worth sending
-/// is the labels, and `diagram_outline` extracts those before this cap ever applies.
+/// is the labels, and the frontend's `documentOutline` extracts those before this cap ever applies.
 pub const MAX_DIAGRAM_CONTEXT_CHARS: usize = 8_000;
 
 /// The same cap for [`fill_rows`], and three times the size on purpose.
@@ -5464,7 +5464,7 @@ pub fn user_stories_prompt(prompt_template: &str) -> &str {
 /// what lets this run in a workspace with no repository open at all, on any provider including a
 /// local model behind Cline.
 ///
-/// Returns the model's raw answer; the caller parses it with [`extract_json_block`], because what
+/// Returns the model's raw answer; the caller parses it (`parse_or_repair` in `stories_cmd`), because what
 /// to do with a malformed answer (retry, show it, keep the previous batch) is not this layer's call.
 pub async fn generate_user_stories(
     engine: &dyn AiEngine,

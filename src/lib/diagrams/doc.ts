@@ -86,7 +86,3 @@ export function emptyDoc(format: DiagramFormat = DEFAULT_FORMAT): string {
   return "";
 }
 
-/** Whether a diagram's document is a schema rather than a drawing. The one branch on `format`. */
-export function isSchemaFormat(format: DiagramFormat): boolean {
-  return format === FORMAT_DBML;
-}

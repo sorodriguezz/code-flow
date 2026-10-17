@@ -64,9 +64,7 @@ const MAX_PROBES_PER_TICK = 2;
 /** Rotates through the shares that don't own the active tab. */
 let probeCursor = 0;
 
-let probeTimer: ReturnType<typeof setInterval> | null = null;
 let pushTimer: ReturnType<typeof setTimeout> | null = null;
-let unsubscribe: (() => void) | null = null;
 let started = false;
 
 /** Rounds in flight, so a slow one never overlaps itself. */
@@ -163,17 +161,6 @@ function activeShares(): string[] {
     .map((share) => share.collection_id);
 }
 
-/** Forces a round on everything shared in this workspace, ignoring the backoff. */
-export async function syncNow(): Promise<SyncResult[]> {
-  const results: SyncResult[] = [];
-  for (const id of activeShares()) {
-    nextAttempt.delete(id);
-    const result = await syncCollection(id);
-    if (result) results.push(result);
-  }
-  return results;
-}
-
 // ---------------------------------------------------------------------------
 // The heartbeat
 // ---------------------------------------------------------------------------
@@ -266,8 +253,8 @@ function tick() {
   // Gated on `syncAuto` and nothing else. The project a round talks to comes from the share —
   // `syncCollection` and `probe` both read `share.project_url` — and the settings field is only
   // where a *new* share would be created. Requiring one here meant a machine that had only ever
-  // accepted invitations, which by design has no project of its own (`disownInheritedProject`
-  // clears it, and never setting one is the normal state for a guest), returned on the first line
+  // accepted invitations, which by design has no project of its own (never setting one is the
+  // normal state for a guest), returned on the first line
   // of every heartbeat: it never probed, so it never pulled, so a teammate's edits arrived only if
   // the guest happened to press "sync now". Their own edits still went out, because the push is
   // scheduled from the store subscription below, which never asked about this field — which is
@@ -360,9 +347,9 @@ export function startSyncWatcher() {
 
   void useCollabStore.getState().refresh();
 
-  probeTimer = setInterval(tick, PROBE_MS);
+  setInterval(tick, PROBE_MS);
 
-  unsubscribe = useApiStore.subscribe((state, prev) => {
+  useApiStore.subscribe((state, prev) => {
     if (
       state.collections === prev.collections &&
       state.folders === prev.folders &&
@@ -385,17 +372,3 @@ export function startSyncWatcher() {
   });
 }
 
-/** Only for tests and teardown; the watcher otherwise lives as long as the window. */
-export function stopSyncWatcher() {
-  if (probeTimer) clearInterval(probeTimer);
-  if (pushTimer) clearTimeout(pushTimer);
-  unsubscribe?.();
-  probeTimer = null;
-  pushTimer = null;
-  unsubscribe = null;
-  started = false;
-  running.clear();
-  failures.clear();
-  nextAttempt.clear();
-  dirty.clear();
-}

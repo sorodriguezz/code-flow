@@ -89,7 +89,7 @@ export function removePane(node: PaneNode, id: string): PaneNode | null {
   return { ...node, a, b };
 }
 
-/** Sets one divider's position, found by the split's own path. See [`pathTo`]. */
+/** Sets one divider's position, found by the split's own path — the dotted `a`/`b` steps from the root that `PaneTree` builds. */
 export function setRatio(node: PaneNode, path: string, ratio: number): PaneNode {
   if (node.kind === "leaf") return node;
   if (path === "") return { ...node, ratio: clampRatio(ratio) };

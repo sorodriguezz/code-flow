@@ -19,11 +19,6 @@ import type { TsRenameGroup } from "./workspaceEdit";
 /** Starts the server for a repository. Resolves with the `tsserver.js` that answered. */
 export const tsStart = (repoPath: string) => invoke<string>("ts_start", { repoPath });
 
-/** The repository a server is running for, or `null`. */
-export const tsStatus = () => invoke<string | null>("ts_status");
-
-export const tsStop = () => invoke<void>("ts_stop");
-
 /** A request that expects an answer. Rejects on timeout and on a refusal from the server. */
 export const tsRequest = <T>(command: string, args: unknown) =>
   invoke<T>("ts_request", { command, arguments: args });

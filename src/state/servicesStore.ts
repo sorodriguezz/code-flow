@@ -375,18 +375,6 @@ export function deriveRunning(
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** A stable empty list, for the same reason `workspaceStore` keeps one: a selector that builds `[]`
- *  hands back a new reference every call, which `useSyncExternalStore` reads as a change. */
-const NO_SERVICES: ServiceRow[] = [];
-
-/** The services in one group — `null` for the ungrouped ones. */
-export function useServicesInGroup(groupId: string | null): ServiceRow[] {
-  return useServicesStore((s) => {
-    const found = s.services.filter((service) => service.group_id === groupId);
-    return found.length ? found : NO_SERVICES;
-  });
-}
-
 /** How a status is coloured, in one place so the tree, the console header and the status bar agree. */
 export const STATUS_TONE: Record<ServiceStatus, string> = {
   stopped: "var(--cf-text-muted)",

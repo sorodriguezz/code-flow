@@ -5,7 +5,7 @@
 //! **gate policy** answers the other question the team reads as a traffic light: which severities
 //! make the Quality Gate fail.
 //!
-//! Both used to live as a paragraph inside the prompt (`review_level_directive`), which meant the
+//! Both used to live as a paragraph inside the prompt, which meant the
 //! numbers existed only in the model's reading of them: two runs of the same PR at the same level
 //! could filter differently and nothing noticed. Here they are values — resolved once, published to
 //! the model in the bundle header, applied by [`super::merge`], and frozen into the run's memory so

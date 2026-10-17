@@ -117,4 +117,3 @@ export const AI_TASKS: AiTaskDef[] = [
   { key: "spoken_summary", labelKey: "task.spokenSummary", hintKey: "task.spokenSummaryHint", area: "other", modelForKey: "task.spokenSummaryModelFor" },
 ];
 
-export const AI_TASK_KEYS = AI_TASKS.map((t) => t.key);

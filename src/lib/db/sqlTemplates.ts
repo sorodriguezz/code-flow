@@ -47,7 +47,7 @@ export type SqlTemplate =
  * module — the console is where they are finished and run — but they arrive already qualified with
  * the schema you right-clicked, which is the part that is tedious and easy to get wrong.
  *
- * `schema` is the schema to create in (or to create, for `newSchema`); pass `null` on an engine
+ * `schema` is the schema to create in (or to create, for `"schema"`); pass `null` on an engine
  * that has no schemas, and the name comes out bare.
  */
 export function createTemplate(

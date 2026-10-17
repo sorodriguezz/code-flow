@@ -401,12 +401,6 @@ pub fn api_duplicate_environment(db: State<Db>, id: String) -> Result<ApiEnviron
 
 // ---------- history ----------
 
-#[tauri::command]
-pub fn api_list_history(db: State<Db>, workspace_id: String, limit: i64) -> Result<Vec<ApiHistoryEntry>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    api_queries::list_history(&conn, &workspace_id, limit).map_err(|e| e.to_string())
-}
-
 /// The history list without the `snapshot` blob — see `api_queries::list_history_meta`.
 ///
 /// The list only ever draws the method, URL, status and duration, but every row used to carry the

@@ -565,12 +565,7 @@ export function ChatComposer({
         {/* Nothing under the box. The strip that used to live here listed what the engine could not
             do — no typing, resume-by-last-conversation, no images — and it was permanent chrome for
             facts that matter when you *choose* a provider, not on every glance at a chat you are
-            already having.
-
-            The one hazard worth keeping is not lost with it: a Gemini conversation that can pull in
-            another chat's context is marked on its own row in the sidebar (`crossTalk` in
-            `ConversationSidebar`), which is where two of them are visible side by side and where
-            the warning can actually be acted on. */}
+            already having. */}
       </div>
     </div>
   );

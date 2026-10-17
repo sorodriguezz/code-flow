@@ -206,27 +206,6 @@ pub async fn ado_wiki_pages_content(
     azure::get_wiki_pages_combined(&org, &project, &wiki, &paths, &pat).await
 }
 
-/// Publishes one page to a wiki the user picked.
-///
-/// The provider lives in the command name rather than in a parameter, matching how the rest of this
-/// module addresses Azure. When a second host arrives it gets its own command and the frontend
-/// dispatches on the target's `kind` — the same shape the VCS side already uses, and a cheaper
-/// change than a `provider: String` that every call site would have to start passing today.
-#[tauri::command]
-pub async fn ado_publish_wiki_page(
-    org: String,
-    project: String,
-    wiki: String,
-    path: String,
-    content: String,
-) -> Result<azure::AdoWikiPageRef, String> {
-    let pat = pat_for_org(&org)?;
-    // Nothing here holds a version of the page, so the write is the explicit "over whatever is
-    // there" — the same as before a document could remember one. Documents publish through
-    // `publish_doc_page`, which does.
-    azure::put_wiki_page(&org, &project, &wiki, &path, &content, &pat, azure::WikiWrite::Overwrite).await
-}
-
 // ---------- the board target ----------
 
 /// The kinds of work item the target project offers.

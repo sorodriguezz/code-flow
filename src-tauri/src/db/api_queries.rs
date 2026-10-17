@@ -35,8 +35,6 @@ const REQUEST_COLUMNS: &str =
     "id, collection_id, folder_id, name, protocol, method, url, spec, sort_order, created_at, updated_at";
 const ENVIRONMENT_COLUMNS: &str =
     "id, workspace_id, name, variables, is_global, sort_order, created_at, updated_at";
-const HISTORY_COLUMNS: &str =
-    "id, workspace_id, request_id, name, protocol, method, url, status, duration_ms, size_bytes, snapshot, created_at";
 const COOKIE_COLUMNS: &str =
     "id, workspace_id, domain, path, name, value, secure, http_only, expires, updated_at";
 
@@ -1226,15 +1224,7 @@ pub fn duplicate_environment(conn: &Connection, id: &str) -> rusqlite::Result<Ap
 
 // ---------- history ----------
 
-pub fn list_history(conn: &Connection, workspace_id: &str, limit: i64) -> rusqlite::Result<Vec<ApiHistoryEntry>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {HISTORY_COLUMNS} FROM api_history WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2"
-    ))?;
-    let rows = stmt.query_map(params![workspace_id, limit.max(0)], map_history)?;
-    rows.collect()
-}
-
-/// The same rows `list_history` returns, minus the one column that costs anything.
+/// The API workspace's history rows, minus the one column that costs anything.
 ///
 /// `snapshot` holds the request *and* the response of a send — a JSON blob that is routinely tens
 /// of kilobytes and occasionally megabytes. The API workspace opens by listing 500 of them, and
@@ -1254,8 +1244,8 @@ pub fn list_history_meta(
     workspace_id: &str,
     limit: i64,
 ) -> rusqlite::Result<Vec<ApiHistoryEntry>> {
-    // Spelled out rather than derived from `HISTORY_COLUMNS` so the literal `''` sits where the
-    // column it stands in for would be, and `map_history` can stay the single row mapper.
+    // The literal `''` sits where the column it stands in for would be, so `map_history` can stay
+    // the single row mapper.
     let mut stmt = conn.prepare(
         "SELECT id, workspace_id, request_id, name, protocol, method, url, status, duration_ms,
                 size_bytes, '' AS snapshot, created_at

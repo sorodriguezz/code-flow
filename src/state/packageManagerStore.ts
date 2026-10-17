@@ -16,7 +16,7 @@ import type { PackageManager } from "../lib/packageScripts";
  * pnpm is not a configuration that works, it is two half-installed node_modules. Offering a picker
  * on every manifest would be offering a choice the tools do not actually support.
  *
- * Detection stays per directory regardless — see `detectPackageManager`, which walks up from the
+ * Detection stays per directory regardless — see `detectPackageManagers`, which walks up from the
  * manifest to the nearest lockfile. This store only holds the override, and `null` means "let the
  * lockfile decide", which is what almost every repository should stay on.
  */

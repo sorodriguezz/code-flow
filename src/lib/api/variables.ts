@@ -28,10 +28,6 @@ export interface VariableContext {
   collectionId?: string | null;
 }
 
-export function emptyVariableContext(): VariableContext {
-  return { local: {}, data: {}, environment: [], collection: [], global: [] };
-}
-
 /** Inner group is the raw name; `[^{}]*` keeps the match from spanning two adjacent tokens. */
 const VARIABLE_PATTERN = /\{\{([^{}]*)\}\}/g;
 

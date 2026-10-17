@@ -141,9 +141,6 @@ export const apiDuplicateEnvironment = (id: string) =>
 
 // ---------- history ----------
 
-export const apiListHistory = (workspaceId: string, limit: number) =>
-  invoke<ApiHistoryEntry[]>("api_list_history", { workspaceId, limit });
-
 /** The history list without the `snapshot` blob.
  *
  * The sidebar only ever draws the method, URL, status and duration, but every row carries the full
@@ -305,10 +302,6 @@ export const apiOAuthAuthorize = (request: {
   state: string;
   implicit: boolean;
 }) => invoke<[string, string][]>("api_oauth_authorize", request);
-
-/** Reads a file for `binary` bodies and file form-parts, returning base64 + a guessed MIME type. */
-export const apiReadFileBase64 = (path: string) =>
-  invoke<{ base64: string; mime: string; size: number }>("api_read_file_base64", { path });
 
 // ---------- WebSocket / Socket.IO ----------
 

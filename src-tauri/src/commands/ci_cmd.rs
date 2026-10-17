@@ -409,7 +409,7 @@ pub async fn analyze_pipeline_failure(
     // they did on purpose.
     if !matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
         let label = format!("Pipeline · {}", job.name);
-        // The coordinates the Activity list needs to reopen this. `run_key` is the same
+        // The coordinates the Activity list needs to reopen this. `pipelineRunKey` is the same
         // `${project}:${provider}:${run}` the frontend keys everything by (see `runKey` in
         // `ciStore`) — a bare run id would be ambiguous, since a build number repeats across
         // repositories and providers. Without this the row exists and clicking it does nothing.

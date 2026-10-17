@@ -101,12 +101,6 @@ pub fn delete_service_group(db: State<Db>, id: String) -> Result<(), String> {
     service_queries::delete_group(&conn, &id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn reorder_services(db: State<Db>, workspace_id: String, ids: Vec<String>) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    service_queries::reorder_services(&conn, &workspace_id, &ids).map_err(|e| e.to_string())
-}
-
 /// Starts `ids` and everything they wait for. Returns as soon as the work is queued; progress
 /// arrives as `services:runtime` events.
 #[tauri::command(async)]

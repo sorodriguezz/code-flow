@@ -597,16 +597,6 @@ export function tabsOfProject(projectId: string): PanelTab[] {
     .filter((tab) => projectOf(tab) === projectId);
 }
 
-/** The tab on screen, when the panel is open — what the sidebar highlights and the title bar's
- *  "review this PR" acts on. */
-export function visibleTab(): PanelTab | null {
-  if (!useUiStore.getState().aiPanelOpen) return null;
-  const ws = useWorkspaceStore.getState().activeWorkspaceId ?? NO_WORKSPACE;
-  const s = useAiPanelStore.getState();
-  const key = s.activeByWorkspace[ws] ?? INBOX_KEY;
-  return (s.tabsByWorkspace[ws] ?? EMPTY_TABS).find((tab) => tab.key === key) ?? null;
-}
-
 // Opening the panel is looking at whatever it lands on.
 useUiStore.subscribe((state, previous) => {
   if (!state.aiPanelOpen || previous.aiPanelOpen) return;

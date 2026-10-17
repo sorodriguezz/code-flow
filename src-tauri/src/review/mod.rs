@@ -24,7 +24,7 @@
 //! | [`render`] | Findings back to the canonical review Markdown the whole frontend already reads. |
 //!
 //! **The output format is not this module's to change.** `render` emits exactly the shape
-//! `src/lib/parseAnalysis.ts` parses and `review_memory::parse_findings` remembers — the leading
+//! `src/lib/parseAnalysis.ts` parses and `review::merge::parse` reads back — the leading
 //! `📈 CALIDAD:` line and the `### {emoji} [{Severidad} · {Tipo}] {Categoría} · F-NNN` blocks. That
 //! contract is what lets the pipeline be rewritten underneath without touching posting, the finding
 //! cards, or a single saved review.

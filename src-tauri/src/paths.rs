@@ -331,7 +331,6 @@ pub fn logs_dir() -> PathBuf {
 /// reproduces them exactly. But they are also multi-gigabyte, so they are the one thing under this
 /// root that a reset must NOT delete — see [`wipe_plan`], and the test that pins it. Deleting all
 /// models is its own action with its own measured size in its own place.
-#[allow(dead_code)]
 pub fn models_dir() -> PathBuf {
     state_dir().join("models")
 }
@@ -458,7 +457,7 @@ pub fn chat_conversation_outputs_dir(conversation_id: &str) -> PathBuf {
 /// So they are removed with the conversation ([`crate::db::chat_queries::delete_conversation`]'s
 /// caller), and anything left behind by a crash or by a deletion that happened while the app was
 /// closed is collected by the startup sweep. State and not cache, for the same reason
-/// [`chat_scratch_dir`] is.
+/// [`chat_outputs_dir`] is.
 pub fn chat_attachments_dir() -> PathBuf {
     state_dir().join("chat-attachments")
 }

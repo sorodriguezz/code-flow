@@ -643,7 +643,7 @@ export function DrawioFrame({
       )}
       <iframe
         // Remounts on theme or language change — both are read once, while booting. The theme in
-        // here is `frameTheme`, which is the app's a wipe later; see the component comment.
+        // here is `bootTheme`, which is the app's a wipe later; see the component comment.
         key={url}
         ref={frame}
         src={url}

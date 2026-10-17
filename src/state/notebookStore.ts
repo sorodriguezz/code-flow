@@ -601,11 +601,6 @@ function newSession(key: string, repoPath: string, path: string, projectId: stri
   };
 }
 
-function cellIndex(session: NotebookSession, cellKey: string | null): number {
-  if (!cellKey || !session.doc) return -1;
-  return session.doc.cells.findIndex((cell) => cell.key === cellKey);
-}
-
 export const notebookActions = {
   /**
    * Shows a notebook: makes its session if it has none and brings it up to date with the tab's
@@ -1126,7 +1121,3 @@ export const notebookActions = {
   },
 };
 
-/** The index of a cell in its notebook, or -1. */
-export function indexOfCell(session: NotebookSession, cellKey: string | null): number {
-  return cellIndex(session, cellKey);
-}

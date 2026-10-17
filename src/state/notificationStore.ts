@@ -261,8 +261,8 @@ export function onNotificationPushed(listener: (item: AppNotification) => void):
  * Raises the operating system's own notification for a row that was just filed, when the user has
  * asked for them.
  *
- * Called from inside the `set` above, which is why it can neither throw nor await: `sendNative`
- * swallows everything and returns immediately. The visibility check is `document.hidden`, which
+ * Called from inside the `set` above, which is why it can neither throw nor await:
+ * `sendNativeNotification` swallows everything and returns immediately. The visibility check is `document.hidden`, which
  * covers the two states that matter — the window minimised, and the window hidden to the tray,
  * which is this app's own close behaviour — and deliberately not focus: a window sitting visible on
  * a second monitor is one the user can see.

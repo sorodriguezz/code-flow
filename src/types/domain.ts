@@ -423,7 +423,7 @@ export interface SavedFinding {
    * have it. A client that publishes from the stored memory rather than from the parsed review — the
    * mobile one — must treat its absence as "this finding cannot be published from here" rather than
    * substituting the subtitle, which posts an unanchored one-liner and then owns the thread for
-   * good (see `apply_post_outcome`).
+   * good (see `record_published`).
    */
   comentario_md?: string;
   /** The iteration whose publish last wrote to this finding's thread. A finding published in the
@@ -864,7 +864,6 @@ export interface WorkspaceSkill {
   installed_at: string;
 }
 
-
 export interface ActivityLogEntry {
   id: string;
   project_id: string;
@@ -951,12 +950,6 @@ export interface PrCommentThread {
 export interface GitProgressEvent {
   op: string;
   line: string;
-}
-
-export interface GitDoneEvent {
-  op: string;
-  success: boolean;
-  message: string;
 }
 
 export type ThemePreference = "light" | "dark" | "system";

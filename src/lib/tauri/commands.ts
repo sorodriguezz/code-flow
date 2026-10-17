@@ -25,7 +25,6 @@ import type {
   CommitInfo,
   CommitPage,
   TagInfo,
-  ConflictFile,
   FileBlame,
   FileDiffInfo,
   FileEntry,
@@ -310,14 +309,9 @@ export const updateProjectColor = (id: string, color: string) =>
 
 export const getStatus = (repoPath: string) => invoke<RepoStatusInfo>("get_status", { repoPath });
 
-export const listCommits = (repoPath: string, allRefs: boolean, limit: number) =>
-  invoke<CommitInfo[]>("list_commits", { repoPath, allRefs, limit });
-
 /**
- * One page of history, and whether there is more behind it.
- *
- * `listCommits` above still exists and is still right for the fixed windows other screens want; the
- * graph uses this one, because a hard cap with no "load more" is a history that silently stops.
+ * One page of history, and whether there is more behind it — a hard cap with no "load more" is a
+ * history that silently stops.
  */
 export const listCommitsPage = (repoPath: string, allRefs: boolean, skip: number, limit: number) =>
   invoke<CommitPage>("list_commits_page", { repoPath, allRefs, skip, limit });
@@ -566,10 +560,6 @@ export const setRepoGitIdentity = (repoPath: string, name: string, email: string
 export const mergeBranch = (repoPath: string, branchName: string) =>
   invoke<MergeOutcome>("merge_branch", { repoPath, branchName });
 
-export const isMerging = (repoPath: string) => invoke<boolean>("is_merging", { repoPath });
-
-export const listConflicts = (repoPath: string) => invoke<ConflictFile[]>("list_conflicts", { repoPath });
-
 export const resolveConflictSide = (repoPath: string, relPath: string, side: "ours" | "theirs") =>
   invoke<void>("resolve_conflict_side", { repoPath, relPath, side });
 
@@ -579,11 +569,6 @@ export const markConflictResolved = (repoPath: string, relPath: string) =>
 /** Proposes an AI-merged version of a conflicted file. Returns the resolved content (no markers). */
 export const resolveConflictWithAi = (repoPath: string, relPath: string, runId?: string) =>
   invoke<string>("resolve_conflict_with_ai", { repoPath, relPath, runId });
-
-export const completeMerge = (repoPath: string, message: string) =>
-  invoke<string>("complete_merge", { repoPath, message });
-
-export const abortMerge = (repoPath: string) => invoke<void>("abort_merge", { repoPath });
 
 /** Which operation is half done, its unresolved paths (whatever the state) and its prepared message. */
 export const getOperationState = (repoPath: string) =>
@@ -867,8 +852,6 @@ export const deleteWorkspaceAgent = (id: string) => invoke<void>("delete_workspa
 export const listAgentTasks = (workspaceId: string) =>
   invoke<AgentTask[]>("list_agent_tasks", { workspaceId });
 
-export const getAgentTask = (id: string) => invoke<AgentTask | null>("get_agent_task", { id });
-
 /** `provider`/`prompt` are the agent's, snapshotted here on purpose — see `AgentTask`. */
 export const createAgentTask = (
   workspaceId: string,
@@ -1087,8 +1070,6 @@ export const upsertAgentProject = (
 /** The tasks and chains filed here survive: they only stop being filed. */
 export const deleteAgentProject = (id: string) => invoke<void>("delete_agent_project", { id });
 
-export const reorderAgentProjects = (ids: string[]) => invoke<void>("reorder_agent_projects", { ids });
-
 // Filing and pinning deliberately leave `updated_at` alone — the list is ordered by it, and moving
 // a task into a folder is not work done on the task.
 export const setAgentTaskGroup = (id: string, agentProjectId: string) =>
@@ -1268,7 +1249,6 @@ export const writeSkillFile = (workspaceId: string, skillName: string, relPath: 
 export const deleteSkillFile = (workspaceId: string, skillName: string, relPath: string) =>
   invoke<void>("delete_skill_file", { workspaceId, skillName, relPath });
 
-
 // ---------- secrets ----------
 
 export const setAdoPat = (org: string, pat: string) => invoke<void>("set_ado_pat", { org, pat });
@@ -1280,7 +1260,6 @@ export const deleteAdoPat = (org: string) => invoke<void>("delete_ado_pat", { or
 export const setGithubToken = (host: string, token: string) =>
   invoke<void>("set_github_token", { host, token });
 
-export const getGithubToken = (host: string) => invoke<string | null>("get_github_token", { host });
 /** A host this app connects to, as the publish dialog names it. Mirrors `publish_cmd::PublishTarget`. */
 export type PublishProvider = "github" | "gitlab" | "bitbucket" | "azure";
 export interface PublishTarget {
@@ -1308,8 +1287,6 @@ export const deleteGithubToken = (host: string) => invoke<void>("delete_github_t
  * issued it. */
 export const setGitlabToken = (host: string, token: string) =>
   invoke<void>("set_gitlab_token", { host, token });
-
-export const getGitlabToken = (host: string) => invoke<string | null>("get_gitlab_token", { host });
 
 export const deleteGitlabToken = (host: string) => invoke<void>("delete_gitlab_token", { host });
 
@@ -1399,7 +1376,6 @@ export const deleteAiCheckpoint = (repoPath: string, checkpointId: string) =>
   invoke<void>("delete_ai_checkpoint", { repoPath, checkpointId });
 
 export const defaultCommitTemplate = () => invoke<string>("default_commit_template");
-
 
 export const defaultAnalyzeTemplate = () => invoke<string>("default_analyze_template");
 
@@ -1538,15 +1514,9 @@ export const linkProjectGitlab = (id: string, gitlabProject: string, gitlabHost:
 export const linkProjectBitbucket = (id: string, workspace: string, repo: string) =>
   invoke<void>("link_project_bitbucket", { id, workspace, repo });
 
-/** Clears whichever VCS link (Azure DevOps, GitHub or GitLab) the project currently has. */
-export const unlinkProject = (id: string) => invoke<void>("unlink_project", { id });
-
 /** Opens the project's repository home page (GitHub / GitLab / Azure DevOps) in the browser. */
 export const openRepoInBrowser = (projectId: string) =>
   invoke<void>("open_repo_in_browser", { projectId });
-
-export const listPullRequests = (projectId: string) =>
-  invoke<PullRequestSummary[]>("list_pull_requests", { projectId });
 
 /** One page of the repository's pull requests: `scope` open (the default) · closed · all, `page`
  * 1-based. The list used to be one page of every state, where an older open PR fell off the end. */
@@ -2204,7 +2174,6 @@ export const listJobHistory = (
  * opened. Same shape, and for the same reason, as `getTurnTrace` for conversation traces. */
 export const getJobResult = (id: string) => invoke<string | null>("get_job_result", { id });
 
-
 export const renameJobHistoryEntry = (id: string, label: string) => invoke<void>("rename_job_history_entry", { id, label });
 
 export const deleteJobHistoryEntry = (id: string) => invoke<void>("delete_job_history_entry", { id });
@@ -2348,8 +2317,6 @@ export const lspStart = (
   settings: unknown,
 ) => invoke<Record<string, unknown> | null>("lsp_start", { sessionId, root, command, args, initializationOptions, settings });
 
-export const lspStop = (sessionId: string) => invoke<void>("lsp_stop", { sessionId });
-
 /** Every server this project started. */
 export const lspStopProject = (projectId: string) => invoke<void>("lsp_stop_project", { projectId });
 
@@ -2358,8 +2325,6 @@ export const lspRequest = <T>(sessionId: string, method: string, params: unknown
 
 export const lspNotify = (sessionId: string, method: string, params: unknown) =>
   invoke<void>("lsp_notify", { sessionId, method, params });
-
-export const lspRunning = (sessionId: string) => invoke<boolean>("lsp_running", { sessionId });
 
 /** A running server's `capabilities`, or `null` when nothing runs under that id — for a window that
  *  joins a server rather than starting one (`lib/lsp/client`'s `startForProject`). */
@@ -2854,15 +2819,6 @@ export const generateDocPage = (input: {
     agentProvider: input.agent?.provider,
     agentModel: input.agent?.model,
   });
-
-/** Publishes one page to a wiki. Azure DevOps today; a second host gets its own command. */
-export const adoPublishWikiPage = (input: {
-  org: string;
-  project: string;
-  wiki: string;
-  path: string;
-  content: string;
-}) => invoke<AdoWikiPageRef>("ado_publish_wiki_page", input);
 
 /** The workspace's saved review sessions, newest first. */
 export const listWorkItemReviews = (workspaceId: string) =>

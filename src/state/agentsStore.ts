@@ -62,7 +62,7 @@ export function taskTitleFrom(goal: string): string {
 /** An agent that can actually run: enabled, and pointed at both a provider and a model.
  *
  * The model half is not a nicety — the backend only takes the agent's routing when *both* are
- * non-blank (`load_ai_config_for`), so an agent missing one silently runs on the normal chat
+ * non-blank (only then does it call `load_ai_config_as`), so an agent missing one silently runs on the normal chat
  * routing instead. Offering it would mean the picker naming one engine while another answers. */
 export function isRunnableAgent(agent: WorkspaceAgent): boolean {
   return agent.enabled && agent.provider.trim() !== "" && agent.model.trim() !== "";

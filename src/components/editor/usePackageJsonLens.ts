@@ -521,7 +521,7 @@ export function usePackageJsonLens(
     /**
      * **Not keyed to the open file**, and that is the fix for lens rows landing on the wrong one.
      *
-     * With `isManifest` in here, every tab switch away from a manifest unregistered the provider.
+     * With whether the open file is a manifest in here, every tab switch away from a manifest unregistered the provider.
      * That fires the language registry's own change event, which makes each editor schedule a
      * *debounced* recompute of its lenses — and the model swap for the new tab lands inside that
      * window. What Monaco then had was a recompute belonging to the manifest and a view showing the

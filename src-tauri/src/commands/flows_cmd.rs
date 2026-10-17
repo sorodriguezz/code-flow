@@ -19,7 +19,7 @@ use tauri::{AppHandle, State};
 
 use crate::db::flow_queries::{self, FlowFolderRow, FlowMeta, FlowRow, FlowSaved, FlowsTree};
 use crate::db::flow_run_queries::{
-    self, FlowCredential, FlowRunNodeRow, FlowRunRow, FlowStateEntry, FlowVariable,
+    self, FlowCredential, FlowRunNodeRow, FlowRunRow, FlowVariable,
 };
 use crate::db::version_queries::{self, DocVersion};
 use crate::db::Db;
@@ -318,16 +318,6 @@ pub fn flows_rename_flow(db: State<Db>, id: String, name: String) -> Result<Opti
     let name = clean_name(&name)?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     flow_queries::rename_flow(&conn, &id, &name).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn flows_set_description(
-    db: State<Db>,
-    id: String,
-    description: String,
-) -> Result<Option<FlowMeta>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    flow_queries::set_description(&conn, &id, description.trim()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1380,13 +1370,6 @@ pub fn flows_chat_assistants(workspace_id: String) -> Vec<triggers::ChatAssistan
     triggers::chat_assistants(&workspace_id)
 }
 
-/// One message to a chat flow; its answer, as text.
-#[tauri::command]
-pub async fn flows_chat_turn(app: AppHandle, flow_id: String, message: String, history: Vec<Value>, conversation_id: Option<String>) -> Result<Value, String> {
-    // No conversation row behind this door, so no workspace to hold the flow to and no Stop to obey.
-    triggers::chat_turn(&app, &flow_id, &message, history, conversation_id.as_deref().unwrap_or_default(), "", std::future::pending()).await
-}
-
 // ---------- tables («Tablas») ----------
 
 #[tauri::command]
@@ -1476,18 +1459,6 @@ pub fn flows_table_clear(db: State<Db>, table_id: String) -> Result<usize, Strin
     crate::flows::tables::clear(&conn, &table_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn flows_table_drop_column(db: State<Db>, table_id: String, column: String) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    crate::flows::tables::drop_column(&conn, &table_id, &column)
-}
-
-#[tauri::command]
-pub fn flows_table_set_columns(db: State<Db>, table_id: String, columns: Vec<String>) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    crate::flows::tables::set_columns(&conn, &table_id, &columns)
-}
-
 /// Rows from a file the window read (CSV or JSON): each one's key from `key_field`, or a new one.
 /// One transaction, so a bad row leaves the table as it was.
 #[tauri::command]
@@ -1543,18 +1514,6 @@ pub fn flows_unpin_node(db: State<Db>, flow_id: String, node_id: String) -> Resu
 }
 
 // ---------- remembered state ----------
-
-#[tauri::command]
-pub fn flows_state_list(db: State<Db>, flow_id: String) -> Result<Vec<FlowStateEntry>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    flow_run_queries::state_list(&conn, &flow_id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn flows_state_clear(db: State<Db>, flow_id: String) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    flow_run_queries::state_clear(&conn, &flow_id).map_err(|e| e.to_string())
-}
 
 // ---------- variables ----------
 

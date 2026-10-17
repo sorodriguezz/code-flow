@@ -82,7 +82,7 @@ export const DEFAULT_TAB_VIEW: ApiTabView = {
 /** A gRPC call's chrome and result, per tab — beside `sending`, for the same reason it is. */
 export interface GrpcCallState {
   describing: boolean;
-  /** What `apiCancelGrpc` needs; `null` when nothing is in flight. */
+  /** What `apiCancelHttp` needs; `null` when nothing is in flight. */
   callId: string | null;
   response: GrpcResponse | null;
   error: string | null;
@@ -111,8 +111,8 @@ interface ApiRuntimeState {
    * Deliberately **not** capped the way `messages` and `consoleLines` are, and this is the one
    * place in the store where that is a decision rather than an oversight. Those two are streams of
    * independent frames, so dropping the oldest loses context and nothing else. A body is one
-   * value: `saveResponseToFile`, copy-response, save-as-example and the test-script runner all read
-   * `body_text` in full, and handing them a silently shortened string would write a corrupt file,
+   * value: the response download (`downloadBody`), copy-response, save-as-example and the
+   * test-script runner all read `body_text` in full, and handing them a silently shortened string would write a corrupt file,
    * store a corrupt example and fail an assertion on text the server never sent — with nothing on
    * screen to say why.
    *

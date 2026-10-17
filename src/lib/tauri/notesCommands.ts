@@ -220,7 +220,7 @@ export const notesDeleteTemplate = (id: string) => invoke<void>("notes_delete_te
  * Titles and tags are not searched here and must not be: the store already holds every note's
  * metadata, so it filters those itself on the keystroke with no round trip. This call exists for
  * the one thing the frontend cannot do — look inside bodies it never loaded — and the two results
- * are merged in `notesStore.visibleNotes`.
+ * are merged in `notesStore`'s `filterNotes`.
  */
 export const notesSearch = (workspaceId: string, query: string) =>
   invoke<NoteSearchHit[]>("notes_search", { workspaceId, query });

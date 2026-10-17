@@ -659,10 +659,6 @@ export function tabsFor(id: SettingsSectionId): SettingsTabDef[] {
   return SETTINGS_SECTIONS.find((section) => section.id === id)?.tabs ?? [];
 }
 
-export function sectionFor(id: SettingsSectionId): SettingsSectionDef | undefined {
-  return SETTINGS_SECTIONS.find((section) => section.id === id);
-}
-
 /** One place the search can send you: a section, and optionally a pane inside it. */
 export interface SettingsHit {
   section: SettingsSectionDef;

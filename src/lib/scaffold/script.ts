@@ -89,8 +89,8 @@ const PS_PRELUDE = [
 ].join("\n");
 
 /**
- * The whole script. `skippedLabel` is what an optional step's failure prints ("skipped"), in the
- * app's language; `doneLabel` is the last line on success.
+ * The whole script. `labels.skipped` is what an optional step's failure prints ("skipped"), in the
+ * app's language; `labels.done` is the last line on success.
  */
 export function buildScript(
   shell: Shell,

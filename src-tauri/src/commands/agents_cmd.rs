@@ -761,12 +761,6 @@ pub fn delete_agent_project(db: State<Db>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn reorder_agent_projects(db: State<Db>, ids: Vec<String>) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::reorder_agent_projects(&conn, &ids).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 pub fn set_agent_task_group(db: State<Db>, id: String, agent_project_id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::set_agent_task_group(&conn, &id, &agent_project_id).map_err(|e| e.to_string())

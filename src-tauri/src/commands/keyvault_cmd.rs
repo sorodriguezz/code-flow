@@ -668,26 +668,6 @@ pub fn keyvault_read_blob(
     Ok(B64.encode(&bytes))
 }
 
-/// Writes an attachment back out to a file the user chose.
-#[tauri::command]
-pub fn keyvault_save_blob(
-    db: State<Db>,
-    session: State<VaultSession>,
-    id: String,
-    path: String,
-) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let Some((meta, nonce, data)) = queries::get_sealed_blob(&conn, &id).map_err(|e| e.to_string())?
-    else {
-        return Err("That attachment is no longer here.".to_string());
-    };
-    let opened = session.with_key(|dek| crypto::open(dek, &meta.id, &nonce, &data))?;
-    let bytes = opened.map_err(String::from)?;
-    std::fs::write(&path, &bytes).map_err(|e| format!("{path}: {e}"))?;
-    queries::record_audit(&conn, &meta.item_id, "reveal");
-    Ok(())
-}
-
 #[tauri::command]
 pub fn keyvault_delete_blob(
     db: State<Db>,
@@ -1022,7 +1002,7 @@ pub struct PasswordVerdict {
     /// Shared with at least one other entry. The number identifies *which* group, so the UI can say
     /// "these three share a password" without being told what it is.
     pub reuse_group: Option<u32>,
-    /// Short, or drawn from too small an alphabet. See `password_strength`.
+    /// Short, or drawn from too small an alphabet. See `is_weak`.
     pub weak: bool,
     /// Not changed in over a year, counted from `updated_at`.
     pub stale: bool,

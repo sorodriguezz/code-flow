@@ -388,11 +388,6 @@ export function formatParseError(error: unknown): string {
   return String(error);
 }
 
-/** The line a parse error points at, 1-based, or `null`. What the editor needs to put a marker on it. */
-export function errorLine(error: unknown): number | null {
-  return errorPosition(error)?.line ?? null;
-}
-
 /**
  * Where the first diagnostic starts, 1-based, or `null`.
  *

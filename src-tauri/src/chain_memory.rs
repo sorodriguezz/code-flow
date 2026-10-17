@@ -4,7 +4,7 @@
 //!
 //! Steps of a chain are separate engine sessions on purpose, and between two *different* engines
 //! they could not be anything else — a resume token belongs to the CLI that minted it and does not
-//! cross (see `claude_cmd::session_for_provider`). So the only context that reaches step 4 is text
+//! cross (see `claude_cmd::session_for_engine`). So the only context that reaches step 4 is text
 //! somebody put in its opening message, and until now that was one thing: the immediately previous
 //! answer. Step 4 never saw step 1.
 //!

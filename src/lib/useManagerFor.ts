@@ -10,7 +10,7 @@ import type { FileEntry } from "../types/domain";
  * # Why this exists next to the tree's own answer
  *
  * `FileTree` resolves this from `childrenRef` — its `listDir` cache — and the note on
- * `detectPackageManager` explains why that is exactly right there: for a `package.json` row to be on
+ * `detectPackageManagers` explains why that is exactly right there: for a `package.json` row to be on
  * screen the tree must already have listed every directory above it, so the walk to the root is a
  * handful of `Map` lookups and clicking a chevron never becomes a burst of filesystem calls.
  *
@@ -49,7 +49,7 @@ export interface ResolvedManager {
 const FALLBACK: ResolvedManager = { manager: "npm", source: "fallback", candidates: [] };
 
 /**
- * Lists `dir` and every directory above it, so `detectPackageManager` can walk up looking for a
+ * Lists `dir` and every directory above it, so `detectPackageManagers` can walk up looking for a
  * lockfile.
  *
  * A directory that fails to list contributes nothing rather than aborting the walk — a permission

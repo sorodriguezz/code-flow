@@ -14,7 +14,7 @@ import { toggleMaximize } from "./windowControls";
  *
  * So the press is resolved a second time, against what the backdrop is covering. Only the backdrop
  * is stepped through — the dialog itself, and every other element on screen, still gets the press
- * it would have got. What is underneath decides by Tauri's own rules (`isDragRegion` below is its
+ * it would have got. What is underneath decides by Tauri's own rules (`resolve` below is its
  * `drag.js` walk, kept identical on purpose), so the bar's buttons, the `deep` region and the AI
  * menu's `data-tauri-drag-region="false"` opt-out all mean here what they mean everywhere else.
  *

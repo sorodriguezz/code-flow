@@ -47,11 +47,6 @@ export const listSatellites = () => invoke<SatelliteInfo[]>("list_satellites");
  */
 export const restoreSatellites = () => invoke<number>("restore_satellites");
 
-/** What a given window holds. The window itself reads its identity from its query string; this is
- *  for the restore path and for anything asking about a window that is not this one. */
-export const satelliteSpec = (label: string) =>
-  invoke<SatelliteInfo | null>("satellite_spec", { label });
-
 /**
  * Puts the main window back on screen, asked from a window that is not it.
  *

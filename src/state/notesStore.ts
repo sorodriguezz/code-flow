@@ -84,7 +84,7 @@ import type {
  * 3. **Search is two searches.** Titles and tags are filtered here, synchronously, on the
  *    keystroke — the metadata is already in memory, so there is nothing to wait for. Bodies are
  *    searched in SQLite behind a debounce, because they are the one thing this store does not
- *    hold. `bodyHits` is that second answer arriving late, and `visibleNotes` unions the two.
+ *    hold. `bodyHits` is that second answer arriving late, and `filterNotes` unions the two.
  *
  * 4. **Filing and writing are different acts.** Moving a note between books deliberately does
  *    not touch `updated_at` (see `note_queries::move_note`), so an afternoon of tidying doesn't

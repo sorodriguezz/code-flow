@@ -113,7 +113,7 @@ function guardWords(masked: string): GuardWord[] {
   return words;
 }
 
-/** What `unguardedWrite` found: the verb, and the statement it belongs to (trimmed, and shortened
+/** What `unguardedWrites` found: the verb, and the statement it belongs to (trimmed, and shortened
  *  when long) so the question can quote it. */
 export interface UnguardedWrite {
   verb: "DELETE" | "UPDATE";

@@ -460,16 +460,6 @@ pub fn merge_branch(repo_path: String, branch_name: String) -> Result<merge::Mer
     merge::merge_branch(&repo_path, &branch_name)
 }
 
-#[tauri::command(async)]
-pub fn is_merging(repo_path: String) -> Result<bool, String> {
-    merge::is_merging(&repo_path)
-}
-
-#[tauri::command(async)]
-pub fn list_conflicts(repo_path: String) -> Result<Vec<merge::ConflictFile>, String> {
-    merge::list_conflicts(&repo_path)
-}
-
 #[tauri::command]
 pub fn resolve_conflict_side(repo_path: String, rel_path: String, side: String) -> Result<(), String> {
     merge::resolve_conflict_side(&repo_path, &rel_path, &side)
@@ -478,16 +468,6 @@ pub fn resolve_conflict_side(repo_path: String, rel_path: String, side: String) 
 #[tauri::command]
 pub fn mark_conflict_resolved(repo_path: String, rel_path: String) -> Result<(), String> {
     merge::mark_conflict_resolved(&repo_path, &rel_path)
-}
-
-#[tauri::command]
-pub fn complete_merge(repo_path: String, message: String) -> Result<String, String> {
-    merge::complete_merge(&repo_path, &message)
-}
-
-#[tauri::command]
-pub fn abort_merge(repo_path: String) -> Result<(), String> {
-    merge::abort_merge(&repo_path)
 }
 
 /// Which operation is half done, its unresolved paths (read whatever the state), and the message

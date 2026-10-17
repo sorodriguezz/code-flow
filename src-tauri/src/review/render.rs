@@ -9,7 +9,7 @@
 //! **ids are the reconciled ones**, so the report, the durable memory and the comment threads on
 //! the pull request finally agree on what `F-003` is.
 //!
-//! The shape is not negotiable: `src/lib/parseAnalysis.ts` and `review_memory::parse_findings` both
+//! The shape is not negotiable: `src/lib/parseAnalysis.ts` and `review::merge::parse` both
 //! read it, and posting anchors comments from it.
 
 use super::contract::{Dimension, LevelContract, Ratings, Severity};
@@ -183,7 +183,7 @@ pub fn replacement_markdown(finding: &Finding, provider: &str) -> Option<String>
 /// `por_que`, `sugerencia` and `ejemplo_*` — everything a comment is actually made of. A client
 /// holding only that projection (the mobile one does; it never sees a `Finding`) can therefore not
 /// build this body, and the one that tried posted `subtitulo` alone. That is worse than it sounds:
-/// `apply_post_outcome` writes the resulting thread id back onto the finding, so a one-line comment
+/// `record_published` writes the resulting thread id back onto the finding, so a one-line comment
 /// posted once becomes the thread every *future* desktop publish replies to — the full finding
 /// never gets written anywhere. Rendering it at save time is what lets any client publish the same
 /// comment the desktop would have.

@@ -294,8 +294,6 @@ export interface StreamingBuffers {
   thinking: Record<string, string>;
 }
 
-const EMPTY_BUFFERS: StreamingBuffers = { text: {}, thinking: {} };
-
 /** Writes an absolute value into one buffer, returning a new object. Both sources of streamed text
  *  end here — the live deltas by way of {@link reduceDelta}, the reveal by slicing — so there is
  *  exactly one place that decides what "the visible answer so far" is. */
@@ -2390,4 +2388,4 @@ function prune(): void {
   });
 }
 
-export { EMPTY_CONVERSATION, EMPTY_BUFFERS };
+export { EMPTY_CONVERSATION };
