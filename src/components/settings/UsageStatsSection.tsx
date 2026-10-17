@@ -245,12 +245,59 @@ function Tile({
 const CHART_HEIGHT = 120;
 
 /**
+ * Which buckets carry a label under the chart, and what it says. Each window marks the boundary a
+ * reader counts in: hours inside a short window, days across a week, every fifth day across a
+ * month (counted back from today, so today is always labelled). Local time, except a whole-day
+ * column: the backend aligns buckets in UTC, so a day column starts at 21:00 the evening before in
+ * Chile and would carry yesterday's date — it is named by its UTC date, the day it holds.
+ */
+function axisTicks(stats: UsageStats, locale: string): { at: number; label: string }[] {
+  const minutes = stats.bucket_minutes;
+  const day = (d: Date) => d.toLocaleDateString(locale, { weekday: "short", day: "numeric" });
+  const ticks: { at: number; label: string }[] = [];
+  stats.series.forEach((bucket, at) => {
+    const start = new Date(bucket.start);
+    if (minutes >= 60 * 24) {
+      if ((stats.series.length - 1 - at) % 5 === 0) {
+        ticks.push({ at, label: start.toLocaleDateString(locale, { day: "numeric", month: "short", timeZone: "UTC" }) });
+      }
+      return;
+    }
+    if (minutes >= 60 * 6) {
+      const before = new Date(start.getTime() - minutes * 60_000);
+      if (before.toDateString() !== start.toDateString()) ticks.push({ at, label: day(start) });
+      return;
+    }
+    if (start.getMinutes() !== 0) return;
+    const every = minutes >= 60 ? 4 : 1;
+    if (start.getHours() % every !== 0) return;
+    ticks.push({
+      at,
+      label: start.getHours() === 0 ? day(start) : start.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }),
+    });
+  });
+  return ticks;
+}
+
+/** One bucket in full — the day always, and the hours it covers unless it is a whole day. */
+function bucketRange(iso: string, minutes: number, locale: string): string {
+  const start = new Date(iso);
+  if (minutes >= 60 * 24) {
+    return start.toLocaleDateString(locale, { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+  }
+  const date = start.toLocaleDateString(locale, { weekday: "short", day: "numeric", month: "short" });
+  const clock = (d: Date) => d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+  return `${date}, ${clock(start)}–${clock(new Date(start.getTime() + minutes * 60_000))}`;
+}
+
+/**
  * Tokens over the window, one bar per bucket.
  *
  * Scaled to the busiest bucket, which is the only honest scale available: there is no quota to
  * measure against, so the chart answers "when was I busy" rather than "how close am I to a limit".
  * The bars are drawn as a percentage of the width so the SVG resizes with the pane without a
- * measurement pass.
+ * measurement pass; the labelled boundaries get a faint guide line so a bar can be read against
+ * the day or hour it falls in.
  */
 function Chart({ stats, locale }: { stats: UsageStats; locale: string }) {
   const t = useT();
@@ -258,16 +305,7 @@ function Chart({ stats, locale }: { stats: UsageStats; locale: string }) {
   const peak = Math.max(stats.peak_tokens, 1);
   const count = Math.max(stats.series.length, 1);
   const width = 100 / count;
-
-  /** Whole days get a date; anything shorter gets a clock. A 5-hour window labelled by date would
-   * repeat the same string thirty times. */
-  const tick = (iso: string) =>
-    new Date(iso).toLocaleString(
-      locale,
-      stats.bucket_minutes >= 60 * 24
-        ? { day: "2-digit", month: "short" }
-        : { hour: "2-digit", minute: "2-digit" },
-    );
+  const ticks = useMemo(() => axisTicks(stats, locale), [stats, locale]);
 
   const at = hover !== null ? stats.series[hover] : null;
 
@@ -277,7 +315,7 @@ function Chart({ stats, locale }: { stats: UsageStats; locale: string }) {
         <span className={SECTION_LABEL}>{t("usage.overTime")}</span>
         <span className="ml-auto min-w-0 truncate text-[11px] tabular-nums text-[var(--cf-text-muted)]">
           {at
-            ? `${tick(at.start)} · ${compactTokens(at.tokens)} · ${t("usage.runsN", { n: at.runs })}`
+            ? `${bucketRange(at.start, stats.bucket_minutes, locale)} · ${compactTokens(at.tokens)} · ${t("usage.runsN", { n: at.runs })}`
             : t("usage.peakN", { n: compactTokens(stats.peak_tokens) })}
         </span>
       </div>
@@ -288,6 +326,19 @@ function Chart({ stats, locale }: { stats: UsageStats; locale: string }) {
         className="h-[120px] w-full"
         onMouseLeave={() => setHover(null)}
       >
+        {ticks.map((tick) => (
+          <line
+            key={tick.at}
+            x1={tick.at * width}
+            x2={tick.at * width}
+            y1={0}
+            y2={CHART_HEIGHT}
+            stroke="var(--cf-border)"
+            strokeDasharray="3 3"
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+        <line x1={0} x2={100} y1={CHART_HEIGHT} y2={CHART_HEIGHT} stroke="var(--cf-border)" vectorEffect="non-scaling-stroke" />
         {stats.series.map((bucket, at) => {
           const height = (bucket.tokens / peak) * (CHART_HEIGHT - 4);
           return (
@@ -309,9 +360,20 @@ function Chart({ stats, locale }: { stats: UsageStats; locale: string }) {
         })}
       </svg>
 
-      <div className="mt-1 flex justify-between text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
-        <span>{stats.series[0] ? tick(stats.series[0].start) : ""}</span>
-        <span>{stats.series.length > 0 ? tick(stats.series[stats.series.length - 1].start) : ""}</span>
+      {/* Each label starts at its guide line; one too close to the right edge ends there instead. */}
+      <div className="relative mt-1 h-[14px] text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
+        {ticks.map((tick) => {
+          const left = tick.at * width;
+          return (
+            <span
+              key={tick.at}
+              className="absolute top-0 whitespace-nowrap"
+              style={left > 88 ? { right: `${100 - left}%`, paddingRight: 3 } : { left: `${left}%`, paddingLeft: 3 }}
+            >
+              {tick.label}
+            </span>
+          );
+        })}
       </div>
     </div>
   );

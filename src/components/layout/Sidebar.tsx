@@ -241,6 +241,7 @@ function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: ()
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const reorderProject = useWorkspaceStore((s) => s.reorderProject);
   const openProjectInit = useUiStore((s) => s.openProjectInit);
+  const openCloneModal = useUiStore((s) => s.openCloneModal);
   const t = useT();
 
   // The same hold as the unfolded rows, writing the same `sort_order` — folding the panel changes
@@ -276,6 +277,18 @@ function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: ()
           className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
         >
           <Plus size={13} />
+        </button>
+      </Tooltip>
+      {/* Clone, between the two: the folded panel offers the same three ways in as the header
+          of the unfolded one (2026-10-17), and the modal it opens is mounted either way. */}
+      <Tooltip side="right" label={t("sidebar.cloneRepo")}>
+        <button
+          onClick={openCloneModal}
+          data-tour="clone-repo-folded"
+          aria-label={t("sidebar.cloneRepo")}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+        >
+          <GitBranchPlus size={12} />
         </button>
       </Tooltip>
       {/* Under the "+", the user's placement (2026-09-26): the other way a repository gets into a

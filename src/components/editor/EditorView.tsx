@@ -139,6 +139,7 @@ import { explorerClass, inspectorClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import type { ShortcutId } from "../../lib/shortcuts";
+import { elementAtDropPoint } from "../../lib/useImageDrop";
 import type { FileDiffInfo, Project } from "../../types/domain";
 
 /**
@@ -2239,8 +2240,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     /** The destination for a drop at this point, or `null` if it isn't the editor's to take.
      * Positions come in physical pixels — the platform's, not the page's. */
     const dirAt = (px: number, py: number): string | null => {
-      const ratio = window.devicePixelRatio || 1;
-      const el = document.elementFromPoint(px / ratio, py / ratio);
+      const el = elementAtDropPoint(px, py);
       if (!el?.closest("[data-cf-editor-drop]")) return null;
       const row = el.closest<HTMLElement>("[data-cf-treepath]");
       const path = row?.dataset.cfTreepath;

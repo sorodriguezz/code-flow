@@ -13144,6 +13144,8 @@ const en = {
   "meetings.settings.audio": "Audio",
   "meetings.settings.audioHint": "Backups carry the text; the audio stays on this computer. Export it from a meeting to keep it elsewhere.",
   "meetings.settings.keep": "Keep the audio",
+  "meetings.settings.folder": "Folder",
+  "meetings.settings.openFolder": "Open folder",
   "meetings.settings.days": "{n} days",
   "meetings.settings.forever": "Always",
   "meetings.settings.deleteAfter": "Delete once transcribed",

@@ -21,6 +21,39 @@ describe("the shortcut registry's defaults", () => {
     }
   });
 
+  it("never put Shift or Alt on a symbol key, which no keypress produces", () => {
+    // On a symbol, Shift (and Option on macOS) is part of the character: ⇧` arrives as `~` and ⌥.
+    // as `≥`, so `eventToChord` drops it — "Mod+Shift+`" and "Mod+Alt+." both shipped dead.
+    for (const command of SHORTCUT_COMMANDS) {
+      const parts = command.defaultChord.split("+");
+      const base = parts[parts.length - 1];
+      if (base.length !== 1 || /[A-Z0-9]/.test(base)) continue;
+      expect(parts.slice(0, -1), `${command.id}: ${command.defaultChord}`).not.toContain("Shift");
+      expect(parts.slice(0, -1), `${command.id}: ${command.defaultChord}`).not.toContain("Alt");
+    }
+  });
+
+  it("leave alone the chords macOS keeps for itself", () => {
+    // System-wide (the window never sees them) or the app menu's own key equivalents.
+    const system = ["Mod+Alt+D", "Mod+Space", "Mod+Alt+Space", "Mod+Tab", "Mod+H", "Mod+Alt+H", "Mod+M", "Mod+Q", "Mod+`"];
+    for (const command of SHORTCUT_COMMANDS) {
+      expect(system, `${command.id}: ${command.defaultChord}`).not.toContain(command.defaultChord);
+    }
+  });
+
+  it("leave alone the chords Windows keeps for itself", () => {
+    // `Mod` is Ctrl there. Task switching, the window menu, Start, Task Manager, the secure screen.
+    const system = ["Alt+Tab", "Alt+F4", "Alt+Space", "Mod+Escape", "Mod+Shift+Escape", "Mod+Alt+Delete", "Mod+Alt+Space"];
+    for (const command of SHORTCUT_COMMANDS) {
+      expect(system, `${command.id}: ${command.defaultChord}`).not.toContain(command.defaultChord);
+    }
+  });
+
+  it("give every default to one command", () => {
+    const chords = SHORTCUT_COMMANDS.map((command) => command.defaultChord);
+    expect(chords.filter((chord, index) => chords.indexOf(chord) !== index)).toEqual([]);
+  });
+
   it("bind Save All and Find All References where VS Code does", () => {
     expect(SHORTCUT_BY_ID.get("editor.saveAll")?.defaultChord).toBe("Mod+Alt+S");
     expect(SHORTCUT_BY_ID.get("editor.saveAll")?.run).toBeTypeOf("function");

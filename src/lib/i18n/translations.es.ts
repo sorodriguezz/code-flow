@@ -12985,6 +12985,8 @@ export const es = {
   "meetings.settings.audio": "Audio",
   "meetings.settings.audioHint": "Los respaldos guardan el texto; el audio queda en este equipo. Expórtalo desde la reunión para guardarlo en otro lugar.",
   "meetings.settings.keep": "Conservar el audio",
+  "meetings.settings.folder": "Carpeta",
+  "meetings.settings.openFolder": "Abrir carpeta",
   "meetings.settings.days": "{n} días",
   "meetings.settings.forever": "Siempre",
   "meetings.settings.deleteAfter": "Borrar al transcribir",

@@ -364,7 +364,8 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     id: "speech.stop",
     group: "general",
     labelKey: "shortcuts.cmdHush",
-    defaultChord: "Mod+Alt+.",
+    // A letter, not ⌥⌘. as it was: on macOS Option turns `.` into `≥`, so that chord never matched.
+    defaultChord: "Mod+Alt+X",
     run: () => void speechStop().catch(() => {}),
   },
 
@@ -396,9 +397,10 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     id: "terminal.new",
     group: "panels",
     labelKey: "shortcuts.cmdTerminalNew",
-    // What VS Code binds "Create New Terminal" to, and distinct from Mod+J above: that one shows
-    // and hides the dock, this one puts a shell in it.
-    defaultChord: "Mod+Shift+`",
+    // Mod+J with Shift: that one shows and hides the dock, this one puts a shell in it. Not VS Code's
+    // ⌃⇧`, which it was — Shift on a symbol key is the character, not a modifier (`eventToChord`
+    // reads ⇧` as `~`), so "Mod+Shift+`" was a chord no keypress could produce.
+    defaultChord: "Mod+Shift+J",
     run: () => {
       // A shell is opened *in* a repository — there's no sensible cwd without one, and the `+`
       // button in the dock is disabled for the same reason.
@@ -639,8 +641,9 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     group: "editor",
     labelKey: "debug.title",
     // Not ⇧⌘D, which VS Code uses for this — that is `git.pull` here, and a shortcut people press
-    // all day outranks matching another app's letter.
-    defaultChord: "Mod+Alt+D",
+    // all day outranks matching another app's letter. Nor ⌥⌘D, which it was: macOS keeps that one
+    // system-wide for hiding the Dock, so on a Mac the press never reached the app.
+    defaultChord: "Mod+Alt+Shift+D",
     run: () => useEditorCommandStore.getState().send("debug"),
   },
   {

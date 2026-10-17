@@ -33,11 +33,14 @@ function size(bytes: number): string {
 export function AttachmentBar({
   files,
   canSeeImages,
+  providerLabel = "",
   onRemove,
 }: {
   files: ChatAttachment[];
   /** Whether this conversation's engine can look at an image as an image. */
   canSeeImages: boolean;
+  /** The engine's name, for the warning on an image it cannot see. */
+  providerLabel?: string;
   onRemove: (attachmentId: string) => void;
 }) {
   const t = useT();
@@ -50,7 +53,7 @@ export function AttachmentBar({
         return (
           <span
             key={file.id}
-            title={blind ? t("chat.attachImageBlind") : file.path}
+            title={blind ? t("chat.attachImageBlind", { provider: providerLabel }) : file.path}
             className={`group flex max-w-[240px] items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] ${
               blind
                 ? "border-[var(--cf-warning)]/40 bg-[color-mix(in_oklab,var(--cf-warning)_8%,transparent)]"

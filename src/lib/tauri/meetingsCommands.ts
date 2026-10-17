@@ -96,6 +96,8 @@ export interface MeetingsStatus {
   processing: string | null;
   queued: string[];
   cloudKey: boolean;
+  /** Where the recordings are kept on this computer. */
+  recordingsDir: string;
 }
 
 export interface MeetingBench {
@@ -129,6 +131,7 @@ export const meetingsSetCloudKey = (key: string) => invoke<void>("meetings_set_c
 export const meetingsTestCloud = () => invoke<void>("meetings_test_cloud");
 export const meetingsBench = () => invoke<MeetingBench>("meetings_bench");
 export const meetingsSystemAudioSettings = () => invoke<void>("meetings_system_audio_settings");
+export const meetingsRevealRecordings = () => invoke<void>("meetings_reveal_recordings");
 
 export const meetingsStart = (args: { noteId: string; workspaceId: string; kind: "virtual" | "room"; mode?: MeetingMode; language: string }) =>
   invoke<{ meeting: Meeting; warning: string | null; mode: MeetingMode }>("meetings_start", args);

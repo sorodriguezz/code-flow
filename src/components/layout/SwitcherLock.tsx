@@ -6,6 +6,7 @@ import { openable } from "../../lib/shortcuts";
 import { shortcutBlockedByDialog } from "../../lib/useFocusTrap";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import { useDataDirsStore } from "../../state/dataDirsStore";
+import { useShortcutsStore } from "../../state/shortcutsStore";
 import { chordHeld, LOCK_ARROWS, lockAxisFor, useSwitcherLockStore, type LockAxis } from "../../state/switcherLockStore";
 import { useT } from "../../state/languageStore";
 import { useTourStore } from "../../state/tourStore";
@@ -151,6 +152,8 @@ export function SwitcherLock({ repos = true }: { repos?: boolean }) {
   useEffect(() => {
     const blocked = () =>
       useSwitcherLockStore.getState().recording !== null ||
+      // A Settings row recording any other chord: the press is the recorder's, not a roll.
+      useShortcutsStore.getState().recordingId !== null ||
       useTourStore.getState().active ||
       (useDataDirsStore.getState().status !== null && !useDataDirsStore.getState().status?.ok) ||
       shortcutBlockedByDialog("workspace.switcher");

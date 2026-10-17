@@ -146,6 +146,8 @@ pub struct FullStatus {
     processing: Option<String>,
     queued: Vec<String>,
     cloud_key: bool,
+    /// Where the recordings are kept, shown in Settings so the audio can be found by hand.
+    recordings_dir: String,
 }
 
 #[tauri::command]
@@ -171,6 +173,7 @@ pub fn meetings_status(state: State<MeetingsState>) -> FullStatus {
         processing: state.current.lock().ok().and_then(|c| c.as_ref().map(|(id, _)| id.clone())),
         queued: state.queue.lock().map(|q| q.iter().map(|j| j.meeting_id.clone()).collect()).unwrap_or_default(),
         cloud_key: crate::secrets::get_secret(meetings::CLOUD_KEY_SECRET).ok().flatten().is_some_and(|k| !k.trim().is_empty()),
+        recordings_dir: meetings::recordings_root().to_string_lossy().into_owned(),
     }
 }
 
@@ -324,6 +327,15 @@ pub fn meetings_system_audio_settings() -> Result<(), String> {
     return open::that("x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture").map_err(|e| e.to_string());
     #[cfg(not(target_os = "macos"))]
     Err("Not needed on this system".into())
+}
+
+/// Opens the recordings folder in Finder / Explorer. Made first: before the first meeting it
+/// does not exist yet, and opening a missing path fails.
+#[tauri::command]
+pub fn meetings_reveal_recordings() -> Result<(), String> {
+    let dir = meetings::recordings_root();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    open::that(&dir).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------------------------

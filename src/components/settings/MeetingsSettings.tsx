@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Gauge, Mic, Trash2 } from "lucide-react";
+import { Check, FolderOpen, Gauge, Mic, Trash2 } from "lucide-react";
 import { Select } from "../common/Select";
 import { Segmented } from "../common/Segmented";
 import { Button } from "../common/Button";
@@ -11,6 +11,7 @@ import {
   meetingsDeleteVoice,
   meetingsRemoveVoices,
   meetingsRenameVoice,
+  meetingsRevealRecordings,
   meetingsSetCloudKey,
   meetingsTestCloud,
   meetingsVoices,
@@ -211,6 +212,23 @@ export function MeetingsSettings() {
                 ]}
               />
             </div>
+          </Row>
+          <Row label={t("meetings.settings.folder")}>
+            <code
+              title={status.recordingsDir}
+              className="min-w-0 truncate select-text font-mono text-[11.5px] text-[var(--cf-text-muted)]"
+            >
+              {status.recordingsDir}
+            </code>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="shrink-0"
+              onClick={() => void meetingsRevealRecordings().catch((error) => pushErrorToast(String(error)))}
+            >
+              <FolderOpen size={13} />
+              {t("meetings.settings.openFolder")}
+            </Button>
           </Row>
           <label className="flex w-fit cursor-pointer items-center gap-2 text-[12.5px]">
             <Checkbox checked={settings.detect} onChange={(on) => void save("detect", on ? "1" : "0")} />

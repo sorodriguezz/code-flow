@@ -6,6 +6,7 @@ import { useShortcutsStore, activeChords, bindingFor } from "../../state/shortcu
 import { useQuickAskHotkeyStore } from "../../state/quickAskHotkeyStore";
 import {
   DEFAULT_LOCK_CHORD,
+  LOCK_ARROWS,
   lockChordKeycaps,
   sameLockChord,
   usableLockChord,
@@ -19,6 +20,32 @@ import { isMac } from "../../lib/platform";
 import { Kbd, buttonClass, iconButtonClass } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
 import { RailSection } from "./settingsNav";
+
+// TEMP-TRACE: what a press looks like while a row is recording. Remove after the diagnosis.
+function tempTrace(message: string) {
+  void import("@tauri-apps/api/core").then(({ invoke }) =>
+    invoke("log_frontend_error", { kind: "shortcut-trace", message: `${Date.now()} ${message}`, detail: null }).catch(() => {}),
+  );
+}
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (!useShortcutsStore.getState().recordingId) return;
+    const target = e.target as HTMLElement | null;
+    tempTrace(
+      `key=${JSON.stringify(e.key)} code=${e.code} meta=${e.metaKey} alt=${e.altKey} shift=${e.shiftKey} ctrl=${e.ctrlKey} altgr=${e.getModifierState("AltGraph")} chord=${eventToChord(e)} bindable=${(() => { const c = eventToChord(e); return c ? isBindable(c) : null; })()} prevented=${e.defaultPrevented} target=${target?.tagName}.${String(target?.className ?? "").slice(0, 40)} active=${document.activeElement?.tagName}`,
+    );
+  },
+  true,
+);
+window.addEventListener("focusin", (e) => {
+  if (!useShortcutsStore.getState().recordingId) return;
+  tempTrace(`focusin ${(e.target as HTMLElement)?.tagName} role=${(e.target as HTMLElement)?.getAttribute?.("role")}`);
+});
+useShortcutsStore.subscribe((s, prev) => {
+  if (s.recordingId !== prev.recordingId) tempTrace(`recording ${prev.recordingId} -> ${s.recordingId}`);
+  if (s.overrides !== prev.overrides) tempTrace(`overrides ${JSON.stringify(s.overrides)}`);
+});
 
 /**
  * Captures the next chord the user presses and hands it back.
@@ -52,6 +79,39 @@ function useChordRecorder(active: boolean, onCapture: (chord: string | null) => 
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
   }, [active, onCapture, onCancel]);
+}
+
+const ACCELERATOR_ARROWS: Record<string, string> = { Up: "↑", Down: "↓", Left: "←", Right: "→" };
+
+/**
+ * A combination as the set of keys pressed, in this platform's spelling. The registry's chords, the
+ * switcher's and the system-wide accelerator each have a vocabulary of their own; key caps are the
+ * one form all three come out in, so it is the one they can be held against each other in.
+ */
+function pressedKeys(caps: string[]): string {
+  return caps
+    .map((cap) => ACCELERATOR_ARROWS[cap] ?? cap)
+    .sort()
+    .join(" ");
+}
+
+/**
+ * The presses held by the chords outside the registry — the switcher's two drums and the quick-ask
+ * hotkey — as `pressedKeys`. A registry chord on one of them never fires: the switcher takes the
+ * press in the capture phase, and the system takes the quick-ask before the window ever sees it.
+ */
+function useReservedPresses(): Set<string> {
+  const lock = useSwitcherLockStore((s) => s.chords);
+  const quickAsk = useQuickAskHotkeyStore((s) => s.accelerator);
+  const mac = isMac();
+  const presses = new Set<string>();
+  for (const axis of ["workspace", "repo"] as const) {
+    const chord = lock[axis];
+    if (!chord) continue;
+    for (const arrow of LOCK_ARROWS[axis]) presses.add(pressedKeys([...lockChordKeycaps(chord, mac), ...chordKeycaps(arrow)]));
+  }
+  if (quickAsk) presses.add(pressedKeys(acceleratorKeycaps(quickAsk, mac)));
+  return presses;
 }
 
 /** What each switcher row is called, explains, and shows after its chord. */
@@ -296,6 +356,14 @@ export function ShortcutsSettings() {
   const resetAll = useShortcutsStore((s) => s.resetAll);
 
   const assigned = activeChords(overrides);
+  const reserved = useReservedPresses();
+
+  // Read here rather than only by their rows, which live in the General pane: the warnings below
+  // need both chords on every pane.
+  useEffect(() => {
+    void useSwitcherLockStore.getState().init();
+    void useQuickAskHotkeyStore.getState().load();
+  }, []);
 
   const capture = useCallback(
     (chord: string | null) => {
@@ -324,16 +392,16 @@ export function ShortcutsSettings() {
     const chord = bindingFor(id, overrides);
     const recording = recordingId === id;
     const customized = id in overrides;
-    const duplicate = chord ? assigned.get(chord) !== id : false;
+    const duplicate = chord ? assigned.get(chord) !== id || reserved.has(pressedKeys(chordKeycaps(chord))) : false;
 
     return (
       <div key={id} className="flex min-h-[42px] items-center gap-3 border-b border-[var(--cf-border)] py-1.5 last:border-0">
         <div className="min-w-0 flex-1">
           {/* Wraps: the name of a shortcut is the only thing telling you which row you are rebinding. */}
           <p className="break-words text-[13px] leading-snug text-[var(--cf-text)]">{t(command.labelKey)}</p>
-          {/* One warning now, because there is one kind of collision. The editor's chords used to
-              be a separate list that could only be warned about; they are ordinary commands in the
-              same table, so the duplicate check that always covered app actions covers them too. */}
+          {/* One warning for every collision: another command in the table (the editor's chords are
+              ordinary commands there), or the switcher's or the quick-ask's chord, which take the
+              press before any command can. */}
           {duplicate && !recording && (
             <p className="mt-0.5 flex items-center gap-1 text-[11px] text-[var(--cf-warning)]">
               <AlertTriangle size={12} className="shrink-0" />

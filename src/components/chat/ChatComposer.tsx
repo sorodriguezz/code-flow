@@ -17,6 +17,7 @@ import { CommandMenu, appCommandFor, type ChatAppCommand, type CommandSurface } 
 import { COLUMN_GUTTER, READING_COLUMN } from "./chatChrome";
 import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
 import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
+import { isImagePath, useImageDrop } from "../../lib/useImageDrop";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -161,6 +162,7 @@ export function ChatComposer({
   /** The box's own Cut / Copy / Paste, in place of the webview's menu. */
   const textMenu = useTextMenu();
   const boxRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
   const [imageNotice, setImageNotice] = useState<string | null>(null);
   // The skill staged for the next message. Dropped when the engine changes: a skill is one CLI's,
   // and carrying it across would tell the next engine to use something it may not have.
@@ -282,7 +284,7 @@ export function ChatComposer({
       setImageNotice(t("chat.attachNotHere"));
       return;
     }
-    setImageNotice(caps.acceptsImages ? null : t("chat.attachImageBlind"));
+    setImageNotice(caps.acceptsImages ? null : t("chat.attachImageBlind", { provider: providerDisplayLabel(provider, t) }));
     void file.arrayBuffer().then((buffer) => {
       // The clipboard gives no filename, so one is made from the mime type. The extension matters:
       // it is how the backend decides this is an image, and how several engines decide what they
@@ -306,6 +308,28 @@ export function ChatComposer({
     }
     boxRef.current?.focus();
   };
+
+  /** Files dragged onto the box attach like the button's picks: any file, since the button has no
+   *  filter either. An image on an engine that cannot see one is kept and said, as on paste. */
+  const dropOver = useImageDrop(
+    composerRef,
+    (paths) => {
+      if (!onAttachPath) {
+        setImageNotice(t("chat.attachNotHere"));
+        return;
+      }
+      setImageNotice(
+        caps.acceptsImages || !paths.some(isImagePath)
+          ? null
+          : t("chat.attachImageBlind", { provider: providerDisplayLabel(provider, t) }),
+      );
+      void (async () => {
+        for (const path of paths) await onAttachPath(path);
+        boxRef.current?.focus();
+      })().catch((error: unknown) => pushErrorToast(String(error)));
+    },
+    () => true,
+  );
 
   const stopping = sending && cancelling;
 
@@ -365,14 +389,18 @@ export function ChatComposer({
         {shownQueue && <QueuedMessages queue={shownQueue} />}
 
         <div
+          ref={composerRef}
           data-tour="chat-composer"
-          className="flex flex-col gap-1.5 rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 shadow-[var(--cf-shadow)] focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]"
+          className={`flex flex-col gap-1.5 rounded-2xl border bg-[var(--cf-surface-raised)] p-2 shadow-[var(--cf-shadow)] focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))] ${
+            dropOver ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)]"
+          }`}
         >
           {/* Above the input, not below it: the chips are context for what is about to be sent, and a
               row that appears under the send button reads as a result rather than as an ingredient. */}
           <AttachmentBar
             files={attachments}
             canSeeImages={caps.acceptsImages}
+            providerLabel={providerDisplayLabel(provider, t)}
             onRemove={(id) => onRemoveAttachment?.(id)}
           />
           {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}

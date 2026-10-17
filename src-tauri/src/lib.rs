@@ -1904,6 +1904,7 @@ sharded_invoke_handler! {
         commands::meetings_cmd::meetings_test_cloud,
         commands::meetings_cmd::meetings_bench,
         commands::meetings_cmd::meetings_system_audio_settings,
+        commands::meetings_cmd::meetings_reveal_recordings,
         commands::meetings_cmd::meetings_start,
         commands::meetings_cmd::meetings_pause,
         commands::meetings_cmd::meetings_monitor,
