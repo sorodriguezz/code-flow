@@ -1866,6 +1866,10 @@ export function FileTree({
     });
   }, []);
 
+  /** `beginDrag` holds its first closure for the tree's life; the repository reaches it here. */
+  const repoPathRef = useRef(repoPath);
+  repoPathRef.current = repoPath;
+
   const beginDrag = useCallback((e: React.PointerEvent<HTMLElement>, entry: FileEntry) => {
     if (e.button !== 0) return;
     const from = { x: e.clientX, y: e.clientY };
@@ -1922,6 +1926,13 @@ export function FileTree({
         .current()
         .filter((path) => path === dragged.path || markedRef.current.has(path));
       const moving = batch.includes(dragged.path) ? batch : [dragged.path];
+      // Released over a dock terminal: its paths are typed at the prompt there (`TerminalPane`).
+      const terminal = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-cf-terminal-drop]");
+      if (dest === null && terminal) {
+        const root = repoPathRef.current;
+        terminal.dispatchEvent(new CustomEvent("cf-explorer-drop", { detail: moving.map((path) => absoluteIn(root, path)) }));
+        return;
+      }
       if (dest === null) {
         // Released over nothing of this window's — maybe over another window of the app, which
         // the pointer reached without this page ever losing it. That window gets a copy.

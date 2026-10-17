@@ -2582,6 +2582,26 @@ export function EditorPane({
         askInRepoChat(projectRef.current.id, `@${path}:${from === to ? from : `${from}-${to}`} `);
       },
     });
+    // The selection — or the caret's line when nothing is selected — typed into the repository's
+    // terminal and run, the way VS Code's «Run Selected Text in Active Terminal» does.
+    editorInstance.addAction({
+      id: "cf-run-in-terminal",
+      label: tRef.current("terminal.runSelection"),
+      contextMenuGroupId: "9_cutcopypaste",
+      contextMenuOrder: 10,
+      run: (ed) => {
+        const model = ed.getModel();
+        const selection = ed.getSelection();
+        if (!model || !selection) return;
+        const text = selection.isEmpty() ? model.getLineContent(selection.startLineNumber) : model.getValueInRange(selection);
+        if (!text.trim()) return;
+        const project = projectRef.current;
+        void useTerminalStore
+          .getState()
+          .sendText(project.id, project.local_path, text)
+          .catch((e: unknown) => pushErrorToast(String(e)));
+      },
+    });
     applyIndentRef.current();
     editorInstance.onDidChangeModel(() => applyIndentRef.current());
     testFileKeyRef.current = editorInstance.createContextKey<boolean>("cfTestFile", false);

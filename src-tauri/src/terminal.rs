@@ -251,6 +251,43 @@ fn start_dir(cwd: &str) -> Option<String> {
     dirs::home_dir().map(|path| path.to_string_lossy().into_owned())
 }
 
+/// Where a profile with a start folder of its own opens, or `None` to keep the requested one.
+///
+/// `~` and `~/…` expand to the home folder; a relative path is taken from the folder the terminal
+/// was opened on, so a profile can say "always in `./backend`". A path that is not an existing
+/// directory is ignored rather than failing the open — a profile written for another machine, or a
+/// folder deleted since, should still give the user a shell.
+fn profile_start(profile_cwd: &str, requested: Option<&str>, home: Option<&std::path::Path>) -> Option<String> {
+    let raw = profile_cwd.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = if raw == "~" {
+        home?.to_path_buf()
+    } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        home?.join(rest)
+    } else {
+        let path = std::path::PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else {
+            std::path::Path::new(requested?).join(path)
+        }
+    };
+    path.is_dir().then(|| path.to_string_lossy().into_owned())
+}
+
+/// A profile's own variables as pairs, blank keys dropped — a half-typed row in Settings is not a
+/// variable named "".
+fn profile_env(profile: &ShellProfile) -> Vec<(String, String)> {
+    profile
+        .env
+        .iter()
+        .filter(|var| !var.key.trim().is_empty())
+        .map(|var| (var.key.trim().to_string(), var.value.clone()))
+        .collect()
+}
+
 pub fn open_terminal(
     app: AppHandle,
     registry: &TerminalRegistry,
@@ -260,16 +297,39 @@ pub fn open_terminal(
     owner: Option<String>,
     account: Option<&crate::ai_accounts::AccountEnv>,
 ) -> Result<String, String> {
-    let start = start_dir(&cwd);
+    let requested = start_dir(&cwd);
+    let start = profile_start(&profile.cwd, requested.as_deref(), dirs::home_dir().as_deref()).or(requested);
     if let Some(account) = account {
         // The folder has to exist before the shell hands it to a CLI — see `ensure_dirs`.
         account.ensure_dirs();
     }
+
+    // Environment in three layers, later winning: the profile's own variables, then what shell
+    // integration needs, then an account's. A profile can set ZDOTDIR and still be integrated —
+    // `shell_integration::prepare` reads it as the user's — but cannot switch integration's
+    // plumbing off by accident, and nothing a profile says outranks the account it was opened as.
+    let mut env = profile_env(profile);
+    let mut program = profile.command.clone();
+    let mut args = profile.args.clone();
+    // Desk terminals only: a phone's session has nobody reading the marks.
+    if owner.is_none() && crate::shell_integration::enabled(&app) {
+        if let Some(launch) = crate::shell_integration::prepare(&profile.command, &profile.args, &env) {
+            program = launch.program;
+            args = launch.args;
+            env.extend(launch.env);
+        }
+    }
+    let mut env_remove: Vec<String> = crate::shell_integration::INTERNAL_VARS.iter().map(|v| v.to_string()).collect();
+    if let Some(account) = account {
+        env.extend(account.set.iter().cloned());
+        env_remove.extend(account.remove.iter().cloned());
+    }
+
     open_pty(
         app,
         registry,
-        &profile.command,
-        &profile.args,
+        &program,
+        &args,
         start.as_deref(),
         record,
         Origin {
@@ -281,11 +341,7 @@ pub fn open_terminal(
         },
         // A shell opened *as an account*: every `claude`, `codex`, `grok` or `opencode` typed into it
         // runs as that account, because the variable is in the shell's own environment.
-        PtyHooks {
-            env: account.map(|a| a.set.clone()).unwrap_or_default(),
-            env_remove: account.map(|a| a.remove.clone()).unwrap_or_default(),
-            ..PtyHooks::default()
-        },
+        PtyHooks { env, env_remove, ..PtyHooks::default() },
     )
 }
 
@@ -1002,6 +1058,35 @@ pub fn close_recorded(registry: &TerminalRegistry, keys: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A profile's start folder: `~` expands, relative paths hang off the requested folder, and
+    /// anything that is not an existing directory leaves the requested folder in charge.
+    #[test]
+    fn a_profile_start_folder_resolves_or_steps_aside() {
+        let base = std::env::temp_dir().join(format!("cf-profile-start-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("backend")).unwrap();
+        let base_str = base.to_string_lossy().into_owned();
+        let home = base.as_path();
+
+        assert_eq!(profile_start("", Some(&base_str), Some(home)), None);
+        assert_eq!(profile_start("  ", Some(&base_str), Some(home)), None);
+        assert_eq!(profile_start("~", None, Some(home)), Some(base_str.clone()));
+        assert_eq!(
+            profile_start("~/backend", None, Some(home)),
+            Some(base.join("backend").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            profile_start("backend", Some(&base_str), None),
+            Some(base.join("backend").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            profile_start(&base.join("backend").to_string_lossy(), None, None),
+            Some(base.join("backend").to_string_lossy().into_owned())
+        );
+        assert_eq!(profile_start("missing", Some(&base_str), Some(home)), None);
+        assert_eq!(profile_start("backend", None, Some(home)), None, "relative with nothing to hang off");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn transcript() -> Transcript {
         Transcript { key: Some("row".into()), buf: String::new(), dirty: false }

@@ -47,7 +47,10 @@ export type NotificationSource =
   | "reviewer"
   /** A flow that failed, finished after a long while, or told the user something with its Notify
    *  node. Its own source: a flow is the user's automation, and its noise is muted separately. */
-  | "flows";
+  | "flows"
+  /** A command in a dock terminal that ran a long while and finished out of sight — needs the
+   *  shell integration's marks to know a command ended at all. */
+  | "terminal";
 
 /**
  * The menu each source is called in the rest of the app.
@@ -72,6 +75,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   ci: "tabbar.pipelines",
   reviewer: "tabbar.reviewer",
   flows: "tabbar.flows",
+  terminal: "terminal.title",
 };
 
 /**

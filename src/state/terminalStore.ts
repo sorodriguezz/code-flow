@@ -2,6 +2,19 @@ import { create } from "zustand";
 import { closeTerminal, getSetting, openTerminal, setSetting, writeTerminal } from "../lib/tauri/commands";
 import { onTerminalExit, onTerminalOutput } from "../lib/tauri/events";
 import { isMainWindow } from "../lib/windowIdentity";
+import { translate } from "./languageStore";
+import {
+  addToGroup,
+  detach,
+  joinGroup,
+  moveInList,
+  newGroup,
+  normalizeSizes,
+  removeFromGroups,
+  replaceId,
+  type TerminalGroup,
+} from "./terminalLayout";
+import { parseSavedDock, replayText, snapshotProject, type SavedDock, type SavedProject } from "./terminalRestore";
 
 export interface TerminalTab {
   id: string;
@@ -20,15 +33,27 @@ export interface TerminalTab {
    * match a shell this store opened on purpose, never one somebody is halfway through a command
    * in. */
   reuseKey?: string;
+  /** The profile the shell was started with, as the backend resolved it — what a restart and a
+   *  restore open again. */
+  profileId?: string;
+  /** The folder the shell is in *now*, from the shell integration's `OSC 7` — absent for a shell
+   *  without it. What the row shows, what "new terminal here" opens in, what a restore returns to. */
+  liveCwd?: string;
+  /** A colour token (`red`, `amber`…) and an icon name the user gave the tab. */
+  color?: string;
+  icon?: string;
+  /** Output to print before the shell's own — a restored tab's old session. Read once, at mount. */
+  replay?: string;
 }
 
-interface ProjectTerminals {
+export interface ProjectTerminals {
+  /** In the order the list draws them — the user can drag them into another. */
   tabs: TerminalTab[];
-  /** Each entry is a "split group" — terminal ids shown side by side together. A terminal
-   * belongs to exactly one group. Only the group containing `focusedId` is ever shown in the
-   * dock, so switching to any terminal in a split reveals the whole split, VS Code–style,
-   * instead of collapsing it down to just that one pane. */
-  groups: string[][];
+  /** Each entry is a split — terminals shown together. A terminal belongs to exactly one group.
+   * Only the group containing `focusedId` is ever shown in the dock, so switching to any terminal
+   * in a split reveals the whole split, VS Code–style, instead of collapsing it down to just that
+   * one pane. See `terminalLayout`. */
+  groups: TerminalGroup[];
   focusedId: string | null;
   nextNumber: number;
 }
@@ -39,10 +64,15 @@ function emptyProject(): ProjectTerminals {
 
 /** The group currently shown in the dock: whichever one contains `focusedId`, falling back to
  * the most recently created group if that id is stale (e.g. right after its terminal closed). */
+export function activeGroupOf(proj: ProjectTerminals | undefined): TerminalGroup | null {
+  if (!proj) return null;
+  const found = proj.focusedId ? proj.groups.find((g) => g.ids.includes(proj.focusedId!)) : undefined;
+  return found ?? proj.groups[proj.groups.length - 1] ?? null;
+}
+
+/** The ids of the group on screen — see `activeGroupOf`. */
 export function activeGroup(proj: ProjectTerminals | undefined): string[] {
-  if (!proj) return [];
-  const found = proj.focusedId ? proj.groups.find((g) => g.includes(proj.focusedId!)) : undefined;
-  return found ?? proj.groups[proj.groups.length - 1] ?? [];
+  return activeGroupOf(proj)?.ids ?? [];
 }
 
 const DOCK_VIEW_KEY = "terminal_dock_view";
@@ -91,9 +121,15 @@ interface TerminalState {
     cwd: string,
     opts?: {
       split?: boolean;
+      /** Which way a new split runs: beside (`row`, the default) or below (`column`). Only read when
+       *  the split it joins has a single pane — a split keeps the direction it was made with. */
+      splitDir?: "row" | "column";
       profileId?: string;
       reuseKey?: string;
       title?: string;
+      color?: string;
+      icon?: string;
+      replay?: string;
       /** Runs the shell as one AI account — see `lib/aiAccounts.ts`. */
       account?: { provider: string; accountId: string };
     },
@@ -115,6 +151,33 @@ interface TerminalState {
   /** Retitles a tab. A blank/whitespace-only title is ignored rather than blanking the tab,
    * so cancelling out of the inline editor with an empty field is harmless. */
   rename: (projectId: string, id: string, title: string) => void;
+  /** A fresh shell where this one stood: same place in the list and the split, same name, look,
+   *  profile and folder. For a shell that exited or hung. */
+  restart: (projectId: string, id: string) => Promise<void>;
+  /** The tab moved to `index` in the list. */
+  reorder: (projectId: string, id: string, index: number) => void;
+  /** The tab taken out of its split, into one of its own. */
+  detachTab: (projectId: string, id: string) => void;
+  /** The tab moved into the split on screen. */
+  joinActive: (projectId: string, id: string) => void;
+  setGroupSizes: (projectId: string, groupId: string, sizes: number[]) => void;
+  toggleBroadcast: (projectId: string, groupId: string) => void;
+  /** A colour token and an icon name for the tab; `undefined` clears either. */
+  setLook: (projectId: string, id: string, look: { color?: string; icon?: string }) => void;
+  /** The folder a shell reports it is in (`OSC 7`). Looked up across every project — the pane only
+   *  knows its session id. */
+  setLiveCwd: (id: string, cwd: string) => void;
+  /**
+   * Types `text` into the terminal on screen for this repository and runs it — the editor's «Run
+   * selection in terminal». Opens a shell in `cwd` when the repository has none. Never into a
+   * terminal an action opened for itself (`reuseKey`): that one may be running a dev server.
+   */
+  sendText: (projectId: string, cwd: string, text: string) => Promise<void>;
+  /**
+   * Brings back the terminals this repository had when the app last closed, if any, and answers
+   * whether it did. Main window only — see `terminalRestore`.
+   */
+  restore: (projectId: string, fallbackCwd: string) => Promise<boolean>;
 }
 
 /** What a mounted `TerminalPane` hands the router: where to put this session's bytes, and what
@@ -190,6 +253,7 @@ export function startTerminalRouter(): void {
   routerStarted = true;
   void onTerminalOutput((e) => {
     const sink = sinks.get(e.id);
+    outputSinceSave = true;
     if (sink) {
       sink.write(e.data, e.seq);
       return;
@@ -254,6 +318,80 @@ export function disownTerminalBacklog(id: string): void {
 function forgetTerminal(id: string): void {
   pending.delete(id);
   introduced.delete(id);
+  readers.delete(id);
+}
+
+/**
+ * Readers of what each dock pane holds, as plain text — registered by the pane, read by the restore
+ * snapshot. A pane that is gone has none, and its tab saves without output.
+ */
+const readers = new Map<string, () => string>();
+
+export function registerTextReader(id: string, read: () => string): () => void {
+  readers.set(id, read);
+  return () => {
+    if (readers.get(id) === read) readers.delete(id);
+  };
+}
+
+/** What `id`'s pane holds, as plain text — `null` when no pane is mounted for it. */
+export function readTerminalText(id: string): string | null {
+  return readers.get(id)?.() ?? null;
+}
+
+const RESTORE_KEY = "terminal_dock_restore";
+/** How often the dock's state is written while anything changed — at most this much is lost to a
+ *  crash. A tab opened, closed, renamed or moved is written on the next tick too. */
+const SAVE_EVERY_MS = 15_000;
+let outputSinceSave = false;
+let layoutSinceSave = false;
+/** What was on disk at start, kept so the repositories not opened this session keep their entry. */
+let savedAtStart: SavedDock | null = null;
+let saveLoopStarted = false;
+
+function startSaveLoop(): void {
+  if (saveLoopStarted || !isMainWindow()) return;
+  saveLoopStarted = true;
+  window.setInterval(() => {
+    if (!outputSinceSave && !layoutSinceSave) return;
+    outputSinceSave = false;
+    layoutSinceSave = false;
+    void saveDock();
+  }, SAVE_EVERY_MS);
+}
+
+async function saveDock(): Promise<void> {
+  if (!savedAtStart) return;
+  const projects: Record<string, SavedProject> = { ...savedAtStart.projects };
+  for (const [projectId, proj] of Object.entries(useTerminalStore.getState().byProject)) {
+    // Tabs a caller opened to run something (`reuseKey`) are that caller's, not the user's shells.
+    const tabs = proj.tabs.filter((tab) => !tab.reuseKey);
+    if (tabs.length === 0) {
+      delete projects[projectId];
+      continue;
+    }
+    const kept = new Set(tabs.map((tab) => tab.id));
+    const groups = proj.groups
+      .map((group) => ({ ...group, ids: group.ids.filter((id) => kept.has(id)) }))
+      .map((group) => ({ ...group, sizes: normalizeSizes(group.sizes.length === group.ids.length ? group.sizes : [], group.ids.length) }));
+    projects[projectId] = snapshotProject(tabs, groups, proj.focusedId, readTerminalText);
+  }
+  savedAtStart = { v: 1, projects };
+  await setSetting(RESTORE_KEY, JSON.stringify(savedAtStart)).catch(() => {});
+}
+
+function markLayoutChanged(): void {
+  layoutSinceSave = true;
+}
+
+/** Every project's terminals with one changed — `fn` given the project's (or an empty one). */
+function patchProject(
+  state: { byProject: Record<string, ProjectTerminals> },
+  projectId: string,
+  fn: (proj: ProjectTerminals) => ProjectTerminals,
+): { byProject: Record<string, ProjectTerminals> } {
+  markLayoutChanged();
+  return { byProject: { ...state.byProject, [projectId]: fn(state.byProject[projectId] ?? emptyProject()) } };
 }
 
 export const useTerminalStore = create<TerminalState>((set, get) => ({
@@ -271,6 +409,10 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     // back — the dock itself starts hidden (see `panelOpen`).
     const view = isMainWindow() ? await getSetting(DOCK_VIEW_KEY).catch(() => null) : null;
     set({ dockView: view === "services" || view === "containers" ? view : "terminal" });
+    if (isMainWindow()) {
+      savedAtStart = parseSavedDock(await getSetting(RESTORE_KEY).catch(() => null));
+      startSaveLoop();
+    }
   },
 
   togglePanel: () => get().toggleDock("terminal"),
@@ -294,23 +436,31 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     // Before the await, not after: the shell can print its first prompt while `open_terminal` is
     // still returning, and that chunk has to land in the router's buffer rather than on the floor.
     startTerminalRouter();
-    const { id, profile_name } = await openTerminal(cwd, opts?.profileId, opts?.account);
-    set((s) => {
-      const proj = s.byProject[projectId] ?? emptyProject();
-      // A caller that opened this shell *for* something says what it is for; otherwise the shell's
-      // own name is the useful label, with `Terminal N` remaining the fallback for a profile that
-      // somehow reports none, so a tab is never nameless.
-      const title = opts?.title?.trim() || profile_name.trim() || `Terminal ${proj.nextNumber}`;
-      const tabs = [...proj.tabs, { id, title, cwd, reuseKey: opts?.reuseKey }];
-      const current = activeGroup(proj);
-      const groups =
-        opts?.split && current.length > 0
-          ? proj.groups.map((g) => (g === current ? [...g, id] : g))
-          : [...proj.groups, [id]];
-      return {
-        byProject: { ...s.byProject, [projectId]: { tabs, groups, focusedId: id, nextNumber: proj.nextNumber + 1 } },
-      };
-    });
+    const { id, profile_id, profile_name } = await openTerminal(cwd, opts?.profileId, opts?.account);
+    set((s) =>
+      patchProject(s, projectId, (proj) => {
+        // A caller that opened this shell *for* something says what it is for; otherwise the shell's
+        // own name is the useful label, with `Terminal N` remaining the fallback for a profile that
+        // somehow reports none, so a tab is never nameless.
+        const title = opts?.title?.trim() || profile_name.trim() || `Terminal ${proj.nextNumber}`;
+        const tab: TerminalTab = {
+          id,
+          title,
+          cwd,
+          reuseKey: opts?.reuseKey,
+          profileId: profile_id,
+          ...(opts?.color ? { color: opts.color } : {}),
+          ...(opts?.icon ? { icon: opts.icon } : {}),
+          ...(opts?.replay ? { replay: opts.replay } : {}),
+        };
+        const current = activeGroupOf(proj);
+        const groups =
+          opts?.split && current
+            ? proj.groups.map((g) => (g.id === current.id ? addToGroup(g, id, opts.splitDir) : g))
+            : [...proj.groups, newGroup([id])];
+        return { tabs: [...proj.tabs, tab], groups, focusedId: id, nextNumber: proj.nextNumber + 1 };
+      }),
+    );
     // The terminals, whichever panel was up: a shell was just asked for, from the `+`, the
     // explorer's "Open in Integrated Terminal" or a script — and a dock left on the services would
     // put it out of sight the moment it opened.
@@ -359,19 +509,19 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     set((s) => {
       const proj = s.byProject[projectId];
       if (!proj) return s;
-      const closedGroup = proj.groups.find((g) => g.includes(id));
+      const closedGroup = proj.groups.find((g) => g.ids.includes(id));
       const tabs = proj.tabs.filter((tab) => tab.id !== id);
-      const groups = proj.groups.map((g) => g.filter((gid) => gid !== id)).filter((g) => g.length > 0);
+      const groups = removeFromGroups(proj.groups, id);
 
       let focusedId = proj.focusedId;
       if (focusedId === id) {
         // Prefer staying in the same split if other panes remain in it, otherwise fall back
         // to whatever group is now last.
-        const remainingSiblings = closedGroup?.filter((gid) => gid !== id) ?? [];
-        focusedId = remainingSiblings[0] ?? groups[groups.length - 1]?.[0] ?? null;
+        const remainingSiblings = closedGroup?.ids.filter((gid) => gid !== id) ?? [];
+        focusedId = remainingSiblings[0] ?? groups[groups.length - 1]?.ids[0] ?? null;
       }
 
-      return { byProject: { ...s.byProject, [projectId]: { ...proj, tabs, groups, focusedId } } };
+      return patchProject(s, projectId, () => ({ ...proj, tabs, groups, focusedId }));
     });
   },
 
@@ -379,7 +529,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     set((s) => {
       const proj = s.byProject[projectId];
       if (!proj) return s;
-      return { byProject: { ...s.byProject, [projectId]: { ...proj, focusedId: id } } };
+      return patchProject(s, projectId, () => ({ ...proj, focusedId: id }));
     });
   },
 
@@ -390,7 +540,132 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       const proj = s.byProject[projectId];
       if (!proj) return s;
       const tabs = proj.tabs.map((tab) => (tab.id === id ? { ...tab, title: trimmed } : tab));
-      return { byProject: { ...s.byProject, [projectId]: { ...proj, tabs } } };
+      return patchProject(s, projectId, () => ({ ...proj, tabs }));
     });
+  },
+
+  restart: async (projectId, id) => {
+    const old = get().byProject[projectId]?.tabs.find((tab) => tab.id === id);
+    if (!old) return;
+    const where = old.liveCwd || old.cwd;
+    const opened = await openTerminal(where, old.profileId).catch(() => openTerminal(old.cwd));
+    await closeTerminal(id).catch(() => {});
+    forgetTerminal(id);
+    set((s) => {
+      const proj = s.byProject[projectId];
+      if (!proj) return s;
+      // The replay was the *old* session's history; the new shell starts clean.
+      const tabs = proj.tabs.map((tab) =>
+        tab.id === id
+          ? { ...tab, id: opened.id, profileId: opened.profile_id, cwd: where, liveCwd: undefined, replay: undefined }
+          : tab,
+      );
+      const focusedId = proj.focusedId === id ? opened.id : proj.focusedId;
+      return patchProject(s, projectId, () => ({ ...proj, tabs, groups: replaceId(proj.groups, id, opened.id), focusedId }));
+    });
+  },
+
+  reorder: (projectId, id, index) =>
+    set((s) => {
+      const proj = s.byProject[projectId];
+      if (!proj) return s;
+      return patchProject(s, projectId, () => ({ ...proj, tabs: moveInList(proj.tabs, id, index) }));
+    }),
+
+  detachTab: (projectId, id) =>
+    set((s) => {
+      const proj = s.byProject[projectId];
+      if (!proj) return s;
+      return patchProject(s, projectId, () => ({ ...proj, groups: detach(proj.groups, id), focusedId: id }));
+    }),
+
+  joinActive: (projectId, id) =>
+    set((s) => {
+      const proj = s.byProject[projectId];
+      const target = activeGroupOf(proj);
+      if (!proj || !target || target.ids.includes(id)) return s;
+      return patchProject(s, projectId, () => ({ ...proj, groups: joinGroup(proj.groups, id, target.id), focusedId: id }));
+    }),
+
+  setGroupSizes: (projectId, groupId, sizes) =>
+    set((s) => {
+      const proj = s.byProject[projectId];
+      if (!proj) return s;
+      const groups = proj.groups.map((g) => (g.id === groupId ? { ...g, sizes: normalizeSizes(sizes, g.ids.length) } : g));
+      return patchProject(s, projectId, () => ({ ...proj, groups }));
+    }),
+
+  toggleBroadcast: (projectId, groupId) =>
+    set((s) => {
+      const proj = s.byProject[projectId];
+      if (!proj) return s;
+      const groups = proj.groups.map((g) => (g.id === groupId ? { ...g, broadcast: !g.broadcast && g.ids.length > 1 } : g));
+      return patchProject(s, projectId, () => ({ ...proj, groups }));
+    }),
+
+  setLook: (projectId, id, look) =>
+    set((s) => {
+      const proj = s.byProject[projectId];
+      if (!proj) return s;
+      const tabs = proj.tabs.map((tab) => (tab.id === id ? { ...tab, color: look.color, icon: look.icon } : tab));
+      return patchProject(s, projectId, () => ({ ...proj, tabs }));
+    }),
+
+  setLiveCwd: (id, cwd) => {
+    const entry = Object.entries(get().byProject).find(([, proj]) => proj.tabs.some((tab) => tab.id === id));
+    if (!entry) return;
+    const [projectId, proj] = entry;
+    if (proj.tabs.find((tab) => tab.id === id)?.liveCwd === cwd) return;
+    set((s) =>
+      patchProject(s, projectId, (current) => ({
+        ...current,
+        tabs: current.tabs.map((tab) => (tab.id === id ? { ...tab, liveCwd: cwd } : tab)),
+      })),
+    );
+  },
+
+  sendText: async (projectId, cwd, text) => {
+    const proj = get().byProject[projectId];
+    const mine = (id: string | null | undefined) => proj?.tabs.find((tab) => tab.id === id && !tab.reuseKey);
+    const target = mine(proj?.focusedId) ?? proj?.tabs.find((tab) => !tab.reuseKey);
+    const id = target?.id ?? (await get().openNew(projectId, cwd));
+    if (target) get().focus(projectId, target.id);
+    get().showDock("terminal");
+    // A line at a time, each ended with the carriage return Enter sends; blank lines dropped so a
+    // trailing newline in the selection does not submit an empty command.
+    const lines = text.replace(/\r\n?/g, "\n").split("\n").filter((line) => line.trim() !== "");
+    if (lines.length > 0) await writeTerminal(id, `${lines.join("\r")}\r`);
+  },
+
+  restore: async (projectId, fallbackCwd) => {
+    const saved = savedAtStart?.projects[projectId];
+    if (!saved || saved.tabs.length === 0 || (get().byProject[projectId]?.tabs.length ?? 0) > 0) return false;
+    const label = translate("terminal.restored");
+    const ids: (string | null)[] = [];
+    for (const tab of saved.tabs) {
+      const opts = { title: tab.title, color: tab.color, icon: tab.icon, replay: replayText(tab.text, label) };
+      // A folder that is gone, or a profile since removed, still gets the tab back — in the
+      // repository, with the default shell — rather than losing it.
+      const id = await get()
+        .openNew(projectId, tab.cwd || fallbackCwd, { ...opts, profileId: tab.profileId })
+        .catch(() => get().openNew(projectId, fallbackCwd, opts))
+        .catch(() => null);
+      ids.push(id);
+    }
+    set((s) =>
+      patchProject(s, projectId, (proj) => {
+        const groups: TerminalGroup[] = saved.groups
+          .map((group) => {
+            const members = group.tabs.map((at) => ids[at]).filter((id): id is string => !!id);
+            return { ...newGroup(members, group.dir), sizes: normalizeSizes(group.sizes, members.length), broadcast: group.broadcast && members.length > 1 };
+          })
+          .filter((group) => group.ids.length > 0);
+        // Anything the saved groups did not mention (an older row) stands on its own.
+        const placed = new Set(groups.flatMap((group) => group.ids));
+        for (const id of ids) if (id && !placed.has(id)) groups.push(newGroup([id]));
+        return { ...proj, groups, focusedId: ids[saved.focused] ?? proj.focusedId };
+      }),
+    );
+    return ids.some(Boolean);
   },
 }));

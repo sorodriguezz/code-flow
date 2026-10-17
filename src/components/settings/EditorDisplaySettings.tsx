@@ -206,7 +206,7 @@ export function EditorDisplaySettings() {
 }
 
 /** A labelled control — a select or a field — with what it does under it. */
-function Row({ label, tip, children }: { label: string; tip: string; children: React.ReactNode }) {
+export function Row({ label, tip, children }: { label: string; tip: string; children: React.ReactNode }) {
   return (
     <div className="flex items-start gap-3">
       <span className="min-w-0 flex-1">

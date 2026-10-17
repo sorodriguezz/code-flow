@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, TerminalSquare, Trash2 } from "lucide-react";
 import { getSetting, listShellProfiles, setSetting } from "../../lib/tauri/commands";
-import type { ShellProfile } from "../../types/domain";
+import type { ShellProfile, ShellProfileEnvVar } from "../../types/domain";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
@@ -9,15 +9,40 @@ import { buttonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import { RailSection } from "./settingsNav";
+import { TerminalAppearanceSettings } from "./TerminalAppearanceSettings";
+import { Switch } from "./EditorDisplaySettings";
 
 const PROFILES_KEY = "terminal_profiles";
 const DEFAULT_PROFILE_KEY = "terminal_default_profile";
+/** Read by the backend (`shell_integration::SETTING_KEY`) when a terminal opens: `"0"` is off, anything
+ * else — including no row at all — is on. */
+const INTEGRATION_KEY = "terminal_shell_integration";
 
 /** Args are edited as a single line because that's how anyone thinks of a command — split on
  * whitespace, which covers every flag a shell profile realistically needs (`--login -i`,
  * `-NoLogo`). A profile needing a quoted argument with spaces is beyond what this input is for. */
 function parseArgs(input: string): string[] {
   return input.split(/\s+/).filter(Boolean);
+}
+
+/** A profile's environment is edited as `KEY=value` lines, the way it would sit in a `.env` file.
+ * Blank lines and `#` comments are dropped; a line with no `=` is a variable set to the empty
+ * string; only the first `=` splits, so values may contain more. */
+function parseEnv(input: string): ShellProfileEnvVar[] {
+  const vars: ShellProfileEnvVar[] = [];
+  for (const raw of input.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    const key = (eq === -1 ? line : line.slice(0, eq)).trim();
+    if (!key) continue;
+    vars.push({ key, value: eq === -1 ? "" : line.slice(eq + 1) });
+  }
+  return vars;
+}
+
+function serializeEnv(vars: ShellProfileEnvVar[] | undefined): string {
+  return (vars ?? []).map((v) => `${v.key}=${v.value}`).join("\n");
 }
 
 export function TerminalSettings() {
@@ -32,13 +57,19 @@ export function TerminalSettings() {
   // `args.join(" ")` would swallow the space that separates one flag from the next — the parse
   // drops the trailing empty token, so the space never survives long enough to type after it.
   const [argsDraft, setArgsDraft] = useState<Record<string, string>>({});
+  // The same for the environment: parsing drops blank and comment lines, so the textarea keeps the
+  // text as typed and only the parsed list is saved.
+  const [envDraft, setEnvDraft] = useState<Record<string, string>>({});
+  const [integration, setIntegration] = useState(true);
 
   useEffect(() => {
     void (async () => {
-      const [all, saved] = await Promise.all([
+      const [all, saved, integrationSetting] = await Promise.all([
         listShellProfiles().catch(() => [] as ShellProfile[]),
         getSetting(DEFAULT_PROFILE_KEY).catch(() => null),
+        getSetting(INTEGRATION_KEY).catch(() => null),
       ]);
+      setIntegration(integrationSetting !== "0");
       setBuiltins(all.filter((p) => p.builtin));
       setCustom(all.filter((p) => !p.builtin));
       setDefaultId(saved ?? "");
@@ -63,7 +94,15 @@ export function TerminalSettings() {
   const addProfile = () =>
     setCustom((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), name: t("settings.terminalNewProfile"), command: "", args: [], builtin: false },
+      {
+        id: crypto.randomUUID(),
+        name: t("settings.terminalNewProfile"),
+        command: "",
+        args: [],
+        builtin: false,
+        env: [],
+        cwd: "",
+      },
     ]);
 
   const updateProfile = (id: string, patch: Partial<ShellProfile>) =>
@@ -79,6 +118,11 @@ export function TerminalSettings() {
       setDefaultId("");
       void setSetting(DEFAULT_PROFILE_KEY, "");
     }
+  };
+
+  const toggleIntegration = (on: boolean) => {
+    setIntegration(on);
+    void setSetting(INTEGRATION_KEY, on ? "1" : "0");
   };
 
   const chooseDefault = (id: string) => {
@@ -99,6 +143,7 @@ export function TerminalSettings() {
           {tab === "default" && (
             // Sized by its wrapper: the trigger is `w-full`, and a shell name does not need the
             // whole pane.
+            <div className="space-y-4">
             <div className="max-w-sm">
               <Select
                 value={defaultId}
@@ -115,7 +160,16 @@ export function TerminalSettings() {
                 ]}
               />
             </div>
+              <Switch
+                checked={integration}
+                onChange={toggleIntegration}
+                label={t("settings.terminalIntegration")}
+                tip={t("settings.terminalIntegrationHint")}
+              />
+            </div>
           )}
+
+          {tab === "appearance" && <TerminalAppearanceSettings />}
 
           {tab === "detected" && (
             <div className="space-y-1.5">
@@ -184,6 +238,26 @@ export function TerminalSettings() {
                           className={fieldClass({ size: "sm", className: "flex-1 font-mono" })}
                         />
                       </div>
+                      <input
+                        value={profile.cwd ?? ""}
+                        onChange={(e) => updateProfile(profile.id, { cwd: e.target.value })}
+                        placeholder={t("settings.terminalProfileCwd")}
+                        title={t("settings.terminalProfileCwdHint")}
+                        className={fieldClass({ size: "sm", className: "mt-2 w-full font-mono" })}
+                      />
+                      <textarea
+                        value={envDraft[profile.id] ?? serializeEnv(profile.env)}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          setEnvDraft((prev) => ({ ...prev, [profile.id]: raw }));
+                          updateProfile(profile.id, { env: parseEnv(raw) });
+                        }}
+                        placeholder={t("settings.terminalProfileEnv")}
+                        title={t("settings.terminalProfileEnvHint")}
+                        rows={2}
+                        spellCheck={false}
+                        className={fieldClass({ size: "sm", className: "mt-2 h-auto min-h-[52px] w-full resize-y py-1.5 font-mono" })}
+                      />
                     </div>
                   ))}
                 </div>

@@ -156,10 +156,10 @@ jobs:
       # `vite build` peaks well above Node's default heap: it died at ~2 GB on the macOS runner
       # with "Ineffective mark-compacts near heap limit". The peak is a minifier working on the
       # largest single chunk — `@dbml/core` at ~15.6 MB — so the ceiling has to clear it. Ubuntu's
-      # runner has 16 GB; raise this if the bundle grows a lot.
+      # runner has 16 GB; raise this if the bundle grows a lot. 4096 ran out on 2026-10-17.
       - run: pnpm exec vite build
         env:
-          NODE_OPTIONS: --max-old-space-size=4096
+          NODE_OPTIONS: --max-old-space-size=8192
 
       - run: pnpm build:mobile
 

@@ -4,12 +4,41 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { homeDir } from "@tauri-apps/api/path";
 import "@xterm/xterm/css/xterm.css";
-import { Check, ClipboardPaste, Copy, TriangleAlert, X } from "lucide-react";
-import { resizeTerminal, writeTerminal } from "../../lib/tauri/commands";
+import {
+  Check,
+  ClipboardPaste,
+  Copy,
+  Eraser,
+  FileDown,
+  FolderPlus,
+  RotateCcw,
+  Search,
+  SquareArrowOutUpRight,
+  TextSelect,
+  TriangleAlert,
+  X,
+} from "lucide-react";
+import { resizeTerminal, terminalPathKinds, writeTerminal } from "../../lib/tauri/commands";
+import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { edgeMoving, whenEdgeSettles } from "../../lib/useEdgeSlide";
+import { elementAtDropPoint } from "../../lib/useImageDrop";
+import { definitionProject, openDefinitionTarget } from "../../lib/goToDefinition";
+import { relativeInside } from "../../lib/folderPath";
 import { registerTerminalSink } from "../../state/terminalStore";
+import { DEFAULT_FONT_FAMILY, ensureTerminalPrefsLoaded, useTerminalPrefsStore, type TerminalPrefs } from "../../state/terminalPrefsStore";
+import { notify } from "../../state/notificationStore";
+import { useUiStore } from "../../state/uiStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
+import { pushSuccessToast } from "../../state/toastStore";
+import { AiSparkles } from "../common/AiGlyph";
+import { findFileRefs, quotePath, resolveRef } from "./fileLinks";
+import { installShellIntegration, type ShellIntegration } from "./shellIntegration";
+import { formatDuration } from "./shellMarks";
 import { useThemeStore } from "../../state/themeStore";
 import { useGlassStore } from "../../state/glassStore";
 import { findTheme } from "../../lib/codeThemes";
@@ -22,13 +51,6 @@ import { ContextMenu } from "../common/ContextMenu";
 import { TerminalSearch } from "./TerminalSearch";
 import { bufferText } from "./bufferText";
 
-/**
- * How far back you can scroll in one terminal. Stated rather than inherited: it used to be
- * whatever xterm's default happened to be (1000), which is a per-instance cost multiplied by
- * every terminal ever opened, since none of them is ever unmounted. Same number as before on
- * purpose — the memory lever worth pulling is the *number* of retained terminals, not how much
- * of each one's history the user is allowed to scroll back to.
- */
 /** Shorter than one row and there is nothing meaningful to fit to — see `fitAndReport`. */
 const MIN_FIT_PX = 8;
 
@@ -45,7 +67,50 @@ const WEBGL_RETRIES = 3;
  * frame, so asking immediately only burns the budget. */
 const WEBGL_RETRY_MS = 400;
 
-const SCROLLBACK_LINES = 1000;
+/** Where a file reference's look-ups are cached, so hovering the same build log again asks nothing. */
+const pathKindCache = new Map<string, number>();
+let home: string | null = null;
+void homeDir()
+  .then((dir) => (home = dir))
+  .catch(() => {});
+
+/**
+ * A ⌘-clicked file reference: a file of the repository on screen opens in the editor at its line; a
+ * file anywhere else opens in the program the system has for it; a folder opens in the file manager.
+ */
+function openFileRef(path: string, isDir: boolean, line?: number, column?: number): void {
+  const fail = (e: unknown) => pushErrorToast(String(e));
+  if (isDir) {
+    void openPath(path).catch(fail);
+    return;
+  }
+  const project = definitionProject();
+  const rel = project ? relativeInside(project.local_path, path) : null;
+  if (!rel) {
+    // Shown in the file manager, never opened: opening a `.sh` or an `.exe` would run it.
+    void revealItemInDir(path).catch(fail);
+    return;
+  }
+  useUiStore.getState().setActiveView("editor");
+  // The editor may only now be mounting; give it two frames to register before falling back.
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      // Revealed rather than opened: opening a `.sh` or an `.exe` would run it.
+      if (!openDefinitionTarget(rel, line ?? 1, column)) void revealItemInDir(path).catch(fail);
+    }),
+  );
+}
+
+/** The xterm options a preference sets — applied at construction and whenever it changes. */
+function prefOptions(prefs: TerminalPrefs) {
+  return {
+    fontFamily: prefs.fontFamily.trim() || DEFAULT_FONT_FAMILY,
+    fontSize: prefs.fontSize,
+    lineHeight: prefs.lineHeight,
+    cursorStyle: prefs.cursorStyle,
+    scrollback: prefs.scrollback,
+  } as const;
+}
 
 /** How long the "Copied" badge sits in the corner of the pane. Long enough to be read out of the
  *  corner of the eye while dragging a second selection, short enough never to be in the way. */
@@ -78,7 +143,18 @@ const COPIED_BADGE_MS = 1200;
  * **Find is here too** — ⌘F on macOS, `Ctrl+F` elsewhere, VS Code's chords for its terminal — because
  * xterm takes one custom key handler per terminal, and a second one would replace this one.
  */
-function clipboardKeys(term: Terminal, actions: { copy: () => boolean; paste: () => void; find: () => void }) {
+function clipboardKeys(
+  term: Terminal,
+  actions: {
+    copy: () => boolean;
+    paste: () => void;
+    find: () => void;
+    clear: () => void;
+    zoom: (step: 1 | -1 | 0) => void;
+    /** Answers whether there were command marks to move between. */
+    jump: (direction: -1 | 1) => boolean;
+  },
+) {
   const windows = currentPlatform() === "windows";
   term.attachCustomKeyEventHandler((event) => {
     if (event.type !== "keydown" || event.altKey) return true;
@@ -87,6 +163,28 @@ function clipboardKeys(term: Terminal, actions: { copy: () => boolean; paste: ()
       : event.ctrlKey && !event.metaKey && !event.shiftKey;
     if (findChord && event.key.toLowerCase() === "f") {
       actions.find();
+      event.preventDefault();
+      return false;
+    }
+    // ⌘K clears, as in Terminal.app, iTerm and VS Code — macOS only: elsewhere Ctrl+K is the line
+    // editor's "kill to end of line", which a terminal must leave alone. The menu clears everywhere.
+    if (isMac() && findChord && event.key.toLowerCase() === "k") {
+      actions.clear();
+      event.preventDefault();
+      return false;
+    }
+    // ⌘+ / ⌘- / ⌘0 size every terminal's font (Ctrl elsewhere). Claimed with `preventDefault`, so the
+    // app's own ⌘0 (the vault) does not also fire — the global handler skips a prevented event.
+    const zoomChord = isMac() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+    if (zoomChord && (event.key === "=" || event.key === "+" || event.key === "-" || event.key === "0")) {
+      actions.zoom(event.key === "-" ? -1 : event.key === "0" ? 0 : 1);
+      event.preventDefault();
+      return false;
+    }
+    // ⌘↑ / ⌘↓ (Ctrl elsewhere) move between commands — only when the shell marks them; otherwise
+    // the keys stay the shell's.
+    if (findChord && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+      if (!actions.jump(event.key === "ArrowUp" ? -1 : 1)) return true;
       event.preventDefault();
       return false;
     }
@@ -132,6 +230,7 @@ export function TerminalPane({
   closeLabel,
   autoFocus = false,
   textRef,
+  dock,
 }: {
   sessionId: string;
   visible: boolean;
@@ -197,6 +296,26 @@ export function TerminalPane({
    * copy, save or analyse the whole of it: a container's log, where what is on screen is the answer.
    */
   textRef?: { current: (() => string) | null };
+  /**
+   * What only a pane in the repository dock has: a folder to resolve file links against and open
+   * "here" in, a restart, a way to the assistant, typing into a whole split, and somewhere to report
+   * the folder the shell moved to and a long command that finished. The bench, the Remote workspace
+   * and a service's console mount the pane without it and keep the plain menu.
+   */
+  dock?: {
+    /** The folder the shell started in — file links resolve against it until the shell says where
+     *  it is now. */
+    cwd: string;
+    title: string;
+    projectId: string;
+    onCwd: (cwd: string) => void;
+    onRestart: () => void;
+    onNewHere: (cwd: string) => void;
+    onAskAi: (text: string) => void;
+    /** The other sessions typing should reach too — empty unless the split broadcasts. Read on
+     *  every keystroke, so it is a function rather than a prop that would rebuild the terminal. */
+    broadcastTo: () => string[];
+  };
 }) {
   const t = useT();
   // The scheme on screen, so a shell wears the same colours as the editor — and, in a see-through
@@ -215,6 +334,19 @@ export function TerminalPane({
   const autoFocusRef = useRef(autoFocus);
   const textRefRef = useRef(textRef);
   textRefRef.current = textRef;
+  const dockRef = useRef(dock);
+  dockRef.current = dock;
+  /** The folder the shell last said it is in, for links and "new terminal here". */
+  const cwdRef = useRef<string | null>(null);
+  const shellRef = useRef<ShellIntegration | null>(null);
+  const exitedRef = useRef(false);
+  const prefs = useTerminalPrefsStore((s) => s.prefs);
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  /** Which preferences xterm is wearing, like `themedAs` for the scheme. */
+  const prefsAs = useRef<string | null>(null);
+  /** Whether a drag from the explorer or the desktop is over this pane, for the ring. */
+  const [dropOver, setDropOver] = useState(false);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   /** The size the pty was last told about, so an unchanged fit costs nothing. See `fitAndReport`. */
@@ -231,7 +363,14 @@ export function TerminalPane({
   const [copied, setCopied] = useState(false);
   /** The open right-click menu and where it goes. `hasSelection` is sampled when the menu opens
    *  rather than read during render, because it lives in xterm, not in React. */
-  const [menu, setMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    hasSelection: boolean;
+    selection: string;
+    /** What the last finished command printed — `null` for a shell that marks no commands. */
+    lastOutput: string | null;
+  } | null>(null);
   /**
    * Which renderer this pane ended up on. `null` until the attach below has run.
    *
@@ -313,6 +452,67 @@ export function TerminalPane({
       .catch((e: unknown) => pushErrorToast(String(e)));
   }, [sessionId]);
 
+  /**
+   * A command that ran at least the configured while and finished where nobody was looking — the
+   * pane hidden, the window in the background — is worth a notification. Dock panes only: a bench
+   * tile or a service's console has its own way of saying it stopped.
+   */
+  const notifyIfUnwatched = useCallback((done: { command: string | null; exit: number | null; ms: number }) => {
+    const owner = dockRef.current;
+    const prefs = prefsRef.current;
+    if (!owner || !prefs.notifyLong || done.ms < prefs.notifyAfterSec * 1000) return;
+    if (visibleRef.current && !document.hidden && document.hasFocus()) return;
+    const failed = done.exit !== null && done.exit !== 0;
+    notify({
+      source: "terminal",
+      workspaceId: useWorkspaceStore.getState().workspaceOfProject(owner.projectId),
+      target: { projectId: owner.projectId },
+      titleKey: failed ? "notifications.terminalFailed" : "notifications.terminalDone",
+      params: { name: owner.title, time: formatDuration(done.ms), code: done.exit ?? "?" },
+      status: failed ? "error" : "success",
+      detail: done.command ? (done.command.length > 120 ? `${done.command.slice(0, 120)}…` : done.command) : undefined,
+    });
+  }, []);
+
+  /** Everything the pane holds, as text — what "Save output…" writes and the restore keeps. */
+  const allText = useCallback(() => (termRef.current ? bufferText(termRef.current.buffer.active) : ""), []);
+
+  const saveOutput = useCallback(async () => {
+    const text = allText();
+    if (!text.trim()) return;
+    const name = `${(dockRef.current?.title || "terminal").replace(/[^\w.-]+/g, "-")}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`;
+    try {
+      const path = await apiSaveFile(name, text);
+      if (path) pushSuccessToast(t("terminal.savedOutput", { path }));
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  }, [allText, t]);
+
+  const copyText = useCallback(
+    (text: string) => {
+      void navigator.clipboard
+        .writeText(text)
+        .then(flashCopied)
+        .catch((e: unknown) => pushErrorToast(String(e)));
+    },
+    [flashCopied],
+  );
+
+  /**
+   * Paths dropped onto the pane — from the explorer or from the desktop — typed at the prompt,
+   * quoted for the shell and separated by spaces, with no Enter: the user finishes the command.
+   */
+  const typePaths = useCallback(
+    (paths: string[]) => {
+      if (readOnlyRef.current || exitedRef.current || paths.length === 0) return;
+      const windows = currentPlatform() === "windows";
+      void writeTerminal(sessionId, `${paths.map((path) => quotePath(path, windows)).join(" ")} `);
+      termRef.current?.focus();
+    },
+    [sessionId],
+  );
+
   // The menu is portalled to `document.body`, and a pane is hidden with a class rather than
   // unmounted — so a pane that goes away with its menu open would leave the menu floating over
   // whatever took its place, pointing at a terminal that is no longer on screen.
@@ -323,16 +523,14 @@ export function TerminalPane({
   useEffect(() => {
     if (!containerRef.current) return;
 
+    ensureTerminalPrefsLoaded();
     const term = new Terminal({
-      fontSize: 13,
-      // Cascadia first among the Windows faces: it ships with Windows Terminal and modern Windows,
-      // it carries the powerline and box-drawing glyphs a shell prompt actually uses, and Consolas
-      // does not. Without it a Windows user fell straight through to `monospace`, which resolves to
-      // Courier New — a face with no box-drawing coverage at all, so every table and progress bar
-      // rendered as a row of substitution boxes. Menlo stays for macOS, where it is what `ui-mono`
-      // already resolves to anyway.
-      fontFamily:
-        "ui-monospace, Menlo, 'Cascadia Mono', 'Cascadia Code', Consolas, 'DejaVu Sans Mono', monospace",
+      // Font, size, line height, cursor and scrollback are the user's — Settings › Terminal. The
+      // default font stack puts Cascadia first among the Windows faces, for the reason given at
+      // `DEFAULT_FONT_FAMILY`.
+      ...prefOptions(prefsRef.current),
+      // An overview ruler beside the scrollbar, where the command marks show as ticks.
+      overviewRuler: { width: 8 },
       theme: terminalTheme(scheme, glass),
       // Read by the WebGL renderer when it builds its glyph atlas: a cleared ground is only honoured
       // with it on. Kept off outside the glass, where the ground is solid and it would cost for nothing.
@@ -352,8 +550,7 @@ export function TerminalPane({
         : {}),
       // Only the pane on screen blinks — see the effect below for why that matters when a dozen
       // hidden terminals are still mounted.
-      cursorBlink: visibleRef.current,
-      scrollback: SCROLLBACK_LINES,
+      cursorBlink: visibleRef.current && prefsRef.current.cursorBlink,
       // xterm defaults this to `true` on macOS, and that default is wrong for a pane whose
       // right-click opens a Copy menu: selecting a paragraph and then right-clicking it would
       // throw the paragraph away and select the one word under the pointer, so Copy would hand
@@ -381,14 +578,82 @@ export function TerminalPane({
         void openUrl(uri).catch((e: unknown) => pushErrorToast(String(e)));
       }),
     );
+    // Unicode 11 widths: emoji and the wide East Asian characters take the two cells the shell
+    // counted for them, so a prompt carrying one does not leave the cursor a column off.
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = "11";
+    // File references a command printed — `src/a.ts:12:3`, a stack frame, a Python traceback — are
+    // links too, for the dock's panes: ⌘/Ctrl-click opens the file at that line. Each candidate is
+    // looked up before it is drawn as a link (`terminalPathKinds`), so text that merely looks like a
+    // path is never one.
+    const linkDisposable = dockRef.current
+      ? term.registerLinkProvider({
+          provideLinks: (y, callback) => {
+            const text = term.buffer.active.getLine(y - 1)?.translateToString(true) ?? "";
+            const refs = findFileRefs(text).slice(0, 12);
+            const base = cwdRef.current ?? dockRef.current?.cwd ?? "";
+            if (refs.length === 0 || !base) return callback(undefined);
+            const paths = refs.map((ref) => resolveRef(ref.path, base, home ?? ""));
+            const unknown = paths.filter((path) => !pathKindCache.has(path));
+            void (unknown.length ? terminalPathKinds(unknown) : Promise.resolve([] as number[]))
+              .then((kinds) => {
+                unknown.forEach((path, at) => pathKindCache.set(path, kinds[at] ?? 0));
+                if (pathKindCache.size > 2000) pathKindCache.clear();
+                const links = refs.flatMap((ref, at) => {
+                  const kind = pathKindCache.get(paths[at]) ?? 0;
+                  if (!kind) return [];
+                  return [
+                    {
+                      range: { start: { x: ref.start + 1, y }, end: { x: ref.end, y } },
+                      text: text.slice(ref.start, ref.end),
+                      decorations: { pointerCursor: true, underline: true },
+                      activate: (event: MouseEvent) => {
+                        if (!(isMac() ? event.metaKey : event.ctrlKey)) return;
+                        openFileRef(paths[at], kind === 2, ref.line, ref.column);
+                      },
+                    },
+                  ];
+                });
+                callback(links.length ? links : undefined);
+              })
+              .catch(() => callback(undefined));
+          },
+        })
+      : null;
     term.open(containerRef.current);
     termRef.current = term;
     fitRef.current = fitAddon;
+    prefsAs.current = JSON.stringify(prefsRef.current);
     const textSink = textRefRef.current;
     const readText = () => bufferText(term.buffer.active);
     if (textSink) textSink.current = readText;
     if (autoFocusRef.current) term.focus();
-    clipboardKeys(term, { copy: copySelection, paste: pasteClipboard, find: openFind });
+    clipboardKeys(term, {
+      copy: copySelection,
+      paste: pasteClipboard,
+      find: openFind,
+      clear: () => term.clear(),
+      zoom: (step) => useTerminalPrefsStore.getState().zoom(step),
+      jump: (direction) => shellRef.current?.jump(direction) ?? false,
+    });
+
+    // The shell integration's marks: a coloured bar at each prompt, the folder the shell is in, and a
+    // notification for a long command that finished out of sight. Installed on every pane — a shell
+    // without the integration never prints a mark, and then this does nothing.
+    shellRef.current = installShellIntegration(term, {
+      onCwd: (cwd) => {
+        cwdRef.current = cwd;
+        dockRef.current?.onCwd(cwd);
+      },
+      onFinished: (done) => notifyIfUnwatched(done),
+      colors: () => {
+        const styles = getComputedStyle(document.documentElement);
+        return {
+          ok: styles.getPropertyValue("--cf-success").trim() || "#3fb950",
+          failed: styles.getPropertyValue("--cf-danger").trim() || "#f85149",
+        };
+      },
+    });
 
     // Before `onData` is wired and before the output listener is attached, so the replay can never
     // interleave with what the live shell is saying — the whole of the past, then the present.
@@ -399,7 +664,20 @@ export function TerminalPane({
     const lines = new TypedLineBuffer();
     const dataDisposable = term.onData((data) => {
       if (readOnlyRef.current) return;
+      // A shell that has exited takes Enter as "start it again" — the line under `[process exited]`
+      // says so. Anything else typed into a dead pane goes nowhere, as before.
+      if (exitedRef.current) {
+        if (data === "\r" && dockRef.current) {
+          exitedRef.current = false;
+          dockRef.current.onRestart();
+        }
+        return;
+      }
       void writeTerminal(sessionId, data);
+      // A split typing into all its panes: the same keystrokes, to each of the others.
+      for (const other of dockRef.current?.broadcastTo() ?? []) {
+        if (other !== sessionId) void writeTerminal(other, data).catch(() => {});
+      }
       // After the write, never instead of it: reconstructing the line must not be able to swallow
       // a keystroke. `onCommandRef` rather than the prop, so a parent that re-renders with a new
       // closure doesn't require tearing down the terminal to pick it up.
@@ -431,10 +709,14 @@ export function TerminalPane({
             else deliver(data, seq);
           },
           exit: () => {
+            exitedRef.current = true;
             if (quietExitRef.current) return;
+            const line = dockRef.current
+              ? `\r\n[process exited] \x1b[2m${t("terminal.exitedRestartHint")}\x1b[0m\r\n`
+              : "\r\n[process exited]\r\n";
             // Held like output, so an exit that lands mid-fetch is not printed above the history.
-            if (holding) held.push({ data: "\r\n[process exited]\r\n" });
-            else term.write("\r\n[process exited]\r\n");
+            if (holding) held.push({ data: line });
+            else term.write(line);
           },
         });
     if (backlogRef.current) {
@@ -513,6 +795,9 @@ export function TerminalPane({
       if (settleTimer) clearTimeout(settleTimer);
       if (badgeTimer.current) clearTimeout(badgeTimer.current);
       dataDisposable.dispose();
+      linkDisposable?.dispose();
+      shellRef.current?.dispose();
+      shellRef.current = null;
       unregister();
       // Identity-checked, like the sink: a pane that replaced this one has already put its own reader.
       if (textSink && textSink.current === readText) textSink.current = null;
@@ -563,8 +848,68 @@ export function TerminalPane({
    * restarts its blink on the spot.
    */
   useEffect(() => {
-    if (termRef.current) termRef.current.options.cursorBlink = visible;
-  }, [visible]);
+    if (termRef.current) termRef.current.options.cursorBlink = visible && prefs.cursorBlink;
+  }, [visible, prefs.cursorBlink]);
+
+  /**
+   * Font, size, line height, cursor and scrollback, put on the pane on screen when they change —
+   * and on a hidden one when it is shown, like the scheme: a font option rebuilds xterm's renderer,
+   * which a dozen hidden panes should not each pay for at the moment of the change.
+   */
+  useEffect(() => {
+    const term = termRef.current;
+    const wanted = JSON.stringify(prefs);
+    if (!term || !visible || prefsAs.current === wanted) return;
+    Object.assign(term.options, prefOptions(prefs));
+    prefsAs.current = wanted;
+    refit();
+    repaint();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefs, visible]);
+
+  /**
+   * Drops onto a dock pane: files from the desktop through Tauri's own drag-drop event (the webview
+   * takes those before the page sees them), and rows from the explorer through the event its drag
+   * dispatches on the element under the pointer (`cf-explorer-drop`). Only while on screen — a
+   * hidden pane is not under any pointer, and a listener per hidden pane would be all cost.
+   */
+  useEffect(() => {
+    const box = containerRef.current?.parentElement;
+    if (!visible || !box || !dockRef.current || readOnlyRef.current) return;
+    const onExplorerDrop = (event: Event) => typePaths((event as CustomEvent<string[]>).detail ?? []);
+    box.addEventListener("cf-explorer-drop", onExplorerDrop);
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    const inside = (x: number, y: number) => {
+      const el = elementAtDropPoint(x, y);
+      return !!el && box.contains(el);
+    };
+    try {
+      void getCurrentWebview()
+        .onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === "leave") return setDropOver(false);
+          const hit = inside(payload.position.x, payload.position.y);
+          if (payload.type === "drop") {
+            setDropOver(false);
+            if (hit) typePaths(payload.paths);
+          } else setDropOver(hit);
+        })
+        .then((stop) => {
+          if (disposed) stop();
+          else unlisten = stop;
+        })
+        .catch(() => {});
+    } catch {
+      // No webview (tests): nothing to listen to.
+    }
+    return () => {
+      disposed = true;
+      unlisten?.();
+      box.removeEventListener("cf-explorer-drop", onExplorerDrop);
+      setDropOver(false);
+    };
+  }, [visible, typePaths]);
 
   /**
    * Repaints every row xterm is already holding.
@@ -782,7 +1127,9 @@ export function TerminalPane({
     // changes — it exists to be the badge's positioning parent, and to keep the badge out of the
     // node xterm owns the children of.
     <div
-      className="relative h-full w-full"
+      className={`relative h-full w-full ${dropOver ? "ring-2 ring-inset ring-[var(--cf-accent)]" : ""}`}
+      // Where the explorer's drag looks when it is released over nothing of its own — see `FileTree`.
+      data-cf-terminal-drop={dock ? "" : undefined}
       onContextMenu={(event) => {
         // Claims the right-click before `contextMenuGuard`'s document listener sees it, which is
         // what stops the webview's own Reload/Back menu from appearing over a terminal.
@@ -791,6 +1138,8 @@ export function TerminalPane({
           x: event.clientX,
           y: event.clientY,
           hasSelection: termRef.current?.hasSelection() ?? false,
+          selection: termRef.current?.getSelection() ?? "",
+          lastOutput: shellRef.current?.lastOutput() ?? null,
         });
       }}
     >
@@ -862,6 +1211,43 @@ export function TerminalPane({
               onClick: () => copySelection(),
             },
             ...(readOnly ? [] : [{ label: t("terminal.paste"), icon: ClipboardPaste, onClick: pasteClipboard }]),
+            // Only once the shell has marked a finished command — see `shellIntegration`.
+            ...(menu.lastOutput !== null
+              ? [
+                  {
+                    label: t("terminal.copyLastOutput"),
+                    leading: <TextSelect size={13} className="shrink-0 opacity-70" />,
+                    onClick: () => copyText(menu.lastOutput ?? ""),
+                  },
+                ]
+              : []),
+            { label: t("terminal.find"), icon: Search, separated: true, onClick: openFind },
+            { label: t("terminal.clear"), icon: Eraser, onClick: () => termRef.current?.clear() },
+            { label: t("terminal.saveOutput"), icon: FileDown, onClick: () => void saveOutput() },
+            ...(dock
+              ? [
+                  {
+                    label: t("terminal.askAi"),
+                    leading: <AiSparkles size={13} />,
+                    separated: true,
+                    // The selection, else the last command's output, else the screen's last lines.
+                    onClick: () =>
+                      dock.onAskAi(
+                        menu.selection || menu.lastOutput || allText().split("\n").slice(-60).join("\n"),
+                      ),
+                  },
+                  {
+                    label: t("terminal.newHere"),
+                    icon: FolderPlus,
+                    separated: true,
+                    onClick: () => dock.onNewHere(cwdRef.current ?? dock.cwd),
+                  },
+                  ...(cwdRef.current
+                    ? [{ label: t("terminal.revealFolder"), icon: SquareArrowOutUpRight, onClick: () => void openPath(cwdRef.current!).catch((e: unknown) => pushErrorToast(String(e))) }]
+                    : []),
+                  { label: t("terminal.restart"), icon: RotateCcw, onClick: dock.onRestart },
+                ]
+              : []),
             ...(onClose
               ? [{ label: closeLabel ?? t("terminal.close"), icon: X, danger: true, separated: true, onClick: onClose }]
               : []),

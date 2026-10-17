@@ -121,6 +121,50 @@ pub fn close_terminal(registry: State<TerminalRegistry>, id: String) -> Result<(
     terminal::close_terminal(&registry, &id)
 }
 
+/// What each of `paths` is on disk — `0` missing, `1` a file, `2` a directory — so the terminal can
+/// make a path printed by a command clickable only when it names something real.
+///
+/// A leading `~` expands to the home folder; every other path is taken as given, which in practice
+/// means absolute — the pane resolves relative ones against the shell's folder before asking.
+/// `std::fs::metadata` and nothing more: no opening, no reading, no canonicalising. At most
+/// [`PATH_KINDS_LIMIT`] paths per call; the rest answer `0`, since a screenful of output is the
+/// most anyone hovers over and a runaway caller must not turn this into a disk walk.
+#[tauri::command(async)]
+pub fn terminal_path_kinds(paths: Vec<String>) -> Vec<u8> {
+    let home = dirs::home_dir();
+    paths
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| if i < PATH_KINDS_LIMIT { path_kind(raw, home.as_deref()) } else { 0 })
+        .collect()
+}
+
+const PATH_KINDS_LIMIT: usize = 64;
+
+fn path_kind(raw: &str, home: Option<&std::path::Path>) -> u8 {
+    if raw.is_empty() || raw.contains('\0') {
+        return 0;
+    }
+    let path = if raw == "~" {
+        match home {
+            Some(h) => h.to_path_buf(),
+            None => return 0,
+        }
+    } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        match home {
+            Some(h) => h.join(rest),
+            None => return 0,
+        }
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => 2,
+        Ok(meta) if meta.is_file() => 1,
+        _ => 0,
+    }
+}
+
 /// What a terminal is busy with — the program in its foreground other than the shell — so closing
 /// its tab can ask first. `None` when it sits at its prompt. Reads the process table, hence async.
 #[tauri::command(async)]
@@ -458,6 +502,28 @@ pub fn spawn_transcript_flush(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_kinds_tell_files_from_folders_and_cap_the_batch() {
+        let dir = std::env::temp_dir().join(format!("cf-path-kinds-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        let kinds = terminal_path_kinds(vec![
+            file.to_string_lossy().into_owned(),
+            dir.to_string_lossy().into_owned(),
+            dir.join("missing").to_string_lossy().into_owned(),
+            String::new(),
+        ]);
+        assert_eq!(kinds, vec![1, 2, 0, 0]);
+        assert_eq!(path_kind("~", Some(&dir)), 2);
+        assert_eq!(path_kind("~/a.txt", Some(&dir)), 1);
+        assert_eq!(path_kind("~/a.txt", None), 0);
+        let many = terminal_path_kinds(vec![dir.to_string_lossy().into_owned(); 70]);
+        assert_eq!(many.len(), 70);
+        assert!(many[..64].iter().all(|k| *k == 2) && many[64..].iter().all(|k| *k == 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The whole point of the seed: a history that was cut inside a full-screen program must not
     /// arm that program's modes on the shell replacing it.

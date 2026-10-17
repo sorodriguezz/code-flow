@@ -17,7 +17,7 @@ component's own licence wins — which is what section 6 says.
 
 | What ships | Count |
 |---|---|
-| npm packages (production tree) | 348 resolved versions of 319 packages |
+| npm packages (production tree) | 349 resolved versions of 320 packages |
 | Rust crates (resolved for macOS and Windows) | 878 resolved versions of 772 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
@@ -255,7 +255,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### MIT — 238 packages
+### MIT — 239 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -349,6 +349,7 @@ because there the order carries meaning.
 | `@upsetjs/venn.js` | 2.0.0 | MIT | <https://github.com/upsetjs/venn.js> |
 | `@xterm/addon-fit` | 0.11.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/addon-search` | 0.16.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
+| `@xterm/addon-unicode11` | 0.9.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/addon-web-links` | 0.12.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/addon-webgl` | 0.19.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/xterm` | 6.0.0 | MIT | <https://github.com/xtermjs/xterm.js> |

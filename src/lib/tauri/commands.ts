@@ -661,6 +661,8 @@ export const resizeTerminal = (id: string, cols: number, rows: number) =>
   invoke<void>("resize_terminal", { id, cols, rows });
 
 export const closeTerminal = (id: string) => invoke<void>("close_terminal", { id });
+/** Per path, what it is on disk: 0 missing, 1 file, 2 directory (`~` expands; at most 64 per call). */
+export const terminalPathKinds = (paths: string[]) => invoke<number[]>("terminal_path_kinds", { paths });
 /** What a terminal is running in its foreground other than its shell — `null` at the prompt. Closing
  *  its tab ends it, so the tab asks first. */
 export const terminalForeground = (id: string) => invoke<string | null>("terminal_foreground", { id });

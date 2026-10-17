@@ -90,6 +90,7 @@ mod secret_scan;
 mod secrets;
 mod services;
 mod shell_env;
+mod shell_integration;
 mod shell_profiles;
 /// The one cleanup every way out of the app runs — the `Exit` event and a Windows update alike.
 mod shutdown;
@@ -1526,6 +1527,7 @@ sharded_invoke_handler! {
         commands::terminal_cmd::write_terminal,
         commands::terminal_cmd::resize_terminal,
         commands::terminal_cmd::close_terminal,
+        commands::terminal_cmd::terminal_path_kinds,
         commands::terminal_cmd::terminal_foreground,
         commands::terminal_cmd::list_workspace_terminals,
         commands::terminal_cmd::add_workspace_terminal,

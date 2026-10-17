@@ -47,6 +47,25 @@ pub struct ShellProfile {
     /// Detected by the app rather than added by the user — built-ins aren't editable in Settings.
     #[serde(default)]
     pub builtin: bool,
+    /// Extra environment for every shell this profile opens, in order (a later entry wins). Applied
+    /// beneath an AI account's variables, so a shell opened *as* an account is that account
+    /// whatever the profile says. Empty for built-ins.
+    #[serde(default)]
+    pub env: Vec<EnvVar>,
+    /// Where the shell starts instead of the folder the terminal was opened on: `~` expands, and a
+    /// relative path is taken from that folder. Blank, or not a directory, leaves the start alone —
+    /// see `terminal::profile_start`.
+    #[serde(default)]
+    pub cwd: String,
+}
+
+/// One `KEY=value` of a profile's environment. A list of objects rather than a map so the order the
+/// user wrote them in survives the round trip through JSON.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnvVar {
+    pub key: String,
+    #[serde(default)]
+    pub value: String,
 }
 
 /// Resolves a bare executable name against `PATH`. Windows callers pass the name *with* its
@@ -96,6 +115,8 @@ fn profile(id: &str, name: &str, command: PathBuf, args: &[&str]) -> ShellProfil
         command: command.to_string_lossy().into_owned(),
         args: args.iter().map(|a| a.to_string()).collect(),
         builtin: true,
+        env: Vec::new(),
+        cwd: String::new(),
     }
 }
 
@@ -423,6 +444,22 @@ mod tests {
         assert_eq!(found[0].command, shell.to_string_lossy());
     }
 
+    /// Profiles saved before `env` and `cwd` existed still load, and the new fields round-trip.
+    #[test]
+    fn env_and_cwd_are_optional_and_round_trip() {
+        let old: ShellProfile =
+            serde_json::from_str(r#"{"id":"a","name":"A","command":"/bin/zsh","args":["-l"]}"#).unwrap();
+        assert!(old.env.is_empty() && old.cwd.is_empty());
+        let new: ShellProfile = serde_json::from_str(
+            r#"{"id":"b","name":"B","command":"zsh","env":[{"key":"FOO","value":"1"},{"key":"BAR"}],"cwd":"~/src"}"#,
+        )
+        .unwrap();
+        assert_eq!(new.env, vec![EnvVar { key: "FOO".into(), value: "1".into() }, EnvVar { key: "BAR".into(), value: String::new() }]);
+        assert_eq!(new.cwd, "~/src");
+        let again: ShellProfile = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(again.env, new.env);
+    }
+
     fn utf16(text: &str) -> Vec<u8> {
         text.encode_utf16().flat_map(u16::to_le_bytes).collect()
     }
@@ -450,6 +487,8 @@ mod tests {
             command: format!("/bin/{id}"),
             args: Vec::new(),
             builtin: true,
+            env: Vec::new(),
+            cwd: String::new(),
         }
     }
 

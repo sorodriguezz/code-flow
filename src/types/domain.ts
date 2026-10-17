@@ -1158,6 +1158,18 @@ export interface ShellProfile {
   command: string;
   args: string[];
   builtin: boolean;
+  /** Extra environment for every shell the profile opens, in order (a later entry wins). Always
+   * empty for built-ins. */
+  env: ShellProfileEnvVar[];
+  /** Where the shell starts instead of the requested folder: `~` expands, relative paths hang off the
+   * requested folder, and a path that isn't an existing directory is ignored. Blank = no override. */
+  cwd: string;
+}
+
+/** One `KEY=value` of a shell profile's environment — a list rather than a map so order survives. */
+export interface ShellProfileEnvVar {
+  key: string;
+  value: string;
 }
 
 /** What `open_terminal` hands back: the pty session id plus the profile that actually started —

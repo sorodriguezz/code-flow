@@ -1,6 +1,26 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { CirclePlay, Container, Maximize2, Minimize2, Pencil, Plus, SplitSquareHorizontal, TerminalSquare, X } from "lucide-react";
+import {
+  CirclePlay,
+  Container,
+  Maximize2,
+  Minimize2,
+  Palette,
+  Pencil,
+  Plus,
+  Radio,
+  RotateCcw,
+  SplitSquareHorizontal,
+  SplitSquareVertical,
+  SquareArrowOutUpRight,
+  SquareArrowUpLeft,
+  TerminalSquare,
+  X,
+} from "lucide-react";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { askInRepoChat } from "../../lib/aiPanelNav";
+import { colorCss, iconFor, TERMINAL_COLORS, TERMINAL_ICONS } from "../terminal/terminalLook";
+import { resizeAt } from "../../state/terminalLayout";
 import { EmptyState } from "../common/EmptyState";
 import { DockBodySkeleton } from "../common/ViewSkeleton";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -16,7 +36,15 @@ import { ContainersList, ContainersPane, ContainersSummary, useContainersPulse }
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
 import { STATUS_TONE, useServicesStore } from "../../state/servicesStore";
-import { activeGroup, useTerminalStore, type DockView, type TerminalTab } from "../../state/terminalStore";
+import {
+  activeGroup,
+  activeGroupOf,
+  registerTextReader,
+  useTerminalStore,
+  type DockView,
+  type TerminalTab,
+} from "../../state/terminalStore";
+import { translate } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
@@ -59,22 +87,50 @@ const MAX_HEIGHT = 720;
  */
 
 /** Kept out of the dock's own render so a burst of output in one pane cannot re-render the others:
- *  the props are ids and a boolean, and the callback comes from a store action that never changes. */
+ *  the props are ids, strings and a boolean, and every callback reaches the store by `getState`. */
 const DockPane = memo(function DockPane({
   projectId,
   tabId,
   visible,
+  title,
+  cwd,
+  replay,
 }: {
   projectId: string;
   tabId: string;
   visible: boolean;
+  title: string;
+  cwd: string;
+  replay?: string;
 }) {
   const close = useCallback(() => {
     void confirmCloseTerminal(tabId).then((ok) => {
       if (ok) void useTerminalStore.getState().close(projectId, tabId);
     });
   }, [projectId, tabId]);
-  return <TerminalPane sessionId={tabId} visible={visible} onClose={close} />;
+  // What the pane holds, for the restore snapshot — see `terminalStore.readTerminalText`.
+  const textRef = useMemo<{ current: (() => string) | null }>(() => ({ current: null }), []);
+  useEffect(() => registerTextReader(tabId, () => textRef.current?.() ?? ""), [tabId, textRef]);
+  const dock = useMemo(
+    () => ({
+      cwd,
+      title,
+      projectId,
+      onCwd: (next: string) => useTerminalStore.getState().setLiveCwd(tabId, next),
+      onRestart: () => void useTerminalStore.getState().restart(projectId, tabId).catch((e: unknown) => pushErrorToast(String(e))),
+      onNewHere: (here: string) =>
+        void useTerminalStore.getState().openNew(projectId, here).catch((e: unknown) => pushErrorToast(String(e))),
+      onAskAi: (text: string) =>
+        askInRepoChat(projectId, `${translate("terminal.askAiPrompt")}\n\n\`\`\`\n${text.trim()}\n\`\`\`\n`),
+      broadcastTo: () => {
+        const proj = useTerminalStore.getState().byProject[projectId];
+        const group = proj?.groups.find((g) => g.ids.includes(tabId));
+        return group?.broadcast ? group.ids : [];
+      },
+    }),
+    [projectId, tabId, title, cwd],
+  );
+  return <TerminalPane sessionId={tabId} visible={visible} onClose={close} replay={replay} textRef={textRef} dock={dock} />;
 });
 
 /** What the services panel's pane shows: one service's console, or the machine's ports. `null`
@@ -160,6 +216,8 @@ export function ServicesDock() {
   const activeProjectId = project?.id ?? null;
   const activeProj = activeProjectId ? byProject[activeProjectId] : undefined;
   const visibleIds = activeGroup(activeProj);
+  const visibleGroup = activeGroupOf(activeProj);
+  const paneAreaRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (showServices && workspaceId) void loadServices(workspaceId);
@@ -184,7 +242,14 @@ export function ServicesDock() {
     if (!open || view !== "terminal" || !project || autoOpened.current.has(project.id)) return;
     if ((activeProj?.tabs.length ?? 0) > 0) return;
     autoOpened.current.add(project.id);
-    void openNew(project.id, project.local_path).catch((e: unknown) => pushErrorToast(String(e)));
+    // The terminals this repository had when the app last closed come back first; only a repository
+    // with none gets a fresh shell.
+    const target = project;
+    void useTerminalStore
+      .getState()
+      .restore(target.id, target.local_path)
+      .then((restored) => (restored ? undefined : openNew(target.id, target.local_path)))
+      .catch((e: unknown) => pushErrorToast(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProjectId, view, open]);
 
@@ -204,6 +269,155 @@ export function ServicesDock() {
 
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  /** A terminal row's right-click menu. */
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; tab: TerminalTab } | null>(null);
+  /** A row being dragged to another place in the list, and the gap it would land in. */
+  const [rowDrag, setRowDrag] = useState<{ id: string; index: number } | null>(null);
+
+  /** Opens beside the focused terminal, in the folder it is in — what VS Code's split does. */
+  const splitFrom = (tab: TerminalTab, dir: "row" | "column") => {
+    if (!project) return;
+    focusTab(project.id, tab.id);
+    void openNew(project.id, tab.liveCwd || tab.cwd, { split: true, splitDir: dir, profileId: tab.profileId }).catch((e: unknown) =>
+      pushErrorToast(String(e)),
+    );
+  };
+
+  /**
+   * Drag a row to reorder the list. Pointer events rather than HTML5 drag-and-drop, which the
+   * webview's own file-drop handling takes over on Windows; the explorer drags its rows the same way.
+   */
+  const beginRowDrag = (event: React.PointerEvent<HTMLElement>, tab: TerminalTab) => {
+    if (event.button !== 0 || !project || renamingId) return;
+    const projectId = project.id;
+    const from = { x: event.clientX, y: event.clientY };
+    let started = false;
+    let index = -1;
+    const indexAt = (y: number) => {
+      const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-cf-term-row]"));
+      const at = rows.findIndex((row) => {
+        const rect = row.getBoundingClientRect();
+        return y < rect.top + rect.height / 2;
+      });
+      return at < 0 ? rows.length : at;
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!started && Math.hypot(ev.clientX - from.x, ev.clientY - from.y) < 5) return;
+      started = true;
+      index = indexAt(ev.clientY);
+      setRowDrag({ id: tab.id, index });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      setRowDrag(null);
+      if (!started) return;
+      const tabs = useTerminalStore.getState().byProject[projectId]?.tabs ?? [];
+      const current = tabs.findIndex((entry) => entry.id === tab.id);
+      // The gap is counted with the dragged row still in the list; taking it out shifts the rest up.
+      const target = index > current ? index - 1 : index;
+      if (current >= 0 && target !== current) useTerminalStore.getState().reorder(projectId, tab.id, target);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
+  /** The dividers of the split on screen: drag one and the two panes beside it trade room. */
+  const beginResize = (event: React.PointerEvent<HTMLElement>, index: number) => {
+    const area = paneAreaRef.current;
+    const group = visibleGroup;
+    if (!area || !group || !project) return;
+    event.preventDefault();
+    const projectId = project.id;
+    const rect = area.getBoundingClientRect();
+    const column = group.dir === "column";
+    const start = column ? event.clientY : event.clientX;
+    const span = column ? rect.height : rect.width;
+    const sizes = group.sizes;
+    const onMove = (ev: PointerEvent) => {
+      const delta = ((column ? ev.clientY : ev.clientX) - start) / Math.max(1, span);
+      useTerminalStore.getState().setGroupSizes(projectId, group.id, resizeAt(sizes, index, delta));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      document.body.style.cursor = "";
+    };
+    document.body.style.cursor = column ? "row-resize" : "col-resize";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
+  const rowMenuItems = (tab: TerminalTab): MenuItem[] => {
+    if (!project) return [];
+    const projectId = project.id;
+    const store = useTerminalStore.getState();
+    const group = byProject[projectId]?.groups.find((g) => g.ids.includes(tab.id));
+    const inSplit = (group?.ids.length ?? 0) > 1;
+    const onScreen = visibleIds.includes(tab.id);
+    return [
+      { label: t("terminal.rename"), icon: Pencil, onClick: () => startRename(tab) },
+      { label: t("terminal.splitRight"), icon: SplitSquareHorizontal, separated: true, onClick: () => splitFrom(tab, "row") },
+      { label: t("terminal.splitDown"), icon: SplitSquareVertical, onClick: () => splitFrom(tab, "column") },
+      ...(inSplit ? [{ label: t("terminal.detach"), icon: SquareArrowUpLeft, onClick: () => store.detachTab(projectId, tab.id) }] : []),
+      ...(!onScreen && visibleIds.length > 0
+        ? [{ label: t("terminal.joinSplit"), icon: SquareArrowOutUpRight, onClick: () => store.joinActive(projectId, tab.id) }]
+        : []),
+      ...(inSplit && group
+        ? [
+            {
+              label: group.broadcast ? t("terminal.broadcastOff") : t("terminal.broadcastOn"),
+              icon: Radio,
+              onClick: () => store.toggleBroadcast(projectId, group.id),
+            },
+          ]
+        : []),
+      {
+        label: t("terminal.look"),
+        icon: Palette,
+        separated: true,
+        onClick: () => {},
+        children: [
+          { label: t("terminal.colorNone"), swatch: "transparent", checked: !tab.color, onClick: () => store.setLook(projectId, tab.id, { color: undefined, icon: tab.icon }) },
+          ...TERMINAL_COLORS.map((color) => ({
+            label: t(color.label),
+            swatch: color.css,
+            checked: tab.color === color.id,
+            onClick: () => store.setLook(projectId, tab.id, { color: color.id, icon: tab.icon }),
+          })),
+        ],
+      },
+      {
+        label: t("terminal.icon"),
+        icon: iconFor(tab.icon),
+        onClick: () => {},
+        children: TERMINAL_ICONS.map((entry) => ({
+          label: t(entry.label),
+          icon: entry.icon,
+          onClick: () => store.setLook(projectId, tab.id, { color: tab.color, icon: entry.id === "terminal" ? undefined : entry.id }),
+        })),
+      },
+      { label: t("terminal.restart"), icon: RotateCcw, separated: true, onClick: () => void store.restart(projectId, tab.id) },
+      {
+        label: t("terminal.close"),
+        icon: X,
+        danger: true,
+        onClick: () =>
+          void confirmCloseTerminal(tab.id).then((ok) => {
+            if (ok) void closeTab(projectId, tab.id);
+          }),
+      },
+    ];
+  };
+
+  const startRename = (tab: TerminalTab) => {
+    setRenamingId(tab.id);
+    setRenameValue(tab.title);
+  };
 
   const commitRename = () => {
     const id = renamingId;
@@ -332,6 +546,17 @@ export function ServicesDock() {
 
         <div className="flex-1" />
 
+        {view === "terminal" && visibleGroup?.broadcast && project && (
+          <button
+            onClick={() => useTerminalStore.getState().toggleBroadcast(project.id, visibleGroup.id)}
+            title={t("terminal.broadcastOff")}
+            className="mr-1 flex items-center gap-1 rounded px-1.5 text-[11px] text-[var(--cf-warning)] hover:bg-[var(--cf-hover)]"
+          >
+            <Radio size={11} />
+            {t("terminal.broadcasting")}
+          </button>
+        )}
+
         {showServices && view === "terminal" && terminalActions}
 
         {/* A ×, not the ⌄ it used to be: right after the shell menu's own ⌄ the two read as the same
@@ -414,28 +639,31 @@ export function ServicesDock() {
                   {t("terminal.noneOpen")}
                 </button>
               )}
-              {(activeProj?.tabs ?? []).map((tab) => (
+              {(activeProj?.tabs ?? []).map((tab, index) => (
                 <TerminalRow
                   key={tab.id}
                   tab={tab}
-                  where={project ? whereOf(project.local_path, tab.cwd) : ""}
+                  where={project ? whereOf(project.local_path, tab.liveCwd || tab.cwd) : ""}
                   inSplit={visibleIds.includes(tab.id)}
                   selected={visibleIds.includes(tab.id)}
+                  dropBefore={rowDrag !== null && rowDrag.id !== tab.id && rowDrag.index === index}
+                  dropAfter={rowDrag !== null && index === (activeProj?.tabs.length ?? 0) - 1 && rowDrag.index > index}
+                  dragging={rowDrag?.id === tab.id}
+                  onDragStart={(event) => beginRowDrag(event, tab)}
+                  onMenu={(event) => {
+                    event.preventDefault();
+                    setRowMenu({ x: event.clientX, y: event.clientY, tab });
+                  }}
                   renaming={renamingId === tab.id}
                   renameValue={renameValue}
                   onRenameChange={setRenameValue}
-                  onRenameStart={() => {
-                    setRenamingId(tab.id);
-                    setRenameValue(tab.title);
-                  }}
+                  onRenameStart={() => startRename(tab)}
                   onRenameCommit={commitRename}
                   onRenameCancel={() => setRenamingId(null)}
                   onSelect={() => {
                     if (project) focusTab(project.id, tab.id);
                   }}
-                  onSplit={() =>
-                    project && void openNew(project.id, project.local_path, { split: true })
-                  }
+                  onSplit={() => splitFrom(tab, "row")}
                   onClose={() =>
                     project &&
                     void confirmCloseTerminal(tab.id).then((ok) => {
@@ -459,7 +687,10 @@ export function ServicesDock() {
 
         {/* The pane area. Every terminal stays mounted here whichever panel is up; with the
             services on screen, a service's console or the ports mount on top of them. */}
-        <div className="relative flex min-h-0 min-w-0 flex-1">
+        <div
+          ref={paneAreaRef}
+          className={`relative flex min-h-0 min-w-0 flex-1 ${view === "terminal" && visibleGroup?.dir === "column" ? "flex-col" : ""}`}
+        >
           {shown === "containers" ? (
             <ContainersPane />
           ) : shown === "services" ? (
@@ -483,27 +714,62 @@ export function ServicesDock() {
               <EmptyState icon={TerminalSquare} title={t("terminal.emptyHint")} />
             </div>
           ) : null}
-          {allPanes.map(({ projectId, tab, visible }) => (
-            <div
-              key={tab.id}
-              className={
-                visible
-                  ? `flex min-w-0 flex-1 flex-col ${tab.id !== visibleIds[visibleIds.length - 1] ? "border-r border-[var(--cf-border)]" : ""}`
-                  : "hidden"
-              }
-            >
-              {/* The pane's own project, not the selected one: every project's terminals are
-                  mounted here at once, and closing one from its menu has to reach the store under
-                  the id it actually belongs to. */}
-              <DockPane projectId={projectId} tabId={tab.id} visible={visible} />
-            </div>
-          ))}
+          {allPanes.map(({ projectId, tab, visible }) => {
+            const at = visibleIds.indexOf(tab.id);
+            const last = at === visibleIds.length - 1;
+            const column = visibleGroup?.dir === "column";
+            const color = colorCss(tab.color);
+            return (
+              <div
+                key={tab.id}
+                // The split's shares, as flex-grow over a zero basis — the dividers below move them.
+                style={visible ? { flex: `${visibleGroup?.sizes[at] ?? 1} 1 0%` } : undefined}
+                className={
+                  visible
+                    ? `relative flex min-h-0 min-w-0 flex-col ${last ? "" : column ? "border-b border-[var(--cf-border)]" : "border-r border-[var(--cf-border)]"} ${
+                        visibleGroup?.broadcast ? "ring-1 ring-inset ring-[var(--cf-warning)]" : ""
+                      }`
+                    : "hidden"
+                }
+              >
+                {/* A tab's colour, as a hairline across the top of its pane — enough to tell the red
+                    one from the others at a glance without tinting what the shell prints. */}
+                {color && <div aria-hidden className="h-[2px] shrink-0" style={{ background: color }} />}
+                {/* The pane's own project, not the selected one: every project's terminals are
+                    mounted here at once, and closing one from its menu has to reach the store under
+                    the id it actually belongs to. */}
+                <div className="min-h-0 flex-1">
+                  <DockPane projectId={projectId} tabId={tab.id} visible={visible} title={tab.title} cwd={tab.cwd} replay={tab.replay} />
+                </div>
+              </div>
+            );
+          })}
+          {/* The split's dividers, over the borders between its panes. */}
+          {view === "terminal" &&
+            visibleGroup &&
+            visibleGroup.ids.length > 1 &&
+            visibleGroup.sizes.slice(0, -1).map((_, index) => {
+              const at = visibleGroup.sizes.slice(0, index + 1).reduce((sum, size) => sum + size, 0) * 100;
+              const column = visibleGroup.dir === "column";
+              return (
+                <div
+                  key={index}
+                  onPointerDown={(event) => beginResize(event, index)}
+                  className={`absolute z-10 ${column ? "left-0 right-0 h-1.5 -translate-y-1/2 cursor-row-resize" : "top-0 bottom-0 w-1.5 -translate-x-1/2 cursor-col-resize"} hover:bg-[color-mix(in_srgb,var(--cf-accent)_40%,transparent)]`}
+                  style={column ? { top: `${at}%` } : { left: `${at}%` }}
+                />
+              );
+            })}
         </div>
           </>
         ) : (
           <DockBodySkeleton listWidth={listWidth} />
         )}
       </div>
+
+      {rowMenu && (
+        <ContextMenu x={rowMenu.x} y={rowMenu.y} items={rowMenuItems(rowMenu.tab)} onClose={() => setRowMenu(null)} />
+      )}
 
       {editing && workspaceId && (
         <ServiceEditor
@@ -538,6 +804,11 @@ function TerminalRow({
   where,
   inSplit,
   selected,
+  dropBefore,
+  dropAfter,
+  dragging,
+  onDragStart,
+  onMenu,
   renaming,
   renameValue,
   onRenameChange,
@@ -556,6 +827,12 @@ function TerminalRow({
    *  split reads as the pair it is. */
   inSplit: boolean;
   selected: boolean;
+  /** A row being dragged would land above this one (or, on the last row, below it). */
+  dropBefore: boolean;
+  dropAfter: boolean;
+  dragging: boolean;
+  onDragStart: (event: React.PointerEvent<HTMLElement>) => void;
+  onMenu: (event: React.MouseEvent<HTMLElement>) => void;
   renaming: boolean;
   renameValue: string;
   onRenameChange: (value: string) => void;
@@ -567,26 +844,38 @@ function TerminalRow({
   onClose: () => void;
 }) {
   const t = useT();
+  const TabIcon = iconFor(tab.icon);
+  const color = colorCss(tab.color);
 
   return (
     // The whole row selects, not just its text: the row is as tall as its action buttons and padded
     // on every side, and a click on that margin used to land on nothing. The button inside stays for
     // the keyboard — its click bubbles here — and the action buttons and the rename field stop theirs.
     <div
+      data-cf-term-row=""
       onClick={() => !renaming && onSelect()}
       onDoubleClick={() => !renaming && onRenameStart()}
-      className={`group/row flex cursor-pointer items-center gap-1.5 px-2 py-[3px] pl-4 text-[12px] ${
+      onPointerDown={(event) => !renaming && onDragStart(event)}
+      onContextMenu={onMenu}
+      className={`group/row relative flex cursor-pointer items-center gap-1.5 px-2 py-[3px] pl-4 text-[12px] ${
         selected
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
           : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
-      }`}
+      } ${dragging ? "opacity-50" : ""}`}
     >
+      {(dropBefore || dropAfter) && (
+        <span
+          aria-hidden
+          className={`pointer-events-none absolute left-2 right-2 h-0.5 rounded bg-[var(--cf-accent)] ${dropBefore ? "top-0" : "bottom-0"}`}
+        />
+      )}
       {renaming ? (
         <input
           autoFocus
           value={renameValue}
           onChange={(e) => onRenameChange(e.target.value)}
           onClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
           onBlur={onRenameCommit}
           onKeyDown={(e) => {
             if (e.key === "Enter") onRenameCommit();
@@ -597,9 +886,10 @@ function TerminalRow({
       ) : (
         <>
           <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-            <TerminalSquare
+            <TabIcon
               size={10}
-              className={`shrink-0 ${inSplit ? "text-[var(--cf-accent)]" : "opacity-60"}`}
+              className={`shrink-0 ${color ? "" : inSplit ? "text-[var(--cf-accent)]" : "opacity-60"}`}
+              style={color ? { color } : undefined}
             />
             <span className="min-w-0 flex-1 truncate" title={where ? `${tab.title} — ${tab.cwd}` : tab.title}>
               {tab.title}
@@ -640,6 +930,7 @@ function RowButton({
         e.stopPropagation();
         onClick();
       }}
+      onPointerDown={(e) => e.stopPropagation()}
       title={label}
       aria-label={label}
       className={`inline-flex h-[22px] w-[22px] items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
