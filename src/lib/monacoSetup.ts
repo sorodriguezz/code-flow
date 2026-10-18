@@ -48,6 +48,23 @@ function bare(hex: string): string {
   return hex.replace("#", "");
 }
 
+/**
+ * A grey of the scheme's, leaned toward white on a dark scheme and black on a light one by `share`
+ * — the glass's ink, as `index.css` leans the page's text tones while the window is see-through.
+ * Anything but `#rrggbb` is handed back as it came.
+ */
+function glassInk(hex: string, mode: "light" | "dark", share: number): string {
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return hex;
+  const end = mode === "dark" ? 255 : 0;
+  const channels = [1, 3, 5].map((at) => {
+    const channel = parseInt(hex.slice(at, at + 2), 16);
+    return Math.round(channel + share * (end - channel))
+      .toString(16)
+      .padStart(2, "0");
+  });
+  return `#${channels.join("")}`;
+}
+
 window.MonacoEnvironment = {
   getWorker(_workerId: string, label: string) {
     switch (label) {
@@ -158,12 +175,19 @@ for (const theme of ALL_THEMES) {
   // into the token theme's default background, whose colour map has no alpha — `#00000000` arrives
   // there as black — and the overview ruler falls back to that default when it has no colour of
   // its own. The rule wins over the copy (it comes later), and the ruler gets its own clear colour.
+  //
+  // The greys are leaned out the way the page's text is (`index.css`, "Ink over the glass"):
+  // comments and line numbers, the quietest ink in an editor, sank into the desktop behind.
+  const quiet = new Set(["comment", "comment.doc"]);
   monaco.editor.defineTheme(monacoThemeName(theme.id, true), {
     base,
     inherit: true,
-    rules,
+    rules: rules.map((rule) =>
+      quiet.has(rule.token) ? { ...rule, foreground: bare(glassInk(`#${rule.foreground}`, theme.mode, 0.4)) } : rule,
+    ),
     colors: {
       ...colors,
+      "editorLineNumber.foreground": glassInk(theme.ui.textMuted, theme.mode, 0.4),
       "editor.background": "#00000000",
       "editorGutter.background": "#00000000",
       "minimap.background": "#00000000",

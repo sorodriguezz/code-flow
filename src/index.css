@@ -3602,19 +3602,21 @@ body.cf-dragging * {
   --cf-sunken-solid: var(--cf-sunken);
   --cf-field-solid: var(--cf-field);
   --cf-accent-soft-solid: var(--cf-accent-soft);
+  --cf-text-solid: var(--cf-text);
+  --cf-text-muted-solid: var(--cf-text-muted);
   --cf-glass-frame-fill: color-mix(
     in oklab,
-    var(--cf-bg) min(var(--cf-glass-frame, 47.5%) + var(--cf-glass-boost, 0%), 100%),
+    var(--cf-bg) min(var(--cf-glass-frame, 32.5%) + var(--cf-glass-boost, 0%), 100%),
     transparent
   );
   --cf-glass-sheet-fill: color-mix(
     in oklab,
-    var(--cf-surface) min(var(--cf-glass-sheet, 55%) + var(--cf-glass-boost, 0%), 100%),
+    var(--cf-surface) min(var(--cf-glass-sheet, 45%) + var(--cf-glass-boost, 0%), 100%),
     transparent
   );
   --cf-glass-solo-fill: color-mix(
     in oklab,
-    var(--cf-surface) min(var(--cf-glass-solo, 76.4%) + var(--cf-glass-boost, 0%), 100%),
+    var(--cf-surface) min(var(--cf-glass-solo, 62.9%) + var(--cf-glass-boost, 0%), 100%),
     transparent
   );
   /* What floats: the window's whole density (frame and sheet together) and never thinner than 72%
@@ -3622,18 +3624,18 @@ body.cf-dragging * {
      being glass. */
   --cf-glass-float-fill: color-mix(
     in oklab,
-    var(--cf-surface-raised-solid) min(max(var(--cf-glass-solo, 76.4%), 72%) + var(--cf-glass-boost, 0%), 96%),
+    var(--cf-surface-raised-solid) min(max(var(--cf-glass-solo, 62.9%), 72%) + var(--cf-glass-boost, 0%), 96%),
     transparent
   );
   /* What is pinned: 0.6 of a sheet's coat, laid over the sheet it is pinned in. */
   --cf-glass-pin-fill: color-mix(
     in oklab,
-    var(--cf-surface-solid) calc((var(--cf-glass-sheet, 55%) + var(--cf-glass-boost, 0%)) * 0.6),
+    var(--cf-surface-solid) calc((var(--cf-glass-sheet, 45%) + var(--cf-glass-boost, 0%)) * 0.6),
     transparent
   );
   --cf-glass-pin-cell-fill: color-mix(
     in oklab,
-    var(--cf-surface-solid) min(var(--cf-glass-sheet, 55%) + var(--cf-glass-boost, 0%) + 25%, 100%),
+    var(--cf-surface-solid) min(var(--cf-glass-sheet, 45%) + var(--cf-glass-boost, 0%) + 25%, 100%),
     transparent
   );
   --cf-glass-acrylic: blur(28px) saturate(1.6);
@@ -3642,6 +3644,27 @@ body.cf-dragging * {
 
 :root[data-glass] body {
   background: transparent;
+}
+
+/* Ink over the glass. A scheme's greys are chosen against its own opaque ground; over the desktop —
+   a bright window behind a dark scheme, a dark wallpaper behind a light one — the muted text and the
+   icons drawn in it sank into whatever was behind (the user, 2026-10-18: "donde son muy grises o
+   negras se pierde… pero solo en transparente"). So while the glass is on, the text tones lean
+   toward the far end of their mode: white on dark, black on light, the scheme's hue kept. On
+   `body`, because the scheme writes the plain names inline on `<html>`, where no rule can outrank
+   them; the tones derived from them on `:root` are re-derived here, or they would keep the old ink.
+   Off, none of this exists and every tone is the scheme's own. */
+:root[data-glass] body {
+  --cf-glass-ink: #ffffff;
+  --cf-text: color-mix(in oklab, var(--cf-text-solid) 55%, var(--cf-glass-ink));
+  --cf-text-muted: color-mix(in oklab, var(--cf-text-muted-solid) 60%, var(--cf-glass-ink));
+  --cf-text-faint: color-mix(in oklab, var(--cf-text-muted) 85%, var(--cf-surface-solid));
+  --cf-toast-ink: var(--cf-text-muted);
+  --cf-toast-faint: var(--cf-text-faint);
+}
+
+:root[data-glass][data-theme="light"] body {
+  --cf-glass-ink: #000000;
 }
 
 /* Every see-through region: what its controls are filled with. */

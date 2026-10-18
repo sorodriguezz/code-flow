@@ -11,6 +11,7 @@ import {
   paintGlass,
 } from "../lib/windowGlass";
 import { useThemeStore } from "./themeStore";
+import { getWindowStatus, subscribeWindowStatus } from "../lib/windowControls";
 
 interface GlassState {
   /** Whether this window lets the desktop through. Off unless asked for. */
@@ -43,6 +44,39 @@ function syncNative(enabled: boolean, force = false): void {
   void setWindowGlass(enabled, useThemeStore.getState().preference).catch(() => {});
 }
 
+/**
+ * Whether the window is in macOS fullscreen, where it is painted opaque whatever the switch says.
+ *
+ * Fullscreen puts the window in a Space of its own: there is no desktop behind it, only the window
+ * server's black, and the blur and the thin coat of the scheme over that came out a murky, wrong
+ * colour (the user, 2026-10-18: "cuando ocupa toda la pantalla se vuelve raro el color"). Nothing
+ * to see through, so nothing is see-through; leaving fullscreen puts the glass back.
+ */
+let fullscreen = false;
+let watchingFullscreen = false;
+
+/** The switch, as this window shows it right now. */
+function shown(enabled: boolean): boolean {
+  return enabled && !fullscreen;
+}
+
+/** Starts following fullscreen the first time the glass is on — a window that never turns it on
+ *  never asks. Only macOS reports fullscreen (`windowControls`), and only macOS needs it. */
+function watchFullscreen(): void {
+  if (watchingFullscreen) return;
+  watchingFullscreen = true;
+  fullscreen = getWindowStatus().fullscreen;
+  subscribeWindowStatus(() => {
+    const next = getWindowStatus().fullscreen;
+    if (next === fullscreen) return;
+    fullscreen = next;
+    const { enabled, level } = useGlassStore.getState();
+    if (!enabled) return;
+    paint(shown(enabled), level);
+    syncNative(shown(enabled));
+  });
+}
+
 function paint(enabled: boolean, level: number): void {
   const was = isGlassPainted();
   paintGlass(enabled, level);
@@ -69,26 +103,28 @@ export const useGlassStore = create<GlassState>((set, get) => ({
     const enabled = stored[GLASS_KEY] === "true";
     const level = clampGlassLevel(stored[GLASS_LEVEL_KEY]);
     set({ enabled, level });
-    paint(enabled, level);
-    syncNative(enabled);
+    if (enabled) watchFullscreen();
+    paint(shown(enabled), level);
+    syncNative(shown(enabled));
   },
 
   setEnabled: async (enabled) => {
     set({ enabled });
-    paint(enabled, get().level);
-    syncNative(enabled);
+    if (enabled) watchFullscreen();
+    paint(shown(enabled), get().level);
+    syncNative(shown(enabled));
     await setSetting(GLASS_KEY, String(enabled));
   },
 
   setLevel: async (level) => {
     const value = clampGlassLevel(level);
     set({ level: value });
-    if (get().enabled) paint(true, value);
+    if (shown(get().enabled)) paint(true, value);
     await setSetting(GLASS_LEVEL_KEY, String(value));
   },
 
   preview: (level) => {
-    if (get().enabled) paintGlass(true, level);
+    if (shown(get().enabled)) paintGlass(true, level);
   },
 }));
 
@@ -98,5 +134,5 @@ watchSettings([GLASS_KEY, GLASS_LEVEL_KEY], () => useGlassStore.getState().init(
 // The backdrop is tinted by the window's appearance, which follows the light/dark preference while
 // the glass is on — so a new preference has to reach the window too. See `apply_native`.
 useThemeStore.subscribe((state, previous) => {
-  if (state.preference !== previous.preference && useGlassStore.getState().enabled) syncNative(true, true);
+  if (state.preference !== previous.preference && shown(useGlassStore.getState().enabled)) syncNative(true, true);
 });

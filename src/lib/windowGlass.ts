@@ -34,19 +34,21 @@ export interface GlassFills {
  */
 export function glassFills(level: number): GlassFills {
   const t = clampGlassLevel(level) / 100;
-  const frame = 80 - 65 * t;
-  const sheet = 80 - 50 * t;
+  const frame = 60 - 55 * t;
+  const sheet = 70 - 50 * t;
   const solo = 100 - ((100 - frame) * (100 - sheet)) / 100;
   return { frame, sheet, solo };
 }
 
-/** The most a scheme's glass is thickened, in points: past it, the glass would stop being glass. */
-export const MAX_GLASS_BOOST = 20;
+/** The most a scheme's glass is thickened, in points: past it, the glass would stop being glass.
+ *  10 since 2026-10-18 — at 20 most schemes came out nearly as dense as before the slider was made
+ *  more see-through, and the user wanted the scheme's colour "apenas" over the blur. */
+export const MAX_GLASS_BOOST = 10;
 
-/** What the backdrop measures behind the page, as a grey from 0 to 1, over a mid-toned wallpaper:
- *  the dark material lets through about half (0.74 over a white wallpaper); the light one lifts what
- *  is under it (0.59 over navy, 0.94 over white). Measured on macOS's HUD material, 2026-09-25. */
-const BACKDROP_GREY = { dark: 0.5, light: 0.75 } as const;
+/** What the backdrop measures behind the page, as a grey from 0 to 1: a mid-toned desktop, blurred.
+ *  The backdrop is a plain blur since 2026-10-18 (`glass.rs`), with no material of its own to lift
+ *  it — so the same grey for light and dark. */
+const BACKDROP_GREY = { dark: 0.5, light: 0.5 } as const;
 
 /** Muted text on the frame and on a sheet should keep this contrast over the glass — or 70% / 80% of
  *  what it has on its own opaque ground, for a scheme that never had it. CodeFlow's own two schemes

@@ -94,3 +94,22 @@ describe("see-through window", () => {
     }
   });
 });
+
+describe("ink over the glass", () => {
+  // The user's ask, 2026-10-18: stronger text and icons in a see-through window, and the opaque
+  // window exactly as it was.
+  it("leans the text tones only while the glass is on", () => {
+    const ink = css.slice(css.indexOf("\n:root[data-glass] body {\n  --cf-glass-ink"));
+    const body = ink.slice(0, ink.indexOf("\n}"));
+    expect(body).toContain("--cf-text: color-mix(");
+    expect(body).toContain("--cf-text-muted: color-mix(");
+    expect(body).toContain("--cf-text-faint: color-mix(");
+    // The leaned ink is used nowhere but in that rule.
+    expect(css.split("var(--cf-glass-ink)").length - 1).toBe(2);
+    expect(body.split("var(--cf-glass-ink)").length - 1).toBe(2);
+  });
+
+  it("leans toward black on a light scheme", () => {
+    expect(rule(':root[data-glass][data-theme="light"] body')).toContain("--cf-glass-ink: #000000;");
+  });
+});

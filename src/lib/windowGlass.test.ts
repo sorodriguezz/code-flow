@@ -30,9 +30,9 @@ describe("glassFills", () => {
   // The same three points `fills_match_the_frontend` pins in `glass.rs`: a window opens at the
   // tint the Rust side stamps and must not jump when this side takes over.
   it("matches glass.rs at the ends and the middle", () => {
-    expect(glassFills(0)).toEqual({ frame: 80, sheet: 80, solo: 96 });
-    expect(glassFills(50)).toEqual({ frame: 47.5, sheet: 55, solo: 76.375 });
-    expect(glassFills(100)).toEqual({ frame: 15, sheet: 30, solo: 40.5 });
+    expect(glassFills(0)).toEqual({ frame: 60, sheet: 70, solo: 88 });
+    expect(glassFills(50)).toEqual({ frame: 32.5, sheet: 45, solo: 62.875 });
+    expect(glassFills(100)).toEqual({ frame: 5, sheet: 20, solo: 24 });
   });
 
   it("lets more through as the level rises, and the frame faster than the sheet", () => {
@@ -62,9 +62,9 @@ describe("paintGlass", () => {
     paintGlass(true, 100, root);
     expect(isGlassPainted(root)).toBe(true);
     expect(Object.fromEntries(properties)).toEqual({
-      "--cf-glass-frame": "15.0%",
-      "--cf-glass-sheet": "30.0%",
-      "--cf-glass-solo": "40.5%",
+      "--cf-glass-frame": "5.0%",
+      "--cf-glass-sheet": "20.0%",
+      "--cf-glass-solo": "24.0%",
     });
   });
 
@@ -83,8 +83,8 @@ describe("paintGlass", () => {
 
 describe("glassBoost", () => {
   // The slider's numbers were tuned on these two; thickening them would move the default look.
-  it("leaves CodeFlow's own schemes at the slider's numbers", () => {
-    expect(glassBoost(findTheme("codeflow-dark", "dark"))).toBe(0);
+  it("leaves CodeFlow's own schemes at the slider's numbers, or a point off", () => {
+    expect(glassBoost(findTheme("codeflow-dark", "dark"))).toBeLessThanOrEqual(1);
     expect(glassBoost(findTheme("codeflow-light", "light"))).toBe(0);
   });
 

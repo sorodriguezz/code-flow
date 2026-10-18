@@ -2,9 +2,9 @@
 //!
 //! Two halves, on opposite sides of the bridge on purpose:
 //!
-//! - **The backdrop is native.** Only the platform can blur what is behind a window: macOS puts an
-//!   `NSVisualEffectView` under the webview (vibrancy), Windows a DWM system backdrop. Applied here,
-//!   per window, by [`apply_native`].
+//! - **The backdrop is native.** Only the platform can blur what is behind a window: the window
+//!   server's background blur on macOS, the accent policy's blur behind on Windows — a plain blur
+//!   with no tone of its own on both. Applied here, per window, by [`apply_native`].
 //! - **The tint is CSS.** How much of the scheme's own colours covers that backdrop is the slider,
 //!   and `index.css` paints it from `data-glass` plus the percentages [`fills`] computes. The
 //!   frontend's `lib/windowGlass.ts` computes the same numbers; the tests on both sides pin them to
@@ -63,8 +63,8 @@ pub struct Fills {
 
 pub fn fills(level: u8) -> Fills {
     let t = f64::from(level.min(100)) / 100.0;
-    let frame = 80.0 - 65.0 * t;
-    let sheet = 80.0 - 50.0 * t;
+    let frame = 60.0 - 55.0 * t;
+    let sheet = 70.0 - 50.0 * t;
     let solo = 100.0 - (100.0 - frame) * (100.0 - sheet) / 100.0;
     Fills { frame, sheet, solo }
 }
@@ -164,24 +164,29 @@ pub fn apply_native(window: &WebviewWindow, enabled: bool, theme: Option<Theme>)
     window.set_theme(if enabled { theme } else { None })
 }
 
+/// How far the desktop behind a see-through window is blurred, in points.
+const BLUR_RADIUS: i32 = 30;
+
+/// **A plain blur, no material** (the user, 2026-10-18: "la gracia es que sea full
+/// transparente/acrílico y el color del tema se pinte apenas"). Every `NSVisualEffectView` material
+/// carries a tone of its own — the HUD one this used lifted a dark scheme to a milky grey, and the
+/// theme could only win it back by covering it, which is the opaque window again. The window
+/// server's background blur (what iTerm2, kitty and Ghostty use for the same look) blurs what is
+/// behind and adds nothing, so the page's thin coat of the scheme is the only colour on it. Private
+/// API, as `macos-private-api` already is for this window; should it ever refuse, the HUD material
+/// is put back rather than leaving a sharp, unreadable desktop behind the text.
 #[cfg(target_os = "macos")]
 fn backdrop(window: &WebviewWindow, enabled: bool) {
     use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
-    // Every `apply_vibrancy` adds a view and `clear_vibrancy` removes one, so a window switched on
-    // twice would stack two blurs. Clear them all, then add one.
+    // Every `apply_vibrancy` adds a view and `clear_vibrancy` removes one: clear them all, whatever
+    // put them there.
     while let Ok(true) = clear_vibrancy(window) {}
-    if !enabled {
+    let radius = if enabled { BLUR_RADIUS } else { 0 };
+    if window_blur(window, radius) || !enabled {
         return;
     }
-    // `Active` rather than following the window's focus: the whole window is the effect here, and a
-    // window that turns grey and opaque every time another app is clicked reads as a glitch.
-    //
-    // `HudWindow`, not `UnderWindowBackground`, which is what this shipped with and what the user
-    // found "más o menos… no queda con una transparencia como acrílica" (2026-09-25). That material
-    // is built to *be* a window background — nearly opaque, the desktop only a faint cast — and the
-    // CSS tint on top of it left almost nothing of what is behind. The HUD material is the frosted,
-    // see-through one: rendered side by side over the same wallpaper, it shows the colours behind
-    // the window blurred, the look the setting is named for, and it follows light and dark alike.
+    // `Active` rather than following the window's focus: a window that turns grey and opaque every
+    // time another app is clicked reads as a glitch.
     if let Err(e) = apply_vibrancy(
         window,
         NSVisualEffectMaterial::HudWindow,
@@ -192,118 +197,46 @@ fn backdrop(window: &WebviewWindow, enabled: bool) {
     }
 }
 
-#[cfg(windows)]
-fn backdrop(window: &WebviewWindow, enabled: bool) {
-    use window_vibrancy::{apply_acrylic, apply_blur, apply_mica, clear_acrylic, clear_blur, clear_mica};
-    // All three, whatever was applied: switching builds of Windows is not a thing, but a failed
-    // apply of one kind after a successful one of another is, and clearing is harmless.
-    let _ = clear_acrylic(window);
-    let _ = clear_mica(window);
-    let _ = clear_blur(window);
-    if !enabled {
-        system_frame(window, false);
-        return;
+/// Sets the window server's blur behind `window`; `0` takes it off. Whether it took.
+#[cfg(target_os = "macos")]
+fn window_blur(window: &WebviewWindow, radius: i32) -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGSMainConnectionID() -> i32;
+        fn CGSSetWindowBackgroundBlurRadius(connection: i32, window: isize, radius: i32) -> i32;
     }
-    let kind = windows_backdrop(windows_build());
-    let result = match kind {
-        WindowsBackdrop::Acrylic => apply_acrylic(window, None),
-        WindowsBackdrop::Mica => apply_mica(window, None),
-        // No tint of its own: the page paints the scheme's colour over it.
-        WindowsBackdrop::Blur => apply_blur(window, Some((0, 0, 0, 0))),
-    };
-    match result {
-        Ok(()) if kind != WindowsBackdrop::Blur => system_frame(window, true),
-        Ok(()) => {}
-        Err(e) => crate::applog::info(&format!("window: backdrop refused — {e:?}")),
+    let Ok(ns_window) = window.ns_window() else { return false };
+    // SAFETY: `ns_window` is this window's live `NSWindow`, read on the main thread; `windowNumber`
+    // takes no arguments and returns an `NSInteger`.
+    let number: isize = unsafe { objc2::msg_send![ns_window.cast::<objc2::runtime::AnyObject>(), windowNumber] };
+    // SAFETY: both are plain C calls on the window server's connection, with the window's own number.
+    let status = unsafe { CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), number, radius) };
+    if status != 0 {
+        crate::applog::info(&format!("window: background blur refused — CGError {status}"));
     }
+    status == 0
 }
 
-/// What a DWM *system* backdrop (Acrylic, Mica) needs from the window besides the attribute that
-/// names it — and what `window-vibrancy` does not do, which is why the setting "no funciona para nada
-/// bien" on Windows (the user, 2026-09-25).
-///
-/// DWM draws those backdrops in the window's *frame*. This window has none worth the name — it is
-/// undecorated, its title row is ours — so the material had nowhere to appear and the transparent
-/// page showed through to nothing behind it. Extending the frame over the whole client area (`-1`
-/// margins, the "sheet of glass") is what puts the backdrop under the page. Then the caption colour
-/// goes to "none": tao keeps `WS_CAPTION` on an undecorated window (it hides the bar in
-/// `WM_NCCALCSIZE`), and with the frame extended DWM would otherwise paint a caption bar across it.
-/// Last, the non-client area is told it is active, so the backdrop is drawn in its active state
-/// without waiting for a focus change. All three are the steps Electron's
-/// `NativeWindowViews::SetBackgroundMaterial` takes for a frameless window, in that order — the
-/// closest thing to a tested recipe for this exact case, since this path cannot be run on the Mac
-/// it was written on.
-///
-/// Off undoes the first two: zero margins (tao never extends the frame itself, so zero is what the
-/// window was built with) and the default caption colour. Windows 10's blur is an accent policy on
-/// the whole window and needs none of this.
+/// **A plain blur, no material**, as on macOS (see there): DWM's Acrylic and Mica each carry a tone
+/// of their own — Acrylic's grey luminosity layer is what made the glass look "peor en Windows" — and
+/// the accent policy's blur behind adds none when given a clear colour, so the page's thin coat of
+/// the scheme is the only colour on it. The user chose it knowing the cost (2026-10-18): on Windows 11
+/// 22H2 and later this blur can trail the cursor while the window is dragged or resized — only while
+/// the glass is on.
 #[cfg(windows)]
-fn system_frame(window: &WebviewWindow, on: bool) {
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_COLOR_DEFAULT,
-        DWMWA_COLOR_NONE,
-    };
-    use windows_sys::Win32::UI::Controls::MARGINS;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, WM_NCACTIVATE};
-
-    let Ok(handle) = window.hwnd() else { return };
-    let hwnd = handle.0 as HWND;
-    let inset = if on { -1 } else { 0 };
-    let margins = MARGINS { cxLeftWidth: inset, cxRightWidth: inset, cyTopHeight: inset, cyBottomHeight: inset };
-    let caption: u32 = if on { DWMWA_COLOR_NONE } else { DWMWA_COLOR_DEFAULT };
-    // SAFETY: `hwnd` is this window's live handle, read on the thread that owns it, and both
-    // pointers are to locals that outlive the calls.
-    unsafe {
-        DwmExtendFrameIntoClientArea(hwnd, &margins);
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_CAPTION_COLOR as u32,
-            (&caption as *const u32).cast(),
-            std::mem::size_of::<u32>() as u32,
-        );
-        if on {
-            // `-1`: do not repaint a non-client area this window does not show.
-            DefWindowProcW(hwnd, WM_NCACTIVATE, 1, -1);
-        }
+fn backdrop(window: &WebviewWindow, enabled: bool) {
+    use window_vibrancy::{apply_blur, clear_blur};
+    let _ = clear_blur(window);
+    if !enabled {
+        return;
+    }
+    if let Err(e) = apply_blur(window, Some((0, 0, 0, 0))) {
+        crate::applog::info(&format!("window: backdrop refused — {e:?}"));
     }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
 fn backdrop(_window: &WebviewWindow, _enabled: bool) {}
-
-#[cfg(windows)]
-fn windows_build() -> u64 {
-    match tauri_plugin_os::version() {
-        tauri_plugin_os::Version::Semantic(_, _, build) => build,
-        _ => 0,
-    }
-}
-
-/// Which of the three DWM backdrops a build of Windows can draw without dragging.
-///
-/// Acrylic is the one that shows what is behind the window, which is the look — but before the
-/// system backdrop API (build 22523, 22H2 in practice) it goes through `SetWindowCompositionAttribute`,
-/// and there the window lags a frame behind the cursor on every move and resize. So 21H2 gets Mica
-/// (the wallpaper's colour, no lag) and Windows 10 the plain blur, which is smooth there.
-#[cfg_attr(not(windows), allow(dead_code))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum WindowsBackdrop {
-    Acrylic,
-    Mica,
-    Blur,
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-fn windows_backdrop(build: u64) -> WindowsBackdrop {
-    if build >= 22523 {
-        WindowsBackdrop::Acrylic
-    } else if build >= 22000 {
-        WindowsBackdrop::Mica
-    } else {
-        WindowsBackdrop::Blur
-    }
-}
 
 /// The page's half of the switch, and of the light/dark change while the switch is on — see
 /// [`apply_native`]. `theme` is the stored preference as `themeStore` writes it.
@@ -324,9 +257,9 @@ mod tests {
     /// opens at one tint and jumps to another when its store boots.
     #[test]
     fn fills_match_the_frontend() {
-        assert_eq!(fills(0), Fills { frame: 80.0, sheet: 80.0, solo: 96.0 });
-        assert_eq!(fills(50), Fills { frame: 47.5, sheet: 55.0, solo: 76.375 });
-        assert_eq!(fills(100), Fills { frame: 15.0, sheet: 30.0, solo: 40.5 });
+        assert_eq!(fills(0), Fills { frame: 60.0, sheet: 70.0, solo: 88.0 });
+        assert_eq!(fills(50), Fills { frame: 32.5, sheet: 45.0, solo: 62.875 });
+        assert_eq!(fills(100), Fills { frame: 5.0, sheet: 20.0, solo: 24.0 });
     }
 
     #[test]
@@ -345,9 +278,9 @@ mod tests {
         let on = Glass { enabled: true, level: 100, theme: None };
         let script = init_script(&on).expect("a script while on");
         assert!(script.contains(r#"setAttribute("data-glass", "")"#));
-        assert!(script.contains(r#""--cf-glass-frame", "15.0%""#));
-        assert!(script.contains(r#""--cf-glass-sheet", "30.0%""#));
-        assert!(script.contains(r#""--cf-glass-solo", "40.5%""#));
+        assert!(script.contains(r#""--cf-glass-frame", "5.0%""#));
+        assert!(script.contains(r#""--cf-glass-sheet", "20.0%""#));
+        assert!(script.contains(r#""--cf-glass-solo", "24.0%""#));
     }
 
     #[test]
@@ -356,13 +289,5 @@ mod tests {
         assert_eq!(parse_theme(Some("light")), Some(Theme::Light));
         assert_eq!(parse_theme(Some("system")), None);
         assert_eq!(parse_theme(None), None);
-    }
-
-    #[test]
-    fn windows_backdrop_by_build() {
-        assert_eq!(windows_backdrop(22631), WindowsBackdrop::Acrylic);
-        assert_eq!(windows_backdrop(22523), WindowsBackdrop::Acrylic);
-        assert_eq!(windows_backdrop(22000), WindowsBackdrop::Mica);
-        assert_eq!(windows_backdrop(19045), WindowsBackdrop::Blur);
     }
 }
