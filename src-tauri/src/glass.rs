@@ -228,10 +228,48 @@ fn backdrop(window: &WebviewWindow, enabled: bool) {
     use window_vibrancy::{apply_blur, clear_blur};
     let _ = clear_blur(window);
     if !enabled {
+        system_frame(window, false);
         return;
     }
-    if let Err(e) = apply_blur(window, Some((0, 0, 0, 0))) {
-        crate::applog::info(&format!("window: backdrop refused — {e:?}"));
+    match apply_blur(window, Some((0, 0, 0, 0))) {
+        Ok(()) => system_frame(window, true),
+        Err(e) => crate::applog::info(&format!("window: backdrop refused — {e:?}")),
+    }
+}
+
+/// The frame extended over the whole client area. Without it DWM composites the page's clear
+/// pixels as **black**, not as the blur behind them (2.3.39 on Windows 11: the dark schemes looked
+/// unchanged and the light ones went dark) — the accent blur alone does not make the window's alpha
+/// count. Extended, the client area is "glass" and the blur shows through wherever the page lets it.
+#[cfg(windows)]
+fn system_frame(window: &WebviewWindow, on: bool) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_COLOR_DEFAULT,
+        DWMWA_COLOR_NONE,
+    };
+    use windows_sys::Win32::UI::Controls::MARGINS;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, WM_NCACTIVATE};
+
+    let Ok(handle) = window.hwnd() else { return };
+    let hwnd = handle.0 as HWND;
+    let inset = if on { -1 } else { 0 };
+    let margins = MARGINS { cxLeftWidth: inset, cxRightWidth: inset, cyTopHeight: inset, cyBottomHeight: inset };
+    let caption: u32 = if on { DWMWA_COLOR_NONE } else { DWMWA_COLOR_DEFAULT };
+    // SAFETY: `hwnd` is this window's live handle, read on the thread that owns it, and both
+    // pointers are to locals that outlive the calls.
+    unsafe {
+        DwmExtendFrameIntoClientArea(hwnd, &margins);
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR as u32,
+            (&caption as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+        if on {
+            // `-1`: do not repaint a non-client area this window does not show.
+            DefWindowProcW(hwnd, WM_NCACTIVATE, 1, -1);
+        }
     }
 }
 
