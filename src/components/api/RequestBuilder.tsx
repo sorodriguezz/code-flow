@@ -803,6 +803,19 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
     update({ params: rows, url: applyParamsToUrl(spec.url, rows) });
   };
 
+  const isStreaming = STREAMING_PROTOCOLS.includes(protocol);
+  const isGrpc = protocol === "grpc";
+  // The section tabs only exist on the HTTP/GraphQL branch below, so that is when to watch them.
+  // Above the early return: below it these two hooks were skipped while the tab had no spec, and
+  // React threw "Rendered fewer hooks than expected" (#300) when it went from one to the other.
+  // `spec` in `active` so the watch starts once the tabs are actually drawn.
+  const sectionTabsRef = useRef<HTMLDivElement>(null);
+  const sectionTabsMask = scrollEdgeMask(
+    useScrollEdges(sectionTabsRef, !!tab && !!spec && !isStreaming && !isGrpc, "x"),
+    24,
+    "x",
+  );
+
   if (!tab || !spec) return <div className="h-full" />;
 
   const ProtocolIcon = protocolIcon(spec.protocol);
@@ -810,11 +823,6 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
   // and that is exactly the moment the protocol stops being a choice.
   const protocolLocked = tab.requestId !== null;
 
-  const isStreaming = STREAMING_PROTOCOLS.includes(protocol);
-  const isGrpc = protocol === "grpc";
-  // The section tabs only exist on the HTTP/GraphQL branch below, so that is when to watch them.
-  const sectionTabsRef = useRef<HTMLDivElement>(null);
-  const sectionTabsMask = scrollEdgeMask(useScrollEdges(sectionTabsRef, !isStreaming && !isGrpc, "x"), 24, "x");
   const crumbs = breadcrumbFor(collections, folders, tab.collectionId, tab.folderId);
 
   const badgeCount = (id: PanelId): string | null => {
