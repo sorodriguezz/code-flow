@@ -832,6 +832,22 @@ export function ChangesPanel({
       ? { icon: Columns2, title: t("changes.openDiff"), onClick: () => onOpenDiff?.(entry.path) }
       : { icon: Code2, title: t("changes.openInEditor"), onClick: () => openFile(entry.path, staged) };
 
+  // Above the early return below: a hook after it is skipped while there is no status, and React
+  // throws (#300) the moment the panel goes from one render to the other.
+  /** ↑ / ↓ in the message box walk the messages committed before — VS Code's input history. Only
+   *  from an empty box or one still showing a history entry, so ↑ inside a message moves the caret. */
+  const history = useMemo(
+    () =>
+      repoPath
+        ? messageHistory(
+            readMessageHistory(repoPath),
+            useRepoStore.getState().commits.slice(0, 50).map((commit) => commit.summary),
+          )
+        : [],
+    // Re-read whenever the box empties — a commit just landed and added one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [repoPath, message === ""],
+  );
   if (!status) {
     return <EmptyState icon={FileText} title={t("changes.noRepo")} />;
   }
@@ -1137,20 +1153,6 @@ export function ChangesPanel({
     return confirmAction(t("graph.amendPushedConfirm", { upstream: head?.upstream ?? "" }), true, t("graph.menuAmend"));
   };
 
-  /** ↑ / ↓ in the message box walk the messages committed before — VS Code's input history. Only
-   *  from an empty box or one still showing a history entry, so ↑ inside a message moves the caret. */
-  const history = useMemo(
-    () =>
-      repoPath
-        ? messageHistory(
-            readMessageHistory(repoPath),
-            useRepoStore.getState().commits.slice(0, 50).map((commit) => commit.summary),
-          )
-        : [],
-    // Re-read whenever the box empties — a commit just landed and added one.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [repoPath, message === ""],
-  );
   const onMessageKey = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.key !== "ArrowUp" && event.key !== "ArrowDown") || event.altKey || event.metaKey || event.ctrlKey) return;
     const showing = historyAt.current >= 0 ? history[historyAt.current] : null;
