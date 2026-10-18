@@ -612,6 +612,10 @@ export function ChangesPanel({
   const [ignoreWhitespace, setIgnoreWhitespace] = useState(false);
   /** Where ↑ is in the message history; `-1` is the box's own text. */
   const historyAt = useRef(-1);
+  /** What runs after the commit, picked in the button's menu: nothing, or a push of the branch.
+   *  Up here with the other hooks: below the `!status` early return it was skipped while a
+   *  workspace switch had no status yet, and React threw "Rendered fewer hooks than expected". */
+  const afterCommit = useRef<"none" | "push">("none");
   const [commitMenu, setCommitMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<ClaudeErrorInfo | null>(null);
@@ -1115,8 +1119,6 @@ export function ChangesPanel({
   /** Clears the box only when the commit landed. It used to clear it unconditionally, so a commit
    * that failed — a hook, a missing identity, a conflict still in the index — took the message the
    * user had just written down with it. */
-  /** What runs after the commit, picked in the button's menu: nothing, or a push of the branch. */
-  const afterCommit = useRef<"none" | "push">("none");
   const performCommit = async () => {
     const text = message.trim();
     const committed = await commitChanges(text, { amend });

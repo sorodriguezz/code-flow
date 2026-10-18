@@ -12,6 +12,7 @@ import {
 } from "../lib/windowGlass";
 import { useThemeStore } from "./themeStore";
 import { getWindowStatus, subscribeWindowStatus } from "../lib/windowControls";
+import { isMac } from "../lib/platform";
 
 interface GlassState {
   /** Whether this window lets the desktop through. Off unless asked for. */
@@ -100,7 +101,9 @@ export const useGlassStore = create<GlassState>((set, get) => ({
     const stored = await getSettings([GLASS_KEY, GLASS_LEVEL_KEY]).catch(() => null);
     if (!stored) return;
     // Unset and explicit-false are both "off": a window you can see through is a look to ask for.
-    const enabled = stored[GLASS_KEY] === "true";
+    // And off outside macOS whatever the row says — a Windows install that switched it on before
+    // 2.3.41 opens opaque (see `glass.rs`, "Why not Windows").
+    const enabled = isMac() && stored[GLASS_KEY] === "true";
     const level = clampGlassLevel(stored[GLASS_LEVEL_KEY]);
     set({ enabled, level });
     if (enabled) watchFullscreen();

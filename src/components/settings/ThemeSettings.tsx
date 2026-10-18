@@ -355,10 +355,11 @@ function ModeThemes({ mode, defaultOpen }: { mode: "light" | "dark"; defaultOpen
 export function ThemeSettings() {
   const t = useT();
   const resolved = useThemeStore((s) => s.resolved);
-  // The two platforms with a backdrop to show: vibrancy on macOS, Acrylic/Mica on Windows. Anywhere
-  // else a see-through window would be a sharp, unblurred desktop behind the text.
+  // macOS only: the window server's blur is the one backdrop that never turns opaque. Windows had
+  // the switch until 2.3.40 — DWM's blurs fall back to a solid colour (black, for the clear blur)
+  // whenever it decides not to blur, with no way to know beforehand; see `glass.rs`.
   const platform = usePlatform();
-  const glassAvailable = platform === "macos" || platform === "windows";
+  const glassAvailable = platform === "macos";
   // The mode you are looking at comes first — the other is a deliberate visit.
   const modes: ("light" | "dark")[] = resolved === "dark" ? ["dark", "light"] : ["light", "dark"];
 

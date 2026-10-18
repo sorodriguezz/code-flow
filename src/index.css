@@ -3562,9 +3562,9 @@ body.cf-dragging * {
 /* See-through — Apariencia › Modo y color › Transparencia (`state/glassStore`, `glass.rs`).
 
    Every window is built transparent. With the setting off, `body` paints its opaque tone edge to
-   edge and nothing below it shows: the window the app always had. On, the platform draws a blurred
-   backdrop under the page (vibrancy on macOS, Acrylic/Mica on Windows) and the page lets it through
-   in exactly two layers — the frame, and each sheet on it — covering it with `--cf-glass-frame` and
+   edge and nothing below it shows: the window the app always had. On — macOS only — the window
+   server draws a blurred backdrop under the page and the page lets it through in exactly two
+   layers — the frame, and each sheet on it — covering it with `--cf-glass-frame` and
    `--cf-glass-sheet` of their own colour, the slider's two numbers (`lib/windowGlass`).
 
    **One layer per sheet, not one per element.** Views paint the sheet's own tone again and again —

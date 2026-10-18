@@ -1,22 +1,33 @@
-//! The see-through window — Apariencia › Modo y color › Transparencia.
+//! The see-through window — Apariencia › Modo y color › Transparencia. **macOS only.**
 //!
 //! Two halves, on opposite sides of the bridge on purpose:
 //!
 //! - **The backdrop is native.** Only the platform can blur what is behind a window: the window
-//!   server's background blur on macOS, the accent policy's blur behind on Windows — a plain blur
-//!   with no tone of its own on both. Applied here, per window, by [`apply_native`].
+//!   server's background blur, a plain blur with no tone of its own. Applied here, per window, by
+//!   [`apply_native`].
 //! - **The tint is CSS.** How much of the scheme's own colours covers that backdrop is the slider,
 //!   and `index.css` paints it from `data-glass` plus the percentages [`fills`] computes. The
 //!   frontend's `lib/windowGlass.ts` computes the same numbers; the tests on both sides pin them to
 //!   each other.
 //!
+//! ## Why not Windows
+//!
+//! Windows had the setting until 2.3.40 and lost it (the user's call, 2026-10-18). Every DWM blur —
+//! the accent policy's blur and acrylic, the system Acrylic — is composited as an opaque fallback
+//! colour whenever DWM decides not to blur (transparency effects off, energy saver, a DWM policy in
+//! the registry, or one changed since DWM started), and nothing an app can ask says beforehand when
+//! that is: the clear blur came out **black**, the Acrylic a flat grey. A window that may turn black
+//! on a user's machine is worse than no setting. So [`stored`] reads it as off there, the switch is
+//! not shown, and [`apply_native`] does nothing.
+//!
 //! ## Every window is created transparent, always
 //!
-//! Neither platform can make an opaque window transparent after it exists — the flag reaches the
-//! window, the webview and (on macOS) the webview's `drawsBackground` at creation only. So the
-//! windows are always built transparent and the page decides: with the setting off, `body` paints
-//! its own opaque tone edge to edge and nothing behind it can show, which is exactly the window
-//! this app always had. That is what lets the switch work live instead of after a restart.
+//! macOS cannot make an opaque window transparent after it exists — the flag reaches the window,
+//! the webview and the webview's `drawsBackground` at creation only. So the windows are always built
+//! transparent and the page decides: with the setting off, `body` paints its own opaque tone edge to
+//! edge and nothing behind it can show, which is exactly the window this app always had. That is
+//! what lets the switch work live instead of after a restart. (Windows builds them transparent too,
+//! as it has since the setting arrived there; with the switch gone the page is always opaque.)
 //!
 //! ## Why not Tauri's own `setEffects`
 //!
@@ -69,7 +80,9 @@ pub fn fills(level: u8) -> Fills {
     Fills { frame, sheet, solo }
 }
 
-/// Reads the three rows in one lock. Anything unreadable is the default: off.
+/// Reads the three rows in one lock. Anything unreadable is the default: off — and off everywhere
+/// but macOS, whatever the row says (see "Why not Windows" above): a Windows install that switched it
+/// on before 2.3.41 opens opaque.
 pub fn stored(app: &AppHandle) -> Glass {
     let rows = app
         .state::<crate::db::Db>()
@@ -82,7 +95,7 @@ pub fn stored(app: &AppHandle) -> Glass {
         })
         .unwrap_or_default();
     Glass {
-        enabled: rows.get(ENABLED_KEY).map(String::as_str) == Some("true"),
+        enabled: cfg!(target_os = "macos") && rows.get(ENABLED_KEY).map(String::as_str) == Some("true"),
         level: rows
             .get(LEVEL_KEY)
             .and_then(|raw| raw.trim().parse::<f64>().ok())
@@ -150,21 +163,31 @@ pub fn on_create(window: &WebviewWindow, glass: &Glass) {
 
 /// Switches one window's backdrop, and the appearance it is tinted in, on or off.
 ///
-/// **The appearance travels with it.** Both platforms tint the backdrop by the *window's*
-/// appearance, not the page's: a dark scheme over a light vibrancy (the system in light mode, the
-/// app in dark) is a milky grey. So while the backdrop is on the window takes the app's explicit
-/// light/dark choice — and "system" stays `None`, because an explicit appearance would also pin the
-/// webview's `prefers-color-scheme`, and "system" is read from exactly that media query. Off, the
-/// window goes back to following the system, which is what it did before this setting existed.
+/// **The appearance travels with it.** macOS tints the backdrop by the *window's* appearance, not
+/// the page's: a dark scheme over a light vibrancy (the system in light mode, the app in dark) is a
+/// milky grey. So while the backdrop is on the window takes the app's explicit light/dark choice —
+/// and "system" stays `None`, because an explicit appearance would also pin the webview's
+/// `prefers-color-scheme`, and "system" is read from exactly that media query. Off, the window goes
+/// back to following the system, which is what it did before this setting existed.
+///
+/// Nothing anywhere else — the setting is macOS's alone (see "Why not Windows" above).
 pub fn apply_native(window: &WebviewWindow, enabled: bool, theme: Option<Theme>) -> tauri::Result<()> {
-    let target = window.clone();
-    // AppKit refuses to be touched off the main thread (`apply_vibrancy` checks), and DWM is happiest
-    // on the thread that owns the window.
-    window.run_on_main_thread(move || backdrop(&target, enabled))?;
-    window.set_theme(if enabled { theme } else { None })
+    #[cfg(target_os = "macos")]
+    {
+        let target = window.clone();
+        // AppKit refuses to be touched off the main thread (`apply_vibrancy` checks).
+        window.run_on_main_thread(move || backdrop(&target, enabled))?;
+        window.set_theme(if enabled { theme } else { None })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, enabled, theme);
+        Ok(())
+    }
 }
 
 /// How far the desktop behind a see-through window is blurred, in points.
+#[cfg(target_os = "macos")]
 const BLUR_RADIUS: i32 = 30;
 
 /// **A plain blur, no material** (the user, 2026-10-18: "la gracia es que sea full
@@ -216,65 +239,6 @@ fn window_blur(window: &WebviewWindow, radius: i32) -> bool {
     }
     status == 0
 }
-
-/// **A plain blur, no material**, as on macOS (see there): DWM's Acrylic and Mica each carry a tone
-/// of their own — Acrylic's grey luminosity layer is what made the glass look "peor en Windows" — and
-/// the accent policy's blur behind adds none when given a clear colour, so the page's thin coat of
-/// the scheme is the only colour on it. The user chose it knowing the cost (2026-10-18): on Windows 11
-/// 22H2 and later this blur can trail the cursor while the window is dragged or resized — only while
-/// the glass is on.
-#[cfg(windows)]
-fn backdrop(window: &WebviewWindow, enabled: bool) {
-    use window_vibrancy::{apply_blur, clear_blur};
-    let _ = clear_blur(window);
-    if !enabled {
-        system_frame(window, false);
-        return;
-    }
-    match apply_blur(window, Some((0, 0, 0, 0))) {
-        Ok(()) => system_frame(window, true),
-        Err(e) => crate::applog::info(&format!("window: backdrop refused — {e:?}")),
-    }
-}
-
-/// The frame extended over the whole client area. Without it DWM composites the page's clear
-/// pixels as **black**, not as the blur behind them (2.3.39 on Windows 11: the dark schemes looked
-/// unchanged and the light ones went dark) — the accent blur alone does not make the window's alpha
-/// count. Extended, the client area is "glass" and the blur shows through wherever the page lets it.
-#[cfg(windows)]
-fn system_frame(window: &WebviewWindow, on: bool) {
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_COLOR_DEFAULT,
-        DWMWA_COLOR_NONE,
-    };
-    use windows_sys::Win32::UI::Controls::MARGINS;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, WM_NCACTIVATE};
-
-    let Ok(handle) = window.hwnd() else { return };
-    let hwnd = handle.0 as HWND;
-    let inset = if on { -1 } else { 0 };
-    let margins = MARGINS { cxLeftWidth: inset, cxRightWidth: inset, cyTopHeight: inset, cyBottomHeight: inset };
-    let caption: u32 = if on { DWMWA_COLOR_NONE } else { DWMWA_COLOR_DEFAULT };
-    // SAFETY: `hwnd` is this window's live handle, read on the thread that owns it, and both
-    // pointers are to locals that outlive the calls.
-    unsafe {
-        DwmExtendFrameIntoClientArea(hwnd, &margins);
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_CAPTION_COLOR as u32,
-            (&caption as *const u32).cast(),
-            std::mem::size_of::<u32>() as u32,
-        );
-        if on {
-            // `-1`: do not repaint a non-client area this window does not show.
-            DefWindowProcW(hwnd, WM_NCACTIVATE, 1, -1);
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "macos", windows)))]
-fn backdrop(_window: &WebviewWindow, _enabled: bool) {}
 
 /// The page's half of the switch, and of the light/dark change while the switch is on — see
 /// [`apply_native`]. `theme` is the stored preference as `themeStore` writes it.
