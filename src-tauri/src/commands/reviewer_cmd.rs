@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::db::Db;
 use crate::reviewer::analysis::{self, ActiveRun, HistoryEntry, RunRequest, RunSummary};
 use crate::reviewer::config::{self, GatePreset, RemoteServer, ReviewerConfig, RulesPreset};
-use crate::reviewer::{catalog, detect, install, rules, server, Settings};
+use crate::reviewer::{catalog, detect, install, rules, server, triage, Settings};
 
 /// A connected server, as listed: never its token, only whether there is one.
 #[derive(Debug, Clone, Serialize)]
@@ -241,4 +241,68 @@ pub struct LastRun {
 pub fn reviewer_last_run(repo_path: String, project_name: String, project_key: Option<String>) -> LastRun {
     let key = detect::project_key(std::path::Path::new(&repo_path), &project_name, project_key.as_deref().unwrap_or_default());
     LastRun { summary: analysis::last(&key), history: analysis::history(&key), project_key: key }
+}
+
+// ------------------------------------------------------------------------------------ the report
+
+/// A client of the local server, starting it first when it went idle — a rule or a triage is asked
+/// for from a report, long after the review that made it.
+async fn local_client(app: &AppHandle, db: &State<'_, Db>) -> Result<crate::reviewer::api::SonarClient, String> {
+    let settings = settings(db)?;
+    server::start(Some(app), &settings).await?;
+    server::signed_in().await.map(|(client, _)| client)
+}
+
+/// The rule behind an issue or a hotspot, as SonarQube explains it.
+#[tauri::command]
+pub async fn reviewer_rule(app: AppHandle, db: State<'_, Db>, key: String) -> Result<triage::RuleInfo, String> {
+    let client = local_client(&app, &db).await?;
+    triage::rule(&client, &key).await
+}
+
+/// Marks an issue a false positive or accepted, on the server and in the kept report.
+#[tauri::command]
+pub async fn reviewer_issue_decide(
+    app: AppHandle,
+    db: State<'_, Db>,
+    project_key: String,
+    issue_key: String,
+    verdict: triage::IssueVerdict,
+    comment: String,
+) -> Result<(), String> {
+    let client = local_client(&app, &db).await?;
+    triage::decide_issue(&client, &issue_key, verdict, &comment).await?;
+    triage::update_last(&project_key, |summary| {
+        let before = summary.issues.len();
+        summary.issues.retain(|issue| issue.key != issue_key);
+        if summary.issues.len() < before {
+            summary.issues_total = summary.issues_total.saturating_sub(1);
+        }
+    })
+}
+
+/// Reviews a hotspot (`SAFE`, `FIXED`, `ACKNOWLEDGED`) or sends it back (`None`).
+#[tauri::command]
+pub async fn reviewer_hotspot_review(
+    app: AppHandle,
+    db: State<'_, Db>,
+    project_key: String,
+    hotspot_key: String,
+    resolution: Option<String>,
+    comment: String,
+) -> Result<(), String> {
+    let client = local_client(&app, &db).await?;
+    triage::review_hotspot(&client, &hotspot_key, resolution.as_deref(), &comment).await?;
+    triage::update_last(&project_key, |summary| {
+        if let Some(hotspot) = summary.hotspots.iter_mut().find(|h| h.key == hotspot_key) {
+            hotspot.status = if resolution.is_some() { "REVIEWED".into() } else { "TO_REVIEW".into() };
+            hotspot.resolution = resolution.clone();
+        }
+    })
+}
+
+/// The lines changed against `base` (empty: the default branch) — what "new code only" filters by.
+#[tauri::command]
+pub async fn reviewer_changed_lines(repo_path: String, base: String) -> Result<triage::ChangedLines, String> {
+    tokio::task::spawn_blocking(move || triage::changed_lines(&repo_path, &base)).await.map_err(|e| e.to_string())?
 }

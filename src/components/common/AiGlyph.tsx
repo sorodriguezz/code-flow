@@ -36,7 +36,11 @@ export type AiGlyphName =
  * `.cf-ai-glyph` in `index.css` for why it is a mask and not an SVG with a gradient.
  *
  * Laid out like the lucide icon it replaces (a `size`-square block), so it swaps in anywhere one sat.
- * `still` stops the flow at rest, for a door that has already been opened. `onFill` is for a primary
+ * At rest it holds still and flows only while the control it sits in is hovered or focused: a loop
+ * running for ever on an idle screen (the commit-message button is always in view) kept the
+ * compositor drawing at the display's refresh rate, so the window never went idle. `busy` flows
+ * regardless, for an engine at work; `still` never flows, for a door that has already been opened.
+ * `onFill` is for a primary
  * button: the logo's indigo is the accent's own hue and would vanish into the fill, so the stroke is
  * mixed toward the button's ink (`.cf-ai-glyph-on-fill`).
  */
@@ -44,6 +48,7 @@ export function AiGlyph({
   name = "sparkles",
   size = 24,
   still = false,
+  busy = false,
   onFill = false,
   className = "",
   ref,
@@ -51,6 +56,7 @@ export function AiGlyph({
   name?: AiGlyphName;
   size?: number | string;
   still?: boolean;
+  busy?: boolean;
   onFill?: boolean;
   className?: string;
   ref?: Ref<HTMLSpanElement>;
@@ -62,7 +68,7 @@ export function AiGlyph({
     <span
       ref={ref}
       aria-hidden
-      className={`cf-ai-glyph cf-ai-${name} ${still ? "" : "cf-ai-glyph-flowing"} ${onFill ? "cf-ai-glyph-on-fill" : ""} ${className}`}
+      className={`cf-ai-glyph cf-ai-${name} ${still ? "" : busy ? "cf-ai-glyph-flowing" : "cf-ai-glyph-idle"} ${onFill ? "cf-ai-glyph-on-fill" : ""} ${className}`}
       style={{ width: size, height: size, "--cf-ai-phase": `${phase.toFixed(0)}ms` } as CSSProperties}
     />
   );

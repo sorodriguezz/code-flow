@@ -6,7 +6,7 @@
 use serde::Serialize;
 
 use crate::codemap::index::{FileOutline, SymbolHit, UsageReport};
-use crate::codemap::summary::MapGraph;
+use crate::codemap::summary::{MapGraph, MapHealth};
 use crate::codemap::BuildInfo;
 
 #[derive(Serialize)]
@@ -77,6 +77,16 @@ pub async fn codemap_key_symbols(repo_path: String) -> Result<Vec<SymbolHit>, St
     blocking(move || {
         let (map, _) = crate::codemap::snapshot(&repo_path)?;
         Ok(map.key_symbols(40))
+    })
+    .await
+}
+
+/// Files nothing imports, and the most depended-on and most dependent ones.
+#[tauri::command]
+pub async fn codemap_health(repo_path: String) -> Result<MapHealth, String> {
+    blocking(move || {
+        let (map, _) = crate::codemap::snapshot(&repo_path)?;
+        Ok(crate::codemap::summary::health(&map, 25))
     })
     .await
 }

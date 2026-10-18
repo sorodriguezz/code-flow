@@ -53,6 +53,9 @@ const {
   findDispatchedRun,
   DISPATCH_ATTEMPTS,
   DISPATCH_POLL_MS,
+  mergeHead,
+  matchesRunFilters,
+  NO_RUN_FILTERS,
 } = await import("./ciStore");
 const { useWorkspaceStore } = await import("./workspaceStore");
 
@@ -488,5 +491,26 @@ describe("artifacts", () => {
     };
     await expect(useCiStore.getState().downloadArtifact("p-1", theRun, artifact, "/tmp/dist.zip")).rejects.toContain("expired");
     expect(useCiStore.getState().downloads[key]).toMatchObject({ state: "failed", error: expect.stringContaining("expired") });
+  });
+});
+
+describe("more history and client-side filters", () => {
+  const at = (id: string, minute: number) => run(id, { created_at: `2026-09-01T10:${String(minute).padStart(2, "0")}:00Z` });
+
+  it("lays a poll's first page over the older history «Cargar más» fetched", () => {
+    const loaded = [at("5", 50), at("4", 40), at("3", 30), at("2", 20), at("1", 10)];
+    // A new run pushed in; the page (two long here) now ends at 4, and 3 falls off its end.
+    const page = [at("6", 55), at("5", 50)];
+    expect(mergeHead(page, loaded).map((r) => r.id)).toEqual(["6", "5", "4", "3", "2", "1"]);
+    // A first page longer than what was loaded simply replaces it.
+    expect(mergeHead(page, [at("5", 50)]).map((r) => r.id)).toEqual(["6", "5"]);
+  });
+
+  it("filters on workflow, trigger and who ran it", () => {
+    const pushed = run("1", { name: "CI", event: "push", actor: "ana" });
+    expect(matchesRunFilters(pushed, NO_RUN_FILTERS)).toBe(true);
+    expect(matchesRunFilters(pushed, { ...NO_RUN_FILTERS, workflow: "Release" })).toBe(false);
+    expect(matchesRunFilters(pushed, { workflow: "CI", event: "push", actor: "ana" })).toBe(true);
+    expect(matchesRunFilters(pushed, { ...NO_RUN_FILTERS, actor: "bea" })).toBe(false);
   });
 });

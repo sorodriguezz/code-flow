@@ -925,6 +925,8 @@ export const createAgentTask = (
   agentProjectId: string,
   /** The agent's account preference, copied like its provider and model. */
   account?: string | null,
+  /** Give the task a linked worktree of its own, on a new branch. */
+  worktree?: boolean,
 ) =>
   invoke<AgentTask>("create_agent_task", {
     workspaceId,
@@ -938,6 +940,7 @@ export const createAgentTask = (
     title,
     agentProjectId,
     account: account ?? null,
+    worktree: worktree ?? false,
   });
 
 export const updateAgentTaskRun = (
@@ -956,7 +959,8 @@ export const setAgentTaskProject = (id: string, projectId: string) =>
 export const renameAgentTask = (id: string, title: string) =>
   invoke<void>("rename_agent_task", { id, title });
 
-export const deleteAgentTask = (id: string) => invoke<void>("delete_agent_task", { id });
+/** Resolves to the worktree folder left in place because it still had changes, or null. */
+export const deleteAgentTask = (id: string) => invoke<string | null>("delete_agent_task", { id });
 
 // ---------- agent chains ----------
 
@@ -1136,6 +1140,12 @@ export const setAgentTaskGroup = (id: string, agentProjectId: string) =>
 
 export const setAgentTaskPinned = (id: string, pinned: boolean) =>
   invoke<void>("set_agent_task_pinned", { id, pinned });
+
+export const setAgentTaskPlanning = (id: string, priority: number, dueDate: string, labels: string[]) =>
+  invoke<void>("set_agent_task_planning", { id, priority, dueDate, labels });
+
+export const setAgentTaskArchived = (id: string, archived: boolean) =>
+  invoke<void>("set_agent_task_archived", { id, archived });
 
 export const setChainGroup = (chainId: string, agentProjectId: string) =>
   invoke<void>("set_chain_group", { chainId, agentProjectId });
@@ -1647,6 +1657,27 @@ export const fetchPipelineJobLog = (
   jobId: string,
   logRef: string | null,
 ) => invoke<JobLog>("fetch_pipeline_job_log", { projectId, runId, jobId, logRef });
+
+/** One problem actionlint found — `ci_cmd::WorkflowLint`. */
+export interface ActionlintHit {
+  message: string;
+  filepath: string;
+  line: number;
+  column: number;
+  kind: string;
+}
+
+/** actionlint over the repository's workflows; `null` when it is not installed here. */
+export const ciActionlint = (repoPath: string) => invoke<ActionlintHit[] | null>("ci_actionlint", { repoPath });
+
+/** One job's whole log (up to 200 MB) written to `destination`. Returns `[bytes, truncated]`. */
+export const savePipelineJobLog = (
+  projectId: string,
+  runId: string,
+  jobId: string,
+  logRef: string | null,
+  destination: string,
+) => invoke<[number, boolean]>("save_pipeline_job_log", { projectId, runId, jobId, logRef, destination });
 
 /**
  * Asks the AI why a job failed, with the log, the CI definition and the repository itself in
@@ -2555,6 +2586,21 @@ export const setMondayToken = (slug: string, token: string) =>
 
 export const deleteMondayToken = (slug: string) => invoke<void>("delete_monday_token", { slug });
 
+/** Who a Linear API key belongs to — its organisation's url key and name. */
+export const linearWhoami = (token: string) => invoke<{ key: string; name: string }>("linear_whoami", { token });
+export const linearListTeams = (key: string) => invoke<{ id: string; key: string; name: string }[]>("linear_list_teams", { key });
+export const setLinearToken = (key: string, token: string) => invoke<void>("set_linear_token", { key, token });
+export const deleteLinearToken = (key: string) => invoke<void>("delete_linear_token", { key });
+
+/** Every published story of a batch read back from its board; each one's state is kept on it. */
+export const storyBatchBoardStates = (batchId: string) =>
+  invoke<{ story_id: string; state: string; error: string | null }[]>("story_batch_board_states", { batchId });
+
+/** A PDF, Word or other document on disk, as Markdown — a story source. */
+export const storySourceDocument = (path: string) => invoke<{ name: string; markdown: string }>("story_source_document", { path });
+/** A web page's main content (or a linked document), as Markdown — a story source. */
+export const storySourceUrl = (url: string) => invoke<{ name: string; markdown: string }>("story_source_url", { url });
+
 /** The project's area or iteration tree, flattened, with each node's path already in the form the
  * work item field takes. */
 export const adoListClassificationNodes = (org: string, project: string, structure: "areas" | "iterations") =>
@@ -2723,6 +2769,25 @@ export const writeStoryFeatureFile = (batchId: string, fileName: string, content
  * story is attempted even when an earlier one fails. */
 export const publishStories = (batchId: string, storyIds: string[]) =>
   invoke<StoryPublishOutcome>("publish_stories", { batchId, storyIds });
+
+/** An item already on the board. `id` 0 is an earlier story of the same selection instead. */
+export interface ExistingBoardItem {
+  id: number;
+  key: string;
+  title: string;
+  state: string;
+  url: string;
+}
+
+export interface StoryDuplicate {
+  story_id: string;
+  story_title: string;
+  matches: ExistingBoardItem[];
+}
+
+/** The selected stories that look like items already on the board, read before a publish. */
+export const findStoryDuplicates = (batchId: string, storyIds: string[]) =>
+  invoke<StoryDuplicate[]>("find_story_duplicates", { batchId, storyIds });
 
 /** One field "update on the board" would change on a published story's item. `content` is the
  * narrative, description and criteria together, too long to quote — its `before`/`after` are empty. */

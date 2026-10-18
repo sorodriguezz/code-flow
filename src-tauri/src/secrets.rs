@@ -345,6 +345,12 @@ pub fn monday_token_key(slug: &str) -> String {
     format!("monday-token:{slug}")
 }
 
+/// Linear's personal API key, keyed by the organisation's url key — read back from Linear when the
+/// key is saved, as monday's slug is, since one API host serves every organisation.
+pub fn linear_token_key(org: &str) -> String {
+    format!("linear-token:{}", org.trim())
+}
+
 /// A connected SonarQube server's token — a company's SonarQube Server or SonarQube Cloud, whose
 /// rules the Reviewer copies — keyed by the connection's id.
 pub fn sonar_server_token_key(id: &str) -> String {

@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { GitCompareArrows } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";
 import { DiffView } from "./DiffView";
+import type { DiffSides } from "./BinaryDiff";
 import { SkeletonRows } from "../common/Skeleton";
 import { getRevisionsDiff } from "../../lib/tauri/commands";
 import { describeGitError } from "../../lib/gitErrors";
@@ -32,6 +33,7 @@ export function CommitCompareModal({
   const [error, setError] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
   const [fileDiff, setFileDiff] = useState<FileDiffInfo | null>(null);
+  const sides = useMemo<DiffSides>(() => ({ repoPath, old: from.id, new: to.id }), [repoPath, from.id, to.id]);
 
   useEffect(() => {
     let live = true;
@@ -103,7 +105,7 @@ export function CommitCompareModal({
             })}
           </div>
           <div className="flex min-w-0 flex-1 flex-col">
-            {fileDiff ? <DiffView files={[fileDiff]} /> : <SkeletonRows count={10} />}
+            {fileDiff ? <DiffView files={[fileDiff]} sides={sides} /> : <SkeletonRows count={10} />}
           </div>
         </div>
       )}

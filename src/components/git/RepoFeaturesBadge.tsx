@@ -1,6 +1,10 @@
-import { FileLock2, HardDrive, Webhook } from "lucide-react";
+import { useState } from "react";
+import { FileLock2, HardDrive, LoaderCircle, Webhook } from "lucide-react";
 import { useGitToolsStore } from "../../state/gitToolsStore";
+import { useRepoStore } from "../../state/repoStore";
 import { useT } from "../../state/languageStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
+import { gitLfsPull } from "../../lib/tauri/gitCommands";
 
 /**
  * The Changes screen's note that commits here are not plain libgit2 commits: hooks run, commits are
@@ -9,6 +13,8 @@ import { useT } from "../../state/languageStore";
  */
 export function RepoFeaturesBadge() {
   const features = useGitToolsStore((s) => s.features);
+  const repoPath = useRepoStore((s) => s.repoPath);
+  const [pulling, setPulling] = useState(false);
   const t = useT();
   if (!features) return null;
   const hooks = features.hooks.length > 0;
@@ -34,9 +40,32 @@ export function RepoFeaturesBadge() {
     >
       {hooks && <Webhook size={12} />}
       {signing && <FileLock2 size={12} />}
-      {features.lfs && (
-        <HardDrive size={12} className={features.lfs_available ? undefined : "text-[var(--cf-warning)]"} />
-      )}
+      {features.lfs &&
+        (features.lfs_available && repoPath ? (
+          // With LFS installed the glyph is also its one verb: fetch the objects the checkout points
+          // at — a clone made before LFS was installed holds only pointers.
+          <button
+            type="button"
+            disabled={pulling}
+            title={`${lines.join("\n")}\n\n${t("features.lfsPull")}`}
+            aria-label={t("features.lfsPull")}
+            onClick={() => {
+              setPulling(true);
+              gitLfsPull(repoPath)
+                .then(async () => {
+                  await useRepoStore.getState().refreshStatus();
+                  pushSuccessToast(t("binaryDiff.lfsPulled"));
+                })
+                .catch((e: unknown) => pushErrorToast(String(e)))
+                .finally(() => setPulling(false));
+            }}
+            className="rounded hover:text-[var(--cf-text)]"
+          >
+            {pulling ? <LoaderCircle size={12} className="animate-spin" /> : <HardDrive size={12} />}
+          </button>
+        ) : (
+          <HardDrive size={12} className={features.lfs_available ? undefined : "text-[var(--cf-warning)]"} />
+        ))}
     </span>
   );
 }

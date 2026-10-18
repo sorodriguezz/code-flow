@@ -37,6 +37,9 @@ export function FlowSettingsDialog({ onClose }: { onClose: () => void }) {
   const [aiPerHour, setAiPerHour] = useState(typeof settings.aiPerHour === "number" ? String(settings.aiPerHour) : "60");
   const [skipOnBattery, setSkipOnBattery] = useState(settings.skipOnBattery === true);
   const [settleSec, setSettleSec] = useState(typeof settings.settleSec === "number" ? String(settings.settleSec) : "0");
+  const [runTimeout, setRunTimeout] = useState(
+    typeof settings.runTimeoutMinutes === "number" ? String(settings.runTimeoutMinutes) : "0",
+  );
 
   const save = () => {
     const draft = useFlowsStore.getState().draft;
@@ -48,6 +51,10 @@ export function FlowSettingsDialog({ onClose }: { onClose: () => void }) {
     next.notifyOn = notifyOn;
     const cap = Number.parseInt(aiPerHour, 10);
     next.aiPerHour = Number.isFinite(cap) && cap >= 0 ? Math.min(cap, 10_000) : 60;
+    // Minutes a run may work before it is stopped (`runs::run_timeout`); 0 is no limit.
+    const limit = Number.parseInt(runTimeout, 10);
+    if (Number.isFinite(limit) && limit > 0) next.runTimeoutMinutes = Math.min(limit, 7 * 24 * 60);
+    else delete next.runTimeoutMinutes;
     if (skipOnBattery) next.skipOnBattery = true;
     else delete next.skipOnBattery;
     const settle = Number.parseFloat(settleSec);
@@ -153,6 +160,17 @@ export function FlowSettingsDialog({ onClose }: { onClose: () => void }) {
             onChange={(event) => setAiPerHour(event.target.value)}
           />,
           t("flows.settingsDialog.aiPerHourHint"),
+        )}
+        {row(
+          t("flows.settingsDialog.runTimeout"),
+          <input
+            type="number"
+            min={0}
+            className={fieldClass({ size: "sm", className: "w-32" })}
+            value={runTimeout}
+            onChange={(event) => setRunTimeout(event.target.value)}
+          />,
+          t("flows.settingsDialog.runTimeoutHint"),
         )}
         {/* For the heavy flows — a local model, a build: a trigger on battery skips the run. */}
         <label className="flex items-center gap-2 text-[12.5px]" title={t("flows.settingsDialog.skipOnBatteryHint")}>

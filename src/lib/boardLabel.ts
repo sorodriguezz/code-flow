@@ -15,6 +15,12 @@ export function boardLabelKey(provider: string | null | undefined): TranslationK
       return "stories.targetJira";
     case "monday":
       return "stories.targetMonday";
+    case "github":
+      return "stories.targetGithub";
+    case "gitlab":
+      return "stories.targetGitlab";
+    case "linear":
+      return "stories.targetLinear";
     default:
       return "stories.targetAzure";
   }

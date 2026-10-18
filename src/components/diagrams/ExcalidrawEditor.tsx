@@ -25,10 +25,11 @@ import { ViewSkeleton } from "../common/ViewSkeleton";
 import { EMPTY_EXCALIDRAW_DOC } from "../../lib/diagrams/doc";
 import { THUMBNAIL_MAX_CHARS } from "../../lib/diagrams/embed";
 import { saveBytes } from "../../lib/diagrams/exportFile";
-import { pngToPdf } from "../../lib/diagrams/pdf";
-import type { PendingExport } from "../../lib/diagrams/exportOptions";
+import { pngToPdf, svgToPdf } from "../../lib/diagrams/pdf";
+import { fitExportCanvas, type PendingExport } from "../../lib/diagrams/exportOptions";
+import { getSetting, setSetting } from "../../lib/tauri/commands";
 import { useDiagramsStore } from "../../state/diagramsStore";
-import { useLanguageStore, useT } from "../../state/languageStore";
+import { translate, useLanguageStore, useT } from "../../state/languageStore";
 import { useThemeStore } from "../../state/themeStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 
@@ -102,13 +103,26 @@ export function ExcalidrawEditor({
       const scene = doc === null ? null : readScene(doc);
       written.current = doc;
       if (scene) writtenKey.current = sceneKey(scene.elements ?? [], scene.appState ?? {}, scene.files ?? {});
-      return scene ? { ...scene, libraryItems: loadLibrary(), scrollToContent: true } : null;
+      return scene ? { ...scene, libraryItems: libraryCache ?? [], scrollToContent: true } : null;
     },
     // Once per diagram, and only once the document has arrived: `doc` itself changes on every
     // edit, and re-reading it would hand the editor a new initial scene it ignores anyway.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [diagramId, doc === null],
   );
+
+  // The library is a setting (so backup carries it), read asynchronously: handed to the editor once
+  // both it and the API are there. A cached copy is already in `initialData`.
+  useEffect(() => {
+    if (!api || libraryCache !== null) return;
+    let live = true;
+    void loadLibrary().then((items) => {
+      if (live) api.updateLibrary({ libraryItems: items, merge: false });
+    });
+    return () => {
+      live = false;
+    };
+  }, [api]);
 
   useEffect(
     () => () => {
@@ -368,16 +382,34 @@ async function exportScene(
     const svg = await exportToSvg({ elements, appState: exportAppState, files, exportPadding: border });
     return saveBytes(new TextEncoder().encode(svg.outerHTML), "svg", name);
   }
+  if (request.format === "pdf" && request.options.vector) {
+    const svg = await exportToSvg({ elements, appState: exportAppState, files, exportPadding: border });
+    return saveBytes(await svgToPdf(svg.outerHTML), "pdf", name);
+  }
+  // Without `getDimensions` the library draws at 1× whatever the zoom says; with it, the canvas is
+  // also kept inside what the webview can draw — past that it comes back blank.
+  let used = scale;
   const blob = await exportToBlob({
     elements,
     appState: exportAppState,
     files,
     mimeType: "image/png",
     exportPadding: border,
+    getDimensions: (width: number, height: number) => {
+      const fit = fitExportCanvas(width, height, scale);
+      used = fit.scale;
+      return fit;
+    },
   });
+  if (used < scale - 1e-6) {
+    useToastStore.getState().pushToast(
+      translate("diagrams.exportScaledDown", { zoom: Math.round(scale * 100), actual: Math.round(used * 100) }),
+      "info",
+    );
+  }
   const png = new Uint8Array(await blob.arrayBuffer());
   return request.format === "pdf"
-    ? saveBytes(await pngToPdf(png, scale), "pdf", name)
+    ? saveBytes(await pngToPdf(png, used), "pdf", name)
     : saveBytes(png, "png", name);
 }
 
@@ -391,17 +423,26 @@ function blobToDataUri(blob: Blob): Promise<string> {
 }
 
 /**
- * The shape library — the editor's own panel of saved pieces — kept on this machine.
+ * The shape library — the editor's own panel of saved pieces.
  *
  * Excalidraw embedded holds it in memory only; without this, every piece somebody saved would be
  * gone the next time a diagram opened. One library for every diagram, which is how the editor
  * presents it: a toolbox, not part of any one drawing.
+ *
+ * Kept in the `excalidraw_library` setting, not `localStorage`: settings are in the database, so
+ * backup and restore carry the library to another machine. A library left in `localStorage` by an
+ * earlier version is moved over the first time it is read.
  */
-const LIBRARY_KEY = "cf.excalidraw.library";
+const LIBRARY_SETTING = "excalidraw_library";
+const LEGACY_LIBRARY_KEY = "cf.excalidraw.library";
 
-function loadLibrary(): LibraryItems {
+/** `null` until read; after that the library as last loaded or saved. */
+let libraryCache: LibraryItems | null = null;
+let libraryLoading: Promise<LibraryItems> | null = null;
+let librarySaved = "";
+
+function parseLibrary(raw: string | null | undefined): LibraryItems {
   try {
-    const raw = localStorage.getItem(LIBRARY_KEY);
     const items = raw ? JSON.parse(raw) : [];
     return Array.isArray(items) ? items : [];
   } catch {
@@ -409,10 +450,39 @@ function loadLibrary(): LibraryItems {
   }
 }
 
+function loadLibrary(): Promise<LibraryItems> {
+  if (libraryCache !== null) return Promise.resolve(libraryCache);
+  libraryLoading ??= (async () => {
+    const stored = await getSetting(LIBRARY_SETTING).catch(() => null);
+    let items = parseLibrary(stored);
+    if (stored === null || stored === undefined) {
+      let legacy: string | null = null;
+      try {
+        legacy = localStorage.getItem(LEGACY_LIBRARY_KEY);
+      } catch {
+        // No store: nothing to move.
+      }
+      items = parseLibrary(legacy);
+      if (items.length > 0) {
+        librarySaved = JSON.stringify(items);
+        await setSetting(LIBRARY_SETTING, librarySaved).catch(() => {});
+      }
+    } else {
+      librarySaved = stored;
+    }
+    libraryCache = items;
+    return items;
+  })();
+  return libraryLoading;
+}
+
 function saveLibrary(items: LibraryItems): void {
-  try {
-    localStorage.setItem(LIBRARY_KEY, JSON.stringify(items));
-  } catch {
-    // Too large for the store, or the store is off: the library lasts the session.
-  }
+  // Before the stored library has arrived, the editor reports the empty one it started with —
+  // writing that would wipe what is stored.
+  if (libraryCache === null) return;
+  const raw = JSON.stringify(items);
+  libraryCache = items;
+  if (raw === librarySaved) return;
+  librarySaved = raw;
+  void setSetting(LIBRARY_SETTING, raw).catch((error) => pushErrorToast(String(error)));
 }

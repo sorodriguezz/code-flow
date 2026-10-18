@@ -117,7 +117,32 @@ fn board_auth(db: &State<Db>, provider: BoardProvider, org: &str) -> Result<Boar
             })?;
             Ok(BoardAuth::basic(jira_email(db, org)?, token))
         }
+        // The tokens the app already holds for the host's pull requests.
+        BoardProvider::Github => Ok(BoardAuth::raw(crate::commands::ado_cmd::github_token(org.trim())?)),
+        BoardProvider::Gitlab => Ok(BoardAuth::raw(crate::commands::ado_cmd::gitlab_token(org.trim())?)),
+        BoardProvider::Linear => {
+            let token = secrets::get_secret(&secrets::linear_token_key(org.trim()))?.ok_or_else(|| {
+                format!("No hay ninguna clave de Linear guardada para \"{org}\" — conéctala en Ajustes")
+            })?;
+            Ok(BoardAuth::raw(token))
+        }
     }
+}
+
+/// Who a Linear API key belongs to — the connect step, like `monday_whoami`.
+#[tauri::command]
+pub async fn linear_whoami(token: String) -> Result<boards::linear::LinearAccount, String> {
+    if token.trim().is_empty() {
+        return Err("Falta la clave de Linear".to_string());
+    }
+    boards::linear::whoami(&BoardAuth::raw(token.trim())).await
+}
+
+/// The teams a connected Linear organisation has, for the target picker.
+#[tauri::command]
+pub async fn linear_list_teams(db: State<'_, Db>, key: String) -> Result<Vec<boards::linear::LinearTeam>, String> {
+    let auth = board_auth(&db, BoardProvider::Linear, &key)?;
+    boards::linear::list_teams(&auth).await
 }
 
 /// Who a monday.com token belongs to.
@@ -206,6 +231,97 @@ pub async fn ado_wiki_pages_content(
     azure::get_wiki_pages_combined(&org, &project, &wiki, &paths, &pat).await
 }
 
+// ---------- a document or a page as the source ----------
+
+/// The most of a document read as a source — a specification, not a library.
+const MAX_SOURCE_BYTES: u64 = 30 * 1024 * 1024;
+
+/// A source read into Markdown, with the name a batch is titled after.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorySource {
+    pub name: String,
+    pub markdown: String,
+}
+
+fn source_markdown(bytes: &[u8], name_hint: &std::path::Path) -> Result<String, String> {
+    let format = anydoc::Format::from_bytes(bytes)
+        .or_else(|| anydoc::Format::from_path(name_hint))
+        .ok_or_else(|| "No es un formato que se pueda leer (PDF, Word, PowerPoint, Excel, OpenDocument, RTF o EPUB)".to_string())?;
+    match anydoc::to_markdown_bytes(bytes, format) {
+        Ok(markdown) => Ok(markdown),
+        Err(anydoc::ConvertError::Encrypted) => Err("El documento está protegido con contraseña".into()),
+        Err(anydoc::ConvertError::NeedsOcr { .. }) => {
+            Err("El PDF son páginas escaneadas, sin texto: conviértelo con OCR o pega su texto".into())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// A PDF, Word or other office document on disk, as Markdown — the «Documento» source.
+#[tauri::command]
+pub async fn story_source_document(path: String) -> Result<StorySource, String> {
+    tokio::task::spawn_blocking(move || {
+        let source = std::path::PathBuf::from(&path);
+        let meta = std::fs::metadata(&source).map_err(|e| format!("{path}: {e}"))?;
+        if meta.len() > MAX_SOURCE_BYTES {
+            return Err(format!("{path} pesa más de {} MB", MAX_SOURCE_BYTES / (1024 * 1024)));
+        }
+        let bytes = std::fs::read(&source).map_err(|e| format!("{path}: {e}"))?;
+        let extension = source.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        let markdown = if matches!(extension.as_str(), "md" | "markdown" | "txt") {
+            String::from_utf8_lossy(&bytes).into_owned()
+        } else {
+            source_markdown(&bytes, &source)?
+        };
+        let name = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok(StorySource { name, markdown })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// A web page (or a document behind a link) as Markdown, its main content only — the «Página web»
+/// source. Public pages: nothing here signs in.
+#[tauri::command]
+pub async fn story_source_url(url: String) -> Result<StorySource, String> {
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|_| format!("«{url}» no es una dirección web"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Solo direcciones http o https".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(45))
+        .user_agent(crate::github::USER_AGENT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client.get(parsed.clone()).send().await.map_err(|e| format!("no se pudo abrir la página: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("la página respondió {status}"));
+    }
+    let html_like = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_none_or(|v| v.contains("html") || v.contains("text/"));
+    let final_url = response.url().clone();
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        return Err("La página es demasiado grande".into());
+    }
+    let fallback = final_url.path_segments().and_then(|mut s| s.next_back().map(str::to_string)).filter(|s| !s.is_empty()).unwrap_or_else(|| final_url.host_str().unwrap_or_default().to_string());
+    if !html_like {
+        let markdown = source_markdown(&bytes, std::path::Path::new(&fallback))?;
+        return Ok(StorySource { name: fallback, markdown });
+    }
+    let page = crate::flows::nodes::utils::page_markdown(&String::from_utf8_lossy(&bytes), Some(&final_url));
+    let markdown = page["markdown"].as_str().unwrap_or_default().trim().to_string();
+    if markdown.is_empty() {
+        return Err("La página no tiene texto que leer (puede que se arme con JavaScript): copia su contenido y pégalo".into());
+    }
+    let name = page["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string).unwrap_or(fallback);
+    Ok(StorySource { name, markdown })
+}
+
 // ---------- the board target ----------
 
 /// The kinds of work item the target project offers.
@@ -266,6 +382,55 @@ pub async fn board_get_work_item(
     let provider = BoardProvider::parse(provider.as_deref().unwrap_or_default());
     let auth = board_auth(&db, provider, &org)?;
     boards::get_work_item(provider, &org, id, key.as_deref().unwrap_or_default(), &auth).await
+}
+
+/// One published story's state on its board, as just read back.
+#[derive(Debug, Clone, Serialize)]
+pub struct StoryBoardState {
+    pub story_id: String,
+    pub state: String,
+    /// Why it could not be read — the item deleted, the token gone. The story keeps its last state.
+    pub error: Option<String>,
+}
+
+/// Reads every published story of a batch back from its board and keeps each one's state on the
+/// story — what the team has started, finished or closed since the publish, without opening the
+/// board. Six at a time: a batch is a few dozen stories, and one board is being asked.
+#[tauri::command]
+pub async fn story_batch_board_states(db: State<'_, Db>, batch_id: String) -> Result<Vec<StoryBoardState>, String> {
+    use futures_util::StreamExt;
+    let (batch, stories) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let detail = queries::get_story_batch(&conn, &batch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Ese conjunto de historias ya no existe".to_string())?;
+        (detail.batch, detail.stories)
+    };
+    let provider = BoardProvider::parse(&batch.board_provider);
+    let published: Vec<StoryDraft> = stories.into_iter().filter(|s| s.work_item_id > 0 || !s.work_item_key.is_empty()).collect();
+    if published.is_empty() {
+        return Ok(Vec::new());
+    }
+    let auth = board_auth(&db, provider, &batch.ado_org)?;
+    let org = batch.ado_org.clone();
+    let read: Vec<StoryBoardState> = futures_util::stream::iter(published)
+        .map(|story| {
+            let (auth, org) = (auth.clone(), org.clone());
+            async move {
+                match boards::get_work_item(provider, &org, story.work_item_id, &story.work_item_key, &auth).await {
+                    Ok(item) => StoryBoardState { story_id: story.id, state: item.state, error: None },
+                    Err(e) => StoryBoardState { story_id: story.id, state: story.board_state, error: Some(e) },
+                }
+            }
+        })
+        .buffer_unordered(6)
+        .collect()
+        .await;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    for found in read.iter().filter(|r| r.error.is_none()) {
+        let _ = queries::set_story_board_state(&conn, &found.story_id, &found.state);
+    }
+    Ok(read)
 }
 
 /// One INVEST letter and how the story does on it.
@@ -1684,7 +1849,7 @@ pub async fn board_create_child_tasks(
         BoardProvider::Azure => {
             azure::work_item_type_fields(&org, &project, &work_item_type, &auth.secret).await.ok()
         }
-        BoardProvider::Jira | BoardProvider::Monday => None,
+        _ => None,
     };
 
     // Where the story is filed, so its tasks land in the same sprint. Azure inherits neither field
@@ -1695,7 +1860,7 @@ pub async fn board_create_child_tasks(
         BoardProvider::Azure => azure::classification_of(&org, parent_id, &auth.secret)
             .await
             .unwrap_or_default(),
-        BoardProvider::Jira | BoardProvider::Monday => Default::default(),
+        _ => Default::default(),
     };
 
     let mut created = Vec::with_capacity(tasks.len());
@@ -2883,7 +3048,7 @@ pub async fn update_story_on_board(db: State<'_, Db>, story_id: String) -> Resul
                 // every process template a story type comes from, and a wrong guess fails loudly.
                 .unwrap_or(true)
         }
-        BoardProvider::Jira | BoardProvider::Monday => false,
+        _ => false,
     };
     let criteria: Vec<String> = serde_json::from_str(&story.acceptance_criteria).unwrap_or_default();
     let content = boards::StoryContent {
@@ -2919,6 +3084,73 @@ pub struct StoryPublishOutcome {
     pub failed: usize,
 }
 
+/// One story about to be published that looks like something already there.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoryDuplicate {
+    pub story_id: String,
+    pub story_title: String,
+    /// Items on the board with the same title — or, with `id` 0 and no url, an earlier story in the
+    /// same selection.
+    pub matches: Vec<boards::ExistingItem>,
+}
+
+/// Looks for the selected stories on the board before they are published: the board's newest items
+/// of the same kind with the same title (see `boards::same_title`), and two stories in the selection
+/// that say the same thing. Nothing is written; the UI asks before publishing over a match.
+#[tauri::command]
+pub async fn find_story_duplicates(
+    db: State<'_, Db>,
+    batch_id: String,
+    story_ids: Vec<String>,
+) -> Result<Vec<StoryDuplicate>, String> {
+    let (batch, stories) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let detail = queries::get_story_batch(&conn, &batch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Ese conjunto de historias ya no existe".to_string())?;
+        (detail.batch, detail.stories)
+    };
+    let targets: Vec<&StoryDraft> = stories
+        .iter()
+        .filter(|s| story_ids.iter().any(|id| id == &s.id) && s.work_item_id == 0)
+        .collect();
+    if targets.is_empty() || batch.ado_org.trim().is_empty() || batch.ado_project.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let provider = BoardProvider::parse(&batch.board_provider);
+    let auth = board_auth(&db, provider, &batch.ado_org)?;
+    let existing =
+        boards::recent_items(provider, &batch.ado_org, &batch.ado_project, &batch.work_item_type, &auth).await?;
+    Ok(duplicates_among(&targets, &existing))
+}
+
+fn duplicates_among(targets: &[&StoryDraft], existing: &[boards::ExistingItem]) -> Vec<StoryDuplicate> {
+    let mut out = Vec::new();
+    for (index, story) in targets.iter().enumerate() {
+        let mut matches: Vec<boards::ExistingItem> =
+            existing.iter().filter(|item| boards::same_title(&story.title, &item.title)).cloned().collect();
+        matches.extend(
+            targets
+                .iter()
+                .enumerate()
+                // Only an earlier one: the first copy is the story, every later one its repeat — so
+                // skipping what is flagged keeps exactly one.
+                .filter(|(other, s)| *other < index && boards::same_title(&story.title, &s.title))
+                .map(|(_, s)| boards::ExistingItem {
+                    id: 0,
+                    key: String::new(),
+                    title: s.title.clone(),
+                    state: String::new(),
+                    url: String::new(),
+                }),
+        );
+        if !matches.is_empty() {
+            out.push(StoryDuplicate { story_id: story.id.clone(), story_title: story.title.clone(), matches });
+        }
+    }
+    out
+}
+
 /// Creates one Azure Boards work item per selected story.
 ///
 /// Every story is attempted even when an earlier one fails — a wrong area path on story three must
@@ -2949,13 +3181,19 @@ pub async fn publish_stories(
             BoardProvider::Monday => {
                 "Elige la cuenta y el tablero de monday.com antes de publicar".to_string()
             }
+            BoardProvider::Github | BoardProvider::Gitlab => {
+                "Elige el repositorio antes de publicar".to_string()
+            }
+            BoardProvider::Linear => "Elige la organización y el equipo de Linear antes de publicar".to_string(),
         });
     }
-    if batch.work_item_type.trim().is_empty() {
+    // An issue tracker's "type" is a label, and none is a plain issue.
+    let typed = !matches!(provider, BoardProvider::Github | BoardProvider::Gitlab | BoardProvider::Linear);
+    if typed && batch.work_item_type.trim().is_empty() {
         return Err(match provider {
-            BoardProvider::Azure => "Elige el tipo de work item antes de publicar".to_string(),
             BoardProvider::Jira => "Elige el tipo de incidencia antes de publicar".to_string(),
             BoardProvider::Monday => "Elige el grupo del tablero antes de publicar".to_string(),
+            _ => "Elige el tipo de work item antes de publicar".to_string(),
         });
     }
     let auth = board_auth(&db, provider, &batch.ado_org)?;
@@ -2972,10 +3210,10 @@ pub async fn publish_stories(
         )
         .await
         .ok(),
-        // Neither of the others rejects a whole item over one field it doesn't define, so neither
-        // needs the probe: Jira ignores what it doesn't know, and monday is told which columns to
-        // write by its own detection pass.
-        BoardProvider::Jira | BoardProvider::Monday => None,
+        // None of the others rejects a whole item over one field it doesn't define, so none needs
+        // the probe: Jira ignores what it doesn't know, monday is told which columns to write by its
+        // own detection pass, and the issue trackers have no fields beyond their text.
+        _ => None,
     };
 
     let targets: Vec<&StoryDraft> = stories
@@ -3208,6 +3446,8 @@ mod tests {
             last_error: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
+            board_state: String::new(),
+            board_state_at: String::new(),
         };
         let payload = build_verification_payload(&[&story]);
         assert!(payload.contains("HISTORIA 1: Pagar"));

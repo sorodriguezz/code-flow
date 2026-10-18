@@ -129,6 +129,11 @@ interface CiState {
    */
   branchesSeenByProject: Record<string, string[]>;
   statusFilter: PipelineRun["status"] | null;
+  /** Workflow / event / who-ran-it, per project and applied here — like the status filter, no host
+   *  offers all three as a query. `""` is "any". */
+  runFiltersByProject: Record<string, RunFilters>;
+  /** How many runs a project's list holds: {@link PAGE} until «Cargar más» asks for another page. */
+  limitByProject: Record<string, number>;
   graphMode: GraphMode;
 
   /** Runs the failure analysis has been asked about: the AI run id it was given, so the panel can
@@ -179,6 +184,9 @@ interface CiState {
   openByKey: (key: string) => Promise<void>;
   setBranchFilter: (projectId: string, branch: string | null) => void;
   setStatusFilter: (status: PipelineRun["status"] | null) => void;
+  setRunFilter: (projectId: string, patch: Partial<RunFilters>) => void;
+  /** One more page of history, up to {@link MAX_RUNS}. */
+  loadMore: (projectId: string) => Promise<void>;
   setGraphMode: (mode: GraphMode) => void;
   rememberNeeds: (key: string, needs: Map<string, string[]> | null) => void;
   rememberStages: (key: string, stages: DeclaredStages | null) => void;
@@ -194,6 +202,40 @@ interface CiState {
 
 /** How many runs a page asks for. One screen of scrolling; more is a rate limit spent on history. */
 const PAGE = 50;
+/** The most «Cargar más» reaches: the backends stop at ten pages of 50 whatever they are asked. */
+export const MAX_RUNS = 500;
+
+export interface RunFilters {
+  workflow: string;
+  event: string;
+  actor: string;
+}
+
+export const NO_RUN_FILTERS: RunFilters = { workflow: "", event: "", actor: "" };
+
+/** Whether a run passes the client-side filters. */
+export function matchesRunFilters(run: PipelineRun, filters: RunFilters): boolean {
+  return (
+    (!filters.workflow || run.name === filters.workflow) &&
+    (!filters.event || run.event === filters.event) &&
+    (!filters.actor || run.actor === filters.actor)
+  );
+}
+
+/**
+ * A poll's first page laid over a longer list «Cargar más» built.
+ *
+ * Only the first page is re-read on a poll — re-reading ten pages every five seconds to keep history
+ * nobody is looking at fresh would spend the rate limit on nothing. So the page replaces what it
+ * covers and the older tail is kept: everything not in the page and created before its oldest run.
+ */
+export function mergeHead(fresh: PipelineRun[], existing: PipelineRun[] | undefined): PipelineRun[] {
+  if (!existing || existing.length <= fresh.length || fresh.length === 0) return fresh;
+  const ids = new Set(fresh.map((run) => `${run.provider}:${run.id}`));
+  const oldest = fresh.reduce((min, run) => (run.created_at < min ? run.created_at : min), fresh[0].created_at);
+  const tail = existing.filter((run) => !ids.has(`${run.provider}:${run.id}`) && run.created_at < oldest);
+  return [...fresh, ...tail];
+}
 
 /**
  * How often a live run is re-read, in seconds, and what it may be set to.
@@ -417,6 +459,8 @@ export const useCiStore = create<CiState>((set, get) => ({
   branchFilterByProject: {},
   branchesSeenByProject: {},
   statusFilter: null,
+  runFiltersByProject: {},
+  limitByProject: {},
   graphMode: "graph",
   analysisByJob: {},
   artifactsByRun: {},
@@ -441,7 +485,10 @@ export const useCiStore = create<CiState>((set, get) => ({
     const branch = get().branchFilterByProject[projectId] ?? null;
 
     try {
-      const runs = await api.listPipelineRuns(projectId, branch, PAGE);
+      const limit = get().limitByProject[projectId] ?? PAGE;
+      // A poll re-reads the first page only and keeps the older history it already has.
+      const fetched = await api.listPipelineRuns(projectId, branch, quiet ? PAGE : limit);
+      const runs = quiet ? mergeHead(fetched, get().runsByProject[projectId]) : fetched;
       failures.delete(projectId);
       nextAttempt.delete(projectId);
       announceTransitions(projectId, runs, workspaceId);
@@ -610,7 +657,11 @@ export const useCiStore = create<CiState>((set, get) => ({
   },
 
   setBranchFilter: (projectId, branch) => {
-    set((s) => ({ branchFilterByProject: { ...s.branchFilterByProject, [projectId]: branch } }));
+    // Another branch's history starts again at one page.
+    set((s) => ({
+      branchFilterByProject: { ...s.branchFilterByProject, [projectId]: branch },
+      limitByProject: { ...s.limitByProject, [projectId]: PAGE },
+    }));
     // The filter is applied by the host, not here, so changing it is a refetch. Manual, so it
     // clears any backoff the last failure left behind — the user asking again is a good reason to
     // stop waiting.
@@ -620,6 +671,19 @@ export const useCiStore = create<CiState>((set, get) => ({
   },
 
   setStatusFilter: (status) => set({ statusFilter: status }),
+  setRunFilter: (projectId, patch) =>
+    set((s) => ({
+      runFiltersByProject: {
+        ...s.runFiltersByProject,
+        [projectId]: { ...(s.runFiltersByProject[projectId] ?? NO_RUN_FILTERS), ...patch },
+      },
+    })),
+  loadMore: async (projectId) => {
+    const current = get().limitByProject[projectId] ?? PAGE;
+    if (current >= MAX_RUNS) return;
+    set((s) => ({ limitByProject: { ...s.limitByProject, [projectId]: Math.min(current + PAGE, MAX_RUNS) } }));
+    await get().load(projectId);
+  },
   setGraphMode: (mode) => set({ graphMode: mode }),
 
   clearAnalysis: (key) =>

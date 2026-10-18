@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "2.3.37",
+  "version": "2.3.38",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -47,8 +47,10 @@
     "dompurify": "^3.4.12",
     "emmet-monaco-es": "5.7.0",
     "framer-motion": "^12.42.2",
+    "katex": "0.16.47",
     "lucide-react": "^1.25.0",
     "marked": "^18.0.7",
+    "mermaid": "11.17.2",
     "pdfmake": "^0.3.11",
     "qrcode-generator": "^2.0.4",
     "quicktype-core": "26.0.0",

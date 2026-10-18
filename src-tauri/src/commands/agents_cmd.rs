@@ -274,8 +274,8 @@ pub fn get_agent_task(db: State<Db>, id: String) -> Result<Option<AgentTask>, St
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn create_agent_task(
-    db: State<Db>,
+pub async fn create_agent_task(
+    db: State<'_, Db>,
     workspace_id: String,
     project_id: String,
     agent_id: String,
@@ -287,10 +287,39 @@ pub fn create_agent_task(
     title: String,
     agent_project_id: String,
     account: Option<String>,
+    worktree: Option<bool>,
 ) -> Result<AgentTask, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    // The worktree first, with no lock held: `git worktree add` checks out a whole tree, which on a
+    // large repository takes seconds. A task whose folder could not be made is not created at all.
+    let made = if worktree.unwrap_or(false) {
+        let project = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            queries::get_project(&conn, &project_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Project not found".to_string())?
+        };
+        let (path, branch) = task_worktree_names(&project.name, &id, &title);
+        let repo = project.local_path.clone();
+        let target = path.clone();
+        let branch_name = branch.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = std::path::Path::new(&target).parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            crate::git::worktree::add(&repo, &target, &branch_name, true, None)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        Some((path, branch))
+    } else {
+        None
+    };
+    let (path, branch) = made.clone().unwrap_or_default();
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::create_agent_task(
+    queries::create_agent_task_with_id(
         &conn,
+        &id,
         &workspace_id,
         &project_id,
         &agent_id,
@@ -302,8 +331,30 @@ pub fn create_agent_task(
         &title,
         &agent_project_id,
         account.as_deref(),
+        (&path, &branch),
     )
     .map_err(|e| e.to_string())
+}
+
+/// The folder and the branch of a task's own worktree. The branch reads as the task — its title,
+/// slugged — with the id's head so two tasks named alike never collide.
+fn task_worktree_names(repo_name: &str, id: &str, title: &str) -> (String, String) {
+    let short: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+    let mut slug = String::new();
+    for c in title.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+        if slug.len() >= 32 {
+            break;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let name = if slug.is_empty() { format!("task-{short}") } else { format!("{slug}-{short}") };
+    let path = crate::paths::agent_worktree_dir(repo_name, &name);
+    (path.to_string_lossy().into_owned(), format!("codeflow/{name}"))
 }
 
 #[tauri::command]
@@ -333,10 +384,35 @@ pub fn rename_agent_task(db: State<Db>, id: String, title: String) -> Result<(),
     queries::rename_agent_task(&conn, &id, &title).map_err(|e| e.to_string())
 }
 
+/// Deletes the task, and its worktree when it has one and nothing is left in it. A worktree with
+/// changes nobody committed stays where it is, and its path comes back so the UI can say so; the
+/// branch always stays — the task's commits are on it.
 #[tauri::command]
-pub fn delete_agent_task(db: State<Db>, id: String) -> Result<(), String> {
+pub async fn delete_agent_task(db: State<'_, Db>, id: String) -> Result<Option<String>, String> {
+    let (task, repo) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let task = queries::get_agent_task(&conn, &id).map_err(|e| e.to_string())?;
+        let repo = match task.as_ref() {
+            Some(t) => queries::get_project(&conn, &t.project_id).map_err(|e| e.to_string())?.map(|p| p.local_path),
+            None => None,
+        };
+        (task, repo)
+    };
+    let mut left = None;
+    if let (Some(task), Some(repo)) = (task.as_ref(), repo) {
+        if !task.worktree_path.is_empty() && std::path::Path::new(&task.worktree_path).exists() {
+            let target = task.worktree_path.clone();
+            let removed = tokio::task::spawn_blocking(move || crate::git::worktree::remove(&repo, &target, false))
+                .await
+                .map_err(|e| e.to_string())?;
+            if removed.is_err() {
+                left = Some(task.worktree_path.clone());
+            }
+        }
+    }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::delete_agent_task(&conn, &id).map_err(|e| e.to_string())
+    queries::delete_agent_task(&conn, &id).map_err(|e| e.to_string())?;
+    Ok(left)
 }
 
 // ---------- chains ----------
@@ -773,6 +849,18 @@ pub fn set_agent_task_pinned(db: State<Db>, id: String, pinned: bool) -> Result<
 }
 
 #[tauri::command]
+pub fn set_agent_task_planning(db: State<Db>, id: String, priority: i64, due_date: String, labels: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_agent_task_planning(&conn, &id, priority, &due_date, &labels).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_agent_task_archived(db: State<Db>, id: String, archived: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_agent_task_archived(&conn, &id, archived).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn set_chain_group(db: State<Db>, chain_id: String, agent_project_id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::set_chain_group(&conn, &chain_id, &agent_project_id).map_err(|e| e.to_string())
@@ -798,6 +886,15 @@ pub fn list_workspace_chain_steps(
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn a_task_worktree_is_named_after_the_task() {
+        let (path, branch) = task_worktree_names("api", "1a2b3c4d-9999", "Arreglar el login (OAuth)!");
+        assert_eq!(branch, "codeflow/arreglar-el-login-oauth-1a2b3c4d");
+        assert!(path.replace('\\', "/").ends_with("worktrees/api/arreglar-el-login-oauth-1a2b3c4d"), "{path}");
+        // Nothing usable in the title: the id alone.
+        assert_eq!(task_worktree_names("api", "ffff0000aaaa", "¿¿??").1, "codeflow/task-ffff0000");
+    }
 
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 only asks whether the process exists.

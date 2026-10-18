@@ -40,6 +40,11 @@ import type { DocVersion } from "../../types/notes";
 export const diagramsLoadTree = (workspaceId: string) =>
   invoke<DiagramsWorkspaceTree>("diagrams_load_tree", { workspaceId });
 
+/** Diagrams whose content (labels, whiteboard text, DBML/Mermaid source) holds every word of `query`,
+ *  each with the line that matched. */
+export const diagramsSearchContent = (workspaceId: string, query: string) =>
+  invoke<{ id: string; snippet: string }[]>("diagrams_search_content", { workspaceId, query });
+
 /** One diagram's document, exactly as stored. `null` if it has been deleted. To *open* a diagram
  *  use `diagramsPullFile`, which is this plus the working tree for a linked one. */
 export const diagramsGetDiagram = (id: string) =>

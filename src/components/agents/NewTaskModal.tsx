@@ -129,6 +129,9 @@ export function NewTaskModal({
   /** Stop for approval between the plan and the local execution. On by default: the plan is the
    *  one moment the work can still be redirected for free. */
   const [gate, setGate] = useState(true);
+  /** Each task in a linked worktree of its own, on a new branch — tasks in one repository then run
+   *  side by side instead of taking turns at its working copy. */
+  const [worktree, setWorktree] = useState(false);
   /** Several repositories, one plan across them — when the planner's CLI can see them all. */
   const [onePlan, setOnePlan] = useState(true);
   /** Commands that validate the change, one per line: approved by typing them. */
@@ -306,8 +309,14 @@ export function NewTaskModal({
       // a failed create with turns already running in it; this way the only thing a failure can
       // leave is tasks that have said nothing, which is what closing the dialog leaves anyway.
       const created: AgentTask[] = [];
-      for (const projectId of projectIds) {
-        created.push(await store.create({ projectId, agent, goal, agentProjectId }));
+      try {
+        for (const projectId of projectIds) {
+          created.push(await store.create({ projectId, agent, goal, agentProjectId, worktree }));
+        }
+      } catch (error) {
+        // A worktree git refused (a branch of that name, a locked index): the task was not made.
+        pushErrorToast(error instanceof Error ? error.message : String(error));
+        if (created.length === 0) return;
       }
       // A refusal here is the one-agent-per-repository guard, and `send` says so itself, naming the
       // repository. The dialog still closes on it: the task exists, `create` selected it, and it
@@ -579,6 +588,14 @@ export function NewTaskModal({
               );
             })}
           </div>
+          {!hybrid && (
+            <Tooltip label={t("agents.worktreeHint")}>
+              <label className="mt-1.5 flex w-fit cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text)]">
+                <Checkbox checked={worktree} onChange={setWorktree} />
+                {t("agents.worktree")}
+              </label>
+            </Tooltip>
+          )}
           {hybrid && projectIds.length > 1 && (
             <div className="mt-1.5">
               {spansRepos ? (

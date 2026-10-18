@@ -317,7 +317,7 @@ fn read_zip_within(path: &Path, only: Option<&str>, part_cap: u64, total_cap: u6
     Ok(out)
 }
 
-fn write_zip(path: &Path, entries: &BTreeMap<String, Vec<u8>>) -> Result<(), NodeError> {
+pub(crate) fn write_zip(path: &Path, entries: &BTreeMap<String, Vec<u8>>) -> Result<(), NodeError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| NodeError::failed(e.to_string()))?;
     }

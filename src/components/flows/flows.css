@@ -537,3 +537,21 @@
   --xy-minimap-mask-stroke-color: var(--cf-accent);
   --xy-minimap-mask-stroke-width: 1.5;
 }
+
+/* A breakpoint: a red dot on the tile's left edge, as an editor's gutter draws one. */
+.cf-flow-node__breakpoint {
+  position: absolute;
+  left: -5px;
+  top: 50%;
+  z-index: 1;
+  width: 10px;
+  height: 10px;
+  margin-top: -5px;
+  border-radius: 999px;
+  background: var(--cf-danger);
+  box-shadow: 0 0 0 2px var(--cf-sunken);
+}
+/* The node a run is held before. */
+.cf-flow-node.is-paused .cf-flow-node__tile {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--cf-danger) 55%, transparent);
+}

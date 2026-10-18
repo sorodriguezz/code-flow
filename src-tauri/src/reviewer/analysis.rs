@@ -192,6 +192,9 @@ pub struct RunSummary {
     pub measures: Measures,
     pub issues: Vec<Issue>,
     pub issues_total: u64,
+    /// Security hotspots — code to look at, not issues. Empty in reports from before they were read.
+    #[serde(default)]
+    pub hotspots: Vec<super::triage::Hotspot>,
     pub tests: Option<TestReportSummary>,
     /// Top-level folders, then the files with the most uncovered lines.
     pub coverage: Vec<CoverageEntry>,
@@ -653,6 +656,7 @@ async fn pipeline(
         measures: Measures::default(),
         issues: Vec::new(),
         issues_total: 0,
+        hotspots: Vec::new(),
         tests: None,
         coverage: Vec::new(),
         commit,
@@ -837,6 +841,7 @@ async fn pipeline(
             summary.issues = found.issues;
             summary.issues_total = found.issues_total;
             summary.coverage = found.coverage;
+            summary.hotspots = found.hotspots;
             let passed = found.gate.status != "ERROR";
             summary.stages[gate].status = if passed { StageStatus::Ok } else { StageStatus::Failed };
             summary.stages[gate].detail = Some(found.gate.status.clone());
@@ -1012,6 +1017,7 @@ struct Found {
     issues: Vec<Issue>,
     issues_total: u64,
     coverage: Vec<CoverageEntry>,
+    hotspots: Vec<super::triage::Hotspot>,
 }
 
 const METRICS: &[&str] = &[
@@ -1141,7 +1147,9 @@ async fn results(client: &SonarClient, key: &str) -> Result<Found, String> {
             }
         }
     }
-    Ok(Found { gate, measures, issues, issues_total: total, coverage })
+    // A server whose edition or version has no hotspots API still has a report to give.
+    let hotspots = super::triage::hotspots(client, key).await.unwrap_or_default();
+    Ok(Found { gate, measures, issues, issues_total: total, coverage, hotspots })
 }
 
 fn rating_letter(value: Option<&String>) -> Option<String> {
@@ -1276,10 +1284,16 @@ fn git_state(repo: &Path) -> (Option<String>, Option<String>, bool) {
     (commit, branch, dirty)
 }
 
-fn save(summary: &RunSummary) -> Result<(), String> {
+/// Writes the report the tab shows on its next open — after a review, and after a triage.
+pub fn save_last(summary: &RunSummary) -> Result<(), String> {
     let dir = install::runs_dir(&summary.project_key);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("last.json"), serde_json::to_string(summary).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("last.json"), serde_json::to_string(summary).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+fn save(summary: &RunSummary) -> Result<(), String> {
+    save_last(summary)?;
+    let dir = install::runs_dir(&summary.project_key);
     let mut history = history(&summary.project_key);
     history.push(HistoryEntry {
         run_id: summary.run_id.clone(),

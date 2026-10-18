@@ -10,6 +10,7 @@ import { useT } from "../../state/languageStore";
 import { lineClasses } from "../../lib/diffText";
 import { InlineContent } from "./DiffInline";
 import { StagingDiff, type DiffStaging } from "./StagingDiff";
+import { BinaryDiff, showsAsBinary, type DiffSides } from "./BinaryDiff";
 import { fileStatusChipStyle, fileStatusLabelKey } from "../../lib/fileStatus";
 import { scrollBehavior } from "../../lib/motion";
 
@@ -226,6 +227,7 @@ function DiffViewImpl({
   context,
   staging,
   toolbarExtra,
+  sides,
 }: {
   files: FileDiffInfo[];
   /**
@@ -251,6 +253,9 @@ function DiffViewImpl({
   /** More controls for the toolbar, before the view switch — the Changes screen's whitespace switch.
    *  Memoise it, for the reason `onClose` gives. */
   toolbarExtra?: ReactNode;
+  /** Where the two sides of a single file can be read, so a binary or LFS change is drawn (two
+   *  images, two sizes) instead of named. Memoise it, for the reason `onClose` gives. */
+  sides?: DiffSides;
 }) {
   const t = useT();
   const [mode, setMode] = useState<ViewMode>("unified");
@@ -297,6 +302,7 @@ function DiffViewImpl({
    */
   const single = files.length === 1 ? files[0] : null;
   const singlePath = single ? (single.new_path ?? single.old_path ?? "") : "";
+  const binary = !!single && !!sides && showsAsBinary(single);
 
   /** Shared by both modes, so the close button can't exist in one view and not the other. Sits
    * outside the scroll container in both, so it stays put while the diff scrolls under it. */
@@ -323,8 +329,9 @@ function DiffViewImpl({
       {toolbarExtra}
       {/* The one control for how a diff is laid out, the same segmented switch every "two ways to
           show one thing" in the app wears. Icons only, named by their tooltips: this pane can be
-          280px wide, and two labelled options would take a third of it. */}
-      <Segmented
+          280px wide, and two labelled options would take a third of it. A binary change has no
+          lines to lay out, and no switch. */}
+      {!binary && <Segmented
         size="sm"
         value={mode}
         onChange={setMode}
@@ -333,10 +340,20 @@ function DiffViewImpl({
           { value: "unified", icon: Rows3, title: t("diff.unifiedView") },
           { value: "split", icon: Columns2, title: t("diff.splitView") },
         ]}
-      />
+      />}
       {closeButton}
     </div>
   );
+
+  if (binary && single && sides) {
+    return (
+      <div className="flex h-full flex-col">
+        {toolbar}
+        {contextLine}
+        <BinaryDiff file={single} sides={sides} />
+      </div>
+    );
+  }
 
   if (mode === "split") {
     return (

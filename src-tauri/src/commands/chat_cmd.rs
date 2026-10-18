@@ -1038,7 +1038,7 @@ pub fn chat_set_archived(
     chat_queries::set_archived(&conn, &conversation_id, archived).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn chat_search_conversations(
     db: State<'_, Db>,
     query: String,

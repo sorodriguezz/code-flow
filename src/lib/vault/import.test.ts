@@ -311,3 +311,55 @@ describe("our own Bitwarden export, read back", () => {
     expect(find(result.items, "Visa").secret.custom).toContainEqual({ name: "cardNumber", value: "4111111111111111", secret: false });
   });
 });
+
+describe("browsers, LastPass and KeePass", () => {
+  it("recognises each exporter by its header", () => {
+    expect(detectFormat("name,url,username,password,note\n")).toBe("chrome-csv");
+    expect(detectFormat("url,username,password,httpRealm,formActionOrigin,guid,timeCreated\n")).toBe("firefox-csv");
+    expect(detectFormat("url,username,password,totp,extra,name,grouping,fav\n")).toBe("lastpass-csv");
+    expect(detectFormat('"Group","Title","Username","Password","URL","Notes","TOTP"\n')).toBe("keepass-csv");
+    expect(detectFormat('"Account","Login Name","Password","Web Site","Comments"\n')).toBe("keepass-csv");
+  });
+
+  it("reads Chrome's saved passwords", () => {
+    const result = importVaultExport(
+      "name,url,username,password,note\nexample.com,https://example.com/login,ana,s3cret,first\n,https://www.example.org/,bea,pw,\n",
+    );
+    expect(result.format).toBe("chrome-csv");
+    expect(result.items.map((item) => [item.title, item.site, item.secret.username, item.secret.password])).toEqual([
+      ["example.com", "https://example.com/login", "ana", "s3cret"],
+      // No name: the site's host stands in.
+      ["example.org", "https://www.example.org/", "bea", "pw"],
+    ]);
+    expect(result.items[0].secret.notes).toBe("first");
+  });
+
+  it("names Firefox's entries after their site", () => {
+    const result = importVaultExport(
+      'url,username,password,httpRealm,formActionOrigin,guid,timeCreated\n"https://mail.example.com","ana","pw",,"https://mail.example.com","{1}","1"\n',
+    );
+    expect(result.items[0]).toMatchObject({ title: "mail.example.com", kind: "login" });
+  });
+
+  it("turns LastPass's secure notes into notes and keeps its folders", () => {
+    const result = importVaultExport(
+      "url,username,password,totp,extra,name,grouping,fav\n" +
+        "https://example.com,ana,pw,JBSWY3DPEHPK3PXP,,Example,Work,1\n" +
+        "http://sn,,,,the wifi is 1234,Wifi,Home,0\n",
+    );
+    expect(result.items[0]).toMatchObject({ kind: "login", folder: "Work", favorite: true });
+    expect(result.items[0].secret.totp).toBe("JBSWY3DPEHPK3PXP");
+    expect(result.items[1]).toMatchObject({ kind: "note", title: "Wifi", site: "", folder: "Home" });
+    expect(result.items[1].secret.notes).toBe("the wifi is 1234");
+    expect(result.folders.sort()).toEqual(["Home", "Work"]);
+  });
+
+  it("drops KeePass's database root from the folder path", () => {
+    const result = importVaultExport(
+      '"Group","Title","Username","Password","URL","Notes","TOTP"\n' +
+        '"Root/Work/Servers","db","admin","pw","https://db.example.com","",""\n' +
+        '"Root","top","u","p","","",""\n',
+    );
+    expect(result.items.map((item) => item.folder)).toEqual(["Work / Servers", null]);
+  });
+});

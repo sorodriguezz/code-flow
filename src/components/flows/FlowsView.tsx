@@ -1,3 +1,4 @@
+import { FailuresView } from "./FailuresView";
 import { lazy, Suspense, useEffect } from "react";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ViewSkeleton } from "../common/ViewSkeleton";
@@ -78,6 +79,8 @@ export function FlowsView() {
           <ScheduleView />
         ) : pane === "tables" ? (
           <TablesView />
+        ) : pane === "failures" ? (
+          <FailuresView />
         ) : activeId ? (
           <Suspense fallback={<ViewSkeleton />}>
             <FlowEditor />

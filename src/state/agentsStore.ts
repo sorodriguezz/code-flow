@@ -13,7 +13,9 @@ import {
   renameAgentTask,
   sendChatMessage,
   setAgentTaskGroup,
+  setAgentTaskArchived,
   setAgentTaskPinned,
+  setAgentTaskPlanning,
   setAgentTaskProject,
   updateAgentTaskRun,
   upsertAgentProject,
@@ -24,7 +26,7 @@ import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunAbout
 import type { ChatMessage } from "./chatStore";
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { translate } from "./languageStore";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, useToastStore } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type { AgentProject, AgentTask, AgentTaskStatus, WorkspaceAgent } from "../types/domain";
@@ -132,7 +134,8 @@ function evictableLive(entry: AgentTaskLive): boolean {
  * progress and the only one that draws a chain as a chain; `status` is a flat cut across it; and
  * `templates` is not work at all, but the saved plans work gets started from — a tab rather than a
  * fourth section of the tree, which is where they sat collapsed and unnoticed. */
-export type TaskGrouping = "tree" | "status" | "templates";
+/** `board` is the status cut drawn as a kanban across the middle column. */
+export type TaskGrouping = "tree" | "status" | "board" | "templates";
 
 /** The order `list_agent_projects` returns — the user's own arrangement, name as the tie-break.
  * Local edits are re-sorted through it so a renamed folder sits where the next load will put it. */
@@ -163,6 +166,8 @@ interface AgentsState {
   /** Whether the roster rail is open. A view state, so it lives here rather than in `uiStore` —
    * nothing outside this view needs to open it. */
   rosterOpen: boolean;
+  /** Archived tasks are in the list instead of the live ones. View state, like `groupBy`. */
+  showArchived: boolean;
   loading: boolean;
   /**
    * A follow-up the backend refused because the repository was taken, by task id — handed back so
@@ -207,6 +212,8 @@ interface AgentsState {
     agent: WorkspaceAgent;
     goal: string;
     agentProjectId?: string;
+    /** Run in a worktree of its own, so it never shares files with another task. */
+    worktree?: boolean;
   }) => Promise<AgentTask>;
   /** Adds a task created outside this store (a chain step). Unlike `create` it does **not** touch
    * `selectedId`: a background step must not yank the detail pane out from under the user. */
@@ -246,6 +253,10 @@ interface AgentsState {
    * the repository the turns run in. */
   setTaskGroup: (taskId: string, agentProjectId: string) => Promise<void>;
   setTaskPinned: (taskId: string, pinned: boolean) => Promise<void>;
+  /** Priority (0 none … 3 high), due date (`YYYY-MM-DD` or `""`) and labels. */
+  setPlanning: (taskId: string, planning: { priority?: number; dueDate?: string; labels?: string[] }) => Promise<void>;
+  setArchived: (taskId: string, archived: boolean) => Promise<void>;
+  setShowArchived: (show: boolean) => void;
   setStatus: (taskId: string, status: AgentTaskStatus) => Promise<void>;
   rename: (taskId: string, title: string) => Promise<void>;
   remove: (taskId: string) => Promise<void>;
@@ -274,6 +285,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   open: {},
   query: "",
   rosterOpen: false,
+  showArchived: false,
   loading: false,
   bounced: {},
 
@@ -368,7 +380,10 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     await deleteAgentProject(id);
   },
 
-  setGroupBy: (groupBy) => set({ groupBy }),
+  // The board is drawn in the middle column, which shows one thing: choosing it puts the open task
+  // away, or the board would never be seen.
+  setGroupBy: (groupBy) => set(groupBy === "board" ? { groupBy, selectedId: null } : { groupBy }),
+  setShowArchived: (showArchived) => set({ showArchived }),
   setQuery: (query) => set({ query }),
   toggleRoster: () => set((s) => ({ rosterOpen: !s.rosterOpen })),
   toggleOpen: (key) =>
@@ -417,7 +432,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     });
   },
 
-  create: async ({ projectId, agent, goal, agentProjectId }) => {
+  create: async ({ projectId, agent, goal, agentProjectId, worktree }) => {
     const workspaceId = get().workspaceId;
     if (!workspaceId) throw new Error("no workspace");
     const task = await createAgentTask(
@@ -432,6 +447,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       taskTitleFrom(goal),
       agentProjectId ?? "",
       agent.account_id ?? null,
+      worktree ?? false,
     );
     // Newest first, matching the backend's ordering so the list doesn't reshuffle on next load.
     set((s) => ({
@@ -445,9 +461,16 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
 
   runningInProject: (projectId, exceptTaskId) => {
     const { tasks, live } = get();
+    // A task with a worktree of its own shares no files with anyone, so it neither waits nor makes
+    // anyone wait — that is what the worktree is for.
+    if (exceptTaskId && tasks.find((task) => task.id === exceptTaskId)?.worktree_path) return null;
     return (
       tasks.find(
-        (task) => task.project_id === projectId && task.id !== exceptTaskId && (live[task.id]?.sending ?? false),
+        (task) =>
+          task.project_id === projectId &&
+          task.id !== exceptTaskId &&
+          !task.worktree_path &&
+          (live[task.id]?.sending ?? false),
       ) ?? null
     );
   },
@@ -817,6 +840,35 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     await setAgentTaskGroup(taskId, agentProjectId);
   },
 
+  setPlanning: async (taskId, planning) => {
+    const task = get().tasks.find((candidate) => candidate.id === taskId);
+    if (!task) return;
+    const next = {
+      priority: planning.priority ?? task.priority ?? 0,
+      due_date: planning.dueDate ?? task.due_date ?? "",
+      labels: planning.labels ?? task.labels ?? [],
+    };
+    set((s) => ({ tasks: s.tasks.map((candidate) => (candidate.id === taskId ? { ...candidate, ...next } : candidate)) }));
+    try {
+      await setAgentTaskPlanning(taskId, next.priority, next.due_date, next.labels);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  },
+
+  setArchived: async (taskId, archived) => {
+    set((s) => ({
+      tasks: s.tasks.map((candidate) => (candidate.id === taskId ? { ...candidate, archived } : candidate)),
+      // An archived task leaves the list, so it leaves the middle column too.
+      selectedId: archived && s.selectedId === taskId ? null : s.selectedId,
+    }));
+    try {
+      await setAgentTaskArchived(taskId, archived);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  },
+
   setTaskPinned: async (taskId, pinned) => {
     const task = get().tasks.find((candidate) => candidate.id === taskId);
     if (!task || task.pinned === pinned) return;
@@ -866,7 +918,9 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         selectedId: s.selectedId === taskId ? null : s.selectedId,
       };
     });
-    await deleteAgentTask(taskId);
+    const left = await deleteAgentTask(taskId);
+    // Its worktree still had changes nobody committed: the folder stays, and the user hears where.
+    if (left) useToastStore.getState().pushToast(translate("agents.worktreeLeft", { path: left }), "info");
     // The turns live in `activity_log`, which only cascades on project delete — without this the
     // task's transcript would outlive it and surface as an orphan conversation in the AI panel.
     await deleteChatConversation(task.project_id, task.conversation_id).catch(() => undefined);

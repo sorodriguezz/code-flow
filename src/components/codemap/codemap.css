@@ -55,3 +55,14 @@
 .cf-map-node--dimmed {
   opacity: 0.35;
 }
+
+/* The minimap, as the Flujos canvas draws its own. */
+.cf-map-canvas .react-flow__minimap.cf-map-minimap {
+  background: var(--cf-surface);
+  border-radius: 9px;
+  box-shadow: var(--cf-shadow-lift), 0 0 0 1px var(--cf-border);
+  overflow: hidden;
+  --xy-minimap-mask-background-color: color-mix(in oklab, var(--cf-bg) 62%, transparent);
+  --xy-minimap-mask-stroke-color: var(--cf-accent);
+  --xy-minimap-mask-stroke-width: 1.5;
+}

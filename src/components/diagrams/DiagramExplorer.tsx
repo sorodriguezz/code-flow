@@ -3,6 +3,7 @@ import {
   Copy,
   FolderOpen,
   FolderPlus,
+  GitFork,
   LayoutTemplate,
   Palette,
   Pencil,
@@ -10,8 +11,8 @@ import {
   Pin,
   PinOff,
   Plus,
-  Table2,
   Search,
+  Table2,
   Trash2,
   X,
 } from "lucide-react";
@@ -21,7 +22,7 @@ import { DiagramTreeRow } from "./DiagramTreeRow";
 import { TemplatePickerModal } from "./TemplatePickerModal";
 import { ICON_BUTTON } from "./diagramsChrome";
 import { TREE_COLORS } from "../../lib/swatchColors";
-import { FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
+import { FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MERMAID } from "../../lib/diagrams/doc";
 import { buildFolderTree, descendantIds, flattenTree } from "../../lib/diagrams/tree";
 import type { DiagramTreeRow as DiagramTreeRowData } from "../../types/diagrams";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
@@ -110,9 +111,10 @@ export function DiagramExplorer() {
 
   // `folderId` is omitted, so this is the whole workspace's surviving diagrams — the tree places
   // each under its own folder rather than showing one folder's worth.
+  const contentHits = useDiagramsStore((s) => s.contentHits);
   const visible = useMemo(
-    () => filterDiagrams(diagrams, { query, tagFilter, sort }),
-    [diagrams, query, tagFilter, sort],
+    () => filterDiagrams(diagrams, { query, contentHits, tagFilter, sort }),
+    [diagrams, query, contentHits, tagFilter, sort],
   );
 
   const tree = useMemo(() => buildFolderTree(folders), [folders]);
@@ -436,6 +438,11 @@ export function DiagramExplorer() {
         label: t("diagrams.newDbmlDiagramHere"),
         icon: Table2,
         onClick: () => void createDiagram(folderId, undefined, FORMAT_DBML),
+      },
+      {
+        label: t("diagrams.newMermaidHere"),
+        icon: GitFork,
+        onClick: () => void createDiagram(folderId, undefined, FORMAT_MERMAID),
       },
       {
         label: t("diagrams.newFromTemplate"),

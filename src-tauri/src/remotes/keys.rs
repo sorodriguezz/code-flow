@@ -83,6 +83,16 @@ fn disk_keys(agent: &[(String, String)]) -> Vec<SshKey> {
     let mut keys = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
+        // A PuTTY key: listed so it can be converted, never passed to `-i` as it is — OpenSSH
+        // cannot read it. The `kind` is what the picker keys its "convert" offer off.
+        if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ppk")) {
+            let comment = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| text.lines().find_map(|l| l.strip_prefix("Comment:").map(|c| c.trim().to_string())))
+                .unwrap_or_default();
+            keys.push(SshKey { path: path.to_string_lossy().to_string(), label: file_label(&path), kind: PPK_KIND.into(), comment, in_agent: false });
+            continue;
+        }
         if path.extension().and_then(|e| e.to_str()) != Some("pub") {
             continue;
         }
@@ -110,6 +120,28 @@ fn disk_keys(agent: &[(String, String)]) -> Vec<SshKey> {
         });
     }
     keys
+}
+
+/// The `kind` a `.ppk` is listed with.
+pub const PPK_KIND: &str = "putty-ppk";
+
+/// Pageant's OpenSSH-compatible pipe, when it is running (PuTTY 0.75 and later open one at
+/// `\\.\pipe\pageant.<user>.<hash>`). Given to `ssh` as `IdentityAgent`, it serves the keys
+/// Pageant holds to OpenSSH as they are — no conversion. `None` off Windows, or with no Pageant.
+pub fn pageant_pipe() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let entries = std::fs::read_dir(r"\\.\pipe\").ok()?;
+        entries
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with("pageant."))
+            .map(|name| format!(r"\\.\pipe\{name}"))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 fn file_label(path: &Path) -> String {

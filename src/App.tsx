@@ -1154,6 +1154,9 @@ export default function App() {
     }
     useFetchTimerStore.getState().setRemaining(autoFetchSeconds);
     const id = setInterval(() => {
+      // Hidden or minimised, the clock stands still — no fetch and no status-bar re-render each
+      // second for nobody. Coming back fetches anyway (the `focus` / `app:foreground` handler below).
+      if (document.visibilityState !== "visible") return;
       const remaining = useFetchTimerStore.getState().remainingSeconds;
       if (remaining === null) return;
       if (remaining <= 1) {

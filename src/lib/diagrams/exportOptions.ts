@@ -57,7 +57,7 @@ import type { DiagramFormat } from "../../types/diagrams";
  */
 
 /** The formats that produce a picture, which is to say every one that is not a document. */
-export type ImageExportFormat = Exclude<ExportFormat, "drawio" | "dbml" | "excalidraw" | "html" | "archify">;
+export type ImageExportFormat = Exclude<ExportFormat, "drawio" | "dbml" | "excalidraw" | "html" | "archify" | "mermaid">;
 
 /** The choices the export dialog collects. */
 export interface ImageExportOptions {
@@ -74,6 +74,9 @@ export interface ImageExportOptions {
   /** `"auto"` means "send no theme", which leaves the editor's own `"auto"` in place — the SVG
    *  adapts to whoever opens it. The other two pin it. */
   appearance: "auto" | "light" | "dark";
+  /** PDF only: draw the page as vectors (from the SVG) rather than as the PNG — sharp at any zoom,
+   *  text selectable; see `svgToPdf` for what an HTML label becomes. */
+  vector: boolean;
 }
 
 /**
@@ -98,6 +101,7 @@ export const DEFAULT_EXPORT_OPTIONS: ImageExportOptions = {
   grid: false,
   size: "diagram",
   appearance: "auto",
+  vector: false,
 };
 
 export type ExportOptionKey = keyof ImageExportOptions;
@@ -126,6 +130,7 @@ const RESTRICTED_TO: Partial<Record<ExportOptionKey, readonly ImageExportFormat[
   grid: ["png", "pdf"],
   size: ["png", "pdf"],
   appearance: ["svg"],
+  vector: ["pdf"],
 };
 
 /**
@@ -174,7 +179,11 @@ export function supportsOption(
  * remembered from the first time it is ticked.
  */
 export function exportMessage(format: ImageExportFormat, options: ImageExportOptions): EmbedAction {
-  const { zoom, border, transparent, shadow, grid, size, appearance } = options;
+  const { zoom, border, transparent, shadow, grid, size, appearance, vector } = options;
+  // A vector PDF is built from the SVG — see `svgToPdf`.
+  if (format === "pdf" && vector) {
+    return { action: "export", format: "svg", scale: 1, border, shadow, background: transparent ? "none" : "#ffffff" };
+  }
   // A PDF is built from exactly the PNG a PNG export would produce — see the module note.
   if (format === "png" || format === "pdf") {
     return {
@@ -232,6 +241,7 @@ export function parseExportOptions(raw: string | null): ImageExportOptions {
     size: stored.size === "page" ? "page" : "diagram",
     appearance:
       stored.appearance === "light" || stored.appearance === "dark" ? stored.appearance : "auto",
+    vector: bool(stored.vector, DEFAULT_EXPORT_OPTIONS.vector),
   };
 }
 
@@ -256,4 +266,21 @@ function clamp(value: unknown, min: number, max: number, fallback: number): numb
 
 function bool(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+/** The longest canvas side every webview this app runs in will draw (WebKit and Chromium alike). */
+export const MAX_CANVAS_SIDE = 16_384;
+/** The most pixels one canvas may hold here — below WebKit's ceiling, where a larger one comes back blank. */
+export const MAX_CANVAS_PIXELS = 1 << 27;
+
+/**
+ * The canvas for a drawing `width` × `height` CSS pixels exported at `scale`, shrunk to fit what the
+ * webview can draw. A canvas past either limit is not refused by the browser — it is handed back
+ * empty, and the PNG is a blank picture. The returned `scale` is the one actually used.
+ */
+export function fitExportCanvas(width: number, height: number, scale: number): { width: number; height: number; scale: number } {
+  const w = Math.max(1, width);
+  const h = Math.max(1, height);
+  const fitted = Math.min(scale, MAX_CANVAS_SIDE / w, MAX_CANVAS_SIDE / h, Math.sqrt(MAX_CANVAS_PIXELS / (w * h)));
+  return { width: Math.floor(w * fitted), height: Math.floor(h * fitted), scale: fitted };
 }

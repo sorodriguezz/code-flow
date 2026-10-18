@@ -125,11 +125,16 @@ impl Transcript {
 }
 
 struct TerminalSession {
-    writer: Box<dyn Write + Send>,
+    /// Its own lock, so a write is made outside the registry's: a large paste into a program that
+    /// is not reading its input blocks on the pty, and under the registry lock every other
+    /// terminal's writes, resizes and exit checks waited with it.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     /// `None` once the session's own process has exited and [`watch_exit`] has closed the pty from
     /// this side — the row stays until the emitter has sent the last of the output.
     master: Option<Box<dyn MasterPty + Send>>,
-    child: Box<dyn Child + Send + Sync>,
+    /// Behind its own lock so [`watch_exit`] can poll it without taking the registry's — with ten
+    /// terminals that was fifty acquisitions of the one lock every write and resize needs, a second.
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     /// `Some` for the agent console's bench and for a phone's session. The repository dock's
     /// terminals and the Remote workspace's `ssh` sessions are not recorded: neither has anywhere to
     /// be replayed into, and a remote host's output is somebody else's machine talking.
@@ -474,9 +479,9 @@ pub fn open_pty<R: Runtime>(
         sessions.insert(
             id.clone(),
             TerminalSession {
-                writer,
+                writer: Arc::new(Mutex::new(writer)),
                 master: Some(pair.master),
-                child,
+                child: Arc::new(Mutex::new(child)),
                 transcript: transcript.clone(),
                 origin,
             },
@@ -608,7 +613,7 @@ pub fn open_pty<R: Runtime>(
         // Outside the registry lock: reaping can wait a moment for a child that is still on its way
         // out, and every other terminal would wait with it. `None` when the session was closed from
         // this side — `close_terminal` took it out of the map first, and the kill was ours.
-        let code = removed.and_then(|mut session| reap(session.child.as_mut()));
+        let code = removed.and_then(|session| session.child.lock().ok().and_then(|mut child| reap(child.as_mut())));
         if let Some(on_exit) = on_exit {
             on_exit(code);
         }
@@ -651,16 +656,28 @@ pub fn open_pty<R: Runtime>(
 /// nothing anyone can measure. The loop ends by itself once the session leaves the registry by any
 /// other route — closed from this side, or the reader's own EOF.
 fn watch_exit<R: Runtime>(app: AppHandle<R>, id: &str, outbox: &(Mutex<Outbox>, Condvar)) {
-    let master = loop {
+    let Some(registry) = app.try_state::<TerminalRegistry>() else { return };
+    let child = {
+        let Ok(sessions) = registry.0.lock() else { return };
+        let Some(session) = sessions.get(id) else { return };
+        Arc::clone(&session.child)
+    };
+    loop {
         std::thread::sleep(EXIT_POLL);
-        let Some(registry) = app.try_state::<TerminalRegistry>() else { return };
+        // The registry's copy is the other holder: alone with it, the session has left the
+        // registry by another route — closed from this side, or the reader's own EOF.
+        if Arc::strong_count(&child) == 1 {
+            return;
+        }
+        let exited = child.lock().map(|mut child| matches!(child.try_wait(), Ok(Some(_)))).unwrap_or(false);
+        if exited {
+            break;
+        }
+    }
+    let master = {
         let Ok(mut sessions) = registry.0.lock() else { return };
         let Some(session) = sessions.get_mut(id) else { return };
-        match session.child.try_wait() {
-            Ok(Some(_)) => break session.master.take(),
-            // Still running, or not answerable right now: the registry decides when to stop asking.
-            Ok(None) | Err(_) => continue,
-        }
+        session.master.take()
     };
     // Outside the registry lock: `ClosePseudoConsole` waits for the console's own pump to drain,
     // and every other terminal on the machine would wait with it.
@@ -700,7 +717,8 @@ fn reap(child: &mut (dyn Child + Send + Sync)) -> Option<i32> {
 /// whatever it has started since. `None` once the session is gone.
 pub fn pid_of(registry: &TerminalRegistry, id: &str) -> Option<u32> {
     let sessions = registry.0.lock().ok()?;
-    sessions.get(id)?.child.process_id()
+    let pid = sessions.get(id)?.child.lock().ok()?.process_id();
+    pid
 }
 
 /// Whether a session is still in the registry — which is to say its pty has not closed yet.
@@ -720,13 +738,13 @@ fn lock_outbox(lock: &Mutex<Outbox>) -> std::sync::MutexGuard<'_, Outbox> {
 }
 
 pub fn write_terminal(registry: &TerminalRegistry, id: &str, data: &str) -> Result<(), String> {
-    let mut sessions = registry.0.lock().map_err(|e| e.to_string())?;
-    let session = sessions.get_mut(id).ok_or("no such terminal session")?;
-    session
-        .writer
-        .write_all(data.as_bytes())
-        .map_err(|e| e.to_string())?;
-    session.writer.flush().map_err(|e| e.to_string())?;
+    let writer = {
+        let sessions = registry.0.lock().map_err(|e| e.to_string())?;
+        Arc::clone(&sessions.get(id).ok_or("no such terminal session")?.writer)
+    };
+    let mut writer = writer.lock().map_err(|e| e.to_string())?;
+    writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -776,8 +794,8 @@ pub fn close_terminal(registry: &TerminalRegistry, id: &str) -> Result<(), Strin
 /// more — then the root goes the way it always went, and whatever of the tree outlives it is ended
 /// on a thread of its own: politely, then not. Each process is named by pid *and* start time, so a
 /// pid reused in the meantime is never signalled (see [`ProcId`]).
-fn end_session(mut session: TerminalSession) {
-    let root = session.child.process_id();
+fn end_session(session: TerminalSession) {
+    let root = session.child.lock().ok().and_then(|child| child.process_id());
     let tree = root
         .map(|pid| {
             let mut table = ProcessTable::new();
@@ -795,7 +813,9 @@ fn end_session(mut session: TerminalSession) {
             .stderr(std::process::Stdio::null())
             .status();
     }
-    let _ = session.child.kill();
+    if let Ok(mut child) = session.child.lock() {
+        let _ = child.kill();
+    }
     let descendants: Vec<ProcId> = tree.into_iter().skip(1).collect();
     if !descendants.is_empty() {
         std::thread::spawn(move || end_leftovers(&descendants));
@@ -844,7 +864,7 @@ pub fn foreground_process(registry: &TerminalRegistry, id: &str) -> Option<Strin
     let (shell, foreground) = {
         let sessions = registry.0.lock().ok()?;
         let session = sessions.get(id)?;
-        let shell = session.child.process_id()?;
+        let shell = session.child.lock().ok()?.process_id()?;
         #[cfg(unix)]
         let foreground = session.master.as_ref().and_then(|master| master.process_group_leader()).map(|pid| pid as u32);
         #[cfg(not(unix))]

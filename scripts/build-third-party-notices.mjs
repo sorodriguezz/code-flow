@@ -304,6 +304,9 @@ const FONTS = [
   { family: "Lilita One", use: "headings on whiteboards", package: "@excalidraw/excalidraw", kind: "woff2", file: "dist/prod/fonts/Lilita" },
   { family: "Assistant", use: "the whiteboard editor's own controls", package: "@excalidraw/excalidraw", kind: "woff2", file: "dist/prod/fonts/Assistant/Assistant-Regular.woff2" },
   { family: "codicon", use: "the editor's own icons", package: "monaco-editor", kind: "ttf", file: "esm/vs/base/browser/ui/codicons/codicon/codicon.ttf" },
+  // One row for KaTeX's set (Main, Math, AMS, Caligraphic, Fraktur, SansSerif, Script, Size1–4,
+  // Typewriter): every file carries the same notice and licence as this one.
+  { family: "KaTeX_Main", use: "formulas in notes (and the rest of KaTeX's families)", package: "katex", kind: "ttf", file: "dist/fonts/KaTeX_Main-Regular.ttf" },
 ];
 
 /** The weights the app offers to download: read out of the catalogue, never restated here. */

@@ -402,6 +402,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "bitbucket", labelKey: "integrations.bitbucket", icon: FolderGit2, searchKey: "settings.searchTermsIntegrations" },
       { id: "jira", labelKey: "integrations.jira", icon: Blocks, searchKey: "settings.searchTermsIntegrations" },
       { id: "monday", labelKey: "integrations.monday", icon: LayoutGrid, searchKey: "settings.searchTermsIntegrations" },
+      { id: "linear", labelKey: "integrations.linear", icon: LayoutGrid, searchKey: "settings.searchTermsIntegrations" },
       // "Availability" is folded in: "why is there no Pipelines tab on this repository" is the
       // question this pane is opened with, and the answer sits under the one knob.
       { id: "pipelines", labelKey: "tabbar.pipelines", headingKey: "settings.railBehaviour", hintKey: "pipelines.pollHint", icon: Route, searchKey: "settings.searchTermsPipelines" },

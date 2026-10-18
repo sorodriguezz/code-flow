@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ImagePlus, ListChecks, ListPlus, MessageSquareShare, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
@@ -25,7 +25,6 @@ import { resolveAccount } from "../../lib/aiAccounts";
 import { ChatMessageBubble, dayDivider, type ChatBubbleActions, type CodeBlockTarget } from "../chat/ChatMessageBubble";
 import { ChatFindBar, useChatFind } from "../chat/ChatFind";
 import { ContextMeter, type ContextReading } from "../chat/ContextMeter";
-import { ApplyCodeModal } from "./ApplyCodeModal";
 import { insertCodeAtCaret, useApplyCodeStore } from "../../lib/codeToEditor";
 import { estimateTokens } from "../../lib/contextWindow";
 import { providerCapabilities } from "../../lib/aiProviders";
@@ -46,6 +45,10 @@ import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+
+// Lazy, as the editor it diffs in is: a static import put all of Monaco on the boot path, since
+// the panel is part of the shell.
+const ApplyCodeModal = lazy(() => import("./ApplyCodeModal").then((m) => ({ default: m.ApplyCodeModal })));
 
 /** Whether a question was Claude's own `/compact` — here it is the CLI's, not the app's (see
  *  `CommandSurface`), and it answers with no text: the reply under it says what happened. */
@@ -928,7 +931,11 @@ export function PanelChat({
           )}
         </div>
       </div>
-      {applyRequest && project && <ApplyCodeModal request={applyRequest} repoPath={project.local_path} />}
+      {applyRequest && project && (
+        <Suspense fallback={null}>
+          <ApplyCodeModal request={applyRequest} repoPath={project.local_path} />
+        </Suspense>
+      )}
     </div>
   );
 }

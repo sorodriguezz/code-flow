@@ -80,3 +80,14 @@ pub fn delete_monday_token(slug: String) -> Result<(), String> {
     secrets::delete_secret(&secrets::monday_token_key(&slug))
 }
 
+// Linear's API key, keyed by organisation like monday's. Write and delete only.
+#[tauri::command]
+pub fn set_linear_token(key: String, token: String) -> Result<(), String> {
+    secrets::set_secret(&secrets::linear_token_key(&key), &token)
+}
+
+#[tauri::command]
+pub fn delete_linear_token(key: String) -> Result<(), String> {
+    secrets::delete_secret(&secrets::linear_token_key(&key))
+}
+

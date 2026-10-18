@@ -148,6 +148,11 @@ export function ExportImageModal({
         >
           <Field type="number" value={border} onChange={setBorder} />
         </Row>
+        {format === "pdf" && (
+          <Row label={t("diagrams.exportOptions.vector")} hint={t("diagrams.exportOptions.vectorHint")}>
+            <Checkbox checked={draft.vector} onChange={(on) => set("vector", on)} />
+          </Row>
+        )}
         <Row label={t("diagrams.exportOptions.transparent")} hint={unavailable("transparent")}>
           <Checkbox
             checked={draft.transparent}

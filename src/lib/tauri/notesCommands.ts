@@ -297,3 +297,13 @@ export const notesSetBookScope = (id: string, global: boolean) =>
  *  leaving it global. It lands at the root of its new home. */
 export const notesMoveBookToWorkspace = (id: string, workspaceId: string) =>
   invoke<void>("notes_move_book_to_workspace", { id, workspaceId });
+
+/** Every note and the `[[links]]` between them, for the graph view. Reads every body once. */
+export const notesGraph = (workspaceId: string) =>
+  invoke<{ nodes: { id: string; title: string; book_id: string }[]; edges: [string, string][] }>("notes_graph", { workspaceId });
+
+/** Every Markdown file under a folder (an Obsidian vault) or inside a `.zip` (a Notion export). */
+export const notesReadVault = (path: string) => invoke<{ dir: string; name: string; content: string }[]>("notes_read_vault", { path });
+
+/** Markdown as a Word document at `path`. */
+export const notesExportDocx = (path: string, markdown: string) => invoke<void>("notes_export_docx", { path, markdown });

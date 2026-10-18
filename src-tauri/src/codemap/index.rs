@@ -102,7 +102,14 @@ pub struct FileOutline {
 }
 
 impl Snapshot {
-    pub fn build(mut rows: Vec<FileRow>) -> Snapshot {
+    /// `build_with` and no aliases — what the tests build from.
+    #[cfg(test)]
+    pub fn build(rows: Vec<FileRow>) -> Snapshot {
+        Self::build_with(rows, &super::tsconfig::TsPaths::default())
+    }
+
+    /// `build`, with the repository's tsconfig aliases for TypeScript imports.
+    pub fn build_with(mut rows: Vec<FileRow>, ts_paths: &super::tsconfig::TsPaths) -> Snapshot {
         rows.sort_by(|a, b| a.path.cmp(&b.path));
         let by_path: HashMap<String, u32> = rows.iter().enumerate().map(|(i, row)| (row.path.clone(), i as u32)).collect();
 
@@ -122,7 +129,7 @@ impl Snapshot {
         }
 
         let pairs: Vec<(&str, &Facts)> = rows.iter().map(|row| (row.path.as_str(), row.facts.as_ref())).collect();
-        let resolver = Resolver::new(&pairs);
+        let resolver = Resolver::new(&pairs).with_ts_paths(ts_paths);
         let mut direct: Vec<Vec<u32>> = Vec::with_capacity(rows.len());
         let mut reexports: Vec<Vec<u32>> = Vec::with_capacity(rows.len());
         let mut knows = Vec::with_capacity(rows.len());

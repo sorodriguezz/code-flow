@@ -274,8 +274,24 @@ fn not_here<'a, T: Send + 'a>(what: &'static str) -> HostFuture<'a, Result<T, St
 /// A change to one remembered value — see [`RunHost::state_stage`].
 pub type StateUpdate = Arc<dyn Fn(Option<Value>) -> Option<Value> + Send + Sync>;
 
+/// What a debugger paused before a node says to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakAction {
+    /// Run the node (and pause again where the host says — a breakpoint, or the next node when
+    /// stepping).
+    Continue,
+    /// End the run here, as its Stop button would.
+    Stop,
+}
+
 /// What a run reports to, and asks of, the app around it.
 pub trait RunHost: Send + Sync {
+    /// Asked before each node runs: a host debugging this run may hold it here (a breakpoint, a
+    /// step) until the user says. The default never pauses.
+    fn pause_before<'a>(&'a self, node: &'a FlowNode, inputs: &'a Ports, cancel: &'a CancellationToken) -> HostFuture<'a, BreakAction> {
+        let _ = (node, inputs, cancel);
+        Box::pin(async { BreakAction::Continue })
+    }
     fn node_started(&self, node: &FlowNode, seq: u32, items_in: usize, started_at: &str);
     fn node_finished(&self, node: &FlowNode, report: NodeReport);
     fn log(&self, node_id: &str, stream: LogStream, text: &str);
@@ -1119,6 +1135,15 @@ pub async fn execute(spec: Arc<FlowSpec>, plan: Plan, run: Arc<RunContext>) -> R
                 loop_runs.insert(id.clone(), LoopRun { queue: given.iter().cloned().enumerate().collect(), given, batch, emitted: 0, remaining: 0 });
                 due_loops.push_back(id.clone());
                 continue;
+            }
+
+            // A debugger's pause, before anything about the node is reported: the canvas shows it
+            // waiting, its input in hand.
+            if !node.disabled && run.host.pause_before(&node, &inputs, &run.cancel).await == BreakAction::Stop {
+                run.cancel.cancel();
+            }
+            if run.cancel.is_cancelled() {
+                break;
             }
 
             seq += 1;

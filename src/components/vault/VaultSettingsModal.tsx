@@ -65,6 +65,8 @@ export function VaultSettingsBody({ onReset }: { onReset?: () => void }) {
   const t = useT();
   const unlocked = useVaultStore((s) => s.unlocked);
   const remembered = useVaultStore((s) => s.remembered);
+  const biometric = useVaultStore((s) => s.biometric);
+  const biometricAvailable = useVaultStore((s) => s.biometricAvailable);
   const autolockMinutes = useVaultStore((s) => s.autolockMinutes);
 
   const [current, setCurrent] = useState("");
@@ -159,6 +161,23 @@ export function VaultSettingsBody({ onReset }: { onReset?: () => void }) {
         <p className="mt-1.5 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
           {t("vault.rememberHint")}
         </p>
+        {/* Only where it means something: a remembered password, on a machine that can check. */}
+        {remembered && biometricAvailable && (
+          <label className="mt-2.5 flex cursor-pointer items-start gap-2 text-[12px] text-[var(--cf-text)]">
+            <input
+              type="checkbox"
+              checked={biometric}
+              onChange={(event) => void useVaultStore.getState().setBiometric(event.target.checked)}
+              className="mt-[3px] accent-[var(--cf-accent)]"
+            />
+            <span>
+              {t("vault.biometric")}
+              <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
+                {t("vault.biometricHint")}
+              </span>
+            </span>
+          </label>
+        )}
       </section>
 
       {/* ---- change the master password ---- */}

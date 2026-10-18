@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { ArchiveRestore, HardDriveDownload, Loader2, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { ContextMenu } from "../common/ContextMenu";
@@ -9,11 +10,12 @@ import { engineMenu, runtimeLabel } from "./containerActions";
 import { DataTable, Dialog, EmptyLine, Field, LiveMark, LoadingLine, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
 import { BulkBar, CopyText, Drawer, DrawerBody, InspectPane, MutedLine, StopClick, menuAt, useEngineList, useInspect, usePicked, type DrawerView, type MenuState } from "./pageBits";
 import { firstRead, validObjectName } from "./pageModel";
-import { containersCreateVolume } from "../../lib/tauri/containersCommands";
-import { confirmAction } from "../../state/confirmStore";
+import { containersBackupVolume, containersCreateVolume, containersRestoreVolume } from "../../lib/tauri/containersCommands";
+import { chooseAction, confirmAction } from "../../state/confirmStore";
 import { useContainersStore } from "../../state/containersStore";
 import { useT } from "../../state/languageStore";
-import { pushSuccessToast } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
+import type { MenuItem } from "../common/ContextMenu";
 import type { RuntimeInfo, VolumeRow } from "../../types/containers";
 
 /**
@@ -71,7 +73,58 @@ export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
     void act({ runtime: runtime.id, context, object: "volume", action: "remove", ids: names, label: t("containers.m.done.removed", { count: names.length }) });
     setAll(null);
   };
-  const rowMenu = (row: VolumeRow) => engineMenu({ runtime: runtime.id, context, object: "volume", id: row.name, t, act, select: () => setOpenName(row.name) });
+  /** Volumes being copied out or in, by name — a transfer can take minutes, and the row says so. */
+  const [moving, setMoving] = useState<Set<string>>(new Set());
+  const moveWith = async (name: string, work: () => Promise<void>) => {
+    setMoving((current) => new Set(current).add(name));
+    try {
+      await work();
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setMoving((current) => {
+        const next = new Set(current);
+        next.delete(name);
+        return next;
+      });
+    }
+  };
+  const backup = async (row: VolumeRow) => {
+    const stamp = new Date().toISOString().slice(0, 10);
+    const path = await saveDialog({ defaultPath: `${row.name}-${stamp}.tar.gz`, filters: [{ name: "tar.gz", extensions: ["gz", "tgz"] }] }).catch(() => null);
+    if (!path) return;
+    await moveWith(row.name, async () => {
+      const bytes = await containersBackupVolume(runtime.id, context, row.name, path);
+      pushSuccessToast(t("containers.m.volumes.backedUp", { name: row.name, size: `${(bytes / (1024 * 1024)).toFixed(1)} MB` }));
+    });
+  };
+  const restore = async (row: VolumeRow) => {
+    const picked = await openDialog({ multiple: false, filters: [{ name: "tar.gz", extensions: ["gz", "tgz", "tar.gz"] }] }).catch(() => null);
+    const path = typeof picked === "string" ? picked : null;
+    if (!path) return;
+    const how = await chooseAction({
+      message: t("containers.m.volumes.restoreHow", { name: row.name, context: place }),
+      danger: true,
+      choices: [
+        { id: "merge", label: t("containers.m.volumes.restoreMerge"), variant: "primary" },
+        { id: "replace", label: t("containers.m.volumes.restoreReplace"), variant: "danger" },
+      ],
+    });
+    if (!how) return;
+    await moveWith(row.name, async () => {
+      await containersRestoreVolume(runtime.id, context, row.name, path, how === "replace");
+      pushSuccessToast(t("containers.m.volumes.restored", { name: row.name }));
+    });
+  };
+  const rowMenu = (row: VolumeRow): MenuItem[] => [
+    ...engineMenu({ runtime: runtime.id, context, object: "volume", id: row.name, t, act, select: () => setOpenName(row.name) }),
+    ...(ctr
+      ? []
+      : [
+          { label: t("containers.m.volumes.backup"), icon: HardDriveDownload, separated: true, disabled: moving.has(row.name), onClick: () => void backup(row) },
+          { label: t("containers.m.volumes.restore"), icon: ArchiveRestore, disabled: moving.has(row.name), onClick: () => void restore(row) },
+        ]),
+  ];
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -150,8 +203,9 @@ export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
                       </StopClick>
                     </Td>
                     <Td>
-                      <span className="block truncate font-medium text-[var(--cf-text)]" title={row.name}>
-                        {row.name}
+                      <span className="flex min-w-0 items-center gap-1.5 font-medium text-[var(--cf-text)]" title={row.name}>
+                        <span className="truncate">{row.name}</span>
+                        {moving.has(row.name) && <Loader2 size={12} className="shrink-0 animate-spin text-[var(--cf-text-muted)]" />}
                       </span>
                     </Td>
                     <Td className="text-[var(--cf-text-muted)]">{row.driver || "—"}</Td>

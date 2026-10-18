@@ -61,6 +61,7 @@ import {
   outputCount,
   parseSpec,
   pasteFragment,
+  serializeSpec,
   portLabels,
   portText,
   removeElements,
@@ -78,19 +79,22 @@ import {
   flowsVersionContent,
   type FlowNodeDescriptor,
   flowsPublishedNodes,
+  flowsDebugResume,
+  flowsMissingPrograms,
 } from "../../lib/tauri/flowsCommands";
 import { diffSpecs } from "../../lib/flows/diff";
 import { useConnectors } from "../../lib/flows/connectorList";
 import { nodeIssues } from "../../lib/flows/nodeIssues";
 import { paletteEntries, publishedEntries, serviceOf, type PaletteEntry, type PublishedNode } from "../../lib/flows/paletteEntries";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import { useFlowRunsStore } from "../../state/flowRunsStore";
+import { useFlowRunsStore, type FlowPause } from "../../state/flowRunsStore";
 import { useFlowVaultStore } from "../../state/flowVaultStore";
 import { useFlowsStore } from "../../state/flowsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { promptAction } from "../../state/promptStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { useLiveNow } from "../../lib/useLiveNow";
 import { useUiStore } from "../../state/uiStore";
 import { isViewFind } from "../../lib/useFindShortcut";
 import { isMac } from "../../lib/platform";
@@ -228,6 +232,24 @@ function Editor() {
   const canRedo = useFlowsStore((s) => s.future.length > 0);
   const { screenToFlowPosition, fitView, setCenter, getZoom, getIntersectingNodes } = useReactFlow();
   const live = useFlowRunsStore((s) => s.current[draftId]);
+  const paused = useFlowRunsStore((s) => s.paused[draftId]);
+  /** Programs the flow's script nodes name that this computer lacks (a shell, Python, Node), by
+   *  node — a flow made on another machine says so before its first run fails on them. */
+  const [missing, setMissing] = useState<Map<string, string>>(new Map());
+  const specText = useMemo(() => (spec ? serializeSpec(spec) : ""), [spec]);
+  useEffect(() => {
+    if (!specText) return;
+    let live = true;
+    const timer = window.setTimeout(() => {
+      void flowsMissingPrograms(specText)
+        .then((list) => live && setMissing(new Map(list.map((entry) => [entry.nodeId, entry.program]))))
+        .catch(() => {});
+    }, 600);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [specText]);
   const pins = useFlowRunsStore((s) => s.pins[draftId]);
   const openWaits = useFlowRunsStore((s) => s.waits);
   // The nodes of the run on screen that are parked waiting for someone.
@@ -241,7 +263,8 @@ function Editor() {
   const logOpen = useFlowRunsStore((s) => s.logOpen);
   const pane = useFlowRunsStore((s) => s.pane);
   const running = live?.run.status === "running";
-  const [now, setNow] = useState(Date.now());
+  // Only while the canvas is on screen: it is the only thing that draws this clock.
+  const now = useLiveNow(running && onScreen, 500);
   // The AI builder: its window, and a proposal drawn over the canvas as changes until answered.
   const aiRun = useFlowsStore((s) => s.aiByFlow[draftId]);
   const [aiOpen, setAiOpen] = useState(false);
@@ -257,12 +280,6 @@ function Editor() {
     if (draftId && workspaceId) void useFlowRunsStore.getState().loadFlow(draftId, workspaceId);
     useFlowRunsStore.getState().openInspector(null);
   }, [draftId]);
-
-  useEffect(() => {
-    if (!running) return;
-    const timer = setInterval(() => setNow(Date.now()), 500);
-    return () => clearInterval(timer);
-  }, [running]);
 
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const [edgeSelection, setEdgeSelection] = useState<Set<string>>(() => new Set());
@@ -317,10 +334,13 @@ function Editor() {
       const mark = diff?.nodes.get(item.id);
       // Only a running node's clock moves; every other node keeps its cached object.
       const time = record ? nodeTime(record, now) : "";
-      const issue = descriptor
-        ? nodeIssues(item, connectors, credentialIds, (label) => (language === "es" ? label.es : label.en), t, descriptor.params.find((p) => p.name === "call")?.default).join("\n")
-        : "";
-      const key = [item, selected, size, descriptor, language, record, pinned, waiting, mark, time, issue];
+      const lacking = missing.get(item.id);
+      const issue = [
+        ...(descriptor ? nodeIssues(item, connectors, credentialIds, (label) => (language === "es" ? label.es : label.en), t, descriptor.params.find((p) => p.name === "call")?.default) : []),
+        ...(lacking ? [t("flows.missingProgram", { program: lacking })] : []),
+      ].join("\n");
+      const pausedHere = paused?.nodeId === item.id;
+      const key = [item, selected, size, descriptor, language, record, pinned, waiting, mark, time, issue, pausedHere];
       const cached = nodeCache.current.get(item.id);
       if (cached && same(cached.key, key)) {
         out.push(cached.node);
@@ -371,6 +391,8 @@ function Editor() {
           issue,
           diff: mark,
           diffTitle: mark ? t(`flows.builder.${mark}` as TranslationKey) : "",
+          breakpoint: item.settings?.breakpoint === true,
+          pausedHere,
         },
       };
       out.push(node);
@@ -407,7 +429,7 @@ function Editor() {
     return out;
     // `measureTick` is the signal that `measured` (a ref) changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shown, diff, selection, measureTick, catalogMap, language, t, live, pins, waitingNodes, now, connectors, credentialIds]);
+  }, [shown, diff, selection, measureTick, catalogMap, language, t, live, pins, waitingNodes, now, connectors, credentialIds, paused, missing]);
 
   const edges = useMemo<Edge[]>(
     () =>
@@ -1284,6 +1306,13 @@ function Editor() {
         ) : (
           <div className="flex min-h-0 flex-1">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {missing.size > 0 && (
+              <div className="flex shrink-0 items-center gap-2 border-b border-[color-mix(in_oklab,var(--cf-warning)_35%,var(--cf-border))] bg-[color-mix(in_oklab,var(--cf-warning)_8%,var(--cf-surface))] px-3 py-1.5 text-[12px] text-[var(--cf-warning)]">
+                <span className="min-w-0 flex-1 truncate">
+                  {t("flows.missingPrograms", { list: [...new Set(missing.values())].join(", ") })}
+                </span>
+              </div>
+            )}
             <div
               ref={wrapper}
               className="relative min-h-0 flex-1"
@@ -1405,6 +1434,7 @@ function Editor() {
                 </Suspense>
               )}
             </div>
+            {paused && <PauseBar pause={paused} name={names[paused.nodeId] ?? paused.nodeId} />}
             {logOpen && <RunLog lines={live?.logs ?? []} names={names} onClose={() => useFlowRunsStore.getState().setLogOpen(false)} />}
           </div>
           {/* Docked beside the canvas, not over it — see `NodePalette`. */}
@@ -1644,6 +1674,41 @@ function CanvasTools({
       >
         <MapIcon size={14} />
       </button>
+    </div>
+  );
+}
+
+/**
+ * A run held before a node (a breakpoint, or «Paso»): which node, what it is about to get, and the
+ * three ways on — run on to the next breakpoint, run this node and hold before the next, or stop.
+ */
+function PauseBar({ pause, name }: { pause: FlowPause; name: string }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const answer = (action: "continue" | "step" | "stop") => void flowsDebugResume(pause.runId, action);
+  return (
+    <div className="shrink-0 border-t border-[color-mix(in_oklab,var(--cf-danger)_35%,var(--cf-border))] bg-[color-mix(in_oklab,var(--cf-danger)_6%,var(--cf-surface))] px-3 py-1.5">
+      <div className="flex items-center gap-2 text-[12px]">
+        <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--cf-danger)]" />
+        <button type="button" onClick={() => setOpen((v) => !v)} className="min-w-0 flex-1 truncate text-left text-[var(--cf-text)]">
+          {t("flows.debug.pausedAt", { node: name, n: pause.items })}
+        </button>
+        <Button size="sm" variant="primary" onClick={() => answer("continue")}>
+          {t("flows.debug.continue")}
+        </Button>
+        <Button size="sm" variant="secondary" onClick={() => answer("step")}>
+          {t("flows.debug.step")}
+        </Button>
+        <Button size="sm" variant="danger-ghost" onClick={() => answer("stop")}>
+          {t("flows.debug.stop")}
+        </Button>
+      </div>
+      {open && (
+        <pre className="mt-1.5 max-h-48 overflow-auto rounded-md bg-[var(--cf-sunken)] p-2 font-mono text-[11px] text-[var(--cf-text-muted)]">
+          {JSON.stringify(pause.sample, null, 2)}
+          {pause.items > pause.sample.length ? `\n… ${pause.items - pause.sample.length}` : ""}
+        </pre>
+      )}
     </div>
   );
 }

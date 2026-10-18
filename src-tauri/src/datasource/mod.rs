@@ -2302,9 +2302,10 @@ pub struct DbRegistry {
     /// `run_id` → the switch that stops it. A `oneshot` rather than a flag so the waiting side is
     /// a future `select!` can race, the same shape `ApiRegistry` uses for an in-flight send.
     cancels: Mutex<HashMap<String, oneshot::Sender<()>>>,
-    /// Whether the idle sweep has been started. Started on the first session rather than at
-    /// construction, because the registry is built before there is a Tokio runtime to spawn into.
-    sweeping: std::sync::atomic::AtomicBool,
+    /// Whether the idle sweep is running. Started on the first session rather than at
+    /// construction, because the registry is built before there is a Tokio runtime to spawn into;
+    /// it stops once no session is left, and the next one starts it again.
+    sweeping: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Milliseconds since the first call. Monotonic — unlike the wall clock, which a machine waking
@@ -2370,6 +2371,9 @@ impl DbRegistry {
         if let Ok(mut map) = self.sessions.lock() {
             map.insert(key, live);
         }
+        // Again now that it is in the map: a sweep that found the map empty while this connected
+        // has stopped, and this session needs one.
+        self.ensure_sweeper();
         Ok(session)
     }
 
@@ -2431,10 +2435,17 @@ impl DbRegistry {
             return;
         }
         let sessions = self.sessions.clone();
+        let sweeping = Arc::clone(&self.sweeping);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(SWEEP_INTERVAL).await;
                 sweep(&sessions).await;
+                // Nothing left to watch: stop waking every five seconds for an empty map. A session
+                // opened from here on starts the sweep again (see `session_in`).
+                if sessions.lock().map(|map| map.is_empty()).unwrap_or(false) {
+                    sweeping.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
             }
         });
     }

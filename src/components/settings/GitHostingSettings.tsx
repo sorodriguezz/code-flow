@@ -6,6 +6,7 @@ import { GitHubSettings } from "./GitHubSettings";
 import { GitLabSettings } from "./GitLabSettings";
 import { JiraSettings } from "./JiraSettings";
 import { MondaySettings } from "./MondaySettings";
+import { LinearSettings } from "./LinearSettings";
 import { ActivePill } from "../common/ActivePill";
 import { chipClass } from "../common/recipes";
 import { HOSTING_PROVIDERS, type HostingProvider } from "../../lib/vcsProviders";
@@ -28,6 +29,7 @@ const HINT_KEYS: Record<HostingProvider, TranslationKey> = {
   bitbucket: "settings.bitbucketHint",
   jira: "settings.jiraHint",
   monday: "settings.mondayHint",
+  linear: "settings.linearHint",
 };
 
 /** The single "Integrations" settings section — the accounts (Azure DevOps / GitHub / GitLab /
@@ -152,6 +154,7 @@ export function GitHostingSettings() {
             {tab === "azure" && <AzureDevOpsSettings />}
             {tab === "jira" && <JiraSettings />}
             {tab === "monday" && <MondaySettings />}
+            {tab === "linear" && <LinearSettings />}
             {tab === "pipelines" && <PipelinesPane />}
           </Panel>
         </div>

@@ -50,10 +50,12 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { AgentProject, AgentTask } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { agentName } from "./agentName";
+import { PriorityFlag, planningMenuItems, planningMeta } from "./taskPlanning";
 
 const GROUPINGS: { id: TaskGrouping; labelKey: TranslationKey }[] = [
   { id: "tree", labelKey: "agents.groupTree" },
   { id: "status", labelKey: "agents.groupStatus" },
+  { id: "board", labelKey: "agents.groupBoard" },
   { id: "templates", labelKey: "agents.sectionTemplates" },
 ];
 
@@ -107,6 +109,8 @@ export function AgentTaskList({
   const rosterOpen = useAgentsStore((s) => s.rosterOpen);
   const setGroupBy = useAgentsStore((s) => s.setGroupBy);
   const setQuery = useAgentsStore((s) => s.setQuery);
+  const showArchived = useAgentsStore((s) => s.showArchived);
+  const setShowArchived = useAgentsStore((s) => s.setShowArchived);
   const toggleRoster = useAgentsStore((s) => s.toggleRoster);
   const benchOpen = useBenchStore((s) => s.open);
   const benchTabs = useBenchStore((s) => s.tabs);
@@ -141,19 +145,26 @@ export function AgentTaskList({
     if (activeView !== "agents") setMenu(null);
   }, [activeView]);
 
+  const archivedCount = useMemo(() => tasks.filter((task) => task.archived).length, [tasks]);
+  // Archived tasks leave every grouping; the toggle at the foot lists them instead of the rest.
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return tasks;
-    return tasks.filter(
+    const kept = tasks.filter((task) => !!task.archived === showArchived);
+    if (!needle) return kept;
+    return kept.filter(
       (task) =>
         task.title.toLowerCase().includes(needle) ||
         task.goal.toLowerCase().includes(needle) ||
-        task.agent_name.toLowerCase().includes(needle),
+        task.agent_name.toLowerCase().includes(needle) ||
+        (task.labels ?? []).some((label) => label.toLowerCase().includes(needle)),
     );
-  }, [tasks, query]);
+  }, [tasks, query, showArchived]);
 
   const groups = useMemo<Group[]>(() => {
-    if (groupBy === "status") {
+    if (showArchived) {
+      return filtered.length ? [{ key: "archived", label: t("agents.archived"), tasks: filtered }] : [];
+    }
+    if (groupBy === "status" || groupBy === "board") {
       return STATUS_ORDER.map((status) => ({
         key: status,
         label: t(AGENT_STATUS[status].labelKey),
@@ -161,7 +172,7 @@ export function AgentTaskList({
       })).filter((group) => group.tasks.length > 0);
     }
     return [];
-  }, [filtered, groupBy, t]);
+  }, [filtered, groupBy, showArchived, t]);
 
   // Looked up rather than remembered, so a row deleted from elsewhere takes its menu with it.
   const menuTask = menu ? (tasks.find((candidate) => candidate.id === menu.id) ?? null) : null;
@@ -190,6 +201,7 @@ export function AgentTaskList({
         // is the one action in the menu that cannot wait for the task to be opened first.
         ...(running ? [{ label: t("ai.stop"), icon: Square, onClick: () => void store().stop(task.id) }] : []),
       ],
+      planningMenuItems(task, t),
       [
         // Nothing to hand on until it has answered once, and a chain seeded with an empty handoff
         // is the one shape that feature refuses to produce.
@@ -408,7 +420,7 @@ export function AgentTaskList({
             actionLabel={t(roster.length === 0 ? "agents.newAgent" : "agents.newTask")}
             onAction={roster.length === 0 ? onNewAgent : () => onNewTask("")}
           />
-        ) : groupBy === "tree" ? (
+        ) : groupBy === "tree" && !showArchived ? (
           <TaskTree
             tasks={filtered}
             query={query}
@@ -456,6 +468,17 @@ export function AgentTaskList({
           ))
         )}
       </div>
+
+      {/* Out of the way at the foot, and only once something has been archived. */}
+      {(archivedCount > 0 || showArchived) && groupBy !== "templates" && (
+        <button
+          type="button"
+          onClick={() => setShowArchived(!showArchived)}
+          className="flex h-8 shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-3 text-[12px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        >
+          {showArchived ? t("agents.backFromArchived") : t("agents.showArchived", { n: archivedCount })}
+        </button>
+      )}
 
       {/* The same two actions the tab in the panel offers, on the row that stands for it. Rename
           opens the panel on that tab first and *then* starts the editor: the input lives in the tab
@@ -649,7 +672,8 @@ function FlatTaskRow({
       title={task.goal || task.title}
       glyph={status === "running" ? <ThinkingOrb size="sm" /> : <Icon size={14} className={color} />}
       label={task.title || t("agents.newTask")}
-      meta={[agentName(task.agent_name, task.provider, t), projectName, when].filter(Boolean).join(" · ")}
+      flag={<PriorityFlag priority={task.priority} />}
+      meta={[agentName(task.agent_name, task.provider, t), projectName, ...planningMeta(task, t), when].filter(Boolean).join(" · ")}
       menuLabel={t("api.moreActions")}
     />
   );

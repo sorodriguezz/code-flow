@@ -19,6 +19,7 @@ import {
   Tags,
   Trash2,
   X,
+  FolderInput,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { NoteTreeRow } from "./NoteTreeRow";
@@ -28,7 +29,7 @@ import { TREE_COLORS } from "../../lib/swatchColors";
 import { scopeMenuItems } from "../../lib/scopeMenu";
 import { noteRepoItems } from "./noteRepoItems";
 import { buildBookTree, descendantIds, flattenTree } from "../../lib/notes/tree";
-import { exportNotes, importMarkdownFiles, notebookForExport } from "../../lib/notes/exportActions";
+import { exportNotes, importMarkdownFiles, importVault, notebookForExport } from "../../lib/notes/exportActions";
 import type { NoteTreeRow as NoteTreeRowData } from "../../types/notes";
 import type { RowScope } from "../../types/domain";
 import { tagCounts, tagHue } from "../../lib/notes/tags";
@@ -102,6 +103,7 @@ export function NoteExplorer() {
 
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [importMenu, setImportMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   /** Which row holds the tree's single tab stop. See `NoteTreeRow`'s roving-tabindex comment. */
   const [focusedId, setFocusedId] = useState<string | null>(null);
   /** The tag cloud folded shut, which is how it starts.
@@ -515,6 +517,11 @@ export function NoteExplorer() {
           onClick: () => void notebookForExport(bookId).then((all) => exportNotes("pdf", all, name)),
         },
         {
+          label: t("notes.exportDocx"),
+          icon: FileText,
+          onClick: () => void notebookForExport(bookId).then((all) => exportNotes("docx", all, name)),
+        },
+        {
           label: t("notes.rename"),
           icon: Pencil,
           separated: true,
@@ -715,10 +722,21 @@ export function NoteExplorer() {
             className={ICON_BUTTON}
             title={t("notes.importMarkdownHint")}
             aria-label={t("notes.importMarkdown")}
-            onClick={() => void importMarkdownFiles(null)}
+            onClick={(event) =>
+              setImportMenu({
+                x: event.clientX,
+                y: event.clientY,
+                items: [
+                  { label: t("notes.importMarkdown"), icon: FileUp, onClick: () => void importMarkdownFiles(null) },
+                  { label: t("notes.importObsidian"), icon: FolderInput, separated: true, onClick: () => void importVault("folder") },
+                  { label: t("notes.importNotion"), icon: FolderInput, onClick: () => void importVault("zip") },
+                ],
+              })
+            }
           >
             <FileUp size={13} />
           </button>
+          {importMenu && <ContextMenu x={importMenu.x} y={importMenu.y} items={importMenu.items} onClose={() => setImportMenu(null)} />}
           <button
             type="button"
             className={`${ICON_BUTTON} ${trashOpen ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : ""}`}

@@ -195,6 +195,40 @@ describe("settling a failed step", () => {
   });
 });
 
+describe("the tray", () => {
+  it("holds back a plan nobody set moving in this session", async () => {
+    useChainStore.setState({ background: true });
+    await useChainStore.getState().pump(current);
+    expect(claims()).toBe(0);
+  });
+
+  it("lets a plan started on screen carry on once the window is hidden", async () => {
+    failWith = "API Error: 529 Overloaded";
+    settledAs = chainRow({ status: "queued", last_reason: failWith });
+
+    await useChainStore.getState().pump(current);
+    await flush();
+    expect(claims()).toBe(1);
+
+    // Closed to the tray while it waits out the backoff: the next step still goes.
+    useChainStore.setState({ background: true });
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(claims()).toBe(2);
+  });
+
+  it("stops carrying on once the plan parks", async () => {
+    failWith = "QUOTA_EXCEEDED::limit";
+    settledAs = chainRow({ status: "paused", last_reason: "chain.pausedQuota" });
+
+    await useChainStore.getState().pump(current);
+    await flush();
+    useChainStore.setState({ background: true });
+    // Parked on a pause: whatever wakes it now in the tray is not a person.
+    await useChainStore.getState().pump(current);
+    expect(claims()).toBe(1);
+  });
+});
+
 describe("automatic resume", () => {
   it("is armed in seconds and fires only while the backend still lists it", async () => {
     let scheduled: { chain_id: string; resume_at: number }[] = [];

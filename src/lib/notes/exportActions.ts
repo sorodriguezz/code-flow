@@ -1,7 +1,8 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { renderMarkdown } from "../markdown";
 import { writeFileBytes } from "../tauri/commands";
-import { notesGetNote, notesReadImport } from "../tauri/notesCommands";
+import { notesExportDocx, notesGetNote, notesReadImport, notesReadVault } from "../tauri/notesCommands";
+import { fromVault, looksLikeNotion } from "./importVault";
 import { descendantIds } from "./tree";
 import { exportFileStem, notesToHtml, renderNotesPdf, type ExportedNote } from "./exportNotes";
 import { MARKDOWN_EXTENSIONS, noteFromMarkdownFile, type ImportedMarkdown } from "./importMarkdown";
@@ -16,12 +17,13 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
  * between `exportOptions` and `exportFile`.
  */
 
-export type NoteExportFormat = "md" | "html" | "pdf";
+export type NoteExportFormat = "md" | "html" | "pdf" | "docx";
 
 const FILTERS: Record<NoteExportFormat, { name: string; extensions: string[] }> = {
   md: { name: "Markdown", extensions: ["md"] },
   html: { name: "HTML", extensions: ["html"] },
   pdf: { name: "PDF", extensions: ["pdf"] },
+  docx: { name: "Word", extensions: ["docx"] },
 };
 
 /**
@@ -41,6 +43,16 @@ export async function exportNotes(
       filters: [FILTERS[format]],
     });
     if (!path) return;
+    if (format === "docx") {
+      // One document: each note under its own title when there are several.
+      const markdown =
+        notes.length === 1
+          ? notes[0].content
+          : notes.map((note) => `# ${note.title.trim() || untitled}\n\n${note.content.trim()}\n`).join("\n");
+      await notesExportDocx(path, markdown);
+      useToastStore.getState().pushToast(translate("notes.exported"), "success");
+      return;
+    }
     let bytes: Uint8Array;
     if (format === "md") {
       bytes = new TextEncoder().encode(notes[0].content);
@@ -91,6 +103,32 @@ export async function notebookForExport(bookId: string): Promise<ExportedNote[]>
     }
   }
   return out;
+}
+
+/**
+ * A whole vault in one go: an Obsidian vault (a folder) or a Notion export (its `.zip`), its folders
+ * becoming books inside a new book named after it. Notion is recognised by the ids on its file
+ * names whichever was picked, so a Notion export unzipped by hand imports the same way.
+ */
+export async function importVault(from: "folder" | "zip"): Promise<void> {
+  try {
+    const picked = await open(
+      from === "folder" ? { directory: true, multiple: false } : { multiple: false, filters: [{ name: "Notion (.zip)", extensions: ["zip"] }] },
+    );
+    const path = typeof picked === "string" ? picked : null;
+    if (!path) return;
+    const files = await notesReadVault(path);
+    if (files.length === 0) {
+      pushErrorToast(translate("notes.vaultEmpty"));
+      return;
+    }
+    const kind = looksLikeNotion(files) ? "notion" : "obsidian";
+    const name = (path.split(/[\\/]/).pop() ?? "").replace(/\.zip$/i, "").replace(/\s+[0-9a-f]{32}$/i, "").replace(/^Export-[0-9a-f-]+$/i, "Notion");
+    const created = await useNotesStore.getState().importVault(name, fromVault(files, kind));
+    if (created > 0) useToastStore.getState().pushToast(translate("notes.imported", { n: created }), "success");
+  } catch (error) {
+    pushErrorToast(String(error));
+  }
 }
 
 /**

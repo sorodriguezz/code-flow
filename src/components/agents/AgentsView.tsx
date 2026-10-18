@@ -12,6 +12,7 @@ import { NewTaskModal } from "./NewTaskModal";
 import { StoryRealizerModal } from "./StoryRealizerModal";
 import { TemplateDetail } from "./TemplateDetail";
 import { TerminalBench } from "./TerminalBench";
+import { TaskBoard } from "./taskPlanning";
 import { useBenchStore } from "../../state/benchStore";
 import { useChainStore } from "../../state/chainStore";
 import { CARD } from "../api/panelChrome";
@@ -56,6 +57,7 @@ export function AgentsView() {
   const rosterOpen = useAgentsStore((s) => s.rosterOpen);
   const benchOpen = useBenchStore((s) => s.open);
   const selectedId = useAgentsStore((s) => s.selectedId);
+  const groupBy = useAgentsStore((s) => s.groupBy);
   const listWidth = useLayoutStore((s) => s.sizes.agentsListWidth);
   const rosterWidth = useLayoutStore((s) => s.sizes.agentsRosterWidth);
   const setSize = useLayoutStore((s) => s.setSize);
@@ -216,6 +218,8 @@ export function AgentsView() {
                 <ChainDetail key={selectedChainId} chainId={selectedChainId} />
               ) : selectedId ? (
                 <AgentTaskDetail key={selectedId} taskId={selectedId} />
+              ) : groupBy === "board" ? (
+                <TaskBoard />
               ) : (
                 <EmptyState icon={Bot} title={t("agents.selectTask")} subtitle={t("agents.selectTaskHint")} />
               ))}

@@ -39,11 +39,10 @@ fn out_item(ctx: &NodeCtx, index: usize, json: Value) -> Item {
 }
 
 fn http_client(timeout: Duration) -> Result<reqwest::Client, NodeError> {
-    reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (compatible; CodeFlow Flujos)")
-        .timeout(timeout)
-        .build()
-        .map_err(|e| NodeError::failed(e.to_string()))
+    crate::http_clients::cached(&format!("utils:{}", timeout.as_millis()), || {
+        reqwest::Client::builder().user_agent("Mozilla/5.0 (compatible; CodeFlow Flujos)").timeout(timeout)
+    })
+    .map_err(NodeError::failed)
 }
 
 // ------------------------------------------------------------------------------------- web page

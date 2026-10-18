@@ -29,6 +29,7 @@ pub mod install;
 pub mod reports;
 pub mod rules;
 pub mod server;
+pub mod triage;
 
 use config::{RemoteServer, ReviewerConfig};
 

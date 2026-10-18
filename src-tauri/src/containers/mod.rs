@@ -348,8 +348,15 @@ pub async fn start_runtime(how: &str) -> Result<String, String> {
             }
             #[cfg(target_os = "windows")]
             {
-                let exe = r"C:\Program Files\Docker\Docker\Docker Desktop.exe";
-                crate::proc::std_command(exe).spawn().map(|_| String::new()).map_err(|e| format!("could not start Docker Desktop: {e}"))
+                let candidates = docker_desktop_candidates(
+                    cli::find("docker"),
+                    docker_desktop_registry_location(),
+                    |name| std::env::var(name).ok(),
+                );
+                let Some(exe) = candidates.into_iter().find(|p| p.is_file()) else {
+                    return Err("Docker Desktop is not installed where it could be found".into());
+                };
+                crate::proc::std_command(&exe).spawn().map(|_| String::new()).map_err(|e| format!("could not start Docker Desktop: {e}"))
             }
             #[cfg(target_os = "linux")]
             {
@@ -360,9 +367,84 @@ pub async fn start_runtime(how: &str) -> Result<String, String> {
     }
 }
 
+/// Where `Docker Desktop.exe` may be, most trustworthy first: the folder its installer recorded,
+/// the install the `docker` on PATH belongs to (`<install>\resources\bin\docker.exe`), then the
+/// machine-wide and per-user defaults. A fixed `C:\Program Files` path missed per-user installs and
+/// any install moved to another drive.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn docker_desktop_candidates(
+    docker_cli: Option<std::path::PathBuf>,
+    registry_location: Option<String>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    const EXE: &str = "Docker Desktop.exe";
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = registry_location.filter(|d| !d.trim().is_empty()) {
+        out.push(PathBuf::from(dir.trim().trim_matches('"')).join(EXE));
+    }
+    if let Some(install) = docker_cli.as_deref().and_then(|cli| cli.parent()?.parent()?.parent()) {
+        out.push(install.join(EXE));
+    }
+    for (var, tail) in [
+        ("ProgramFiles", r"Docker\Docker"),
+        ("ProgramW6432", r"Docker\Docker"),
+        ("LOCALAPPDATA", r"Programs\Docker\Docker"),
+        ("LOCALAPPDATA", r"Docker\Docker"),
+    ] {
+        if let Some(base) = env(var) {
+            out.push(PathBuf::from(base).join(tail).join(EXE));
+        }
+    }
+    out.dedup();
+    out
+}
+
+/// `InstallLocation` from Docker Desktop's uninstall entry — per-user (HKCU) or machine-wide (HKLM).
+#[cfg(target_os = "windows")]
+fn docker_desktop_registry_location() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let key = wide(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Docker Desktop");
+    let value = wide("InstallLocation");
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let mut buffer = vec![0u16; 1024];
+        let mut size = (buffer.len() * 2) as u32;
+        // SAFETY: NUL-terminated names; `size` is the buffer's length in bytes.
+        let status = unsafe {
+            RegGetValueW(root, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size)
+        };
+        if status == 0 {
+            let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+            return Some(String::from_utf16_lossy(&buffer[..len]));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_desktop_is_looked_for_where_it_was_installed_first() {
+        use std::path::PathBuf;
+        let env = |name: &str| match name {
+            "ProgramFiles" => Some(r"C:\Program Files".to_string()),
+            "LOCALAPPDATA" => Some(r"C:\Users\me\AppData\Local".to_string()),
+            _ => None,
+        };
+        let install = PathBuf::from("D:").join("Apps").join("Docker");
+        let found = docker_desktop_candidates(
+            Some(install.join("resources").join("bin").join("docker.exe")),
+            Some("\"E:\\Docker\"".to_string()),
+            env,
+        );
+        assert_eq!(found[0], PathBuf::from(r"E:\Docker").join("Docker Desktop.exe"));
+        assert_eq!(found[1], install.join("Docker Desktop.exe"));
+        assert!(found.contains(&PathBuf::from(r"C:\Program Files").join(r"Docker\Docker").join("Docker Desktop.exe")));
+        assert_eq!(docker_desktop_candidates(None, None, |_| None), Vec::<PathBuf>::new());
+    }
 
     #[test]
     fn providers_from_endpoints() {

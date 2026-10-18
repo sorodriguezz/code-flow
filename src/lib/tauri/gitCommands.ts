@@ -43,6 +43,33 @@ export interface RepoFeatures {
 
 export const getRepoFeatures = (repoPath: string) => invoke<RepoFeatures>("get_repo_features", { repoPath });
 
+export interface LfsPointer {
+  oid: string;
+  size: number;
+  /** The object is in the local LFS store. */
+  downloaded: boolean;
+}
+
+/** One side of a file's change, as bytes — see `git/blobs.rs`. */
+export interface FileSide {
+  exists: boolean;
+  /** The real content's size (the LFS object's for a pointer). */
+  size: number;
+  /** Base64; `null` past 25 MB or for an LFS object not downloaded. */
+  data: string | null;
+  lfs: LfsPointer | null;
+}
+
+/** `side` is `WORKDIR`, `INDEX`, or a revision (`HEAD`, `<commit>`, `<commit>^`). */
+export const gitFileSide = (repoPath: string, path: string, side: string) =>
+  invoke<FileSide>("git_file_side", { repoPath, path, side });
+
+/** `git lfs pull`: downloads the objects the checked-out LFS files point at. */
+export const gitLfsPull = (repoPath: string) => invoke<void>("git_lfs_pull", { repoPath });
+
+/** `git lfs track <pattern>` — writes the root `.gitattributes`. */
+export const gitLfsTrack = (repoPath: string, pattern: string) => invoke<void>("git_lfs_track", { repoPath, pattern });
+
 // ---------- the three-way conflict editor ----------
 
 export type ConflictKind = "text" | "binary" | "deleted_by_us" | "deleted_by_them";

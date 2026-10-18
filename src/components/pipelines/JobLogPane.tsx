@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDownToLine, Copy, Search, X } from "lucide-react";
+import { ArrowDownToLine, Copy, Download, LoaderCircle, Search, X } from "lucide-react";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { AiSparkles } from "../common/AiGlyph";
-import { analyzePipelineFailure, isRepoBusy, REPO_BUSY_MARKER } from "../../lib/tauri/commands";
+import { analyzePipelineFailure, isRepoBusy, REPO_BUSY_MARKER, savePipelineJobLog } from "../../lib/tauri/commands";
 import { parseClaudeError } from "../../lib/claudeError";
 import { firstErrorIndex, looksLikeError, parseLog, type LogLine } from "../../lib/ansiLog";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
@@ -9,7 +10,7 @@ import { useCiStore, selectedJobKey } from "../../state/ciStore";
 import { statusOf } from "./pipelineStatus";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { AiRunLog } from "../ai/AiRunLog";
 import { Markdown } from "../common/Markdown";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -211,6 +212,24 @@ export function JobLogPane({
   /** Live, not loading, and nothing to show: waiting on the host rather than empty. */
   const pending = live && !busy && visible.length === 0 && query.trim() === "";
 
+  const [saving, setSaving] = useState(false);
+  /** The whole log to a file: the pane holds at most 5 MB, and a long build's end is past it. */
+  const saveLog = async () => {
+    if (!selection || !job) return;
+    const safe = job.name.replace(/[\\/:*?"<>|]+/g, "-").trim() || "job";
+    const path = await saveDialog({ defaultPath: `${safe}.log`, filters: [{ name: "Log", extensions: ["log", "txt"] }] }).catch(() => null);
+    if (!path) return;
+    setSaving(true);
+    try {
+      const [, truncated] = await savePipelineJobLog(selection.projectId, selection.runId, job.id, job.log_ref, path);
+      pushSuccessToast(t(truncated ? "pipelines.logSavedCut" : "pipelines.logSaved"));
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const askable = job && (job.status === "failed" || job.status === "warning");
   const running = analysis !== undefined && analysis.text === undefined && analysis.error === undefined;
 
@@ -265,6 +284,11 @@ export function JobLogPane({
             className={TOOLBAR}
           >
             <Copy size={13} />
+          </button>
+        </Tooltip>
+        <Tooltip label={t("pipelines.saveLog")}>
+          <button type="button" disabled={!job || saving} onClick={() => void saveLog()} className={TOOLBAR}>
+            {saving ? <LoaderCircle size={13} className="animate-spin" /> : <Download size={13} />}
           </button>
         </Tooltip>
       </div>

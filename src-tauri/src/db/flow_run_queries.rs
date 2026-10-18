@@ -218,6 +218,18 @@ pub fn list_runs(conn: &Connection, flow_id: &str, limit: i64, before: Option<&s
     rows.collect()
 }
 
+/// The workspace's failed executions, newest first, across every flow — the «Fallos» view: what
+/// broke, wherever it broke, without opening each flow's history.
+pub fn failed_runs(conn: &Connection, workspace_id: &str, limit: i64) -> rusqlite::Result<Vec<FlowRunRow>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {RUN_COLUMNS} FROM flow_runs
+         WHERE workspace_id = ?1 AND status = 'error'
+         ORDER BY started_at DESC LIMIT ?2"
+    ))?;
+    let rows = statement.query_map(params![workspace_id, limit], run_row)?;
+    rows.collect()
+}
+
 /// How a flow has been doing: its finished executions since a moment, counted, timed and by day.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

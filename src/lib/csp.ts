@@ -42,7 +42,8 @@ export const CSP_DIRECTIVES: Record<string, readonly string[]> = {
   // `convertFileSrc`, no `assetProtocol` in `tauri.conf.json`); allowed for images and media so the
   // first feature that turns it on is not refused in silence.
   "img-src": ["'self'", "data:", "blob:", "https:", "asset:", "http://asset.localhost"],
-  "media-src": ["'self'", "data:", "blob:", "asset:", "http://asset.localhost"],
+  // `cf-meeting:` is a meeting's recording streamed from disk (`meetings_cmd::serve_audio`).
+  "media-src": ["'self'", "data:", "blob:", "asset:", "http://asset.localhost", "cf-meeting:", "http://cf-meeting.localhost"],
   // The bundled Instrument Sans / JetBrains Mono subsets and Monaco's codicon font, all files in
   // the bundle; `data:` for any Vite chose to inline.
   "font-src": ["'self'", "data:"],

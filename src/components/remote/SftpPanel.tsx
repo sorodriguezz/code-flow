@@ -4,6 +4,7 @@ import {
   ArrowRight,
   ChevronRight,
   File as FileIcon,
+  FileCode2,
   Folder,
   FolderPlus,
   HardDrive,
@@ -18,6 +19,7 @@ import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { TransferBar, formatSize, joinRemote, parentRemote } from "./remoteChrome";
 import { conflictQuestions } from "./transferQuestions";
+import { RemoteFileEditor } from "./RemoteFileEditor";
 import { offerHostKeyTrust, useRemoteStore } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -110,6 +112,8 @@ export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
     null,
   );
   const [dropSide, setDropSide] = useState<"local" | "remote" | null>(null);
+  /** The remote file open in the editor dialog. */
+  const [editing, setEditing] = useState<RemoteFile | null>(null);
 
   // A release anywhere ends it, including over chrome that is not a drop target.
   useEffect(() => {
@@ -313,6 +317,7 @@ export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
             selected={remotePick}
             onSelect={setRemotePick}
             onOpen={(entry) => void loadRemote(entry.path)}
+            onEdit={setEditing}
             onUp={() => void loadRemote(parentRemote(remotePath))}
             onRefresh={() => void loadRemote(remotePath)}
             onDragStart={(entry) => setDragging({ side: "remote", entry })}
@@ -358,6 +363,17 @@ export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
       </div>
       </div>
 
+      {editing && (
+        <RemoteFileEditor
+          hostId={hostId}
+          entry={editing}
+          onClose={() => {
+            setEditing(null);
+            void loadRemote(remotePath);
+          }}
+        />
+      )}
+
       {progress && (
         <TransferBar
           progress={progress}
@@ -400,6 +416,7 @@ function FilePane({
   selected,
   onSelect,
   onOpen,
+  onEdit,
   onUp,
   onRefresh,
   onMakeDir,
@@ -417,6 +434,8 @@ function FilePane({
   selected: RemoteFile | null;
   onSelect: (entry: RemoteFile) => void;
   onOpen: (entry: RemoteFile) => void;
+  /** Opens a file in the editor dialog — the remote side only. A double-click does it too. */
+  onEdit?: (entry: RemoteFile) => void;
   onUp: () => void;
   onRefresh: () => void;
   /** Only the remote side offers these — the local one has Finder/Explorer, which is better at it. */
@@ -528,7 +547,7 @@ function FilePane({
                 press.current = null;
               }}
               onClick={() => onSelect(entry)}
-              onDoubleClick={() => entry.is_dir && onOpen(entry)}
+              onDoubleClick={() => (entry.is_dir ? onOpen(entry) : onEdit?.(entry))}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
@@ -565,6 +584,20 @@ function FilePane({
                 </span>
               )}
               <span className="flex shrink-0 gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                {onEdit && !entry.is_dir && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEdit(entry);
+                    }}
+                    aria-label={t("remote.editFile")}
+                    title={t("remote.editFile")}
+                    className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
+                  >
+                    <FileCode2 size={12} />
+                  </button>
+                )}
                 {onRename && (
                   <button
                     type="button"

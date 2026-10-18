@@ -414,7 +414,19 @@ jobs:
           key: tauri-bundler-tools-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: tauri-bundler-tools-${{ runner.os }}-
 
+      # So the fallback upload below can only ever find this run's bundles, never ones a restored
+      # cache brought back from an earlier version.
+      - name: Clear old bundles
+        shell: bash
+        run: rm -rf src-tauri/target/release/bundle
+
       - uses: tauri-apps/tauri-action@v0
+        id: build
+        # The step below takes over when only the upload failed. v2.3.37's macOS leg built, signed
+        # and bundled, then lost both of the action's upload attempts to `Connect Timeout Error` —
+        # its retry sleeps 1–10 s, too short for a network blip — and a red step here threw away 21
+        # minutes of compile. A real build failure still fails the job: the fallback finds no bundle.
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Updater signing — required so the app can verify and auto-install updates.
@@ -496,6 +508,62 @@ jobs:
           # `build:mobile`, whose output the `frontend` artifact already put in place. A path, not
           # inline JSON, because the action splits `args` on whitespace and quotes.
           args: --config src-tauri/tauri.ci.conf.json ${{ matrix.args }}
+
+      # Uploads what `tauri-action` built but could not upload, under the names it would have used
+      # (`updater-json` maps signatures by name): the macOS updater archive gains `_aarch64`, the
+      # rest keep theirs. Each upload deletes a same-named asset first, inside the retry, so an
+      # upload that landed but lost its response is not a 422 on the next attempt.
+      - name: Upload the bundles (fallback)
+        if: steps.build.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+        run: |
+          set -euo pipefail
+          bundle=src-tauri/target/release/bundle
+          files=()
+          for f in "$bundle"/dmg/*.dmg "$bundle"/macos/*.app.tar.gz "$bundle"/macos/*.app.tar.gz.sig \
+                   "$bundle"/msi/*.msi "$bundle"/msi/*.msi.sig "$bundle"/nsis/*-setup.exe "$bundle"/nsis/*-setup.exe.sig; do
+            [ -f "$f" ] && files+=("$f")
+          done
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::tauri-action failed before producing a bundle — this is a build failure, not an upload one"
+            exit 1
+          fi
+
+          retry() {
+            local attempt=1 max=6
+            until "$@"; do
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::\`$*\` failed $max times — see the attempts above"
+                return 1
+              fi
+              echo "attempt $attempt of $max failed; retrying in $((attempt * 15))s"
+              sleep $((attempt * 15))
+              attempt=$((attempt + 1))
+            done
+          }
+          upload() {
+            local file=$1 name=$2 old
+            old=$(gh api --paginate "/repos/$REPO/releases/$RELEASE_ID/assets" \
+                    --jq ".[] | select(.name==\"$name\") | .id" | awk 'NR==1')
+            [ -z "$old" ] || gh api -X DELETE "/repos/$REPO/releases/assets/$old"
+            gh api --method POST -H "Content-Type: application/octet-stream" \
+              "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$name" \
+              --input "$file" > /dev/null
+          }
+
+          for f in "${files[@]}"; do
+            name=$(basename "$f")
+            case "$name" in
+              *.app.tar.gz)     name="${name%.app.tar.gz}_aarch64.app.tar.gz" ;;
+              *.app.tar.gz.sig) name="${name%.app.tar.gz.sig}_aarch64.app.tar.gz.sig" ;;
+            esac
+            echo "Uploading $name"
+            retry upload "$f" "$name"
+          done
 
       # The one thing no unit test can check: that the JDBC bridge actually made it *inside* what was
       # built. Everything upstream can pass while a `bundle.resources` change quietly drops it, and the

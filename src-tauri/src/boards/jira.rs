@@ -910,6 +910,48 @@ async fn children_of(site: &str, key: &str, auth: &BoardAuth) -> Result<Vec<Work
         .collect())
 }
 
+/// The newest issues of one type in the project — see `boards::recent_items`. One page of 100, the
+/// most a search with fields returns, on the enhanced route and on the old one for Server.
+pub async fn recent_issues(
+    site: &str,
+    project: &str,
+    issue_type: &str,
+    auth: &BoardAuth,
+) -> Result<Vec<super::ExistingItem>, String> {
+    let site = normalize_site(site);
+    let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let jql = format!(
+        "project = {} AND issuetype = {} ORDER BY created DESC",
+        quote(project),
+        quote(issue_type)
+    );
+    let url = |route: SearchRoute| {
+        let path = match route {
+            SearchRoute::Enhanced => "search/jql",
+            SearchRoute::Legacy => "search",
+        };
+        format!("{site}/rest/api/2/{path}?jql={}&maxResults=100&fields=summary,status", encode_segment(&jql))
+    };
+    let found: RawSearch = match fetch_json(&url(SearchRoute::Enhanced), auth).await {
+        Ok(found) => found,
+        Err(failure) if failure.status == Some(reqwest::StatusCode::NOT_FOUND) => {
+            get_json(&url(SearchRoute::Legacy), auth).await?
+        }
+        Err(failure) => return Err(failure.message),
+    };
+    Ok(found
+        .issues
+        .into_iter()
+        .map(|issue| super::ExistingItem {
+            id: numeric_id(&issue.id),
+            url: browse_url(&site, &issue.key),
+            key: issue.key,
+            title: issue.fields.summary,
+            state: issue.fields.status.map(|s| s.name).unwrap_or_default(),
+        })
+        .collect())
+}
+
 // ---------- what the user pasted ----------
 
 /// Whether a word is shaped like an issue key: `PROJ-123`.

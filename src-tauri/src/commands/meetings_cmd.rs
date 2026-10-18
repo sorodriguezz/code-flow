@@ -1115,7 +1115,7 @@ pub fn meetings_detail(db: State<Db>, meeting_id: String) -> Result<Detail, Stri
 }
 
 /// The meeting's audio, for the player: the file's bytes and its type.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn meetings_audio(db: State<Db>, meeting_id: String) -> Result<tauri::ipc::Response, String> {
     let file = {
         let conn = db.0.lock().map_err(db_err)?;
@@ -1128,6 +1128,82 @@ pub fn meetings_audio(db: State<Db>, meeting_id: String) -> Result<tauri::ipc::R
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// The `cf-meeting:` scheme: a meeting's audio, served from disk a range at a time.
+///
+/// What the player's `<audio>` points at, instead of [`meetings_audio`] handing the whole file over
+/// IPC to be copied into a blob — an hour of WAV is hundreds of megabytes, and it was held twice for
+/// as long as the player was open. With ranges the element reads what it plays and seeks where it
+/// is told, the way it reads any file. The path is the meeting's id, looked up in the database, so
+/// nothing but a meeting's own recording can be named through it.
+pub fn serve_audio(app: &AppHandle, request: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    use tauri::http::{header, Response, StatusCode};
+    let fail = |status: StatusCode| Response::builder().status(status).body(Vec::new()).unwrap_or_default();
+    let meeting_id = request.uri().path().trim_start_matches('/').to_string();
+    let file = match with_db(app, |conn| q::get_meeting(conn, &meeting_id)) {
+        Ok(Some(meeting)) if !meeting.audio_file.is_empty() => meeting.audio_file,
+        _ => return fail(StatusCode::NOT_FOUND),
+    };
+    let path = meetings::meeting_dir(&meeting_id).join(&file);
+    let Ok(mut handle) = std::fs::File::open(&path) else { return fail(StatusCode::NOT_FOUND) };
+    let size = handle.metadata().map(|m| m.len()).unwrap_or(0);
+    let range = request.headers().get(header::RANGE).and_then(|v| v.to_str().ok()).and_then(|v| byte_range(v, size));
+    let (start, end) = range.unwrap_or((0, size.saturating_sub(1)));
+    // An open-ended range is answered in pieces: the element asks again for the rest. Without a
+    // `Range` header (media elements always send one) the answer has to be the whole file.
+    let end = if range.is_some() { end.min(start + AUDIO_CHUNK - 1) } else { end };
+    let mut body = vec![0u8; (end + 1).saturating_sub(start) as usize];
+    if size > 0 && (handle.seek(SeekFrom::Start(start)).is_err() || handle.read_exact(&mut body).is_err()) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let kind = if file.ends_with(".wav") { "audio/wav" } else { "audio/mp4" };
+    let mut response = Response::builder()
+        .header(header::CONTENT_TYPE, kind)
+        .header(header::ACCEPT_RANGES, "bytes")
+        // The page's origin is not this scheme's: Web Audio (the player's mono mix) only reads a
+        // cross-origin element's samples when the response says it may.
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::CONTENT_LENGTH, body.len().to_string());
+    if range.is_some() {
+        response = response
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
+    }
+    response.body(body).unwrap_or_default()
+}
+
+/// How much one answer of [`serve_audio`] carries at most.
+const AUDIO_CHUNK: u64 = 2 * 1024 * 1024;
+
+/// `bytes=a-b`, `bytes=a-` or `bytes=-n` against a file of `size` bytes, as inclusive offsets.
+fn byte_range(header: &str, size: u64) -> Option<(u64, u64)> {
+    let spec = header.trim().strip_prefix("bytes=")?.split(',').next()?.trim();
+    let (from, to) = spec.split_once('-')?;
+    let last = size.checked_sub(1)?;
+    let (start, end) = match (from.trim(), to.trim()) {
+        ("", n) => (size.saturating_sub(n.parse().ok()?), last),
+        (a, "") => (a.parse().ok()?, last),
+        (a, b) => (a.parse().ok()?, b.parse::<u64>().ok()?.min(last)),
+    };
+    (start <= end).then_some((start, end))
+}
+
+#[cfg(test)]
+mod audio_range_tests {
+    use super::byte_range;
+
+    #[test]
+    fn reads_the_three_shapes_of_a_range() {
+        assert_eq!(byte_range("bytes=0-99", 1000), Some((0, 99)));
+        assert_eq!(byte_range("bytes=500-", 1000), Some((500, 999)));
+        assert_eq!(byte_range("bytes=-100", 1000), Some((900, 999)));
+        assert_eq!(byte_range("bytes=900-5000", 1000), Some((900, 999)));
+        assert_eq!(byte_range("bytes=1000-", 1000), None);
+        assert_eq!(byte_range("items=0-1", 1000), None);
+        assert_eq!(byte_range("bytes=0-", 0), None);
+    }
+}
+
 /// The waveform: per channel, a few hundred peaks 0–255.
 #[tauri::command]
 pub fn meetings_peaks(meeting_id: String) -> HashMap<String, Vec<u8>> {
@@ -1138,7 +1214,7 @@ pub fn meetings_peaks(meeting_id: String) -> HashMap<String, Vec<u8>> {
 }
 
 /// Copies the meeting's audio to `path` — the way to keep it past the retention, or elsewhere.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn meetings_export_audio(db: State<Db>, meeting_id: String, path: String) -> Result<(), String> {
     let file = {
         let conn = db.0.lock().map_err(db_err)?;
@@ -1376,21 +1452,28 @@ pub fn start(app: &AppHandle) {
             enqueue(app, JobRequest { meeting_id: meeting.id, retranscribe: false, import: None });
         }
     }
-    if let (Ok(ids), Ok(entries)) = (with_db(app, q::all_meeting_ids), std::fs::read_dir(meetings::recordings_root())) {
-        let known: HashSet<String> = ids.into_iter().collect();
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !known.contains(&name) {
-                let _ = std::fs::remove_dir_all(entry.path());
+    // Off the boot path: deleting a folder of audio is seconds on a slow disk, and nothing waits
+    // for it.
+    if let Ok(ids) = with_db(app, q::all_meeting_ids) {
+        std::thread::spawn(move || {
+            let Ok(entries) = std::fs::read_dir(meetings::recordings_root()) else { return };
+            let known: HashSet<String> = ids.into_iter().collect();
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !known.contains(&name) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
             }
-        }
+        });
     }
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut since_sweep = Duration::from_secs(u64::MAX / 4);
         loop {
             if since_sweep >= Duration::from_secs(6 * 3600) {
-                sweep_audio(&handle);
+                // File deletions and database writes: on the blocking pool, not a runtime worker.
+                let sweeping = handle.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || sweep_audio(&sweeping)).await;
                 since_sweep = Duration::ZERO;
             }
             detect_tick(&handle).await;
@@ -1407,7 +1490,11 @@ struct Detected {
 }
 
 async fn detect_tick(app: &AppHandle) {
-    let enabled = with_db(app, |conn| Ok(meetings::load_settings(conn).detect)).unwrap_or(false);
+    // The one setting this needs, not all eleven `load_settings` reads — this runs every five seconds.
+    let enabled = with_db(app, |conn| {
+        Ok(crate::db::queries::get_setting(conn, meetings::key::DETECT)?.is_none_or(|value| value.trim() != "0"))
+    })
+    .unwrap_or(false);
     let state = app.state::<MeetingsState>();
     let recording = state.active.lock().map(|a| a.is_some()).unwrap_or(true);
     if !enabled || recording || !meetings::status().supported {

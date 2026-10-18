@@ -57,6 +57,7 @@ export function Row({
   chip,
   pinned = false,
   muted = false,
+  flag,
 }: {
   selected: boolean;
   onClick: () => void;
@@ -80,6 +81,8 @@ export function Row({
   /** A row that cannot be opened — a chain step whose task does not exist. It still has to be
    * *there*, or the plan would read as shorter than it is. */
   muted?: boolean;
+  /** A mark before the name — a task's priority. */
+  flag?: ReactNode;
 }) {
   return (
     <div
@@ -111,6 +114,7 @@ export function Row({
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1">
             {pinned && <Pin size={11} className="shrink-0 text-[var(--cf-text-faint)]" />}
+            {flag}
             <span
               className={`min-w-0 flex-1 truncate text-[13px] font-medium leading-[18px] ${
                 muted ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"

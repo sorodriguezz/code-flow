@@ -46,6 +46,10 @@ export interface CfNodeData extends Record<string, unknown> {
   /** What an AI proposal on screen does to it. */
   diff?: "added" | "changed" | "removed";
   diffTitle?: string;
+  /** Runs started by hand stop before it (`settings.breakpoint`). */
+  breakpoint?: boolean;
+  /** The run on screen is held right before it. */
+  pausedHere?: boolean;
 }
 
 export interface NoteNodeData extends Record<string, unknown> {
@@ -125,7 +129,7 @@ function RunBadge({ status, title, waiting }: { status: FlowNodeRunStatus; title
 }
 
 export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNode>) {
-  const { descriptor, name, typeLabel, disabled, inputLabels, inputs, outputLabels, outputs, errorPort, run, time, pinned, pinnedTitle, diff, diffTitle, logo, issue } = data;
+  const { descriptor, name, typeLabel, disabled, inputLabels, inputs, outputLabels, outputs, errorPort, run, time, pinned, pinnedTitle, diff, diffTitle, logo, issue, breakpoint, pausedHere } = data;
   const Icon = nodeIcon(descriptor.icon);
   const mark = logo ? appLogo(logo) : undefined;
   // AI by what the node is, not where the palette files it: "Analizar PR" lives under Git and PRs
@@ -142,7 +146,7 @@ export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNod
     <div
       className={`cf-flow-node ${descriptor.family === "trigger" ? "is-trigger" : ""} ${disabled ? "is-disabled" : ""} ${
         run ? `is-run-${run.status}` : ""
-      } ${diff ? `is-diff-${diff}` : ""}`}
+      } ${diff ? `is-diff-${diff}` : ""} ${pausedHere ? "is-paused" : ""}`}
       style={{ "--node-color": familyColor(descriptor.family) } as CSSProperties}
     >
       <div className="cf-flow-node__tile">
@@ -159,6 +163,7 @@ export const FlowNodeView = memo(function FlowNodeView({ data }: NodeProps<CfNod
             {diff === "added" ? "+" : diff === "changed" ? "~" : "−"}
           </span>
         )}
+        {breakpoint && <span className="cf-flow-node__breakpoint" aria-hidden />}
         {pinned && (
           <span className="cf-flow-node__pin" title={pinnedTitle}>
             <Pin size={9} strokeWidth={2.5} />

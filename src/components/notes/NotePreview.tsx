@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import DOMPurify from "dompurify";
+import { diagramsLoadThumbnails, diagramsLoadTree } from "../../lib/tauri/diagramsCommands";
 import { renderMarkdown } from "../../lib/markdown";
 import { findTheme } from "../../lib/codeThemes";
 import type { renderRichMarkdown } from "../../lib/notes/richMarkdown";
@@ -21,6 +23,21 @@ import { useToastStore } from "../../state/toastStore";
  */
 let cached: typeof renderRichMarkdown | null = null;
 
+/** The workspace's diagrams by folded title, for `![[Title]]` — read once per workspace while the
+ *  app runs, and again whenever an embed names one it does not know (a diagram made since). */
+const diagramTitles = new Map<string, Map<string, { id: string; title: string }>>();
+
+function foldTitle(title: string): string {
+  return title.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+async function loadDiagramTitles(workspaceId: string): Promise<Map<string, { id: string; title: string }>> {
+  const tree = await diagramsLoadTree(workspaceId);
+  const map = new Map(tree.diagrams.map((d) => [foldTitle(d.title), { id: d.id, title: d.title }] as const));
+  diagramTitles.set(workspaceId, map);
+  return map;
+}
+
 export function NotePreview({ source, className }: { source: string; className?: string }) {
   const resolved = useThemeStore((s) => s.resolved);
   const darkThemeId = useThemeStore((s) => s.darkThemeId);
@@ -28,6 +45,8 @@ export function NotePreview({ source, className }: { source: string; className?:
   const t = useT();
   const notes = useNotesStore((s) => s.notes);
   const openNote = useNotesStore((s) => s.openNote);
+  const workspaceId = useNotesStore((s) => s.workspaceId);
+  const container = useRef<HTMLDivElement>(null);
 
   /**
    * The rendered HTML. Seeded with the plain rendering so there is never a blank frame, then
@@ -59,7 +78,10 @@ export function NotePreview({ source, className }: { source: string; className?:
         const module = await import("../../lib/notes/richMarkdown");
         cached = module.renderRichMarkdown;
       }
-      const rich = await cached(source, theme, copyLabel, resolve, missingLabel);
+      let diagrams = workspaceId ? diagramTitles.get(workspaceId) : undefined;
+      if (workspaceId && source.includes("![[") && !diagrams) diagrams = await loadDiagramTitles(workspaceId).catch(() => undefined);
+      const resolveDiagram = (title: string) => diagrams?.get(foldTitle(title)) ?? null;
+      const rich = await cached(source, theme, copyLabel, resolve, missingLabel, resolveDiagram);
       // The note may have been edited or closed while the tokenizers were loading; a stale render
       // dropped in here would show text the user has already changed.
       if (live) setHtml(rich);
@@ -71,7 +93,55 @@ export function NotePreview({ source, className }: { source: string; className?:
     return () => {
       live = false;
     };
-  }, [source, theme, copyLabel, resolve, missingLabel]);
+  }, [source, theme, copyLabel, resolve, missingLabel, workspaceId]);
+
+  // What the HTML marks for drawing after it lands: Mermaid blocks, and diagrams embedded with
+  // `![[Title]]`. Done on the element rather than in the HTML string, because both are fetched or
+  // computed — and redone whenever the HTML is replaced, which throws the drawn ones away.
+  useEffect(() => {
+    const root = container.current;
+    if (!root) return;
+    let live = true;
+    const dark = resolved === "dark";
+    root.querySelectorAll<HTMLElement>(".cf-note-mermaid").forEach((block) => {
+      const code = block.querySelector(".cf-mermaid-src")?.textContent ?? "";
+      if (!code.trim()) return;
+      void import("../../lib/diagrams/mermaidRuntime")
+        .then(({ renderMermaid }) => renderMermaid(code, dark))
+        .then((svg) => {
+          if (!live) return;
+          block.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true }, ADD_TAGS: ["style"] });
+          block.classList.add("cf-note-mermaid-drawn");
+        })
+        .catch((error: unknown) => {
+          if (!live) return;
+          block.classList.add("cf-note-mermaid-error");
+          block.setAttribute("title", String(error));
+        });
+    });
+    const embeds = Array.from(root.querySelectorAll<HTMLElement>("[data-cf-diagram]"));
+    const ids = [...new Set(embeds.map((el) => el.getAttribute("data-cf-diagram") ?? "").filter(Boolean))];
+    if (ids.length > 0) {
+      void diagramsLoadThumbnails(ids)
+        .then((rows) => {
+          if (!live) return;
+          const byId = new Map(rows.map((row) => [row.id, row.thumbnail]));
+          for (const el of embeds) {
+            const picture = byId.get(el.getAttribute("data-cf-diagram") ?? "");
+            if (!picture || el.querySelector("img")) continue;
+            const img = document.createElement("img");
+            img.src = picture;
+            img.alt = el.getAttribute("title") ?? "";
+            img.draggable = false;
+            el.prepend(img);
+          }
+        })
+        .catch(() => {});
+    }
+    return () => {
+      live = false;
+    };
+  }, [html, resolved]);
 
   /**
    * Copying, by delegation.
@@ -96,6 +166,14 @@ export function NotePreview({ source, className }: { source: string; className?:
         event.preventDefault();
         const href = anchor.getAttribute("href") ?? "";
         if (/^https?:\/\//i.test(href)) void openUrl(href).catch(() => {});
+        return;
+      }
+
+      // An embedded diagram opens in Diagramas.
+      const embed = target.closest?.("[data-cf-diagram]");
+      if (embed) {
+        const id = embed.getAttribute("data-cf-diagram");
+        if (id && workspaceId) void import("../../lib/dbmlBridge").then(({ showDiagramAnywhere }) => showDiagramAnywhere(workspaceId, id));
         return;
       }
 
@@ -126,11 +204,12 @@ export function NotePreview({ source, className }: { source: string; className?:
           useToastStore.getState().pushToast(t("notes.copyFailed"), "error");
         });
     },
-    [t, openNote],
+    [t, openNote, workspaceId],
   );
 
   return (
     <div
+      ref={container}
       className={className}
       onClick={onClick}
       onKeyDown={(event) => {

@@ -305,6 +305,14 @@ export const remoteRenameFile = (hostId: string, from: string, to: string) =>
 
 export const remoteCloseFiles = (hostId: string) => invoke<void>("remote_close_files", { hostId });
 
+/** A remote file's text, for editing in place. Refused over 5 MB, for binaries and for non-UTF-8. */
+export const remoteReadText = (hostId: string, path: string) =>
+  invoke<string>("remote_read_text", { hostId, path });
+
+/** Writes the edited text back over the remote file. */
+export const remoteWriteText = (hostId: string, path: string, text: string) =>
+  invoke<void>("remote_write_text", { hostId, path, text });
+
 /** Asks a running transfer to stop; it rejects with `TRANSFER_CANCELLED` and removes the partial
  *  file it was writing. */
 export const remoteCancelTransfer = (id: string) => invoke<void>("remote_cancel_transfer", { id });
@@ -367,6 +375,20 @@ export const remoteListKeys = () => invoke<SshKey[]>("remote_list_keys");
 /** Makes an ed25519 key at `~/.ssh/<name>` with `ssh-keygen`. Refuses a name that exists. */
 export const remoteGenerateKey = (name: string, passphrase: string, comment: string) =>
   invoke<SshKey>("remote_generate_key", { name, passphrase, comment });
+
+/** Pageant's pipe (Windows, PuTTY 0.75+), for a host's `IdentityAgent`; `null` when there is none. */
+export const remotePageantPipe = () => invoke<string | null>("remote_pageant_pipe");
+
+export interface ImportedPpk {
+  /** The OpenSSH key written, when it went to a file. */
+  path: string | null;
+  comment: string;
+  algorithm: string;
+}
+
+/** A PuTTY `.ppk` unlocked and handed to OpenSSH — the agent, or a key file beside it. */
+export const remoteImportPpk = (path: string, passphrase: string, toAgent: boolean) =>
+  invoke<ImportedPpk>("remote_import_ppk", { path, passphrase, toAgent });
 
 /** Spelled out rather than assumed: `~/.ssh/config` is not where it lives on Windows. */
 export const remoteSshConfigPath = () => invoke<string>("remote_ssh_config_path");

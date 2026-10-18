@@ -213,6 +213,18 @@ pub async fn containers_update_limits(runtime: String, context: Option<String>, 
     containers::manage::update_limits(&engine::Target { runtime, context }, &id, memory_mb, cpus).await
 }
 
+/// Volume `name` as a `.tar.gz` at `path` (what the save dialog returned). Returns the bytes written.
+#[tauri::command]
+pub async fn containers_backup_volume(runtime: String, context: Option<String>, name: String, path: String) -> Result<u64, String> {
+    containers::manage::backup_volume(&engine::Target { runtime, context }, &name, std::path::Path::new(&path)).await
+}
+
+/// A `.tar.gz` at `path` unpacked into volume `name`, made if missing; `replace` empties it first.
+#[tauri::command]
+pub async fn containers_restore_volume(runtime: String, context: Option<String>, name: String, path: String, replace: bool) -> Result<(), String> {
+    containers::manage::restore_volume(&engine::Target { runtime, context }, &name, std::path::Path::new(&path), replace).await
+}
+
 #[tauri::command]
 pub async fn containers_create_volume(runtime: String, context: Option<String>, name: String, driver: Option<String>) -> Result<(), String> {
     containers::manage::create_volume(&engine::Target { runtime, context }, &name, driver.as_deref().unwrap_or_default()).await

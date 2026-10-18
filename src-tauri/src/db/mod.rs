@@ -11,6 +11,7 @@ pub mod diagram_queries;
 pub mod flow_queries;
 pub mod flow_run_queries;
 pub mod flow_share_queries;
+pub mod housekeeping;
 pub mod hybrid_queries;
 pub mod keyvault_queries;
 pub mod meeting_queries;

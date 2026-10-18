@@ -239,13 +239,37 @@ fn default_viewer(
             let auth = if user.is_empty() { String::new() } else { format!("{user}@") };
             Ok(vec!["open".into(), format!("vnc://{auth}{host}:{port}")])
         }
-        // Microsoft Remote Desktop registers `rdp://` with this query shape; without it installed
-        // the URL opens nothing, which is why the custom-viewer field exists.
-        ScreenProtocol::Rdp => Ok(vec![
-            "open".into(),
-            format!("rdp://full%20address=s:{host}:{port}"),
-        ]),
+        // Microsoft's Windows App (formerly Remote Desktop) registers `rdp://` with this query
+        // shape. macOS ships no RDP client, and without one `open` fails with a bare "no
+        // application" — so its absence is said here, with where to get it.
+        ScreenProtocol::Rdp => {
+            if !rdp_app_installed() {
+                return Err(
+                    "macOS has no RDP client of its own. Install Microsoft's «Windows App» from the App \
+                     Store (it opens rdp:// links), or set a viewer command on the host."
+                        .into(),
+                );
+            }
+            Ok(vec!["open".into(), format!("rdp://full%20address=s:{host}:{port}")])
+        }
     }
+}
+
+/// Whether an app that opens `rdp://` is installed: Microsoft's (by its bundle id, wherever it
+/// lives) or one of the others that register the scheme.
+#[cfg(target_os = "macos")]
+fn rdp_app_installed() -> bool {
+    let homes = [std::path::PathBuf::from("/Applications"), dirs::home_dir().unwrap_or_default().join("Applications")];
+    let names = ["Windows App.app", "Microsoft Remote Desktop.app", "Microsoft Remote Desktop Beta.app", "Jump Desktop.app", "Royal TSX.app"];
+    if homes.iter().any(|dir| names.iter().any(|name| dir.join(name).exists())) {
+        return true;
+    }
+    // Installed somewhere else: Spotlight knows it by bundle id.
+    crate::proc::std_command("mdfind")
+        .arg("kMDItemCFBundleIdentifier == 'com.microsoft.rdc.macos'")
+        .output()
+        .map(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]

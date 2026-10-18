@@ -22,6 +22,10 @@ const DbmlWorkbench = lazy(() =>
  * The whiteboard editor, behind the same boundary and for a bigger version of the same reason:
  * Excalidraw is a few megabytes of editor, and nobody who never opens a whiteboard should load it.
  */
+/** Mermaid's editor: Monaco and a preview, with Mermaid itself loaded on first use. */
+const MermaidEditor = lazy(() =>
+  import("./MermaidEditor").then((module) => ({ default: module.MermaidEditor })),
+);
 const ExcalidrawEditor = lazy(() => {
   // Before the import starts, never after: see `pointExcalidrawAtBundledFonts`.
   pointExcalidrawAtBundledFonts();
@@ -40,7 +44,7 @@ import {
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CARD, ICON_BUTTON } from "./diagramsChrome";
 import { relativeTime } from "../notes/notesChrome";
-import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
+import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MERMAID } from "../../lib/diagrams/doc";
 import { saveBytes } from "../../lib/diagrams/exportFile";
 import { archifyDocKind } from "../../lib/diagrams/archify/ir";
 import { presetNames, viewerLabels } from "../../lib/diagrams/archify/labels";
@@ -131,6 +135,7 @@ export function DiagramsView() {
   const isSchema = openFormat === FORMAT_DBML;
   const isWhiteboard = openFormat === FORMAT_EXCALIDRAW;
   const isArchify = openFormat === FORMAT_ARCHIFY;
+  const isMermaid = openFormat === FORMAT_MERMAID;
 
   const sidebarWidth = useLayoutStore((s) => s.sizes.diagramsSidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
@@ -530,6 +535,15 @@ export function DiagramsView() {
                     onOlderVersions={() => setHistoryOpen(true)}
                   />
                 </Suspense>
+              ) : isMermaid ? (
+                <Suspense fallback={<ViewSkeleton />}>
+                  <MermaidEditor
+                    key={activeId}
+                    diagramId={activeId}
+                    onSaveAsTemplate={saveAsTemplate}
+                    onHistory={() => setHistoryOpen(true)}
+                  />
+                </Suspense>
               ) : isWhiteboard ? (
                 <Suspense fallback={<ViewSkeleton />}>
                   <ExcalidrawEditor
@@ -557,7 +571,7 @@ export function DiagramsView() {
                   chrome around it — would straddle a switch to the next; without `diagramId`, a
                   generation could only ever be applied to the diagram that happened to be open
                   when it came back. */}
-              {aiOpen && !isArchify && (
+              {aiOpen && !isArchify && !isMermaid && (
                 <DiagramAiPanel
                   key={activeId}
                   diagramId={activeId}

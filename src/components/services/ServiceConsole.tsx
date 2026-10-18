@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import {
   CirclePlay,
+  Cpu,
+  Download,
   Eraser,
   FolderOpen,
   Hourglass,
@@ -16,10 +18,11 @@ import { Tooltip } from "../common/Tooltip";
 import { useT } from "../../state/languageStore";
 import { isActive, useServicesStore } from "../../state/servicesStore";
 import { useTerminalStore } from "../../state/terminalStore";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { joinFolder } from "../../lib/folderPath";
-import { clearServiceLog, serviceLog } from "../../lib/tauri/services";
+import { clearServiceLog, exportServiceLog, serviceLog } from "../../lib/tauri/services";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { serviceDeps, serviceDetectedPorts, type ServiceRow } from "../../types/services";
 import {
   PortChip,
@@ -216,6 +219,21 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
         >
           <Eraser size={12} />
         </IconButton>
+        <IconButton
+          onClick={() => {
+            const safe = service.name.replace(/[\\/:*?"<>|]+/g, "-").trim() || "service";
+            void saveDialog({ defaultPath: `${safe}.log`, filters: [{ name: "Log", extensions: ["log", "txt"] }] })
+              .then(async (path) => {
+                if (!path) return;
+                await exportServiceLog(service.id, path);
+                pushSuccessToast(t("services.logExported"));
+              })
+              .catch((e: unknown) => pushErrorToast(String(e)));
+          }}
+          label={t("services.exportLog")}
+        >
+          <Download size={12} />
+        </IconButton>
       </div>
 
       <div className="flex h-7 shrink-0 items-center gap-4 overflow-hidden border-b border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 text-[11px] text-[var(--cf-text-muted)]">
@@ -232,6 +250,14 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
             <Hourglass size={11} className="shrink-0" />
             <span className="truncate">{t("services.waitsForList", { names: deps.join(", ") })}</span>
           </span>
+        )}
+        {runtime?.alive && runtime.cpu != null && (
+          <Tooltip label={t("services.usageHint")}>
+            <span className="flex shrink-0 items-center gap-1.5 tabular-nums">
+              <Cpu size={11} className="shrink-0" />
+              {t("services.usage", { cpu: runtime.cpu, memory: (runtime.memoryMb ?? 0).toLocaleString() })}
+            </span>
+          </Tooltip>
         )}
         <span className="flex min-w-0 shrink-[3] items-center gap-1.5">
           <ShieldCheck size={11} className="shrink-0" />

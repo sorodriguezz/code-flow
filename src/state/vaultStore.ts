@@ -60,7 +60,9 @@ import {
   keyvaultTouch,
   keyvaultUnlock,
   keyvaultUnlockRemembered,
+  keyvaultSetBiometric,
   keyvaultUpdateItem,
+  keyvaultCopySecret,
 } from "../lib/tauri/keyvaultCommands";
 import { parseTags, serializeTags } from "../lib/notes/tags";
 import type { ImportResult } from "../lib/vault/import";
@@ -139,6 +141,9 @@ interface VaultState {
    */
   resuming: boolean;
   remembered: boolean;
+  /** Touch ID / Windows Hello can run here, and whether it guards the remembered password. */
+  biometricAvailable: boolean;
+  biometric: boolean;
   autolockMinutes: number;
   /** The unlock attempt is in flight — Argon2 takes ~100 ms and the button has to say so. */
   unlocking: boolean;
@@ -210,6 +215,10 @@ interface VaultState {
   changePassword: (oldPassword: string, newPassword: string) => Promise<boolean>;
   setAutolock: (minutes: number) => Promise<void>;
   forgetPassword: () => Promise<void>;
+  setBiometric: (on: boolean) => Promise<void>;
+  /** The lock screen's «Desbloquear con Touch ID / Windows Hello»: the remembered password, behind
+   *  the system's check. Only offered while that check guards it. */
+  unlockWithBiometric: () => Promise<boolean>;
   /** Destroys the keyring and everything in it. The way out of a forgotten master password, and the
    *  only one there is. */
   reset: () => Promise<boolean>;
@@ -303,6 +312,8 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   unlocked: false,
   resuming: false,
   remembered: false,
+  biometricAvailable: false,
+  biometric: false,
   autolockMinutes: 15,
   unlocking: false,
   loading: false,
@@ -347,6 +358,8 @@ export const useVaultStore = create<VaultState>((set, get) => ({
         unlocked: status.unlocked,
         autolockMinutes: status.autolock_minutes,
         remembered: status.remembered,
+        biometricAvailable: status.biometric_available,
+        biometric: status.biometric,
         resuming,
       });
       if (!resuming) return;
@@ -409,6 +422,11 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       if (opened) {
         set({ unlocked: true });
         await get().refresh();
+      } else if (get().biometric) {
+        // Touch ID / Windows Hello said no (or was dismissed) — or the stored password went stale
+        // and the backend forgot it. Only a fresh read can tell the two apart.
+        const status = await keyvaultStatus().catch(() => null);
+        if (status) set({ remembered: status.remembered });
       } else {
         // `false` also covers "the stored password no longer opens this vault" — changed on another
         // machine — in which case the backend has just forgotten the stale entry. Saying so keeps
@@ -459,6 +477,24 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       set({ remembered: false });
     } catch (error) {
       pushErrorToast(String(error));
+    }
+  },
+
+  setBiometric: async (on) => {
+    try {
+      const done = await keyvaultSetBiometric(on);
+      if (done) set({ biometric: on });
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  unlockWithBiometric: async () => {
+    set({ unlocking: true, unlockError: null });
+    try {
+      return await get().tryRemembered();
+    } finally {
+      set({ unlocking: false });
     }
   },
 
@@ -919,18 +955,26 @@ export const useVaultStore = create<VaultState>((set, get) => ({
    */
   copySecret: async (value) => {
     try {
-      await navigator.clipboard.writeText(value);
+      // Native first: hidden from clipboard history, and cleared by the backend — which still runs
+      // when the page is gone and clears a pending secret on quit. See `secret_clipboard.rs`.
+      const native = await keyvaultCopySecret(value, CLIPBOARD_CLEAR_SECONDS).then(
+        () => true,
+        () => false,
+      );
+      if (!native) {
+        await navigator.clipboard.writeText(value);
+        window.setTimeout(() => {
+          // Only if it is still ours: overwriting something the user copied since would be worse
+          // than leaving the password there.
+          void navigator.clipboard
+            .readText()
+            .then((current) => (current === value ? navigator.clipboard.writeText("") : undefined))
+            .catch(() => {});
+        }, CLIPBOARD_CLEAR_SECONDS * 1000);
+      }
       useToastStore
         .getState()
         .pushToast(translate("vault.copiedClears", { seconds: CLIPBOARD_CLEAR_SECONDS }), "info");
-      window.setTimeout(() => {
-        // Only if it is still ours: overwriting something the user copied since would be worse than
-        // leaving the password there.
-        void navigator.clipboard
-          .readText()
-          .then((current) => (current === value ? navigator.clipboard.writeText("") : undefined))
-          .catch(() => {});
-      }, CLIPBOARD_CLEAR_SECONDS * 1000);
     } catch (error) {
       pushErrorToast(String(error));
     }

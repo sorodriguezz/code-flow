@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { BookText, ClipboardList, FileText, FolderGit2, ListChecks, Search } from "lucide-react";
+import { BookText, ClipboardList, FileText, FileUp, FolderGit2, Globe, ListChecks, Loader2, Search } from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AiSparkles } from "../common/AiGlyph";
 import { TaskModelTag } from "../ai/ModelTag";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
@@ -15,6 +16,8 @@ import {
   adoWikiPagesContent,
   listRepoFiles,
   readFileText,
+  storySourceDocument,
+  storySourceUrl,
 } from "../../lib/tauri/commands";
 import { useStoriesStore } from "../../state/storiesStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
@@ -26,6 +29,8 @@ import { fieldClass } from "../common/recipes";
 const SOURCES: { id: StorySourceKind; icon: typeof BookText; labelKey: TranslationKey }[] = [
   { id: "wiki", icon: BookText, labelKey: "stories.sourceWiki" },
   { id: "files", icon: FolderGit2, labelKey: "stories.sourceFiles" },
+  { id: "document", icon: FileUp, labelKey: "stories.sourceDocument" },
+  { id: "url", icon: Globe, labelKey: "stories.sourceUrl" },
   { id: "text", icon: FileText, labelKey: "stories.sourceText" },
 ];
 
@@ -82,6 +87,34 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
 
   // --- text source ---
   const [pasted, setPasted] = useState("");
+
+  // --- document / page sources: read into Markdown before the batch is made, so what the model
+  // will read is on screen to check first ---
+  const [read, setRead] = useState<{ name: string; markdown: string; ref: string } | null>(null);
+  const [reading, setReading] = useState(false);
+  const [url, setUrl] = useState("");
+  const readWith = async (ref: string, work: () => Promise<{ name: string; markdown: string }>) => {
+    setReading(true);
+    setError(null);
+    setRead(null);
+    try {
+      const found = await work();
+      if (!found.markdown.trim()) throw new Error(t("stories.sourceEmpty"));
+      setRead({ ...found, ref });
+    } catch (e: unknown) {
+      setError(String(e));
+    } finally {
+      setReading(false);
+    }
+  };
+  const pickDocument = async () => {
+    const picked = await openDialog({
+      multiple: false,
+      filters: [{ name: t("stories.sourceDocument"), extensions: ["pdf", "docx", "doc", "odt", "rtf", "pptx", "xlsx", "epub", "md", "txt"] }],
+    }).catch(() => null);
+    if (typeof picked !== "string") return;
+    await readWith(picked, () => storySourceDocument(picked));
+  };
 
   useEffect(() => {
     void loadAdoConnections()
@@ -152,7 +185,9 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
       ? pickedPages.length > 0
       : kind === "files"
         ? pickedFiles.length > 0
-        : pasted.trim() !== "");
+        : kind === "document" || kind === "url"
+          ? !!read && !reading
+          : pasted.trim() !== "");
 
   /** Gathers the documentation for the chosen source. Kept here rather than in the store because
    * it is the *only* thing the three sources do differently. */
@@ -179,6 +214,9 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
         projectId,
         name: pickedFiles[0].split("/").pop() ?? repo.name,
       };
+    }
+    if ((kind === "document" || kind === "url") && read) {
+      return { text: read.markdown, ref: read.ref, projectId: null, name: read.name };
     }
     return { text: pasted, ref: "", projectId: null, name: t("stories.sourceText") };
   };
@@ -254,7 +292,10 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
               <button
                 key={source.id}
                 type="button"
-                onClick={() => setKind(source.id)}
+                onClick={() => {
+                  setKind(source.id);
+                  setRead(null);
+                }}
                 className={`flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1.5 text-[12px] font-medium ${
                   active
                     ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
@@ -401,6 +442,48 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
               </Field>
             </div>
           ))}
+
+        {kind === "document" && (
+          <Field label={t("stories.sourceDocument")} hint={t("stories.sourceDocumentHint")}>
+            <button type="button" onClick={() => void pickDocument()} disabled={reading} className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-[var(--cf-border-strong)] px-2 py-3 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]">
+              {reading ? <Loader2 size={13} className="animate-spin" /> : <FileUp size={13} />}
+              {read && kind === "document" ? read.ref : t("stories.pickDocument")}
+            </button>
+          </Field>
+        )}
+
+        {kind === "url" && (
+          <Field label={t("stories.sourceUrl")} hint={t("stories.sourceUrlHint")}>
+            <form
+              className="flex gap-1.5"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (url.trim()) void readWith(url.trim(), () => storySourceUrl(url.trim()));
+              }}
+            >
+              <input
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="https://"
+                spellCheck={false}
+                className={fieldClass({ className: "min-w-0 flex-1 font-mono" })}
+              />
+              <button type="submit" disabled={reading || !url.trim()} className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] font-medium hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-50">
+                {reading ? <Loader2 size={12} className="animate-spin" /> : <Globe size={12} />}
+                {t("stories.readPage")}
+              </button>
+            </form>
+          </Field>
+        )}
+
+        {(kind === "document" || kind === "url") && read && (
+          <Field label={t("stories.sourceRead", { n: read.markdown.length.toLocaleString() })}>
+            <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-2 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+              {read.markdown.slice(0, 4000)}
+              {read.markdown.length > 4000 ? "\n…" : ""}
+            </pre>
+          </Field>
+        )}
 
         {kind === "text" && (
           <Field label={t("stories.pastedText")} hint={t("stories.pastedTextHint")}>

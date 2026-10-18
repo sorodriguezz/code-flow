@@ -1,15 +1,4 @@
-import {
-  BookText,
-  Circle,
-  CircleAlert,
-  CircleCheck,
-  CircleDashed,
-  CircleDot,
-  CircleX,
-  FileText,
-  FolderGit2,
-  type LucideIcon,
-} from "lucide-react";
+import { BookText, Circle, CircleAlert, CircleCheck, CircleDashed, CircleDot, CircleX, FileText, FileUp, FolderGit2, Globe, type LucideIcon } from "lucide-react";
 import type { QualityDimension, QualitySeverity } from "../../lib/gherkin";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { StoryBatchStatus, StoryDraftStatus, StorySourceKind, StoryVerdict } from "../../types/domain";
@@ -47,6 +36,8 @@ export const SOURCE_KIND: Record<StorySourceKind, { icon: LucideIcon; labelKey: 
   wiki: { icon: BookText, labelKey: "stories.sourceWiki" },
   files: { icon: FolderGit2, labelKey: "stories.sourceFiles" },
   text: { icon: FileText, labelKey: "stories.sourceText" },
+  document: { icon: FileUp, labelKey: "stories.sourceDocument" },
+  url: { icon: Globe, labelKey: "stories.sourceUrl" },
 };
 
 /**

@@ -1,8 +1,8 @@
 /**
  * Reading another password manager's export.
  *
- * Four shapes, all of them the same job: turn somebody else's file into entries this keyring can
- * store. Bitwarden's JSON is the richest (folders, kinds, custom fields, TOTP) and the others give
+ * Eight shapes, all of them the same job: turn somebody else's file into entries this keyring can
+ * store — Bitwarden, 1Password, LastPass, KeePass / KeePassXC, and the browsers' saved passwords. Bitwarden's JSON is the richest (folders, kinds, custom fields, TOTP) and the others give
  * up something — a CSV has no folders on 1Password's side and no custom-field types on anyone's.
  *
  * **Every function here is pure and none of them throw.** Text in, a result out, problems collected
@@ -29,6 +29,10 @@ export type ImportFormat =
   | "bitwarden-csv"
   | "onepassword-csv"
   | "onepassword-1pux"
+  | "chrome-csv"
+  | "firefox-csv"
+  | "lastpass-csv"
+  | "keepass-csv"
   | "unknown";
 
 export interface ImportWarning {
@@ -86,10 +90,22 @@ export function detectFormat(text: string, fileName = ""): ImportFormat {
   }
 
   const firstLine = head.split(/\r?\n/, 1)[0]?.toLowerCase() ?? "";
+  const columns = firstLine.split(",").map((column) => column.trim().replace(/^"|"$/g, ""));
+  const has = (...names: string[]) => names.every((name) => columns.includes(name));
   // Bitwarden's CSV header is fixed and unmistakable.
   if (firstLine.includes("login_username") || firstLine.includes("login_password")) {
     return "bitwarden-csv";
   }
+  // LastPass: `url,username,password,totp,extra,name,grouping,fav`.
+  if (has("grouping", "extra")) return "lastpass-csv";
+  // KeePassXC (`Group,Title,Username,Password,URL,Notes…`) and KeePass 2 (`Account,Login Name,…`).
+  if (has("group", "title", "username", "password") || has("account", "login name", "password")) {
+    return "keepass-csv";
+  }
+  // Firefox: `url,username,password,httpRealm,formActionOrigin,guid,…`.
+  if (has("httprealm") || has("formactionorigin")) return "firefox-csv";
+  // Chrome, Edge, Brave, Opera, Vivaldi: `name,url,username,password[,note]`.
+  if (has("name", "url", "username", "password")) return "chrome-csv";
   // 1Password 8's CSV. `otpauth` is the giveaway — no other exporter names a column that.
   if (firstLine.includes("otpauth") || (firstLine.includes("title") && firstLine.includes("url"))) {
     return "onepassword-csv";
@@ -110,6 +126,11 @@ export function importVaultExport(text: string, fileName = ""): ImportResult {
       return parseOnePasswordCsv(text);
     case "onepassword-1pux":
       return parseOnePux(text);
+    case "chrome-csv":
+    case "firefox-csv":
+    case "lastpass-csv":
+    case "keepass-csv":
+      return parseBrowserCsv(text, format);
     default: {
       const result = empty("unknown");
       result.warnings.push({ key: "vault.import.unknownFormat" });
@@ -321,6 +342,137 @@ export function parseBitwardenCsv(text: string): ImportResult {
 
   result.folders = [...new Set(result.items.map((item) => item.folder).filter(Boolean))] as string[];
   if (skipped > 0) result.warnings.push({ key: "vault.import.skippedUnnamed", params: { n: skipped } });
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Browsers, LastPass and KeePass
+// ---------------------------------------------------------------------------
+
+/** Which column holds what, per exporter — the first name the header has wins. */
+const CSV_COLUMNS: Record<
+  "chrome-csv" | "firefox-csv" | "lastpass-csv" | "keepass-csv",
+  Record<"title" | "url" | "username" | "password" | "notes" | "totp" | "folder" | "favorite", string[]>
+> = {
+  "chrome-csv": {
+    title: ["name"],
+    url: ["url"],
+    username: ["username"],
+    password: ["password"],
+    notes: ["note", "notes"],
+    totp: [],
+    folder: [],
+    favorite: [],
+  },
+  "firefox-csv": {
+    title: [],
+    url: ["url"],
+    username: ["username"],
+    password: ["password"],
+    notes: [],
+    totp: [],
+    folder: [],
+    favorite: [],
+  },
+  "lastpass-csv": {
+    title: ["name"],
+    url: ["url"],
+    username: ["username"],
+    password: ["password"],
+    notes: ["extra"],
+    totp: ["totp"],
+    folder: ["grouping"],
+    favorite: ["fav"],
+  },
+  "keepass-csv": {
+    title: ["title", "account"],
+    url: ["url", "web site"],
+    username: ["username", "login name"],
+    password: ["password"],
+    notes: ["notes", "comments"],
+    totp: ["totp"],
+    folder: ["group"],
+    favorite: [],
+  },
+};
+
+/** The host of a URL, for an entry the exporter gave no name (Firefox never does). */
+function hostOf(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url.includes("://") ? url : `https://${url}`).hostname.replace(/^www\./, "") || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A browser's saved passwords (Chrome and its kin, Firefox), LastPass, or KeePass / KeePassXC — all
+ * CSV, all one row per entry, differing only in what the columns are called.
+ *
+ * Two exporter habits are smoothed over: LastPass files a secure note as a row whose URL is
+ * `http://sn` (it arrives as a note, not a login to a site called "sn"), and KeePass writes its
+ * folder as a path from the database root (`Root/Work/Servers`), whose first segment is the
+ * database's own name and says nothing.
+ */
+export function parseBrowserCsv(
+  text: string,
+  format: "chrome-csv" | "firefox-csv" | "lastpass-csv" | "keepass-csv",
+): ImportResult {
+  const result = empty(format);
+  const grid = parseCsvGrid(text);
+  const [header, ...rows] = grid;
+  if (!header) {
+    result.warnings.push({ key: "vault.import.emptyFile" });
+    return result;
+  }
+  const index = new Map(header.map((name, at) => [name.trim().toLowerCase(), at]));
+  const columns = CSV_COLUMNS[format];
+  const at = (row: string[], field: keyof typeof columns) => {
+    for (const name of columns[field]) {
+      const position = index.get(name);
+      if (position !== undefined) return value(row[position]);
+    }
+    return undefined;
+  };
+
+  let skipped = 0;
+  for (const row of rows) {
+    if (row.every((cell) => !cell?.trim())) continue;
+    let url = at(row, "url");
+    const note = format === "lastpass-csv" && url === "http://sn";
+    if (note) url = undefined;
+    const title = at(row, "title") ?? hostOf(url);
+    if (!title) {
+      skipped += 1;
+      continue;
+    }
+    let folder = at(row, "folder") ?? null;
+    if (folder && format === "keepass-csv") {
+      const parts = folder.split("/").filter(Boolean);
+      folder = parts.length > 1 ? parts.slice(1).join(" / ") : null;
+    }
+    const secret: VaultSecret = {
+      username: note ? undefined : at(row, "username"),
+      password: note ? undefined : at(row, "password"),
+      totp: at(row, "totp"),
+      notes: at(row, "notes"),
+    };
+    result.items.push({
+      kind: note ? "note" : "login",
+      title,
+      subtitle: secret.username ?? "",
+      site: url ?? "",
+      tags: [],
+      folder,
+      favorite: at(row, "favorite") === "1",
+      secret,
+    });
+  }
+
+  result.folders = [...new Set(result.items.map((item) => item.folder).filter(Boolean))] as string[];
+  if (skipped > 0) result.warnings.push({ key: "vault.import.skippedUnnamed", params: { n: skipped } });
+  if (format === "chrome-csv" || format === "firefox-csv") result.warnings.push({ key: "vault.import.browserNoFolders" });
   return result;
 }
 

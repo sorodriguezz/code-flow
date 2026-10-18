@@ -24,6 +24,23 @@ pub fn dir() -> PathBuf {
     crate::paths::models_dir()
 }
 
+/// Deletes partial downloads (`<file>.part`) nobody has touched in a week — a multi-gigabyte model
+/// whose download was abandoned otherwise kept its half on disk for good. A week is long enough
+/// for a paused download to be resumed; after that it starts over.
+pub fn sweep_partials() {
+    let Ok(entries) = std::fs::read_dir(dir()) else { return };
+    let week = std::time::Duration::from_secs(7 * 24 * 3600);
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().ends_with(".part") {
+            continue;
+        }
+        let stale = entry.metadata().and_then(|m| m.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > week);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 pub fn path_of(spec: &ModelSpec) -> PathBuf {
     dir().join(spec.file)
 }

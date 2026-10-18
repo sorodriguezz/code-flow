@@ -44,11 +44,12 @@ async fn folder_of(ctx: &NodeCtx, params: &Value) -> Result<PathBuf, NodeError> 
 }
 
 fn http() -> Result<reqwest::Client, NodeError> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent("CodeFlow (https://github.com/sorodriguezz/code-flow)")
-        .build()
-        .map_err(|e| NodeError::failed(e.to_string()))
+    crate::http_clients::cached("devtools", || {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("CodeFlow (https://github.com/sorodriguezz/code-flow)")
+    })
+    .map_err(NodeError::failed)
 }
 
 // ------------------------------------------------------------------------------------- version

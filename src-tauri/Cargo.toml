@@ -506,7 +506,19 @@ windows-core = "0.61"
 # `hybrid::hardware`). The same version webview2-com already pulls in; this adds the DXGI module.
 # Media Foundation's sink writer is «Reuniones»' AAC encoder (`meetings::encode`): the system's own,
 # so no codec is built here. COM is what Media Foundation runs on. Bindings only, like DXGI.
-windows = { version = "0.61", features = ["Win32_Graphics_Dxgi", "Win32_Media_MediaFoundation", "Win32_System_Com"] }
+# Windows Hello for the keyring (`keyvault::biometric`): `UserConsentVerifier` and its interop, which
+# ties the dialog to the app's window — bindings only. `windows-future` is the crate those WinRT
+# calls already return their async operations from (in the tree with `windows`); naming it is what
+# lets the operation be named and waited on.
+windows = { version = "0.61", features = [
+  "Win32_Graphics_Dxgi",
+  "Win32_Media_MediaFoundation",
+  "Win32_System_Com",
+  "Win32_System_WinRT",
+  "Foundation",
+  "Security_Credentials_UI",
+] }
+windows-future = "0.2"
 # `GetProcessMemoryInfo` with `PROCESS_MEMORY_COUNTERS_EX2`, so the panel behind the status bar bills
 # this app for the same private working set Task Manager shows in its own rows — see
 # `sysload::footprint` for why the resident size sysinfo hands out cannot be reconciled with it. Also
@@ -519,11 +531,16 @@ windows = { version = "0.61", features = ["Win32_Graphics_Dxgi", "Win32_Media_Me
 # Power is «Evitar que el equipo se suspenda» (`keep_awake`: a power request), and Registry the
 # launch-at-login entry written with its path quoted (`autostart`) — bindings only as well.
 # Shell is `DragQueryFileW`, for the files Explorer put on the clipboard (`explorer_bridge`) —
-# bindings only.
+# bindings only. Security and Security_Authorization build the owner-only DACL on the named pipe
+# that hands a saved password to `ssh`'s askpass helper (`remotes::askpass`) — bindings only. Memory
+# is the global block a vault secret is copied into (`secret_clipboard`) — bindings only.
 windows-sys = { version = "0.60", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
+  "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_System_DataExchange",
+  "Win32_System_Memory",
   "Win32_System_Power",
   "Win32_System_Registry",
   "Win32_System_SystemInformation",

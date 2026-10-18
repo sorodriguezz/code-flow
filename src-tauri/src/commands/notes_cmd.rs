@@ -536,7 +536,7 @@ pub fn notes_delete_template(db: State<Db>, id: String) -> Result<(), String> {
 
 /// Notes whose **body** matched. Titles and tags are filtered in the frontend, which already holds
 /// them — see [`note_queries::search_notes`].
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notes_search(
     db: State<Db>,
     workspace_id: String,
@@ -563,6 +563,29 @@ pub fn notes_backlinks(
         .map_err(|e| e.to_string())
 }
 
+/// One note of the graph view.
+#[derive(serde::Serialize)]
+pub struct GraphNote {
+    pub id: String,
+    pub title: String,
+    pub book_id: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct NoteGraph {
+    pub nodes: Vec<GraphNote>,
+    /// `[from, to]` note ids, one per note pair a `[[link]]` joins.
+    pub edges: Vec<(String, String)>,
+}
+
+/// Every note and the `[[links]]` between them — the graph view. Reads every body, once.
+#[tauri::command(async)]
+pub fn notes_graph(db: State<Db>, workspace_id: String) -> Result<NoteGraph, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let (nodes, edges) = note_queries::link_graph(&conn, &workspace_id).map_err(|e| e.to_string())?;
+    Ok(NoteGraph { nodes: nodes.into_iter().map(|(id, title, book_id)| GraphNote { id, title, book_id }).collect(), edges })
+}
+
 // ---------- import ----------
 
 /// Reads a Markdown file the user just picked in a dialog, for "Import Markdown".
@@ -582,6 +605,104 @@ pub fn notes_read_import(path: String) -> Result<String, String> {
         ));
     }
     std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
+}
+
+/// One Markdown file of a vault or an export, with the folder it sits in (relative, `/`-separated).
+#[derive(serde::Serialize)]
+pub struct VaultFile {
+    pub dir: String,
+    pub name: String,
+    pub content: String,
+}
+
+/// Files an import reads at most, and bytes in all — a vault of notes, not a disk.
+const VAULT_MAX_FILES: usize = 5_000;
+const VAULT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+fn is_markdown_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".mdown") || lower.ends_with(".txt")
+}
+
+/// Every Markdown file under a folder (an Obsidian vault, any folder of notes) or inside a `.zip`
+/// (a Notion export, which may hold its parts as zips of their own) — the «Importar bóveda» source.
+/// Hidden folders (`.obsidian`, `.trash`, `.git`) are skipped.
+#[tauri::command(async)]
+pub fn notes_read_vault(path: String) -> Result<Vec<VaultFile>, String> {
+    let root = std::path::PathBuf::from(&path);
+    let mut out = Vec::new();
+    let mut total = 0u64;
+    if root.is_dir() {
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let child = entry.path();
+                let Ok(kind) = entry.file_type() else { continue };
+                if kind.is_dir() {
+                    stack.push(child);
+                } else if kind.is_file() && is_markdown_name(&name) {
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    total += size;
+                    if out.len() >= VAULT_MAX_FILES || total > VAULT_MAX_BYTES {
+                        return Err(format!("La carpeta tiene más de {VAULT_MAX_FILES} notas o {} MB", VAULT_MAX_BYTES / (1024 * 1024)));
+                    }
+                    let rel = child.parent().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+                    let content = std::fs::read(&child).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+                    out.push(VaultFile { dir: rel, name, content });
+                }
+            }
+        }
+    } else if path.to_ascii_lowercase().ends_with(".zip") {
+        let bytes = std::fs::read(&root).map_err(|e| format!("{path}: {e}"))?;
+        read_zip_markdown(&bytes, &mut out, &mut total, 0)?;
+    } else {
+        return Err("Elige una carpeta o un .zip exportado".into());
+    }
+    out.sort_by(|a, b| (a.dir.as_str(), a.name.as_str()).cmp(&(b.dir.as_str(), b.name.as_str())));
+    Ok(out)
+}
+
+fn read_zip_markdown(bytes: &[u8], out: &mut Vec<VaultFile>, total: &mut u64, depth: u8) -> Result<(), String> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("no es un zip legible: {e}"))?;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).map_err(|e| e.to_string())?;
+        if file.is_dir() {
+            continue;
+        }
+        let Some(path) = file.enclosed_name() else { continue };
+        let path = path.to_string_lossy().replace('\\', "/");
+        let (dir, name) = path.rsplit_once('/').map(|(d, n)| (d.to_string(), n.to_string())).unwrap_or((String::new(), path.clone()));
+        let nested_zip = name.to_ascii_lowercase().ends_with(".zip");
+        if !(is_markdown_name(&name) || (nested_zip && depth == 0)) {
+            continue;
+        }
+        *total += file.size();
+        if out.len() >= VAULT_MAX_FILES || *total > VAULT_MAX_BYTES {
+            return Err(format!("El zip tiene más de {VAULT_MAX_FILES} notas o {} MB", VAULT_MAX_BYTES / (1024 * 1024)));
+        }
+        let mut content = Vec::new();
+        file.read_to_end(&mut content).map_err(|e| e.to_string())?;
+        if nested_zip {
+            // Notion splits a large export into zips inside the zip.
+            read_zip_markdown(&content, out, total, depth + 1)?;
+        } else {
+            out.push(VaultFile { dir, name, content: String::from_utf8_lossy(&content).into_owned() });
+        }
+    }
+    Ok(())
+}
+
+/// A note (or a notebook) as a Word document, written to `path` — the same Markdown-to-DOCX the
+/// Flujos node uses.
+#[tauri::command(async)]
+pub fn notes_export_docx(path: String, markdown: String) -> Result<(), String> {
+    crate::flows::nodes::docs::write_zip(std::path::Path::new(&path), &crate::flows::nodes::docs::markdown_docx(&markdown)).map_err(|e| e.to_string())
 }
 
 // ---------- writing with AI ----------

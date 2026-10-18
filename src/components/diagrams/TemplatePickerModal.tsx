@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { LayoutTemplate, PencilLine, Plus, Table2, Trash2, X } from "lucide-react";
+import { GitFork, LayoutTemplate, PencilLine, Plus, Table2, Trash2, X } from "lucide-react";
 import { TagPill } from "../notes/notesChrome";
 import { ICON_BUTTON } from "./diagramsChrome";
 import { templateIcon } from "../../lib/diagrams/templateIcons";
-import { FORMAT_DBML, FORMAT_EXCALIDRAW } from "../../lib/diagrams/doc";
+import { FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MERMAID } from "../../lib/diagrams/doc";
 import type { DiagramFormat, DiagramTemplate } from "../../types/diagrams";
 import { useDiagramsStore } from "../../state/diagramsStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -144,6 +144,19 @@ export function TemplatePickerModal({
                 <span className="text-[11px] text-[var(--cf-text-muted)]">
                   {t("diagrams.tpl.dbml.desc")}
                 </span>
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void blank(FORMAT_MERMAID)}
+              disabled={busy}
+              className="flex items-start gap-2.5 rounded-lg border border-dashed border-[var(--cf-field-border)] p-3 text-left transition-colors hover:border-[var(--cf-accent)] disabled:opacity-50"
+            >
+              <GitFork size={15} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="truncate text-[12px] font-medium">{t("diagrams.tpl.mermaid.name")}</span>
+                <span className="text-[11px] text-[var(--cf-text-muted)]">{t("diagrams.tpl.mermaid.desc")}</span>
               </span>
             </button>
 

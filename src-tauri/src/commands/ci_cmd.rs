@@ -247,14 +247,51 @@ pub async fn fetch_pipeline_job_log(
     log_ref: Option<String>,
 ) -> Result<ci::JobLog, String> {
     let project = load_project(&db, &project_id)?;
-    match linked_repo(&project)? {
+    job_log_of(&project, &run_id, &job_id, log_ref).await
+}
+
+/// One job's whole log, written to `destination` (what the save dialog returned) — the pane shows
+/// at most [`ci::MAX_LOG_BYTES`], and the end of a long build is often past it. Read through the
+/// same provider code as the pane, under [`ci::SAVED_LOG_BYTES`] instead. Returns the bytes
+/// written, and whether even that ceiling cut it.
+#[tauri::command]
+pub async fn save_pipeline_job_log(
+    db: State<'_, Db>,
+    project_id: String,
+    run_id: String,
+    job_id: String,
+    log_ref: Option<String>,
+    destination: String,
+) -> Result<(u64, bool), String> {
+    let destination = download_destination(&destination)?;
+    let project = load_project(&db, &project_id)?;
+    let file = tokio::fs::File::create(&destination).await.map_err(|e| format!("couldn't write {}: {e}", destination.display()))?;
+    // Streamed into the file as it downloads (see `ci::http::save_log_into`); Azure, which joins
+    // its parts in memory, hands its text back instead.
+    let log = ci::http::save_log_into(file, ci::with_log_cap(ci::SAVED_LOG_BYTES, job_log_of(&project, &run_id, &job_id, log_ref))).await;
+    let log = match log {
+        Ok(log) => log,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&destination).await;
+            return Err(e);
+        }
+    };
+    if log.text.is_empty() {
+        return Ok((log.total_bytes, log.truncated));
+    }
+    tokio::fs::write(&destination, log.text.as_bytes()).await.map_err(|e| format!("couldn't write {}: {e}", destination.display()))?;
+    Ok((log.text.len() as u64, log.truncated))
+}
+
+async fn job_log_of(project: &crate::db::models::Project, run_id: &str, job_id: &str, log_ref: Option<String>) -> Result<ci::JobLog, String> {
+    match linked_repo(project)? {
         LinkedRepo::GitHub { host, owner, repo } => {
             let token = github_token(&host)?;
-            ci::github::job_log(&host, &owner, &repo, &job_id, &token).await
+            ci::github::job_log(&host, &owner, &repo, job_id, &token).await
         }
         LinkedRepo::GitLab { host, project: path } => {
             let token = gitlab_token(&host)?;
-            ci::gitlab::job_log(&host, &path, &job_id, &token).await
+            ci::gitlab::job_log(&host, &path, job_id, &token).await
         }
         LinkedRepo::Azure { org, project: ado_project, .. } => {
             let pat = pat_for_org(&org)?;
@@ -263,13 +300,58 @@ pub async fn fetch_pipeline_job_log(
                  reported one"
                     .to_string()
             })?;
-            ci::azure::job_log(&org, &ado_project, &run_id, &log_ref, &pat).await
+            ci::azure::job_log(&org, &ado_project, run_id, &log_ref, &pat).await
         }
         LinkedRepo::Bitbucket { workspace, repo } => {
             let auth = bitbucket_auth(&workspace)?;
-            ci::bitbucket::step_log(&workspace, &repo, &run_id, &job_id, &auth).await
+            ci::bitbucket::step_log(&workspace, &repo, run_id, job_id, &auth).await
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// actionlint
+// ---------------------------------------------------------------------------
+
+/// One problem actionlint found in a workflow file.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct WorkflowLint {
+    pub message: String,
+    pub filepath: String,
+    pub line: u32,
+    pub column: u32,
+    /// actionlint's rule name: `syntax-check`, `expression`, `shellcheck`, `runner-label`…
+    pub kind: String,
+}
+
+/// actionlint's verdict on the repository's GitHub workflows, or `None` when it is not installed
+/// here — the app does not ship it; the view then runs only its own checks. It reads
+/// `.github/workflows` from the working tree itself, and runs shellcheck on `run:` scripts when
+/// that is installed too.
+#[tauri::command]
+pub async fn ci_actionlint(repo_path: String) -> Result<Option<Vec<WorkflowLint>>, String> {
+    let Some(binary) = crate::ai::find_on_path("actionlint") else { return Ok(None) };
+    let mut cmd = crate::proc::command(binary);
+    cmd.args(["-format", "{{json .}}"]).current_dir(&repo_path).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(90), cmd.output())
+        .await
+        .map_err(|_| "actionlint took longer than 90 s".to_string())?
+        .map_err(|e| format!("couldn't run actionlint: {e}"))?;
+    // 0 is clean, 1 is "found problems"; anything else is actionlint itself failing.
+    let code = output.status.code().unwrap_or(-1);
+    if code != 0 && code != 1 {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("actionlint failed: {}", detail.trim()));
+    }
+    parse_actionlint(&String::from_utf8_lossy(&output.stdout)).map(Some)
+}
+
+fn parse_actionlint(stdout: &str) -> Result<Vec<WorkflowLint>, String> {
+    let text = stdout.trim();
+    if text.is_empty() || text == "null" {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(text).map_err(|e| format!("couldn't read actionlint's answer: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -881,6 +963,17 @@ fn download_destination(path: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn actionlint_json_is_read_and_a_clean_run_is_empty() {
+        let out = r#"[{"message":"label \"ubuntu-lates\" is unknown","filepath":".github/workflows/ci.yml","line":7,"column":14,"kind":"runner-label","snippet":"x","end_column":26}]"#;
+        let found = parse_actionlint(out).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, "runner-label");
+        assert_eq!((found[0].line, found[0].column), (7, 14));
+        assert!(parse_actionlint("").unwrap().is_empty());
+        assert!(parse_actionlint("null\n").unwrap().is_empty());
+    }
 
     fn request(definition: &str, reference: &str) -> StartPipelineRequest {
         StartPipelineRequest {

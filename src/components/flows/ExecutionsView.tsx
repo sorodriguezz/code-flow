@@ -30,6 +30,8 @@ import { useFlowRunsStore } from "../../state/flowRunsStore";
 import { useFlowsStore } from "../../state/flowsStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
+import { useUiStore } from "../../state/uiStore";
+import { useLiveNow } from "../../lib/useLiveNow";
 
 /**
  * A flow's executions: the list on the left, the selected one on the right as a waterfall — one row
@@ -242,7 +244,6 @@ function RunDetail({ runId, flowId }: { runId: string; flowId: string }) {
   const detail = useFlowRunsStore((s) => s.details[runId]);
   const selectedNode = useFlowRunsStore((s) => s.selectedRunNode);
   const catalogMap = useFlowsStore((s) => s.catalogMap);
-  const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
     void useFlowRunsStore.getState().loadRun(runId);
@@ -251,11 +252,10 @@ function RunDetail({ runId, flowId }: { runId: string; flowId: string }) {
   const running = detail?.run.status === "running" || detail?.run.status === "waiting";
   const openWaits = useFlowRunsStore((s) => s.waits);
   const waits = useMemo(() => openWaits.filter((wait) => wait.runId === runId), [openWaits, runId]);
-  useEffect(() => {
-    if (!running) return;
-    const timer = setInterval(() => setNow(Date.now()), 250);
-    return () => clearInterval(timer);
-  }, [running]);
+  // A quarter second while something is executing; a waiting run only has its clock to move, and
+  // can wait for days — once a second does for that. Neither ticks while Flujos is out of sight.
+  const onScreen = useUiStore((s) => s.activeView === "flows");
+  const now = useLiveNow(running && onScreen, detail?.run.status === "waiting" ? 1000 : 250);
 
   const nodes = useMemo(() => [...(detail?.nodes ?? [])].sort((a, b) => a.seq - b.seq || a.nodeName.localeCompare(b.nodeName)), [detail]);
   /** Starts this run again and moves the list onto the new one. An untrusted flow is refused by

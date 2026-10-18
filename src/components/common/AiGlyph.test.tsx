@@ -7,11 +7,15 @@ import { AiGlyph, AiSparkles, type AiGlyphName } from "./AiGlyph";
 const css = readFileSync(new URL("../../index.css", import.meta.url), "utf8");
 
 describe("AiGlyph", () => {
-  it("is a size-square block that flows unless told to hold still", () => {
-    const flowing = renderToStaticMarkup(<AiGlyph size={13} />);
-    expect(flowing).toContain("cf-ai-glyph cf-ai-sparkles cf-ai-glyph-flowing");
-    expect(flowing).toContain("width:13px;height:13px");
-    expect(renderToStaticMarkup(<AiGlyph still />)).not.toContain("cf-ai-glyph-flowing");
+  it("is a size-square block that flows on hover at rest, always when busy, never when still", () => {
+    const idle = renderToStaticMarkup(<AiGlyph size={13} />);
+    expect(idle).toContain("cf-ai-glyph cf-ai-sparkles cf-ai-glyph-idle");
+    expect(idle).not.toContain("cf-ai-glyph-flowing");
+    expect(idle).toContain("width:13px;height:13px");
+    expect(renderToStaticMarkup(<AiGlyph busy />)).toContain("cf-ai-glyph-flowing");
+    const still = renderToStaticMarkup(<AiGlyph still busy />);
+    expect(still).not.toContain("cf-ai-glyph-flowing");
+    expect(still).not.toContain("cf-ai-glyph-idle");
   });
 
   it("takes a lucide icon's place in a menu item or a settings pane", () => {

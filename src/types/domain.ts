@@ -559,6 +559,22 @@ export interface AgentTask {
   updated_at: string;
   /** The agent's account preference, copied at creation — see `WorkspaceAgent.account_id`. */
   account_id?: string | null;
+  /** The task's own linked worktree, or `""` when its turns run in the repository's working copy. */
+  worktree_path?: string;
+  /** The branch that worktree has checked out. */
+  worktree_branch?: string;
+  /** 0 none, 1 low, 2 medium, 3 high. */
+  priority?: number;
+  /** `YYYY-MM-DD`, or `""`. */
+  due_date?: string;
+  labels?: string[];
+  archived?: boolean;
+  /** What its turns spent, summed as each finished. */
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
+  /** Turns whose engine reported a price. */
+  costed_turns?: number;
 }
 
 /**
@@ -1292,7 +1308,7 @@ export interface AdoWikiPage {
  * `""` is a saved target that predates the others and means Azure — the backend applies the same
  * rule, so an older row and a newer one land on the same client rather than on none.
  */
-export type BoardProvider = "azure" | "jira" | "monday";
+export type BoardProvider = "azure" | "jira" | "monday" | "github" | "gitlab" | "linear";
 
 /** Where inside the container a published story lands — "User Story" on Azure Agile, "Story" on
  * Jira, a group on monday. Read from the host, never assumed. */
@@ -1340,7 +1356,7 @@ export interface MondayColumn {
 }
 
 /** Where a batch's documentation came from. */
-export type StorySourceKind = "wiki" | "files" | "text";
+export type StorySourceKind = "wiki" | "files" | "text" | "document" | "url";
 
 /** `generating` is only meaningful inside the session that set it — a row still saying so at
  * startup is one whose app was killed mid-run, and the backend demotes it on load. */
@@ -1484,6 +1500,9 @@ export interface StoryDraft {
   last_error: string;
   created_at: string;
   updated_at: string;
+  /** The published item's state on its board, as last read back; `""` until read. */
+  board_state?: string;
+  board_state_at?: string;
 }
 
 export interface StoryBatchDetail {

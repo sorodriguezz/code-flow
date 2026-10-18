@@ -599,6 +599,8 @@ export function ScheduleView() {
                   <span className="min-w-0 flex-1 truncate">{t("flows.schedule.webhooks")}</span>
                   <TunnelControl />
                 </h3>
+                {/* The server is this app: a call that arrives with it closed finds nobody. */}
+                <p className="mb-1.5 text-[11.5px] text-[var(--cf-text-faint)]">{t("flows.webhook.needsApp")}</p>
                 {hooks.map(({ flow, trigger }) => (
                   <div key={`${flow.flowId}:${trigger.nodeId}`} className="flex flex-col gap-0.5 border-t border-[var(--cf-border)] py-2 first-of-type:border-t-0">
                     <div className="flex min-w-0 items-center gap-2">

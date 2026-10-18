@@ -79,16 +79,18 @@ export function DiagramGallery() {
    * diagram that is right there in the next folder — and the sidebar draws every folder open while
    * a query is live, so the two halves of the screen would disagree about what was found.
    */
+  const contentHits = useDiagramsStore((s) => s.contentHits);
   const filtering = query.trim().length > 0 || tagFilter.length > 0;
   const shown = useMemo(
     () =>
       filterDiagrams(diagrams, {
         query,
+        contentHits,
         tagFilter,
         folderId: filtering ? undefined : folderFilter,
         sort,
       }),
-    [diagrams, query, tagFilter, folderFilter, filtering, sort],
+    [diagrams, query, contentHits, tagFilter, folderFilter, filtering, sort],
   );
 
   /** The subfolders of the folder being shown, so the gallery can be walked down as well as the
@@ -379,7 +381,7 @@ export function DiagramGallery() {
                     active={diagram.id === activeId}
                     locale={language}
                     untitled={t("diagrams.untitled")}
-                    shapesLabel={t("diagrams.shapes", { count: String(diagram.shape_count) })}
+                    shapesLabel={contentHits[diagram.id] && query.trim() ? `“${contentHits[diagram.id]}”` : t("diagrams.shapes", { count: String(diagram.shape_count) })}
                     onSelect={() => void openDiagram(diagram.id)}
                     onMenu={(event) => onCardMenu(event, diagram)}
                   />
@@ -394,7 +396,7 @@ export function DiagramGallery() {
                     active={diagram.id === activeId}
                     locale={language}
                     untitled={t("diagrams.untitled")}
-                    shapesLabel={t("diagrams.shapes", { count: String(diagram.shape_count) })}
+                    shapesLabel={contentHits[diagram.id] && query.trim() ? `“${contentHits[diagram.id]}”` : t("diagrams.shapes", { count: String(diagram.shape_count) })}
                     onSelect={() => void openDiagram(diagram.id)}
                     onMenu={(event) => onCardMenu(event, diagram)}
                   />

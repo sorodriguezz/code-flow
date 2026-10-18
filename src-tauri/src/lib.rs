@@ -49,6 +49,7 @@ mod gemini;
 mod git;
 mod glass;
 mod grok;
+mod http_clients;
 mod bitbucket;
 mod github;
 mod gitlab;
@@ -86,6 +87,7 @@ mod review;
 mod review_memory;
 mod reviewer;
 mod search;
+mod secret_clipboard;
 mod secret_scan;
 mod secrets;
 mod services;
@@ -242,8 +244,13 @@ fn hide_to_background(window: &tauri::Window) {
 ///
 /// The sequence the close handler used to run in line, moved here so the first-close notice's
 /// "keep it in the tray" answer (`tray::hide_main_to_tray`) does exactly what the button does.
+/// Whether the main window has been put away (in the tray) — for background loops that slow down
+/// while nobody is looking. Cleared by `tray::show_main_window`.
+pub(crate) static MAIN_AWAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub(crate) fn put_main_away(app: &tauri::AppHandle) {
     let Some(main) = app.get_webview_window("main") else { return };
+    MAIN_AWAY.store(true, std::sync::atomic::Ordering::Relaxed);
     // The `Window` half, which is what the hiding needs: `Webview::window()`, reached through the
     // same `as_ref()` view `tray::show_main_window` uses.
     let webview: &tauri::Webview<_> = main.as_ref();
@@ -263,6 +270,33 @@ pub(crate) fn put_main_away(app: &tauri::AppHandle) {
     // itself to, so one left alone is an app the user cannot navigate. See `windows::close_all`.
     windows::close_all(app);
     hide_to_background(&window);
+}
+
+/// Minimising a window on Windows tells its WebView2 nothing: the page goes on reading as visible,
+/// so every pause keyed to `document.visibilityState` (the flow clocks, the ports and container
+/// polls, the auto-fetch, the status-bar meters) kept running in a minimised window. macOS's
+/// WKWebView reports a minimised window as hidden by itself. Here the controller is told, the
+/// same `put_IsVisible` the tray path uses, and told again when the window comes back.
+///
+/// Only a webview this hid is shown again — never one the tray path hid, whose return
+/// `tray::show_main_window` owns, with an ordering of its own.
+#[cfg(windows)]
+fn follow_minimize(window: &tauri::Window) {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    static HIDDEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    let Some(webview_window) = window.get_webview_window(window.label()) else { return };
+    let webview: &tauri::Webview<_> = webview_window.as_ref();
+    let minimized = window.is_minimized().unwrap_or(false);
+    let Ok(mut hidden) = HIDDEN.lock() else { return };
+    let hidden = hidden.get_or_insert_with(HashSet::new);
+    if minimized {
+        if hidden.insert(window.label().to_string()) {
+            let _ = webview.hide();
+        }
+    } else if hidden.remove(window.label()) {
+        let _ = webview.show();
+    }
 }
 
 /// Tells WebView2 how hard to hold on to its caches. Windows only; the enum has no counterpart on
@@ -311,6 +345,12 @@ pub(crate) fn set_webview_memory_target(webview_window: &tauri::WebviewWindow, l
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// The executable's other job: `ssh`'s askpass helper on Windows (see `remotes::askpass`). `None`
+/// when this run is the app.
+pub fn askpass_helper() -> Option<i32> {
+    remotes::askpass::helper_main()
+}
+
 pub fn run() {
     // First, before anything that can fail. Everything from here to the window appearing runs with
     // no way to report itself — no console on Windows, no window anywhere — and two of the steps
@@ -400,6 +440,11 @@ pub fn run() {
             }
             tray::show_main_window(app);
         }))
+        // A meeting's recording, streamed from disk to the player — see `meetings_cmd::serve_audio`.
+        .register_asynchronous_uri_scheme_protocol("cf-meeting", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            std::thread::spawn(move || responder.respond(commands::meetings_cmd::serve_audio(&app, &request)));
+        })
         // After the single instance, never before it — see above. Neither of these is a reason to
         // let a rival process reach this far.
         //
@@ -595,37 +640,59 @@ pub fn run() {
                     }
                 }
             }
-            // Delete every DBML scratch database whose diagram is gone. Covers the three ways a
-            // file can outlive its owner: a workspace deleted while the app was shut, a backup
-            // restored over the database, and a crash between removing the file and removing the
-            // row. Failing is not worth a startup error — the files are reclaimed next launch.
+            // Startup sweeps, on a thread of their own so the window does not wait for them: every
+            // DBML scratch database whose diagram is gone, notes trashed more than thirty days ago
+            // (with their history), and note or diagram history whose document is already gone.
+            // Failing is not worth a startup error — whatever is left is reclaimed next launch.
             {
-                let known: std::collections::HashSet<String> = app
-                    .state::<db::Db>()
-                    .0
-                    .lock()
-                    .ok()
-                    .and_then(|conn| {
-                        let mut stmt = conn.prepare("SELECT id FROM diagrams").ok()?;
-                        let rows = stmt.query_map([], |row| row.get::<_, String>(0)).ok()?;
-                        Some(rows.flatten().collect())
-                    })
-                    .unwrap_or_default();
-                // Only when the table could be read. An empty set from a failed read would mean
-                // "no diagrams exist", and the sweep would delete every sandbox the user has.
-                if !known.is_empty() {
-                    sandbox::sweep(&known);
-                }
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let known: std::collections::HashSet<String> = handle
+                        .state::<db::Db>()
+                        .0
+                        .lock()
+                        .ok()
+                        .and_then(|conn| {
+                            let mut stmt = conn.prepare("SELECT id FROM diagrams").ok()?;
+                            let rows = stmt.query_map([], |row| row.get::<_, String>(0)).ok()?;
+                            Some(rows.flatten().collect())
+                        })
+                        .unwrap_or_default();
+                    // Only when the table could be read. An empty set from a failed read would mean
+                    // "no diagrams exist", and the sweep would delete every sandbox the user has.
+                    if !known.is_empty() {
+                        sandbox::sweep(&known);
+                    }
+                    // See `note_queries::purge_expired_trash` and `diagrams_cmd::sweep_orphan_versions`.
+                    if let Ok(conn) = handle.state::<db::Db>().0.lock() {
+                        if let Err(e) = db::note_queries::purge_expired_trash(&conn, chrono::Utc::now()) {
+                            applog::info(&format!("notes: trash sweep failed — {e}"));
+                        }
+                        let _ = commands::diagrams_cmd::sweep_orphan_versions(&conn);
+                    }
+                    // Caches of repositories that are no longer projects, and abandoned model
+                    // downloads. Read under the lock, swept outside it.
+                    let projects: Vec<(String, String)> = handle
+                        .state::<db::Db>()
+                        .0
+                        .lock()
+                        .ok()
+                        .and_then(|conn| {
+                            let mut stmt = conn.prepare("SELECT id, local_path FROM projects").ok()?;
+                            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).ok()?;
+                            Some(rows.flatten().collect())
+                        })
+                        .unwrap_or_default();
+                    // Same guard as the sandboxes: an unreadable table is not "no projects".
+                    if !projects.is_empty() {
+                        codemap::sweep_cache(&projects.iter().map(|(_, path)| path.clone()).collect::<Vec<_>>());
+                        review::checkout::sweep(&projects.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>());
+                    }
+                    localai::models::sweep_partials();
+                });
             }
-            // Notes trashed more than thirty days ago go for good, with their history, and so does
-            // any note or diagram history whose document is already gone. See
-            // `note_queries::purge_expired_trash` and `diagrams_cmd::sweep_orphan_versions`.
-            if let Ok(conn) = app.state::<db::Db>().0.lock() {
-                if let Err(e) = db::note_queries::purge_expired_trash(&conn, chrono::Utc::now()) {
-                    applog::info(&format!("notes: trash sweep failed — {e}"));
-                }
-                let _ = commands::diagrams_cmd::sweep_orphan_versions(&conn);
-            }
+            // Retention and vacuum for the database, a minute after launch and daily after.
+            db::housekeeping::start(&app.handle());
             tray::setup(&app.handle())?;
             // The usage meter's way to the database. Set here because `setup` is the only place
             // with an `AppHandle`, and the recording point is deep inside `ai::run`, where threading
@@ -690,6 +757,10 @@ pub fn run() {
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
             ) {
                 window_state::record(window);
+            }
+            #[cfg(windows)]
+            if matches!(event, tauri::WindowEvent::Resized(_)) {
+                follow_minimize(window);
             }
 
             // The custom title bar's close button and the OS's own close paths (Alt+F4, the
@@ -1027,6 +1098,8 @@ sharded_invoke_handler! {
         commands::containers_cmd::containers_file_download,
         commands::containers_cmd::containers_update_limits,
         commands::containers_cmd::containers_create_volume,
+        commands::containers_cmd::containers_backup_volume,
+        commands::containers_cmd::containers_restore_volume,
         commands::containers_cmd::containers_create_network,
         commands::containers_cmd::containers_image_history,
         commands::containers_cmd::containers_disk_usage,
@@ -1056,6 +1129,7 @@ sharded_invoke_handler! {
         commands::services_cmd::services_runtime,
         commands::services_cmd::service_log,
         commands::services_cmd::service_clear_log,
+        commands::services_cmd::service_export_log,
         commands::services_cmd::service_detect,
         commands::services_cmd::service_env_files,
         commands::services_cmd::services_detect_workspace,
@@ -1160,6 +1234,9 @@ sharded_invoke_handler! {
         commands::git_ops::abort_operation,
         commands::git_ops::git_clone,
         commands::git_ops::git_fetch,
+        commands::git_ops::git_file_side,
+        commands::git_ops::git_lfs_pull,
+        commands::git_ops::git_lfs_track,
         commands::git_ops::git_pull,
         commands::git_ops::git_pull_with,
         commands::git_ops::git_fetch_branch,
@@ -1276,6 +1353,8 @@ sharded_invoke_handler! {
         commands::agents_cmd::delete_agent_project,
         commands::agents_cmd::set_agent_task_group,
         commands::agents_cmd::set_agent_task_pinned,
+        commands::agents_cmd::set_agent_task_planning,
+        commands::agents_cmd::set_agent_task_archived,
         commands::agents_cmd::set_chain_group,
         commands::agents_cmd::set_chain_pinned,
         commands::agents_cmd::list_workspace_chain_steps,
@@ -1318,6 +1397,8 @@ sharded_invoke_handler! {
         commands::secrets_cmd::delete_jira_token,
         commands::secrets_cmd::set_monday_token,
         commands::secrets_cmd::delete_monday_token,
+        commands::secrets_cmd::set_linear_token,
+        commands::secrets_cmd::delete_linear_token,
         commands::claude_cmd::generate_commit_message,
         commands::claude_cmd::draft_pr_comment_reply,
         commands::claude_cmd::list_ai_models,
@@ -1368,6 +1449,8 @@ sharded_invoke_handler! {
         commands::ci_cmd::list_pipeline_runs,
         commands::ci_cmd::pipeline_run_detail,
         commands::ci_cmd::fetch_pipeline_job_log,
+        commands::ci_cmd::save_pipeline_job_log,
+        commands::ci_cmd::ci_actionlint,
         commands::ci_cmd::rerun_pipeline,
         commands::ci_cmd::cancel_pipeline,
         commands::ci_cmd::analyze_pipeline_failure,
@@ -1432,11 +1515,16 @@ sharded_invoke_handler! {
         commands::stories_cmd::board_list_item_types,
         commands::stories_cmd::jira_list_projects,
         commands::stories_cmd::monday_whoami,
+        commands::stories_cmd::linear_whoami,
+        commands::stories_cmd::linear_list_teams,
         commands::stories_cmd::monday_list_boards,
         commands::stories_cmd::monday_board_schema,
         commands::stories_cmd::ado_list_classification_nodes,
         commands::stories_cmd::board_parse_item_ref,
         commands::stories_cmd::board_get_work_item,
+        commands::stories_cmd::story_batch_board_states,
+        commands::stories_cmd::story_source_document,
+        commands::stories_cmd::story_source_url,
         commands::stories_cmd::review_work_item,
         commands::stories_cmd::board_update_work_item,
         commands::stories_cmd::board_create_child_tasks,
@@ -1461,6 +1549,7 @@ sharded_invoke_handler! {
         commands::stories_cmd::save_story_draft,
         commands::stories_cmd::delete_story_draft,
         commands::stories_cmd::publish_stories,
+            commands::stories_cmd::find_story_duplicates,
         commands::github_cmd::link_project_github,
         commands::github_cmd::github_authenticated_user,
         commands::publish_cmd::publish_targets,
@@ -1591,6 +1680,8 @@ sharded_invoke_handler! {
         commands::remote_cmd::remote_remove_file,
         commands::remote_cmd::remote_rename_file,
         commands::remote_cmd::remote_close_files,
+        commands::remote_cmd::remote_read_text,
+        commands::remote_cmd::remote_write_text,
         commands::remote_cmd::remote_cancel_transfer,
         commands::remote_cmd::remote_paths_exist,
         commands::remote_cmd::remote_parse_ssh_command,
@@ -1605,6 +1696,8 @@ sharded_invoke_handler! {
         commands::remote_cmd::remote_discover_azure,
         commands::remote_cmd::remote_check_cloud,
         commands::remote_cmd::remote_list_keys,
+        commands::remote_cmd::remote_pageant_pipe,
+        commands::remote_cmd::remote_import_ppk,
     ]
     shard_18 => [
         commands::remote_cmd::remote_generate_key,
@@ -1617,6 +1710,8 @@ sharded_invoke_handler! {
         // ---- Notes (workspace-scoped, like Remote above it) ----
         // ---- The keyring ("Llavero"). Global — no workspace scoping on the vault itself. ----
         commands::keyvault_cmd::keyvault_status,
+        commands::keyvault_cmd::keyvault_copy_secret,
+            commands::keyvault_cmd::keyvault_set_biometric,
         commands::keyvault_cmd::keyvault_initialise,
         commands::keyvault_cmd::keyvault_unlock,
         commands::keyvault_cmd::keyvault_unlock_remembered,
@@ -1688,6 +1783,9 @@ sharded_invoke_handler! {
         commands::notes_cmd::notes_delete_template,
         commands::notes_cmd::notes_search,
         commands::notes_cmd::notes_backlinks,
+        commands::notes_cmd::notes_graph,
+        commands::notes_cmd::notes_read_vault,
+        commands::notes_cmd::notes_export_docx,
         commands::notes_cmd::notes_list_versions,
         commands::notes_cmd::notes_version_content,
     ]
@@ -1744,6 +1842,7 @@ sharded_invoke_handler! {
         commands::flows_cmd::flows_run_form,
         commands::flows_cmd::flows_bridge_answer,
         commands::flows_cmd::flows_cancel_run,
+        commands::flows_cmd::flows_debug_resume,
         commands::flows_cmd::flows_list_waits,
         commands::flows_cmd::flows_trust_flow,
         commands::flows_cmd::flows_export_flow,
@@ -1751,6 +1850,8 @@ sharded_invoke_handler! {
         commands::flows_cmd::flows_decide_wait,
         commands::flows_cmd::flows_active_runs,
         commands::flows_cmd::flows_list_runs,
+        commands::flows_cmd::flows_failed_runs,
+        commands::flows_cmd::flows_missing_programs,
         commands::flows_cmd::flows_metrics,
         commands::flows_cmd::flows_run_periods,
         commands::flows_cmd::flows_list_templates,
@@ -1815,6 +1916,7 @@ sharded_invoke_handler! {
     shard_23 => [
         commands::flows_cmd::flows_test_credential,
         commands::diagrams_cmd::diagrams_load_tree,
+        commands::diagrams_cmd::diagrams_search_content,
         commands::diagrams_cmd::diagrams_get_diagram,
         commands::diagrams_cmd::diagrams_load_thumbnails,
         commands::diagrams_cmd::diagrams_create_diagram,
@@ -1868,6 +1970,10 @@ sharded_invoke_handler! {
         commands::debug_cmd::debug_session,
         commands::debug_cmd::debug_python,
         commands::reviewer_cmd::reviewer_status,
+        commands::reviewer_cmd::reviewer_rule,
+        commands::reviewer_cmd::reviewer_issue_decide,
+        commands::reviewer_cmd::reviewer_hotspot_review,
+        commands::reviewer_cmd::reviewer_changed_lines,
         commands::reviewer_cmd::reviewer_disk_used,
         commands::reviewer_cmd::reviewer_install,
         commands::reviewer_cmd::reviewer_cancel_install,
@@ -1891,6 +1997,7 @@ sharded_invoke_handler! {
         commands::codemap_cmd::codemap_find,
         commands::codemap_cmd::codemap_usages,
         commands::codemap_cmd::codemap_key_symbols,
+        commands::codemap_cmd::codemap_health,
         commands::localai_cmd::localai_state,
         commands::localai_cmd::localai_set_enabled,
         commands::localai_cmd::localai_set_model,

@@ -1,7 +1,7 @@
 use tauri::AppHandle;
 
 use crate::git::{
-    bisect, blame, branch, conflict, diff, features, graph, history, hunk, identity, lines, merge, reflog, remotes, repo,
+    bisect, blame, blobs, branch, conflict, diff, features, graph, history, hunk, identity, lines, merge, reflog, remotes, repo,
     stash, submodule, worktree,
 };
 use crate::remote;
@@ -18,19 +18,21 @@ use crate::remote;
 // would not compile — the attribute is the mechanism that gets the work off this thread without
 // touching the code that does it.
 //
-// Only reads get it, and that limit is load-bearing rather than cautious. Today the UI thread is
-// an implicit global lock over the index: stage, unstage, discard and commit each open the
-// repository themselves and cannot currently interleave with each other or with the watcher's
-// `refreshStatus`. Moving those off the UI thread would make them genuinely concurrent and expose
-// real races on `index.write()`. Reads are safe to run concurrently because libgit2 reads take
-// their own snapshot — a read racing a write returns stale data or an error, never corruption.
+// The writes get it too, and each takes `crate::git::write_lock()` first. The UI thread used to be
+// an implicit global lock over the index — stage, unstage, discard, checkout, stash could not
+// interleave — which is also why a checkout or a stash on a big repository froze the window. The
+// lock keeps that guarantee off the UI thread: writes run one at a time, on a worker. Reads never
+// take it; libgit2 reads take their own snapshot — a read racing a write returns stale data or an
+// error, never corruption. `commit` and its kin stay outside the lock (see `commit`): with hooks
+// they can take a minute, and the CLI's `index.lock` already makes a stage meanwhile fail cleanly.
 
 /// Creates a repository in a folder that has stopped being one.
 ///
 /// The repair half of `commands::repos::project_path_health` — the other half being removing the
 /// project from the list. A write, so no `(async)`: see the note above.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn init_repository(repo_path: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     repo::init(&repo_path)
 }
 
@@ -54,13 +56,15 @@ pub fn list_branches(repo_path: String) -> Result<Vec<branch::BranchInfo>, Strin
     branch::list_branches(&repo_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_branch(repo_path: String, name: String, start_point: Option<String>) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     branch::create_branch(&repo_path, &name, start_point)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_branch(repo_path: String, name: String, is_remote: bool) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     branch::delete_branch(&repo_path, &name, is_remote)
 }
 
@@ -71,34 +75,39 @@ pub fn branch_unmerged_count(repo_path: String, name: String) -> Result<usize, S
     branch::unmerged_commit_count(&repo_path, &name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_branch_locked(repo_path: String, name: String, locked: bool) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     branch::set_branch_locked(&repo_path, &name, locked)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn checkout_local_branch(app: AppHandle, repo_path: String, name: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     branch::checkout_local_branch(&repo_path, &name)?;
     switched(&app, &repo_path);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn checkout_detached(app: AppHandle, repo_path: String, refname: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     branch::checkout_detached(&repo_path, &refname)?;
     switched(&app, &repo_path);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn checkout_remote_tracking(app: AppHandle, repo_path: String, remote_branch: String) -> Result<String, String> {
+    let _write = crate::git::write_lock();
     let local = branch::checkout_remote_tracking(&repo_path, &remote_branch)?;
     switched(&app, &repo_path);
     Ok(local)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn track_remote_branch(repo_path: String, remote_branch: String) -> Result<String, String> {
+    let _write = crate::git::write_lock();
     branch::track_remote_branch(&repo_path, &remote_branch)
 }
 
@@ -107,28 +116,33 @@ pub fn list_stashes(repo_path: String) -> Result<Vec<stash::StashInfo>, String> 
     stash::list_stashes(&repo_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stash_save(repo_path: String, message: Option<String>, include_untracked: bool) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     stash::stash_save(&repo_path, message, include_untracked)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stash_apply(repo_path: String, index: usize) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     stash::stash_apply(&repo_path, index)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stash_pop(repo_path: String, index: usize) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     stash::stash_pop(&repo_path, index)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stash_drop(repo_path: String, index: usize) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     stash::stash_drop(&repo_path, index)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_stash(repo_path: String, index: usize, new_message: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     stash::rename_stash(&repo_path, index, &new_message)
 }
 
@@ -184,7 +198,7 @@ pub fn file_at_revision(repo_path: String, revision: String, path: String) -> Re
     diff::file_at_revision(&repo_path, &revision, &path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_commit_diff(repo_path: String, oid: String) -> Result<Vec<diff::FileDiffInfo>, String> {
     diff::get_commit_diff(&repo_path, &oid)
 }
@@ -193,10 +207,9 @@ pub fn get_commit_diff(repo_path: String, oid: String) -> Result<Vec<diff::FileD
 /// side-by-side counterpart to [`get_commit_diff`]'s whole-changeset list. `null` when that commit
 /// didn't touch the path.
 ///
-/// `(async)` where the neighbouring [`get_commit_diff`] doesn't have it: this one sits on a click
-/// path in the editor, and full-file context over a large file is exactly the kind of work that
-/// stops the window painting if it runs in the IPC handler. (That `get_commit_diff` lacks it is an
-/// existing inconsistency, left alone here.)
+/// `(async)`, like [`get_commit_diff`]: this one sits on a click path in the editor, and full-file
+/// context over a large file is exactly the kind of work that stops the window painting if it runs
+/// in the IPC handler.
 #[tauri::command(async)]
 pub fn get_commit_file_diff(
     repo_path: String,
@@ -222,23 +235,27 @@ pub fn get_file_blame(
     blame::blame_file(&repo_path, &path, contents.as_deref())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stage_file(repo_path: String, file_path: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     diff::stage_file(&repo_path, &file_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stage_all(repo_path: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     diff::stage_all(&repo_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unstage_file(repo_path: String, file_path: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     diff::unstage_file(&repo_path, &file_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unstage_all(repo_path: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     diff::unstage_all(&repo_path)
 }
 
@@ -255,11 +272,13 @@ pub fn quick_diff_base(repo_path: String, file_path: String, staged: bool) -> Re
 // window does not repaint, which is exactly what "the app freezes" looks like.
 #[tauri::command(async)]
 pub fn discard_file_changes(repo_path: String, file_path: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     diff::discard_file_changes(&repo_path, &file_path)
 }
 
 #[tauri::command(async)]
 pub fn discard_all_changes(repo_path: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     diff::discard_all_changes(&repo_path)
 }
 
@@ -281,22 +300,25 @@ pub fn discard_all_changes(repo_path: String) -> Result<(), String> {
 // `src/state/repoStore.ts`.
 
 /// Adds one hunk to the index and leaves the working tree alone — `git add -p`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stage_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Stage, context_lines)
 }
 
 /// Removes one hunk from the index and leaves the working tree alone — `git reset -p`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unstage_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Unstage, context_lines)
 }
 
 /// Throws one hunk of working-tree change away, restoring that region from the **index** — the same
 /// contract as [`discard_file_changes`], so a file that is staged and then edited keeps its staged
 /// part. Nothing here is recoverable: no reflog, no stash, no restore point. The caller confirms.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discard_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Discard, context_lines)
 }
 
@@ -342,8 +364,9 @@ fn pushed(app: &AppHandle, repo_path: &str, force: bool) {
     );
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reset_to_commit(repo_path: String, oid: String, mode: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     repo::reset_to_commit(&repo_path, &oid, &mode)
 }
 
@@ -382,8 +405,9 @@ pub fn format_patch(repo_path: String, oid: String) -> Result<String, String> {
     history::format_patch(&repo_path, &oid)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_branch(repo_path: String, name: String, new_name: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     branch::rename_branch(&repo_path, &name, &new_name)
 }
 
@@ -413,7 +437,7 @@ pub fn file_history(repo_path: String, rel_path: String, limit: usize) -> Result
 }
 
 /// The message the amend dialog opens on — see `history::head_commit_message`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn head_commit_message(repo_path: String) -> Result<String, String> {
     history::head_commit_message(&repo_path)
 }
@@ -455,7 +479,7 @@ pub fn list_tags(repo_path: String) -> Result<Vec<history::TagInfo>, String> {
     history::list_tags(&repo_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_tag(
     repo_path: String,
     name: String,
@@ -464,11 +488,13 @@ pub fn create_tag(
     author_name: Option<String>,
     author_email: Option<String>,
 ) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     history::create_tag(&repo_path, &name, &oid, &message, author_name, author_email)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_tag(repo_path: String, name: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     history::delete_tag(&repo_path, &name)
 }
 
@@ -477,50 +503,58 @@ pub fn list_remotes(repo_path: String) -> Result<Vec<remotes::RemoteInfo>, Strin
     remotes::list_remotes(&repo_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_remote_url(repo_path: String, name: String, url: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     remotes::set_remote_url(&repo_path, &name, &url)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_remote(repo_path: String, name: String, url: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     remotes::add_remote(&repo_path, &name, &url)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_remote(repo_path: String, name: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     remotes::remove_remote(&repo_path, &name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_git_identity() -> Result<identity::GitIdentity, String> {
     identity::get_identity()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_git_identity(name: String, email: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     identity::set_identity(&name, &email)
 }
 
 /// The "only this repository" answer to a commit that failed for want of a name and email — see
 /// `identity::set_repo_identity`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_repo_git_identity(repo_path: String, name: String, email: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     identity::set_repo_identity(&repo_path, &name, &email)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge_branch(repo_path: String, branch_name: String) -> Result<merge::MergeOutcome, String> {
+    let _write = crate::git::write_lock();
     merge::merge_branch(&repo_path, &branch_name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_conflict_side(repo_path: String, rel_path: String, side: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     merge::resolve_conflict_side(&repo_path, &rel_path, &side)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mark_conflict_resolved(repo_path: String, rel_path: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     merge::mark_conflict_resolved(&repo_path, &rel_path)
 }
 
@@ -563,6 +597,39 @@ pub async fn abort_operation(app: AppHandle, repo_path: String) -> Result<(), St
 #[tauri::command]
 pub async fn git_clone(app: AppHandle, url: String, dest: String) -> Result<(), String> {
     remote::clone(app, url, dest).await
+}
+
+/// One side of a file's change, as bytes — for showing an image or binary change. `side` is
+/// `WORKDIR`, `INDEX` or a revision.
+#[tauri::command(async)]
+pub fn git_file_side(repo_path: String, path: String, side: String) -> Result<blobs::FileSide, String> {
+    blobs::file_side(&repo_path, &path, &side)
+}
+
+#[tauri::command]
+pub async fn git_lfs_pull(app: AppHandle, repo_path: String) -> Result<(), String> {
+    remote::lfs_pull(app, repo_path).await
+}
+
+/// `git lfs track <pattern>`: stores files matching it through LFS from now on (written to the root
+/// `.gitattributes`, which then shows as a change to commit). Files already committed stay in
+/// history as they were — `git lfs migrate` rewrites that, and is not done from here.
+#[tauri::command(async)]
+pub fn git_lfs_track(repo_path: String, pattern: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
+    let pattern = pattern.trim();
+    if pattern.is_empty() || pattern.starts_with('-') {
+        return Err("not a file pattern".into());
+    }
+    if !crate::git::cli::lfs_available() {
+        return Err("Git LFS is not installed on this machine (https://git-lfs.com).".into());
+    }
+    let out = crate::git::cli::run_in(&repo_path, &["lfs", "track", "--", pattern], &[])?;
+    if out.success {
+        Ok(())
+    } else {
+        Err(out.detail())
+    }
 }
 
 #[tauri::command]
@@ -628,21 +695,24 @@ pub async fn git_push_force_with_lease(app: AppHandle, repo_path: String) -> Res
 // is the drawn lines, never bytes to write — see `git::lines`.
 
 /// Adds the selected lines to the index; the working tree is not touched.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stage_lines(repo_path: String, selection: lines::LineSelection) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     lines::apply_lines(&repo_path, &selection, lines::LineOp::Stage)
 }
 
 /// Takes the selected lines back out of the index; the working tree is not touched.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unstage_lines(repo_path: String, selection: lines::LineSelection) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     lines::apply_lines(&repo_path, &selection, lines::LineOp::Unstage)
 }
 
 /// Throws the selected lines of working-tree change away, back to the index copy. Not recoverable —
 /// the caller confirms.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discard_lines(repo_path: String, selection: lines::LineSelection) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     lines::apply_lines(&repo_path, &selection, lines::LineOp::Discard)
 }
 
@@ -668,14 +738,16 @@ pub fn get_conflict_merge_text(repo_path: String, rel_path: String) -> Result<St
 }
 
 /// Writes the editor's result and stages it — "mark resolved".
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_conflict_with_text(repo_path: String, rel_path: String, text: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     conflict::resolve_with_text(&repo_path, &rel_path, &text)
 }
 
 /// Resolves a modify/delete conflict as deleted — `git rm`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_conflict_deleted(repo_path: String, rel_path: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     conflict::resolve_deleted(&repo_path, &rel_path)
 }
 
@@ -694,14 +766,16 @@ pub fn get_undo_plan(repo_path: String) -> Result<Option<reflog::UndoPlan>, Stri
 }
 
 /// Carries out the plan, if HEAD is still `expected_head`. Returns the backup ref it wrote.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn undo_last_operation(repo_path: String, expected_head: String) -> Result<Option<String>, String> {
+    let _write = crate::git::write_lock();
     reflog::undo(&repo_path, &expected_head)
 }
 
 /// "Restore to here" from the reflog view. Returns the backup ref it wrote first.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_reflog_entry(repo_path: String, oid: String) -> Result<Option<String>, String> {
+    let _write = crate::git::write_lock();
     reflog::restore(&repo_path, &oid)
 }
 

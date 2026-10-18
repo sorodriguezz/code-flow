@@ -90,3 +90,28 @@ describe("code blocks in a note's preview", () => {
     expect(fake.models).toEqual([]);
   });
 });
+
+describe("renderRichMarkdown — diagrams and formulas", () => {
+  it("keeps a Mermaid block's source for the preview to draw", async () => {
+    const { renderRichMarkdown } = await import("./richMarkdown");
+    const html = await renderRichMarkdown("```mermaid\ngraph TD; A-->B\n```", THEME, "Copiar", () => null, "No existe");
+    expect(html).toContain('<div class="cf-note-mermaid"><pre class="cf-mermaid-src">graph TD; A--&gt;B</pre></div>');
+  });
+
+  it("renders TeX between dollars, and leaves prices alone", async () => {
+    const { renderRichMarkdown } = await import("./richMarkdown");
+    const html = await renderRichMarkdown("Area $a^2$ costs $5 and $10.\n\n$$\n\\frac{1}{2}\n$$\n", THEME, "Copiar", () => null, "No existe");
+    expect(html).toContain('class="katex"');
+    expect(html).toContain("costs $5 and $10.");
+    expect(html).toContain('<div class="cf-math-block">');
+  });
+
+  it("embeds a diagram the workspace has, and marks one it has not", async () => {
+    const resolve = (title: string) => (title === "Arquitectura" ? { id: "d1", title: "Arquitectura" } : null);
+    const { renderRichMarkdown } = await import("./richMarkdown");
+    const html = await renderRichMarkdown("![[Arquitectura]] y ![[Otro]] y [[Nota]]", THEME, "Copiar", () => null, "No existe", resolve);
+    expect(html).toContain('data-cf-diagram="d1"');
+    expect(html).toContain('cf-note-link-missing" title="No existe">Otro<');
+    expect(html).not.toContain("!<span");
+  });
+});

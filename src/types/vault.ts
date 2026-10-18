@@ -110,6 +110,10 @@ export interface VaultStatus {
   autolock_minutes: number;
   /** Whether this machine holds the master password in the OS credential store. */
   remembered: boolean;
+  /** Whether Touch ID / Windows Hello (or the Mac's login password) can confirm who is there. */
+  biometric_available: boolean;
+  /** Whether the remembered password waits for that check. */
+  biometric: boolean;
 }
 
 export interface VaultFolderRow {

@@ -28,13 +28,15 @@ pub fn ai_checkpoint_changed_paths(repo_path: String, checkpoint_id: String) -> 
 
 /// Puts every file that differs from the checkpoint back to its snapshotted content. Returns the
 /// paths it touched, so the UI can report what it undid instead of a bare "done".
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_ai_checkpoint(repo_path: String, checkpoint_id: String) -> Result<Vec<String>, String> {
+    let _write = crate::git::write_lock();
     checkpoint::restore(&repo_path, &checkpoint_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_ai_checkpoint(repo_path: String, checkpoint_id: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     checkpoint::remove(&repo_path, &checkpoint_id)
 }
 
@@ -64,7 +66,8 @@ pub fn ai_checkpoint_file(repo_path: String, checkpoint_id: String, path: String
 
 /// Puts the named files back as the checkpoint has them — "discard" on a file of the per-turn
 /// review. Sync, like [`restore_ai_checkpoint`]: a write.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_ai_checkpoint_paths(repo_path: String, checkpoint_id: String, paths: Vec<String>) -> Result<Vec<String>, String> {
+    let _write = crate::git::write_lock();
     checkpoint::restore_paths(&repo_path, &checkpoint_id, &paths)
 }

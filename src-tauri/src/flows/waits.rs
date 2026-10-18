@@ -38,6 +38,39 @@ static WAITERS: LazyLock<Mutex<HashMap<String, oneshot::Sender<WaitAnswer>>>> = 
 /// Set when the app is quitting. Every run is cancelled then, and a wait cancelled that way is not an
 /// answer: its row stays open and its run `waiting`, for the next launch to pick up.
 static QUITTING: AtomicBool = AtomicBool::new(false);
+/// How many of each run's nodes are parked on a wait right now. A run's own time limit
+/// (`settings.runTimeoutMinutes`) does not count the time a person takes to answer one.
+static PARKED: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+/// Whether any node of `run_id` is waiting on a person, a call or a timer.
+pub fn is_waiting(run_id: &str) -> bool {
+    PARKED.lock().map(|parked| parked.get(run_id).is_some_and(|n| *n > 0)).unwrap_or(false)
+}
+
+/// One node of a run parked on a wait, for as long as this lives.
+pub(super) struct Parked(String);
+
+impl Parked {
+    pub(super) fn begin(run_id: &str) -> Self {
+        if let Ok(mut parked) = PARKED.lock() {
+            *parked.entry(run_id.to_string()).or_default() += 1;
+        }
+        Parked(run_id.to_string())
+    }
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        if let Ok(mut parked) = PARKED.lock() {
+            if let Some(count) = parked.get_mut(&self.0) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    parked.remove(&self.0);
+                }
+            }
+        }
+    }
+}
 
 /// The quit path, before it cancels the runs — see [`QUITTING`].
 pub fn quitting() {
@@ -162,6 +195,7 @@ pub(super) fn wait_for(host: &AppHost, request: WaitRequest, cancel: Cancellatio
         emit_run(&app, &host.run_id);
         emit_wait(&app, &row);
 
+        let _parked = Parked::begin(&host.run_id);
         let limit = async {
             match request.timeout {
                 Some(limit) => tokio::time::sleep(limit).await,

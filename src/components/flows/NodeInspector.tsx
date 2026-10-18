@@ -605,6 +605,9 @@ function TriggerInfo({ flowId, node }: { flowId: string; node: FlowNodeSpec }) {
           </button>
         </span>
       )}
+      {/* Served by this app on 127.0.0.1 (and through the tunnel, by this app too): it answers while
+          CodeFlow is open, in the tray included, and nobody answers with it closed. */}
+      {listening && view?.url && <span className="text-[11.5px] text-[var(--cf-text-faint)]">{t("flows.webhook.needsApp")}</span>}
       {listening && node.type === "trigger.link" && view?.detail && <LinkCommand name={view.detail.replace(/^codeflow --flow /, "")} />}
       {listening && view?.next && (
         <span className="text-[var(--cf-text-muted)]">
@@ -676,6 +679,7 @@ function NodeSettingsForm({
   if (isTrigger) return <p className="text-[12px] text-[var(--cf-text-muted)]">{t("flows.settings.trigger")}</p>;
   return (
     <div className="flex flex-col gap-4">
+      {row(t("flows.settings.debugging"), check("breakpoint", t("flows.settings.breakpoint")), t("flows.settings.breakpointHint"))}
       {check("retryOnFail", t("flows.settings.retryOnFail"))}
       {settings.retryOnFail === true && (
         <div className="ml-6 grid grid-cols-2 gap-3">

@@ -64,9 +64,20 @@ interface History {
   more: boolean;
 }
 
-export type FlowPane = "editor" | "executions" | "tests" | "schedule" | "tables";
+export type FlowPane = "editor" | "executions" | "tests" | "schedule" | "tables" | "failures";
+
+/** A run held at a breakpoint — `runs::Paused`. */
+export interface FlowPause {
+  runId: string;
+  flowId: string;
+  nodeId: string;
+  items: number;
+  sample: unknown[];
+}
 
 interface FlowRunsState {
+  /** Runs held at a breakpoint, by flow id. */
+  paused: Record<string, FlowPause>;
   /** Per flow: the run its canvas shows — the newest this window started, saw arrive, or loaded. */
   current: Record<string, LiveRun>;
   /** Per flow: pinned output, node id → ports. */
@@ -119,6 +130,7 @@ const startedHere = new Set<string>();
 const isRunning = (run: FlowRunRow | undefined) => run?.status === "running";
 
 export const useFlowRunsStore = create<FlowRunsState>((set, get) => ({
+  paused: {},
   current: {},
   pins: {},
   history: {},
@@ -414,7 +426,27 @@ export function ensureFlowRunEvents(): void {
   void listen<FlowRunRow>("flows:run", (event) => {
     const run = event.payload;
     adoptRun(run);
-    if (run.status !== "running") settled(run);
+    if (run.status !== "running") {
+      settled(run);
+      // A run that ended is held nowhere.
+      useFlowRunsStore.setState((state) => {
+        if (state.paused[run.flowId]?.runId !== run.id) return {};
+        const { [run.flowId]: _, ...rest } = state.paused;
+        return { paused: rest };
+      });
+    }
+  });
+  void listen<FlowPause>("flows:paused", (event) => {
+    const pause = event.payload;
+    useFlowRunsStore.setState((state) => ({ paused: { ...state.paused, [pause.flowId]: pause } }));
+  });
+  void listen<{ runId: string; flowId: string }>("flows:resumed", (event) => {
+    const { flowId, runId } = event.payload;
+    useFlowRunsStore.setState((state) => {
+      if (state.paused[flowId]?.runId !== runId) return {};
+      const { [flowId]: _, ...rest } = state.paused;
+      return { paused: rest };
+    });
   });
   void listen<FlowNodeEvent>("flows:node", (event) => {
     const { flowId, runId, node } = event.payload;

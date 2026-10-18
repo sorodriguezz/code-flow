@@ -21,7 +21,7 @@ component's own licence wins — which is what section 6 says.
 | Rust crates (resolved for macOS and Windows) | 878 resolved versions of 772 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
-| Fonts | 10 |
+| Fonts | 11 |
 | Icon sets | 2 |
 
 A package resolved at two versions gets one row carrying both, which is why the first two counts
@@ -180,6 +180,7 @@ macOS's zlib, and on Windows the CNG cryptography libssh2 uses in place of OpenS
 | Lilita One | 1.002 | MIT | headings on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Lilita`) | Copyright (c) 2011 Juan Montoreano (juan@remolacha.biz), with Reserved Font Names "Lilita One" |
 | Assistant | 3.000 | OFL-1.1 | the whiteboard editor's own controls | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Assistant/Assistant-Regular.woff2`) | Copyright 2020 The Assistant Project Authors (https://github.com/hafontia/Assistant). Copyright 2010 The Source Sans Pro Authors (https://github.com/adobe-fonts/source-sans-pro), with Reserved Font Name 'Source'. Source is a trademark of Adobe Systems Incorporated in the United States and/or other countries. |
 | codicon | 1.15 | MIT | the editor's own icons | inside `monaco-editor` 0.56.0 (`esm/vs/base/browser/ui/codicons/codicon/codicon.ttf`) | — |
+| KaTeX_Main | 1.1 | OFL-1.1 | formulas in notes (and the rest of KaTeX's families) | inside `katex` 0.16.47 (`dist/fonts/KaTeX_Main-Regular.ttf`) | Copyright (c) 2009-2010 Design Science, Inc.; Copyright (c) 2014-2018 Khan Academy |
 
 Each OFL font carries its copyright notice and licence in its own metadata, which is where the
 SIL Open Font License allows them to travel; they are repeated here.

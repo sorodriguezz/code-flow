@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  Coins,
   Blend,
   Check,
   ChevronRight,
@@ -32,6 +33,7 @@ import { buttonClass, iconButtonClass, type ButtonVariant } from "../common/Butt
 import { Checkbox } from "../common/Checkbox";
 import { chipClass, fieldClass, toolbarClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
+import { costText } from "./taskPlanning";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useChainStore } from "../../state/chainStore";
@@ -65,6 +67,12 @@ export function ChainDetail({ chainId }: { chainId: string }) {
   });
   const setActiveView = useUiStore((s) => s.setActiveView);
   const focusProject = useWorkspaceStore((s) => s.focusProject);
+  const allTasks = useAgentsStore((s) => s.tasks);
+  /** What the plan's steps have spent between them — the sum of their tasks'. */
+  const spent = useMemo(() => {
+    const ids = new Set(steps.map((step) => step.task_id).filter(Boolean));
+    return costText(allTasks.filter((task) => ids.has(task.id)), t);
+  }, [steps, allTasks, t]);
 
   /** The gate's message, editable. Seeded once per gate so typing is never overwritten. */
   const [draft, setDraft] = useState<string | null>(null);
@@ -159,6 +167,14 @@ export function ChainDetail({ chainId }: { chainId: string }) {
         <span className="shrink-0 text-[12px] tabular-nums text-[var(--cf-text-faint)]">
           {t("agents.stepN", { n: chain.current_step + 1, total: chain.step_count })}
         </span>
+        {spent && (
+          <Tooltip label={t("agents.chainCostHint")}>
+            <span className="flex shrink-0 items-center gap-1 text-[12px] tabular-nums text-[var(--cf-text-faint)]">
+              <Coins size={12} />
+              {spent}
+            </span>
+          </Tooltip>
+        )}
         {/* The one bound a looping plan runs into. Steps say where the plan is; this says how much
             of its budget the loops and retries have spent — amber once it is three-quarters gone,
             which is the moment a plan going round in circles is worth a look. */}

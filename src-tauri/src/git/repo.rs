@@ -41,49 +41,53 @@ pub fn unborn_head_branch(repo: &Repository) -> Option<String> {
         .and_then(|target| target.strip_prefix("refs/heads/").map(|name| name.to_string()))
 }
 
-fn status_label(status: git2::Status) -> Option<(&'static str, &'static str)> {
-    // returns (bucket, label) where bucket is one of staged/unstaged/untracked/conflicted
+/// Where one status entry belongs, as `(bucket, label)` pairs. A file can sit in two buckets at
+/// once — staged *and* unstaged (`MM` in `git status --short`) after only some of its hunks were
+/// staged — so this returns both rather than the first match: picking one hid the unstaged rest of
+/// the file the moment a hunk was staged.
+fn status_labels(status: git2::Status) -> Vec<(&'static str, &'static str)> {
     if status.is_conflicted() {
-        return Some(("conflicted", "conflicted"));
+        return vec![("conflicted", "conflicted")];
     }
-    if status.is_index_new() {
-        return Some(("staged", "added"));
-    }
-    if status.is_index_modified() {
-        return Some(("staged", "modified"));
-    }
-    if status.is_index_deleted() {
-        return Some(("staged", "deleted"));
-    }
-    if status.is_index_renamed() {
-        return Some(("staged", "renamed"));
-    }
-    if status.is_index_typechange() {
-        return Some(("staged", "typechange"));
+    let mut out = Vec::with_capacity(2);
+    let index = if status.is_index_new() {
+        Some("added")
+    } else if status.is_index_modified() {
+        Some("modified")
+    } else if status.is_index_deleted() {
+        Some("deleted")
+    } else if status.is_index_renamed() {
+        Some("renamed")
+    } else if status.is_index_typechange() {
+        Some("typechange")
+    } else {
+        None
+    };
+    if let Some(label) = index {
+        out.push(("staged", label));
     }
     if status.is_wt_new() {
-        return Some(("untracked", "untracked"));
+        out.push(("untracked", "untracked"));
+    } else if status.is_wt_modified() {
+        out.push(("unstaged", "modified"));
+    } else if status.is_wt_deleted() {
+        out.push(("unstaged", "deleted"));
+    } else if status.is_wt_renamed() {
+        out.push(("unstaged", "renamed"));
+    } else if status.is_wt_typechange() {
+        out.push(("unstaged", "typechange"));
     }
-    if status.is_wt_modified() {
-        return Some(("unstaged", "modified"));
-    }
-    if status.is_wt_deleted() {
-        return Some(("unstaged", "deleted"));
-    }
-    if status.is_wt_renamed() {
-        return Some(("unstaged", "renamed"));
-    }
-    if status.is_wt_typechange() {
-        return Some(("unstaged", "typechange"));
-    }
-    None
+    out
 }
 
 pub fn get_status(path: &str) -> Result<RepoStatusInfo, String> {
     let repo = open(path)?;
 
     let mut opts = StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
+    // Staged renames only: a `git mv` then reads as one renamed row instead of a deletion plus an
+    // addition. Working-tree rename detection is left off on purpose — it would fold an untracked
+    // file and an unrelated deletion into one row that staging and discard could only act on half of.
+    opts.include_untracked(true).recurse_untracked_dirs(true).renames_head_to_index(true);
 
     let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.message().to_string())?;
 
@@ -98,18 +102,24 @@ pub fn get_status(path: &str) -> Result<RepoStatusInfo, String> {
     };
 
     for entry in statuses.iter() {
-        let Some(file_path) = entry.path() else { continue };
-        let Some((bucket, label)) = status_label(entry.status()) else { continue };
-        let item = FileStatusEntry {
-            path: file_path.to_string(),
-            status: label.to_string(),
-        };
-        match bucket {
-            "staged" => info.staged.push(item),
-            "unstaged" => info.unstaged.push(item),
-            "untracked" => info.untracked.push(item),
-            "conflicted" => info.conflicted.push(item),
-            _ => {}
+        // `entry.path()` is the *old* path of a rename; the row is named after where the file is now.
+        let renamed_to = entry
+            .head_to_index()
+            .filter(|_| entry.status().is_index_renamed())
+            .and_then(|delta| delta.new_file().path().map(|p| p.to_string_lossy().into_owned()));
+        let Some(file_path) = renamed_to.or_else(|| entry.path().map(|p| p.to_string())) else { continue };
+        for (bucket, label) in status_labels(entry.status()) {
+            let item = FileStatusEntry {
+                path: file_path.clone(),
+                status: label.to_string(),
+            };
+            match bucket {
+                "staged" => info.staged.push(item),
+                "unstaged" => info.unstaged.push(item),
+                "untracked" => info.untracked.push(item),
+                "conflicted" => info.conflicted.push(item),
+                _ => {}
+            }
         }
     }
 
@@ -276,5 +286,58 @@ mod tests {
     fn init_refuses_a_folder_that_is_not_there() {
         let dir = std::env::temp_dir().join(format!("cf-repo-gone-{}", uuid::Uuid::new_v4()));
         assert!(init(dir.to_str().unwrap()).is_err());
+    }
+
+    fn committed_repo(name: &str, files: &[(&str, &str)]) -> (std::path::PathBuf, git2::Repository) {
+        let dir = std::env::temp_dir().join(format!("cf-repo-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let repo = git2::Repository::init(&dir).unwrap();
+        let mut index = repo.index().unwrap();
+        for (path, body) in files {
+            fs::write(dir.join(path), body).unwrap();
+            index.add_path(std::path::Path::new(path)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        drop(tree);
+        (dir, repo)
+    }
+
+    /// Staging one hunk must not hide the rest: the file is listed staged *and* unstaged.
+    #[test]
+    fn a_partly_staged_file_is_in_both_lists() {
+        let (dir, repo) = committed_repo("mm", &[("a.txt", "one\n")]);
+        fs::write(dir.join("a.txt"), "two\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        fs::write(dir.join("a.txt"), "three\n").unwrap();
+
+        let status = get_status(dir.to_str().unwrap()).unwrap();
+        assert_eq!(status.staged.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["a.txt"]);
+        assert_eq!(status.unstaged.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["a.txt"]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `git mv` reads as one renamed row, under the new name — not a deletion plus an addition.
+    #[test]
+    fn a_staged_move_is_one_renamed_row_under_the_new_name() {
+        let (dir, repo) = committed_repo("mv", &[("old.txt", "same content long enough to match\n")]);
+        fs::rename(dir.join("old.txt"), dir.join("new.txt")).unwrap();
+        let mut index = repo.index().unwrap();
+        index.remove_path(std::path::Path::new("old.txt")).unwrap();
+        index.add_path(std::path::Path::new("new.txt")).unwrap();
+        index.write().unwrap();
+
+        let status = get_status(dir.to_str().unwrap()).unwrap();
+        assert_eq!(status.staged.len(), 1);
+        assert_eq!(status.staged[0].path, "new.txt");
+        assert_eq!(status.staged[0].status, "renamed");
+        assert!(status.unstaged.is_empty() && status.untracked.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

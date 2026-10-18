@@ -38,7 +38,7 @@ pub fn provider_id(raw: &str) -> String {
 }
 
 pub(super) fn client() -> Result<reqwest::Client, NodeError> {
-    reqwest::Client::builder().timeout(Duration::from_secs(300)).build().map_err(|e| NodeError::failed(e.to_string()))
+    crate::http_clients::cached("llm", || reqwest::Client::builder().timeout(Duration::from_secs(300))).map_err(NodeError::failed)
 }
 
 /// Where a provider's API is. Only a server of the user's own — an OpenAI-compatible one, Ollama — takes

@@ -698,6 +698,12 @@ pub fn flows_run_form(app: AppHandle, flow_id: String, mode: RunMode, trigger: O
     runs::run_form(&app, &flow_id, &mode, trigger.as_deref())
 }
 
+/// Answers a run held at a breakpoint: `continue`, `step` (pause before the next node too) or `stop`.
+#[tauri::command]
+pub fn flows_debug_resume(run_id: String, action: String) -> bool {
+    runs::debug_resume(&run_id, &action)
+}
+
 #[tauri::command]
 pub fn flows_cancel_run(app: AppHandle, run_id: String) -> bool {
     // A run waiting since before a restart has no task to cancel; it is ended from its records.
@@ -774,7 +780,7 @@ pub struct RepoFlowEntry {
 
 /// Every flow file in the workspace's repositories (`.codeflow/flows/`), each with the flow linked
 /// to it and which side moved since they last agreed.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn flows_repo_scan(db: State<Db>, workspace_id: String) -> Result<Vec<RepoFlowEntry>, String> {
     let (projects, links) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -969,6 +975,21 @@ pub fn flows_active_runs(db: State<Db>, workspace_id: String) -> Result<Vec<Flow
         }
     }
     Ok(out)
+}
+
+/// The programs a flow's script nodes name that this computer lacks — a shell, Python, Node — said
+/// before a run fails on them. `spec` is the flow's document as the editor holds it.
+#[tauri::command(async)]
+pub fn flows_missing_programs(spec: String) -> Result<Vec<crate::flows::nodes::MissingProgram>, String> {
+    let parsed = crate::flows::spec::parse(&spec)?;
+    Ok(crate::flows::nodes::missing_programs(&parsed))
+}
+
+/// The workspace's failed executions, newest first, across every flow.
+#[tauri::command]
+pub fn flows_failed_runs(db: State<Db>, workspace_id: String, limit: Option<i64>) -> Result<Vec<FlowRunRow>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    flow_run_queries::failed_runs(&conn, &workspace_id, limit.unwrap_or(200).clamp(1, 1000)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1705,7 +1726,7 @@ pub async fn flows_test_credential(db: State<'_, Db>, id: String, url: Option<St
             if url.trim().is_empty() {
                 return Err("Write a URL to try it against".into());
             }
-            let mut request = reqwest::Client::new().get(url.trim()).timeout(std::time::Duration::from_secs(15));
+            let mut request = crate::http_clients::plain().get(url.trim()).timeout(std::time::Duration::from_secs(15));
             match kind.as_str() {
                 "bearer" => request = request.bearer_auth(&secret),
                 "basic" => request = request.basic_auth(meta("user"), Some(&secret)),
@@ -1737,7 +1758,7 @@ pub async fn flows_test_credential(db: State<'_, Db>, id: String, url: Option<St
                 "sts",
                 &chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
             )?;
-            let mut request = reqwest::Client::new().post(url.as_str()).timeout(std::time::Duration::from_secs(15)).body(body);
+            let mut request = crate::http_clients::plain().post(url.as_str()).timeout(std::time::Duration::from_secs(15)).body(body);
             for (name, value) in headers.into_iter().chain(signed) {
                 request = request.header(name, value);
             }
@@ -1765,7 +1786,7 @@ pub async fn flows_test_credential(db: State<'_, Db>, id: String, url: Option<St
                 return Err("The webhook is not an http or https URL".into());
             }
             let host = parsed.host_str().unwrap_or_default().to_string();
-            let response = reqwest::Client::new()
+            let response = crate::http_clients::plain()
                 .get(parsed)
                 .timeout(std::time::Duration::from_secs(15))
                 .send()

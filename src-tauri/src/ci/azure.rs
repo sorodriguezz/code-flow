@@ -27,7 +27,7 @@ use super::{
     artifact_file_name, gate_kind, input_as_text, split_ref, status, DeclaredVariable, JobLog,
     PipelineArtifact, PipelineDefinition, PipelineGate, PipelineJob, PipelineLaunchContext,
     PipelineRun, PipelineRunDetail, PipelineStage, PipelineVariable, RefKind, StartedPipeline,
-    MAX_LOG_BYTES, PROVIDER_AZURE,
+    PROVIDER_AZURE,
 };
 use crate::ado::{
     auth_header, encode_segment, normalize_org, ListResponse, API_VERSION, BAD_CREDENTIALS,
@@ -989,7 +989,8 @@ pub async fn job_log(
             // Without it the endpoint is content-negotiated into a JSON envelope with the lines in
             // an array, which is the same log at twice the size and none of the formatting.
             .header("Accept", "text/plain");
-        let part = http::get_log(request, http::Provider::Azure).await?;
+        // In memory even when the log is being saved: the parts are joined and cached here.
+        let part = http::get_log_in_memory(request, http::Provider::Azure).await?;
         if settled && !part.truncated {
             remember_part(&org_enc, &project_enc, &build_enc, id, &part.text);
         }
@@ -1002,9 +1003,10 @@ pub async fn job_log(
         // ninety megabytes across the IPC bridge with `truncated: false`. This is the only
         // provider whose log arrives in pieces, and so the only one where the documented ceiling
         // did not hold.
-        if part.truncated || text.len() as u64 >= MAX_LOG_BYTES {
-            if text.len() as u64 > MAX_LOG_BYTES {
-                let mut cut = MAX_LOG_BYTES as usize;
+        let cap = super::log_cap();
+        if part.truncated || text.len() as u64 >= cap {
+            if text.len() as u64 > cap {
+                let mut cut = cap as usize;
                 while cut > 0 && !text.is_char_boundary(cut) {
                     cut -= 1;
                 }

@@ -97,6 +97,24 @@ pub fn prepare(repo_path: &str, project_id: &str, sha: &str) -> Result<String, S
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// Deletes review checkouts whose project is gone — one deleted while the app was closed, or one a
+/// crash left behind. `discard` covers a project removed
+/// from the app; this covers everything else.
+pub fn sweep(project_ids: &[String]) {
+    let root = crate::paths::cache_dir().join("review-trees");
+    let Ok(entries) = std::fs::read_dir(&root) else { return };
+    let known: std::collections::HashSet<PathBuf> = project_ids.iter().map(|id| dir_for(id)).collect();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || entry.file_name().to_string_lossy().starts_with('.') || known.contains(&path) {
+            continue;
+        }
+        // Its registration in the gone project's repository is left for git's own `gc` (or the
+        // next `worktree prune` there): there is no project left to say which repository it was.
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
+
 /// Removes a project's review checkout, if it has one — for when the project goes away.
 pub fn discard(repo_path: &str, project_id: &str) {
     let dir = dir_for(project_id);

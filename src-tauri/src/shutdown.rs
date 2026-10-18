@@ -65,6 +65,8 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // The power hold «Evitar que el equipo se suspenda» took, if any — it dies with the process
         // anyway; let go here so the log says so on a normal quit.
         crate::keep_awake::release_on_exit();
+        // A vault secret still on the clipboard, its clear not yet due: cleared now, not left there.
+        crate::secret_clipboard::clear_on_exit();
         // The last four seconds of every bench terminal's output, which the flusher's timer
         // has not come round for. The shells themselves die with the process — that is what
         // a pty is — so this is the whole of what "don't lose my work" can mean here, and
@@ -90,8 +92,10 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // Services, stopped the way the Stop button stops them — Ctrl-C first — rather than
         // by the process exiting under them. The difference is Compose: its Ctrl-C takes the
         // containers down, and an app that simply exits leaves them running.
-        app.state::<Arc<crate::services::Supervisor>>()
-            .shutdown(app, std::time::Duration::from_secs(8));
+        let supervisor = app.state::<Arc<crate::services::Supervisor>>();
+        supervisor.shutdown(app, std::time::Duration::from_secs(8));
+        // What each printed, so the console still has it on the next launch.
+        supervisor.persist_logs();
         let registry = app.state::<DbRegistry>();
         tauri::async_runtime::block_on(registry.close_all());
         // The Remote workspace's own `static` maps, for the reason the comment in `lib.rs` gives:
@@ -104,6 +108,8 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // process holding an index of the repository, and a reparented `rust-analyzer`
         // keeps several hundred megabytes that nothing is left to reap.
         tauri::async_runtime::block_on(crate::lsp::stop_all());
+        // The editor's tsserver is a `node` of its own, outside the LSP registry.
+        tauri::async_runtime::block_on(crate::tsserver::ts_stop());
         // Every notebook's Jupyter kernel: asked to shut down, then its process group killed if it
         // has not left. Each sits in a group of its own for interrupting, so none dies with this
         // process — and a kernel is a Python holding whatever the notebook loaded into memory.
@@ -120,6 +126,10 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // parent, and this one can be holding twenty gigabytes; the sweep at the next launch would
         // find it, but only after it had sat in memory for however long the app was closed.
         tauri::async_runtime::block_on(crate::localai::executor::shutdown());
+        // And the editor completion's `llama-server`, for the same reason: the quit ends in
+        // `process::exit`, where no destructor runs, so `kill_on_drop` never fires and the server
+        // sat on its gigabyte until the next launch's sweep.
+        tauri::async_runtime::block_on(crate::localai::engine::shutdown());
         // Last, once everything above has actually finished: the marker's whole meaning is
         // "the previous session did not get this far", so clearing it early would call a
         // shutdown clean that a hang in any of the steps above could still spoil.

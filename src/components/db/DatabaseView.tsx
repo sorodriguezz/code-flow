@@ -21,6 +21,7 @@ import { Tooltip } from "../common/Tooltip";
 import { HostKeyDialog } from "../common/HostKeyDialog";
 import { DbExplorer } from "./DbExplorer";
 import { SqlConsolePanel } from "./SqlConsolePanel";
+import { useDbModelSweep } from "./DocumentsView";
 import { DataTabPanel } from "./DataTabPanel";
 import { DdlPanel } from "./DdlPanel";
 import { DocumentEditorModal } from "./DocumentEditorModal";
@@ -75,6 +76,7 @@ import { useDriverStore } from "../../state/driverStore";
 export function DatabaseView() {
   const tabs = useDbStore((s) => s.tabs);
   const activeTabId = useDbStore((s) => s.activeTabId);
+  useDbModelSweep(useMemo(() => tabs.map((tab) => tab.id), [tabs]));
   const modal = useDbModalStore((s) => s.modal);
   const closeModal = useDbModalStore((s) => s.closeDbModal);
   const activeView = useUiStore((s) => s.activeView);

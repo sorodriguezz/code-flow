@@ -492,6 +492,28 @@ pub struct PipelineAvailability {
 /// itself (see [`http::read_capped`]), not on a buffer we have already filled.
 pub const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
+/// The ceiling for a log saved to a file («Descargar log completo») rather than shown in the pane.
+/// Streamed to the file as it arrives (Azure's joined parts excepted), so the ceiling is about the
+/// file, and one no real job reaches without something being wrong with it.
+pub const SAVED_LOG_BYTES: u64 = 200 * 1024 * 1024;
+
+tokio::task_local! {
+    /// The log cap in force for the task reading a log: [`MAX_LOG_BYTES`] unless a save asked for
+    /// more through [`with_log_cap`].
+    static LOG_CAP: u64;
+}
+
+/// The cap the current read is under — see [`LOG_CAP`].
+pub fn log_cap() -> u64 {
+    LOG_CAP.try_with(|cap| *cap).unwrap_or(MAX_LOG_BYTES)
+}
+
+/// Runs `work` — a provider's ordinary log fetch — with `cap` in place of [`MAX_LOG_BYTES`], so a
+/// save reads through exactly the code the pane reads through, only further.
+pub async fn with_log_cap<F: std::future::Future>(cap: u64, work: F) -> F::Output {
+    LOG_CAP.scope(cap, work).await
+}
+
 /// How much of a log the failure analysis is given.
 ///
 /// Roughly the size of [`crate::ai::MAX_REVIEW_DIFF_CHARS`] halved: a log is far more repetitive

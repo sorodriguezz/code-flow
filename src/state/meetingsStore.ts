@@ -146,6 +146,8 @@ interface MeetingsState {
   suggestion: { name: string } | null;
   /** Collapsed panels, by note id. */
   collapsed: Record<string, boolean>;
+  /** A search result in a transcript, waiting for its note's meeting panel to show the line. */
+  jumpTo: { noteId: string; meetingId: string; atMs: number } | null;
   /** When `status` was read — the recording's clock runs on from it. */
   statusAt: number;
   /** The note whose "record a meeting" options are open. */
@@ -170,6 +172,9 @@ interface MeetingsState {
   cancelInstall: () => Promise<void>;
   dismissSuggestion: () => void;
   toggleCollapsed: (noteId: string) => void;
+  /** Opens a transcript at a line: selects its meeting, unfolds the panel and puts the line in view. */
+  jumpToLine: (noteId: string, meetingId: string, atMs: number) => void;
+  clearJump: () => void;
   setStartOpen: (noteId: string | null) => void;
   setAi: (meetingId: string, run: MeetingAiRun | null) => void;
 }
@@ -264,6 +269,7 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
   notesWithWorkspace: null,
   suggestion: null,
   collapsed: {},
+  jumpTo: null,
   statusAt: 0,
   startOpenFor: null,
   ai: {},
@@ -434,6 +440,11 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
   dismissSuggestion: () => set({ suggestion: null }),
 
   toggleCollapsed: (noteId) => set((state) => ({ collapsed: { ...state.collapsed, [noteId]: !state.collapsed[noteId] } })),
+
+  jumpToLine: (noteId, meetingId, atMs) =>
+    set((state) => ({ jumpTo: { noteId, meetingId, atMs }, collapsed: { ...state.collapsed, [noteId]: false } })),
+
+  clearJump: () => set({ jumpTo: null }),
 
   setStartOpen: (noteId) => set({ startOpenFor: noteId }),
 

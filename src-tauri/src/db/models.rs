@@ -211,6 +211,34 @@ pub struct AgentTask {
     /// fresh session, which the turn's own session rule takes care of.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// The linked worktree the task's turns run in, or `""` for the repository's own working copy.
+    /// Made when the task is created and removed with it (only when clean — see `delete_agent_task`).
+    #[serde(default)]
+    pub worktree_path: String,
+    /// The branch that worktree has checked out — the task's work lives there once it is gone.
+    #[serde(default)]
+    pub worktree_branch: String,
+    /// 0 none, 1 low, 2 medium, 3 high.
+    #[serde(default)]
+    pub priority: i64,
+    /// `YYYY-MM-DD`, or `""`.
+    #[serde(default)]
+    pub due_date: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Out of the list, kept with its history.
+    #[serde(default)]
+    pub archived: bool,
+    /// What its turns spent, summed as each one finishes.
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub output_tokens: i64,
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// How many of its turns reported a price.
+    #[serde(default)]
+    pub costed_turns: i64,
 }
 
 /// One run of "read this documentation, write the backlog": where the requirements came from,
@@ -376,6 +404,12 @@ pub struct StoryDraft {
     pub last_error: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The published item's state on the board when it was last read back (`Active`, `Done`,
+    /// `closed`…), in the board's own words. Empty until read.
+    #[serde(default)]
+    pub board_state: String,
+    #[serde(default)]
+    pub board_state_at: String,
 }
 
 /// A batch and its stories in one round trip — what the detail pane renders.
@@ -1262,6 +1296,12 @@ pub struct NoteSearchHit {
     /// Offset of the match *within `snippet`*, so the frontend can mark it without searching again.
     pub match_start: i64,
     pub match_len: i64,
+    /// Set when the match is in a meeting's transcript rather than the note's body: which meeting,
+    /// and where in the recording the line starts — so opening the result can play from there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<i64>,
 }
 
 /// A folder in the Diagrams tree. The same shape as [`NoteBookRow`], and deliberately so — the two
@@ -1406,6 +1446,12 @@ pub struct VaultStatus {
     pub autolock_minutes: u32,
     /// Whether this machine has been asked to remember the master password in the OS store.
     pub remembered: bool,
+    /// Whether Touch ID / Windows Hello (or the Mac's login password) can confirm who is there.
+    #[serde(default)]
+    pub biometric_available: bool,
+    /// Whether the remembered password is only used after that check — see `keyvault::biometric`.
+    #[serde(default)]
+    pub biometric: bool,
 }
 
 /// A folder in the keyring's tree.

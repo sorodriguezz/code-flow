@@ -50,6 +50,7 @@ import { useT } from "../../state/languageStore";
 import { ContextMenu } from "../common/ContextMenu";
 import { TerminalSearch } from "./TerminalSearch";
 import { bufferText } from "./bufferText";
+import { KEPT_LINES } from "../../state/terminalRestore";
 
 /** Shorter than one row and there is nothing meaningful to fit to — see `fitAndReport`. */
 const MIN_FIT_PX = 8;
@@ -625,7 +626,8 @@ export function TerminalPane({
     fitRef.current = fitAddon;
     prefsAs.current = JSON.stringify(prefsRef.current);
     const textSink = textRefRef.current;
-    const readText = () => bufferText(term.buffer.active);
+    // Only the end: the restore snapshot keeps `KEPT_LINES` of it.
+    const readText = () => bufferText(term.buffer.active, KEPT_LINES);
     if (textSink) textSink.current = readText;
     if (autoFocusRef.current) term.focus();
     clipboardKeys(term, {

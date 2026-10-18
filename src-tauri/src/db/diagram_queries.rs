@@ -50,6 +50,9 @@ pub(crate) const FORMAT_EXCALIDRAW: &str = "excalidraw";
 /// An architecture map in archify's format — its `architecture` IR as JSON, or a page archify
 /// rendered. Mirrors `FORMAT_ARCHIFY` in `lib/diagrams/doc.ts`.
 pub(crate) const FORMAT_ARCHIFY: &str = "archify";
+/// A Mermaid diagram: the Mermaid source, as a `.mmd` file holds it. Mirrors `FORMAT_MERMAID` in
+/// `lib/diagrams/doc.ts`.
+pub(crate) const FORMAT_MERMAID: &str = "mermaid";
 
 fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<DiagramFolderRow> {
     Ok(DiagramFolderRow {
@@ -144,8 +147,203 @@ fn derive(doc: &str, format: &str) -> i64 {
         FORMAT_DBML => count_dbml(doc),
         FORMAT_EXCALIDRAW => count_excalidraw(doc),
         FORMAT_ARCHIFY => count_archify(doc),
+        FORMAT_MERMAID => count_mermaid(doc),
         _ => 0,
     }
+}
+
+// ---------------------------------------------------------------------------------- content search
+
+/// One diagram whose content matched a search, with the line of text that did.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiagramHit {
+    pub id: String,
+    pub snippet: String,
+}
+
+/// A draw.io page's compressed body: base64 of raw deflate of the URL-encoded XML.
+fn inflate_page(body: &str) -> Option<String> {
+    use base64::Engine;
+    use std::io::Read;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(body.trim()).ok()?;
+    let mut out = String::new();
+    flate2::read::DeflateDecoder::new(bytes.as_slice()).read_to_string(&mut out).ok()?;
+    Some(percent_decode(&out))
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' && at + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&text[at + 1..at + 3], 16) {
+                out.push(byte);
+                at += 3;
+                continue;
+            }
+        }
+        out.push(bytes[at]);
+        at += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// XML-escaped text back to text, and any HTML a label carries dropped to its words.
+fn label_text(raw: &str) -> String {
+    let unescaped = raw
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&");
+    let mut out = String::with_capacity(unescaped.len());
+    let mut in_tag = false;
+    for c in unescaped.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The words a diagram shows: draw.io's labels and tooltips (compressed pages included), DBML and
+/// Mermaid as written, a whiteboard's text elements, every string of an archify map.
+pub fn searchable_text(doc: &str, format: &str) -> String {
+    match format {
+        FORMAT_MXGRAPH => {
+            let mut xml = String::from(doc);
+            // Compressed pages: `<diagram …>BODY</diagram>` where BODY is not XML.
+            let mut rest = doc;
+            while let Some(open) = rest.find("<diagram") {
+                let after = &rest[open..];
+                let Some(gt) = after.find('>') else { break };
+                let body_start = &after[gt + 1..];
+                let Some(close) = body_start.find("</diagram>") else { break };
+                let body = body_start[..close].trim();
+                if !body.is_empty() && !body.starts_with('<') {
+                    if let Some(inflated) = inflate_page(body) {
+                        xml.push('\n');
+                        xml.push_str(&inflated);
+                    }
+                }
+                rest = &body_start[close..];
+            }
+            let mut words = Vec::new();
+            for attr in ["value=\"", "label=\"", "tooltip=\"", "name=\""] {
+                let mut from = 0;
+                while let Some(found) = xml[from..].find(attr) {
+                    let start = from + found + attr.len();
+                    let Some(end) = xml[start..].find('"') else { break };
+                    let text = label_text(&xml[start..start + end]);
+                    if !text.is_empty() {
+                        words.push(text);
+                    }
+                    from = start + end;
+                }
+            }
+            words.join("\n")
+        }
+        FORMAT_EXCALIDRAW | FORMAT_ARCHIFY => {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(doc) else { return String::new() };
+            let mut words = Vec::new();
+            fn walk(value: &serde_json::Value, words: &mut Vec<String>, key: &str) {
+                match value {
+                    serde_json::Value::String(text) if !matches!(key, "id" | "type" | "fontFamily" | "strokeColor" | "backgroundColor" | "fillStyle" | "strokeStyle" | "version" | "source" | "link" | "dataURL" | "mimeType" | "fileId") => {
+                        if !text.trim().is_empty() && text.len() < 2000 {
+                            words.push(text.trim().to_string());
+                        }
+                    }
+                    serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, words, key)),
+                    serde_json::Value::Object(map) => map.iter().for_each(|(k, v)| walk(v, words, k)),
+                    _ => {}
+                }
+            }
+            walk(&value, &mut words, "");
+            words.join("\n")
+        }
+        _ => doc.to_string(),
+    }
+}
+
+/// Folded for comparing: lower case, the common accents dropped.
+fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            other => other,
+        })
+        .collect()
+}
+
+/// The workspace's diagrams whose content holds every word of `query`, each with the first line
+/// that holds one — the gallery's search, beyond titles and tags.
+pub fn search_content(conn: &Connection, workspace_id: &str, query: &str, limit: usize) -> rusqlite::Result<Vec<DiagramHit>> {
+    let words: Vec<String> = fold(query).split_whitespace().map(str::to_string).collect();
+    if words.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn.prepare("SELECT id, doc, format FROM diagrams WHERE workspace_id = ?1 ORDER BY updated_at DESC")?;
+    let rows = statement.query_map(params![workspace_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?;
+    let mut hits = Vec::new();
+    for row in rows {
+        let (id, doc, format) = row?;
+        let text = searchable_text(&doc, &format);
+        let folded = fold(&text);
+        if !words.iter().all(|word| folded.contains(word.as_str())) {
+            continue;
+        }
+        let snippet = text
+            .lines()
+            .find(|line| fold(line).contains(words[0].as_str()))
+            .unwrap_or_default()
+            .chars()
+            .take(140)
+            .collect::<String>();
+        hits.push(DiagramHit { id, snippet });
+        if hits.len() >= limit {
+            break;
+        }
+    }
+    Ok(hits)
+}
+
+/// A Mermaid diagram's statements: every line that says something, less the one naming the diagram
+/// type, comments (`%%`), the `---` front matter and the lines that only close a block. Not nodes —
+/// Mermaid's grammar is a dozen grammars — but it grows and shrinks with the drawing, which is what
+/// the gallery's caption is for.
+fn count_mermaid(doc: &str) -> i64 {
+    let mut in_front_matter = false;
+    let mut count = 0i64;
+    let mut header_seen = false;
+    for line in doc.lines().map(str::trim) {
+        if line == "---" {
+            in_front_matter = !in_front_matter;
+            continue;
+        }
+        if in_front_matter || line.is_empty() || line.starts_with("%%") || line == "end" {
+            continue;
+        }
+        if !header_seen {
+            header_seen = true;
+            continue;
+        }
+        count += 1;
+    }
+    count
 }
 
 /// An archify diagram's entities and relations, whichever of its five types it is: components,
@@ -887,6 +1085,24 @@ pub fn delete_template(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_diagram_is_searched_by_the_words_it_shows() {
+        let drawio = r#"<mxfile><diagram id="a" name="Página 1"><mxGraphModel><root><mxCell id="2" value="&lt;b&gt;Servicio de pagos&lt;/b&gt;" vertex="1"/></root></mxGraphModel></diagram></mxfile>"#;
+        let text = searchable_text(drawio, FORMAT_MXGRAPH);
+        assert!(text.contains("Servicio de pagos"), "{text}");
+        assert!(text.contains("Página 1"));
+        // A compressed page: deflate + base64 of the URL-encoded XML, as draw.io writes it.
+        let inner = "%3CmxGraphModel%3E%3Croot%3E%3CmxCell%20value%3D%22Cola%20de%20mensajes%22%2F%3E%3C%2Froot%3E%3C%2FmxGraphModel%3E";
+        let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, inner.as_bytes()).unwrap();
+        use base64::Engine;
+        let body = base64::engine::general_purpose::STANDARD.encode(encoder.finish().unwrap());
+        let compressed = format!(r#"<mxfile><diagram id="b" name="P">{body}</diagram></mxfile>"#);
+        assert!(searchable_text(&compressed, FORMAT_MXGRAPH).contains("Cola de mensajes"));
+        let board = r#"{"elements":[{"id":"x","type":"text","text":"Gateway API"}]}"#;
+        assert_eq!(searchable_text(board, FORMAT_EXCALIDRAW), "Gateway API");
+    }
+
     /// Two workspaces, so the isolation below has something to fail against.
     fn workspaces() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -907,6 +1123,13 @@ mod tests {
     /// `shape_count`, on every save: a format whose count is wrong shows a wrong number on every
     /// card in the workspace, and a format that counts zero shows no caption at all — which is what
     /// a DBML diagram did before this branch existed.
+    #[test]
+    fn a_mermaid_diagram_counts_its_statements() {
+        let doc = "---\ntitle: Flujo\n---\nflowchart LR\n  %% comentario\n  A --> B\n  subgraph S\n    B --> C\n  end\n";
+        assert_eq!(derive(doc, FORMAT_MERMAID), 3);
+        assert_eq!(derive("", FORMAT_MERMAID), 0);
+    }
+
     #[test]
     fn a_document_is_counted_in_its_own_dialect() {
         let drawing = r#"<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>

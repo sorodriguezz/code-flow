@@ -571,8 +571,9 @@ pub(super) fn free_port() -> Result<u16, String> {
 // Surviving the parent
 // ---------------------------------------------------------------------------
 //
-// `kill_on_drop(true)` plus the explicit kill in `stop_locked` covers everything that runs Rust
-// destructors: a normal quit, a window close, a panic that unwinds. What neither covers is the
+// The explicit kill in `stop_locked` (which `shutdown_cleanup` calls on quit — the quit ends in
+// `process::exit`, where no destructor runs) plus `kill_on_drop(true)` cover a normal quit, a
+// window close, a panic that unwinds. What neither covers is the
 // process being killed outright — `kill -9`, Force Quit, End Task, a power loss — after which
 // `llama-server` is left holding a gigabyte with no parent.
 //

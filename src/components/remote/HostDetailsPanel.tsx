@@ -44,10 +44,12 @@ import {
   remoteAskpassSupported,
   remoteGetPassword,
   remoteListKeys,
+  remotePageantPipe,
   remoteParseAzureConnection,
   remoteSetPassword,
 } from "../../lib/tauri/remoteCommands";
 import { GenerateKeyModal } from "./GenerateKeyModal";
+import { ImportPpkModal } from "./ImportPpkModal";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
 import { VaultPicker } from "../vault/VaultPicker";
@@ -1651,7 +1653,19 @@ function KeyPicker({
   const [keys, setKeys] = useState<SshKey[] | null>(null);
   const [generating, setGenerating] = useState(false);
   const [listed, setListed] = useState(0);
+  /** A PuTTY key being converted, by path. */
+  const [converting, setConverting] = useState<string | null>(null);
+  const [pageant, setPageant] = useState<string | null>(null);
   const t = useT();
+
+  useEffect(() => {
+    void remotePageantPipe()
+      .then(setPageant)
+      .catch(() => setPageant(null));
+  }, []);
+  /** Pageant as this host's agent: an `IdentityAgent` option naming its pipe. */
+  const pageantOption = pageant ? `IdentityAgent=${pageant}` : null;
+  const usesPageant = !!pageantOption && spec.options.some((option) => option.trim().startsWith("IdentityAgent=") && option.includes("pageant."));
 
   useEffect(() => {
     let cancelled = false;
@@ -1663,8 +1677,11 @@ function KeyPicker({
     };
   }, [listed]);
 
-  // Only keys with a file can be passed to `-i`; an agent-only identity has nothing to name.
-  const usable = (keys ?? []).filter((key) => key.path);
+  // Only keys with a file can be passed to `-i`; an agent-only identity has nothing to name. A PuTTY
+  // key is listed apart: OpenSSH cannot read it, so it is offered for conversion instead.
+  const usable = (keys ?? []).filter((key) => key.path && key.kind !== "putty-ppk");
+  const putty = (keys ?? []).filter((key) => key.kind === "putty-ppk");
+  const typedPpk = spec.key_file.trim().toLowerCase().endsWith(".ppk");
   // Named after the machine it is probably for, which is also how the user will find it again in
   // `~/.ssh`. Only the characters a key file name may carry — see `remotes::keys::checked_name`.
   const suggested = `id_ed25519_${(spec.host.trim() || "codeflow").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[.-]+/, "")}`;
@@ -1706,6 +1723,35 @@ function KeyPicker({
             {key.label}
           </button>
         ))}
+        {putty.map((key) => (
+          <Tooltip key={key.path} label={t("remote.ppkChip")} description={key.comment || key.path}>
+            <button
+              type="button"
+              onClick={() => setConverting(key.path)}
+              className={chipClass("warn", "font-mono transition-colors duration-100 hover:text-[var(--cf-text)]")}
+            >
+              PuTTY · {key.label}
+            </button>
+          </Tooltip>
+        ))}
+        {pageantOption && (
+          <Tooltip label={t("remote.pageant")} description={t("remote.pageantHint")}>
+            <button
+              type="button"
+              aria-pressed={usesPageant}
+              onClick={() =>
+                onPatch({
+                  options: usesPageant
+                    ? spec.options.filter((option) => !(option.trim().startsWith("IdentityAgent=") && option.includes("pageant.")))
+                    : [...spec.options.filter((option) => !option.trim().startsWith("IdentityAgent=")), pageantOption],
+                })
+              }
+              className={usesPageant ? chipClass("accent") : chipClass("neutral", "transition-colors duration-100 hover:text-[var(--cf-text)]")}
+            >
+              Pageant
+            </button>
+          </Tooltip>
+        )}
         <Tooltip label={t("remote.generateKey")} description={t("remote.generateKeyHint")}>
           <button
             type="button"
@@ -1717,6 +1763,25 @@ function KeyPicker({
           </button>
         </Tooltip>
       </div>
+      {typedPpk && (
+        <p className="flex flex-wrap items-center gap-1.5 pb-1.5 text-[11.5px] text-[var(--cf-warning)]">
+          {t("remote.ppkTyped")}
+          <button type="button" onClick={() => setConverting(spec.key_file.trim())} className="text-[var(--cf-accent)] hover:underline">
+            {t("remote.ppkConvert")}
+          </button>
+        </p>
+      )}
+      {converting && (
+        <ImportPpkModal
+          path={converting}
+          onDone={(imported) => {
+            // In the agent, the key needs no `-i`; as a file, the field points at it.
+            onPatch({ key_file: imported.path ?? "" });
+            setListed((n) => n + 1);
+          }}
+          onClose={() => setConverting(null)}
+        />
+      )}
       {generating && (
         <GenerateKeyModal
           suggestedName={suggested}

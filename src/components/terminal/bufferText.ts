@@ -20,9 +20,9 @@ const EXIT_LINE = "[process exited]";
  * lose theirs, and the blank rows under the last line — the screen's unused height — are dropped,
  * along with the pane's own "[process exited]".
  */
-export function bufferText(rows: TextRows): string {
+export function bufferText(rows: TextRows, lastLines?: number): string {
   const lines: string[] = [];
-  for (let y = 0; y < rows.length; y++) {
+  for (let y = firstRow(rows, lastLines); y < rows.length; y++) {
     const row = rows.getLine(y);
     if (!row) continue;
     const continues = rows.getLine(y + 1)?.isWrapped === true;
@@ -39,4 +39,23 @@ export function bufferText(rows: TextRows): string {
     dropBlankTail();
   }
   return lines.join("\n");
+}
+
+/**
+ * Where to start reading for roughly the last `lastLines` lines — `0` for the whole buffer.
+ *
+ * The restore snapshot keeps a few hundred lines per terminal, and reading all 10 000 rows of
+ * scrollback of every terminal every fifteen seconds to throw almost all of them away was the
+ * dock's biggest idle cost under a chatty dev server. Walked back from the end counting line starts
+ * (rows that are not a wrap's continuation), with room to spare for the blank screen rows under the
+ * last line, which the join drops.
+ */
+function firstRow(rows: TextRows, lastLines?: number): number {
+  if (!lastLines) return 0;
+  let starts = 0;
+  for (let y = rows.length - 1; y > 0; y--) {
+    if (rows.getLine(y)?.isWrapped) continue;
+    if (++starts >= lastLines + 256) return y;
+  }
+  return 0;
 }

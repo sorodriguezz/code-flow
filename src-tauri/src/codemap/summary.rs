@@ -591,6 +591,106 @@ pub fn global_graph(map: &Snapshot, max_nodes: usize) -> MapGraph {
     MapGraph { focus: String::new(), nodes, edges, files: map.file_count(), symbols: map.symbol_count(), languages: languages(map) }
 }
 
+// ----------------------------------------------------------------------------------------- health
+
+/// One file in the map's health lists.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStanding {
+    pub path: String,
+    /// Project files that import it.
+    pub fan_in: usize,
+    /// Project files it imports.
+    pub fan_out: usize,
+    pub lines: u32,
+    pub symbols: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapHealth {
+    /// Files nothing in the project imports — candidates for dead code, entry points left out.
+    pub orphans: Vec<FileStanding>,
+    /// The files the most others depend on: a change there reaches far.
+    pub most_used: Vec<FileStanding>,
+    /// The files that depend on the most others: hard to change, hard to test alone.
+    pub most_dependent: Vec<FileStanding>,
+    /// Files whose family can be checked for orphans at all (see [`orphan_family`]).
+    pub checked: usize,
+}
+
+/// Families where a file nobody imports is unused: every use of another module goes through an
+/// import. Java, C#, Go and Rust reach files through a package or a `mod` without naming the file,
+/// so silence there proves nothing and they are never listed.
+fn orphan_family(lang: &str) -> bool {
+    matches!(lang, "ts" | "py" | "dart")
+}
+
+/// Files that are run, loaded by a tool or found by convention rather than imported: entry points,
+/// configs, tests, declaration files, stories, migrations, scripts. Never orphans, whatever imports
+/// them.
+fn entry_like(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    let stem = name.split('.').next().unwrap_or(name);
+    let in_dir = |dir: &str| lower.starts_with(&format!("{dir}/")) || lower.contains(&format!("/{dir}/"));
+    matches!(stem, "main" | "index" | "app" | "server" | "cli" | "setup" | "manage" | "conftest" | "__main__" | "__init__" | "wsgi" | "asgi" | "worker" | "sw" | "service-worker")
+        || name.contains(".config.")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name.contains(".stories.")
+        || name.contains(".setup.")
+        || name.ends_with(".d.ts")
+        || stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || ["test", "tests", "__tests__", "__mocks__", "e2e", "spec", "scripts", "bin", "migrations", "fixtures", "examples", "public"].iter().any(|dir| in_dir(dir))
+}
+
+/// What the import graph says about the shape of the code: files nothing imports, and the files
+/// most depended on and most dependent. Counted from direct imports (a barrel's re-exports are not
+/// followed), each file counted once per importer.
+pub fn health(map: &Snapshot, limit: usize) -> MapHealth {
+    let count = map.file_count();
+    let mut fan_out = vec![0usize; count];
+    for file in 0..count {
+        for importer in map.imported_by(file as u32) {
+            fan_out[*importer as usize] += 1;
+        }
+    }
+    let standing = |file: usize| {
+        let row = &map.files[file];
+        FileStanding {
+            path: row.path.clone(),
+            fan_in: map.imported_by(file as u32).len(),
+            fan_out: fan_out[file],
+            lines: row.facts.lines,
+            symbols: row.facts.symbols.len(),
+        }
+    };
+    let checkable: Vec<usize> = (0..count).filter(|f| orphan_family(&map.files[*f].facts.lang)).collect();
+    let mut orphans: Vec<FileStanding> = checkable
+        .iter()
+        .copied()
+        .filter(|f| map.imported_by(*f as u32).is_empty() && !entry_like(&map.files[*f].path))
+        // A file that declares nothing (a side-effect script, an empty barrel) is not dead code.
+        .filter(|f| !map.files[*f].facts.symbols.is_empty())
+        .map(standing)
+        .collect();
+    orphans.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.path.cmp(&b.path)));
+    let ranked = |key: fn(&FileStanding) -> usize| {
+        let mut all: Vec<FileStanding> = (0..count).map(standing).filter(|s| key(s) > 0).collect();
+        all.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| a.path.cmp(&b.path)));
+        all.truncate(limit);
+        all
+    };
+    MapHealth {
+        orphans,
+        most_used: ranked(|s| s.fan_in),
+        most_dependent: ranked(|s| s.fan_out),
+        checked: checkable.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +769,27 @@ mod tests {
         assert!(paths.contains(&"src/facturas/facturacion.ts"));
         assert!(!paths.contains(&"src/ui/Header.ts"));
         assert!(points[0].1.contains(&"registrarPago".to_string()));
+    }
+
+    #[test]
+    fn health_lists_unimported_files_and_ranks_fan_in_and_out() {
+        let map = snapshot(&[
+            ("src/lib/pricing.ts", "export function applyDiscount(p) { return p; }\n"),
+            ("src/app/cart.ts", "import { applyDiscount } from '../lib/pricing';\nexport const c = applyDiscount(1);\n"),
+            ("src/app/checkout.ts", "import { applyDiscount } from '../lib/pricing';\nimport { c } from './cart';\nexport const d = applyDiscount(c);\n"),
+            ("src/old/legacy.ts", "export function unused() {}\n"),
+            ("src/main.ts", "import './app/checkout';\n"),
+            ("src/app/cart.test.ts", "import { c } from './cart';\nexport const t = c;\n"),
+            ("src/Service.java", "public class Service {}\n"),
+        ]);
+        let report = health(&map, 10);
+        let orphans: Vec<&str> = report.orphans.iter().map(|o| o.path.as_str()).collect();
+        assert_eq!(orphans, vec!["src/old/legacy.ts"], "entry points, tests and Java are never orphans");
+        let top: Vec<(&str, usize)> = report.most_used.iter().take(2).map(|s| (s.path.as_str(), s.fan_in)).collect();
+        assert_eq!(top, vec![("src/app/cart.ts", 2), ("src/lib/pricing.ts", 2)], "ties by path");
+        assert_eq!(report.most_dependent[0].path, "src/app/checkout.ts");
+        assert_eq!(report.most_dependent[0].fan_out, 2);
+        assert_eq!(report.checked, 6);
     }
 
     #[test]

@@ -13,6 +13,7 @@
 //! log.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -20,7 +21,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
-use super::{JobLog, MAX_LOG_BYTES};
+use super::JobLog;
 
 /// Enough time for a slow self-managed GitLab to answer a list query, and short enough that a
 /// dead host doesn't leave a spinner running until the user gives up on the app.
@@ -226,7 +227,66 @@ pub(crate) async fn get_log(
         return Err(crate::ado::BAD_CREDENTIALS.to_string());
     }
 
-    read_capped(response, provider, MAX_LOG_BYTES).await
+    if let Ok(file) = LOG_FILE.try_with(Arc::clone) {
+        return stream_capped(response, provider, super::log_cap(), &file).await;
+    }
+    read_capped(response, provider, super::log_cap()).await
+}
+
+/// [`get_log`] for a caller that has to hold the text itself whatever the task asked for — Azure,
+/// whose log arrives in parts it joins and caches.
+pub(crate) async fn get_log_in_memory(request: reqwest::RequestBuilder, provider: Provider) -> Result<JobLog, String> {
+    let response = send(request.timeout(LOG_TIMEOUT), provider).await?;
+    let status = response.status();
+    let html = looks_like_html(&response);
+    let quota = quota_note(response.headers());
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(describe(provider, Asked::Log, status, &body, quota));
+    }
+    if provider == Provider::Azure && (status.as_u16() == 203 || html) {
+        return Err(crate::ado::BAD_CREDENTIALS.to_string());
+    }
+    read_capped(response, provider, super::log_cap()).await
+}
+
+tokio::task_local! {
+    /// Where a log being saved goes, chunk by chunk, instead of into memory — see [`save_log_into`].
+    static LOG_FILE: Arc<tokio::sync::Mutex<tokio::fs::File>>;
+}
+
+/// Runs `work` — a provider's ordinary log fetch — writing the body straight into `file` as it
+/// arrives. Saving a 200 MB log used to hold it whole in memory, twice (the bytes, then the text),
+/// before a single byte reached the disk. The [`JobLog`] that comes back then carries no text; its
+/// `total_bytes` is what was written.
+pub(crate) async fn save_log_into<F: std::future::Future>(file: tokio::fs::File, work: F) -> F::Output {
+    LOG_FILE.scope(Arc::new(tokio::sync::Mutex::new(file)), work).await
+}
+
+/// [`read_capped`] into a file.
+async fn stream_capped(
+    response: reqwest::Response,
+    provider: Provider,
+    cap: u64,
+    file: &tokio::sync::Mutex<tokio::fs::File>,
+) -> Result<JobLog, String> {
+    let mut file = file.lock().await;
+    let mut written: u64 = 0;
+    let mut truncated = false;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("couldn't read what {} sent: {e}", provider.label()))?;
+        let room = cap.saturating_sub(written) as usize;
+        let take = chunk.len().min(room);
+        file.write_all(&chunk[..take]).await.map_err(|e| format!("couldn't write the log: {e}"))?;
+        written += take as u64;
+        if take < chunk.len() {
+            truncated = true;
+            break;
+        }
+    }
+    file.flush().await.map_err(|e| format!("couldn't write the log: {e}"))?;
+    Ok(JobLog { text: String::new(), truncated, total_bytes: written })
 }
 
 /// Streams a response body until `cap` bytes, then stops asking for more.

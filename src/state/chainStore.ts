@@ -93,8 +93,9 @@ const MAX_TIMER_MS = 2_147_483_647;
  *
  * It also never dispatches on its own initiative. A chain moves when the user starts it, when a
  * turn in its repository settles (which is the only moment a blocked chain can become unblocked),
- * or when the user approves a gate — and never while the window is hidden in the tray, because an
- * agent turn edits a real working copy and there would be no way to see it or stop it.
+ * or when the user approves a gate. Hidden in the tray it only carries on what a person set moving
+ * (see `inMotion`): an agent turn edits a real working copy, and a plan nobody started in this
+ * session must not wake up with nothing on screen.
  */
 interface ChainState {
   workspaceId: string | null;
@@ -198,8 +199,9 @@ interface ChainState {
    * Advances a chain by at most one step. Safe to call repeatedly and concurrently.
    *
    * `remote: true` means a person asked for this from somewhere other than this window — a phone
-   * approving a gate — and it is what lets the step run with the window hidden in the tray. See the
-   * `background` guard inside.
+   * approving a gate — and it is what lets the step run with the window hidden in the tray. A pump
+   * made while the window is on screen earns the same, for the rest of the plan's run. See
+   * `inMotion` and the `background` guard inside.
    *
    * The chain does **not** have to belong to the loaded workspace. It is claimed and run by id, and
    * a chain from anywhere else is deliberately not filed into this window's lists — see
@@ -275,24 +277,26 @@ interface ChainState {
 const inFlight = new Set<string>();
 
 /**
- * Chains a person is driving from somewhere other than this window.
+ * Chains a person has set moving, and which keep moving with the window hidden in the tray.
  *
- * # Why the flag outlives the tap that set it
+ * # Why the flag outlives the click that set it
  *
- * `background` stops this window dispatching engines while it is hidden in the tray, and that guard
- * is right: an agent turn rewrites a real working copy, and starting one with nothing on screen
- * gives the user no way to watch it or stop it. A gate approved from a phone is the one case where
- * both halves of that reasoning are false — somebody *did* ask, and the phone is showing the run's
- * output with a stop button under it.
+ * `background` stops this window starting engines nobody asked for while it is hidden in the tray —
+ * a launch at login straight into the tray loads every workspace, and a plan left queued from a
+ * past session must not wake up and rewrite a working copy with nothing on screen. But a plan the
+ * user started, approved or resumed *was* asked for, and it used to stop at the next step the moment
+ * the window was closed to the tray: the step in flight finished, `settleStep`'s pump found
+ * `background` set, and a ten-step plan left running over lunch had done one step by the afternoon.
+ * The same holds for a gate approved from a phone, which is where this set started.
  *
- * But a plan is what was approved, not a step. Marking only the one `pump` the invalidation
- * triggered would run step 4 and then park again the moment it settled, because `settleStep`'s own
- * pump would find `background` still set — a ten-step chain approved from the sofa would advance
- * once and stop, which is the same "it says it happened and nothing happens" this whole batch is
- * about. So the chain stays marked until it stops moving on its own, and the next thing that parks
- * it (a gate, a failure, the end of the plan) clears it: a second approval re-marks it.
+ * So any pump made while the window is on screen — or for a phone, or by an automatic resume the
+ * user armed in advance — marks the chain, and the mark stays until the chain stops on its own: the
+ * next thing that parks it (a gate, a failure, the end of the plan, a stop) clears it, and only a
+ * person's next answer re-marks it. What the tray still holds back is exactly what nobody asked for
+ * in this session. The run itself stays visible: the status bar and the tray's own activity show it,
+ * and the phone can stop it.
  */
-const drivenRemotely = new Set<string>();
+const inMotion = new Set<string>();
 /**
  * Poll timers for steps adopted after a reload, keyed by step id.
  *
@@ -617,19 +621,17 @@ export const useChainStore = create<ChainState>((set, get) => ({
     // chain queued for `settleStep` to pick up minutes from now, by which time the tap that
     // authorised it is long over — and an approval that lands while this chain is already mid-advance
     // returns at the very next line, which would otherwise throw the authorisation away with it.
-    if (opts?.remote) drivenRemotely.add(chainId);
+    if (opts?.remote || !get().background) inMotion.add(chainId);
     // A chain sitting out a wait is claimed by its own timer when the wait is over. Every other
     // door into here — a turn settling in the repository, the window coming back, a workspace
     // load — would otherwise walk straight past the backoff it is observing.
     const wait = held.get(chainId);
     if (wait && wait.until > Date.now()) return;
     if (inFlight.has(chainId)) return;
-    // The tray guard, with the one exemption it always needed. `background` exists so a hidden
-    // window does not start engines nobody asked for — and a phone tap *is* somebody asking, from a
-    // screen that shows the run's output and offers to stop it. Without the exemption this feature
-    // did nothing at all in its most common setting: the desktop is closed to the tray, which is
-    // exactly why the user is answering the gate from a phone.
-    if (get().background && !drivenRemotely.has(chainId)) return;
+    // The tray guard. `background` exists so a hidden window does not start engines nobody asked
+    // for; a plan a person set moving — here before the window was hidden, or from a phone — is not
+    // that, and keeps going until it parks. See `inMotion`.
+    if (get().background && !inMotion.has(chainId)) return;
     inFlight.add(chainId);
     let stepId: string | null = null;
     try {
@@ -645,7 +647,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
         //
         // It is also where a remotely driven chain stops moving, so the mark goes with it: whatever
         // parked it wants a person again, and that person's next answer re-marks it.
-        drivenRemotely.delete(chainId);
+        inMotion.delete(chainId);
         await get().refresh(chainId);
         return;
       }
@@ -792,7 +794,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
     forgetTimers(chainId);
     // "Stop" is the one answer that cannot be followed by another step, so whoever was driving this
     // remotely is no longer driving anything.
-    drivenRemotely.delete(chainId);
+    inMotion.delete(chainId);
     // Stop the live step first, or the engine keeps editing a working copy for a plan that no
     // longer exists — the same reason `agentsStore.remove` cancels before deleting.
     const step = (get().stepsByChain[chainId] ?? []).find((s) => s.status === "running");
@@ -1113,8 +1115,8 @@ async function settleStep(
   // claim — this side never decides to retry, it only carries out a chain that is ready to move.
   // A gate, an exhausted step or a stop all still wait for the user.
   //
-  // `remote` carries whatever the last person to ask said, so a plan approved from a phone keeps
-  // going with the window in the tray for the whole of its remaining steps rather than for one. It
+  // `remote` carries whatever the last person to ask said, so a plan set moving here or from a phone
+  // keeps going with the window in the tray for the whole of its remaining steps rather than for one. It
   // is cleared here the moment the chain stops on something a person has to answer.
   //
   // A turn that failed or bounced is not re-sent on the spot: it waits (see `held`), and its own
@@ -1123,9 +1125,9 @@ async function settleStep(
     const attempts = get().stepsByChain[chainId]?.find((step) => step.id === stepId)?.attempts ?? 1;
     hold(chainId, outcome.busy ? BUSY_RECHECK_MS : retryDelay(attempts), outcome.busy, get);
   } else if (chain?.status === "queued") {
-    void get().pump(chainId, { remote: drivenRemotely.has(chainId) });
+    void get().pump(chainId, { remote: inMotion.has(chainId) });
   } else {
-    drivenRemotely.delete(chainId);
+    inMotion.delete(chainId);
   }
 }
 
@@ -1135,7 +1137,7 @@ function hold(chainId: string, ms: number, busy: boolean, get: () => ChainState)
   release(chainId);
   const timer = setTimeout(() => {
     held.delete(chainId);
-    void get().pump(chainId, { remote: drivenRemotely.has(chainId) });
+    void get().pump(chainId, { remote: inMotion.has(chainId) });
   }, ms);
   held.set(chainId, { until: Date.now() + ms, busy, timer });
 }
@@ -1315,8 +1317,8 @@ if (isMainWindow()) {
     }
   });
 
-  // Hiding the window does not stop the webview, so without this a chain would keep launching
-  // engines with nothing on screen to show them and no button to stop them.
+  // Hiding the window does not stop the webview, so without this a plan nobody started in this
+  // session would launch engines with nothing on screen. Plans already moving carry on — `inMotion`.
   void listen("app:background", () => useChainStore.setState({ background: true }));
   void listen("app:foreground", () => {
     useChainStore.setState({ background: false });

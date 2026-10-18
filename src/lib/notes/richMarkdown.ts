@@ -1,6 +1,8 @@
 import { monaco } from "../monacoSetup";
 import { Marked, type Tokens } from "marked";
 import DOMPurify from "dompurify";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import { warm } from "../codeHighlight";
 import { resolveTokenRule, tokenRulesFor, type CodeTheme } from "../codeThemes";
 
@@ -200,20 +202,108 @@ function noteLinkExtension(resolve: NoteLinkResolver, missingLabel: string) {
   };
 }
 
+/** A diagram of the workspace a `![[Title]]` names — what an embed draws. */
+export type DiagramEmbedResolver = (title: string) => { id: string; title: string } | null;
+
+/**
+ * `![[Title]]` — a diagram of the workspace, drawn into the note (Obsidian's embed syntax). The
+ * picture is filled in by the preview from the diagram's stored thumbnail; here it is a marked
+ * placeholder, so the HTML stays a pure function of the source. A title that names no diagram is
+ * left as the text it was, marked missing like a broken note link.
+ */
+function diagramEmbedExtension(resolve: DiagramEmbedResolver, missingLabel: string) {
+  return {
+    name: "diagramEmbed",
+    level: "inline" as const,
+    start(src: string) {
+      return src.indexOf("![[");
+    },
+    tokenizer(src: string) {
+      const match = /^!\[\[([^\]\n]+)\]\]/.exec(src);
+      if (!match) return undefined;
+      return { type: "diagramEmbed", raw: match[0], text: match[1].trim() };
+    },
+    renderer(token: { text: string }) {
+      const target = resolve(token.text);
+      if (!target) {
+        return `<span class="cf-note-link cf-note-link-missing" title="${escapeHtml(missingLabel)}">${escapeHtml(token.text)}</span>`;
+      }
+      return (
+        `<span class="cf-note-embed" role="link" tabindex="0" data-cf-diagram="${escapeHtml(target.id)}" title="${escapeHtml(target.title)}">` +
+        `<span class="cf-note-embed-title">${escapeHtml(target.title)}</span></span>`
+      );
+    },
+  };
+}
+
+/** TeX as KaTeX's HTML, or the source marked as an error — a typo in a formula is not a reason to
+ *  lose the rest of the note. */
+function tex(source: string, displayMode: boolean): string {
+  try {
+    return katex.renderToString(source, { displayMode, throwOnError: false, output: "html", strict: "ignore" });
+  } catch {
+    return `<code class="cf-math-error">${escapeHtml(source)}</code>`;
+  }
+}
+
+/** `$$…$$` on lines of their own: a displayed formula. */
+const mathBlock = {
+  name: "mathBlock",
+  level: "block" as const,
+  start(src: string) {
+    return src.indexOf("$$");
+  },
+  tokenizer(src: string) {
+    const match = /^\$\$([\s\S]+?)\$\$(?:\n|$)/.exec(src);
+    if (!match) return undefined;
+    return { type: "mathBlock", raw: match[0], text: match[1].trim() };
+  },
+  renderer(token: { text: string }) {
+    return `<div class="cf-math-block">${tex(token.text, true)}</div>`;
+  },
+};
+
+/**
+ * `$…$` inside a line. Strict about what counts, so prices stay prices: no space just inside either
+ * dollar, and no digit right after the closing one ("$5 and $10" is money, not a formula).
+ */
+const mathInline = {
+  name: "mathInline",
+  level: "inline" as const,
+  start(src: string) {
+    return src.indexOf("$");
+  },
+  tokenizer(src: string) {
+    const match = /^\$([^\s$](?:[^$\n]*[^\s$])?)\$(?!\d)/.exec(src);
+    if (!match) return undefined;
+    return { type: "mathInline", raw: match[0], text: match[1] };
+  },
+  renderer(token: { text: string }) {
+    return tex(token.text, false);
+  },
+};
+
 export async function renderRichMarkdown(
   source: string,
   theme: CodeTheme,
   copyLabel: string,
   resolveNote: NoteLinkResolver,
   missingLabel: string,
+  resolveDiagram: DiagramEmbedResolver = () => null,
 ): Promise<string> {
   const renderer = new Marked({
     gfm: true,
     breaks: false,
-    extensions: [noteLinkExtension(resolveNote, missingLabel)],
+    // The embed before the link: `![[…]]` starts with what `[[…]]` would otherwise claim.
+    extensions: [mathBlock, diagramEmbedExtension(resolveDiagram, missingLabel), noteLinkExtension(resolveNote, missingLabel), mathInline],
     renderer: {
       code({ text, lang }: { text: string; lang?: string }) {
         const language = languageOf(lang);
+        // A Mermaid block is a diagram: its source rides along hidden, and the preview draws it
+        // (the runtime is loaded on first use — `lib/diagrams/mermaidRuntime`).
+        if (language === "mermaid") {
+          return `<div class="cf-note-mermaid"><pre class="cf-mermaid-src">${escapeHtml(text)}</pre></div>`;
+        }
         const body = highlight(text, language, theme);
         // `data-lang` labels the block in the corner; empty for an unlabelled fence, which the CSS
         // then draws nothing for.
@@ -251,6 +341,6 @@ export async function renderRichMarkdown(
     // its marker attribute to be found by the delegated click handler, and the wrapper needs
     // `data-lang` for the label. `style` is already allowed by default and is what carries the
     // token colours — DOMPurify keeps `color`/`font-*` and drops anything that could escape.
-    ADD_ATTR: ["target", "data-cf-copy", "data-lang", "data-cf-note", "role", "tabindex"],
+    ADD_ATTR: ["target", "data-cf-copy", "data-lang", "data-cf-note", "data-cf-diagram", "role", "tabindex", "aria-hidden"],
   });
 }

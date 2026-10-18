@@ -313,6 +313,7 @@ fn file_extension(format: &str, doc: &str) -> &'static str {
     match format {
         diagram_queries::FORMAT_DBML => "dbml",
         diagram_queries::FORMAT_EXCALIDRAW => "excalidraw",
+        diagram_queries::FORMAT_MERMAID => "mmd",
         diagram_queries::FORMAT_ARCHIFY if doc.trim_start().starts_with('{') => archify_json_extension(doc),
         diagram_queries::FORMAT_ARCHIFY => "html",
         _ => "drawio",
@@ -950,4 +951,11 @@ mod archify_remote_tests {
         assert_eq!(a, normalize_remote("https://user:token@github.com/example/app.git/"));
         assert_ne!(a, normalize_remote("https://github.com/example/other"));
     }
+}
+
+/// The workspace's diagrams whose content (labels, text, source) holds every word of `query`.
+#[tauri::command(async)]
+pub fn diagrams_search_content(db: State<Db>, workspace_id: String, query: String) -> Result<Vec<diagram_queries::DiagramHit>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    diagram_queries::search_content(&conn, &workspace_id, &query, 200).map_err(|e| e.to_string())
 }

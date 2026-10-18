@@ -139,6 +139,15 @@ pub fn service_clear_log(app: AppHandle, id: String) {
     Supervisor::of(&app).clear_log(&id);
 }
 
+/// A service's log written to `path` as plain text — colours and cursor moves taken out, which a
+/// file opened in an editor would show as noise.
+#[tauri::command]
+pub fn service_export_log(app: AppHandle, id: String, path: String) -> Result<(), String> {
+    let log = Supervisor::of(&app).log(&id);
+    let text = crate::services::log::strip_ansi(&log.text);
+    std::fs::write(&path, text).map_err(|e| format!("couldn't write {path}: {e}"))
+}
+
 /// What a folder can run, best first. See [`crate::services::detect`]. With `focus` — the subfolder
 /// the editor has picked, relative to `path` — only what runs in that folder or below it is listed,
 /// and the folder is read however deep it is ([`detect::detect_in`]).

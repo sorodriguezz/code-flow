@@ -9,6 +9,7 @@ import {
   listStoryBatches,
   previewStoryBoardUpdate,
   publishStories,
+  findStoryDuplicates,
   renameStoryBatch,
   saveStoryDraft,
   setStoryBatchAnswers,
@@ -22,7 +23,7 @@ import {
 } from "../lib/tauri/commands";
 import { featureFileName, parseCriteria, toFeatureFile } from "../lib/gherkin";
 import { boardLabelKey } from "../lib/boardLabel";
-import { useConfirmStore } from "./confirmStore";
+import { chooseAction, useConfirmStore } from "./confirmStore";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
@@ -160,8 +161,10 @@ export function targetFrom(batch: StoryBatch): BoardsTarget {
  * create a work item without. Area and iteration are genuinely optional even on Azure: left blank,
  * the project's own defaults apply, which is usually what a team wants. */
 export function isPublishable(batch: StoryBatch): boolean {
+  // An issue tracker's "type" is an optional label: none publishes a plain issue.
+  const labelled = ["github", "gitlab", "linear"].includes(providerOf(batch));
   return (
-    batch.ado_org.trim() !== "" && batch.ado_project.trim() !== "" && batch.work_item_type.trim() !== ""
+    batch.ado_org.trim() !== "" && batch.ado_project.trim() !== "" && (labelled || batch.work_item_type.trim() !== "")
   );
 }
 
@@ -746,10 +749,39 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     // Per batch, not store-wide: the guard and the button it disables have to be asking the same
     // question, and "is anything publishing?" is not it.
     if (get().publishingByBatch[batchId]) return;
-    const ids = get().selectionFor(batchId);
+    let ids = get().selectionFor(batchId);
     if (ids.length === 0) return;
     set((s) => ({ publishingByBatch: { ...s.publishingByBatch, [batchId]: true as const } }));
     try {
+      // Looked for on the board first. A check that cannot run (no network, a token without search
+      // rights) does not stand in the way of a publish the user asked for — it only says nothing.
+      const duplicates = await findStoryDuplicates(batchId, ids).catch(() => []);
+      if (duplicates.length > 0) {
+        const items = duplicates.flatMap((dupe) =>
+          dupe.matches.map((match) =>
+            match.id === 0
+              ? translate("stories.duplicateInSelection", { title: dupe.story_title })
+              : translate("stories.duplicateOnBoard", {
+                  title: dupe.story_title,
+                  item: `${match.key || `#${match.id}`} «${match.title}»${match.state ? ` · ${match.state}` : ""}`,
+                }),
+          ),
+        );
+        const choice = await chooseAction({
+          message: translate("stories.duplicatesFound", { n: String(duplicates.length) }),
+          items: items.slice(0, 12),
+          choices: [
+            { id: "skip", label: translate("stories.publishSkipDuplicates"), variant: "primary" },
+            { id: "all", label: translate("stories.publishAnyway"), variant: "secondary" },
+          ],
+        });
+        if (choice === null) return;
+        if (choice === "skip") {
+          const flagged = new Set(duplicates.map((dupe) => dupe.story_id));
+          ids = ids.filter((id) => !flagged.has(id));
+          if (ids.length === 0) return;
+        }
+      }
       const outcome = await publishStories(batchId, ids);
       set((s) => ({
         storiesByBatch: { ...s.storiesByBatch, [batchId]: outcome.stories },

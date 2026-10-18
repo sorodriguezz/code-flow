@@ -6,6 +6,7 @@ import {
   Background,
   BackgroundVariant,
   Handle,
+  MiniMap,
   Position,
   ReactFlow,
   ReactFlowProvider,
@@ -14,7 +15,7 @@ import {
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { ArrowRightLeft, ChevronRight, FileCode2, Folder, FolderTree, LoaderCircle, Network, RefreshCw, Repeat, Search, Users, Waypoints, Workflow, X } from "lucide-react";
+import { ArrowRightLeft, ChevronRight, FileCode2, FileQuestion, Folder, FolderTree, GitFork, LoaderCircle, Network, RefreshCw, Repeat, Search, Users, Waypoints, Workflow, X } from "lucide-react";
 import { Tooltip } from "../common/Tooltip";
 import { Segmented } from "../common/Segmented";
 import { buttonClass, iconButtonClass } from "../common/Button";
@@ -40,10 +41,12 @@ import {
   codemapFind,
   codemapGlobal,
   codemapGraph,
+  codemapHealth,
   codemapKeySymbols,
   codemapOutline,
   codemapUsages,
   type FileOutline,
+  type FileStanding,
   type MapBuild,
   type MapGraph,
   type MapNode,
@@ -90,8 +93,12 @@ function groupColors(nodes: MapNode[]): Map<string, string> {
 }
 
 /** Nodes drawn at once. A folder of 166 stores laid out whole is a wall of unreadable cards at the
- *  zoom that fits it; the rest are one click away in the side panel's list. */
-const MAX_NODES = 24;
+ *  zoom that fits it; the rest are one click away in the side panel's list. The minimap is what
+ *  makes this many navigable — zoomed in to read, the rest is a drag on it away. */
+const MAX_NODES = 60;
+
+/** From this many nodes the canvas no longer reads whole at a glance, and the minimap shows. */
+const MINIMAP_FROM = 13;
 
 /** The nodes worth drawing first: folders, then what the most files depend on. */
 function drawable(graph: MapGraph): { shown: MapNode[]; hidden: MapNode[] } {
@@ -104,7 +111,11 @@ type Panel =
   | { kind: "rest" }
   | { kind: "file"; path: string; highlight?: number }
   | { kind: "search"; query: string }
+  | { kind: "health"; list: HealthList }
   | { kind: "usages"; name: string; path: string | null };
+
+/** The three lists the map's health section opens. */
+type HealthList = "orphans" | "mostUsed" | "mostDependent";
 
 interface MapNodeData extends Record<string, unknown> {
   node: MapNode;
@@ -322,6 +333,10 @@ function CodeMap() {
       },
       draggable: false,
       connectable: false,
+      // A size up front: with no onNodesChange the canvas never hands its measurements back, and
+      // the minimap skips every node it has no size for — which left it blank.
+      initialWidth: 220,
+      initialHeight: 60,
     }));
   }, [graph, split, positions, colors, mode]);
   const spotlight = useMemo<Spotlight>(() => ({ selected, spotlit, linked }), [selected, spotlit, linked]);
@@ -611,6 +626,16 @@ function CodeMap() {
                 proOptions={{ hideAttribution: true }}
               >
                 <Background variant={BackgroundVariant.Dots} gap={20} size={1.3} />
+                {split.shown.length >= MINIMAP_FROM && (
+                  <MiniMap<CanvasNode>
+                    className="cf-map-minimap"
+                    pannable
+                    zoomable
+                    nodeBorderRadius={6}
+                    nodeColor={(node) => node.data.color ?? (node.data.node.folder ? "var(--cf-accent)" : "var(--cf-border-strong)")}
+                    ariaLabel={t("codemap.minimap")}
+                  />
+                )}
               </ReactFlow>
             </SpotlightContext.Provider>
           )}
@@ -699,6 +724,7 @@ function SidePanel({
   if (panel.kind === "file") return <FilePanel root={root} path={panel.path} highlight={panel.highlight} onPanel={onPanel} onBack={onClear} />;
   if (panel.kind === "search") return <SearchPanel root={root} query={panel.query} onPanel={onPanel} onBack={onClear} />;
   if (panel.kind === "usages") return <UsagesPanel root={root} name={panel.name} path={panel.path} onPanel={onPanel} onBack={onClear} />;
+  if (panel.kind === "health") return <HealthPanel root={root} list={panel.list} onPanel={onPanel} onBack={onClear} />;
   if (panel.kind === "rest") {
     return (
       <>
@@ -741,8 +767,75 @@ function SidePanel({
           </button>
         </div>
       )}
+      <HealthSection root={root} onPanel={onPanel} />
       <KeySymbols root={root} onPanel={onPanel} />
     </div>
+  );
+}
+
+const HEALTH_LISTS: { list: HealthList; icon: typeof Users; label: "codemap.health.orphans" | "codemap.health.mostUsed" | "codemap.health.mostDependent" }[] = [
+  { list: "orphans", icon: FileQuestion, label: "codemap.health.orphans" },
+  { list: "mostUsed", icon: Users, label: "codemap.health.mostUsed" },
+  { list: "mostDependent", icon: GitFork, label: "codemap.health.mostDependent" },
+];
+
+/** The import graph's three questions, each a row that opens its list: what nothing imports, what
+ *  the most depend on, what depends on the most. */
+function HealthSection({ root, onPanel }: { root: string; onPanel: (panel: Panel) => void }) {
+  const t = useT();
+  const { data } = useAsync(() => codemapHealth(root), [root]);
+  return (
+    <>
+      <div className={sectionLabelClass}>{t("codemap.health.title")}</div>
+      {HEALTH_LISTS.map(({ list, icon: Icon, label }) => (
+        <button key={list} type="button" onClick={() => onPanel({ kind: "health", list })} className={rowClass(false, "h-7")}>
+          <Icon size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+          <span className="min-w-0 truncate text-[12.5px]">{t(label)}</span>
+          {data && list === "orphans" && <span className="ml-auto shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">{data.orphans.length}</span>}
+        </button>
+      ))}
+    </>
+  );
+}
+
+function HealthPanel({ root, list, onPanel, onBack }: { root: string; list: HealthList; onPanel: (panel: Panel) => void; onBack: () => void }) {
+  const t = useT();
+  const { data, error } = useAsync(() => codemapHealth(root), [root]);
+  const rows: FileStanding[] = !data ? [] : list === "orphans" ? data.orphans : list === "mostUsed" ? data.mostUsed : data.mostDependent;
+  const entry = HEALTH_LISTS.find((item) => item.list === list)!;
+  return (
+    <>
+      <PanelHeader title={t(entry.label)} onBack={onBack} />
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        {error ? (
+          <p className="px-1.5 py-2 text-[12px] text-[var(--cf-danger)]">{error}</p>
+        ) : !data ? (
+          <Loading />
+        ) : (
+          <>
+            <p className="px-1.5 pb-1 pt-2 text-[11.5px] text-[var(--cf-text-faint)]">
+              {list === "orphans" ? t("codemap.health.orphansHint", { n: formatCount(data.checked) }) : t(list === "mostUsed" ? "codemap.health.mostUsedHint" : "codemap.health.mostDependentHint")}
+            </p>
+            {rows.length === 0 && <p className="px-1.5 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("codemap.health.none")}</p>}
+            {rows.map((row) => (
+              <button
+                key={row.path}
+                type="button"
+                onClick={() => onPanel({ kind: "file", path: row.path })}
+                className={rowClass(false, "min-h-[40px] flex-col items-start gap-0.5 py-1.5")}
+              >
+                <span className="w-full min-w-0 truncate font-mono text-[11.5px]">{row.path}</span>
+                <span className="text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+                  {list === "orphans"
+                    ? t("codemap.health.orphanMeta", { lines: formatCount(row.lines), symbols: formatCount(row.symbols) })
+                    : t("codemap.health.fanMeta", { fanIn: formatCount(row.fanIn), fanOut: formatCount(row.fanOut) })}
+                </span>
+              </button>
+            ))}
+          </>
+        )}
+      </div>
+    </>
   );
 }
 

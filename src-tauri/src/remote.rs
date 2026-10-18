@@ -415,6 +415,13 @@ pub async fn fetch(app: AppHandle, repo_path: String, remote: Option<String>) ->
     run_streamed(&app, "fetch", Some(&repo_path), &["fetch", &remote]).await
 }
 
+/// `git lfs pull`: downloads the LFS objects the checked-out files point at and puts them in the
+/// working tree in place of their pointers — for a clone made without LFS installed, or files whose
+/// objects were never fetched.
+pub async fn lfs_pull(app: AppHandle, repo_path: String) -> Result<(), String> {
+    run_streamed(&app, "lfs", Some(&repo_path), &["lfs", "pull"]).await
+}
+
 /// Fetches a single explicit refspec (e.g. a GitHub `refs/pull/<n>/head` pull-request ref)
 /// rather than the remote's default branches — used to pull a PR's exact head commit for
 /// review, which works even when the PR comes from a fork.

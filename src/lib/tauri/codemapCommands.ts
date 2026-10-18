@@ -108,3 +108,25 @@ export const codemapUsages = (repoPath: string, name: string, path: string | nul
   invoke<UsageReport>("codemap_usages", { repoPath, name, path });
 
 export const codemapKeySymbols = (repoPath: string) => invoke<SymbolHit[]>("codemap_key_symbols", { repoPath });
+
+export interface FileStanding {
+  path: string;
+  /** Project files that import it. */
+  fanIn: number;
+  /** Project files it imports. */
+  fanOut: number;
+  lines: number;
+  symbols: number;
+}
+
+export interface MapHealth {
+  /** Files nothing imports (TypeScript/JavaScript, Python, Dart), entry points and tests left out. */
+  orphans: FileStanding[];
+  mostUsed: FileStanding[];
+  mostDependent: FileStanding[];
+  /** Files of a family the orphan check can read. */
+  checked: number;
+}
+
+/** What the import graph says about the code's shape: unimported files and the most coupled ones. */
+export const codemapHealth = (repoPath: string) => invoke<MapHealth>("codemap_health", { repoPath });

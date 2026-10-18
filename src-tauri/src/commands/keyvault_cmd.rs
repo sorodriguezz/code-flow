@@ -69,12 +69,13 @@ pub async fn keyvault_status(
     // long time, because the dialog can open behind the app's own window. Holding
     // `Mutex<Connection>` across that freezes every other command in the app behind a prompt the
     // user has not necessarily noticed. Same rule as Argon2; see `keyvault_unlock`.
-    let (initialised, autolock_minutes) = {
+    let (initialised, autolock_minutes, biometric) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let meta = queries::get_meta(&conn).map_err(|e| e.to_string())?;
         (
             meta.is_some(),
             meta.as_ref().map(|m| m.autolock_minutes).unwrap_or(15),
+            biometric_on(&conn),
         )
     };
     let unlocked = session.is_unlocked();
@@ -87,13 +88,63 @@ pub async fn keyvault_status(
     })
     .await
     .map_err(|e| e.to_string())?;
+    let biometric_available = tokio::task::spawn_blocking(crate::keyvault::biometric::available)
+        .await
+        .unwrap_or(false);
 
     Ok(VaultStatus {
         initialised,
         unlocked,
         autolock_minutes,
         remembered,
+        biometric_available,
+        biometric,
     })
+}
+
+/// The setting that puts Touch ID / Windows Hello in front of the remembered password.
+const BIOMETRIC_SETTING: &str = "keyvault_biometric";
+
+fn biometric_on(conn: &rusqlite::Connection) -> bool {
+    crate::db::queries::get_setting(conn, BIOMETRIC_SETTING).ok().flatten().as_deref() == Some("1")
+}
+
+/// The app's main window handle, for a Windows Hello dialog to open over rather than behind.
+fn owner_window(app: &AppHandle) -> Option<isize> {
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        return app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        None
+    }
+}
+
+/// The system's own check of who is at the machine — blocking, so off the runtime.
+async fn confirm_owner(app: &AppHandle) -> bool {
+    let window = owner_window(app);
+    let reason = "abrir el Llavero de CodeFlow".to_string();
+    tokio::task::spawn_blocking(move || {
+        crate::keyvault::biometric::available() && crate::keyvault::biometric::verify(&reason, window)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Switches Touch ID / Windows Hello on or off for the remembered password. Switching it on runs the
+/// check once, so it is never turned on by someone it would then refuse; `false` back means the
+/// check did not pass and nothing changed.
+#[tauri::command]
+pub async fn keyvault_set_biometric(app: AppHandle, db: State<'_, Db>, on: bool) -> Result<bool, String> {
+    if on && !confirm_owner(&app).await {
+        return Ok(false);
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::db::queries::set_setting(&conn, BIOMETRIC_SETTING, if on { "1" } else { "0" }).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// Creates the vault and leaves it open.
@@ -178,9 +229,16 @@ pub async fn keyvault_unlock(
 /// read in exactly one place and never travels to the webview to be handed back.
 #[tauri::command]
 pub async fn keyvault_unlock_remembered(
+    app: AppHandle,
     db: State<'_, Db>,
     session: State<'_, VaultSession>,
 ) -> Result<bool, String> {
+    // With Touch ID / Windows Hello switched on, the remembered password is used only after the
+    // system's check — and a refused or unavailable check is "not opened", never a way around it.
+    let gated = db.0.lock().map(|conn| biometric_on(&conn)).unwrap_or(true);
+    if gated && !confirm_owner(&app).await {
+        return Ok(false);
+    }
     // Off the runtime's worker threads, for the same reason `keyvault_status` does it: reading an
     // item from the OS credential store is a blocking call of unbounded duration — on macOS the
     // first one puts a permission dialog in front of the answer and waits for it, and that dialog
@@ -1137,4 +1195,14 @@ mod health_tests {
     fn twelve_characters_of_two_classes_passes() {
         assert!(!is_weak("abcdefgh1234"));
     }
+}
+
+/// Copies a revealed secret to the clipboard natively — hidden from clipboard history — and clears
+/// it after `clear_after_secs` unless something else was copied since. See `secret_clipboard`.
+#[tauri::command]
+pub async fn keyvault_copy_secret(value: String, clear_after_secs: u32) -> Result<(), String> {
+    let delay = std::time::Duration::from_secs(u64::from(clear_after_secs.clamp(5, 600)));
+    tokio::task::spawn_blocking(move || crate::secret_clipboard::copy(&value, delay))
+        .await
+        .map_err(|e| e.to_string())?
 }

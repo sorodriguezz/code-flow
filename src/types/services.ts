@@ -115,6 +115,10 @@ export interface ServiceRuntime {
   ports: number[];
   /** Seen on an earlier run — where a stopped service will be. */
   knownPorts: number[];
+  /** The process tree's CPU, whole percent of one core, while it runs. */
+  cpu?: number | null;
+  /** The process tree's resident memory, in MiB, while it runs. */
+  memoryMb?: number | null;
 }
 
 /** One thing a folder can run, as the detector read it. See `services/detect.rs`. */

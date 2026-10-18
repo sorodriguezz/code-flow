@@ -161,6 +161,14 @@ export const containersUpdateLimits = (runtime: string, context: string | null, 
 export const containersCreateVolume = (runtime: string, context: string | null, name: string, driver: string | null = null) =>
   invoke<void>("containers_create_volume", { runtime, context, name, driver });
 
+/** Volume `name` as a `.tar.gz` at `path`, through a throwaway container. Resolves to the bytes written. */
+export const containersBackupVolume = (runtime: string, context: string | null, name: string, path: string) =>
+  invoke<number>("containers_backup_volume", { runtime, context, name, path });
+
+/** A `.tar.gz` unpacked into volume `name` (made if missing); `replace` empties it first. */
+export const containersRestoreVolume = (runtime: string, context: string | null, name: string, path: string, replace: boolean) =>
+  invoke<void>("containers_restore_volume", { runtime, context, name, path, replace });
+
 export const containersCreateNetwork = (runtime: string, context: string | null, name: string, driver: string | null = null) =>
   invoke<void>("containers_create_network", { runtime, context, name, driver });
 

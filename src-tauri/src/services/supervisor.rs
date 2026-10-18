@@ -39,7 +39,7 @@
 //! a previous process can never be mistaken for the current one's.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -230,6 +230,9 @@ struct Run {
     probed_ports: Vec<u16>,
     cwd: Option<PathBuf>,
     env: Vec<(String, String)>,
+    /// The tree's CPU (whole percent) and memory (MiB) at the monitor's last reading — rounded, so
+    /// a row is re-sent when what it shows changes, not on every flicker.
+    usage: Option<(u32, u64)>,
 }
 
 impl Run {
@@ -267,6 +270,7 @@ impl Run {
             probed_ports: Vec::new(),
             cwd: None,
             env: Vec::new(),
+            usage: None,
         }
     }
 
@@ -288,6 +292,8 @@ impl Run {
             restarts: self.restarts,
             ports: self.ports.clone(),
             known_ports: parse_ports(&self.def.detected_ports),
+            cpu: self.usage.map(|(cpu, _)| cpu),
+            memory_mb: self.usage.map(|(_, memory)| memory),
         }
     }
 }
@@ -315,6 +321,10 @@ pub struct RuntimeView {
     pub ports: Vec<u16>,
     /// The ports seen on a previous run, for a stopped row to still say where it lives.
     pub known_ports: Vec<u16>,
+    /// The process tree's CPU, in whole percent of one core, while it runs.
+    pub cpu: Option<u32>,
+    /// The process tree's resident memory, in MiB, while it runs.
+    pub memory_mb: Option<u64>,
 }
 
 /// A service's output so far, for a pane that is mounting.
@@ -383,6 +393,7 @@ struct MonitorUpdate {
     tree: Vec<ProcId>,
     tree_ports: Vec<u16>,
     compose: Option<compose::ComposeStatus>,
+    usage: (u32, u64),
 }
 
 struct MonitorTarget {
@@ -421,20 +432,33 @@ impl Supervisor {
         self.runs().values().map(Run::view).collect()
     }
 
+    /// What a service printed: this session's, or — for one that has not run since the app
+    /// started — what it printed last time, kept on disk ([`persist_log`]).
     pub fn log(&self, id: &str) -> ServiceLog {
         match self.runs().get(id) {
-            Some(run) => ServiceLog {
+            Some(run) if !run.log.text().is_empty() || run.session_id.is_some() => ServiceLog {
                 text: run.log.text().to_string(),
                 seq: run.seq,
                 session_id: run.session_id.clone(),
             },
-            None => ServiceLog { text: String::new(), seq: 0, session_id: None },
+            Some(run) => ServiceLog { text: saved_log(id), seq: run.seq, session_id: None },
+            None => ServiceLog { text: saved_log(id), seq: 0, session_id: None },
         }
     }
 
     pub fn clear_log(&self, id: &str) {
         if let Some(run) = self.runs().get_mut(id) {
             run.log.clear();
+        }
+        let _ = std::fs::remove_file(saved_log_path(id));
+    }
+
+    /// Every log of this session to disk — on the way out, after the services were stopped.
+    pub fn persist_logs(&self) {
+        for (id, run) in self.runs().iter() {
+            if !run.log.text().is_empty() {
+                write_log(&saved_log_path(id), run.log.text());
+            }
         }
     }
 
@@ -686,6 +710,7 @@ impl Supervisor {
                     }
                     run.session_id = Some(session);
                     run.pid = pid;
+                    wake_monitor();
                     run.cwd = cwd;
                     run.env = env;
                     if gate == Gate::Immediate {
@@ -774,8 +799,10 @@ impl Supervisor {
             run.ports.clear();
             run.probed_ports.clear();
             run.tree.clear();
+            run.usage = None;
             run.compose_ready = false;
             run.log.push(&exit_marker(code));
+            persist_log(id, run.log.text());
             let gate = gate_of(&run.def);
             let mut next = Next::Nothing;
 
@@ -1110,6 +1137,8 @@ impl Supervisor {
                     continue;
                 }
                 run.tree = update.tree;
+                let usage_changed = run.usage != Some(update.usage);
+                run.usage = Some(update.usage);
                 if let Some(status) = update.compose {
                     run.compose_ready = status.ready;
                     run.compose_ports = status.ports;
@@ -1130,6 +1159,8 @@ impl Supervisor {
                         learned.push((run.def.id.clone(), merged));
                     }
                     views.push(run.view());
+                } else if usage_changed {
+                    views.push(run.view());
                 }
             }
         }
@@ -1143,8 +1174,37 @@ impl Supervisor {
     }
 }
 
+/// Rings when a service has been launched, so a monitor with nothing to watch can sleep until
+/// there is something instead of waking every second to find out.
+static MONITOR_WAKE: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+
+fn wake_monitor() {
+    let (flag, bell) = &MONITOR_WAKE;
+    if let Ok(mut rung) = flag.lock() {
+        *rung = true;
+        bell.notify_one();
+    }
+}
+
+/// Sleeps `period`, or less if a service is launched meanwhile.
+fn monitor_sleep(period: Duration) {
+    let (flag, bell) = &MONITOR_WAKE;
+    let Ok(mut rung) = flag.lock() else {
+        std::thread::sleep(period);
+        return;
+    };
+    if !*rung {
+        rung = bell.wait_timeout(rung, period).map(|(guard, _)| guard).unwrap_or_else(|e| e.into_inner().0);
+    }
+    *rung = false;
+}
+
 /// Watches every live service's process tree for listening ports, and Compose projects for their
-/// containers. One thread for the life of the app; a second of sleep per loop while nothing runs.
+/// containers. One thread for the life of the app, asleep while nothing runs.
+///
+/// With the main window put away (in the tray), a settled service is looked at every ten seconds
+/// instead of every two and a half: the ports and the usage chip are for someone looking at them,
+/// and a process that dies is still told by its exit hook, not by this loop.
 pub fn spawn_monitor<R: Runtime>(app: AppHandle<R>) {
     let _ = std::thread::Builder::new().name("services-monitor".into()).spawn(move || {
         let supervisor = Supervisor::of(&app);
@@ -1154,13 +1214,17 @@ pub fn spawn_monitor<R: Runtime>(app: AppHandle<R>) {
             let targets = supervisor.monitor_targets();
             if targets.is_empty() {
                 compose_due.clear();
-                std::thread::sleep(Duration::from_millis(800));
+                // The wake-up is a fallback: a launch rings the bell.
+                monitor_sleep(Duration::from_secs(30));
                 continue;
             }
             let starting = targets.iter().any(|t| t.starting);
+            // Every process for the trees (pid and parent only), then CPU and memory for the
+            // services' own processes — not for every process on the machine.
             table.refresh();
             let trees: Vec<Vec<ProcId>> = targets.iter().map(|t| t.pid.map(|p| table.tree(p)).unwrap_or_default()).collect();
             let pids: Vec<u32> = trees.iter().flatten().map(|p| p.pid).collect();
+            table.refresh_usage(&pids);
             let listeners = ports::listeners_of(&pids);
 
             let mut updates = Vec::new();
@@ -1175,12 +1239,14 @@ pub fn spawn_monitor<R: Runtime>(app: AppHandle<R>) {
                         compose_due.insert(target.id.clone(), Instant::now() + every);
                     }
                 }
+                let (cpu, memory) = table.usage(&tree);
                 updates.push(MonitorUpdate {
                     id: target.id,
                     spawn_id: target.spawn_id,
                     tree,
                     tree_ports,
                     compose: compose_status,
+                    usage: (cpu.round() as u32, memory / (1024 * 1024)),
                 });
             }
             let learned = supervisor.apply_monitor(&app, updates);
@@ -1191,7 +1257,12 @@ pub fn spawn_monitor<R: Runtime>(app: AppHandle<R>) {
                     }
                 }
             }
-            std::thread::sleep(if starting { Duration::from_millis(700) } else { Duration::from_millis(2500) });
+            let away = crate::MAIN_AWAY.load(std::sync::atomic::Ordering::Relaxed);
+            monitor_sleep(match (starting, away) {
+                (true, _) => Duration::from_millis(700),
+                (false, false) => Duration::from_millis(2500),
+                (false, true) => Duration::from_secs(10),
+            });
         }
     });
 }
@@ -1275,13 +1346,14 @@ async fn answering_ports(ports: &[u16]) -> Vec<u16> {
 /// Whether `url` answers with anything below 500. A health endpoint behind auth answers 401 and a
 /// bare `/` on an API answers 404; both mean it is up. A 5xx means up but broken.
 pub async fn probe_http(url: &str, timeout: Duration) -> bool {
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(timeout)
-        // A dev server with a self-signed certificate is the normal case for `https://localhost`.
-        // This request reads nothing but a status code from an address the user configured.
-        .danger_accept_invalid_certs(true)
-        .build()
-    else {
+    // Shared across ticks: the gate asks every few hundred milliseconds while a service starts.
+    let Ok(client) = crate::http_clients::cached(&format!("probe:{}", timeout.as_millis()), || {
+        reqwest::Client::builder()
+            .timeout(timeout)
+            // A dev server with a self-signed certificate is the normal case for `https://localhost`.
+            // This request reads nothing but a status code from an address the user configured.
+            .danger_accept_invalid_certs(true)
+    }) else {
         return false;
     };
     matches!(client.get(url).send().await, Ok(response) if response.status().as_u16() < 500)
@@ -1621,6 +1693,35 @@ fn clock() -> String {
 fn start_marker(command: &str, after_output: bool) -> String {
     let lead = if after_output { "\r\n" } else { "" };
     format!("{lead}\x1b[2m▶ {} · {}\x1b[0m\r\n", clock(), command)
+}
+
+/// Where a service's last log is kept between sessions. The cache, not the state root: losing it
+/// costs one log nobody asked to keep.
+fn saved_log_path(id: &str) -> PathBuf {
+    let safe: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    crate::paths::cache_dir().join("service-logs").join(format!("{safe}.log"))
+}
+
+fn write_log(path: &Path, text: &str) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, text);
+}
+
+/// Keeps a service's log on disk when its process ends, so the console still shows why it stopped
+/// after the app restarts. Off the caller's thread: an exit hook must not wait on a disk.
+fn persist_log(id: &str, text: &str) {
+    if cfg!(test) {
+        return;
+    }
+    let (path, text) = (saved_log_path(id), text.to_string());
+    let _ = std::thread::Builder::new().name("service-log-save".into()).spawn(move || write_log(&path, &text));
+}
+
+/// The log kept by [`persist_log`], or nothing.
+fn saved_log(id: &str) -> String {
+    std::fs::read_to_string(saved_log_path(id)).unwrap_or_default()
 }
 
 fn exit_marker(code: Option<i32>) -> String {

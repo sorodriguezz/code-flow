@@ -380,7 +380,7 @@ async fn sqs_request(signer: &SqsSigner, region: &str, queue_url: &str, action: 
         "sqs",
         &chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
     )?;
-    let mut request = reqwest::Client::new().post(endpoint.as_str()).timeout(Duration::from_secs(40)).body(payload);
+    let mut request = crate::http_clients::plain().post(endpoint.as_str()).timeout(Duration::from_secs(40)).body(payload);
     for (name, value) in headers.into_iter().chain(signed) {
         request = request.header(name, value);
     }

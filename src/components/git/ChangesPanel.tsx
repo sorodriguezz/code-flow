@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -27,6 +27,7 @@ import {
   GitMerge,
   EyeOff,
   GitCompareArrows,
+  HardDrive,
   Search,
   Space,
   UploadCloud,
@@ -51,6 +52,7 @@ import { useRepoStore } from "../../state/repoStore";
 import { useBlameStore } from "../../state/blameStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { DiffView } from "./DiffView";
+import type { DiffSides } from "./BinaryDiff";
 import { EmptyState } from "../common/EmptyState";
 import { FileGlyph } from "../common/FileGlyph";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -92,7 +94,7 @@ import { useConflictEditorStore } from "../../state/conflictEditorStore";
 import { RepoFeaturesBadge } from "./RepoFeaturesBadge";
 import { actionButtonClass } from "./actionButton";
 import type { DiffStaging } from "./StagingDiff";
-import type { SubmoduleInfo } from "../../lib/tauri/gitCommands";
+import { gitLfsTrack, type SubmoduleInfo } from "../../lib/tauri/gitCommands";
 import type { FileDiffInfo, FileStatusEntry, SecretHit } from "../../types/domain";
 import { useMultiDiffStore } from "../../state/multiDiffStore";
 
@@ -241,6 +243,7 @@ function FileRow({
   displayName,
   onContextMenu,
   submodule,
+  windowed = false,
 }: {
   entry: FileStatusEntry;
   selected: boolean;
@@ -258,6 +261,9 @@ function FileRow({
   /** Place in the list it arrives with, which is all the entry animation needs to stagger. */
   at?: number;
   displayName?: string;
+  /** Drawn by `WindowedRows`: built only near the viewport, so it neither rises in (it would rise
+   *  again every time it scrolled back into view) nor needs `content-visibility`. */
+  windowed?: boolean;
 }) {
   const t = useT();
   // Tree mode already draws the folders as rows above this one, so there is nothing left for the
@@ -287,11 +293,9 @@ function FileRow({
        */
       style={{
         ...(depth ? { paddingLeft: depth * 14 } : null),
-        ...riseDelay(at),
-        contentVisibility: "auto",
-        containIntrinsicSize: "auto 26px",
+        ...(windowed ? { height: ROW_HEIGHT } : { ...riseDelay(at), contentVisibility: "auto", containIntrinsicSize: "auto 26px" }),
       }}
-      className={`cf-rise group flex items-center gap-2 rounded-md px-2 py-1 text-[13px] cursor-pointer ${
+      className={`${windowed ? "" : "cf-rise "}group flex items-center gap-2 rounded-md px-2 py-1 text-[13px] cursor-pointer ${
         selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
       }`}
     >
@@ -356,6 +360,83 @@ function FileRow({
   );
 }
 
+/** One row's height in the change lists — what `WindowedRows` lays them out by. */
+const ROW_HEIGHT = 26;
+/** From this many rows a list is windowed. Below it every row is built, and rises in as before. */
+const WINDOW_FROM = 300;
+/** Rows built beyond each edge of the viewport, so a fast scroll does not show blank space. */
+const OVERSCAN = 20;
+
+/**
+ * A long list, built only where it can be seen. `content-visibility` already spared the browser
+ * the layout of rows far off screen, but React still built every one — a branch switch that lands
+ * twenty thousand changed files was twenty thousand rows of components before the first frame.
+ * Here the list is a box of its full height, and only the rows inside the scroller's viewport (plus
+ * `OVERSCAN`) exist; scrolling swaps them. Rows are a fixed `ROW_HEIGHT`, which is what makes the
+ * arithmetic exact.
+ *
+ * The scroller is the panel's, shared with the other section and whatever sits above this one, so
+ * the visible range is worked out from where this box is inside it on each scroll and resize.
+ */
+function WindowedRows({
+  count,
+  scrollRef,
+  keyOf,
+  render,
+}: {
+  count: number;
+  scrollRef: RefObject<HTMLDivElement | null>;
+  keyOf: (index: number) => string;
+  render: (index: number) => ReactNode;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const [range, setRange] = useState<[number, number]>([0, Math.min(count, 80)]);
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    const element = box.current;
+    if (!scroller || !element) return;
+    const measure = () => {
+      const top = element.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+      const first = Math.max(0, Math.floor(-top / ROW_HEIGHT) - OVERSCAN);
+      const last = Math.min(count, Math.max(first, Math.ceil((scroller.clientHeight - top) / ROW_HEIGHT) + OVERSCAN));
+      setRange((prev) => (prev[0] === first && prev[1] === last ? prev : [first, last]));
+    };
+    measure();
+    scroller.addEventListener("scroll", measure, { passive: true });
+    const observer = new ResizeObserver(measure);
+    observer.observe(scroller);
+    return () => {
+      scroller.removeEventListener("scroll", measure);
+      observer.disconnect();
+    };
+  }, [count, scrollRef]);
+  const rows: ReactNode[] = [];
+  for (let index = range[0]; index < Math.min(range[1], count); index++) {
+    rows.push(
+      <div key={keyOf(index)} style={{ position: "absolute", top: index * ROW_HEIGHT, left: 0, right: 0, height: ROW_HEIGHT }}>
+        {render(index)}
+      </div>,
+    );
+  }
+  return (
+    <div ref={box} style={{ position: "relative", height: count * ROW_HEIGHT }}>
+      {rows}
+    </div>
+  );
+}
+
+/** A tree flattened to the rows it shows, folded folders' contents left out — what `WindowedRows`
+ *  draws in tree mode. */
+type TreeRow = { node: FileTreeNode; depth: number };
+
+function flattenTree(nodes: FileTreeNode[], collapsed: Set<string>, depth = 0, out: TreeRow[] = []): TreeRow[] {
+  for (const node of nodes) {
+    out.push({ node, depth });
+    if (node.type !== "file" && !collapsed.has(node.path)) flattenTree(node.children, collapsed, depth + 1, out);
+  }
+  return out;
+}
+
 function FileTreeSection({
   entries,
   isSelected,
@@ -363,7 +444,9 @@ function FileTreeSection({
   buildActions,
   onContextMenu,
   submoduleOf,
+  scrollRef,
 }: {
+  scrollRef: RefObject<HTMLDivElement | null>;
   entries: FileStatusEntry[];
   isSelected: (entry: FileStatusEntry) => boolean;
   onSelectEntry: (entry: FileStatusEntry) => void;
@@ -382,37 +465,65 @@ function FileTreeSection({
       return next;
     });
 
+  const flat = useMemo(() => flattenTree(tree, collapsedDirs), [tree, collapsedDirs]);
+  const windowed = flat.length >= WINDOW_FROM;
+
+  const fileRow = (node: Extract<FileTreeNode, { type: "file" }>, depth: number, at: number) => (
+    <FileRow
+      key={node.entry.path}
+      entry={node.entry}
+      selected={isSelected(node.entry)}
+      onSelect={() => onSelectEntry(node.entry)}
+      actions={buildActions(node.entry)}
+      onContextMenu={(event) => onContextMenu?.(event, node.entry)}
+      depth={depth}
+      at={at}
+      displayName={node.name}
+      submodule={submoduleOf(node.entry.path)}
+      windowed={windowed}
+    />
+  );
+
+  const folderRow = (node: Exclude<FileTreeNode, { type: "file" }>, depth: number, at: number) => {
+    const collapsed = collapsedDirs.has(node.path);
+    return (
+      <div
+        onClick={() => toggleDir(node.path)}
+        style={{ paddingLeft: depth * 14, ...(windowed ? { height: ROW_HEIGHT } : riseDelay(at)) }}
+        className={`${windowed ? "" : "cf-rise "}flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]`}
+      >
+        {collapsed ? <ChevronRight size={12} className="shrink-0" /> : <ChevronDown size={12} className="shrink-0" />}
+        {/* The same glyph the explorer draws for this folder, rather than a plain outline: a
+            folder icon the user chose a rule for should look like itself wherever it appears. */}
+        <FileGlyph path={node.path} isFolder open={!collapsed} size={12} />
+        <span className="truncate">{node.name}</span>
+      </div>
+    );
+  };
+
+  if (windowed) {
+    return (
+      <WindowedRows
+        count={flat.length}
+        scrollRef={scrollRef}
+        keyOf={(index) => {
+          const { node } = flat[index];
+          return node.type === "file" ? `f:${node.entry.path}` : `d:${node.path}`;
+        }}
+        render={(index) => {
+          const { node, depth } = flat[index];
+          return node.type === "file" ? fileRow(node, depth, 0) : folderRow(node, depth, 0);
+        }}
+      />
+    );
+  }
+
   const renderNode = (node: FileTreeNode, depth: number, at: number): React.ReactNode => {
-    if (node.type === "file") {
-      return (
-        <FileRow
-          key={node.entry.path}
-          entry={node.entry}
-          selected={isSelected(node.entry)}
-          onSelect={() => onSelectEntry(node.entry)}
-          actions={buildActions(node.entry)}
-          onContextMenu={(event) => onContextMenu?.(event, node.entry)}
-          depth={depth}
-          at={at}
-          displayName={node.name}
-          submodule={submoduleOf(node.entry.path)}
-        />
-      );
-    }
+    if (node.type === "file") return fileRow(node, depth, at);
     const collapsed = collapsedDirs.has(node.path);
     return (
       <div key={node.path}>
-        <div
-          onClick={() => toggleDir(node.path)}
-          style={{ paddingLeft: depth * 14, ...riseDelay(at) }}
-          className="cf-rise flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
-        >
-          {collapsed ? <ChevronRight size={12} className="shrink-0" /> : <ChevronDown size={12} className="shrink-0" />}
-          {/* The same glyph the explorer draws for this folder, rather than a plain outline: a
-              folder icon the user chose a rule for should look like itself wherever it appears. */}
-          <FileGlyph path={node.path} isFolder open={!collapsed} size={12} />
-          <span className="truncate">{node.name}</span>
-        </div>
+        {folderRow(node, depth, at)}
         {!collapsed && node.children.map((child, index) => renderNode(child, depth + 1, index))}
       </div>
     );
@@ -493,6 +604,8 @@ export function ChangesPanel({
   const [message, setMessage] = useState("");
   /** The list's filter (VS Code's Source Control filter): rows whose path contains it, either list. */
   const [filter, setFilter] = useState("");
+  /** The lists' scroller — what a windowed list measures its visible rows against. */
+  const listScrollRef = useRef<HTMLDivElement>(null);
   /** «Enmendar el último commit»: the button replaces HEAD with the index and the message. */
   const [amend, setAmend] = useState(false);
   /** `git diff -w` in the pane beside the list — read only: nothing is staged by line from it. */
@@ -572,6 +685,13 @@ export function ChangesPanel({
         : undefined,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selected, selectedSignature, selectedIsSubmodule, ignoreWhitespace],
+  );
+
+  /** Where a binary change's two sides are read: HEAD → index for a staged one, index → disk for
+   *  one that is not. */
+  const diffSides = useMemo<DiffSides | undefined>(
+    () => (repoPath && selected ? { repoPath, old: selected.staged ? "HEAD" : "INDEX", new: selected.staged ? "INDEX" : "WORKDIR" } : undefined),
+    [repoPath, selected],
   );
 
   /** The selected file at full file context, straight from git — `null` while it is on its way,
@@ -875,6 +995,25 @@ export function ChangesPanel({
           onClick: () => void addToGitignore(byExtension),
         });
       }
+    }
+
+    // Every file of this kind through Git LFS from now on — what a large asset added by mistake
+    // wants before it is committed. Deleted files have nothing to store.
+    const lfsPattern = entry.status === "deleted" ? null : extensionPatternFor(entry.path);
+    if (repoPath && lfsPattern) {
+      items.push({
+        label: t("changes.lfsTrack", { pattern: lfsPattern }),
+        icon: HardDrive,
+        separated: true,
+        onClick: () =>
+          void gitLfsTrack(repoPath, lfsPattern)
+            .then(async () => {
+              await useRepoStore.getState().refreshStatus();
+              void useGitToolsStore.getState().refreshLight();
+              pushSuccessToast(t("changes.lfsTracked", { pattern: lfsPattern }));
+            })
+            .catch((e: unknown) => pushErrorToast(String(e))),
+      });
     }
 
     setFileMenu({ x: event.clientX, y: event.clientY, items });
@@ -1186,7 +1325,7 @@ export function ChangesPanel({
             </div>
           </div>
         )}
-        <div className="flex-1 overflow-auto p-2">
+        <div ref={listScrollRef} className="flex-1 overflow-auto p-2">
           <UnpushedCommitsSection />
 
           <div className="mb-3">
@@ -1219,6 +1358,27 @@ export function ChangesPanel({
                 buildActions={(entry) => buildStagedActions(entry)}
                 onContextMenu={(event, entry) => openFileMenu(event, entry, true)}
                 submoduleOf={submoduleOf}
+                scrollRef={listScrollRef}
+              />
+            ) : stagedShown.length >= WINDOW_FROM ? (
+              <WindowedRows
+                count={stagedShown.length}
+                scrollRef={listScrollRef}
+                keyOf={(index) => stagedShown[index].path}
+                render={(index) => {
+                  const entry = stagedShown[index];
+                  return (
+                    <FileRow
+                      entry={entry}
+                      windowed
+                      selected={selected?.path === entry.path && selected.staged}
+                      onSelect={() => selectRow(entry, true)}
+                      actions={buildStagedActions(entry)}
+                      onContextMenu={(event) => openFileMenu(event, entry, true)}
+                      submodule={submoduleOf(entry.path)}
+                    />
+                  );
+                }}
               />
             ) : (
               stagedShown.map((entry, at) => (
@@ -1322,6 +1482,27 @@ export function ChangesPanel({
                 buildActions={(entry) => buildUnstagedActions(entry)}
                 onContextMenu={(event, entry) => openFileMenu(event, entry, false)}
                 submoduleOf={submoduleOf}
+                scrollRef={listScrollRef}
+              />
+            ) : workingShown.length >= WINDOW_FROM ? (
+              <WindowedRows
+                count={workingShown.length}
+                scrollRef={listScrollRef}
+                keyOf={(index) => workingShown[index].path}
+                render={(index) => {
+                  const entry = workingShown[index];
+                  return (
+                    <FileRow
+                      entry={entry}
+                      windowed
+                      selected={selected?.path === entry.path && !selected.staged}
+                      onSelect={() => selectRow(entry, false)}
+                      actions={buildUnstagedActions(entry)}
+                      onContextMenu={(event) => openFileMenu(event, entry, false)}
+                      submodule={submoduleOf(entry.path)}
+                    />
+                  );
+                }}
               />
             ) : (
               workingShown.map((entry, at) => (
@@ -1480,7 +1661,7 @@ export function ChangesPanel({
                 pane that blanks for it would read as broken. `null` is "on its way", `[]` is
                 "nothing to show", which `DiffView` draws as its own empty state. */}
             {selectedDiff ? (
-              <DiffView files={selectedDiff} onClose={clearSelection} staging={staging} toolbarExtra={diffToolbar} />
+              <DiffView files={selectedDiff} onClose={clearSelection} staging={staging} toolbarExtra={diffToolbar} sides={diffSides} />
             ) : (
               <div className="flex h-full items-center justify-center">
                 <BouncingDots />

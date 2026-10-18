@@ -36,3 +36,15 @@ describe("a terminal's text", () => {
     expect(bufferText(rows(["", false], ["", false]))).toBe("");
   });
 });
+
+describe("bufferText's tail", () => {
+  it("reads only the end of a long buffer, whole lines included", () => {
+    const many: [string, boolean?][] = [];
+    for (let n = 0; n < 2000; n++) many.push([`line ${n}`]);
+    many.push(["a long line that", false], [" wraps", true]);
+    const tail = bufferText(rows(...many), 10).split("\n");
+    expect(tail.length).toBeLessThan(400);
+    expect(tail[tail.length - 1]).toBe("a long line that wraps");
+    expect(bufferText(rows(...many)).split("\n")).toHaveLength(2001);
+  });
+});

@@ -422,6 +422,11 @@ export function NoteEditor() {
                     onClick: () => exportAs("pdf"),
                   },
                   {
+                    label: t("notes.exportDocx"),
+                    icon: FileText,
+                    onClick: () => exportAs("docx"),
+                  },
+                  {
                     // No confirmation: it lands in the trash, which is where it is undone.
                     label: t("notes.moveToTrash"),
                     icon: Trash2,

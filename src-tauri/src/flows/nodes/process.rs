@@ -169,6 +169,57 @@ fn require(program: &str) -> Result<PathBuf, NodeError> {
     which(program).ok_or_else(|| NodeError::failed(format!("{program} was not found on this computer's PATH")))
 }
 
+/// A program a node of `spec` names that this computer does not have — the warning a flow made on
+/// another machine (shared, imported, from a template) shows before it fails at its first run.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingProgram {
+    pub node_id: String,
+    pub program: String,
+}
+
+/// The programs `spec`'s script nodes name and this machine cannot run: a shell picked by name (an
+/// «auto» shell always has one), a Python interpreter named or none at all, Node, Deno or Bun.
+/// Disabled nodes do not count.
+pub fn missing_programs(spec: &crate::flows::spec::FlowSpec) -> Vec<MissingProgram> {
+    let mut out = Vec::new();
+    for node in spec.nodes.iter().filter(|n| !n.disabled) {
+        let params = &node.params;
+        let missing: Option<String> = match node.type_id.as_str() {
+            "code.shell" => {
+                let shell = text(params, "shell");
+                match shell.as_str() {
+                    "" | "auto" => None,
+                    "cmd" if !cfg!(windows) => Some("cmd".into()),
+                    "cmd" => None,
+                    "powershell" if !cfg!(windows) => which("pwsh").is_none().then(|| "pwsh".into()),
+                    other => which(other).is_none().then(|| other.to_string()),
+                }
+            }
+            "code.python" => {
+                // Relative interpreters (a project's venv) can only be judged where it runs.
+                let chosen = text(params, "interpreter");
+                let cwd = working_dir(params).unwrap_or_else(|_| std::env::temp_dir());
+                let relative = !chosen.trim().is_empty() && !Path::new(chosen.trim()).is_absolute() && !chosen.trim().starts_with('~') && chosen.contains(['/', '\\']);
+                (!relative && python_interpreter(params, &cwd).is_err()).then(|| if chosen.trim().is_empty() { "python3".into() } else { chosen.trim().to_string() })
+            }
+            "code.node" => {
+                let runtime = match text(params, "runtime").as_str() {
+                    "deno" => "deno",
+                    "bun" => "bun",
+                    _ => "node",
+                };
+                which(runtime).is_none().then(|| runtime.to_string())
+            }
+            _ => None,
+        };
+        if let Some(program) = missing {
+            out.push(MissingProgram { node_id: node.id.clone(), program });
+        }
+    }
+    out
+}
+
 /// Where this node's scripts are written for this attempt.
 fn script_dir(ctx: &NodeCtx, index: usize) -> Result<PathBuf, NodeError> {
     let dir = ctx.run.host.work_dir().join(&ctx.node.id).join(format!("{index}"));
@@ -829,5 +880,34 @@ fn read_output(ctx: &NodeCtx, params: &Value, outcome: Outcome, paired: Option<u
                 _ => Ok(vec![text_item()]),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod missing_tests {
+    use super::*;
+    use crate::flows::spec::{FlowNode, FlowSpec};
+    use serde_json::json;
+
+    fn node(id: &str, type_id: &str, params: Value) -> FlowNode {
+        FlowNode { id: id.into(), type_id: type_id.into(), name: id.into(), pos: [0.0, 0.0], params, settings: json!({}), disabled: false }
+    }
+
+    #[test]
+    fn a_shell_this_machine_lacks_is_named_and_auto_never_is() {
+        let spec = FlowSpec {
+            schema: 1,
+            nodes: vec![
+                node("a", "code.shell", json!({"shell": "auto", "script": "echo"})),
+                node("b", "code.shell", json!({"shell": "cf-no-such-shell", "script": "echo"})),
+                node("c", "code.node", json!({"runtime": "node", "code": "1"})),
+            ],
+            connections: vec![],
+            notes: vec![],
+            settings: json!({}),
+        };
+        let missing = missing_programs(&spec);
+        assert!(missing.contains(&MissingProgram { node_id: "b".into(), program: "cf-no-such-shell".into() }));
+        assert!(!missing.iter().any(|m| m.node_id == "a"));
     }
 }

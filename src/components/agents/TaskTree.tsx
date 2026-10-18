@@ -43,6 +43,7 @@ import type {
 } from "../../types/domain";
 import { blankChainStep } from "../../types/domain";
 import { agentName } from "./agentName";
+import { PriorityFlag, planningMenuItems, planningMeta } from "./taskPlanning";
 
 /**
  * A row of the tree, before it is drawn.
@@ -754,7 +755,8 @@ function TaskRowBase({
       pinned={task.pinned}
       title={task.goal || task.title}
       label={task.title || t("agents.newTask")}
-      meta={[agentName(task.agent_name, task.provider, t), repoName, when].filter(Boolean).join(" · ")}
+      flag={<PriorityFlag priority={task.priority} />}
+      meta={[agentName(task.agent_name, task.provider, t), repoName, ...planningMeta(task, t), when].filter(Boolean).join(" · ")}
       glyph={status === "running" && orb ? <ThinkingOrb size="sm" /> : <Icon size={14} className={color} />}
       menuLabel={t("api.moreActions")}
       onClick={() => {
@@ -878,6 +880,7 @@ function menuItemsFor(
         // is the one action in the menu that cannot wait for the task to be opened first.
         ...(running ? [{ label: t("ai.stop"), icon: Square, onClick: () => void store().stop(task.id) }] : []),
       ],
+      planningMenuItems(task, t, inChain),
       [
         // Nothing to hand on until it has answered once, and a chain seeded with an empty handoff
         // is the one shape that feature refuses to produce.

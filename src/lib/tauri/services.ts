@@ -54,6 +54,8 @@ export const serviceLog = (id: string) =>
   invoke<{ text: string; seq: number; sessionId: string | null }>("service_log", { id });
 
 export const clearServiceLog = (id: string) => invoke<void>("service_clear_log", { id });
+/** The service's log, colours taken out, written to `path`. */
+export const exportServiceLog = (id: string, path: string) => invoke<void>("service_export_log", { id, path });
 
 /** What a folder can run, best first. With `focus` — a subfolder of `path`, relative to it — only
  *  what runs in that subfolder or below it, read however deep it sits; blank is all of `path`. */

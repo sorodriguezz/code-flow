@@ -11,6 +11,7 @@ import { useUiStore } from "../../state/uiStore";
 import * as api from "../../lib/tauri/commands";
 import { describeGitError, stoppedOperation } from "../../lib/gitErrors";
 import { DiffView } from "./DiffView";
+import type { DiffSides } from "./BinaryDiff";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Tooltip } from "../common/Tooltip";
@@ -1757,6 +1758,14 @@ export function GraphView() {
     [shortId, summary],
   );
 
+  // A binary change in a commit (or a stash) is read against its first parent.
+  const repoPath = useRepoStore((s) => s.repoPath);
+  const commitId = selectedCommit?.id;
+  const commitSides = useMemo<DiffSides | undefined>(
+    () => (repoPath && commitId ? { repoPath, old: `${commitId}^`, new: commitId } : undefined),
+    [repoPath, commitId],
+  );
+
   return (
     <div className="flex h-full min-h-0">
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)]">
@@ -1819,6 +1828,7 @@ export function GraphView() {
                 files={commitFileDiff ? [commitFileDiff] : []}
                 onClose={closeFile}
                 context={commitContext}
+                sides={commitSides}
               />
             )}
           </div>

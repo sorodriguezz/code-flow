@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   Bot,
   CircleCheck,
+  FolderOpen,
+  GitBranch,
   GitCompare,
   History,
   Link2,
@@ -15,6 +17,7 @@ import {
 } from "lucide-react";
 import { AGENT_STATUS } from "./agentStatus";
 import { AgentModelMenu } from "./AgentModelMenu";
+import { TaskPlanningBar, planningMenuItems } from "./taskPlanning";
 import { ChainStrip } from "./ChainStrip";
 import { ContinueWithModal } from "./ContinueWithModal";
 import { useChainStore } from "../../state/chainStore";
@@ -35,6 +38,7 @@ import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { scrollBehavior } from "../../lib/motion";
+import { revealInFileManager } from "../../lib/tauri/commands";
 
 /**
  * One task, open: who is doing it, where, what has been said so far, and the box to say the next
@@ -68,7 +72,9 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
   const repo = useWorkspaceStore((s) =>
     task ? ((s.projectsByWorkspace[task.workspace_id] ?? []).find((p) => p.id === task.project_id) ?? null) : null,
   );
-  const repoPath = repo?.local_path ?? "";
+  // A task with a worktree of its own edits that folder, so its restore points are there too.
+  const worktree = task?.worktree_path ?? "";
+  const repoPath = worktree || (repo?.local_path ?? "");
   // Another task already running in this repository — the Run button waits for it like the
   // composer's send does.
   const repoTaken = useAgentsStore((s) => (task ? s.runningInProject(task.project_id, task.id) !== null : false));
@@ -87,8 +93,9 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
 
   const status = sending ? "running" : task.status;
   const { icon: StatusIcon, color, labelKey } = AGENT_STATUS[status];
-  // Once a turn has run, the engine session and the files it touched both belong to this repo.
-  const locked = task.turns > 0;
+  // Once a turn has run, the engine session and the files it touched both belong to this repo. A
+  // worktree belongs to the repository it was made from from the start.
+  const locked = task.turns > 0 || !!worktree;
 
   const commitRename = () => {
     if (renaming !== null) void useAgentsStore.getState().rename(taskId, renaming);
@@ -106,6 +113,12 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
       icon: status === "done" ? RotateCcw : CircleCheck,
       onClick: () => void useAgentsStore.getState().setStatus(taskId, status === "done" ? "idle" : "done"),
     },
+    // A chain's step is archived with its plan, never alone.
+    ...planningMenuItems(
+      task,
+      t,
+      Object.values(useChainStore.getState().briefsByChain).some((briefs) => briefs.some((brief) => brief.task_id === taskId)),
+    ),
     {
       // Only once it has said something: a chain seeded with an empty handoff is the one shape
       // this feature refuses to produce.
@@ -114,15 +127,23 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
       separated: true,
       onClick: () => setContinuing(true),
     },
-    {
-      label: t("agents.openChanges"),
-      icon: GitCompare,
-      // Whatever the agent changed is in that repository's working copy, and reviewing it is the
-      // Changes view's job — reimplementing a diff here would be a second one to keep in step.
-      onClick: () => {
-        void focusProject(task.workspace_id, task.project_id).then(() => setActiveView("changes"));
-      },
-    },
+    worktree
+      ? {
+          // Its edits are in its own folder, not in the repository's working copy the Changes view
+          // shows; the branch carries them back once committed.
+          label: t("agents.revealWorktree"),
+          icon: FolderOpen,
+          onClick: () => void revealInFileManager(worktree),
+        }
+      : {
+          label: t("agents.openChanges"),
+          icon: GitCompare,
+          // Whatever the agent changed is in that repository's working copy, and reviewing it is the
+          // Changes view's job — reimplementing a diff here would be a second one to keep in step.
+          onClick: () => {
+            void focusProject(task.workspace_id, task.project_id).then(() => setActiveView("changes"));
+          },
+        },
     // Every turn takes a restore point before it edits anything; this is where an agent's edits are
     // undone from, without leaving the task for the AI panel. The same list the panel opens.
     ...(repoPath
@@ -190,6 +211,15 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
           </span>
         )}
 
+        {worktree && (
+          <Tooltip label={t("agents.worktreeAt", { path: worktree })}>
+            <span className="flex min-w-0 max-w-[200px] shrink items-center gap-1 text-[12px] text-[var(--cf-text-muted)]">
+              <GitBranch size={13} className="shrink-0" />
+              <span className="truncate font-mono text-[11.5px]">{task.worktree_branch}</span>
+            </span>
+          </Tooltip>
+        )}
+
         <Tooltip label={locked ? t("agents.repoLocked") : t("agents.repositoryHint")}>
           <span className="w-[180px] shrink-0">
             <Select
@@ -219,6 +249,7 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
         </Tooltip>
       </div>
 
+      <TaskPlanningBar task={task} />
       <ChainStrip taskId={taskId} />
 
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">

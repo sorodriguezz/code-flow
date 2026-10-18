@@ -5,6 +5,36 @@ import { meetingsAudio, meetingsPeaks, type Meeting, type MeetingLine, type Meet
 import { clock, speakerColor } from "./meetingLabels";
 import { useT } from "../../../state/languageStore";
 import { pushErrorToast } from "../../../state/toastStore";
+import { currentPlatform } from "../../../lib/platform";
+
+/**
+ * The recording read straight from disk through the `cf-meeting:` scheme (`meetings_cmd::serve_audio`),
+ * a range at a time — instead of the whole file copied over IPC and again into a blob, hundreds of
+ * megabytes for an hour of WAV. `null` when the element cannot load it, so the player falls back.
+ */
+function streamed(meetingId: string, file: string): Promise<HTMLAudioElement | null> {
+  // WebView2 serves a custom scheme as `http://<scheme>.localhost`; WKWebView as the scheme itself.
+  const base = currentPlatform() === "windows" ? "http://cf-meeting.localhost" : "cf-meeting://localhost";
+  const element = new Audio();
+  // Web Audio's mono mix reads the samples only of an element loaded with CORS.
+  element.crossOrigin = "anonymous";
+  element.preload = "metadata";
+  return new Promise((resolve) => {
+    const done = (ok: boolean) => {
+      element.removeEventListener("loadedmetadata", onLoaded);
+      element.removeEventListener("error", onError);
+      clearTimeout(timer);
+      if (!ok) element.removeAttribute("src");
+      resolve(ok ? element : null);
+    };
+    const onLoaded = () => done(true);
+    const onError = () => done(false);
+    const timer = setTimeout(() => done(false), 5000);
+    element.addEventListener("loadedmetadata", onLoaded);
+    element.addEventListener("error", onError);
+    element.src = `${base}/${encodeURIComponent(meetingId)}?f=${encodeURIComponent(file)}`;
+  });
+}
 
 export interface PlayerHandle {
   /** Jumps to `ms`, and starts playing with `play`. */
@@ -71,11 +101,15 @@ export const MeetingPlayer = forwardRef<PlayerHandle, {
     if (audio.current) return audio.current;
     setLoading(true);
     try {
-      const bytes = await meetingsAudio(meeting.id);
-      const type = meeting.audioFile.endsWith(".wav") ? "audio/wav" : "audio/mp4";
-      url.current = URL.createObjectURL(new Blob([bytes], { type }));
-      const element = new Audio(url.current);
-      element.preload = "auto";
+      let element = await streamed(meeting.id, meeting.audioFile);
+      if (!element) {
+        // The old way, kept for a webview that refuses the scheme: the whole file over IPC.
+        const bytes = await meetingsAudio(meeting.id);
+        const type = meeting.audioFile.endsWith(".wav") ? "audio/wav" : "audio/mp4";
+        url.current = URL.createObjectURL(new Blob([bytes], { type }));
+        element = new Audio(url.current);
+        element.preload = "auto";
+      }
       element.playbackRate = speed;
       element.addEventListener("timeupdate", () => {
         const ms = element.currentTime * 1000;

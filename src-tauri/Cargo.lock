@@ -1437,6 +1437,7 @@ dependencies = [
  "window-vibrancy",
  "windows 0.61.3",
  "windows-core 0.61.2",
+ "windows-future 0.2.1",
  "windows-sys 0.60.2",
  "x509-cert",
  "yaml-rust2",

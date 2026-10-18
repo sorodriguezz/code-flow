@@ -36,6 +36,15 @@ export const FORMAT_EXCALIDRAW: DiagramFormat = "excalidraw";
  */
 export const FORMAT_ARCHIFY: DiagramFormat = "archify";
 
+/**
+ * A Mermaid diagram: the Mermaid source itself, exactly as a `.mmd` file holds it. Mirrors
+ * `FORMAT_MERMAID` in Rust. See `MermaidEditor`.
+ */
+export const FORMAT_MERMAID: DiagramFormat = "mermaid";
+
+/** What a new Mermaid diagram starts with: something drawn, so the preview shows what it is for. */
+export const STARTER_MERMAID_DOC = "flowchart LR\n  A[Inicio] --> B{¿Listo?}\n  B -- Sí --> C[Fin]\n  B -- No --> A\n";
+
 /** The format a new diagram is created in when nothing says otherwise — the drawing one. */
 export const DEFAULT_FORMAT = FORMAT_MXGRAPH;
 
@@ -83,6 +92,7 @@ export const EMPTY_EXCALIDRAW_DOC = JSON.stringify({
 export function emptyDoc(format: DiagramFormat = DEFAULT_FORMAT): string {
   if (format === FORMAT_MXGRAPH) return EMPTY_MXGRAPH_DOC;
   if (format === FORMAT_EXCALIDRAW) return EMPTY_EXCALIDRAW_DOC;
+  if (format === FORMAT_MERMAID) return STARTER_MERMAID_DOC;
   return "";
 }
 

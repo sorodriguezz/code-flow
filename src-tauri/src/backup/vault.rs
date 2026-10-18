@@ -204,6 +204,11 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
         push_unique(&mut keys, secrets::jira_token_key(site.trim()));
     }
 
+    // Linear: one API key per organisation, keyed like monday's — the key is the identity.
+    for key in field_of_each(conn, "linear_connections", "key") {
+        push_unique(&mut keys, secrets::linear_token_key(key.trim()));
+    }
+
     // monday.com: one token per account slug. No host to key by — the token is the identity.
     for slug in field_of_each(conn, "monday_connections", "slug") {
         push_unique(&mut keys, secrets::monday_token_key(slug.trim()));

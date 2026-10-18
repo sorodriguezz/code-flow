@@ -38,6 +38,12 @@ export function ContainerStats({ runtime, context, id, running, memoryLimit, cpu
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
+      // `docker stats` every second and a half is for a window someone is looking at; hidden, the
+      // loop only waits, and the next sample after it shows again measures from the last one.
+      if (document.visibilityState !== "visible") {
+        if (alive) timer = setTimeout(() => void tick(), 1500);
+        return;
+      }
       try {
         const [found] = await containersStats(runtime, context, [id]);
         if (!alive) return;

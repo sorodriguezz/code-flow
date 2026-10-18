@@ -87,6 +87,12 @@ export const MeetingSection = memo(function MeetingSection({
     setSelected(null);
   }, [noteId]);
 
+  // A transcript search result for this note: its meeting is the one to show.
+  const jump = useMeetingsStore((s) => (s.jumpTo?.noteId === noteId ? s.jumpTo : null));
+  useEffect(() => {
+    if (jump) setSelected(jump.meetingId);
+  }, [jump]);
+
   const live = recording?.noteId === noteId ? recording : null;
   const shown = useMemo(() => {
     if (!meetings || meetings.length === 0) return null;
@@ -392,7 +398,10 @@ function TranscriptLine({
   const [draft, setDraft] = useState(line.text);
   const color = speakerColor(line.speaker, speakers);
   return (
-    <div className={`group grid grid-cols-[46px_minmax(0,1fr)] gap-x-2 rounded px-1 py-[3px] text-[12.5px] leading-[1.45] ${active ? "bg-[var(--cf-accent-soft)]" : ""}`}>
+    <div
+      data-start-ms={line.startMs}
+      className={`group grid grid-cols-[46px_minmax(0,1fr)] gap-x-2 rounded px-1 py-[3px] text-[12.5px] leading-[1.45] ${active ? "bg-[var(--cf-accent-soft)]" : ""}`}
+    >
       <button
         type="button"
         disabled={!onSeek}
@@ -495,6 +504,20 @@ function MeetingPanel({
   useEffect(() => {
     if (!detail) void useMeetingsStore.getState().loadDetail(meeting.id);
   }, [detail, meeting.id]);
+
+  // Landed here from a search hit in this transcript: the line comes into view, and the player (if
+  // the audio is still kept) is put on it, paused — reading the line is the point, not hearing it.
+  const jump = useMeetingsStore((s) => (s.jumpTo?.meetingId === meeting.id ? s.jumpTo : null));
+  useEffect(() => {
+    if (!jump || !detail) return;
+    setTab("transcript");
+    if (meeting.audioFile) player.current?.seek(jump.atMs, false);
+    const atMs = jump.atMs;
+    requestAnimationFrame(() => {
+      listRef.current?.querySelector(`[data-start-ms="${atMs}"]`)?.scrollIntoView({ block: "center" });
+    });
+    useMeetingsStore.getState().clearJump();
+  }, [jump, detail, meeting.audioFile]);
 
   const reload = () => void useMeetingsStore.getState().loadDetail(meeting.id);
   const busy = meeting.status === "queued" || meeting.status === "processing";

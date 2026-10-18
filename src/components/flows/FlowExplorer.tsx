@@ -34,6 +34,7 @@ import {
   Users,
   Waypoints,
   X,
+  CircleX,
 } from "lucide-react";
 import { iconButtonClass } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
@@ -335,7 +336,7 @@ export function FlowExplorer() {
         onClick={() => {
           if (swallowClick.current) return;
           void store().openFlow(flow.id);
-          if (["schedule", "tables"].includes(useFlowRunsStore.getState().pane)) useFlowRunsStore.getState().setPane("editor");
+          if (["schedule", "tables", "failures"].includes(useFlowRunsStore.getState().pane)) useFlowRunsStore.getState().setPane("editor");
         }}
         onContextMenu={(event) => flowMenu(event, flow)}
         onPointerDown={(event) => own && pressRow(event, "flow", flow.id, listId)}
@@ -435,6 +436,16 @@ export function FlowExplorer() {
           data-tour="flows-tables-button"
         >
           <Table2 size={14} />
+        </button>
+        <button
+          type="button"
+          className={iconButtonClass({ size: "sm", active: pane === "failures" })}
+          title={t("flows.failures.title")}
+          aria-label={t("flows.failures.title")}
+          aria-pressed={pane === "failures"}
+          onClick={() => useFlowRunsStore.getState().setPane(pane === "failures" ? "editor" : "failures")}
+        >
+          <CircleX size={14} />
         </button>
         <button
           type="button"

@@ -353,3 +353,18 @@ describe("importing Markdown", () => {
     expect(calls.find((call) => call.args.title === "Dos")?.args.tags).toBe('["x"]');
   });
 });
+
+describe("the search box's own half", () => {
+  it("matches title and tags word by word, without accents", async () => {
+    const { filterNotes, searchWords } = await import("./notesStore");
+    expect(searchWords("  Configuración, DESPLIEGUE ")).toEqual(["configuracion", "despliegue"]);
+    const note = (id: string, title: string, tags: string[] = []) =>
+      ({ id, title, tags, book_id: "b", pinned: false, sort_order: 0, created_at: "", updated_at: "", word_count: 0 }) as unknown as Note;
+    const notes = [note("1", "Despliegue de la configuración"), note("2", "Configuración", ["infra"]), note("3", "Otra cosa")];
+    const ids = (query: string) =>
+      filterNotes(notes, { query, bodyHits: {}, tagFilter: [], sort: "title" }).map((n) => n.id).sort();
+    expect(ids("configuracion despliegue")).toEqual(["1"]);
+    expect(ids("CONFIGURACION")).toEqual(["1", "2"]);
+    expect(ids("infra configuración")).toEqual(["2"]);
+  });
+});

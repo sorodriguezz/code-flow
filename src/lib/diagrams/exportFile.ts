@@ -1,8 +1,7 @@
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeFileBytes } from "../tauri/commands";
-import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MXGRAPH } from "./doc";
+import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MERMAID, FORMAT_MXGRAPH } from "./doc";
 import { archifyDocKind, isArchifyHtml } from "./archify/ir";
-import { convertMermaid, isMermaid } from "./archify/mermaid";
 import { translate } from "../../state/languageStore";
 import type { DiagramFormat } from "../../types/diagrams";
 
@@ -26,7 +25,7 @@ import type { DiagramFormat } from "../../types/diagrams";
  * own CLI renders (`archify`). A diagram is only ever offered the ones its own format is written in
  * — see `DiagramsView`'s export menus, which are built per format.
  */
-export type ExportFormat = "png" | "svg" | "pdf" | "drawio" | "dbml" | "excalidraw" | "html" | "archify";
+export type ExportFormat = "png" | "svg" | "pdf" | "drawio" | "dbml" | "excalidraw" | "html" | "archify" | "mermaid";
 
 /** The dialog's filter and the extension, per format. */
 const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
@@ -40,6 +39,7 @@ const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
   // `json` rather than `architecture.json`: a save panel's type filter is one extension. The double
   // one comes from the suggested name instead — see `DiagramsView.openArchifyExportMenu`.
   archify: { name: "Archify", extensions: ["json"] },
+  mermaid: { name: "Mermaid", extensions: ["mmd"] },
 };
 
 /**
@@ -107,31 +107,24 @@ const IMPORT_FILTER = {
 function formatOf(path: string): DiagramFormat {
   if (/\.dbml$/i.test(path)) return FORMAT_DBML;
   if (/\.excalidraw$/i.test(path)) return FORMAT_EXCALIDRAW;
-  if (/\.(json|html?|mmd|mermaid)$/i.test(path)) return FORMAT_ARCHIFY;
+  // Mermaid opens as itself — every diagram type it draws, as written.
+  if (/\.(mmd|mermaid)$/i.test(path)) return FORMAT_MERMAID;
+  if (/\.(json|html?)$/i.test(path)) return FORMAT_ARCHIFY;
   return FORMAT_MXGRAPH;
 }
 
 /**
- * The one exception to "the extension decides, and nothing is inspected": archify's files, and
- * Mermaid's.
+ * The one exception to "the extension decides, and nothing is inspected": archify's files.
  *
  * `.json` and `.html` say nothing about what is inside — most of either kind is not a diagram — so
  * here the extension only names the candidate, and the content has to back it up: a page archify
  * rendered carries its `generator` stamp, and a document has to read as one of archify's five types.
- * A Mermaid file is not stored as it is: it is converted (`archify/mermaid.ts`) into the archify
- * document it stands for, which is what the viewer draws and what an export writes.
+ * (A Mermaid file opens as a Mermaid diagram now; turning one into an archify map is the Mermaid
+ * editor's «Convertir a mapa de arquitectura».)
  *
  * Returns the text to store.
  */
 function prepareArchify(path: string, doc: string): string {
-  if (/\.(mmd|mermaid)$/i.test(path)) {
-    if (!isMermaid(doc)) throw new Error(translate("archify.mermaidUnsupported"));
-    const converted = convertMermaid(doc);
-    if (!converted.ok) {
-      throw new Error(translate(converted.reason === "empty" ? "archify.mermaidEmpty" : "archify.mermaidUnsupported"));
-    }
-    return `${JSON.stringify(converted.doc, null, 2)}\n`;
-  }
   if (/\.html?$/i.test(path)) {
     if (!isArchifyHtml(doc)) throw new Error(translate("diagrams.importNotArchify"));
     return doc;

@@ -300,6 +300,32 @@ pub(super) struct AppHost {
     staged: Mutex<Staged>,
     /// What nodes asked to have done once the run has ended well (`RunHost::after_success`).
     deferred: Mutex<Vec<engine::HostFuture<'static, ()>>>,
+    /// Started by hand: its breakpoints hold it, and «Paso» pauses it before every node.
+    debug: bool,
+    /// «Paso» was the last answer at a pause: hold before the next node as well.
+    stepping: std::sync::atomic::AtomicBool,
+}
+
+/// The runs held at a breakpoint, by run id: what answers the pause («Continuar», «Paso», «Detener»).
+static PAUSES: LazyLock<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// What the canvas is told when a run stops at a node.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Paused {
+    run_id: String,
+    flow_id: String,
+    node_id: String,
+    /// How many items the node is about to get, and the first few of them.
+    items: usize,
+    sample: Vec<Value>,
+}
+
+/// Answers a run paused at a breakpoint: `continue`, `step` or `stop`. `false` when it was not
+/// paused (it moved on, or ended).
+pub fn debug_resume(run_id: &str, action: &str) -> bool {
+    let Some(sender) = PAUSES.lock().ok().and_then(|mut pauses| pauses.remove(run_id)) else { return false };
+    sender.send(action.to_string()).is_ok()
 }
 
 /// What a run asked to remember for the next one (see `RunHost::state_stage`): the changes in order, for the moment the run
@@ -515,6 +541,51 @@ impl AppHost {
 }
 
 impl RunHost for AppHost {
+    fn pause_before<'a>(&'a self, node: &'a FlowNode, inputs: &'a Ports, cancel: &'a CancellationToken) -> engine::HostFuture<'a, engine::BreakAction> {
+        Box::pin(async move {
+            let marked = node.settings.get("breakpoint").and_then(Value::as_bool).unwrap_or(false);
+            if !self.debug || !(marked || self.stepping.load(Ordering::SeqCst)) {
+                return engine::BreakAction::Continue;
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if let Ok(mut pauses) = PAUSES.lock() {
+                pauses.insert(self.run_id.clone(), tx);
+            }
+            // Paused time is not working time: the run's own time limit does not count it.
+            let _parked = super::waits::Parked::begin(&self.run_id);
+            let all: Vec<&Item> = inputs.iter().flatten().collect();
+            let _ = self.app.emit(
+                "flows:paused",
+                Paused {
+                    run_id: self.run_id.clone(),
+                    flow_id: self.flow_id.clone(),
+                    node_id: node.id.clone(),
+                    items: all.len(),
+                    sample: all.iter().take(3).map(|item| item.json.clone()).collect(),
+                },
+            );
+            let answer = tokio::select! {
+                answer = rx => answer.unwrap_or_else(|_| "stop".into()),
+                _ = cancel.cancelled() => "stop".into(),
+            };
+            if let Ok(mut pauses) = PAUSES.lock() {
+                pauses.remove(&self.run_id);
+            }
+            let _ = self.app.emit("flows:resumed", json!({ "runId": self.run_id, "flowId": self.flow_id }));
+            match answer.as_str() {
+                "step" => {
+                    self.stepping.store(true, Ordering::SeqCst);
+                    engine::BreakAction::Continue
+                }
+                "continue" => {
+                    self.stepping.store(false, Ordering::SeqCst);
+                    engine::BreakAction::Continue
+                }
+                _ => engine::BreakAction::Stop,
+            }
+        })
+    }
+
     fn node_started(&self, node: &FlowNode, seq: u32, items_in: usize, started_at: &str) {
         let mut row = self.row(node, NodeStatus::Running, seq);
         row.started_at = Some(started_at.to_string());
@@ -1020,6 +1091,42 @@ pub fn ai_per_hour(spec: &FlowSpec) -> u32 {
 
 pub const DEFAULT_AI_PER_HOUR: u32 = 60;
 
+/// The most a run may take, from the flow's settings (`runTimeoutMinutes`): `None` when it set none
+/// or `0`. Capped at a week — a number past that is a typo, not a plan.
+pub fn run_timeout(spec: &FlowSpec) -> Option<std::time::Duration> {
+    let minutes = spec.settings.get("runTimeoutMinutes").and_then(Value::as_u64).unwrap_or(0).min(7 * 24 * 60);
+    (minutes > 0).then(|| std::time::Duration::from_secs(minutes * 60))
+}
+
+/// Stops a run once it has been working for `limit` — time spent parked on a wait (an approval, a
+/// call, a timer) not counted: those have their own limits, and a person taking an afternoon to
+/// approve is not the run hanging. Raises `timed_out` before it cancels, so the run's end can say why.
+fn watch_time_limit(
+    run_id: String,
+    limit: std::time::Duration,
+    cancel: CancellationToken,
+    timed_out: Arc<std::sync::atomic::AtomicBool>,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        const TICK: std::time::Duration = std::time::Duration::from_secs(1);
+        let mut used = std::time::Duration::ZERO;
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(TICK) => {}
+            }
+            if !super::waits::is_waiting(&run_id) {
+                used += TICK;
+            }
+            if used >= limit {
+                timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+                cancel.cancel();
+                return;
+            }
+        }
+    })
+}
+
 /// When a flow's runs end in a notification: never, when they fail, or always. Read from the flow's
 /// settings for the runs nobody is watching; a run started by hand answers to the window instead.
 pub(super) fn notify_setting(spec: &FlowSpec, origin: RunOrigin) -> Option<String> {
@@ -1235,6 +1342,8 @@ pub(super) fn launch(app: &AppHandle, launch: Launch) -> Option<tokio::sync::one
         spec: parsed.clone(),
         staged: Mutex::new(Staged::default()),
         deferred: Mutex::new(Vec::new()),
+        debug: matches!(origin, RunOrigin::Manual),
+        stepping: std::sync::atomic::AtomicBool::new(false),
     });
     let timezone = parsed
         .settings
@@ -1277,7 +1386,19 @@ pub(super) fn launch(app: &AppHandle, launch: Launch) -> Option<tokio::sync::one
                 }
             })
         };
-        let outcome = engine::execute(parsed, plan, context).await;
+        let limit = run_timeout(&parsed);
+        let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watcher = limit.map(|limit| watch_time_limit(started.id.clone(), limit, cancel.clone(), timed_out.clone()));
+        let mut outcome = engine::execute(parsed, plan, context).await;
+        if let Some(watcher) = watcher {
+            watcher.abort();
+        }
+        // Stopped by its own time limit: a failure, said in words, not a run somebody canceled.
+        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+            let minutes = limit.map(|limit| limit.as_secs() / 60).unwrap_or(0);
+            outcome.status = engine::RunStatus::Error;
+            outcome.error = Some(format!("The run went past its time limit ({minutes} min) and was stopped."));
+        }
         // What the nodes asked to remember for the next run counts only if this one ended well — and what they asked to have
         // done then (a queue's messages deleted) is done now, or never.
         let deferred = host.deferred.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default();
@@ -1581,6 +1702,37 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_runs_time_limit_is_read_in_minutes_and_zero_is_none() {
+        let mut spec = super::super::spec::empty();
+        assert_eq!(run_timeout(&spec), None);
+        spec.settings = serde_json::json!({ "runTimeoutMinutes": 0 });
+        assert_eq!(run_timeout(&spec), None);
+        spec.settings = serde_json::json!({ "runTimeoutMinutes": 15 });
+        assert_eq!(run_timeout(&spec), Some(std::time::Duration::from_secs(900)));
+        // A typo of a number is held to a week.
+        spec.settings = serde_json::json!({ "runTimeoutMinutes": 99_999_999 });
+        assert_eq!(run_timeout(&spec), Some(std::time::Duration::from_secs(7 * 24 * 3600)));
+    }
+
+    #[tokio::test]
+    async fn the_time_limit_stops_a_run_but_not_while_it_waits() {
+        let cancel = CancellationToken::new();
+        let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let run = "run-limit-test";
+        // Parked on a wait from the start: the clock does not run.
+        let parked = super::super::waits::Parked::begin(run);
+        let watcher = watch_time_limit(run.into(), std::time::Duration::from_secs(1), cancel.clone(), timed_out.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(2_300)).await;
+        assert!(!timed_out.load(std::sync::atomic::Ordering::SeqCst), "time spent waiting counted");
+        // Working again: a second later it is over.
+        drop(parked);
+        tokio::time::sleep(std::time::Duration::from_millis(1_600)).await;
+        assert!(timed_out.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(cancel.is_cancelled());
+        let _ = watcher.await;
+    }
 
     #[test]
     fn secrets_are_redacted_at_any_depth_longest_first() {

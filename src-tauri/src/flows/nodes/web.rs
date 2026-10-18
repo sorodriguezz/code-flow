@@ -21,11 +21,13 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 }
 
 fn client(timeout: Duration) -> Result<reqwest::Client, NodeError> {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) CodeFlow/Flujos")
-        .build()
-        .map_err(|e| NodeError::failed(e.to_string()))
+    // One per timeout for the app's life, not one per item: see `http_clients`.
+    crate::http_clients::cached(&format!("web:{}", timeout.as_millis()), || {
+        reqwest::Client::builder()
+            .timeout(timeout)
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) CodeFlow/Flujos")
+    })
+    .map_err(NodeError::failed)
 }
 
 async fn resolved(ctx: &NodeCtx) -> Result<Vec<(Value, Option<usize>)>, NodeError> {

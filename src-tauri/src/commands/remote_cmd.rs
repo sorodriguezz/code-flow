@@ -636,6 +636,19 @@ pub fn remote_list_keys() -> Vec<remotes::keys::SshKey> {
     remotes::keys::list()
 }
 
+/// Pageant's pipe, for a host to use as its `IdentityAgent` — `None` off Windows or with none.
+#[tauri::command]
+pub fn remote_pageant_pipe() -> Option<String> {
+    remotes::keys::pageant_pipe()
+}
+
+/// A PuTTY `.ppk` key unlocked and handed to OpenSSH: into the agent, or written beside itself as an
+/// OpenSSH key file.
+#[tauri::command]
+pub async fn remote_import_ppk(path: String, passphrase: String, to_agent: bool) -> Result<remotes::ppk::Imported, String> {
+    remotes::ppk::import(std::path::Path::new(&path), &passphrase, to_agent).await
+}
+
 /// Makes a new ed25519 key at `~/.ssh/<name>` with `ssh-keygen`, refusing any name that exists.
 /// The key is the user's, in `~/.ssh`, like one they made in a terminal — see [`remotes::keys`].
 #[tauri::command]
@@ -753,6 +766,71 @@ pub async fn remote_rename_file(
 ) -> Result<(), String> {
     let (_, spec) = load(&db, &host_id)?;
     remotes::files::rename(&host_id, &spec, &from, &to).await
+}
+
+/// The most a file opened for editing may weigh. An editor is for configuration and scripts; a
+/// 200 MB log is for the download button.
+const EDIT_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// A scratch folder for one edit's round trip, removed when the guard drops.
+struct EditScratch(std::path::PathBuf);
+
+impl EditScratch {
+    fn new() -> Result<Self, String> {
+        let dir = crate::paths::cache_dir().join("remote-edit").join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for EditScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Reads a remote file as text, to edit it in place. Goes through the same transport as a
+/// download — SFTP, FTP, SMB, a bucket — into a scratch copy that is gone when this returns.
+/// Refuses a file over [`EDIT_MAX_BYTES`], a binary one (a NUL byte), and one that is not UTF-8.
+#[tauri::command]
+pub async fn remote_read_text(
+    app: AppHandle,
+    db: State<'_, Db>,
+    host_id: String,
+    path: String,
+) -> Result<String, String> {
+    let (_, spec) = load(&db, &host_id)?;
+    let scratch = EditScratch::new()?;
+    let local = scratch.0.join("file");
+    let local_str = local.to_string_lossy().into_owned();
+    let id = format!("edit-{}", uuid::Uuid::new_v4());
+    remotes::files::download(&app, &id, &host_id, &spec, &path, &local_str).await?;
+    let size = std::fs::metadata(&local).map_err(|e| e.to_string())?.len();
+    if size > EDIT_MAX_BYTES {
+        return Err(format!("El archivo pesa {} MB: para editarlo aquí debe pesar menos de 5 MB.", size / (1024 * 1024)));
+    }
+    let bytes = std::fs::read(&local).map_err(|e| e.to_string())?;
+    if bytes.contains(&0) {
+        return Err("Es un archivo binario: no se puede editar como texto.".to_string());
+    }
+    String::from_utf8(bytes).map_err(|_| "El archivo no está en UTF-8: no se puede editar como texto.".to_string())
+}
+
+/// Writes `text` over a remote file — the save half of [`remote_read_text`].
+#[tauri::command]
+pub async fn remote_write_text(
+    app: AppHandle,
+    db: State<'_, Db>,
+    host_id: String,
+    path: String,
+    text: String,
+) -> Result<(), String> {
+    let (_, spec) = load(&db, &host_id)?;
+    let scratch = EditScratch::new()?;
+    let local = scratch.0.join("file");
+    std::fs::write(&local, text.as_bytes()).map_err(|e| e.to_string())?;
+    let id = format!("edit-{}", uuid::Uuid::new_v4());
+    remotes::files::upload(&app, &id, &host_id, &spec, &local.to_string_lossy(), &path).await
 }
 
 #[tauri::command]

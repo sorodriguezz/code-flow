@@ -43,6 +43,9 @@ struct Script {
     /// What the app's operations (`app_call`) answer, in order, and what they were asked.
     app_answers: Mutex<std::collections::VecDeque<Result<Value, String>>>,
     app_calls: Mutex<Vec<(String, Value)>>,
+    /// The nodes a debugger stops the run before, and the ones it was paused at.
+    stop_before: Mutex<Vec<String>>,
+    paused_at: Mutex<Vec<(String, usize)>>,
 }
 
 impl Script {
@@ -65,6 +68,16 @@ struct Host {
 }
 
 impl RunHost for Host {
+    fn pause_before<'a>(&'a self, node: &'a FlowNode, inputs: &'a Ports, _cancel: &'a CancellationToken) -> HostFuture<'a, BreakAction> {
+        Box::pin(async move {
+            self.script.paused_at.lock().unwrap().push((node.id.clone(), inputs.iter().map(Vec::len).sum()));
+            if self.script.stop_before.lock().unwrap().contains(&node.id) {
+                BreakAction::Stop
+            } else {
+                BreakAction::Continue
+            }
+        })
+    }
     fn node_started(&self, node: &FlowNode, _seq: u32, _items_in: usize, _started_at: &str) {
         self.memory.started.lock().unwrap().push(node.id.clone());
     }
@@ -373,6 +386,28 @@ async fn run(spec: FlowSpec) -> Ran {
 
 fn code(id: &str, source: &str) -> FlowNode {
     node(id, "code.js", json!({"mode": "all", "code": source}))
+}
+
+#[tokio::test]
+async fn a_debugger_is_asked_before_each_node_and_can_stop_the_run_there() {
+    let spec = flow(
+        vec![
+            node("start", "trigger.manual", json!({})),
+            code("data", "return [{n: 1}, {n: 2}];"),
+            node("tag", "transform.set", json!({"assignments": [{"name": "t", "type": "string", "value": "x"}]})),
+            node("after", "transform.set", json!({})),
+        ],
+        vec![wire("start", 0, "data", 0), wire("data", 0, "tag", 0), wire("tag", 0, "after", 0)],
+    );
+    let script = Arc::new(Script::default());
+    script.stop_before.lock().unwrap().push("tag".into());
+    let ran = run_scripted(spec, RunMode::Full, HashMap::new(), CancellationToken::new(), script.clone(), Memory::default(), "flow-1", 0).await;
+    assert_eq!(ran.outcome.status, RunStatus::Canceled, "{:?}", ran.outcome);
+    let paused = script.paused_at.lock().unwrap().clone();
+    assert!(paused.contains(&("tag".to_string(), 2)), "asked before tag with its two items: {paused:?}");
+    let started = ran.memory.started.lock().unwrap().clone();
+    assert!(started.contains(&"data".to_string()));
+    assert!(!started.contains(&"tag".to_string()) && !started.contains(&"after".to_string()), "nothing ran past the stop: {started:?}");
 }
 
 #[tokio::test]

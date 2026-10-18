@@ -597,6 +597,19 @@ pub fn clone_root() -> PathBuf {
     user_dir().join("repos")
 }
 
+/// Where an agent task's own worktree goes: `<user dir>/worktrees/<repository>/<folder>`.
+///
+/// Under the user's root and not the state root, because a worktree holds work — uncommitted edits
+/// an agent made and nobody has reviewed yet — and the state root is the one a reset wipes.
+pub fn agent_worktree_dir(repo_name: &str, folder: &str) -> PathBuf {
+    let safe = |s: &str| -> String {
+        let out: String = s.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' }).collect();
+        let out = out.trim_matches(|c| c == '.' || c == '-').to_string();
+        if out.is_empty() { "repo".to_string() } else { out }
+    };
+    user_dir().join("worktrees").join(safe(repo_name)).join(safe(folder))
+}
+
 /// Default destination for encrypted backups.
 ///
 /// Also only the default; `backup_settings.folder` overrides it. Note the asymmetry with

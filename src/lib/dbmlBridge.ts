@@ -1,4 +1,4 @@
-import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MXGRAPH } from "./diagrams/doc";
+import { FORMAT_ARCHIFY, FORMAT_DBML, FORMAT_EXCALIDRAW, FORMAT_MERMAID, FORMAT_MXGRAPH } from "./diagrams/doc";
 import { diagramsLinkFile } from "./tauri/diagramsCommands";
 import { focusSatellite } from "./tauri/windows";
 import { broadcast } from "./windowBus";
@@ -52,6 +52,7 @@ const DIAGRAM_EXTENSIONS: [RegExp, DiagramFormat][] = [
   [/\.dbml$/i, FORMAT_DBML],
   [/\.excalidraw$/i, FORMAT_EXCALIDRAW],
   [/\.(drawio|dio)$/i, FORMAT_MXGRAPH],
+  [/\.(mmd|mermaid)$/i, FORMAT_MERMAID],
   // archify's own names for its documents — one per type. A bare `.json` is not claimed, for the
   // reason a bare `.xml` is not: most of it in a repository is not a diagram.
   [/\.(?:architecture|workflow|sequence|dataflow|lifecycle)\.json$/i, FORMAT_ARCHIFY],

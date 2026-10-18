@@ -11,6 +11,7 @@ import {
   diagramsLinkFile,
   diagramsLoadThumbnails,
   diagramsLoadTree,
+  diagramsSearchContent,
   diagramsPullFile,
   diagramsMoveDiagram,
   diagramsMoveFolder,
@@ -327,8 +328,11 @@ interface DiagramsState {
    */
   aiByDiagram: Record<string, DiagramAiRun>;
 
-  /** The search box. Matches titles and tags — there is no document search yet. */
+  /** The search box. Matches titles and tags here, and what the diagrams say through `contentHits`. */
   query: string;
+  /** Diagrams whose content (labels, text, source) holds the query's words — id → the line that
+   *  matched. Read from the backend a moment after typing stops; empty with no query. */
+  contentHits: Record<string, string>;
   /** ANDed, not ORed: adding a tag narrows. Two tags means "carries both". */
   tagFilter: string[];
   /** Which folder the gallery is showing. `null` is the whole workspace. */
@@ -461,6 +465,8 @@ interface DiagramsState {
    * its title, or `null` when the dialog was dismissed or the read failed.
    */
   importDiagram: (folderId: string | null) => Promise<string | null>;
+  /** A new diagram with this document, opened — what a conversion from another format lands as. */
+  createWithDoc: (folderId: string | null, title: string, doc: string, format: DiagramFormat) => Promise<string | null>;
   /** Called by the frame once it has posted the export request. */
   clearPendingExport: () => void;
 
@@ -594,6 +600,7 @@ function clearedWorkspaceState(): Partial<DiagramsState> {
     undoGeneration: null,
     pendingExport: null,
     query: "",
+    contentHits: {},
     tagFilter: [],
     folderFilter: null,
     // Back to the defaults; the stored values arrive with the tree, when there is one.
@@ -619,6 +626,9 @@ function stopDiagramAiRuns(runs: Record<string, DiagramAiRun>, diagramIds: Itera
   }
 }
 
+/** The pending content search — see `setQuery`. */
+let contentTimer: number | undefined;
+
 export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   workspaceId: null,
   loading: false,
@@ -642,6 +652,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   aiOpen: false,
   aiByDiagram: {},
   query: "",
+  contentHits: {},
   tagFilter: [],
   folderFilter: null,
   sort: "manual",
@@ -769,7 +780,21 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     }
   },
 
-  setQuery: (query) => set({ query }),
+  setQuery: (query) => {
+    set({ query, ...(query.trim() ? {} : { contentHits: {} }) });
+    window.clearTimeout(contentTimer);
+    const workspaceId = get().workspaceId;
+    if (!query.trim() || !workspaceId) return;
+    // A pause before asking: the backend reads every diagram's document.
+    contentTimer = window.setTimeout(() => {
+      void diagramsSearchContent(workspaceId, query)
+        .then((hits) => {
+          if (get().query !== query || get().workspaceId !== workspaceId) return;
+          set({ contentHits: Object.fromEntries(hits.map((hit) => [hit.id, hit.snippet])) });
+        })
+        .catch(() => {});
+    }, 250);
+  },
 
   toggleTag: (tag) =>
     set((state) => ({
@@ -1251,6 +1276,27 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
       }));
       if (folderId) get().expandFolder(folderId);
       return row.title;
+    } catch (error) {
+      pushErrorToast(String(error));
+      return null;
+    }
+  },
+
+  createWithDoc: async (folderId, title, doc, format) => {
+    const workspaceId = get().workspaceId;
+    if (!workspaceId) return null;
+    try {
+      await get().flush();
+      const row = await diagramsCreateDiagram(workspaceId, folderId, title, doc, format, serializeTags([]));
+      set((state) => ({
+        diagrams: [...state.diagrams, toDiagram(row)],
+        activeId: row.id,
+        draft: { id: row.id, doc, format, thumbnail: "", dirty: false },
+        openingId: null,
+        savedAt: null,
+      }));
+      if (folderId) get().expandFolder(folderId);
+      return row.id;
     } catch (error) {
       pushErrorToast(String(error));
       return null;
@@ -1882,6 +1928,8 @@ export function filterDiagrams(
   diagrams: Diagram[],
   options: {
     query: string;
+    /** Diagrams the backend found the query inside — kept whatever their title says. */
+    contentHits?: Record<string, string>;
     tagFilter: string[];
     /** Omit to search every folder; pass `null` for the root specifically. */
     folderId?: string | null;
@@ -1896,7 +1944,8 @@ export function filterDiagrams(
     if (!needle) return true;
     return (
       diagram.title.toLowerCase().includes(needle) ||
-      diagram.tags.some((tag) => tag.includes(needle))
+      diagram.tags.some((tag) => tag.includes(needle)) ||
+      !!options.contentHits?.[diagram.id]
     );
   });
 

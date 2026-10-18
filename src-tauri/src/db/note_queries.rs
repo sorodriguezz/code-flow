@@ -1262,25 +1262,23 @@ pub fn delete_template(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 // Search
 // ---------------------------------------------------------------------------
 
-/// Notes whose **body** contains `query`, with the stretch of text around the first match.
+/// Notes whose **body** — or whose meetings' **transcripts** — hold every word of `query`, with the
+/// stretch of text around the first match.
 ///
 /// Titles and tags are deliberately not searched here. The frontend is already holding every
 /// [`NoteMeta`] in the workspace, so it filters those itself as the user types — no round trip, no
 /// debounce, results on the keystroke. What it cannot do is look inside bodies it never loaded,
 /// and that is the entire job of this function.
 ///
-/// **Matched in Rust, not by SQL `LIKE`, and the reason is Spanish.** SQLite's `LIKE` folds case
-/// for ASCII only, so a body containing `la acción` would not match a search for `ACCIÓN` — while
-/// [`snippet_around`], which folds per character, matches it happily. Using `LIKE` as a prefilter
-/// therefore hid rows the snippet stage would have accepted, and searching `acción` worked while
-/// `ACCIÓN` returned nothing. One matcher, used for both the filter and the snippet, is the only
-/// way those two can agree.
+/// **Words, not a string, and without their accents.** «configuracion despliegue» finds a note that
+/// says "el despliegue … la Configuración", in either order and anywhere in it: each word is matched
+/// as a prefix, case and accents folded on both sides — Spanish is typed without accents as often as
+/// with them. Bodies go through the FTS5 index (`notes_fts`, see `add_notes_fts`), ranked by
+/// relevance after the pinned ones; a query with no word in it at all (`%`, `→`) falls back to the
+/// old character-for-character scan.
 ///
-/// The cost is reading each body until `limit` hits are found. That is affordable for the reason
-/// FTS5 is not used either — the extension is not guaranteed present in the bundled SQLite, and a
-/// notes workspace is a few hundred rows of a few kilobytes, scanned behind a debounce, one row at
-/// a time (`query` streams; the bodies are never all resident). If a workspace ever grows past
-/// that, the fix is an FTS5 shadow table behind this same signature.
+/// A note whose body does not match but one of its meetings said all the words in one line comes
+/// back with that line as its snippet and the meeting and moment it was said in.
 pub fn search_notes(
     conn: &Connection,
     workspace_id: &str,
@@ -1291,7 +1289,126 @@ pub fn search_notes(
     if needle.is_empty() {
         return Ok(Vec::new());
     }
+    let words = query_words(needle);
+    if words.is_empty() {
+        return scan_bodies(conn, workspace_id, needle, limit);
+    }
 
+    let mut hits: Vec<NoteSearchHit> = Vec::new();
+    let indexed = conn
+        .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notes_fts'", [], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if indexed {
+        let fts_query = words.iter().map(|word| format!("\"{word}\"*")).collect::<Vec<_>>().join(" ");
+        let mut statement = conn.prepare(
+            "SELECT n.id, n.content FROM notes_fts f JOIN notes n ON n.id = f.note_id \
+             WHERE notes_fts MATCH ?1 AND (n.workspace_id = ?2 OR n.scope = 'global') AND n.deleted_at = '' \
+             ORDER BY n.pinned DESC, bm25(notes_fts) LIMIT ?3",
+        )?;
+        let mut rows = statement.query(params![fts_query, workspace_id, limit])?;
+        while let Some(row) = rows.next()? {
+            let content: String = row.get(1)?;
+            let (snippet, start, len) = snippet_for_words(&content, &words).unwrap_or_else(|| {
+                (content.chars().take(SNIPPET_PAD * 2).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "), 0, 0)
+            });
+            hits.push(NoteSearchHit {
+                id: row.get(0)?,
+                snippet,
+                match_start: start as i64,
+                match_len: len as i64,
+                meeting_id: None,
+                at_ms: None,
+            });
+        }
+    } else {
+        let mut statement = conn.prepare(
+            "SELECT id, content FROM notes \
+             WHERE (workspace_id = ?1 OR scope = 'global') AND deleted_at = '' \
+             ORDER BY pinned DESC, updated_at DESC",
+        )?;
+        let mut rows = statement.query(params![workspace_id])?;
+        while let Some(row) = rows.next()? {
+            let content: String = row.get(1)?;
+            let folded = fold_text(&content);
+            if !words.iter().all(|word| folded.contains(word.as_str())) {
+                continue;
+            }
+            let Some((snippet, start, len)) = snippet_for_words(&content, &words) else { continue };
+            hits.push(NoteSearchHit {
+                id: row.get(0)?,
+                snippet,
+                match_start: start as i64,
+                match_len: len as i64,
+                meeting_id: None,
+                at_ms: None,
+            });
+            if hits.len() as i64 >= limit {
+                break;
+            }
+        }
+    }
+
+    if (hits.len() as i64) < limit {
+        search_transcripts(conn, workspace_id, &words, limit, &mut hits)?;
+    }
+    Ok(hits)
+}
+
+/// The transcript half of [`search_notes`]: the first line, per note not already found, that says
+/// every word. Newest meeting first. Lines are scanned rather than indexed — they are rewritten in
+/// bulk on every transcription, which an FTS index keyed by line would have to follow row by row.
+fn search_transcripts(
+    conn: &Connection,
+    workspace_id: &str,
+    words: &[String],
+    limit: i64,
+    hits: &mut Vec<NoteSearchHit>,
+) -> rusqlite::Result<()> {
+    let exists = conn
+        .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meeting_lines'", [], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if !exists {
+        return Ok(());
+    }
+    let mut seen: std::collections::HashSet<String> = hits.iter().map(|hit| hit.id.clone()).collect();
+    let mut statement = conn.prepare(
+        "SELECT n.id, m.id, l.start_ms, l.text FROM meeting_lines l \
+         JOIN meetings m ON m.id = l.meeting_id JOIN notes n ON n.id = m.note_id \
+         WHERE (n.workspace_id = ?1 OR n.scope = 'global') AND n.deleted_at = '' \
+         ORDER BY m.started_at DESC, l.start_ms",
+    )?;
+    let mut rows = statement.query(params![workspace_id])?;
+    while let Some(row) = rows.next()? {
+        let note_id: String = row.get(0)?;
+        if seen.contains(&note_id) {
+            continue;
+        }
+        let text: String = row.get(3)?;
+        let folded = fold_text(&text);
+        if !words.iter().all(|word| folded.contains(word.as_str())) {
+            continue;
+        }
+        let Some((snippet, start, len)) = snippet_for_words(&text, words) else { continue };
+        seen.insert(note_id.clone());
+        hits.push(NoteSearchHit {
+            id: note_id,
+            snippet,
+            match_start: start as i64,
+            match_len: len as i64,
+            meeting_id: Some(row.get(1)?),
+            at_ms: Some(row.get(2)?),
+        });
+        if hits.len() as i64 >= limit {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The old matcher, for a query with no word in it: `query` as a run of characters, case folded.
+fn scan_bodies(conn: &Connection, workspace_id: &str, needle: &str, limit: i64) -> rusqlite::Result<Vec<NoteSearchHit>> {
     let mut statement = conn.prepare(
         "SELECT id, content FROM notes \
          WHERE (workspace_id = ?1 OR scope = 'global') AND deleted_at = '' \
@@ -1310,12 +1427,99 @@ pub fn search_notes(
             snippet,
             match_start: start as i64,
             match_len: len as i64,
+            meeting_id: None,
+            at_ms: None,
         });
         if hits.len() as i64 >= limit {
             break;
         }
     }
     Ok(hits)
+}
+
+/// One character, lower-cased and stripped of its accent — the folding FTS5's `unicode61
+/// remove_diacritics 2` applies, done here one character to one so offsets survive it.
+fn fold_char(c: char) -> char {
+    match lower_one(c) {
+        'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' | 'ā' => 'a',
+        'é' | 'è' | 'ë' | 'ê' | 'ē' | 'ę' | 'ě' => 'e',
+        'í' | 'ì' | 'ï' | 'î' | 'ī' => 'i',
+        'ó' | 'ò' | 'ö' | 'ô' | 'õ' | 'ō' | 'ø' => 'o',
+        'ú' | 'ù' | 'ü' | 'û' | 'ū' | 'ů' => 'u',
+        'ý' | 'ÿ' => 'y',
+        'ñ' | 'ń' | 'ň' => 'n',
+        'ç' | 'č' | 'ć' => 'c',
+        'š' | 'ś' => 's',
+        'ž' | 'ź' | 'ż' => 'z',
+        'ř' => 'r',
+        'ł' => 'l',
+        'đ' | 'ď' => 'd',
+        'ť' => 't',
+        other => other,
+    }
+}
+
+fn fold_text(text: &str) -> String {
+    text.chars().map(fold_char).collect()
+}
+
+/// The query's words, folded: what is left once everything that is not a letter or a digit is a
+/// separator — the same split FTS5's tokenizer makes of the bodies.
+fn query_words(query: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for word in fold_text(query).split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+        if !words.iter().any(|known| known == word) {
+            words.push(word.to_string());
+        }
+    }
+    words
+}
+
+/// A window of `content` around the earliest place any of `words` occurs, folded, and that word's
+/// place inside the window — in characters, like [`snippet_around`].
+fn snippet_for_words(content: &str, words: &[String]) -> Option<(String, usize, usize)> {
+    let hay: Vec<char> = content.chars().collect();
+    let folded: Vec<char> = hay.iter().map(|c| fold_char(*c)).collect();
+    let mut best: Option<(usize, usize)> = None;
+    for word in words {
+        let needle: Vec<char> = word.chars().collect();
+        if needle.is_empty() || needle.len() > folded.len() {
+            continue;
+        }
+        if let Some(at) = folded.windows(needle.len()).position(|window| window == needle.as_slice()) {
+            if best.is_none_or(|(known, _)| at < known) {
+                best = Some((at, needle.len()));
+            }
+        }
+    }
+    let (at, len) = best?;
+    let from = at.saturating_sub(SNIPPET_PAD);
+    let to = (at + len + SNIPPET_PAD).min(hay.len());
+    // Whitespace collapsed like `snippet_around`, tracking where the match moved to.
+    let mut snippet = String::new();
+    let mut start = 0;
+    let mut last_space = true;
+    let mut count = 0usize;
+    for (index, c) in hay[from..to].iter().enumerate() {
+        if from + index == at {
+            start = count;
+        }
+        if c.is_whitespace() {
+            if !last_space {
+                snippet.push(' ');
+                count += 1;
+            }
+            last_space = true;
+        } else {
+            snippet.push(*c);
+            count += 1;
+            last_space = false;
+        }
+    }
+    let snippet = snippet.trim_end().to_string();
+    let (snippet, start) = if from > 0 { (format!("…{snippet}"), start + 1) } else { (snippet, start) };
+    let snippet = if to < hay.len() { format!("{snippet}…") } else { snippet };
+    Some((snippet, start, len))
 }
 
 /// The notes that reference `title` with a `[[wiki link]]`, newest first.
@@ -1367,12 +1571,67 @@ pub fn backlinks(
             snippet,
             match_start: (offset - start) as i64,
             match_len: 2,
+            meeting_id: None,
+            at_ms: None,
         });
         if hits.len() as i64 >= limit {
             break;
         }
     }
     Ok(hits)
+}
+
+/// The workspace's notes as a graph: every live note, and a `(from, to)` edge for each `[[Title]]`
+/// that names another of them (case- and accent-blind, like the links themselves). A note linking
+/// one title twice is one edge; a link to a note that is not there draws nothing.
+pub fn link_graph(conn: &Connection, workspace_id: &str) -> rusqlite::Result<(Vec<(String, String, String)>, Vec<(String, String)>)> {
+    let mut statement = conn.prepare(
+        "SELECT id, title, COALESCE(book_id, ''), content FROM notes \
+         WHERE (workspace_id = ?1 OR scope = 'global') AND deleted_at = '' ORDER BY updated_at DESC",
+    )?;
+    let rows: Vec<(String, String, String, String)> = statement
+        .query_map(params![workspace_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let by_title: std::collections::HashMap<String, String> =
+        rows.iter().rev().map(|(id, title, _, _)| (fold_for_match(title), id.clone())).filter(|(t, _)| !t.is_empty()).collect();
+    let mut edges = Vec::new();
+    for (id, _, _, content) in &rows {
+        let mut seen = std::collections::HashSet::new();
+        for target in wiki_link_targets(content) {
+            if let Some(to) = by_title.get(&fold_for_match(&target)) {
+                if to != id && seen.insert(to.clone()) {
+                    edges.push((id.clone(), to.clone()));
+                }
+            }
+        }
+    }
+    let nodes = rows.into_iter().map(|(id, title, book, _)| (id, title, book)).collect();
+    Ok((nodes, edges))
+}
+
+/// Every `[[…]]` target in `content`, in order — the same bounds as [`find_wiki_link`]: no newline,
+/// at most 200 characters, a nested opener ends the first.
+fn wiki_link_targets(content: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = content;
+    while let Some(start) = rest.find("[[") {
+        let after = &rest[start + 2..];
+        let end = after.find("]]");
+        let nested = after.find("[[");
+        match end {
+            Some(end) if nested.is_none_or(|n| n > end) && end <= 200 && !after[..end].contains('\n') => {
+                let target = after[..end].trim();
+                // `[[Title|shown]]` and `[[Title#heading]]` name `Title`.
+                let target = target.split(['|', '#']).next().unwrap_or(target).trim();
+                if !target.is_empty() {
+                    found.push(target.to_string());
+                }
+                rest = &after[end + 2..];
+            }
+            _ => rest = after,
+        }
+    }
+    found
 }
 
 /// How many live notes other than `exclude_id` link to `title` — the number the rename question
@@ -1692,6 +1951,12 @@ fn lower_one(c: char) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wiki_link_targets_are_read_with_their_bounds() {
+        assert_eq!(wiki_link_targets("ver [[Retro 12]] y [[Plan|el plan]] o [[Diseño#API]]"), vec!["Retro 12", "Plan", "Diseño"]);
+        assert_eq!(wiki_link_targets("roto [[sin cierre\n y [[bueno]]"), vec!["bueno"]);
+    }
 
     /// A workspace with one book in it, `b1` — because a note without a book is no longer a state
     /// this module can produce. See [`create_note`].
@@ -2244,10 +2509,59 @@ mod tests {
                 "{query} should match"
             );
         }
-        assert!(
-            search_notes(&conn, "w1", "accion", 20).unwrap().is_empty(),
-            "folding case is not stripping accents — 'accion' is a different word"
-        );
+        // Accents are folded too: Spanish is typed without them as often as with.
+        assert_eq!(search_notes(&conn, "w1", "accion", 20).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_takes_words_in_any_order_without_their_accents() {
+        let conn = workspace();
+        create_note(&conn, "w1", "b1", "Uno", "Notas del despliegue.\n\nLa Configuración vive en el servidor.", "[]").unwrap();
+        create_note(&conn, "w1", "b1", "Dos", "Solo la configuración, nada más.", "[]").unwrap();
+
+        let hits = search_notes(&conn, "w1", "configuracion despliegue", 20).unwrap();
+        assert_eq!(hits.len(), 1, "both words must be in the note");
+        // Prefixes count, so a half-typed word already finds it.
+        assert_eq!(search_notes(&conn, "w1", "desplie", 20).unwrap().len(), 1);
+        assert_eq!(search_notes(&conn, "w1", "CONFIG", 20).unwrap().len(), 2);
+        // The marker lands on the earliest word, accented as written.
+        let hit = &hits[0];
+        let matched: String = hit.snippet.chars().skip(hit.match_start as usize).take(hit.match_len as usize).collect();
+        assert_eq!(matched, "despliegue");
+    }
+
+    #[test]
+    fn the_index_follows_edits_and_deletes() {
+        let conn = workspace();
+        let note = create_note(&conn, "w1", "b1", "Uno", "alfa", "[]").unwrap();
+        conn.execute("UPDATE notes SET content = 'beta' WHERE id = ?1", params![note.id]).unwrap();
+        assert!(search_notes(&conn, "w1", "alfa", 20).unwrap().is_empty());
+        assert_eq!(search_notes(&conn, "w1", "beta", 20).unwrap().len(), 1);
+        conn.execute("DELETE FROM notes WHERE id = ?1", params![note.id]).unwrap();
+        assert!(search_notes(&conn, "w1", "beta", 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_meeting_transcript_is_searched_and_says_when() {
+        let conn = workspace();
+        let note = create_note(&conn, "w1", "b1", "Reunión", "Agenda", "[]").unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO meetings (id, workspace_id, note_id, started_at, created_at, updated_at)
+                 VALUES ('m1', 'w1', '{}', '2026-01-01', '2026-01-01', '2026-01-01');
+             INSERT INTO meeting_lines (meeting_id, seq, channel, speaker, start_ms, end_ms, text)
+                 VALUES ('m1', 0, 'mic', 'A', 1000, 2000, 'Hola a todos'),
+                        ('m1', 1, 'mic', 'B', 64000, 66000, 'El presupuesto se aprobó el martes');",
+            note.id
+        ))
+        .unwrap();
+        let hits = search_notes(&conn, "w1", "aprobo presupuesto", 20).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].meeting_id.as_deref(), Some("m1"));
+        assert_eq!(hits[0].at_ms, Some(64000));
+        // A body match wins: the note is listed once, for its own text.
+        let hits = search_notes(&conn, "w1", "agenda", 20).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].meeting_id.is_none());
     }
 
     #[test]

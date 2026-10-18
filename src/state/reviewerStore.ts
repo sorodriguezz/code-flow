@@ -110,6 +110,8 @@ interface ReviewerState {
   saveProjectConfig: (projectId: string, config: ReviewerProjectConfig) => Promise<void>;
   run: (project: Project) => Promise<void>;
   cancel: (projectId: string) => Promise<void>;
+  /** Rewrites the shown report after a triage — the backend has already rewritten the kept one. */
+  patchSummary: (projectId: string, change: (summary: ReviewerRunSummary) => ReviewerRunSummary) => void;
 }
 
 export const useReviewerStore = create<ReviewerState>((set, get) => ({
@@ -123,6 +125,13 @@ export const useReviewerStore = create<ReviewerState>((set, get) => ({
   suggestions: {},
   projectConfigs: {},
   activeProjectId: null,
+
+  patchSummary: (projectId, change) =>
+    set((state) => {
+      const run = state.runs[projectId];
+      if (!run?.summary) return state;
+      return { runs: { ...state.runs, [projectId]: { ...run, summary: change(run.summary) } } };
+    }),
 
   refresh: async () => {
     listen();

@@ -46,7 +46,10 @@ export function PortsPanel({ onOpenService, onClose }: { onOpenService: (id: str
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => void refresh(), REFRESH_MS);
+    // `lsof` / `netstat` behind it: not while the window is out of sight.
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [refresh]);
 

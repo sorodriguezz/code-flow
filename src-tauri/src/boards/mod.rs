@@ -25,8 +25,12 @@
 //! still goes back through the user's own hands.
 
 pub mod azure;
+pub mod issues;
 pub mod jira;
+pub mod linear;
 pub mod monday;
+
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +49,12 @@ pub enum BoardProvider {
     Azure,
     Jira,
     Monday,
+    /// GitHub Issues: host / `owner/repo` / label — see [`issues`].
+    Github,
+    /// GitLab Issues: host / `group/project` / label.
+    Gitlab,
+    /// Linear: organisation / team / label — see [`linear`].
+    Linear,
 }
 
 impl BoardProvider {
@@ -52,6 +62,9 @@ impl BoardProvider {
         match raw.trim().to_ascii_lowercase().as_str() {
             "jira" => Self::Jira,
             "monday" => Self::Monday,
+            "github" => Self::Github,
+            "gitlab" => Self::Gitlab,
+            "linear" => Self::Linear,
             _ => Self::Azure,
         }
     }
@@ -61,6 +74,18 @@ impl BoardProvider {
             Self::Azure => "azure",
             Self::Jira => "jira",
             Self::Monday => "monday",
+            Self::Github => "github",
+            Self::Gitlab => "gitlab",
+            Self::Linear => "linear",
+        }
+    }
+
+    /// The issue tracker that comes with a repository host.
+    fn tracker(self) -> Option<issues::Tracker> {
+        match self {
+            Self::Github => Some(issues::Tracker::GitHub),
+            Self::Gitlab => Some(issues::Tracker::GitLab),
+            _ => None,
         }
     }
 }
@@ -680,7 +705,7 @@ pub fn story_edit(
         }
         // Both keep the criteria inside the prose, under a heading their own update writes; the
         // narrative opens the prose, as it did when the item was created.
-        BoardProvider::Jira | BoardProvider::Monday => {
+        BoardProvider::Jira | BoardProvider::Monday | BoardProvider::Github | BoardProvider::Gitlab | BoardProvider::Linear => {
             let prose = [story.narrative.trim(), story.description.trim()]
                 .iter()
                 .filter(|part| !part.is_empty())
@@ -757,6 +782,86 @@ pub fn story_changes(current: &WorkItem, story: &StoryContent<'_>) -> Vec<FieldC
     changes
 }
 
+// ---------- duplicates ----------
+
+/// An item already on the board, as the duplicate check before a publish shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExistingItem {
+    pub id: i64,
+    /// Jira's `PROJ-12`; empty where the board numbers items plainly.
+    pub key: String,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+}
+
+/// How many of the board's newest items a duplicate check reads. A story written today repeats
+/// something from this year's backlog, not from five years of it, and the read is one or two
+/// requests whatever the board's size.
+pub const RECENT_ITEMS: usize = 400;
+
+/// A title's words for comparing: lower case, accents dropped, anything that is not a letter or a
+/// digit a separator. "Iniciar sesión con Google" and "iniciar sesion con google." are one title.
+pub fn title_words(title: &str) -> Vec<String> {
+    let folded: String = title
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            c if c.is_alphanumeric() => c,
+            _ => ' ',
+        })
+        .collect();
+    folded.split_whitespace().map(str::to_string).collect()
+}
+
+/// Whether two titles name the same work: the same words, or — for titles long enough that a
+/// shared template does not decide it — nearly all of them (Jaccard ≥ 0.75).
+pub fn same_title(a: &str, b: &str) -> bool {
+    let (wa, wb) = (title_words(a), title_words(b));
+    if wa.is_empty() || wb.is_empty() {
+        return false;
+    }
+    if wa == wb {
+        return true;
+    }
+    if wa.len() < 4 || wb.len() < 4 {
+        return false;
+    }
+    let sa: HashSet<&String> = wa.iter().collect();
+    let sb: HashSet<&String> = wb.iter().collect();
+    let shared = sa.intersection(&sb).count() as f64;
+    let all = sa.union(&sb).count() as f64;
+    shared / all >= 0.75
+}
+
+/// The newest items of this kind on the board — what a duplicate check compares against.
+pub async fn recent_items(
+    provider: BoardProvider,
+    org: &str,
+    project: &str,
+    work_item_type: &str,
+    auth: &BoardAuth,
+) -> Result<Vec<ExistingItem>, String> {
+    match provider {
+        BoardProvider::Azure => azure::recent_items(org, project, work_item_type, &auth.secret).await,
+        BoardProvider::Jira => jira::recent_issues(org, project, work_item_type, auth).await,
+        // A monday group is a column of the board, not a kind of item: the whole board counts.
+        BoardProvider::Monday => monday::recent_items(org, project, auth).await,
+        // A label is not a kind of item either: the whole tracker counts.
+        BoardProvider::Github | BoardProvider::Gitlab => {
+            issues::recent_issues(provider.tracker().expect("an issue tracker"), org, project, &auth.secret).await
+        }
+        BoardProvider::Linear => linear::recent_issues(project, auth).await,
+    }
+}
+
 // ---------- dispatch ----------
 
 /// The kinds of work item this board offers.
@@ -770,6 +875,10 @@ pub async fn list_work_item_types(
         BoardProvider::Azure => azure::list_work_item_types(org, project, &auth.secret).await,
         BoardProvider::Jira => jira::list_issue_types(org, project, auth).await,
         BoardProvider::Monday => monday::list_groups(project, auth).await,
+        BoardProvider::Github | BoardProvider::Gitlab => {
+            issues::list_labels(provider.tracker().expect("an issue tracker"), org, project, &auth.secret).await
+        }
+        BoardProvider::Linear => linear::list_labels(project, auth).await,
     }
 }
 
@@ -794,6 +903,10 @@ pub async fn create_work_item(
         }
         BoardProvider::Jira => jira::create_issue(org, project, work_item_type, item, auth).await,
         BoardProvider::Monday => monday::create_item(org, project, work_item_type, item, auth).await,
+        BoardProvider::Github | BoardProvider::Gitlab => {
+            issues::create_issue(provider.tracker().expect("an issue tracker"), org, project, work_item_type, item, &auth.secret).await
+        }
+        BoardProvider::Linear => linear::create_issue(project, work_item_type, item, auth).await,
     }
 }
 
@@ -814,6 +927,10 @@ pub async fn update_work_item(
         // The only arm that needs the container: monday addresses a column write by board *and*
         // item, so an update that knows only the item has nothing to send it to.
         BoardProvider::Monday => monday::update_item(org, project, id, edit, auth).await,
+        BoardProvider::Github | BoardProvider::Gitlab => {
+            issues::update_issue(provider.tracker().expect("an issue tracker"), org, key, edit, &auth.secret).await
+        }
+        BoardProvider::Linear => linear::update_issue(key, edit, auth).await,
     }
 }
 
@@ -863,6 +980,10 @@ pub async fn create_child_work_item(
         BoardProvider::Monday => {
             monday::create_subitem(org, project, parent_id, task.title, task.detail, auth).await
         }
+        BoardProvider::Github | BoardProvider::Gitlab => {
+            issues::create_child(provider.tracker().expect("an issue tracker"), org, project, parent_id, task, &auth.secret).await
+        }
+        BoardProvider::Linear => linear::create_subissue(project, parent_key, task, auth).await,
     }
 }
 
@@ -878,6 +999,10 @@ pub async fn get_work_item(
         BoardProvider::Azure => azure::get_work_item(org, id, &auth.secret).await,
         BoardProvider::Jira => jira::get_issue(org, key, auth).await,
         BoardProvider::Monday => monday::get_item(org, id, auth).await,
+        BoardProvider::Github | BoardProvider::Gitlab => {
+            issues::get_issue(provider.tracker().expect("an issue tracker"), org, key, &auth.secret).await
+        }
+        BoardProvider::Linear => linear::get_issue(key, auth).await,
     }
 }
 
@@ -889,6 +1014,18 @@ pub async fn get_work_item(
 /// That ordering is what keeps a bare `4821` meaning today exactly what it meant before either of
 /// them existed here.
 pub fn parse_work_item_ref(input: &str) -> Option<WorkItemRef> {
+    // Linear, GitHub and GitLab claim full links only — a bare `ENG-123` stays Jira's, as it was.
+    if let Some((org, key)) = linear::parse_issue_ref(input) {
+        let id = key.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        return Some(WorkItemRef { org: Some(org), project: None, id, key, provider: BoardProvider::Linear });
+    }
+    if let Some((tracker, host, repo, number)) = issues::parse_issue_ref(input) {
+        let provider = match tracker {
+            issues::Tracker::GitHub => BoardProvider::Github,
+            issues::Tracker::GitLab => BoardProvider::Gitlab,
+        };
+        return Some(WorkItemRef { org: Some(host), key: format!("{repo}#{number}"), project: Some(repo), id: number, provider });
+    }
     monday::parse_item_ref(input)
         .or_else(|| jira::parse_issue_ref(input))
         .or_else(|| azure::parse_work_item_ref(input))
@@ -897,6 +1034,24 @@ pub fn parse_work_item_ref(input: &str) -> Option<WorkItemRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_title_written_again_is_recognised_and_a_different_one_is_not() {
+        assert!(same_title("Iniciar sesión con Google", "iniciar sesion con google."));
+        assert!(same_title(
+            "Como cliente quiero descargar mi factura en PDF",
+            "Como cliente quiero descargar la factura en PDF"
+        ));
+        // The same template with another object is another story.
+        assert!(!same_title("Como usuario quiero exportar a PDF", "Como usuario quiero exportar a Excel"));
+        assert!(same_title(
+            "Exportar el reporte mensual de ventas a Excel desde el panel",
+            "Exportar reporte mensual de ventas a Excel desde el panel"
+        ));
+        // Short titles must match outright: two words in common is not the same story.
+        assert!(!same_title("Login con Google", "Login con GitHub"));
+        assert!(!same_title("", "algo"));
+    }
 
     #[test]
     fn a_pasted_reference_goes_to_the_board_that_recognises_it() {

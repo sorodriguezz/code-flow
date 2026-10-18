@@ -9,5 +9,9 @@
 #![cfg_attr(windows, allow(linker_messages))]
 
 fn main() {
+    // On Windows the executable doubles as `ssh`'s askpass helper; that run ends here.
+    if let Some(code) = codeflow_lib::askpass_helper() {
+        std::process::exit(code);
+    }
     codeflow_lib::run()
 }

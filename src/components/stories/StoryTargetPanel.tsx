@@ -11,11 +11,13 @@ import { Field } from "../settings/modelPicker";
 import { loadAdoConnections } from "../../lib/adoConnections";
 import { loadJiraConnections } from "../../lib/jiraConnections";
 import { loadMondayConnections } from "../../lib/mondayConnections";
+import { loadLinearConnections } from "../../lib/linearConnections";
 import {
   adoListClassificationNodes,
   adoListProjects,
   boardListItemTypes,
   jiraListProjects,
+  linearListTeams,
   mondayBoardSchema,
   mondayListBoards,
 } from "../../lib/tauri/commands";
@@ -35,6 +37,7 @@ import type {
   MondayBoardSchema,
 } from "../../types/domain";
 import { fieldClass } from "../common/recipes";
+import type { TranslationKey } from "../../lib/i18n/translations";
 
 /** One entry of a target's host list. `value` is what gets stored; `label` is what is shown. */
 interface Option {
@@ -54,6 +57,16 @@ const PREFERRED_TYPES = ["User Story", "Product Backlog Item", "Historia de usua
  * title, so a name would resolve against whichever the API felt like; Azure, conversely, addresses a
  * work item type by the name shown on the form.
  */
+/** Each board by name, in the order the picker lists them. */
+const PROVIDER_LABEL: Record<BoardProvider, TranslationKey> = {
+  azure: "stories.targetAzure",
+  jira: "stories.targetJira",
+  monday: "stories.targetMonday",
+  github: "stories.targetGithub",
+  gitlab: "stories.targetGitlab",
+  linear: "stories.targetLinear",
+};
+
 function typeValue(type: BoardItemType, byId: boolean): string {
   return byId ? type.reference_name : type.name;
 }
@@ -89,6 +102,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
   const [orgs, setOrgs] = useState<string[]>([]);
   const [sites, setSites] = useState<Option[]>([]);
   const [mondayAccounts, setMondayAccounts] = useState<Option[]>([]);
+  const [linearAccounts, setLinearAccounts] = useState<Option[]>([]);
   const [mondaySchema, setMondaySchema] = useState<MondayBoardSchema | null>(null);
   const [projects, setProjects] = useState<Option[]>([]);
   const [types, setTypes] = useState<BoardItemType[]>([]);
@@ -106,10 +120,33 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
   const provider: BoardProvider = target?.provider ?? "azure";
   const isJira = provider === "jira";
   const isMonday = provider === "monday";
+  /** GitHub or GitLab Issues: host, repository, label. */
+  const isTracker = provider === "github" || provider === "gitlab";
+  const isLinear = provider === "linear";
+  /** Boards whose "type" is an optional label rather than something to pick. */
+  const labelled = isTracker || isLinear;
   const org = target?.org ?? "";
   const project = target?.project ?? "";
-  const hosts: Option[] =
-    isJira ? sites : isMonday ? mondayAccounts : orgs.map((name) => ({ value: name, label: name }));
+  /** The workspace's repositories on this tracker's hosts: `[host, owner/repo, name]`. */
+  const trackerRepos = useMemo(() => {
+    if (!isTracker) return [] as [string, string, string][];
+    return repos.flatMap((repo): [string, string, string][] => {
+      if (provider === "github" && repo.github_owner && repo.github_repo) {
+        return [[repo.github_host || "github.com", `${repo.github_owner}/${repo.github_repo}`, repo.name]];
+      }
+      if (provider === "gitlab" && repo.gitlab_project) return [[repo.gitlab_host || "gitlab.com", repo.gitlab_project, repo.name]];
+      return [];
+    });
+  }, [isTracker, provider, repos]);
+  const hosts: Option[] = isJira
+    ? sites
+    : isMonday
+      ? mondayAccounts
+      : isLinear
+        ? linearAccounts
+        : isTracker
+          ? [...new Set(trackerRepos.map(([host]) => host))].map((host) => ({ value: host, label: host }))
+          : orgs.map((name) => ({ value: name, label: name }));
   const verifyIds = useMemo(
     () => (batch ? parseVerifyProjectIds(batch.verify_project_ids) : []),
     [batch],
@@ -145,6 +182,9 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
         ),
       )
       .catch(() => setMondayAccounts([]));
+    void loadLinearConnections()
+      .then((connections) => setLinearAccounts(connections.map((c) => ({ value: c.key, label: c.name || c.key }))))
+      .catch(() => setLinearAccounts([]));
   }, []);
 
   const save = useCallback(
@@ -169,7 +209,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
       try {
         const [typeList, areaList, iterationList] = await Promise.all([
           boardListItemTypes(nextProvider, nextOrg, nextProject),
-          // Azure-only trees. Asking Jira for them would be a guaranteed 404 on every project pick.
+          // Azure-only trees. Asking any other board for them would be a guaranteed 404.
           nextProvider === "azure"
             ? adoListClassificationNodes(nextOrg, nextProject, "areas")
             : Promise.resolve([]),
@@ -210,14 +250,18 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
         )
       : isMonday
         ? mondayListBoards(org).then((found) => found.map((b) => ({ value: b.id, label: b.name })))
-        : adoListProjects(org).then((found) => found.map((p) => ({ value: p.name, label: p.name })));
+        : isLinear
+          ? linearListTeams(org).then((found) => found.map((team) => ({ value: team.id, label: `${team.key} · ${team.name}` })))
+          : isTracker
+            ? Promise.resolve(trackerRepos.filter(([host]) => host === org).map(([, path, name]) => ({ value: path, label: `${path} · ${name}` })))
+            : adoListProjects(org).then((found) => found.map((p) => ({ value: p.name, label: p.name })));
     void list
       .then(setProjects)
       .catch((e: unknown) => {
         setProjects([]);
         setError(String(e));
       });
-  }, [org, isJira, isMonday]);
+  }, [org, isJira, isMonday, isLinear, isTracker, trackerRepos]);
 
   // The mapping is read alongside the lists rather than at publish time, so "this board has nowhere
   // to put a story" is something the panel says while the user is still choosing the board.
@@ -244,7 +288,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
     if (!target || target.workItemType || types.length === 0) return;
     // Only Azure and Jira have a conventional "this is what a story is" type. A monday group is
     // whatever somebody named it, so landing on the first one would be a decision, not a default.
-    if (isMonday) return;
+    if (isMonday || labelled) return;
     if (autoPicked.current === project) return;
     const preferred =
       types.find((type) => PREFERRED_TYPES.includes(type.name)) ??
@@ -279,15 +323,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
-        <Group
-          title={
-            isJira
-              ? t("stories.targetJira")
-              : isMonday
-                ? t("stories.targetMonday")
-                : t("stories.targetAzure")
-          }
-        >
+        <Group title={t(PROVIDER_LABEL[provider])}>
           <div className="mb-2.5">
             <Field label={t("stories.board")} hint={t("stories.boardHint")}>
               <Select
@@ -307,11 +343,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                     iterationPath: "",
                   })
                 }
-                options={[
-                  { value: "azure", label: t("stories.targetAzure") },
-                  { value: "jira", label: t("stories.targetJira") },
-                  { value: "monday", label: t("stories.targetMonday") },
-                ]}
+                options={(Object.keys(PROVIDER_LABEL) as BoardProvider[]).map((value) => ({ value, label: t(PROVIDER_LABEL[value]) }))}
               />
             </Field>
           </div>
@@ -323,11 +355,15 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                   ? t("stories.noJiraConnection")
                   : isMonday
                     ? t("stories.noMondayConnection")
-                    : t("stories.noAdoConnection")}
+                    : isLinear
+                      ? t("stories.noLinearConnection")
+                      : isTracker
+                        ? t("stories.noTrackerRepo", { host: provider === "github" ? "GitHub" : "GitLab" })
+                        : t("stories.noAdoConnection")}
               </Note>
               <button
                 type="button"
-                onClick={() => openSettings("azure", isJira ? "jira" : isMonday ? "monday" : "azure")}
+                onClick={() => openSettings("azure", isJira ? "jira" : isMonday ? "monday" : isLinear ? "linear" : isTracker ? provider : "azure")}
                 className="flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
               >
                 <Plug size={12} />
@@ -335,14 +371,18 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                   ? t("stories.connectJira")
                   : isMonday
                     ? t("stories.connectMonday")
-                    : t("stories.connectAzure")}
+                    : isLinear
+                      ? t("stories.connectLinear")
+                      : isTracker
+                        ? t("stories.connectTracker", { host: provider === "github" ? "GitHub" : "GitLab" })
+                        : t("stories.connectAzure")}
               </button>
             </>
           ) : (
             <div className="space-y-2.5">
               <Field
                 label={
-                  isJira ? t("stories.site") : isMonday ? t("stories.account") : t("stories.organization")
+                  isJira ? t("stories.site") : isMonday || isLinear ? t("stories.account") : isTracker ? t("stories.host") : t("stories.organization")
                 }
               >
                 <Select
@@ -367,13 +407,13 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                 />
               </Field>
 
-              <Field label={isMonday ? t("stories.board_") : t("stories.project")}>
+              <Field label={isMonday ? t("stories.board_") : isLinear ? t("stories.team") : isTracker ? t("stories.repository") : t("stories.project")}>
                 <Select
                   size="field"
                   value={project}
                   disabled={!org}
                   placeholder={isMonday ? t("stories.pickBoard") : t("stories.pickProject")}
-                  ariaLabel={isMonday ? t("stories.board_") : t("stories.project")}
+                  ariaLabel={isMonday ? t("stories.board_") : isLinear ? t("stories.team") : isTracker ? t("stories.repository") : t("stories.project")}
                   onChange={(value) =>
                     save({ project: value, workItemType: "", areaPath: "", iterationPath: "" })
                   }
@@ -387,21 +427,25 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                     ? t("stories.issueType")
                     : isMonday
                       ? t("stories.group")
-                      : t("stories.workItemType")
+                      : labelled
+                        ? t("stories.label")
+                        : t("stories.workItemType")
                 }
                 hint={
                   isJira
                     ? t("stories.issueTypeHint")
                     : isMonday
                       ? t("stories.groupHint")
-                      : t("stories.workItemTypeHint")
+                      : labelled
+                        ? t("stories.labelHint")
+                        : t("stories.workItemTypeHint")
                 }
               >
                 <Select
                   size="field"
                   value={target.workItemType}
                   disabled={!project || types.length === 0}
-                  placeholder={t("stories.pickType")}
+                  placeholder={labelled ? t("stories.noLabel") : t("stories.pickType")}
                   ariaLabel={
                     isJira
                       ? t("stories.issueType")
@@ -411,7 +455,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                   }
                   onChange={(value) => save({ workItemType: value })}
                   options={types.map((type) => ({
-                    value: typeValue(type, isJira || isMonday),
+                    value: typeValue(type, isJira || isMonday || labelled),
                     label: type.name,
                     leading: (
                       <span
@@ -454,7 +498,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
 
               {/* Azure only, and absent rather than disabled elsewhere: a greyed-out field implies a
                   value that could be filled in, and neither of the other boards has one. */}
-              {!isJira && !isMonday && (
+              {provider === "azure" && (
                 <>
                   <Field label={t("stories.areaPath")} hint={t("stories.pathHint")}>
                     <Select

@@ -138,7 +138,7 @@ export function PipelinesView() {
           style={{ width: listWidth }}
           className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
         >
-          <RunList projectId={project.id} localPath={project.local_path} currentBranch={branch} />
+          <RunList projectId={project.id} localPath={project.local_path} currentBranch={branch} provider={availability?.provider} />
         </div>
 
         <ResizeHandle

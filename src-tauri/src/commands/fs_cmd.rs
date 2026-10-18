@@ -6,7 +6,7 @@ pub fn list_dir(repo_path: String, sub_path: Option<String>) -> Result<Vec<fsops
     fsops::list_dir(&repo_path, sub_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_file_text(repo_path: String, rel_path: String) -> Result<String, String> {
     fsops::read_file_text(&repo_path, &rel_path)
 }
@@ -247,7 +247,7 @@ pub fn search_repo(
 
 /// Rewrites every match across the repo — or within one file when `only_path` is given. Returns
 /// what it touched, plus the checkpoint taken beforehand so the whole thing can be undone.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn replace_in_repo(
     repo_path: String,
     query: String,

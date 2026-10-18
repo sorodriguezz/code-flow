@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, GitBranch, Hand, LoaderCircle, Play, RefreshCw, User } from "lucide-react";
+import { ExternalLink, FileCheck2, GitBranch, Hand, LoaderCircle, Play, RefreshCw, User } from "lucide-react";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { riseDelay } from "../../lib/rise";
-import { useCiStore } from "../../state/ciStore";
+import { MAX_RUNS, NO_RUN_FILTERS, matchesRunFilters, useCiStore, type RunFilters } from "../../state/ciStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { chipClass } from "../common/recipes";
 import { Select, type SelectOption } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
 import { RunPipelineModal } from "./RunPipelineModal";
+import { WorkflowLintModal } from "./WorkflowLintModal";
 import {
   PIPELINE_STATUS,
   STATUS_ORDER,
@@ -246,13 +247,17 @@ export function RunList({
   projectId,
   localPath,
   currentBranch,
+  provider,
 }: {
   projectId: string;
   /** The working copy, where the "Run pipeline" dialog reads the pipeline files first. */
   localPath: string;
   currentBranch: string | null;
+  /** The host the repository is linked to — the workflow check is GitHub Actions' only. */
+  provider?: string | null;
 }) {
   const [runOpen, setRunOpen] = useState(false);
+  const [lintOpen, setLintOpen] = useState(false);
   const runs = useCiStore((s) => s.runsByProject[projectId]);
   const loading = useCiStore((s) => s.loadingProjectId === projectId);
   const selection = useCiStore((s) => s.selection);
@@ -262,6 +267,10 @@ export function RunList({
   const statusFilter = useCiStore((s) => s.statusFilter);
   const setBranchFilter = useCiStore((s) => s.setBranchFilter);
   const setStatusFilter = useCiStore((s) => s.setStatusFilter);
+  const runFilters = useCiStore((s) => s.runFiltersByProject[projectId]) ?? NO_RUN_FILTERS;
+  const setRunFilter = useCiStore((s) => s.setRunFilter);
+  const limit = useCiStore((s) => s.limitByProject[projectId]) ?? 50;
+  const loadMore = useCiStore((s) => s.loadMore);
   const load = useCiStore((s) => s.load);
   const t = useT();
 
@@ -276,8 +285,27 @@ export function RunList({
 
   const visible = useMemo(() => {
     const list = runs ?? [];
-    return statusFilter ? list.filter((run) => run.status === statusFilter) : list;
-  }, [runs, statusFilter]);
+    return list.filter(
+      (run) => (!statusFilter || run.status === statusFilter) && matchesRunFilters(run, runFilters),
+    );
+  }, [runs, statusFilter, runFilters]);
+
+  /** Workflows, events and people seen in the loaded runs — a picker only shows once there are two
+   *  to choose between, or while one is chosen. */
+  const filterChoices = useMemo(() => {
+    const seen = (pick: (run: PipelineRun) => string | null) =>
+      [...new Set((runs ?? []).map(pick).filter((value): value is string => !!value))].sort((a, b) =>
+        a.localeCompare(b),
+      );
+    return {
+      workflow: seen((run) => run.name),
+      event: seen((run) => run.event),
+      actor: seen((run) => run.actor),
+    };
+  }, [runs]);
+  const filtering = statusFilter !== null || Object.values(runFilters).some(Boolean);
+  // The host may have more: the list came back as long as it was asked to be.
+  const more = (runs?.length ?? 0) >= limit && limit < MAX_RUNS;
 
   /**
    * Every branch that has run something here, with the one you are standing on lifted to the top.
@@ -328,6 +356,19 @@ export function RunList({
           </button>
         </Tooltip>
         {runOpen && <RunPipelineModal projectId={projectId} localPath={localPath} onClose={() => setRunOpen(false)} />}
+        {provider === "github" && (
+          <Tooltip label={t("pipelines.lint.action")}>
+            <button
+              type="button"
+              aria-label={t("pipelines.lint.action")}
+              onClick={() => setLintOpen(true)}
+              className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            >
+              <FileCheck2 size={13} />
+            </button>
+          </Tooltip>
+        )}
+        {lintOpen && <WorkflowLintModal localPath={localPath} onClose={() => setLintOpen(false)} />}
         <Tooltip label={t("pipelines.refresh")}>
           <button
             type="button"
@@ -359,6 +400,17 @@ export function RunList({
           <FilterChip active onClick={() => setStatusFilter(null)}>
             {t(PIPELINE_STATUS[statusFilter].labelKey)}
           </FilterChip>
+        )}
+        {(["workflow", "event", "actor"] as const).map((field) =>
+          filterChoices[field].length > 1 || runFilters[field] ? (
+            <RunFilterSelect
+              key={field}
+              field={field}
+              value={runFilters[field]}
+              choices={filterChoices[field]}
+              onChange={(value) => setRunFilter(projectId, { [field]: value })}
+            />
+          ) : null,
         )}
       </div>
 
@@ -398,13 +450,57 @@ export function RunList({
             />
           );
         })}
-        {visible.length === 0 && statusFilter !== null && (
+        {visible.length === 0 && statusFilter !== null && !Object.values(runFilters).some(Boolean) && (
           <p className="px-2 py-3 text-[12px] text-[var(--cf-text-muted)]">
             {t("pipelines.noneWithStatus", { status: t(PIPELINE_STATUS[statusFilter].labelKey) })}
           </p>
         )}
+        {visible.length === 0 && Object.values(runFilters).some(Boolean) && (runs?.length ?? 0) > 0 && (
+          <p className="px-2 py-3 text-[12px] text-[var(--cf-text-muted)]">{t("pipelines.noneMatching")}</p>
+        )}
+        {more && (runs?.length ?? 0) > 0 && (
+          <Tooltip label={filtering ? t("pipelines.loadMoreFiltered") : t("pipelines.loadMoreHint")}>
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => void loadMore(projectId)}
+              className="mx-auto my-1.5 rounded-md px-2.5 py-1 text-[11.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-50"
+            >
+              {loading ? t("pipelines.loadingMore") : t("pipelines.loadMore")}
+            </button>
+          </Tooltip>
+        )}
       </div>
     </>
+  );
+}
+
+/** One of the client-side pickers: workflow, event or who ran it. */
+function RunFilterSelect({
+  field,
+  value,
+  choices,
+  onChange,
+}: {
+  field: keyof RunFilters;
+  value: string;
+  choices: string[];
+  onChange: (value: string) => void;
+}) {
+  const t = useT();
+  const any = t(`pipelines.filterAny.${field}`);
+  const options: SelectOption[] = [
+    { value: "", label: any },
+    ...(value && !choices.includes(value) ? [value] : []).concat(choices).map((choice) => ({
+      value: choice,
+      label: choice,
+      icon: field === "actor" ? User : undefined,
+    })),
+  ];
+  return (
+    <div className="min-w-[96px] max-w-[160px] flex-1">
+      <Select size="compact" value={value} onChange={onChange} options={options} ariaLabel={any} />
+    </div>
   );
 }
 

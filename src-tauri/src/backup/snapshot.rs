@@ -224,12 +224,24 @@ pub const TABLES: &[&str] = &[
 /// row restored without them is an execution whose every node opens empty. `flow_run_days` counts
 /// those same runs, so it stays where they ran too.
 ///
+/// `chat_turn_checkpoints` is the fifth, and again the bench's reason: each row names checkpoint
+/// commits taken in *this* machine's working copies, which a backup does not carry. Restored
+/// elsewhere it would point the per-turn review at commits that are not there.
+///
 /// Read only by [`covers_every_table`], and that is the point rather than an oversight: nothing at
 /// runtime consults this, because excluding a table is *not* an action the exporter takes — it is
 /// [`TABLES`] not naming it. This list is the written-down reason, and the test is what makes
 /// writing it down compulsory.
 #[allow(dead_code)]
 pub const NEVER_BACKED_UP: &[&str] = &[
+    // The Notes search index and FTS5's own shadow tables: derived from `notes`, rebuilt by the
+    // migration whenever the two disagree — a restore included.
+    "notes_fts",
+    "notes_fts_data",
+    "notes_fts_idx",
+    "notes_fts_content",
+    "notes_fts_docsize",
+    "notes_fts_config",
     "workspace_terminals",
     "workspace_bench_tabs",
     "remote_devices",
@@ -238,6 +250,7 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     "flow_run_nodes",
     "flow_waits",
     "flow_run_days",
+    "chat_turn_checkpoints",
 ];
 
 // ---------------------------------------------------------------------------

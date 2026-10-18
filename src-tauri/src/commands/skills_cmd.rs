@@ -152,7 +152,7 @@ pub fn create_custom_skill(
 
 /// Imports a skill from a local folder (one that already has a `SKILL.md`), copying it into the
 /// workspace store. The skill name is the folder's own name.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_skill_from_folder(
     db: State<Db>,
     workspace_id: String,

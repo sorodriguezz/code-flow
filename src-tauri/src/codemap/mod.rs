@@ -27,6 +27,7 @@ pub mod index;
 pub mod mcp;
 pub mod resolve;
 pub mod summary;
+pub mod tsconfig;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -76,6 +77,10 @@ struct RepoMap {
     loaded: bool,
     unsaved: bool,
     saved_at: Option<Instant>,
+    /// The tsconfig / jsconfig files the last build read (the ones they extend included), with the
+    /// stat each had then. An edit to one changes how imports resolve without any code file
+    /// changing, so it has to trigger a rebuild of its own.
+    ts_configs: Vec<(String, u64, u64)>,
 }
 
 static MAPS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<RepoMap>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -118,6 +123,7 @@ fn map_for(root: &str) -> Arc<Mutex<RepoMap>> {
                 loaded: false,
                 unsaved: false,
                 saved_at: None,
+                ts_configs: Vec::new(),
             }))
         })
         .clone()
@@ -247,11 +253,33 @@ fn attr_true(repo: &git2::Repository, path: &str, name: &str) -> bool {
         .is_some_and(|value| matches!(git2::AttrValue::from_string(Some(value)), git2::AttrValue::True) || value == "true")
 }
 
+/// The cache file's name for a repository root (already canonical).
+fn cache_key(root: &Path) -> String {
+    git2::Oid::hash_object(git2::ObjectType::Blob, root.to_string_lossy().as_bytes())
+        .map(|oid| oid.to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Deletes the cached maps of repositories that are no longer projects — a removed repository's
+/// index otherwise sat in the cache folder for good. Only files untouched for a month: a map built
+/// for something that is not a project (a review checkout) is kept while it is in use.
+pub fn sweep_cache(project_roots: &[String]) {
+    let keep: std::collections::HashSet<String> = project_roots.iter().map(|root| cache_key(&canonical(root))).collect();
+    let Ok(entries) = std::fs::read_dir(crate::paths::cache_dir().join("codemap")) else { return };
+    let month = std::time::Duration::from_secs(30 * 24 * 3600);
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(key) = name.strip_suffix(".json.gz") else { continue };
+        let stale = entry.metadata().and_then(|m| m.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > month);
+        if stale && !keep.contains(key) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 impl RepoMap {
     fn cache_path(&self) -> PathBuf {
-        let key = git2::Oid::hash_object(git2::ObjectType::Blob, self.root.to_string_lossy().as_bytes())
-            .map(|oid| oid.to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
+        let key = cache_key(&self.root);
         // Tests index throwaway repositories: their caches go to the temp dir, never the user's.
         let base = if cfg!(test) { std::env::temp_dir().join("codeflow-codemap-tests") } else { crate::paths::cache_dir().join("codemap") };
         base.join(format!("{key}.json.gz"))
@@ -333,6 +361,59 @@ impl RepoMap {
             .collect()
     }
 
+    /// The tsconfig / jsconfig aliases of the working tree: every config in a folder that holds an
+    /// indexed TypeScript file, or above one. Also the configs it read, with their stat, for
+    /// [`Self::ts_configs`].
+    fn working_ts_paths(&self) -> (tsconfig::TsPaths, Vec<(String, u64, u64)>) {
+        let mut dirs: HashSet<String> = HashSet::new();
+        for path in self.entries.keys() {
+            if !matches!(extract::language_of(path), Some(extract::Lang::TypeScript | extract::Lang::Tsx)) {
+                continue;
+            }
+            let mut dir = resolve::dir_of(path);
+            while dirs.insert(dir.to_string()) && !dir.is_empty() {
+                dir = resolve::dir_of(dir);
+            }
+        }
+        let mut configs = Vec::new();
+        for dir in &dirs {
+            let Ok(read) = std::fs::read_dir(self.root.join(dir)) else { continue };
+            for entry in read.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let rel = if dir.is_empty() { name } else { format!("{dir}/{name}") };
+                if tsconfig::is_config(&rel) {
+                    configs.push(rel);
+                }
+            }
+        }
+        let read = std::cell::RefCell::new(Vec::new());
+        let paths = tsconfig::TsPaths::load(&configs, |rel| {
+            read.borrow_mut().push(rel.to_string());
+            std::fs::read_to_string(self.root.join(rel)).ok()
+        });
+        let mut read = read.into_inner();
+        // An `extends` target that could not be read is kept too, as 0/0: one appearing there counts.
+        read.extend(configs);
+        read.sort();
+        read.dedup();
+        let stamped = read.into_iter().map(|rel| {
+            let (mtime, size) = self.stat(&rel);
+            (rel, mtime, size)
+        });
+        (paths, stamped.collect())
+    }
+
+    /// Modification time and size of a file under the root; zeros when there is none.
+    fn stat(&self, rel: &str) -> (u64, u64) {
+        std::fs::metadata(self.root.join(rel)).map(|meta| (mtime_of(&meta), meta.len())).unwrap_or((0, 0))
+    }
+
+    /// Whether a config the last build read was edited, created or deleted since.
+    fn ts_configs_moved(&self) -> bool {
+        self.touched.iter().any(|rel| tsconfig::is_config(rel))
+            || self.ts_configs.iter().any(|(rel, mtime, size)| self.stat(rel) != (*mtime, *size))
+    }
+
     /// Reads one working-tree file into `self` if its stat moved. `Ok(true)` when it had to be parsed.
     fn update_file(&mut self, rel: &str, parse: &mut Vec<(String, String, String, u64, u64)>) -> bool {
         let full = self.root.join(rel);
@@ -377,7 +458,7 @@ impl RepoMap {
             }
         }
         let mut parse = Vec::new();
-        let mut changed = false;
+        let mut changed = self.snapshot.is_some() && self.ts_configs_moved();
         if self.dirty || !fresh || self.snapshot.is_none() {
             let listed = self.list();
             let keep: HashSet<&str> = listed.iter().map(String::as_str).collect();
@@ -414,7 +495,9 @@ impl RepoMap {
                 .iter()
                 .filter_map(|(path, entry)| self.facts.get(&entry.blob).map(|facts| FileRow { path: path.clone(), facts: facts.clone() }))
                 .collect();
-            self.snapshot = Some(Arc::new(Snapshot::build(rows)));
+            let (ts_paths, ts_configs) = self.working_ts_paths();
+            self.ts_configs = ts_configs;
+            self.snapshot = Some(Arc::new(Snapshot::build_with(rows, &ts_paths)));
             self.unsaved = true;
         }
         self.save();
@@ -435,10 +518,14 @@ impl RepoMap {
         }
         let tree = commit.tree().map_err(|e| e.message().to_string())?;
         let mut blobs: Vec<(String, git2::Oid)> = Vec::new();
+        let mut configs: Vec<(String, git2::Oid)> = Vec::new();
         tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
             if entry.kind() == Some(git2::ObjectType::Blob) && blobs.len() < MAX_FILES {
                 if let Some(name) = entry.name() {
                     let path = format!("{dir}{name}").replace('\\', "/");
+                    if tsconfig::is_config(&path) && !path.contains("node_modules/") {
+                        configs.push((path.clone(), entry.id()));
+                    }
                     if extract::language_of(&path).is_some() {
                         blobs.push((path, entry.id()));
                     }
@@ -478,7 +565,13 @@ impl RepoMap {
             self.facts.insert(blob, facts.clone());
             rows.push(FileRow { path, facts });
         }
-        let snapshot = Arc::new(Snapshot::build(rows));
+        let config_paths: Vec<String> = configs.iter().map(|(path, _)| path.clone()).collect();
+        let ts_paths = tsconfig::TsPaths::load(&config_paths, |wanted| {
+            let oid = configs.iter().find(|(path, _)| path == wanted)?.1;
+            let blob = repo.find_blob(oid).ok()?;
+            Some(String::from_utf8_lossy(blob.content()).into_owned())
+        });
+        let snapshot = Arc::new(Snapshot::build_with(rows, &ts_paths));
         self.at_ref = Some((commit_id, snapshot.clone(), ids));
         self.unsaved = true;
         self.save();
@@ -645,6 +738,23 @@ mod tests {
         assert_eq!(info.parsed, 1);
         assert!(!Arc::ptr_eq(&again, &after));
         assert_eq!(after.find_symbol("checkout", 5).len(), 1);
+    }
+
+    #[test]
+    fn editing_a_tsconfig_rebuilds_the_map_with_its_aliases() {
+        let dir = repo();
+        let root = dir.0.to_string_lossy().to_string();
+        std::fs::write(dir.0.join("src/checkout.ts"), "import { applyDiscount } from '@app/pricing';\nexport const c = applyDiscount(2);\n").unwrap();
+        std::fs::write(dir.0.join("tsconfig.json"), r#"{ "compilerOptions": {} }"#).unwrap();
+        invalidate(&root);
+        let (before, _) = snapshot(&root).unwrap();
+        let users = |map: &Snapshot| map.usages("applyDiscount", Some("src/pricing.ts"), 10).usages.iter().filter(|u| u.confirmed).map(|u| u.path.clone()).collect::<Vec<_>>();
+        assert!(!users(&before).contains(&"src/checkout.ts".to_string()), "no alias yet");
+        // Only the config changes — no code file does.
+        std::fs::write(dir.0.join("tsconfig.json"), r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@app/*": ["src/*"] } } }"#).unwrap();
+        touch(&root, "tsconfig.json");
+        let (after, _) = snapshot(&root).unwrap();
+        assert!(users(&after).contains(&"src/checkout.ts".to_string()), "the alias resolves once the config is re-read");
     }
 
     #[test]

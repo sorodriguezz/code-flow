@@ -25,10 +25,11 @@ export const VCS_PROVIDERS: VcsProviderOption[] = [
  * screen all the same, because this is where a user goes to connect an external account, and Azure
  * DevOps has always sat here serving boards and wikis as much as repositories.
  */
-export type HostingProvider = VcsProviderOption["id"] | "jira" | "monday";
+export type HostingProvider = VcsProviderOption["id"] | "jira" | "monday" | "linear";
 
 export const HOSTING_PROVIDERS: { id: HostingProvider; label: string; icon: LucideIcon; available: boolean }[] = [
   ...VCS_PROVIDERS,
   { id: "jira", label: "Jira", icon: SquareKanban, available: true },
   { id: "monday", label: "monday.com", icon: LayoutGrid, available: true },
+  { id: "linear", label: "Linear", icon: SquareKanban, available: true },
 ];

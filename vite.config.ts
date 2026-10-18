@@ -64,6 +64,32 @@ function assertNoChunkCycles(): Plugin {
       };
 
       for (const chunk of importsOf.keys()) walk(chunk);
+
+      // Nor may an entry reach the editor statically: anything an entry imports is a modulepreload
+      // in its HTML, and Monaco there is 4.5 MB fetched, parsed and run on every launch — which is
+      // how a static import of a modal in the AI panel put it back on the boot path, unnoticed.
+      for (const [fileName, output] of Object.entries(bundle)) {
+        if (output.type !== "chunk" || !output.isEntry) continue;
+        const from = new Map<string, string | null>([[fileName, null]]);
+        const queue = [fileName];
+        while (queue.length) {
+          const chunk = queue.shift()!;
+          if (/(^|\/)monaco(Setup)?-[^/]*\.js$/.test(chunk)) {
+            const path: string[] = [];
+            for (let at: string | null = chunk; at; at = from.get(at) ?? null) path.unshift(at);
+            this.error(
+              `The entry ${fileName} statically reaches the editor: ${path.join(" → ")}\n` +
+                "Make whatever imports Monaco a lazy import, so the editor loads when it is opened.",
+            );
+          }
+          for (const next of importsOf.get(chunk) ?? []) {
+            if (!from.has(next)) {
+              from.set(next, chunk);
+              queue.push(next);
+            }
+          }
+        }
+      }
     },
   };
 }
@@ -148,12 +174,39 @@ function excalidrawFonts(): Plugin {
   };
 }
 
+/**
+ * Mermaid's own prebuilt bundle, served beside the app as a plain file (`/vendor/mermaid.min.js`)
+ * and loaded with a `<script>` tag by `lib/diagrams/mermaidRuntime.ts` when a Mermaid diagram is
+ * first opened.
+ *
+ * Never imported, so Rollup never sees it — and that is the point: bundling Mermaid (Cytoscape,
+ * KaTeX, d3, a Langium grammar) is what pushed the production build past the 4 GB heap the release
+ * workflow gives it (see `src/lib/diagrams/mermaidStub.ts`). Its `dist` file is already minified and
+ * self-contained; copying it costs the build nothing.
+ */
+function mermaidRuntime(): Plugin {
+  const file = resolve("node_modules/mermaid/dist/mermaid.min.js");
+  return {
+    name: "codeflow-mermaid-runtime",
+    configureServer(server) {
+      server.middlewares.use("/vendor/mermaid.min.js", (_req, res) => {
+        res.setHeader("Content-Type", "text/javascript");
+        createReadStream(file).pipe(res);
+      });
+    },
+    generateBundle() {
+      this.emitFile({ type: "asset", fileName: "vendor/mermaid.min.js", source: readFileSync(file) });
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [
     react(),
     tailwindcss(),
     excalidrawFonts(),
+    mermaidRuntime(),
     assertNoChunkCycles(),
     contentSecurityPolicyMeta(),
   ],

@@ -1432,6 +1432,60 @@ async fn list_work_items(
         .collect())
 }
 
+/// The newest items of one type in the project, newest first — see `boards::recent_items`.
+///
+/// WIQL returns ids only, so the titles come from the batch read in pages of 200 (its cap).
+pub async fn recent_items(
+    org: &str,
+    project: &str,
+    work_item_type: &str,
+    pat: &str,
+) -> Result<Vec<super::ExistingItem>, String> {
+    let org_enc = encode_segment(&normalize_org(org));
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{}/_apis/wit/wiql?$top={}&api-version={API_VERSION}",
+        encode_segment(project),
+        super::RECENT_ITEMS
+    );
+    // WIQL string literals escape a quote by doubling it.
+    let query = format!(
+        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
+         AND [System.WorkItemType] = '{}' AND [System.State] <> 'Removed' ORDER BY [System.CreatedDate] DESC",
+        work_item_type.replace('\'', "''")
+    );
+    let res = client()
+        .post(&url)
+        .header("Authorization", auth_header(pat))
+        .header("Content-Type", "application/json")
+        .body(serde_json::json!({ "query": query }).to_string())
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(crate::ado::describe_failure(status, &body));
+    }
+    #[derive(Deserialize)]
+    struct Wiql {
+        #[serde(default, rename = "workItems")]
+        work_items: Vec<WiqlRef>,
+    }
+    #[derive(Deserialize)]
+    struct WiqlRef {
+        id: i64,
+    }
+    let found: Wiql = serde_json::from_str(&body).map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
+    let ids: Vec<i64> = found.work_items.into_iter().map(|r| r.id).take(super::RECENT_ITEMS).collect();
+    let mut out = Vec::new();
+    for chunk in ids.chunks(MAX_CHILDREN) {
+        for item in list_work_items(&org_enc, chunk, pat).await? {
+            out.push(super::ExistingItem { id: item.id, key: String::new(), title: item.title, state: item.state, url: item.url });
+        }
+    }
+    Ok(out)
+}
+
 /// Enough of a percent-decoder for one path segment: project names travel as `%20`-style escapes
 /// and have to come back as the name the user would recognise.
 fn percent_decode(value: &str) -> String {

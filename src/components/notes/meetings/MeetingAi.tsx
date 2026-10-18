@@ -200,7 +200,7 @@ export function MeetingAi({
           setQuestion("");
         }}
       >
-        <AiGlyph size={13} still={!running} />
+        <AiGlyph size={13} busy={running} />
         <input
           value={question}
           onChange={(e) => setQuestion(e.target.value)}

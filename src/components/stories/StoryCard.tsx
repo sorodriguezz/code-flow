@@ -201,7 +201,15 @@ export function StoryCard({
               <ExternalLink size={9} />
               {publishedLabel}
             </button>
-          ) : (
+          ) : null}
+          {published && story.board_state ? (
+            <span
+              title={t("stories.boardStateHint", { when: story.board_state_at ? new Date(story.board_state_at).toLocaleString() : "" })}
+              className="rounded-full bg-[var(--cf-press)] px-1.5 py-0.5 text-[10.5px] font-semibold text-[var(--cf-text-muted)]"
+            >
+              {story.board_state}
+            </span>
+          ) : published ? null : (
             <StatusIcon size={12} className={color} />
           )}
         </span>

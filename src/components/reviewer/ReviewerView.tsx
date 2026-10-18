@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   ChevronRight,
   Circle,
+  Download,
   ExternalLink,
   FileCode2,
   FolderOpen,
@@ -53,6 +54,8 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import { buttonClass } from "../common/Button";
 import { chipClass, fieldClass, tabCountClass, underlineStripClass, underlineTabClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
+import { ContextMenu } from "../common/ContextMenu";
+import { HotspotsPanel, IssueDetail, exportReviewReport, onNewCode, useChangedLines, useHotspotsToReview } from "./ReviewerFindings";
 
 const STAGE_LABEL: Record<ReviewerStageId, TranslationKey> = {
   prepare: "reviewer.stagePrepare",
@@ -153,7 +156,7 @@ function StageIcon({ status }: { status: ReviewerStage["status"] }) {
   }
 }
 
-type SubTab = "issues" | "tests" | "coverage" | "log";
+type SubTab = "issues" | "hotspots" | "tests" | "coverage" | "log";
 
 export function ReviewerView() {
   const t = useT();
@@ -173,6 +176,7 @@ export function ReviewerView() {
   const [tab, setTab] = useState<SubTab>("issues");
   const [stageFilter, setStageFilter] = useState<ReviewerStageId | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     void refresh().catch(() => {});
@@ -189,6 +193,7 @@ export function ReviewerView() {
     ? Object.values(projectsByWorkspace).flat().find((p) => p.id === activeProjectId)?.name ?? ""
     : "";
   const summary = run?.summary ?? null;
+  const hotspotsToReview = useHotspotsToReview(summary);
   const ready = status?.install.ready ?? false;
   const commands = effectiveCommands(projectConfig, suggestion);
 
@@ -265,6 +270,32 @@ export function ReviewerView() {
             {t("reviewer.configure")}
           </button>
         </Tooltip>
+        {summary && (
+          <Tooltip label={t("reviewer.report.export")}>
+            <button
+              type="button"
+              onClick={(event) => {
+                const box = event.currentTarget.getBoundingClientRect();
+                setExportAt({ x: box.left, y: box.bottom + 4 });
+              }}
+              className={buttonClass({ variant: "ghost", size: "sm" })}
+            >
+              <Download size={13} />
+              {t("reviewer.report.exportShort")}
+            </button>
+          </Tooltip>
+        )}
+        {exportAt && summary && (
+          <ContextMenu
+            x={exportAt.x}
+            y={exportAt.y}
+            onClose={() => setExportAt(null)}
+            items={[
+              { label: t("reviewer.report.html"), icon: FileCode2, onClick: () => void exportReviewReport(t, summary, project.name, "html") },
+              { label: t("reviewer.report.pdf"), icon: Download, onClick: () => void exportReviewReport(t, summary, project.name, "pdf") },
+            ]}
+          />
+        )}
         {dashboard && (
           <button
             type="button"
@@ -325,6 +356,7 @@ export function ReviewerView() {
 
         <div className={`${underlineStripClass} mt-1`} role="tablist">
           <SubTabButton id="issues" active={tab} onSelect={setTab} label={t("reviewer.tabIssues")} count={summary?.issuesTotal} />
+          <SubTabButton id="hotspots" active={tab} onSelect={setTab} label={t("reviewer.tabHotspots")} count={hotspotsToReview} />
           <SubTabButton id="tests" active={tab} onSelect={setTab} label={t("reviewer.tabTests")} count={summary?.tests?.total} />
           <SubTabButton id="coverage" active={tab} onSelect={setTab} label={t("reviewer.tabCoverage")} />
           <SubTabButton id="log" active={tab} onSelect={setTab} label={t("reviewer.tabLog")} />
@@ -332,7 +364,10 @@ export function ReviewerView() {
           <HistoryStrip history={history} />
         </div>
 
-        {tab === "issues" && <IssuesPanel summary={summary} serverUrl={server.state === "running" ? server.url : null} />}
+        {tab === "issues" && (
+          <IssuesPanel summary={summary} projectId={project.id} repoPath={project.local_path} serverUrl={server.state === "running" ? server.url : null} />
+        )}
+        {tab === "hotspots" && <HotspotsPanel summary={summary} projectId={project.id} serverUrl={server.state === "running" ? server.url : null} />}
         {tab === "tests" && <TestsPanel summary={summary} />}
         {tab === "coverage" && <CoveragePanel summary={summary} />}
         {tab === "log" && <LogPanel log={run?.log ?? EMPTY_LOG} running={running} stage={stageFilter} onClearStage={() => setStageFilter(null)} />}
@@ -600,10 +635,34 @@ function HistoryStrip({ history }: { history: ReviewerHistoryEntry[] | undefined
   );
 }
 
-function IssuesPanel({ summary, serverUrl }: { summary: ReviewerRunSummary | null; serverUrl: string | null }) {
+/** The base "new code" is measured against, per repository, while the app runs — empty is the default branch. */
+const NEW_CODE_BASE = new Map<string, string>();
+
+function IssuesPanel({
+  summary,
+  projectId,
+  repoPath,
+  serverUrl,
+}: {
+  summary: ReviewerRunSummary | null;
+  projectId: string;
+  repoPath: string;
+  serverUrl: string | null;
+}) {
   const t = useT();
   const [quality, setQuality] = useState<ReviewerQuality | "all">("all");
-  const issues = summary?.issues ?? [];
+  const [open, setOpen] = useState<string | null>(null);
+  const [newOnly, setNewOnly] = useState(false);
+  const [base, setBase] = useState(() => NEW_CODE_BASE.get(repoPath) ?? "");
+  const [baseDraft, setBaseDraft] = useState(base);
+  const changed = useChangedLines(repoPath, newOnly, base, summary?.runId);
+  const all = summary?.issues ?? [];
+  // "New code" is git's answer — the lines this branch changed against its base — so it works on
+  // the one branch SonarQube Community Build analyses.
+  const issues = useMemo(
+    () => (newOnly && changed?.changed ? all.filter((issue) => onNewCode(changed.changed!, issue.path, issue.line)) : all),
+    [all, newOnly, changed],
+  );
   const counts = useMemo(() => {
     const out: Record<ReviewerQuality, number> = { reliability: 0, security: 0, maintainability: 0 };
     for (const issue of issues) out[issue.quality] += 1;
@@ -613,7 +672,7 @@ function IssuesPanel({ summary, serverUrl }: { summary: ReviewerRunSummary | nul
   if (!summary) return null;
   return (
     <div>
-      <div className="flex flex-wrap gap-1.5 border-b border-[var(--cf-border)] px-3 py-2">
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-2">
         {(["all", "reliability", "security", "maintainability"] as const).map((key) => (
           <button
             key={key}
@@ -624,27 +683,84 @@ function IssuesPanel({ summary, serverUrl }: { summary: ReviewerRunSummary | nul
             {key === "all" ? t("reviewer.filterAll", { n: issues.length }) : `${t(QUALITY_LABEL[key])} ${counts[key]}`}
           </button>
         ))}
+        <span className="flex-1" />
+        <Tooltip label={t("reviewer.newCodeHint")}>
+          <button type="button" onClick={() => setNewOnly((v) => !v)} aria-pressed={newOnly} className={chipClass(newOnly ? "accent" : "neutral", "cursor-pointer")}>
+            {t("reviewer.newCodeOnly")}
+          </button>
+        </Tooltip>
+        {newOnly && (
+          <form
+            className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)]"
+            onSubmit={(e) => {
+              e.preventDefault();
+              NEW_CODE_BASE.set(repoPath, baseDraft.trim());
+              setBase(baseDraft.trim());
+            }}
+          >
+            {t("reviewer.newCodeVs")}
+            <input
+              value={baseDraft}
+              onChange={(e) => setBaseDraft(e.target.value)}
+              onBlur={() => {
+                NEW_CODE_BASE.set(repoPath, baseDraft.trim());
+                setBase(baseDraft.trim());
+              }}
+              placeholder={changed?.changed?.base ?? "main"}
+              spellCheck={false}
+              className={fieldClass({ size: "sm", className: "w-36 font-mono" })}
+            />
+          </form>
+        )}
       </div>
+      {newOnly && changed?.error && <p className="border-b border-[var(--cf-border)] px-3 py-2 text-[12px] text-[var(--cf-danger)]">{changed.error}</p>}
+      {newOnly && !changed && (
+        <p className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">
+          <Loader2 size={12} className="animate-spin" />
+        </p>
+      )}
+      {newOnly && changed?.changed && (
+        <p className="border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
+          {t("reviewer.newCodeSummary", { n: issues.length, total: all.length, base: changed.changed.base })}
+        </p>
+      )}
       {shown.map((issue) => (
-        <IssueRow key={issue.key} issue={issue} projectKey={summary.projectKey} serverUrl={serverUrl} />
+        <div key={issue.key}>
+          <IssueRow issue={issue} projectKey={summary.projectKey} serverUrl={serverUrl} expanded={open === issue.key} onToggle={() => setOpen(open === issue.key ? null : issue.key)} />
+          {open === issue.key && <IssueDetail issue={issue} projectId={projectId} projectKey={summary.projectKey} />}
+        </div>
       ))}
-      {summary.issuesTotal > issues.length && (
+      {!newOnly && summary.issuesTotal > issues.length && (
         <p className="px-3 py-2 text-[11px] text-[var(--cf-text-muted)]">{t("reviewer.moreIssues", { n: summary.issuesTotal - issues.length })}</p>
       )}
     </div>
   );
 }
 
-function IssueRow({ issue, projectKey, serverUrl }: { issue: ReviewerIssue; projectKey: string; serverUrl: string | null }) {
+function IssueRow({
+  issue,
+  projectKey,
+  serverUrl,
+  expanded,
+  onToggle,
+}: {
+  issue: ReviewerIssue;
+  projectKey: string;
+  serverUrl: string | null;
+  /** The rule and the actions are open under the row. */
+  expanded: boolean;
+  onToggle: () => void;
+}) {
   const t = useT();
   const Icon = QUALITY_ICON[issue.quality];
   const open = () => useUiStore.getState().openInEditor(issue.path, issue.line ?? undefined);
   return (
-    <div className="group flex min-w-0 items-center gap-2.5 border-b border-[var(--cf-border)] px-3 py-1.5 hover:bg-[var(--cf-hover)]">
+    <div className={`group flex min-w-0 items-center gap-2.5 border-b border-[var(--cf-border)] px-3 py-1.5 hover:bg-[var(--cf-hover)] ${expanded ? "bg-[var(--cf-hover)]" : ""}`}>
+      <ChevronRight size={12} className={`-ml-1 shrink-0 text-[var(--cf-text-faint)] transition-transform duration-100 ${expanded ? "rotate-90" : ""}`} />
       <Tooltip label={`${t(QUALITY_LABEL[issue.quality])} · ${t(SEVERITY_LABEL[issue.severity])}`}>
         <Icon size={14} className="shrink-0" style={{ color: severityColor(issue.severity) }} />
       </Tooltip>
-      <button type="button" onClick={open} className="flex min-w-0 flex-1 flex-col text-left">
+      <button type="button" onClick={onToggle} aria-expanded={expanded} className="flex min-w-0 flex-1 flex-col text-left">
         <span className="truncate text-[13px] text-[var(--cf-text)]">{issue.message}</span>
         <span className="truncate text-[11px] text-[var(--cf-text-muted)]">
           <span className="font-mono">

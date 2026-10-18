@@ -46,6 +46,8 @@ pub struct Resolver<'a> {
     /// First path segments, and the ones under a `src/`, `lib/` or `app/` root: what makes an
     /// import that matched nothing look like the project's own rather than a package.
     top: HashSet<String>,
+    /// The repository's `tsconfig` / `jsconfig` aliases, when it has any.
+    ts_paths: Option<&'a super::tsconfig::TsPaths>,
 }
 
 pub fn dir_of(path: &str) -> &str {
@@ -70,7 +72,7 @@ fn last_segment(key: &str) -> &str {
 }
 
 /// Joins `rel` onto `dir` and folds `.` and `..` — `None` when it climbs out of the repository.
-fn join(dir: &str, rel: &str) -> Option<String> {
+pub(crate) fn join(dir: &str, rel: &str) -> Option<String> {
     let mut parts: Vec<&str> = if dir.is_empty() { Vec::new() } else { dir.split('/').collect() };
     for segment in rel.split('/') {
         match segment {
@@ -98,6 +100,7 @@ impl<'a> Resolver<'a> {
             namespaces: HashMap::new(),
             dirs: HashMap::new(),
             top: HashSet::new(),
+            ts_paths: None,
         };
         for (index, (path, facts)) in files.iter().enumerate() {
             let index = index as u32;
@@ -128,6 +131,14 @@ impl<'a> Resolver<'a> {
             }
         }
         resolver
+    }
+
+    /// Resolves TypeScript imports through these `paths` / `baseUrl` first.
+    pub fn with_ts_paths(mut self, ts_paths: &'a super::tsconfig::TsPaths) -> Self {
+        if !ts_paths.is_empty() {
+            self.ts_paths = Some(ts_paths);
+        }
+        self
     }
 
     fn exact(&self, key: &str) -> Vec<u32> {
@@ -212,6 +223,18 @@ impl<'a> Resolver<'a> {
                 return found;
             }
             return Resolution::Unresolved;
+        }
+        // The project's own aliases, as its tsconfig declares them.
+        if let Some(ts_paths) = self.ts_paths {
+            let (matched, candidates) = ts_paths.candidates(from, spec);
+            for candidate in &candidates {
+                if let Some(found) = Self::found(self.exact(stem(candidate))).or_else(|| Self::found(self.exact(candidate))) {
+                    return found;
+                }
+            }
+            if matched {
+                return Resolution::Unresolved;
+            }
         }
         let stripped = spec.trim_start_matches("@/").trim_start_matches("~/").trim_start_matches('#').trim_start_matches('/');
         let aliased = stripped.len() != spec.len();
@@ -474,6 +497,20 @@ mod tests {
         assert_eq!(resolve(&paths, "src/app/cart.ts", "./cart.css"), Resolution::External);
         assert_eq!(resolve(&paths, "src/app/cart.ts", "@/nowhere/thing"), Resolution::Unresolved);
         assert_eq!(resolve(&paths, "src/app/cart.ts", "./missing"), Resolution::Unresolved);
+    }
+
+    #[test]
+    fn typescript_aliases_from_tsconfig_paths() {
+        let ts = || facts("ts", None);
+        let paths = vec![("apps/web/src/page.ts", ts()), ("libs/shared/src/money.ts", ts())];
+        let ts_paths = super::super::tsconfig::TsPaths::load(&["apps/web/tsconfig.json".to_string()], |_| {
+            Some(r#"{ "compilerOptions": { "paths": { "@shared/*": ["../../libs/shared/src/*"] } } }"#.to_string())
+        });
+        let rows: Vec<(&str, &Facts)> = paths.iter().map(|(p, f)| (*p, f)).collect();
+        let resolver = Resolver::new(&rows).with_ts_paths(&ts_paths);
+        assert_eq!(resolver.resolve(0, &paths[0].1, "@shared/money"), files(&paths, &["libs/shared/src/money.ts"]));
+        assert_eq!(resolver.resolve(0, &paths[0].1, "@shared/nothing"), Resolution::Unresolved, "an alias that misses is not a package");
+        assert_eq!(resolver.resolve(0, &paths[0].1, "react"), Resolution::External);
     }
 
     #[test]

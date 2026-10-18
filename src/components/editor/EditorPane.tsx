@@ -88,6 +88,7 @@ import { findAllImplementations, findAllReferences } from "./findReferences";
 import { installImplementationLens } from "./implementationLens";
 import { installHttpFileLens } from "./httpFileLens";
 import { useLanguageServer } from "./useLanguageServer";
+import { useReviewerMarkers } from "./useReviewerMarkers";
 import { useInlineCompletion } from "./useInlineCompletion";
 import { useImportCost } from "./useImportCost";
 import { useManagerFor } from "../../lib/useManagerFor";
@@ -927,6 +928,9 @@ export function EditorPane({
   // Ghost text from the local model, when the user has turned it on and downloaded one. Also no
   // editor instance and for the same reason: `registerInlineCompletionsProvider` is global.
   useInlineCompletion(editorReady ? monacoRef.current : null);
+
+  // The last Revisor report's findings as squiggles, in every file it names.
+  useReviewerMarkers(editorReady ? monacoRef.current : null, project);
 
   useTypeScript(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {
     repoPath: project.local_path,

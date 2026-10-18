@@ -30,7 +30,7 @@ import {
 } from "./Laser";
 import { isTypingTarget } from "../../lib/keys";
 import { bytesFromDataUri, saveBytes, type ExportFormat } from "../../lib/diagrams/exportFile";
-import { pngToPdf } from "../../lib/diagrams/pdf";
+import { pngToPdf, svgToPdf } from "../../lib/diagrams/pdf";
 import { exportMessage } from "../../lib/diagrams/exportOptions";
 import { useDiagramsStore } from "../../state/diagramsStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -489,7 +489,10 @@ export function DrawioFrame({
           format === "drawio"
             ? new TextEncoder().encode(exported)
             : format === "pdf"
-              ? await pngToPdf(bytesFromDataUri(exported), scale)
+              ? // A vector PDF was asked for as an SVG (see `exportMessage`), a raster one as a PNG.
+                exported.startsWith("data:image/svg")
+                ? await svgToPdf(new TextDecoder().decode(bytesFromDataUri(exported)))
+                : await pngToPdf(bytesFromDataUri(exported), scale)
               : bytesFromDataUri(exported);
         const title = useDiagramsStore.getState().diagrams.find((d) => d.id === diagramId)?.title;
         const saved = await saveBytes(bytes, format, title || "diagram");

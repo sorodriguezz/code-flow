@@ -3,11 +3,14 @@ import {
   ClipboardList,
   CircleHelp,
   Copy,
+  Download,
   ExternalLink,
   FileCode,
+  FileText,
   Gauge,
   Plus,
   RefreshCw,
+  Sheet,
   ShieldCheck,
   Sparkles,
   Square,
@@ -35,7 +38,10 @@ import {
 import { confirmAction } from "../../state/confirmStore";
 import { featureFileName, lintBatch, parseCriteria, toFeatureFile } from "../../lib/gherkin";
 import { useT } from "../../state/languageStore";
-import { openExternalUrl } from "../../lib/tauri/commands";
+import { openExternalUrl, storyBatchBoardStates, writeFileBytes } from "../../lib/tauri/commands";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ContextMenu } from "../common/ContextMenu";
+import { storiesCsv, storiesMarkdown } from "./storyExport";
 import { boardLabelKey } from "../../lib/boardLabel";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 
@@ -60,6 +66,8 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
   const publishing = useStoriesStore((s) => s.publishingByBatch[batchId] !== undefined);
   const [showSource, setShowSource] = useState(false);
   const [answering, setAnswering] = useState(false);
+  const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
+  const [readingStates, setReadingStates] = useState(false);
 
   const openQuestions = useMemo(
     () => (batch ? parseOpenQuestions(batch.open_questions) : []),
@@ -99,6 +107,47 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
       .writeText(toFeatureFile(batch, list))
       .then(() => useToastStore.getState().pushToast(t("qa.featureCopied"), "success"))
       .catch((e: unknown) => pushErrorToast(String(e)));
+  };
+
+  /** The set as a file — Markdown to read, CSV for another board's importer. */
+  const exportAs = async (format: "md" | "csv") => {
+    const stem = (batch.title.trim() || "historias").replace(/[\\/:*?"<>|]+/g, "-");
+    const path = await saveDialog({ defaultPath: `${stem}.${format}`, filters: [{ name: format.toUpperCase(), extensions: [format] }] }).catch(() => null);
+    if (!path) return;
+    const text =
+      format === "md"
+        ? storiesMarkdown(batch, list, { criteria: t("stories.criteriaHeading"), points: t("stories.pointsLabel"), tags: t("stories.tagsLabel") })
+        : storiesCsv(list);
+    try {
+      await writeFileBytes(path, new TextEncoder().encode(text));
+      useToastStore.getState().pushToast(t("stories.exported"), "success");
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
+  /** Reads every published story's state back from the board and keeps it on the story. */
+  const readStates = async () => {
+    setReadingStates(true);
+    try {
+      const states = await storyBatchBoardStates(batchId);
+      const byId = new Map(states.filter((s) => !s.error).map((s) => [s.story_id, s.state]));
+      useStoriesStore.setState((state) => ({
+        storiesByBatch: {
+          ...state.storiesByBatch,
+          [batchId]: (state.storiesByBatch[batchId] ?? []).map((story) =>
+            byId.has(story.id) ? { ...story, board_state: byId.get(story.id), board_state_at: new Date().toISOString() } : story,
+          ),
+        },
+      }));
+      const failed = states.filter((s) => s.error);
+      if (failed.length > 0) pushErrorToast(t("stories.statesFailed", { n: failed.length, error: failed[0].error ?? "" }));
+      else useToastStore.getState().pushToast(t("stories.statesRead", { n: states.length }), "success");
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setReadingStates(false);
+    }
   };
 
   // Confirmed every time, not only when it would overwrite: this writes into the user's source
@@ -316,6 +365,17 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
           >
             {t("qa.saveFeature")}
           </ToolbarButton>
+          <ToolbarButton
+            onClick={() => {}}
+            onPress={(event) => {
+              const box = event.currentTarget.getBoundingClientRect();
+              setExportAt({ x: box.left, y: box.bottom + 4 });
+            }}
+            icon={Download}
+            title={t("stories.exportHint")}
+          >
+            {t("stories.export")}
+          </ToolbarButton>
           <ToolbarButton onClick={() => void useStoriesStore.getState().addStory(batchId)} icon={Plus}>
             {t("stories.addStory")}
           </ToolbarButton>
@@ -397,11 +457,21 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
           </span>
           <button
             type="button"
+            disabled={readingStates}
+            onClick={() => void readStates()}
+            title={t("stories.readStatesHint")}
+            className="ml-auto flex shrink-0 items-center gap-1 hover:text-[var(--cf-accent)] disabled:opacity-50"
+          >
+            <RefreshCw size={11} className={readingStates ? "animate-spin" : undefined} />
+            {t("stories.readStates")}
+          </button>
+          <button
+            type="button"
             onClick={() => {
               const first = list.find((story) => story.work_item_url);
               if (first) void openExternalUrl(first.work_item_url).catch((e) => pushErrorToast(String(e)));
             }}
-            className="ml-auto flex shrink-0 items-center gap-1 hover:text-[var(--cf-accent)]"
+            className="flex shrink-0 items-center gap-1 hover:text-[var(--cf-accent)]"
           >
             <ExternalLink size={11} />
             {t("stories.openInBoards", { board: t(boardLabelKey(batch.board_provider)) })}
@@ -410,6 +480,17 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
       )}
 
       {answering && <OpenQuestionsModal batchId={batchId} onClose={() => setAnswering(false)} />}
+      {exportAt && (
+        <ContextMenu
+          x={exportAt.x}
+          y={exportAt.y}
+          onClose={() => setExportAt(null)}
+          items={[
+            { label: t("stories.exportMarkdown"), icon: FileText, onClick: () => void exportAs("md") },
+            { label: t("stories.exportCsv"), icon: Sheet, onClick: () => void exportAs("csv") },
+          ]}
+        />
+      )}
     </div>
   );
 }
@@ -422,8 +503,11 @@ function ToolbarButton({
   disabled,
   title,
   children,
+  onPress,
 }: {
   onClick: () => void;
+  /** For a button that opens a menu under itself — it needs where it is. */
+  onPress?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   icon: typeof Plus;
   disabled?: boolean;
   title?: string;
@@ -432,7 +516,7 @@ function ToolbarButton({
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={(event) => (onPress ? onPress(event) : onClick())}
       disabled={disabled}
       title={title}
       className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] font-medium text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text-muted)]"

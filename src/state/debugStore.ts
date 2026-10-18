@@ -313,11 +313,22 @@ export const useDebugStore = create<DebugState>((set, get) => {
         pauseSeq += 1;
         set({ status: "running", frames: [], pauseReason: null, pauseDescription: null, ...freshStop() });
       });
-      void onDebugOutput((event) => {
+      // A line per event, and a chatty program prints thousands a second: each one copying the
+      // console and re-rendering it was the cost. They are gathered and added once per frame.
+      let pending: { kind: string; text: string }[] = [];
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      const flush = () => {
+        flushTimer = null;
+        const lines = pending;
+        pending = [];
         set((s) => {
-          const next = [...s.console, { kind: event.kind, text: event.text }];
+          const next = s.console.concat(lines);
           return { console: next.length > MAX_CONSOLE_LINES ? next.slice(-MAX_CONSOLE_LINES) : next };
         });
+      };
+      void onDebugOutput((event) => {
+        pending.push({ kind: event.kind, text: event.text });
+        flushTimer ??= setTimeout(flush, 16);
       });
       void onDebugTerminated(() => {
         pauseSeq += 1;

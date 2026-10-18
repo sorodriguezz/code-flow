@@ -1956,6 +1956,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_original_estimate_to_story_drafts(conn)?;
     add_board_provider_to_stories(conn)?;
     add_grouping_to_agent_tasks(conn)?;
+    add_worktree_to_agent_tasks(conn)?;
+    add_planning_to_agent_tasks(conn)?;
+    add_board_state_to_story_drafts(conn)?;
+    add_history_indexes(conn)?;
     add_grouping_to_agent_chains(conn)?;
     add_repos_to_agent_chains(conn)?;
     add_resume_at_to_agent_chains(conn)?;
@@ -2012,6 +2016,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_meeting_tables(conn)?;
     add_checkpoint_to_activity_log(conn)?;
     add_chat_turn_checkpoints(conn)?;
+    add_notes_fts(conn)?;
     Ok(())
 }
 
@@ -3555,6 +3560,80 @@ fn add_grouping_to_agent_tasks(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// A task may run in a linked worktree of its own, so two tasks in one repository never edit the
+/// same files. Empty for every existing task: they ran in the repository's working copy and keep
+/// doing so.
+/// The state a published story's item has on its board, as last read back — the batch shows which
+/// stories the team has started or finished without opening the board.
+fn add_board_state_to_story_drafts(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "story_drafts")? {
+        return Ok(());
+    }
+    for column in ["board_state", "board_state_at"] {
+        if !has_column(conn, "story_drafts", column)? {
+            conn.execute_batch(&format!("ALTER TABLE story_drafts ADD COLUMN {column} TEXT NOT NULL DEFAULT '';"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Indexes for the histories every chat turn and every panel open reads by scope. Without them
+/// each turn's `COUNT(*) … WHERE project_id AND session_id`, each conversation load and each page of
+/// past reviews was a full scan — of tables that only grow — under the one database lock.
+fn add_history_indexes(conn: &Connection) -> rusqlite::Result<()> {
+    for (table, sql) in [
+        ("activity_log", "CREATE INDEX IF NOT EXISTS idx_activity_log_session ON activity_log (project_id, session_id, created_at)"),
+        ("job_history", "CREATE INDEX IF NOT EXISTS idx_job_history_project ON job_history (project_id, created_at)"),
+        ("workspace_activity", "CREATE INDEX IF NOT EXISTS idx_workspace_activity_ws ON workspace_activity (workspace_id, created_at)"),
+    ] {
+        if table_exists(conn, table)? {
+            conn.execute_batch(sql)?;
+        }
+    }
+    Ok(())
+}
+
+/// What the Agents view plans work with (priority, due date, labels, archived) and what a task's
+/// turns have cost. The cost is summed on the row as each turn finishes rather than read from
+/// `ai_usage`, which forgets after thirty days and has no idea which task a turn belonged to.
+fn add_planning_to_agent_tasks(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "agent_tasks")? {
+        return Ok(());
+    }
+    for (column, definition) in [
+        // 0 none, 1 low, 2 medium, 3 high.
+        ("priority", "INTEGER NOT NULL DEFAULT 0"),
+        // `YYYY-MM-DD`, or empty.
+        ("due_date", "TEXT NOT NULL DEFAULT ''"),
+        // A JSON array of strings.
+        ("labels", "TEXT NOT NULL DEFAULT '[]'"),
+        ("archived", "INTEGER NOT NULL DEFAULT 0"),
+        ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("cost_usd", "REAL NOT NULL DEFAULT 0"),
+        // Turns whose engine reported a price — "no price" is not "free".
+        ("costed_turns", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !has_column(conn, "agent_tasks", column)? {
+            conn.execute_batch(&format!("ALTER TABLE agent_tasks ADD COLUMN {column} {definition};"))?;
+        }
+    }
+    Ok(())
+}
+
+fn add_worktree_to_agent_tasks(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "agent_tasks")? {
+        return Ok(());
+    }
+    if !has_column(conn, "agent_tasks", "worktree_path")? {
+        conn.execute_batch("ALTER TABLE agent_tasks ADD COLUMN worktree_path TEXT NOT NULL DEFAULT '';")?;
+    }
+    if !has_column(conn, "agent_tasks", "worktree_branch")? {
+        conn.execute_batch("ALTER TABLE agent_tasks ADD COLUMN worktree_branch TEXT NOT NULL DEFAULT '';")?;
+    }
+    Ok(())
+}
+
 /// The chain half of [`add_grouping_to_agent_tasks`] — see its comment for why neither needs a
 /// backfill.
 fn add_grouping_to_agent_chains(conn: &Connection) -> rusqlite::Result<()> {
@@ -4429,6 +4508,50 @@ fn add_checkpoint_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
 /// the files that differ from it — the per-turn review under the answer. A table of its own rather
 /// than a column on `chat_messages`, which every chat writes and only this one needs; it goes with
 /// its message.
+/// The full-text index behind the Notes search: every note's body, tokenised with accents and case
+/// folded (`unicode61 remove_diacritics 2`), so «configuracion despliegue» finds a note saying
+/// "Configuración del despliegue" — several words, in any order, without their accents.
+///
+/// Kept by triggers, keyed by the note's id rather than its rowid: a table without an INTEGER
+/// PRIMARY KEY may have its rowids renumbered by a VACUUM, and an index keyed on them would then
+/// point at the wrong notes. The insert trigger clears the id first, so an `INSERT OR REPLACE`
+/// (whose implicit delete fires no trigger) cannot leave a twin behind.
+///
+/// Derived data: never backed up, and rebuilt here whenever it and the notes disagree on how many
+/// rows there are — after a restore, or a database from before the index existed.
+fn add_notes_fts(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "notes")? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+             note_id UNINDEXED,
+             content,
+             tokenize = 'unicode61 remove_diacritics 2'
+         );
+         CREATE TRIGGER IF NOT EXISTS notes_fts_insert AFTER INSERT ON notes BEGIN
+             DELETE FROM notes_fts WHERE note_id = new.id;
+             INSERT INTO notes_fts (note_id, content) VALUES (new.id, new.content);
+         END;
+         CREATE TRIGGER IF NOT EXISTS notes_fts_update AFTER UPDATE OF content ON notes BEGIN
+             DELETE FROM notes_fts WHERE note_id = old.id;
+             INSERT INTO notes_fts (note_id, content) VALUES (new.id, new.content);
+         END;
+         CREATE TRIGGER IF NOT EXISTS notes_fts_delete AFTER DELETE ON notes BEGIN
+             DELETE FROM notes_fts WHERE note_id = old.id;
+         END;",
+    )?;
+    let notes: i64 = conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
+    let indexed: i64 = conn.query_row("SELECT COUNT(*) FROM notes_fts", [], |row| row.get(0))?;
+    if notes != indexed {
+        conn.execute_batch(
+            "DELETE FROM notes_fts;
+             INSERT INTO notes_fts (note_id, content) SELECT id, content FROM notes;",
+        )?;
+    }
+    Ok(())
+}
+
 fn add_chat_turn_checkpoints(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS chat_turn_checkpoints (

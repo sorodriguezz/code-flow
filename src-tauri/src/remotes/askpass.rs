@@ -31,9 +31,14 @@
 //! **Where it works.** `SSH_ASKPASS_REQUIRE=force` (OpenSSH 8.4+) makes `ssh` use the helper even
 //! with a terminal around. Older OpenSSH only asks a helper when it has no terminal and `DISPLAY` is
 //! set, so for those this sets a placeholder `DISPLAY` and starts `ssh` in a session of its own —
-//! no controlling terminal — which gets the same result. Windows has no FIFOs and its OpenSSH port
-//! predates the variable on most installs, so [`supported`] says no there, and the UI does not offer
-//! a password for a host kind whose only transport is a background `ssh`.
+//! no controlling terminal — which gets the same result.
+//!
+//! **Windows** has no FIFOs and no `sh`, so the pieces change but not the shape. The helper is
+//! CodeFlow's own executable: `ssh` runs it with `CODEFLOW_ASKPASS_PIPE` in its environment, and
+//! `main` hands over to [`helper_main`] before anything else starts. The pipe is a **named pipe**
+//! whose DACL admits only its owner (`OW`), refuses remote clients, and serves exactly one client:
+//! the server is dropped after the first write, so a second prompt finds no pipe. Same one-shot,
+//! same window, nothing on disk.
 
 /// Whether this machine's `ssh` can be handed a password this way. Asked once per run.
 pub fn supported() -> bool {
@@ -46,9 +51,52 @@ fn detect() -> bool {
     openssh_version().is_some() && imp::helper().is_ok()
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn detect() -> bool {
+    openssh_version().is_some() && std::env::current_exe().is_ok()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn detect() -> bool {
     false
+}
+
+/// The environment variable that turns CodeFlow's executable into the askpass helper (Windows).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const HELPER_PIPE_ENV: &str = "CODEFLOW_ASKPASS_PIPE";
+
+/// Whether a prompt is one this helper answers with the saved password. A yes/no question (an
+/// unknown host key) and a key's passphrase are refused — the same rules as the `sh` helper.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn answers(prompt_kind: Option<&str>, prompt: &str) -> bool {
+    if matches!(prompt_kind, Some("confirm" | "none")) {
+        return false;
+    }
+    !(prompt.contains("assphrase") || prompt.contains("continue connecting") || prompt.contains("yes/no"))
+}
+
+/// The executable's other job, on Windows: when `ssh` runs it as `SSH_ASKPASS`, read the one
+/// password waiting in the pipe and print it. `None` means "not run as the helper — start the app".
+pub fn helper_main() -> Option<i32> {
+    #[cfg(windows)]
+    {
+        let pipe = std::env::var_os(HELPER_PIPE_ENV)?;
+        let prompt = std::env::args().nth(1).unwrap_or_default();
+        let kind = std::env::var("SSH_ASKPASS_PROMPT").ok();
+        if !answers(kind.as_deref(), &prompt) {
+            return Some(1);
+        }
+        use std::io::{Read as _, Write as _};
+        let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(&pipe) else { return Some(1) };
+        let mut password = Vec::new();
+        if file.read_to_end(&mut password).is_err() || password.is_empty() {
+            return Some(1);
+        }
+        let mut out = std::io::stdout();
+        return Some(if out.write_all(&password).and_then(|_| out.flush()).is_ok() { 0 } else { 1 });
+    }
+    #[cfg(not(windows))]
+    None
 }
 
 /// `ssh -V`'s version, when it is OpenSSH. Printed on stderr: `OpenSSH_9.8p1, LibreSSL 3.3.6`.
@@ -84,6 +132,8 @@ pub struct Handoff {
     /// Never read — held for its drop, which is what takes the password back.
     #[cfg(unix)]
     _pending: imp::Pending,
+    #[cfg(windows)]
+    _pending: win::Pending,
 }
 
 impl Handoff {
@@ -117,7 +167,23 @@ impl Handoff {
         Ok(Self { _pending: inner })
     }
 
-    #[cfg(not(unix))]
+    /// Windows: the helper is this executable, and the password waits in a single-client named pipe.
+    #[cfg(windows)]
+    pub fn arm(command: &mut tokio::process::Command, password: &str) -> Result<Self, String> {
+        let exe = std::env::current_exe().map_err(|e| format!("couldn't locate CodeFlow's executable: {e}"))?;
+        let inner = win::Pending::new(password)?;
+        command
+            .env("SSH_ASKPASS", exe)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env(HELPER_PIPE_ENV, &inner.name);
+        if openssh_version().is_some_and(|version| version < FORCE_SINCE) && std::env::var_os("DISPLAY").is_none() {
+            // Older ports only ask a helper when a display is set; it is never used.
+            command.env("DISPLAY", ":0");
+        }
+        Ok(Self { _pending: inner })
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn arm(_command: &mut tokio::process::Command, _password: &str) -> Result<Self, String> {
         Err("This system's ssh can't be handed a saved password.".into())
     }
@@ -277,9 +343,98 @@ exec cat \"$CODEFLOW_ASKPASS_FIFO\"\n";
     }
 }
 
+#[cfg(windows)]
+mod win {
+    use std::ffi::c_void;
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+    /// Protected DACL with one ACE: generic-all for the object's owner. Everyone else — including
+    /// the read access a named pipe's default descriptor grants `Everyone` — is left out.
+    const SDDL: &str = "D:P(A;;GA;;;OW)";
+    const GIVE_UP: std::time::Duration = std::time::Duration::from_secs(120);
+
+    pub(super) struct Pending {
+        pub name: String,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Pending {
+        pub(super) fn new(password: &str) -> Result<Self, String> {
+            let bytes: [u8; 12] = rand::random();
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let name = format!(r"\\.\pipe\codeflow-askpass-{hex}");
+            let mut server = {
+                let sddl: Vec<u16> = SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+                let mut descriptor: *mut c_void = std::ptr::null_mut();
+                // SAFETY: a NUL-terminated wide string; on success `descriptor` is ours to LocalFree.
+                let ok = unsafe {
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        sddl.as_ptr(),
+                        SDDL_REVISION_1,
+                        &mut descriptor,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 {
+                    return Err(format!("couldn't secure the askpass pipe: {}", std::io::Error::last_os_error()));
+                }
+                let mut attrs = SECURITY_ATTRIBUTES {
+                    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                    lpSecurityDescriptor: descriptor,
+                    bInheritHandle: 0,
+                };
+                // SAFETY: `attrs` points at a valid SECURITY_ATTRIBUTES for the duration of the call.
+                let created = unsafe {
+                    ServerOptions::new()
+                        .first_pipe_instance(true)
+                        .reject_remote_clients(true)
+                        .max_instances(1)
+                        .create_with_security_attributes_raw(&name, &mut attrs as *mut _ as *mut c_void)
+                };
+                // SAFETY: allocated by the conversion above, not used after this.
+                unsafe { LocalFree(descriptor) };
+                created.map_err(|e| format!("couldn't create the askpass pipe: {e}"))?
+            };
+            let password = format!("{password}\n");
+            // `arm` runs inside the app's tokio runtime (every caller is async), which the pipe's
+            // registration needs anyway.
+            let task = tokio::spawn(async move {
+                if tokio::time::timeout(GIVE_UP, server.connect()).await.is_ok_and(|r| r.is_ok()) {
+                    let _ = server.write_all(password.as_bytes()).await;
+                    let _ = server.flush().await;
+                    let _ = server.disconnect();
+                }
+                // Dropped here: the pipe's only instance closes, so a second prompt finds nothing.
+            });
+            Ok(Self { name, task })
+        }
+    }
+
+    impl Drop for Pending {
+        fn drop(&mut self) {
+            // Nobody asked (or the handshake is over): take the password back and close the pipe.
+            self.task.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_helper_refuses_everything_but_a_password_prompt() {
+        assert!(answers(None, "deploy@web-01's password:"));
+        assert!(!answers(Some("confirm"), "deploy@web-01's password:"));
+        assert!(!answers(None, "Enter passphrase for key '/k':"));
+        assert!(!answers(None, "Are you sure you want to continue connecting (yes/no)?"));
+    }
 
     #[test]
     fn the_version_is_read_from_what_ssh_v_prints() {

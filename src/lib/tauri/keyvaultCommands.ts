@@ -27,6 +27,9 @@ import type {
 // ---------- opening and closing ----------
 
 export const keyvaultStatus = () => invoke<VaultStatus>("keyvault_status");
+/** Copies a secret natively, hidden from clipboard history, cleared after `clearAfterSecs`. */
+export const keyvaultCopySecret = (value: string, clearAfterSecs: number) =>
+  invoke<void>("keyvault_copy_secret", { value, clearAfterSecs });
 
 /** Creates the keyring and leaves it open. Refuses if one already exists. */
 export const keyvaultInitialise = (password: string, remember: boolean) =>
@@ -38,6 +41,10 @@ export const keyvaultUnlock = (password: string, remember: boolean) =>
 /** Opens it with the password this machine was asked to remember. `false` means there wasn't one
  *  (or it no longer works, in which case the stale entry is forgotten). */
 export const keyvaultUnlockRemembered = () => invoke<boolean>("keyvault_unlock_remembered");
+
+/** Touch ID / Windows Hello in front of the remembered password. Switching on runs the check once;
+ *  `false` back means it did not pass and nothing changed. */
+export const keyvaultSetBiometric = (on: boolean) => invoke<boolean>("keyvault_set_biometric", { on });
 
 export const keyvaultLock = () => invoke<void>("keyvault_lock");
 

@@ -458,6 +458,11 @@ interface NotesState {
   /** Writes Markdown files in as notes of `bookId` (`null`: wherever `createNote` would put one).
    *  Answers with how many were created. */
   importMarkdown: (bookId: string | null, files: ImportedMarkdown[]) => Promise<number>;
+  /** A whole vault (Obsidian) or export (Notion): a book named `name`, its folders as books inside
+   *  it, each note filed where its file was. Resolves to the notes made. */
+  importVault: (name: string, notes: (ImportedMarkdown & { folders: string[] })[]) => Promise<number>;
+  /** Today's note — `YYYY-MM-DD` in the «Diario» book — opened, made first if there is none. */
+  openDailyNote: () => Promise<void>;
 
   /** Saves a template from explicit content, so both callers — "save this note as a template" and
    *  "duplicate a built-in into mine" — go through one action rather than two shapes of the same
@@ -642,7 +647,7 @@ export const useNotesStore = create<NotesState>((set, get) => ({
           templates: tree.templates.map(toTemplate),
           expanded: parseList(expanded),
           viewMode: (viewMode as NoteViewMode | null) ?? "split",
-          galleryView: galleryView === "list" ? "list" : "grid",
+          galleryView: galleryView === "list" || galleryView === "graph" ? galleryView : "grid",
           sort: (sort as NoteSort | null) ?? "manual",
         });
 
@@ -1762,6 +1767,76 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     return created.length;
   },
 
+  importVault: async (name, files) => {
+    const { workspaceId } = get();
+    if (!workspaceId || files.length === 0) return 0;
+    await get().flush();
+    const root = await get().createBook(null, name.trim() || translate("notes.importedVault"));
+    if (!root) return 0;
+    // One book per folder path, made the first time a note needs it.
+    const bookOf = new Map<string, string>([["", root]]);
+    const ensure = async (folders: string[]): Promise<string | null> => {
+      let parent = root;
+      for (let depth = 1; depth <= folders.length; depth++) {
+        const key = folders.slice(0, depth).join("/");
+        const known = bookOf.get(key);
+        if (known) {
+          parent = known;
+          continue;
+        }
+        const made = await get().createBook(parent, folders[depth - 1]);
+        if (!made) return null;
+        bookOf.set(key, made);
+        parent = made;
+      }
+      return parent;
+    };
+    const created: Note[] = [];
+    for (const file of files) {
+      const book = await ensure(file.folders);
+      if (!book) continue;
+      try {
+        const row = await notesCreateNote(workspaceId, book, file.title, file.content, serializeTags(file.tags));
+        created.push(toNote(row));
+      } catch (error) {
+        pushErrorToast(String(error));
+      }
+    }
+    if (created.length > 0 && get().workspaceId === workspaceId) {
+      set((state) => ({ notes: [...created, ...state.notes] }));
+      get().expandBook(root);
+    }
+    return created.length;
+  },
+
+  openDailyNote: async () => {
+    const { workspaceId } = get();
+    if (!workspaceId) return;
+    await get().flush();
+    const now = new Date();
+    const title = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const existing = get().notes.find((note) => note.title.trim() === title);
+    if (existing) {
+      await get().openNote(existing.id);
+      return;
+    }
+    const bookName = translate("notes.dailyBook");
+    const book =
+      get().books.find((candidate) => !candidate.parent_id && candidate.name.trim().toLowerCase() === bookName.toLowerCase())?.id ??
+      (await get().createBook(null, bookName));
+    if (!book) return;
+    try {
+      const weekday = now.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+      const row = await notesCreateNote(workspaceId, book, title, `# ${weekday}\n\n`, serializeTags([translate("notes.dailyTag")]));
+      const note = toNote(row);
+      set((state) => ({ notes: [note, ...state.notes] }));
+      get().expandBook(book);
+      await get().openNote(note.id);
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
   // ---------- templates ----------
 
   createTemplate: async (name, description, icon, content, tags) => {
@@ -2052,6 +2127,16 @@ useNotesStore.subscribe((state, previous) => {
  * hundred, which is cheap — but it runs on every keystroke of the search box, and cheap per
  * keystroke is still worth not paying twice per render.
  */
+/** Lower case, accents dropped — «Configuración» and «configuracion» are one word to the search. */
+function foldForSearch(text: string): string {
+  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
+/** A search box's words, folded; what is not a letter or a digit separates them. */
+export function searchWords(query: string): string[] {
+  return [...new Set(foldForSearch(query).split(/[^\p{L}\p{N}]+/u).filter(Boolean))];
+}
+
 export function filterNotes(
   notes: Note[],
   options: {
@@ -2064,6 +2149,9 @@ export function filterNotes(
     sort: NoteSort;
   },
 ): Note[] {
+  // Words, folded like the backend's search (`note_queries::search_notes`): every word somewhere in
+  // the title and tags, in any order, accents and case ignored.
+  const words = searchWords(options.query);
   const needle = options.query.trim().toLowerCase();
   const filtered = notes.filter((note) => {
     if (options.bookId !== undefined && note.book_id !== options.bookId) return false;
@@ -2071,9 +2159,9 @@ export function filterNotes(
     // AND across tags — see `tagFilter`'s comment.
     if (options.tagFilter.some((tag) => !note.tags.includes(tag))) return false;
     if (!needle) return true;
+    const haystack = foldForSearch(`${note.title} ${note.tags.join(" ")}`);
     return (
-      note.title.toLowerCase().includes(needle) ||
-      note.tags.some((tag) => tag.includes(needle)) ||
+      (words.length > 0 ? words.every((word) => haystack.includes(word)) : haystack.includes(needle)) ||
       // The backend's half: this note's *body* matched, which nothing here could have known.
       options.bodyHits[note.id] !== undefined
     );

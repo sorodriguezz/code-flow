@@ -1025,7 +1025,11 @@ textarea,
   );
 }
 
-.cf-ai-glyph-flowing::before {
+/* Flowing while busy, or while the control it sits in is pointed at or focused. Never at rest: an
+   infinite loop on an idle screen keeps the compositor drawing every frame. */
+.cf-ai-glyph-flowing::before,
+:is(button, a, [role="button"], [role="menuitem"], [role="tab"], [role="option"]):is(:hover, :focus-visible)
+  .cf-ai-glyph-idle::before {
   will-change: transform;
   animation: cf-ai-flow 3s linear infinite;
   animation-delay: var(--cf-ai-phase, 0s);
@@ -1044,9 +1048,11 @@ textarea,
 
 /* Still for reduced motion, and still the logo: the strip rests where the open state leaves it. */
 @media (prefers-reduced-motion: reduce) {
-  .cf-ai-glyph-flowing::before {
-    will-change: auto;
-    animation: none;
+  /* `!important` because the hover rule above outranks a single class. */
+  .cf-ai-glyph-flowing::before,
+  .cf-ai-glyph-idle::before {
+    will-change: auto !important;
+    animation: none !important;
   }
 }
 
@@ -2831,6 +2837,63 @@ body.cf-dragging * {
 .cf-note-link:focus-visible {
   outline: 1px solid var(--cf-accent);
   outline-offset: 2px;
+}
+
+/* A Mermaid block in a note: its source hidden until it is drawn, shown as code if it cannot be. */
+.cf-note-mermaid {
+  margin: 0 0 1em;
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+}
+.cf-note-mermaid .cf-mermaid-src {
+  display: none;
+}
+.cf-note-mermaid.cf-note-mermaid-error .cf-mermaid-src {
+  display: block;
+  width: 100%;
+  border: 1px dashed var(--cf-danger);
+}
+.cf-note-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* `![[Diagram]]`: the diagram's picture, its title under it, opening it in Diagramas. */
+.cf-note-embed {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+  padding: 6px;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  cursor: pointer;
+  vertical-align: top;
+}
+.cf-note-embed:hover {
+  border-color: var(--cf-accent);
+}
+.cf-note-embed img {
+  max-width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: var(--cf-surface);
+}
+.cf-note-embed-title {
+  font-size: 11.5px;
+  color: var(--cf-text-muted);
+}
+
+/* KaTeX formulas: a displayed one centred and scrollable rather than overflowing the column. */
+.cf-math-block {
+  margin: 0 0 1em;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.cf-math-error {
+  color: var(--cf-danger);
 }
 .cf-note-link-missing {
   color: var(--cf-text-muted);

@@ -137,7 +137,9 @@ pub fn spawn(
                     }
                     entry.1 = Instant::now();
                 }
-                _ = tick => {}
+                // Only while something waits out its debounce: with nothing pending the task
+                // sleeps on the channel instead of waking ten times a second for nothing.
+                _ = tick, if !pending.is_empty() => {}
             }
             let ripe: Vec<(PathBuf, Change)> = pending
                 .iter()

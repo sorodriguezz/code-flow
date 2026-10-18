@@ -66,11 +66,34 @@ impl ProcessTable {
     /// Re-reads every process: pid, parent and start time, nothing else. `without_tasks` so that
     /// Linux threads are not listed as children of their own process.
     pub fn refresh(&mut self) {
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing().without_tasks(),
-        );
+        let kind = ProcessRefreshKind::nothing().without_tasks();
+        self.system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+    }
+
+    /// Reads just `pids` (pid, parent, start time, name) — for a lookup that needs a few names.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn refresh_only(&mut self, pids: &[u32]) {
+        let pids: Vec<Pid> = pids.iter().map(|pid| Pid::from_u32(*pid)).collect();
+        let kind = ProcessRefreshKind::nothing().without_tasks();
+        self.system.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, kind);
+    }
+
+    /// Re-reads CPU and memory for `pids` only — on a table refreshed without usage. The monitor's
+    /// way to show a service's consumption without sampling every process on the machine, which on
+    /// Windows was the costliest poll in the app. CPU is a difference between two readings of the
+    /// same process, so this has to be called on the same table each round.
+    pub fn refresh_usage(&mut self, pids: &[u32]) {
+        let pids: Vec<Pid> = pids.iter().map(|pid| Pid::from_u32(*pid)).collect();
+        let kind = ProcessRefreshKind::nothing().without_tasks().with_cpu().with_memory();
+        self.system.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), false, kind);
+    }
+
+    /// CPU (percent of one core, so past 100 on a busy multi-threaded tree) and resident memory
+    /// (bytes) of a process tree, summed.
+    pub fn usage(&self, tree: &[ProcId]) -> (f32, u64) {
+        tree.iter()
+            .filter_map(|id| self.system.process(Pid::from_u32(id.pid)).filter(|p| p.start_time() == id.start))
+            .fold((0.0, 0), |(cpu, memory), process| (cpu + process.cpu_usage(), memory + process.memory()))
     }
 
     /// `root` and everything below it, root first.
@@ -413,8 +436,13 @@ mod platform {
         if let Some(pids) = pids {
             found.retain(|l| pids.contains(&l.pid));
         }
+        if found.is_empty() {
+            return found;
+        }
+        // Names for the pids that hold a socket, not a read of every process on the machine.
         let mut table = ProcessTable::new();
-        table.refresh();
+        let holders: Vec<u32> = found.iter().map(|l| l.pid).collect();
+        table.refresh_only(&holders);
         for listener in &mut found {
             listener.process = table.name(listener.pid).unwrap_or_default();
         }

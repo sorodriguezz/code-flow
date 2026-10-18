@@ -1215,6 +1215,39 @@ pub fn set_agent_task_pinned(conn: &Connection, id: &str, pinned: bool) -> rusql
     Ok(())
 }
 
+/// Priority, due date and labels — planning, not progress, so `updated_at` is left alone and the
+/// row keeps its place in the list.
+pub fn set_agent_task_planning(conn: &Connection, id: &str, priority: i64, due_date: &str, labels: &[String]) -> rusqlite::Result<()> {
+    let labels: Vec<String> = labels.iter().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    conn.execute(
+        "UPDATE agent_tasks SET priority = ?2, due_date = ?3, labels = ?4 WHERE id = ?1",
+        params![id, priority.clamp(0, 3), due_date.trim(), serde_json::to_string(&labels).unwrap_or_else(|_| "[]".into())],
+    )?;
+    Ok(())
+}
+
+pub fn set_agent_task_archived(conn: &Connection, id: &str, archived: bool) -> rusqlite::Result<()> {
+    conn.execute("UPDATE agent_tasks SET archived = ?2 WHERE id = ?1", params![id, archived])?;
+    Ok(())
+}
+
+/// Adds one turn's spend to the task whose conversation it was. A no-op for any other turn.
+pub fn add_agent_task_usage(conn: &Connection, conversation_id: &str, usage: &crate::ai::AiUsage) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_tasks SET input_tokens = input_tokens + ?2, output_tokens = output_tokens + ?3,
+            cost_usd = cost_usd + ?4, costed_turns = costed_turns + ?5
+         WHERE conversation_id = ?1",
+        params![
+            conversation_id,
+            usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens,
+            usage.output_tokens,
+            usage.cost_usd.unwrap_or(0.0),
+            usage.cost_usd.is_some() as i64,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn set_chain_group(conn: &Connection, chain_id: &str, agent_project_id: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE agent_chains SET agent_project_id = ?2 WHERE id = ?1",
@@ -1241,7 +1274,8 @@ pub const AGENT_CONVERSATION_PREFIX: &str = "agent-";
 /// fifteen `row.get(..)` calls onto their neighbours.
 const AGENT_TASK_COLUMNS: &str = "id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt, \
      goal, title, conversation_id, status, turns, last_error, created_at, updated_at, \
-     agent_project_id, pinned, account_id";
+     agent_project_id, pinned, account_id, worktree_path, worktree_branch, priority, due_date, labels, archived, \
+     input_tokens, output_tokens, cost_usd, costed_turns";
 
 fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
     Ok(AgentTask {
@@ -1264,6 +1298,16 @@ fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
         agent_project_id: row.get(16)?,
         pinned: row.get(17)?,
         account_id: row.get(18)?,
+        worktree_path: row.get(19)?,
+        worktree_branch: row.get(20)?,
+        priority: row.get(21)?,
+        due_date: row.get(22)?,
+        labels: serde_json::from_str(&row.get::<_, String>(23)?).unwrap_or_default(),
+        archived: row.get(24)?,
+        input_tokens: row.get(25)?,
+        output_tokens: row.get(26)?,
+        cost_usd: row.get(27)?,
+        costed_turns: row.get(28)?,
     })
 }
 
@@ -1305,9 +1349,46 @@ pub fn create_agent_task(
     agent_project_id: &str,
     account_id: Option<&str>,
 ) -> rusqlite::Result<AgentTask> {
+    create_agent_task_with_id(
+        conn,
+        &Uuid::new_v4().to_string(),
+        workspace_id,
+        project_id,
+        agent_id,
+        agent_name,
+        provider,
+        model,
+        prompt,
+        goal,
+        title,
+        agent_project_id,
+        account_id,
+        ("", ""),
+    )
+}
+
+/// [`create_agent_task`] with the id chosen by the caller — a task with a worktree names its
+/// folder after itself, so the id exists before the row does — and the worktree it runs in.
+#[allow(clippy::too_many_arguments)]
+pub fn create_agent_task_with_id(
+    conn: &Connection,
+    id: &str,
+    workspace_id: &str,
+    project_id: &str,
+    agent_id: &str,
+    agent_name: &str,
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    goal: &str,
+    title: &str,
+    agent_project_id: &str,
+    account_id: Option<&str>,
+    (worktree_path, worktree_branch): (&str, &str),
+) -> rusqlite::Result<AgentTask> {
     let stamp = now();
     let task = AgentTask {
-        id: Uuid::new_v4().to_string(),
+        id: id.to_string(),
         workspace_id: workspace_id.to_string(),
         project_id: project_id.to_string(),
         agent_id: agent_id.to_string(),
@@ -1326,12 +1407,22 @@ pub fn create_agent_task(
         created_at: stamp.clone(),
         updated_at: stamp,
         account_id: account_id.map(str::to_string).filter(|a| !a.trim().is_empty()),
+        worktree_path: worktree_path.to_string(),
+        worktree_branch: worktree_branch.to_string(),
+        priority: 0,
+        due_date: String::new(),
+        labels: Vec::new(),
+        archived: false,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
+        costed_turns: 0,
     };
     conn.execute(
         "INSERT INTO agent_tasks (id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt,
             goal, title, conversation_id, status, turns, last_error, created_at, updated_at, agent_project_id,
-            account_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            account_id, worktree_path, worktree_branch)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             task.id,
             task.workspace_id,
@@ -1351,9 +1442,21 @@ pub fn create_agent_task(
             task.updated_at,
             task.agent_project_id,
             task.account_id,
+            task.worktree_path,
+            task.worktree_branch,
         ],
     )?;
     Ok(task)
+}
+
+/// The worktree a task's conversation runs in, when it has one: `(path, branch)`.
+pub fn agent_task_worktree(conn: &Connection, conversation_id: &str) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT worktree_path, worktree_branch FROM agent_tasks WHERE conversation_id = ?1 AND worktree_path <> ''",
+        params![conversation_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
 }
 
 /// Writes only what a turn changes. `updated_at` is re-stamped, which is also what re-sorts the
@@ -1377,8 +1480,9 @@ pub fn update_agent_task_run(
 /// The repository a task runs in, changeable only while it has no turns yet — after that the
 /// engine session and the working tree it has already touched both belong to the old one.
 pub fn set_agent_task_project(conn: &Connection, id: &str, project_id: &str) -> rusqlite::Result<()> {
+    // Never for a task with a worktree: that folder belongs to the repository it was made from.
     conn.execute(
-        "UPDATE agent_tasks SET project_id = ?2, updated_at = ?3 WHERE id = ?1 AND turns = 0",
+        "UPDATE agent_tasks SET project_id = ?2, updated_at = ?3 WHERE id = ?1 AND turns = 0 AND worktree_path = ''",
         params![id, project_id, now()],
     )?;
     Ok(())
@@ -4848,7 +4952,7 @@ fn map_batch(row: &rusqlite::Row) -> rusqlite::Result<StoryBatch> {
 const DRAFT_COLUMNS: &str = "id, batch_id, seq, title, narrative, description, acceptance_criteria, \
     priority, story_points, tags, notes, work_item_id, work_item_url, status, last_error, created_at, \
     updated_at, verify_status, verify_summary, verify_criteria, verified_at, work_item_key, \
-    original_estimate";
+    original_estimate, board_state, board_state_at";
 
 fn map_draft(row: &rusqlite::Row) -> rusqlite::Result<StoryDraft> {
     Ok(StoryDraft {
@@ -4875,6 +4979,8 @@ fn map_draft(row: &rusqlite::Row) -> rusqlite::Result<StoryDraft> {
         verified_at: row.get(20)?,
         work_item_key: row.get(21)?,
         original_estimate: row.get(22)?,
+        board_state: row.get(23)?,
+        board_state_at: row.get(24)?,
     })
 }
 
@@ -5433,6 +5539,8 @@ fn insert_story_draft(
         last_error: String::new(),
         created_at: now(),
         updated_at: now(),
+        board_state: String::new(),
+        board_state_at: String::new(),
     };
     conn.execute(
         "INSERT INTO story_drafts (id, batch_id, seq, title, narrative, description, acceptance_criteria,
@@ -5615,6 +5723,15 @@ pub fn clear_story_verification(conn: &Connection, id: &str) -> rusqlite::Result
 }
 
 /// Files the work item a story became. This is the row that makes publishing idempotent.
+/// The state a published story's item has on the board, as last read back.
+pub fn set_story_board_state(conn: &Connection, story_id: &str, state: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_drafts SET board_state = ?2, board_state_at = ?3 WHERE id = ?1",
+        params![story_id, state, now()],
+    )?;
+    Ok(())
+}
+
 pub fn mark_story_published(
     conn: &Connection,
     id: &str,

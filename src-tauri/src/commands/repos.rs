@@ -86,7 +86,7 @@ fn is_repo_root(path: &Path) -> bool {
 /// unbounded walk this is here to prevent, and a repository three directories deep is not
 /// something the user pointed at — it is something a search found. One level is what "I keep my
 /// repos in this folder" means.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan_folder(path: String) -> Result<FolderScan, String> {
     let root = Path::new(&path);
     if !root.is_dir() {
@@ -282,7 +282,7 @@ fn duplicate_of(
 /// Every candidate in one call, because the answer needs each existing project's remotes read off
 /// disk: doing that once for a folder of thirty repositories rather than thirty times is the
 /// difference between instant and a stall the user can see.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn find_duplicate_projects(
     db: State<Db>,
     workspace_id: String,

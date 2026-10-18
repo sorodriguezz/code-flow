@@ -664,11 +664,19 @@ export const flowsBridgeAnswer = (id: string, ok: boolean, value: unknown, error
   invoke<boolean>("flows_bridge_answer", { id, ok, value, error });
 
 export const flowsCancelRun = (runId: string) => invoke<boolean>("flows_cancel_run", { runId });
+/** Answers a run held at a breakpoint: `continue`, `step` (hold before the next node too) or `stop`. */
+export const flowsDebugResume = (runId: string, action: "continue" | "step" | "stop") => invoke<boolean>("flows_debug_resume", { runId, action });
 
 export const flowsActiveRuns = (workspaceId: string) => invoke<FlowRunRow[]>("flows_active_runs", { workspaceId });
 
 export const flowsListRuns = (flowId: string, limit?: number, before?: string | null, search?: string | null) =>
   invoke<FlowRunRow[]>("flows_list_runs", { flowId, limit: limit ?? null, before: before ?? null, search: search?.trim() ? search.trim() : null });
+
+/** Programs the flow's script nodes name that this computer lacks — `nodeId` and the program. */
+export const flowsMissingPrograms = (spec: string) => invoke<{ nodeId: string; program: string }[]>("flows_missing_programs", { spec });
+
+/** The workspace's failed executions, newest first, across every flow. */
+export const flowsFailedRuns = (workspaceId: string, limit?: number) => invoke<FlowRunRow[]>("flows_failed_runs", { workspaceId, limit: limit ?? null });
 
 export const flowsGetRun = (runId: string) => invoke<FlowRunDetail | null>("flows_get_run", { runId });
 

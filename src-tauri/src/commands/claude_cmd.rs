@@ -1062,9 +1062,20 @@ pub async fn send_chat_message(
                 return Err("Esta conversación se movió al Chat.".to_string());
             }
         }
-        queries::get_project(&conn, &project_id)
+        let mut project = queries::get_project(&conn, &project_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Project not found".to_string())?
+            .ok_or_else(|| "Project not found".to_string())?;
+        // An agent task with a worktree of its own runs there and nowhere else: every path below —
+        // the restore point, the presence, the skills, the engine's working directory — follows.
+        if let Some(id) = conversation_id.as_deref().filter(|id| id.starts_with(queries::AGENT_CONVERSATION_PREFIX)) {
+            if let Some((path, _)) = queries::agent_task_worktree(&conn, id).map_err(|e| e.to_string())? {
+                if !std::path::Path::new(&path).is_dir() {
+                    return Err(format!("El worktree de esta tarea ya no existe: {path}"));
+                }
+                project.local_path = path;
+            }
+        }
+        project
     };
     let workspace_id = project.workspace_id.clone();
 
@@ -1405,6 +1416,13 @@ pub async fn send_chat_message(
             return Err(e);
         }
     };
+
+    // An agent task keeps what its turns spent — the Agents view shows it per task and per chain.
+    if let Some(usage) = run.usage.as_ref().filter(|_| conversation_id.starts_with(queries::AGENT_CONVERSATION_PREFIX)) {
+        if let Ok(conn) = db.0.lock() {
+            let _ = queries::add_agent_task_usage(&conn, &conversation_id, usage);
+        }
+    }
 
     // A hybrid run counts what its subscription turns spent, for the summary it ends with.
     if let (Some(s), Some(usage)) = (step.as_ref().filter(|s| s.kind == "hybrid"), run.usage.as_ref()) {

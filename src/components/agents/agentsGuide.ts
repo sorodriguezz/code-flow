@@ -120,7 +120,7 @@ Por dentro es una cadena normal: se recupera igual si matan la app, se para en s
 
 ## Límites — léelos
 
-**Los agentes editan tu copia de trabajo de verdad.** Cada turno toma un punto de restauración antes de empezar, pero no es una caja de arena: no hay aislamiento en contenedor ni en worktree.
+**Los agentes editan tu copia de trabajo de verdad.** Cada turno toma un punto de restauración antes de empezar, pero no es una caja de arena. Si marcas «En un worktree propio» al crear la tarea, trabaja en una carpeta aparte con su propia rama, y varias tareas del mismo repositorio corren a la vez sin pisarse.
 
 **Un agente a la vez por repositorio.** No hay cola detrás: dos motores sobre la misma carpeta se pisarían los checkpoints. Para trabajar en paralelo, reparte por repositorios. Una cadena que se encuentra el repo ocupado **espera**, no falla.
 
@@ -249,7 +249,7 @@ Underneath it is an ordinary chain: it recovers from a kill the same way, parks 
 
 ## Limits — read these
 
-**Agents edit your real working copy.** Every turn takes a restore point first, but this is not a sandbox: there is no container or worktree isolation.
+**Agents edit your real working copy.** Every turn takes a restore point first, but this is not a sandbox. Tick «In its own worktree» when creating the task and it works in a separate folder on its own branch, so several tasks in one repository run at once without stepping on each other.
 
 **One agent at a time per repository.** There is no queue behind it: two engines on one folder would take restore points over each other. To work in parallel, spread across repositories. A chain that finds the repository busy **waits**; it does not fail.
 

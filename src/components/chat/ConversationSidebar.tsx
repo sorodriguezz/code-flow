@@ -712,7 +712,9 @@ function FolderSection({
   // Lifted out of `ColorSwatchPicker` because the menu has to be able to open it too — see the
   // `open` prop's note there. The palette still hangs off the folder glyph either way.
   const [colorOpen, setColorOpen] = useState(false);
-  const store = useConversationStore();
+  // Actions only, read without subscribing: subscribed to the whole store, every folder re-rendered
+  // on each streamed chunk of an answer.
+  const store = useConversationStore.getState();
   /** A folder with no colour of its own follows the app's accent, so it keeps matching the window
    *  when the theme changes instead of being frozen at whatever indigo was default that day. */
   const folderColor = group.color || "var(--cf-accent)";

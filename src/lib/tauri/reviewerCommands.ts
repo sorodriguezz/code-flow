@@ -231,6 +231,8 @@ export interface ReviewerRunSummary {
   measures: ReviewerMeasures;
   issues: ReviewerIssue[];
   issuesTotal: number;
+  /** Missing in reports from before hotspots were read. */
+  hotspots?: ReviewerHotspot[];
   tests: ReviewerTestReport | null;
   coverage: ReviewerCoverageEntry[];
   commit: string | null;
@@ -238,6 +240,36 @@ export interface ReviewerRunSummary {
   dirty: boolean;
   sonarqubeVersion: string;
 }
+
+/** A security hotspot: code SonarQube wants a person to look at — `reviewer/triage.rs`. */
+export interface ReviewerHotspot {
+  key: string;
+  rule: string;
+  message: string;
+  path: string;
+  line: number | null;
+  probability: "HIGH" | "MEDIUM" | "LOW" | string;
+  category: string;
+  status: "TO_REVIEW" | "REVIEWED" | string;
+  resolution: "SAFE" | "FIXED" | "ACKNOWLEDGED" | null;
+}
+
+export interface ReviewerRuleInfo {
+  key: string;
+  name: string;
+  language: string;
+  /** SonarQube's own HTML, by section: `introduction`, `root_cause`, `how_to_fix`, `resources`… */
+  sections: { key: string; html: string }[];
+}
+
+/** Lines changed against a base branch — "new code" by git. Runs are inclusive `[first, last]`. */
+export interface ReviewerChangedLines {
+  base: string;
+  files: Record<string, [number, number][]>;
+  added: string[];
+}
+
+export type ReviewerIssueVerdict = "falsePositive" | "accepted";
 
 export interface ReviewerHistoryEntry {
   runId: string;
@@ -321,3 +353,13 @@ export const onReviewerServer = (handler: (status: ReviewerServerStatus) => void
   listen<ReviewerServerStatus>("reviewer:server", (e) => handler(e.payload));
 export const onReviewerInstall = (handler: (progress: ReviewerInstallProgress) => void) =>
   listen<ReviewerInstallProgress>("reviewer:install", (e) => handler(e.payload));
+
+/** The rule's explanation from the local SonarQube (started first when it went idle). */
+export const reviewerRule = (key: string) => invoke<ReviewerRuleInfo>("reviewer_rule", { key });
+export const reviewerIssueDecide = (projectKey: string, issueKey: string, verdict: ReviewerIssueVerdict, comment: string) =>
+  invoke<void>("reviewer_issue_decide", { projectKey, issueKey, verdict, comment });
+/** `resolution` `null` sends the hotspot back to review. */
+export const reviewerHotspotReview = (projectKey: string, hotspotKey: string, resolution: string | null, comment: string) =>
+  invoke<void>("reviewer_hotspot_review", { projectKey, hotspotKey, resolution, comment });
+/** `base` `""` compares with the default branch. */
+export const reviewerChangedLines = (repoPath: string, base: string) => invoke<ReviewerChangedLines>("reviewer_changed_lines", { repoPath, base });

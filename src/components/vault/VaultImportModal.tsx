@@ -36,6 +36,10 @@ const FORMAT_LABELS: Record<ImportFormat, string> = {
   "bitwarden-csv": "vault.import.formatBitwardenCsv",
   "onepassword-csv": "vault.import.formatOnePasswordCsv",
   "onepassword-1pux": "vault.import.formatOnePux",
+  "chrome-csv": "vault.import.formatChromeCsv",
+  "firefox-csv": "vault.import.formatFirefoxCsv",
+  "lastpass-csv": "vault.import.formatLastPassCsv",
+  "keepass-csv": "vault.import.formatKeePassCsv",
   unknown: "vault.import.formatUnknown",
 };
 

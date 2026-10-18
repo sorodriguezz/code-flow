@@ -52,6 +52,7 @@ pub fn show_main_window(app: &AppHandle) {
         // The other half of `app:background` (see `lib.rs`'s close handler): the webview never
         // stopped running, so the only thing that tells the frontend it is on screen again — and
         // that an agent chain may start dispatching once more — is this.
+        crate::MAIN_AWAY.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = app.emit("app:foreground", ());
     }
 }

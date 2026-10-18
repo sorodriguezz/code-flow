@@ -1,5 +1,7 @@
-import { memo, useMemo, useState } from "react";
+import { lazy, memo, Suspense, useMemo, useState } from "react";
 import {
+  CalendarDays,
+  Waypoints,
   ArrowUpDown,
   Book,
   Check,
@@ -12,10 +14,14 @@ import {
   Search,
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
+
+/** The graph pulls in React Flow — loaded only when the view is chosen. */
+const NoteGraphView = lazy(() => import("./NoteGraphView").then((m) => ({ default: m.NoteGraphView })));
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ShelfCard, ShelfRow } from "../common/ShelfCard";
 import { ICON_BUTTON, TagPill, bookInk, readingMinutes, relativeTime } from "./notesChrome";
-import type { Note, NoteBookRow, NoteSort } from "../../types/notes";
+import type { Note, NoteBookRow, NoteSearchHit, NoteSort } from "../../types/notes";
+import { useMeetingsStore } from "../../state/meetingsStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { filterNotes, useNotesStore } from "../../state/notesStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -46,6 +52,15 @@ const SORTS: { value: NoteSort; labelKey: TranslationKey }[] = [
  * can show a preview of four hundred notes without any of their bodies being in memory — see the
  * `notes` table comment. A card that sliced `content` would undo the whole design.
  */
+/** The snippet a result shows; a line from a meeting says when in it the words were said. */
+function hitSnippet(hit: NoteSearchHit | undefined, saidAt: (clock: string) => string): string | undefined {
+  if (!hit) return undefined;
+  if (hit.at_ms === undefined) return hit.snippet;
+  const seconds = Math.floor(hit.at_ms / 1000);
+  const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  return `${saidAt(clock)} · ${hit.snippet}`;
+}
+
 export function NoteGallery() {
   const notes = useNotesStore((s) => s.notes);
   const books = useNotesStore((s) => s.books);
@@ -60,6 +75,15 @@ export function NoteGallery() {
   const setGalleryView = useNotesStore((s) => s.setGalleryView);
   const setBookFilter = useNotesStore((s) => s.setBookFilter);
   const openNote = useNotesStore((s) => s.openNote);
+  /** A hit in a meeting's transcript opens the note at that line of the meeting. */
+  const openHit = (noteId: string) => {
+    const hit = bodyHits[noteId];
+    void openNote(noteId).then(() => {
+      if (hit?.meeting_id && hit.at_ms !== undefined) {
+        useMeetingsStore.getState().jumpToLine(noteId, hit.meeting_id, hit.at_ms);
+      }
+    });
+  };
   const createNote = useNotesStore((s) => s.createNote);
   const toggleTag = useNotesStore((s) => s.toggleTag);
   const language = useLanguageStore((s) => s.language);
@@ -104,6 +128,17 @@ export function NoteGallery() {
         sort: searching && sort === "manual" ? "updated" : sort,
       }),
     [notes, query, bodyHits, tagFilter, searching, openBook, sort],
+  );
+
+  /** The graph lights what the gallery is narrowed to — a book, a tag, a search — and nothing when
+   *  it is not narrowed, which is every note at full strength. */
+  const narrowed = searching || tagFilter.length > 0 || !!openBook;
+  const graphFilter = useMemo(
+    () =>
+      narrowed
+        ? new Set(filterNotes(notes, { query, bodyHits, tagFilter, bookId: openBook?.id ?? undefined, sort }).map((note) => note.id))
+        : new Set<string>(),
+    [narrowed, notes, query, bodyHits, tagFilter, openBook, sort],
   );
 
   if (notes.length === 0 && books.length === 0) {
@@ -170,10 +205,31 @@ export function NoteGallery() {
             active={galleryView === "list"}
             onClick={() => setGalleryView("list")}
           />
+          <ViewButton
+            icon={Waypoints}
+            label={t("notes.viewGraph")}
+            active={galleryView === "graph"}
+            onClick={() => setGalleryView("graph")}
+          />
         </div>
+        <button
+          type="button"
+          className={`${ICON_BUTTON} shrink-0`}
+          title={t("notes.dailyNote")}
+          aria-label={t("notes.dailyNote")}
+          onClick={() => void useNotesStore.getState().openDailyNote()}
+        >
+          <CalendarDays size={13} />
+        </button>
       </div>
 
-      {searching && visible.length === 0 ? (
+      {galleryView === "graph" ? (
+        <div className="min-h-0 flex-1">
+          <Suspense fallback={null}>
+            <NoteGraphView visibleIds={graphFilter} />
+          </Suspense>
+        </div>
+      ) : searching && visible.length === 0 ? (
         <EmptyState icon={Search} title={t("notes.noMatches")} subtitle={t("notes.noMatchesHint")} />
       ) : !searching && shelf.length === 0 && visible.length === 0 ? (
         // The button is `EmptyState`'s `action` and not a sibling of it. As a sibling it was laid
@@ -251,9 +307,9 @@ export function NoteGallery() {
                   <NoteCard
                     key={note.id}
                     note={note}
-                    snippet={bodyHits[note.id]?.snippet}
+                    snippet={hitSnippet(bodyHits[note.id], (at) => t("notes.saidInMeeting", { at }))}
                     locale={language}
-                    onOpen={() => void openNote(note.id)}
+                    onOpen={() => openHit(note.id)}
                     onTag={toggleTag}
                     untitled={t("notes.untitled")}
                     readingLabel={t("notes.readingTime", { n: readingMinutes(note.word_count) })}
@@ -266,9 +322,9 @@ export function NoteGallery() {
                   <NoteListRow
                     key={note.id}
                     note={note}
-                    snippet={bodyHits[note.id]?.snippet}
+                    snippet={hitSnippet(bodyHits[note.id], (at) => t("notes.saidInMeeting", { at }))}
                     locale={language}
-                    onOpen={() => void openNote(note.id)}
+                    onOpen={() => openHit(note.id)}
                     onTag={toggleTag}
                     untitled={t("notes.untitled")}
                     readingLabel={t("notes.readingTime", { n: readingMinutes(note.word_count) })}

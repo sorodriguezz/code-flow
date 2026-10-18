@@ -689,6 +689,44 @@ async fn read_item_text(
 }
 
 /// Reads one item and the sub-items it already has.
+/// The board's newest items, whatever their group — see `boards::recent_items`.
+pub async fn recent_items(slug: &str, board_id: &str, auth: &BoardAuth) -> Result<Vec<super::ExistingItem>, String> {
+    #[derive(Deserialize)]
+    struct Data {
+        #[serde(default)]
+        boards: Vec<Board>,
+    }
+    #[derive(Deserialize)]
+    struct Board {
+        items_page: Page,
+    }
+    #[derive(Deserialize)]
+    struct Page {
+        #[serde(default)]
+        items: Vec<Item>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        id: String,
+        name: String,
+    }
+    let data: Data = run(
+        &format!("query ($ids: [ID!]) {{ boards(ids: $ids) {{ items_page(limit: {}) {{ items {{ id name }} }} }} }}", super::RECENT_ITEMS.min(500)),
+        serde_json::json!({ "ids": [board_id] }),
+        auth,
+    )
+    .await?;
+    Ok(data
+        .boards
+        .into_iter()
+        .flat_map(|board| board.items_page.items)
+        .map(|item| {
+            let id = numeric_id(&item.id);
+            super::ExistingItem { id, key: String::new(), title: item.name, state: String::new(), url: item_url(slug, board_id, id) }
+        })
+        .collect())
+}
+
 pub async fn get_item(slug: &str, item_id: i64, auth: &BoardAuth) -> Result<WorkItem, String> {
     if item_id <= 0 {
         return Err("Ese identificador de elemento no es válido".to_string());

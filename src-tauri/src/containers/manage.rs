@@ -395,9 +395,140 @@ pub async fn add_docker_context(name: &str, host: &str, description: &str) -> Re
     run_ok(&docker, args, engine::ACTION_TIMEOUT).await.map(|_| ())
 }
 
+// ------------------------------------------------------------------------------ volume backups
+
+/// The image both directions of a volume backup run: small, and it has `tar` and `gzip`.
+const VOLUME_TOOL_IMAGE: &str = "alpine:3";
+/// A volume can hold gigabytes; an hour is what one transfer may take before it is given up on.
+const VOLUME_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// The command line that writes a volume's files to standard output as a `.tar.gz`, read-only.
+pub fn backup_args(name: &str) -> Result<Vec<String>, String> {
+    check_name(name, "volume")?;
+    Ok(["run", "--rm", "-v", &format!("{name}:/data:ro"), VOLUME_TOOL_IMAGE, "tar", "czf", "-", "-C", "/data", "."]
+        .iter()
+        .map(|s| s.to_string())
+        .collect())
+}
+
+/// The command line that unpacks a `.tar.gz` from standard input into a volume — made if it does not
+/// exist; with `replace`, emptied first so the volume ends up exactly as the backup.
+pub fn restore_args(name: &str, replace: bool) -> Result<Vec<String>, String> {
+    check_name(name, "volume")?;
+    let script = if replace {
+        // Every entry, dotfiles included, but never `.` and `..`.
+        "rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; tar xzf - -C /data"
+    } else {
+        "tar xzf - -C /data"
+    };
+    Ok(["run", "--rm", "-i", "-v", &format!("{name}:/data"), VOLUME_TOOL_IMAGE, "sh", "-c", script]
+        .iter()
+        .map(|s| s.to_string())
+        .collect())
+}
+
+/// An engine command whose standard streams are the caller's to wire — the bytes of a volume do
+/// not go through a `String`.
+async fn transfer_command(target: &Target, args: Vec<String>) -> Result<tokio::process::Command, String> {
+    let engine = not_ctr(target, "volume backups")?;
+    let mut full = target.global_args();
+    full.extend(args);
+    let mut cmd = crate::proc::command(engine.program());
+    cmd.args(full).env("PATH", cli::search_path()).envs(cli::engine_env().await).kill_on_drop(true);
+    crate::proc::own_process_group(&mut cmd);
+    Ok(cmd)
+}
+
+/// Copies volume `name` into `dest` as a `.tar.gz`, through a throwaway container — the same way on
+/// this computer and on a remote engine, since the archive comes back over the engine's own
+/// connection rather than through a folder both would have to see. Returns the bytes written.
+pub async fn backup_volume(target: &Target, name: &str, dest: &std::path::Path) -> Result<u64, String> {
+    use std::process::Stdio;
+    let mut cmd = transfer_command(target, backup_args(name.trim())?).await?;
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("could not start the engine: {e}"))?;
+    let partial = dest.with_extension("part");
+    let work = async {
+        let mut file = tokio::fs::File::create(&partial).await.map_err(|e| format!("couldn't write {}: {e}", partial.display()))?;
+        let mut out = child.stdout.take().ok_or("no output from the engine")?;
+        let mut err = child.stderr.take().ok_or("no output from the engine")?;
+        let (copied, complaint) = tokio::join!(tokio::io::copy(&mut out, &mut file), async {
+            let mut text = String::new();
+            let _ = tokio::io::AsyncReadExt::read_to_string(&mut err, &mut text).await;
+            text
+        });
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        tokio::io::AsyncWriteExt::flush(&mut file).await.map_err(|e| e.to_string())?;
+        let copied = copied.map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(if complaint.trim().is_empty() { format!("the backup failed ({status})") } else { complaint.trim().to_string() });
+        }
+        Ok(copied)
+    };
+    let result = match tokio::time::timeout(VOLUME_TRANSFER_TIMEOUT, work).await {
+        Ok(result) => result,
+        Err(_) => Err("the backup took more than an hour and was stopped".into()),
+    };
+    match result {
+        Ok(bytes) => {
+            tokio::fs::rename(&partial, dest).await.map_err(|e| e.to_string())?;
+            Ok(bytes)
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&partial).await;
+            Err(error)
+        }
+    }
+}
+
+/// Unpacks a backup made by [`backup_volume`] (or any `.tar.gz` of files) into volume `name`.
+pub async fn restore_volume(target: &Target, name: &str, source: &std::path::Path, replace: bool) -> Result<(), String> {
+    use std::process::Stdio;
+    let mut file = tokio::fs::File::open(source).await.map_err(|e| format!("couldn't read {}: {e}", source.display()))?;
+    let mut cmd = transfer_command(target, restore_args(name.trim(), replace)?).await?;
+    cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("could not start the engine: {e}"))?;
+    let work = async {
+        let mut input = child.stdin.take().ok_or("no input to the engine")?;
+        let mut err = child.stderr.take().ok_or("no output from the engine")?;
+        let feed = async {
+            let copied = tokio::io::copy(&mut file, &mut input).await;
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut input).await;
+            drop(input);
+            copied
+        };
+        let (copied, complaint) = tokio::join!(feed, async {
+            let mut text = String::new();
+            let _ = tokio::io::AsyncReadExt::read_to_string(&mut err, &mut text).await;
+            text
+        });
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(if complaint.trim().is_empty() { format!("the restore failed ({status})") } else { complaint.trim().to_string() });
+        }
+        copied.map(|_| ()).map_err(|e| e.to_string())
+    };
+    match tokio::time::timeout(VOLUME_TRANSFER_TIMEOUT, work).await {
+        Ok(result) => result,
+        Err(_) => Err("the restore took more than an hour and was stopped".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_volume_backup_streams_a_tarball_and_a_restore_can_empty_first() {
+        let backup = backup_args("pgdata").unwrap();
+        assert_eq!(backup[..4], ["run", "--rm", "-v", "pgdata:/data:ro"].map(String::from));
+        assert!(backup.ends_with(&["tar", "czf", "-", "-C", "/data", "."].map(String::from)));
+        let keep = restore_args("pgdata", false).unwrap();
+        assert!(keep.contains(&"-i".to_string()));
+        assert_eq!(keep.last().unwrap(), "tar xzf - -C /data");
+        assert!(restore_args("pgdata", true).unwrap().last().unwrap().starts_with("rm -rf /data/*"));
+        assert!(backup_args("../etc").is_err(), "a name, not a path");
+    }
 
     /// `docker stats --no-stream --format '{{json .}}'` (nerdctl prints the same keys).
     const DOCKER_STATS: &str = r#"{"BlockIO":"1.2MB / 0B","CPUPerc":"0.15%","Container":"4f2c1a9b8d7e","ID":"4f2c1a9b8d7e","MemPerc":"0.10%","MemUsage":"8.3MiB / 7.8GiB","Name":"cf-test-web","NetIO":"1.3kB / 0B","PIDs":"11"}

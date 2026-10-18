@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { KeyRound, Loader2, Lock, ShieldAlert, Unplug } from "lucide-react";
+import { Fingerprint, KeyRound, Loader2, Lock, ShieldAlert, Unplug } from "lucide-react";
 
 import { useVaultStore } from "../../state/vaultStore";
 import { useVaultModalStore } from "../../state/vaultModalStore";
@@ -31,6 +31,9 @@ export function VaultLockScreen() {
   const unlocking = useVaultStore((s) => s.unlocking);
   const unlockError = useVaultStore((s) => s.unlockError);
   const remembered = useVaultStore((s) => s.remembered);
+  // The one way the remembered password opens a *locked* keyring: on a click, and only behind the
+  // system's own check of who is there. Without that check it stays a startup convenience.
+  const biometricUnlock = useVaultStore((s) => s.remembered && s.biometric && s.biometricAvailable);
   const t = useT();
 
   const [password, setPassword] = useState("");
@@ -201,6 +204,18 @@ export function VaultLockScreen() {
               ? t("vault.unlocking")
               : t(initialised ? "vault.unlock" : "vault.create")}
           </button>
+
+          {initialised && biometricUnlock && (
+            <button
+              type="button"
+              disabled={unlocking}
+              onClick={() => void useVaultStore.getState().unlockWithBiometric()}
+              className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] text-[var(--cf-text)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-50"
+            >
+              <Fingerprint size={14} />
+              {t("vault.biometricUnlock")}
+            </button>
+          )}
 
           {/* Only on the unlock screen, and deliberately quiet: this is the way out of a forgotten
               master password, and there is no other — but it destroys the keyring, so it must not

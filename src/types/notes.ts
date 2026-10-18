@@ -141,6 +141,10 @@ export interface NoteSearchHit {
   /** Where the match starts **inside `snippet`**, in characters. */
   match_start: number;
   match_len: number;
+  /** Set when the words were said in a meeting rather than written in the body. */
+  meeting_id?: string;
+  /** Where in that meeting's recording the line starts. */
+  at_ms?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,7 +164,7 @@ export interface NoteTemplate extends Omit<NoteTemplateRow, "tags"> {
 export type NoteViewMode = "editor" | "split" | "preview";
 
 /** How the gallery draws its books and notes — cards or rows. Persisted per workspace. */
-export type NoteGalleryView = "grid" | "list";
+export type NoteGalleryView = "grid" | "list" | "graph";
 
 /**
  * How the list orders its notes. Persisted per workspace.
