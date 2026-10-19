@@ -3032,6 +3032,14 @@ export const deleteWorkItemReview = (id: string) => invoke<void>("delete_work_it
 // open a pairing window, move the port, or revoke the device sitting next to it.
 
 /** Everything the settings panel draws, in one read. */
+/** Opens design mode's preview on an address, or points the one that is open at it. One window
+ *  ever — see `src-tauri/src/design.rs`. */
+export const designOpen = (url: string) => invoke<void>("design_open", { url });
+
+export const designClose = () => invoke<void>("design_close");
+
+export const designIsOpen = () => invoke<boolean>("design_is_open");
+
 export const remotectlStatus = () => invoke<RemoteStatus>("remotectl_status");
 
 /** Turns the server on or off and records the choice for the next launch. Rejects with the bind

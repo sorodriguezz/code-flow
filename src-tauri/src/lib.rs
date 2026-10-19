@@ -22,6 +22,7 @@ mod backup;
 mod boot_guard;
 mod caveman;
 mod chain_memory;
+mod design;
 mod chat_mcp;
 mod archify_suggest;
 mod codemap;
@@ -554,6 +555,9 @@ pub fn run() {
             if boot_guard::take_over(app.handle()) {
                 return Ok(());
             }
+            // The handle design mode's navigation hook reports a pick through. Set once, here,
+            // because the hook outlives the call that builds the preview window — see `design`.
+            design::remember(app.handle());
             // The active flows' triggers: schedules, webhooks, watchers, pollers, chords. After the
             // takeover check, so a launch that is only answering a recovery question arms nothing.
             flows::triggers::start(app.handle());
@@ -964,6 +968,9 @@ sharded_invoke_handler! {
         commands::backup_cmd::backup_restore_onedrive,
         commands::backup_cmd::backup_pick_folder,
         commands::backup_cmd::backup_reveal_folder,
+        design::design_open,
+        design::design_close,
+        design::design_is_open,
         windows::open_satellite,
         windows::focus_satellite,
         windows::list_satellites,

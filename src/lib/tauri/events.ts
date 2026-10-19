@@ -351,3 +351,16 @@ export const onLspExited = (handler: (event: { session_id: string }) => void) =>
  */
 export const onLspRefresh = (handler: (event: { session_id: string; what: string }) => void) =>
   listen<{ session_id: string; what: string }>("lsp:refresh", (e) => handler(e.payload));
+
+/** An element picked in design mode's preview window — see `src-tauri/src/design.rs`. */
+export interface DesignPick {
+  url: string;
+  selector: string;
+  html: string;
+  css: string;
+  /** `x,y,w,h` in CSS pixels. */
+  rect: string;
+}
+
+export const onDesignPick = (handler: (event: DesignPick) => void) =>
+  listen<DesignPick>("design:pick", (e) => handler(e.payload));

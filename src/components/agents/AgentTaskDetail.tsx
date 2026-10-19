@@ -7,6 +7,7 @@ import {
   GitCompare,
   History,
   Flag,
+  Frame,
   Link2,
   MessagesSquare,
   MoreHorizontal,
@@ -48,6 +49,9 @@ import { useT } from "../../state/languageStore";
 import { scrollBehavior } from "../../lib/motion";
 import { revealInFileManager } from "../../lib/tauri/commands";
 import { openPathAsProject } from "../../lib/openAsProject";
+import { buildDesignNote, shortLabel } from "../../lib/agents/designNote";
+import { useDesignStore } from "../../state/designStore";
+import { promptAction } from "../../state/promptStore";
 
 /**
  * One task, open: who is doing it, where, what has been said so far, and the box to say the next
@@ -195,6 +199,25 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
             },
           },
         ]),
+    {
+      // Design mode: the app this task is editing, in a window, with alt-click picking the element
+      // to talk about. The address is asked for rather than guessed — a dev server's port is the
+      // one thing this app cannot know — and remembered for next time.
+      label: t("design.open"),
+      icon: Frame,
+      onClick: () => {
+        const store = useDesignStore.getState();
+        void promptAction(t("design.urlPrompt"), {
+          initial: store.lastUrl || "http://localhost:1420",
+          placeholder: "http://localhost:1420",
+          confirmLabel: t("design.openAction"),
+          validate: (value) =>
+            /^https?:\/\/\S+$/.test(value.trim()) ? null : t("design.urlInvalid"),
+        }).then((url) => {
+          if (url) void store.show(url);
+        });
+      },
+    },
     ...(repoPath
       ? [
           {
@@ -400,6 +423,7 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
               )}
             </div>
           </div>
+          <DesignPickCard taskId={taskId} />
           <AgentComposer taskId={taskId} />
         </>
       )}
@@ -559,6 +583,58 @@ function AgentComposer({ taskId }: { taskId: string }) {
           )}
         </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The element picked in design mode, offered to this task.
+ *
+ * It sits directly above the composer because that is what it becomes: a turn. Drawn only while
+ * there is a pick, and cleared by sending it or by dismissing it — see `designStore` for why only
+ * the last one is kept.
+ */
+function DesignPickCard({ taskId }: { taskId: string }) {
+  const t = useT();
+  const pick = useDesignStore((s) => s.pick);
+  const sending = useAgentsStore((s) => s.live[taskId]?.sending ?? false);
+  if (!pick) return null;
+
+  const send = () => {
+    const message = buildDesignNote(pick, {
+      intro: t("design.noteIntro"),
+      markup: t("design.noteMarkup"),
+      styles: t("design.noteStyles"),
+      where: t("design.noteWhere"),
+    });
+    // Cleared only on a send the store took: a refused turn that dropped the pick would mean
+    // walking back to the preview and picking it again.
+    if (message && useAgentsStore.getState().send(taskId, message)) useDesignStore.getState().clear();
+  };
+
+  return (
+    <div className="shrink-0 px-4 pt-2">
+      <div className="mx-auto flex w-full max-w-[760px] items-center gap-2 rounded-lg border border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] px-3 py-1.5">
+        <Frame size={13} className="shrink-0 text-[var(--cf-accent)]" />
+        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-[var(--cf-text)]">
+          {shortLabel(pick.selector)}
+        </span>
+        <button
+          type="button"
+          disabled={sending}
+          onClick={send}
+          className={buttonClass({ variant: "primary", size: "sm" })}
+        >
+          {t("design.sendToAgent")}
+        </button>
+        <button
+          type="button"
+          onClick={() => useDesignStore.getState().clear()}
+          className={buttonClass({ variant: "ghost", size: "sm" })}
+        >
+          {t("design.dismiss")}
+        </button>
       </div>
     </div>
   );

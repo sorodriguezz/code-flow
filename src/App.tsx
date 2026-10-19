@@ -65,6 +65,7 @@ import { useCsvStore } from "./state/csvStore";
 import { useThinkingDesignStore } from "./state/thinkingDesignStore";
 import { useGlassStore } from "./state/glassStore";
 import { useMotionStore } from "./state/motionStore";
+import { startDesignMode } from "./state/designStore";
 import { useLanguageOverrideStore } from "./state/languageOverrideStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
@@ -682,6 +683,9 @@ export default function App() {
         useGlassStore.getState().init(),
         // How much the app moves. With the look, before the first panel has anything to animate.
         useMotionStore.getState().init(),
+        // Design mode's one subscription, and the address the preview was last pointed at. Cheap
+        // and idempotent: no window is opened here — see `designStore.init`.
+        Promise.resolve(startDesignMode()),
         useLanguageOverrideStore.getState().init(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
