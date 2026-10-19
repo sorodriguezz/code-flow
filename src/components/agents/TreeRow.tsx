@@ -61,12 +61,15 @@ export function Row({
 }: {
   selected: boolean;
   onClick: () => void;
-  onMenu: (x: number, y: number) => void;
+  /** Left out by a row with nothing to offer — a race, which is a grouping rather than a thing of
+   *  its own. The button and the right-click are both skipped: a menu that opens empty, or a
+   *  trigger that does nothing, reads as the app having lost the menu. */
+  onMenu?: (x: number, y: number) => void;
   title: string;
   glyph: ReactNode;
   label: string;
   meta: string;
-  menuLabel: string;
+  menuLabel?: string;
   /** Levels of nesting. 0 is a section's own child. */
   depth?: number;
   /** Position in the list it arrives with, which is all the entry animation needs to stagger. */
@@ -90,6 +93,7 @@ export function Row({
       // menu acts on the row it was opened from, and selecting would swap the middle column —
       // taking with it any follow-up half-typed into the open task's composer.
       onContextMenu={(e) => {
+        if (!onMenu) return;
         e.preventDefault();
         e.stopPropagation();
         onMenu(e.clientX, e.clientY);
@@ -135,19 +139,21 @@ export function Row({
       {/* The same menu the right-click opens. Right-click is not discoverable on its own, and this
           list is where someone goes looking for how to get rid of a row. The pressed tint rather
           than the hover one: it sits on a row that is already wearing the hover tint. */}
-      <button
-        type="button"
-        aria-haspopup="menu"
-        aria-label={menuLabel}
-        title={menuLabel}
-        onClick={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          onMenu(rect.right - 4, rect.bottom + 2);
-        }}
-        className="mt-[5px] flex h-[22px] w-[22px] shrink-0 items-center justify-center self-start rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover:opacity-100"
-      >
-        <MoreHorizontal size={14} />
-      </button>
+      {onMenu && (
+        <button
+          type="button"
+          aria-haspopup="menu"
+          aria-label={menuLabel}
+          title={menuLabel}
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            onMenu(rect.right - 4, rect.bottom + 2);
+          }}
+          className="mt-[5px] flex h-[22px] w-[22px] shrink-0 items-center justify-center self-start rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      )}
     </div>
   );
 }

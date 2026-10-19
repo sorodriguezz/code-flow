@@ -4,6 +4,7 @@ import {
   CONTEXT_FULL_AT,
   CONTEXT_WARN_AT,
   contextFraction,
+  contextSplit,
   formatTokens,
 } from "../../lib/contextWindow";
 import { useLocale } from "./chatChrome";
@@ -17,6 +18,18 @@ export interface ContextReading {
   /** Whether {@link tokens} came from the engine's own report rather than from counting characters.
    *  Drawn differently, and the difference is the point — see `lib/contextWindow`. */
   measured: boolean;
+  /**
+   * A measurement that is no longer this turn's: the last turn ran and reported nothing, so what
+   * is shown was measured before it and does not include whatever has been said since.
+   *
+   * It is kept rather than discarded — the previous turn's figure beats no figure at all — but it
+   * is drawn as an approximation, because presenting a frozen number as exact is what made the
+   * meter look broken on every engine but Claude.
+   */
+  stale?: boolean;
+  /** What the transcript alone accounts for, when it is known. Only used to split a measurement
+   *  into the conversation and the engine's own overhead — see `contextSplit`. */
+  conversationTokens?: number;
   /** The model's window, or `null` when this app does not know it. `null` means no bar and no
    *  percentage, ever. */
   window: number | null;
@@ -123,7 +136,11 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
         ? "var(--cf-warning)"
         : "var(--cf-danger)";
   const count = formatTokens(reading.tokens, locale);
-  const shown = reading.measured ? count : `~${count}`;
+  // A measurement from an earlier turn is an approximation of this one, and wears the same `~` an
+  // estimate does: whatever has been said since it was taken is not in it.
+  const exact = reading.measured && !reading.stale;
+  const shown = exact ? count : `~${count}`;
+  const split = reading.stale ? null : contextSplit(reading.measured ? reading.tokens : null, reading.conversationTokens ?? 0);
 
   return (
     <div ref={box} className="relative">
@@ -178,9 +195,25 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
           )}
 
           <p className="mt-2 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
-            {reading.measured ? t("chat.contextMeasured") : t("chat.contextEstimated")}
+            {reading.stale
+              ? t("chat.contextStale")
+              : reading.measured
+                ? t("chat.contextMeasured")
+                : t("chat.contextEstimated")}
             {!reading.window && ` ${t("chat.contextUnknownWindow")}`}
           </p>
+
+          {/* Where the number comes from, which is the question a terminal's `/context` raises: the
+              transcript is usually the smaller half, and the rest is the CLI's system prompt, tool
+              schemas, MCP servers and skills — which this app cannot list but can account for. */}
+          {split && (
+            <p className="mt-1.5 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
+              {t("chat.contextSplit", {
+                conversation: formatTokens(split.conversation, locale),
+                overhead: formatTokens(split.overhead, locale),
+              })}
+            </p>
+          )}
 
           {/* What the *next* question actually carries, which is the thing the number is about and
               is different for the two halves of this app's providers. */}

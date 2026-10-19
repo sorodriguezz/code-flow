@@ -6,13 +6,16 @@ import {
   GitBranch,
   GitCompare,
   History,
+  Flag,
   Link2,
+  MessagesSquare,
   MoreHorizontal,
   Pencil,
   Play,
   RotateCcw,
   Send,
   Square,
+  TerminalSquare,
   Trash2,
 } from "lucide-react";
 import { AGENT_STATUS } from "./agentStatus";
@@ -20,6 +23,8 @@ import { AgentModelMenu } from "./AgentModelMenu";
 import { TaskPlanningBar, planningMenuItems } from "./taskPlanning";
 import { ChainStrip } from "./ChainStrip";
 import { ContinueWithModal } from "./ContinueWithModal";
+import { RacePanel } from "./RacePanel";
+import { TaskReviewPanel } from "./TaskReviewPanel";
 import { useChainStore } from "../../state/chainStore";
 import { AiRunLog } from "../ai/AiRunLog";
 import { CheckpointsModal } from "../ai/CheckpointsModal";
@@ -27,18 +32,22 @@ import { ChatMessageBubble } from "../chat/ChatMessageBubble";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { fieldClass, toolbarClass } from "../common/recipes";
+import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
 import { Tooltip } from "../common/Tooltip";
 import { registerDictationSend } from "../../state/dictationStore";
 import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useAiRunStore } from "../../state/aiRunStore";
+import { reviewOf, useTaskReviewStore, type TaskTab } from "../../state/taskReviewStore";
+import { useTerminalStore } from "../../state/terminalStore";
 import { useUiStore } from "../../state/uiStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { scrollBehavior } from "../../lib/motion";
 import { revealInFileManager } from "../../lib/tauri/commands";
+import { openPathAsProject } from "../../lib/openAsProject";
 
 /**
  * One task, open: who is doing it, where, what has been said so far, and the box to say the next
@@ -59,6 +68,10 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
   const focusProject = useWorkspaceStore((s) => s.focusProject);
 
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /** The transcript, or the review of what the agent changed. Reset on every task: a task opened
+   *  from a notification should land on what was said, not on a diff of a repository the reader has
+   *  not placed yet. */
+  const [tab, setTab] = useState<TaskTab>("chat");
   const [continuing, setContinuing] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -78,6 +91,22 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
   // Another task already running in this repository — the Run button waits for it like the
   // composer's send does.
   const repoTaken = useAgentsStore((s) => (task ? s.runningInProject(task.project_id, task.id) !== null : false));
+  /** What the review tab has waiting to be sent — drawn on its segment, so a review left half
+   *  written is visible from the transcript. */
+  const pendingNotes = useTaskReviewStore((s) => {
+    const review = reviewOf(s, taskId);
+    return review.comments.length + (review.general.trim() === "" ? 0 : 1);
+  });
+
+  useEffect(() => setTab("chat"), [taskId]);
+  // «Review this one» in the race panel lands here: it selects the task and leaves a request, which
+  // this consumes. After the reset above, so the request wins over it on the render that arrives
+  // with the new task.
+  const takeOpenRequest = useTaskReviewStore((s) => s.takeOpenRequest);
+  useEffect(() => {
+    const asked = takeOpenRequest(taskId);
+    if (asked) setTab(asked);
+  }, [takeOpenRequest, taskId]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: scrollBehavior() });
@@ -96,6 +125,11 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
   // Once a turn has run, the engine session and the files it touched both belong to this repo. A
   // worktree belongs to the repository it was made from from the start.
   const locked = task.turns > 0 || !!worktree;
+  /** The review replaces the transcript *and* its composer: see `TaskReviewPanel`. Guarded by the
+   *  same condition the control is, so a tab left on the review cannot outlive it. */
+  const reviewing = tab === "review" && repoPath !== "" && task.turns > 0;
+  /** The race this task was started as part of, or `""` — see `lib/agents/race`. */
+  const raceId = (task.batch_id ?? "").trim();
 
   const commitRename = () => {
     if (renaming !== null) void useAgentsStore.getState().rename(taskId, renaming);
@@ -127,23 +161,58 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
       separated: true,
       onClick: () => setContinuing(true),
     },
-    worktree
-      ? {
-          // Its edits are in its own folder, not in the repository's working copy the Changes view
-          // shows; the branch carries them back once committed.
-          label: t("agents.revealWorktree"),
-          icon: FolderOpen,
-          onClick: () => void revealInFileManager(worktree),
-        }
-      : {
-          label: t("agents.openChanges"),
-          icon: GitCompare,
-          // Whatever the agent changed is in that repository's working copy, and reviewing it is the
-          // Changes view's job — reimplementing a diff here would be a second one to keep in step.
-          onClick: () => {
-            void focusProject(task.workspace_id, task.project_id).then(() => setActiveView("changes"));
+    // Whatever the agent changed is in the repository's working copy, and reviewing it there — with
+    // staging, discarding and committing to hand — is the Changes view's job. The review tab beside
+    // the transcript is the other half of the same answer, and the only one a worktree task has.
+    ...(worktree
+      ? [
+          {
+            // The review tab reads the *uncommitted* diff. An agent that committed its work leaves
+            // that clean, and the commits are on the worktree's own branch — which only the git
+            // views can read, and only once the folder is a repository of this workspace.
+            label: t("agents.openWorktreeAsRepo"),
+            icon: GitBranch,
+            onClick: () => {
+              void openPathAsProject(worktree, null, task.worktree_branch || undefined).then(() =>
+                setActiveView("changes"),
+              );
+            },
           },
-        },
+          {
+            // Its edits are in its own folder, not in the repository's working copy the Changes view
+            // shows; the branch carries them back once committed.
+            label: t("agents.revealWorktree"),
+            icon: FolderOpen,
+            onClick: () => void revealInFileManager(worktree),
+          },
+        ]
+      : [
+          {
+            label: t("agents.openChanges"),
+            icon: GitCompare,
+            onClick: () => {
+              void focusProject(task.workspace_id, task.project_id).then(() => setActiveView("changes"));
+            },
+          },
+        ]),
+    ...(repoPath
+      ? [
+          {
+            // A shell standing where the agent worked: the one thing a reviewer reaches for that
+            // neither the diff nor the transcript can do — run the tests, see it fail, say so.
+            label: t("agents.openTerminalHere"),
+            icon: TerminalSquare,
+            onClick: () => {
+              void focusProject(task.workspace_id, task.project_id).then(async () => {
+                await useTerminalStore
+                  .getState()
+                  .openNew(task.project_id, repoPath, { title: task.worktree_branch || repo?.name });
+                setActiveView("changes");
+              });
+            },
+          },
+        ]
+      : []),
     // Every turn takes a restore point before it edits anything; this is where an agent's edits are
     // undone from, without leaving the task for the AI panel. The same list the panel opens.
     ...(repoPath
@@ -201,6 +270,39 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
           </button>
         )}
 
+        {/* Only once there is something beside the transcript to look at: a task on its first turn
+            has no diff, and a control whose other half is always empty teaches the wrong thing
+            about where changes show up. A racer is the exception — its race is worth reading before
+            it has said anything itself. */}
+        {(raceId !== "" || (repoPath !== "" && task.turns > 0)) && (
+          <Segmented
+            size="sm"
+            layoutId={`task-tab-${taskId}`}
+            value={tab}
+            onChange={setTab}
+            ariaLabel={t("agents.review.tabs")}
+            options={[
+              { value: "chat", icon: MessagesSquare, title: t("agents.review.conversation") },
+              {
+                value: "review",
+                icon: GitCompare,
+                title: t("agents.review.tab"),
+                // A task that has not run has nothing to review; its race may still have.
+                disabled: repoPath === "" || task.turns === 0,
+                label:
+                  pendingNotes > 0 ? (
+                    <span className="tabular-nums">{pendingNotes}</span>
+                  ) : undefined,
+              },
+              // Only for a task that was started as one of several on the same goal: there is
+              // nothing to compare a task against itself.
+              ...(raceId !== ""
+                ? [{ value: "race" as const, icon: Flag, title: t("agents.race.tab") }]
+                : []),
+            ]}
+          />
+        )}
+
         <span className={`flex shrink-0 items-center gap-1.5 text-[12px] font-medium ${color}`}>
           <StatusIcon size={14} />
           <span className="truncate">{t(labelKey)}</span>
@@ -252,48 +354,55 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
       <TaskPlanningBar task={task} />
       <ChainStrip taskId={taskId} />
 
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        {/* One column of a readable width, like every transcript in the app. */}
-        <div className="mx-auto w-full max-w-[760px] space-y-3.5">
-          {messages.length === 0 && !sending && (
-            <div className="rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3.5 py-3">
-              <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--cf-text-muted)]">{task.goal}</p>
-              {/* A task that has never run — its first turn was refused because the repository was
-                  busy, or it was never sent — has its goal on screen and nothing that sends it. The
-                  composer below would work, but only by retyping the goal into it. */}
-              {task.turns === 0 && live?.loaded !== false && (
-                <Tooltip label={repoTaken ? t("agents.busyInRepo", { name: repo?.name ?? "" }) : t("agents.runTaskHint")}>
-                  <button
-                    type="button"
-                    disabled={repoTaken || !task.goal.trim()}
-                    onClick={() => void useAgentsStore.getState().send(taskId, task.goal)}
-                    className={buttonClass({ variant: "primary", size: "sm", className: "mt-2.5" })}
-                  >
-                    <Play size={12} />
-                    {t("agents.runTask")}
-                  </button>
-                </Tooltip>
+      {tab === "race" && raceId !== "" ? (
+        <RacePanel batchId={raceId} />
+      ) : reviewing ? (
+        <TaskReviewPanel taskId={taskId} repoPath={repoPath} />
+      ) : (
+        <>
+          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+            {/* One column of a readable width, like every transcript in the app. */}
+            <div className="mx-auto w-full max-w-[760px] space-y-3.5">
+              {messages.length === 0 && !sending && (
+                <div className="rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3.5 py-3">
+                  <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--cf-text-muted)]">{task.goal}</p>
+                  {/* A task that has never run — its first turn was refused because the repository was
+                      busy, or it was never sent — has its goal on screen and nothing that sends it. The
+                      composer below would work, but only by retyping the goal into it. */}
+                  {task.turns === 0 && live?.loaded !== false && (
+                    <Tooltip label={repoTaken ? t("agents.busyInRepo", { name: repo?.name ?? "" }) : t("agents.runTaskHint")}>
+                      <button
+                        type="button"
+                        disabled={repoTaken || !task.goal.trim()}
+                        onClick={() => void useAgentsStore.getState().send(taskId, task.goal)}
+                        className={buttonClass({ variant: "primary", size: "sm", className: "mt-2.5" })}
+                      >
+                        <Play size={12} />
+                        {t("agents.runTask")}
+                      </button>
+                    </Tooltip>
+                  )}
+                </div>
+              )}
+              {messages.map((message, i) => (
+                // The panel's own bubble, lifted into `components/chat` and shared by all three
+                // transcripts. `stamp="compact"` is what this thread has always drawn: the header above
+                // already names the agent, the repository and the model, and repeating the duration and
+                // the CLI version under every turn was noise here in a way it is not in the AI panel.
+                <ChatMessageBubble key={i} message={message} stamp="compact" />
+              ))}
+              {sending && live?.runId && (
+                <AiRunLog
+                  runId={live.runId}
+                  running
+                  startedAt={live.runStartedAt}
+                />
               )}
             </div>
-          )}
-          {messages.map((message, i) => (
-            // The panel's own bubble, lifted into `components/chat` and shared by all three
-            // transcripts. `stamp="compact"` is what this thread has always drawn: the header above
-            // already names the agent, the repository and the model, and repeating the duration and
-            // the CLI version under every turn was noise here in a way it is not in the AI panel.
-            <ChatMessageBubble key={i} message={message} stamp="compact" />
-          ))}
-          {sending && live?.runId && (
-            <AiRunLog
-              runId={live.runId}
-              running
-              startedAt={live.runStartedAt}
-            />
-          )}
-        </div>
-      </div>
-
-      <AgentComposer taskId={taskId} />
+          </div>
+          <AgentComposer taskId={taskId} />
+        </>
+      )}
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={overflow} onClose={() => setMenu(null)} />}
       {continuing && <ContinueWithModal taskId={taskId} onClose={() => setContinuing(false)} />}

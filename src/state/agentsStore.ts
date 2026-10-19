@@ -214,6 +214,8 @@ interface AgentsState {
     agentProjectId?: string;
     /** Run in a worktree of its own, so it never shares files with another task. */
     worktree?: boolean;
+    /** The race this task is part of — see `AgentTask.batch_id`. */
+    batch?: string;
   }) => Promise<AgentTask>;
   /** Adds a task created outside this store (a chain step). Unlike `create` it does **not** touch
    * `selectedId`: a background step must not yank the detail pane out from under the user. */
@@ -432,7 +434,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     });
   },
 
-  create: async ({ projectId, agent, goal, agentProjectId, worktree }) => {
+  create: async ({ projectId, agent, goal, agentProjectId, worktree, batch }) => {
     const workspaceId = get().workspaceId;
     if (!workspaceId) throw new Error("no workspace");
     const task = await createAgentTask(
@@ -448,6 +450,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       agentProjectId ?? "",
       agent.account_id ?? null,
       worktree ?? false,
+      batch ?? null,
     );
     // Newest first, matching the backend's ordering so the list doesn't reshuffle on next load.
     set((s) => ({

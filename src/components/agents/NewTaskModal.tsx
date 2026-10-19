@@ -30,7 +30,7 @@ import { isRunnableAgent, useAgentsStore } from "../../state/agentsStore";
 import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
-import type { AgentTask, HybridTemplateConfig } from "../../types/domain";
+import type { AgentTask, HybridTemplateConfig, WorkspaceAgent } from "../../types/domain";
 
 /** Mirrors `queries::MAX_CHAIN_REPOS`, and for the same reason rather than by coincidence: what a
  * ceiling here bounds is how many engine sessions one press of a button starts. */
@@ -119,6 +119,16 @@ export function NewTaskModal({
       (activeProjectId && projects.some((p) => p.id === activeProjectId) ? activeProjectId : projects[0]?.id) ?? "";
     return first ? [first] : [];
   });
+  /**
+   * The other agents to hand this same goal to — a "race".
+   *
+   * Empty is the ordinary case and changes nothing. With one or more picked, the dialog creates one
+   * task per agent against the *one* ticked repository, each in a worktree of its own and all
+   * stamped with the same `batch_id`, so the results can be compared side by side afterwards. The
+   * worktree is not optional there: the app runs one agent at a time per working copy, so without
+   * one the racers would politely queue instead of racing.
+   */
+  const [extraAgentIds, setExtraAgentIds] = useState<string[]>([]);
   const [agentProjectId, setAgentProjectId] = useState(() =>
     agentProjects.some((p) => p.id === initialAgentProjectId) ? initialAgentProjectId : "",
   );
@@ -242,6 +252,22 @@ export function NewTaskModal({
 
   const direct = hybrid && projectIds.length === 1 && triage?.direct === true && !forcePlan;
 
+  /** Several agents can be raced only against one repository: a race is read as columns, and one
+   *  column per (agent × repository) is a grid nobody can compare. */
+  const canRace = !hybrid && projectIds.length === 1;
+  /** The agents of the race, in the order the columns will be drawn: the chosen one first. */
+  const racers = canRace
+    ? [
+        agent,
+        // Never the chosen agent twice: picking an extra and then making *it* the main agent used
+        // to leave its id in both lists, which would have created the same task two times.
+        ...extraAgentIds
+          .filter((id) => id !== agentId)
+          .map((id) => runnable.find((a) => a.id === id) ?? null),
+      ].filter((candidate): candidate is WorkspaceAgent => candidate !== null)
+    : [];
+  const racing = racers.length > 1;
+
   const canStart =
     !starting &&
     agent !== null &&
@@ -309,9 +335,27 @@ export function NewTaskModal({
       // a failed create with turns already running in it; this way the only thing a failure can
       // leave is tasks that have said nothing, which is what closing the dialog leaves anyway.
       const created: AgentTask[] = [];
+      // One task per repository, as before — or, in a race, one task per agent against the single
+      // ticked repository. The two cannot be combined; `canRace` is what says so.
+      const plan = racing
+        ? racers.map((racer) => ({ projectId: projectIds[0], agent: racer }))
+        : projectIds.map((projectId) => ({ projectId, agent }));
+      // Stamped once, here, because it is what makes these tasks one race — see `lib/agents/race`.
+      const batch = racing ? crypto.randomUUID() : undefined;
       try {
-        for (const projectId of projectIds) {
-          created.push(await store.create({ projectId, agent, goal, agentProjectId, worktree }));
+        for (const step of plan) {
+          created.push(
+            await store.create({
+              projectId: step.projectId,
+              agent: step.agent,
+              goal,
+              agentProjectId,
+              // Forced in a race: the app runs one agent at a time per working copy, so racers
+              // without a worktree each would take turns instead of racing.
+              worktree: racing ? true : worktree,
+              batch,
+            }),
+          );
         }
       } catch (error) {
         // A worktree git refused (a branch of that name, a locked index): the task was not made.
@@ -500,6 +544,52 @@ export function NewTaskModal({
           />
         </Field>
 
+        {/* The race. Under the agent field because it is the same question asked again — who does
+            this — and above the repository field because what it needs from that field (exactly
+            one) is the hint it carries. Left out in hybrid mode: that run already has two engines
+            with defined roles, and a third would not be a racer. */}
+        {!hybrid && runnable.length > 1 && (
+          <Field
+            label={t("agents.race.agents")}
+            hint={canRace ? t("agents.race.agentsHint") : t("agents.race.oneRepoOnly")}
+          >
+            <div className="max-h-32 space-y-1 overflow-y-auto rounded-md border border-[var(--cf-border)] px-2 py-1.5">
+              {runnable
+                .filter((candidate) => candidate.id !== agentId)
+                .map((candidate) => (
+                  <label
+                    key={candidate.id}
+                    className={`flex items-center gap-1.5 text-[12px] text-[var(--cf-text)] ${
+                      canRace ? "cursor-pointer" : "cursor-default opacity-50"
+                    }`}
+                  >
+                    <Checkbox
+                      checked={extraAgentIds.includes(candidate.id)}
+                      disabled={!canRace || !isProviderReady(statuses, candidate.provider)}
+                      onChange={() =>
+                        setExtraAgentIds((current) =>
+                          current.includes(candidate.id)
+                            ? current.filter((kept) => kept !== candidate.id)
+                            : [...current, candidate.id],
+                        )
+                      }
+                    />
+                    <ProviderGlyph providerId={candidate.provider} size={13} />
+                    <span className="min-w-0 truncate">
+                      {candidate.name || t("settings.sddNewAgent")} —{" "}
+                      {modelDisplayLabel(candidate.provider, candidate.model, t)}
+                    </span>
+                  </label>
+                ))}
+            </div>
+            {racing && (
+              <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+                {t("agents.race.needsWorktree")}
+              </p>
+            )}
+          </Field>
+        )}
+
         {hybrid && (
           <Field
             label={t("agents.hybridLocalLabel")}
@@ -589,9 +679,15 @@ export function NewTaskModal({
             })}
           </div>
           {!hybrid && (
-            <Tooltip label={t("agents.worktreeHint")}>
-              <label className="mt-1.5 flex w-fit cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text)]">
-                <Checkbox checked={worktree} onChange={setWorktree} />
+            // Ticked and locked in a race: it is what makes the racers independent, and a user who
+            // could untick it would get a queue instead of a race. The reason is said above it.
+            <Tooltip label={racing ? t("agents.race.needsWorktree") : t("agents.worktreeHint")}>
+              <label
+                className={`mt-1.5 flex w-fit items-center gap-2 text-[12px] text-[var(--cf-text)] ${
+                  racing ? "cursor-default" : "cursor-pointer"
+                }`}
+              >
+                <Checkbox checked={racing || worktree} disabled={racing} onChange={setWorktree} />
                 {t("agents.worktree")}
               </label>
             </Tooltip>

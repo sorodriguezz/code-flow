@@ -17,6 +17,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
+import { Flag } from "lucide-react";
 import { AiWand } from "../common/AiGlyph";
 import { AGENT_STATUS } from "./agentStatus";
 import { chainRollup } from "./chainStatus";
@@ -43,6 +44,8 @@ import type {
 } from "../../types/domain";
 import { blankChainStep } from "../../types/domain";
 import { agentName } from "./agentName";
+import { groupRaces, raceStamp, raceStatus, type RaceGroup } from "../../lib/agents/race";
+import { useTaskReviewStore } from "../../state/taskReviewStore";
 import { PriorityFlag, planningMenuItems, planningMeta } from "./taskPlanning";
 
 /**
@@ -53,11 +56,38 @@ import { PriorityFlag, planningMenuItems, planningMeta } from "./taskPlanning";
  * placement decision below — pinned, filed, loose — is made on this and never on the two kinds
  * separately, so the two can never disagree about which section they live in.
  */
-type Item = { kind: "chain"; chain: AgentChain } | { kind: "task"; task: AgentTask };
+type Item =
+  | { kind: "chain"; chain: AgentChain }
+  | { kind: "race"; race: RaceGroup }
+  | { kind: "task"; task: AgentTask };
 
-const itemGroup = (item: Item) => (item.kind === "chain" ? item.chain.agent_project_id : item.task.agent_project_id);
-const itemPinned = (item: Item) => (item.kind === "chain" ? item.chain.pinned : item.task.pinned);
-const itemStamp = (item: Item) => (item.kind === "chain" ? item.chain.updated_at : item.task.updated_at);
+/**
+ * Where an item lives, and when it last moved.
+ *
+ * A race has no row of its own in the database — it is its tasks and nothing else — so all three
+ * answers are read off them. **Filed** is the first racer's folder, which is the folder every one of
+ * them was created in. **Pinned** is any of them: the alternative, a race whose pinned racer is
+ * drawn in the pinned section while the rest stay below, is the one thing this list refuses —
+ * a row in two places is a row you act on twice.
+ */
+const itemGroup = (item: Item) =>
+  item.kind === "chain"
+    ? item.chain.agent_project_id
+    : item.kind === "race"
+      ? (item.race.tasks[0]?.agent_project_id ?? "")
+      : item.task.agent_project_id;
+const itemPinned = (item: Item) =>
+  item.kind === "chain"
+    ? item.chain.pinned
+    : item.kind === "race"
+      ? item.race.tasks.some((task) => task.pinned)
+      : item.task.pinned;
+const itemStamp = (item: Item) =>
+  item.kind === "chain"
+    ? item.chain.updated_at
+    : item.kind === "race"
+      ? raceStamp(item.race)
+      : item.task.updated_at;
 
 /** Which row a menu belongs to. The kind travels with the id because the four row kinds have four
  * different menus and three of them can share an id space only by accident. */
@@ -160,9 +190,15 @@ export function TaskTree({
           brief.instruction.toLowerCase().includes(needle),
       );
     };
+    // Races, out of whatever the search left: a plan's step wins over a race, and a race of one
+    // survivor is no race — see `groupRaces`.
+    const { races, memberOf } = groupRaces(tasks, new Set(owner.keys()));
     const rows: Item[] = [
       ...chains.filter(keeps).map((chain) => ({ kind: "chain" as const, chain })),
-      ...tasks.filter((task) => !owner.has(task.id)).map((task) => ({ kind: "task" as const, task })),
+      ...races.map((race) => ({ kind: "race" as const, race })),
+      ...tasks
+        .filter((task) => !owner.has(task.id) && !memberOf.has(task.id))
+        .map((task) => ({ kind: "task" as const, task })),
     ];
     rows.sort((a, b) => itemStamp(b).localeCompare(itemStamp(a)));
     return { items: rows, chainOfTask: owner };
@@ -223,6 +259,17 @@ export function TaskTree({
         chip={chip}
         onToggle={() => toggleOpen(`chain:${item.chain.id}`)}
         onMenu={(x, y) => setMenu({ x, y, kind: "chain", id: item.chain.id })}
+        onTaskMenu={taskMenu}
+      />
+    ) : item.kind === "race" ? (
+      <RaceGroupRow
+        key={item.race.batchId}
+        race={item.race}
+        expanded={needle !== "" || isOpen(`race:${item.race.batchId}`)}
+        depth={depth}
+        at={at}
+        chip={chip}
+        onToggle={() => toggleOpen(`race:${item.race.batchId}`)}
         onTaskMenu={taskMenu}
       />
     ) : renaming?.kind === "task" && renaming.id === item.task.id ? (
@@ -599,6 +646,87 @@ function Chevron({ expanded, onClick }: { expanded: boolean; onClick: () => void
 }
 
 /**
+ * A race, and — opened — the agents running it.
+ *
+ * The label is the **objective**, like a chain's and for the same reason: every racer carries the
+ * same goal, and their own titles are that goal repeated three times. What the row adds is how many
+ * agents are on it and where they all stand, which is the only question a collapsed race raises.
+ *
+ * Clicking it opens the comparison rather than one of the tasks: a race is a thing you read side by
+ * side, and landing on whichever racer happens to be first would be landing on an answer instead of
+ * on the question. It carries no menu of its own — see `Row`'s `onMenu` — because there is nothing
+ * to do to a race that is not done to one of its tasks, and those rows are one indent below.
+ */
+function RaceGroupRow({
+  race,
+  expanded,
+  depth,
+  at,
+  chip,
+  onToggle,
+  onTaskMenu,
+}: {
+  race: RaceGroup;
+  expanded: boolean;
+  depth: number;
+  at: number;
+  chip?: string;
+  onToggle: () => void;
+  onTaskMenu: (x: number, y: number, taskId: string) => void;
+}) {
+  const t = useT();
+  const first = race.tasks[0] ?? null;
+  // Primitives out of both selectors: this row is redrawn whenever any task's live state moves —
+  // see the note on `TaskRowBase` — and a race mid-run has every one of its agents streaming.
+  const selected = useAgentsStore((s) => race.tasks.some((task) => task.id === s.selectedId));
+  const status = useAgentsStore((s) =>
+    raceStatus(race.tasks, new Set(Object.keys(s.live).filter((id) => s.live[id]?.sending))),
+  );
+  const repoName = useRepoName(first?.project_id ?? "");
+  const { color, labelKey } = AGENT_STATUS[status];
+  const goal = (first?.goal ?? "").trim().split("\n")[0];
+
+  return (
+    <div>
+      <Row
+        selected={selected}
+        depth={depth}
+        at={at}
+        chip={chip}
+        pinned={race.tasks.some((task) => task.pinned)}
+        title={first?.goal ?? ""}
+        label={goal || t("agents.race.tab")}
+        meta={[t("agents.race.agentsN", { n: race.tasks.length }), t(labelKey), repoName]
+          .filter(Boolean)
+          .join(" · ")}
+        glyph={status === "running" ? <ThinkingOrb size="sm" /> : <Flag size={14} className={color} />}
+        leading={<Chevron expanded={expanded} onClick={onToggle} />}
+        onClick={() => {
+          if (!first) return;
+          // The request first: `select` is what re-renders the detail pane, and the pane reads the
+          // request as it lands on this task.
+          useTaskReviewStore.getState().requestTab(first.id, "race");
+          void useAgentsStore.getState().select(first.id);
+        }}
+      />
+      {expanded &&
+        race.tasks.map((task, index) => (
+          <TaskRow
+            key={task.id}
+            task={task}
+            depth={depth + 1}
+            at={index}
+            // One orb per run, as under a chain: the race's own row wears it while any racer is
+            // working, so each racer shows the static mark.
+            orb={false}
+            onMenu={onTaskMenu}
+          />
+        ))}
+    </div>
+  );
+}
+
+/**
  * A chain, and — opened — the work it produced.
  *
  * The label is the **objective**, not the chain's name: the name is usually the ticket, and what you
@@ -756,7 +884,17 @@ function TaskRowBase({
       title={task.goal || task.title}
       label={task.title || t("agents.newTask")}
       flag={<PriorityFlag priority={task.priority} />}
-      meta={[agentName(task.agent_name, task.provider, t), repoName, ...planningMeta(task, t), when].filter(Boolean).join(" · ")}
+      meta={[
+        agentName(task.agent_name, task.provider, t),
+        // Which working copy, not just which repository: two tasks on one repository are the same
+        // row until one of them says it is in a worktree of its own, and that is exactly the pair
+        // the branch tells apart.
+        task.worktree_branch ? `${repoName} (${task.worktree_branch})` : repoName,
+        ...planningMeta(task, t),
+        when,
+      ]
+        .filter(Boolean)
+        .join(" · ")}
       glyph={status === "running" && orb ? <ThinkingOrb size="sm" /> : <Icon size={14} className={color} />}
       menuLabel={t("api.moreActions")}
       onClick={() => {

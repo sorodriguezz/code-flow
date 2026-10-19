@@ -89,6 +89,36 @@ export function contextFraction(tokens: number, window: number | null): number |
   return Math.min(1, tokens / window);
 }
 
+/** What a measured prompt is made of: the conversation itself, and everything the CLI puts around
+ *  it. */
+export interface ContextSplit {
+  /** The transcript — what this app can count for itself. */
+  conversation: number;
+  /** Everything else inside the engine's own report: its system prompt, the tool schemas, the MCP
+   *  servers and skills it loaded. */
+  overhead: number;
+}
+
+/**
+ * The measured prompt split into the conversation and the overhead around it.
+ *
+ * This is the one question the number on its own cannot answer: why `/context` in a terminal says
+ * 60k where the app says 39k for a conversation of the same length. The answer is almost never the
+ * transcript — it is the tool schemas, MCP servers and skills that session loaded, which this app
+ * cannot enumerate but *can* account for, as the part of the engine's own figure the transcript
+ * does not explain.
+ *
+ * `null` when there is nothing to split: no measurement, nothing counted, or an estimate that
+ * already meets or exceeds the measurement — in which case the honest answer is that the overhead
+ * is unknown rather than zero.
+ */
+export function contextSplit(measured: number | null, conversationEstimate: number): ContextSplit | null {
+  if (measured === null || measured <= 0 || conversationEstimate <= 0) return null;
+  const overhead = measured - conversationEstimate;
+  if (overhead <= 0) return null;
+  return { conversation: conversationEstimate, overhead };
+}
+
 /** Where the meter stops being decoration and starts being a warning. Two thirds is early enough
  *  that a compaction still has a conversation worth summarising, and late enough that an ordinary
  *  exchange never sees it. */

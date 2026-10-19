@@ -405,7 +405,17 @@ export function ChatView() {
     const cut = conversation.compactedThroughTurn;
     const summary = conversation.compactedSummary ?? "";
     const replayed = cut === null ? session.messages : session.messages.filter((m) => m.turn > cut);
-    const measured = conversation.contextTokens ?? null;
+    /**
+     * The row keeps the last measurement there has ever been, and the session knows whether the
+     * *last turn* produced one — see `ConversationSession.contextTokens`. Preferring the live
+     * figure and marking the row's as stale is what stopped the meter from showing one frozen
+     * number, presented as exact, for every turn after an engine went quiet about its usage.
+     */
+    const live = session.contextTokens;
+    const row = conversation.contextTokens ?? null;
+    const measured = live ?? row;
+    const stale = live === null && row !== null;
+    const estimated = estimateTokens([summary, ...replayed.map((m) => m.content)].filter(Boolean).join("\n\n"));
     const window = windowByModel[model] ?? null;
     // Both halves, because either one alone is wrong: a provider that cannot resume never has a
     // token, and a provider that can may still be starting fresh — which is exactly the state a
@@ -413,10 +423,12 @@ export function ChatView() {
     const resumes =
       providerCapabilities(session.provider).resumesSessions && Boolean(session.sessionId);
     return {
-      tokens:
-        measured ??
-        estimateTokens([summary, ...replayed.map((m) => m.content)].filter(Boolean).join("\n\n")),
+      tokens: measured ?? estimated,
       measured: measured !== null,
+      stale,
+      // What the transcript itself accounts for, so the panel can say how much of a measured prompt
+      // is the conversation and how much is the engine's own furniture.
+      conversationTokens: estimated,
       window,
       resumes,
       /*
@@ -444,6 +456,7 @@ export function ChatView() {
     session.messages,
     session.provider,
     session.sessionId,
+    session.contextTokens,
     model,
     windowByModel,
     autoCompactEnabled,

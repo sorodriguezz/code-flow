@@ -3,6 +3,7 @@ import {
   CONTEXT_FULL_AT,
   CONTEXT_WARN_AT,
   contextFraction,
+  contextSplit,
   estimateTokens,
   formatTokens,
 } from "./contextWindow";
@@ -72,5 +73,31 @@ describe("the thresholds", () => {
     // conversation that still fits in a turn of its own.
     expect(CONTEXT_WARN_AT).toBeLessThan(CONTEXT_FULL_AT);
     expect(CONTEXT_FULL_AT).toBeLessThan(1);
+  });
+});
+
+/**
+ * The split is what answers "why does `/context` in a terminal say half as much again as this app
+ * does for a conversation of the same length": the difference is the CLI's own tools and skills,
+ * not the transcript. It must never invent an overhead it cannot stand behind.
+ */
+describe("contextSplit", () => {
+  it("accounts for the part of the measurement the transcript does not explain", () => {
+    expect(contextSplit(60_000, 29_000)).toEqual({ conversation: 29_000, overhead: 31_000 });
+  });
+
+  it("says nothing when there is no measurement to split", () => {
+    expect(contextSplit(null, 29_000)).toBeNull();
+  });
+
+  it("says nothing when nothing has been counted", () => {
+    expect(contextSplit(60_000, 0)).toBeNull();
+  });
+
+  /** An estimate at or above the measurement means the estimate is wrong, not that the CLI loaded
+   *  no tools at all. */
+  it("refuses to claim an overhead of zero or less", () => {
+    expect(contextSplit(30_000, 30_000)).toBeNull();
+    expect(contextSplit(30_000, 44_000)).toBeNull();
   });
 });

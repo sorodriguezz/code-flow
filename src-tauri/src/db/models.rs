@@ -197,6 +197,10 @@ pub struct AgentTask {
     /// The [`AgentProject`] this is filed under, or `""` for none. Organisation only — it never
     /// changes which repository a turn runs in.
     pub agent_project_id: String,
+    /// The race this was started as part of, or `""` for a task started on its own: several agents
+    /// handed one goal, each in a worktree of its own, to be compared afterwards.
+    #[serde(default)]
+    pub batch_id: String,
     /// Whether the list keeps it in its pinned section, wherever else it lives.
     pub pinned: bool,
     pub conversation_id: String,

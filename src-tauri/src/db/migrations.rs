@@ -274,6 +274,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             title           TEXT NOT NULL DEFAULT '',
             -- The `agent_projects` folder this is filed under, or '' when it is filed nowhere.
             agent_project_id TEXT NOT NULL DEFAULT '',
+            -- The race this task was started as part of, or '' for a task started on its own. Every
+            -- task of one race carries the same id: same goal, same repository, one worktree each,
+            -- so their results can be read side by side. See `add_batch_to_agent_tasks`.
+            batch_id        TEXT NOT NULL DEFAULT '',
             -- Whether the list keeps it in its pinned section, wherever else it lives.
             pinned          INTEGER NOT NULL DEFAULT 0,
             -- The app's own conversation id; `activity_log.session_id` for every turn of this task.
@@ -2017,6 +2021,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_checkpoint_to_activity_log(conn)?;
     add_chat_turn_checkpoints(conn)?;
     add_notes_fts(conn)?;
+    add_batch_to_agent_tasks(conn)?;
     Ok(())
 }
 
@@ -2328,6 +2333,19 @@ pub(crate) fn add_repo_origin_to_notes(conn: &Connection) -> rusqlite::Result<()
             "CREATE INDEX IF NOT EXISTS idx_notes_origin \
              ON notes (origin_project_id, origin_path) WHERE origin_path <> '';",
         )?;
+    }
+    Ok(())
+}
+
+/// Several agents on one goal, each in its own worktree — a "race", whose results are compared and
+/// one of them kept. The tasks of a race are otherwise ordinary tasks; this id is the only thing
+/// that says they belong together, and it is deliberately not a foreign key: the race is a fact
+/// about how they were started, and deleting one of them must leave the rest readable.
+///
+/// Belt-and-braces with the `CREATE TABLE` above, the same as [`add_repo_origin_to_notes`].
+pub(crate) fn add_batch_to_agent_tasks(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "agent_tasks")? && !has_column(conn, "agent_tasks", "batch_id")? {
+        conn.execute_batch("ALTER TABLE agent_tasks ADD COLUMN batch_id TEXT NOT NULL DEFAULT '';")?;
     }
     Ok(())
 }

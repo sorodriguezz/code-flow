@@ -540,9 +540,13 @@ export function PanelChat({
     const since = session.messages.map((m) => !!m.contextReset).lastIndexOf(true);
     const counted = (since < 0 ? session.messages : session.messages.slice(since)).map((m) => m.content).join("\n\n");
     const measured = session.resetPending ? null : session.contextTokens;
+    const estimated = estimateTokens(counted);
     return {
-      tokens: measured ?? estimateTokens(counted),
+      tokens: measured ?? estimated,
       measured: measured !== null,
+      // So the panel can say how much of a measured prompt is the conversation and how much is the
+      // CLI's own system prompt, tools and skills — see `contextSplit`.
+      conversationTokens: estimated,
       window: meterModel ? (windowByModel[meterModel] ?? null) : null,
       resumes: providerCapabilities(provider).resumesSessions && Boolean(session.sessionId) && !session.resetPending,
       compactedTurns: 0,

@@ -444,6 +444,22 @@ export interface ConversationSession {
   effort: string;
   /** The engine's resume token from the most recent turn; `null` starts a fresh engine session. */
   sessionId: string | null;
+  /**
+   * What the **last turn of this session** reported its prompt to be, which is a different fact
+   * from the figure on the conversation row.
+   *
+   * The row keeps the last measurement there has ever been: `update_session` writes
+   * `COALESCE(?5, context_tokens)`, so a turn that reported nothing — any engine but Claude, a run
+   * whose output format carried no usage — leaves the previous turn's number in place. That is the
+   * right thing to store and the wrong thing to present as current, and the difference was
+   * invisible to the meter, which read the row and called every number it found "measured". A
+   * conversation whose engine goes quiet then showed one frozen figure for the rest of its life.
+   *
+   * So: `undefined` when no turn has run in this session (the row is as fresh as it gets), `null`
+   * when the last turn ran and said nothing (the row is now behind by at least that turn), and a
+   * number when the last turn measured itself.
+   */
+  contextTokens?: number | null;
   messages: ConversationMessage[];
   /** Whether the transcript in `messages` came from disk. A row that only ever came from the
    *  sidebar list is a stub with no messages, and must not be mistaken for an empty conversation. */
@@ -1517,6 +1533,9 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           sessionId: reply.session_id,
           model: reply.model ?? current.model,
           accountId: reply.account_id !== undefined ? reply.account_id : current.accountId,
+          // `null` and not `?? current.contextTokens`: a turn that said nothing is exactly what the
+          // meter has to know about — see `ConversationSession.contextTokens`.
+          contextTokens: reply.context_tokens ?? null,
           sending: false,
           runId: null,
           runStartedAt: null,
@@ -2134,7 +2153,10 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         byConversation: s.byConversation[conversationId]
           ? {
               ...s.byConversation,
-              [conversationId]: { ...s.byConversation[conversationId], sessionId: null },
+              // `contextTokens` with it: the last turn's measurement describes the turns the
+              // summary just replaced, so leaving it would have the meter report a prompt that no
+              // longer exists — on this side as well as on the row's.
+              [conversationId]: { ...s.byConversation[conversationId], sessionId: null, contextTokens: undefined },
             }
           : s.byConversation,
       }));

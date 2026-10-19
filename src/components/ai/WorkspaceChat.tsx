@@ -277,9 +277,11 @@ export function WorkspaceChat({
     // start — unlike the repository chat, which slices from its last reset.
     const counted = session.messages.map((m) => m.content).join("\n\n");
     const measured = session.contextTokens;
+    const estimated = estimateTokens(counted);
     return {
-      tokens: measured ?? estimateTokens(counted),
+      tokens: measured ?? estimated,
       measured: measured !== null,
+      conversationTokens: estimated,
       window: meterModel ? (windowByModel[meterModel] ?? null) : null,
       resumes: providerCapabilities(session.provider || provider).resumesSessions && Boolean(session.engineSessionId),
       compactedTurns: 0,

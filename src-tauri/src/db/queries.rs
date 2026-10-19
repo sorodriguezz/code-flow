@@ -1275,7 +1275,7 @@ pub const AGENT_CONVERSATION_PREFIX: &str = "agent-";
 const AGENT_TASK_COLUMNS: &str = "id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt, \
      goal, title, conversation_id, status, turns, last_error, created_at, updated_at, \
      agent_project_id, pinned, account_id, worktree_path, worktree_branch, priority, due_date, labels, archived, \
-     input_tokens, output_tokens, cost_usd, costed_turns";
+     input_tokens, output_tokens, cost_usd, costed_turns, batch_id";
 
 fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
     Ok(AgentTask {
@@ -1308,6 +1308,7 @@ fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
         output_tokens: row.get(26)?,
         cost_usd: row.get(27)?,
         costed_turns: row.get(28)?,
+        batch_id: row.get(29)?,
     })
 }
 
@@ -1364,6 +1365,7 @@ pub fn create_agent_task(
         agent_project_id,
         account_id,
         ("", ""),
+        "",
     )
 }
 
@@ -1385,6 +1387,7 @@ pub fn create_agent_task_with_id(
     agent_project_id: &str,
     account_id: Option<&str>,
     (worktree_path, worktree_branch): (&str, &str),
+    batch_id: &str,
 ) -> rusqlite::Result<AgentTask> {
     let stamp = now();
     let task = AgentTask {
@@ -1417,12 +1420,13 @@ pub fn create_agent_task_with_id(
         output_tokens: 0,
         cost_usd: 0.0,
         costed_turns: 0,
+        batch_id: batch_id.to_string(),
     };
     conn.execute(
         "INSERT INTO agent_tasks (id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt,
             goal, title, conversation_id, status, turns, last_error, created_at, updated_at, agent_project_id,
-            account_id, worktree_path, worktree_branch)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            account_id, worktree_path, worktree_branch, batch_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             task.id,
             task.workspace_id,
@@ -1444,6 +1448,7 @@ pub fn create_agent_task_with_id(
             task.account_id,
             task.worktree_path,
             task.worktree_branch,
+            task.batch_id,
         ],
     )?;
     Ok(task)
@@ -7421,6 +7426,56 @@ ok", "").unwrap().unwrap();
 
         delete_chain(&conn, &chain_id).unwrap();
         assert!(list_agent_tasks(&conn, &workspace).unwrap().is_empty(), "and none of them outlive the plan");
+    }
+
+    /// A race is several tasks that only a shared id says belong together, so that id has to
+    /// survive the round trip through SQLite — and a task started on its own has to come back
+    /// without one, rather than joining whatever race was stamped last.
+    #[test]
+    fn a_races_tasks_come_back_carrying_the_race() {
+        let (conn, project) = fixture();
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+
+        let mut racers = Vec::new();
+        for (at, agent) in [("1", "Uno"), ("2", "Dos")] {
+            racers.push(
+                create_agent_task_with_id(
+                    &conn,
+                    &format!("task-{at}"),
+                    &workspace,
+                    &project,
+                    "a",
+                    agent,
+                    "claude",
+                    "sonnet",
+                    "",
+                    "arregla el login",
+                    "arregla el login",
+                    "",
+                    None,
+                    (&format!("/wt/{at}"), &format!("agent/{at}")),
+                    "race-1",
+                )
+                .unwrap(),
+            );
+        }
+        let alone =
+            create_agent_task(&conn, &workspace, &project, "a", "Bot", "claude", "sonnet", "", "otra cosa", "otra cosa", "", None)
+                .unwrap();
+
+        assert!(racers.iter().all(|task| task.batch_id == "race-1"));
+        assert_eq!(alone.batch_id, "", "a task started on its own belongs to no race");
+
+        let read = list_agent_tasks(&conn, &workspace).unwrap();
+        let of_race: Vec<_> = read.iter().filter(|task| task.batch_id == "race-1").collect();
+        assert_eq!(of_race.len(), 2, "both racers come back with the race on them");
+        assert_eq!(
+            read.iter().find(|task| task.id == alone.id).unwrap().batch_id,
+            "",
+            "and the loose task still has none"
+        );
     }
 
     /// A task the user made by hand is not the chain's to delete, however the two are filed.

@@ -927,6 +927,9 @@ export const createAgentTask = (
   account?: string | null,
   /** Give the task a linked worktree of its own, on a new branch. */
   worktree?: boolean,
+  /** The race this task belongs to — the same id on every task started from one goal, so their
+   *  results can be compared. `null` for a task started on its own. */
+  batch?: string | null,
 ) =>
   invoke<AgentTask>("create_agent_task", {
     workspaceId,
@@ -941,6 +944,7 @@ export const createAgentTask = (
     agentProjectId,
     account: account ?? null,
     worktree: worktree ?? false,
+    batch: batch ?? null,
   });
 
 export const updateAgentTaskRun = (

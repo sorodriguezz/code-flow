@@ -550,6 +550,9 @@ export interface AgentTask {
   agent_project_id: string;
   /** Whether it sits in the list's pinned section. */
   pinned: boolean;
+  /** The race this was started as part of — several agents handed one goal, each in a worktree of
+   *  its own — or `""` for a task started on its own. */
+  batch_id?: string;
   /** `activity_log.session_id` for every turn of this task. Prefixed `agent-`. */
   conversation_id: string;
   status: AgentTaskStatus;

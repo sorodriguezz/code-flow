@@ -288,6 +288,10 @@ pub async fn create_agent_task(
     agent_project_id: String,
     account: Option<String>,
     worktree: Option<bool>,
+    // The race this task belongs to, or `None` for a task started on its own. Passed by the caller
+    // rather than minted here: every task of one race shares it, and only the caller that starts
+    // the set knows how many there are. (A `///` doc comment is not allowed on a parameter.)
+    batch: Option<String>,
 ) -> Result<AgentTask, String> {
     let id = uuid::Uuid::new_v4().to_string();
     // The worktree first, with no lock held: `git worktree add` checks out a whole tree, which on a
@@ -332,6 +336,7 @@ pub async fn create_agent_task(
         &agent_project_id,
         account.as_deref(),
         (&path, &branch),
+        batch.as_deref().unwrap_or_default(),
     )
     .map_err(|e| e.to_string())
 }
