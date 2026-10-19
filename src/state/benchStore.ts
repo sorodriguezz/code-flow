@@ -13,6 +13,7 @@ import {
   writeTerminal,
 } from "../lib/tauri/commands";
 import {
+  paneAt,
   paneIds,
   parseLayout,
   reconcile,
@@ -20,7 +21,9 @@ import {
   serializeLayout,
   setRatio,
   splitPane,
+  viewPaneId,
   type PaneNode,
+  type PaneView,
 } from "../lib/bench/layout";
 import type { BenchTab, BenchTerminal } from "../types/domain";
 
@@ -83,7 +86,17 @@ interface BenchState {
   addTab: (workspaceId: string, cwd: string, profileId?: string) => Promise<void>;
   /** Splits the focused pane of `tabId` and starts a shell in the half that opens. */
   split: (workspaceId: string, tabId: string, cwd: string, dir: "row" | "col", profileId?: string) => Promise<void>;
+  /**
+   * Splits the focused pane and puts a **view** in the half that opens — a diff beside the shell
+   * that is testing it.
+   *
+   * No backend call and no process: a view pane is the arrangement and nothing else, which is what
+   * keeps "split anything" from costing a shell per pane. With no tab open it opens one first, so
+   * the action works from an empty bench.
+   */
+  addView: (workspaceId: string, view: PaneView, dir?: "row" | "col") => Promise<void>;
   /** Closes one pane: its shell is killed and its row forgotten. Closes the tab with the last one. */
+  /** Closes one pane, shell or view. */
   closePane: (tabId: string, terminalId: string) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   selectTab: (tabId: string) => void;
@@ -297,8 +310,33 @@ export const useBenchStore = create<BenchState>((set, get) => ({
     });
   },
 
+  addView: async (workspaceId, view, dir = "row") => {
+    // An empty bench still answers: the tab this opens is where the view goes.
+    if (!get().activeTabId) await get().addTab(workspaceId, "");
+    const tabId = get().activeTabId;
+    const current = tabId ? get().layouts[tabId] : null;
+    const target = tabId ? get().focusedPane[tabId] : null;
+    if (!tabId || !current || !target) return;
+    const id = viewPaneId();
+    // The id is minted here and the leaf carries the view, so nothing else in the tree has to know
+    // what kind of pane it is — see `PaneView`.
+    const withView = splitPane(current, target, id, dir, view);
+    persist(tabId, withView);
+    set((s) => {
+      if (s.workspaceId !== workspaceId) return s;
+      return {
+        layouts: { ...s.layouts, [tabId]: withView },
+        // Focus follows the new pane, as it does for a split: you opened it in order to read it.
+        focusedPane: { ...s.focusedPane, [tabId]: id },
+      };
+    });
+  },
+
   closePane: async (tabId, terminalId) => {
     const current = get().layouts[tabId];
+    // Read *before* the pane is removed: a view pane has no shell to kill, and asking the backend to
+    // remove a terminal that never existed is an error for a pane that closed correctly.
+    const isView = paneAt(current ?? null, terminalId)?.view !== undefined;
     const next = current ? removePane(current, terminalId) : null;
     // The last pane takes its tab with it. A tab with no panes is not a state anything can draw,
     // and leaving one behind would be an empty tab the user has to close a second time.
@@ -306,7 +344,7 @@ export const useBenchStore = create<BenchState>((set, get) => ({
       await get().closeTab(tabId);
       return;
     }
-    await removeWorkspaceTerminal(terminalId);
+    if (!isView) await removeWorkspaceTerminal(terminalId);
     persist(tabId, next);
     set((s) => ({
       terminals: s.terminals.filter((terminal) => terminal.id !== terminalId),

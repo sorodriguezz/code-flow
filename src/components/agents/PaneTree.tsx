@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from "react";
-import type { PaneNode } from "../../lib/bench/layout";
+import type { PaneLeaf, PaneNode } from "../../lib/bench/layout";
 import { clampRatio } from "../../lib/bench/layout";
 
 /**
@@ -27,9 +27,11 @@ export function PaneTree({
    *  store's `setRatio` walks. The root is `""`. */
   path: string;
   onResize: (path: string, ratio: number) => void;
-  renderPane: (terminalId: string) => ReactNode;
+  /** Given the whole leaf, not just its id: a pane may be a shell or a view, and only the leaf says
+   *  which — see `PaneView`. */
+  renderPane: (pane: PaneLeaf) => ReactNode;
 }) {
-  if (node.kind === "leaf") return <>{renderPane(node.id)}</>;
+  if (node.kind === "leaf") return <>{renderPane(node)}</>;
   return (
     <Split node={node} path={path} onResize={onResize} renderPane={renderPane} />
   );
@@ -44,7 +46,7 @@ function Split({
   node: Extract<PaneNode, { kind: "split" }>;
   path: string;
   onResize: (path: string, ratio: number) => void;
-  renderPane: (terminalId: string) => ReactNode;
+  renderPane: (pane: PaneLeaf) => ReactNode;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
   /** Non-null only while a drag is in flight; the store's value is the truth otherwise. */

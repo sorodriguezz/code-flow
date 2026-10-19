@@ -18,11 +18,29 @@
  * in another window or omit ones that were added.
  */
 
-/** A pane showing one terminal. The leaf is the terminal — there is no empty pane. */
+/**
+ * What a pane shows when it is not a shell.
+ *
+ * The bench started as tiled terminals and the arrangement turned out to be the useful part: what
+ * you want beside a shell running the tests is the diff it is testing, not a second shell. So a leaf
+ * may carry a *view* instead, and everything else in this file — splitting, closing, resizing,
+ * persisting — treats it exactly like a terminal.
+ *
+ * Deliberately a closed union and not "any React node": the tree is persisted as JSON and read back
+ * as untrusted input (see [`valid`]), so every kind has to be something this module can recognise
+ * and rebuild.
+ */
+export type PaneView =
+  /** The uncommitted diff of an agent task's working copy — see `TaskReviewPanel`. */
+  | { kind: "diff"; taskId: string };
+
+/** A pane: one terminal, or one view. The leaf is the content — there is no empty pane. */
 export interface PaneLeaf {
   kind: "leaf";
-  /** A `workspace_terminals.id`. */
+  /** A `workspace_terminals.id` for a shell, or an id minted here for a view — see `viewPaneId`. */
   id: string;
+  /** Absent for a shell, which is the ordinary case and every pane that existed before views did. */
+  view?: PaneView;
 }
 
 export interface PaneSplit {
@@ -49,12 +67,36 @@ const MIN_RATIO = 0.1;
 
 export const clampRatio = (ratio: number): number => Math.min(1 - MIN_RATIO, Math.max(MIN_RATIO, ratio));
 
-export const leaf = (id: string): PaneLeaf => ({ kind: "leaf", id });
+export const leaf = (id: string, view?: PaneView): PaneLeaf => (view ? { kind: "leaf", id, view } : { kind: "leaf", id });
 
-/** Every terminal the tree shows, left to right and top to bottom — which is also tab order. */
+/** The id of a pane that shows a view: not a terminal, so it must never collide with one. The
+ *  prefix is what tells the two apart in a stored tree read back by an older build. */
+let viewSeq = 0;
+export function viewPaneId(): string {
+  viewSeq += 1;
+  return `view:${Date.now().toString(36)}${viewSeq}`;
+}
+
+/** Every pane the tree shows, left to right and top to bottom — which is also tab order. */
 export function paneIds(node: PaneNode | null): string[] {
   if (!node) return [];
   return node.kind === "leaf" ? [node.id] : [...paneIds(node.a), ...paneIds(node.b)];
+}
+
+/** Every pane that is a shell. The counterpart of `paneIds` for the places that are asking about
+ *  terminals rather than about panes — above all [`reconcile`], which compares against the
+ *  terminals that exist and would otherwise prune every view. */
+export function terminalIds(node: PaneNode | null): string[] {
+  if (!node) return [];
+  if (node.kind === "leaf") return node.view ? [] : [node.id];
+  return [...terminalIds(node.a), ...terminalIds(node.b)];
+}
+
+/** The leaf with this id, or `null` — how a caller asks "what is this pane showing". */
+export function paneAt(node: PaneNode | null, id: string): PaneLeaf | null {
+  if (!node) return null;
+  if (node.kind === "leaf") return node.id === id ? node : null;
+  return paneAt(node.a, id) ?? paneAt(node.b, id);
 }
 
 /**
@@ -67,11 +109,22 @@ export function paneIds(node: PaneNode | null): string[] {
  * The new pane always takes the second half, so "split right" puts it on the right and "split down"
  * puts it below. Anything else would be a surprise every time.
  */
-export function splitPane(node: PaneNode, targetId: string, newId: string, dir: "row" | "col"): PaneNode {
+export function splitPane(
+  node: PaneNode,
+  targetId: string,
+  newId: string,
+  dir: "row" | "col",
+  /** What the new pane shows. Omitted for a shell, which is what every split was before views. */
+  view?: PaneView,
+): PaneNode {
   if (node.kind === "leaf") {
-    return node.id === targetId ? { kind: "split", dir, ratio: 0.5, a: node, b: leaf(newId) } : node;
+    return node.id === targetId ? { kind: "split", dir, ratio: 0.5, a: node, b: leaf(newId, view) } : node;
   }
-  return { ...node, a: splitPane(node.a, targetId, newId, dir), b: splitPane(node.b, targetId, newId, dir) };
+  return {
+    ...node,
+    a: splitPane(node.a, targetId, newId, dir, view),
+    b: splitPane(node.b, targetId, newId, dir, view),
+  };
 }
 
 /**
@@ -116,10 +169,13 @@ export function setRatio(node: PaneNode, path: string, ratio: number): PaneNode 
 export function reconcile(node: PaneNode | null, existing: string[]): PaneNode | null {
   const alive = new Set(existing);
   let pruned = node;
-  for (const id of paneIds(node)) {
+  // Only the shells are checked against the terminals that exist: a view pane has no row anywhere
+  // — it is the arrangement itself — so comparing it against this list would delete every one of
+  // them on the next load.
+  for (const id of terminalIds(node)) {
     if (!alive.has(id) && pruned) pruned = removePane(pruned, id);
   }
-  const shown = new Set(paneIds(pruned));
+  const shown = new Set(terminalIds(pruned));
   for (const id of existing) {
     if (shown.has(id)) continue;
     // Appended as a column, which is the axis a terminal has the least use for: a shell's lines are
@@ -143,12 +199,32 @@ export function parseLayout(raw: string): PaneNode | null {
 
 export const serializeLayout = (node: PaneNode | null): string => (node ? JSON.stringify(node) : "");
 
+/**
+ * A stored view, or `undefined` — which turns the pane back into a shell.
+ *
+ * A leaf whose view is unrecognised (written by a newer build, or corrupt) deliberately degrades to
+ * a terminal pane rather than being dropped: the arrangement survives, and `reconcile` then finds a
+ * pane naming a terminal that does not exist and prunes that one pane. Losing a pane beats losing
+ * the tab.
+ */
+function validView(value: unknown): PaneView | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const view = value as Record<string, unknown>;
+  if (view.kind === "diff" && typeof view.taskId === "string" && view.taskId) {
+    return { kind: "diff", taskId: view.taskId };
+  }
+  return undefined;
+}
+
 /** Structural validation, because this comes off disk and a malformed branch would throw inside
  *  the renderer — where the failure is a blank panel rather than a message. */
 function valid(value: unknown): PaneNode | null {
   if (!value || typeof value !== "object") return null;
   const node = value as Record<string, unknown>;
-  if (node.kind === "leaf") return typeof node.id === "string" && node.id ? { kind: "leaf", id: node.id } : null;
+  if (node.kind === "leaf") {
+    if (typeof node.id !== "string" || !node.id) return null;
+    return leaf(node.id, validView(node.view));
+  }
   if (node.kind !== "split") return null;
   const a = valid(node.a);
   const b = valid(node.b);

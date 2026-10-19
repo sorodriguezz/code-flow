@@ -101,3 +101,40 @@ describe("runAcross", () => {
     expect(layout).not.toContain('"dir":"col"');
   });
 });
+
+/**
+ * A view pane is the arrangement and nothing else: no shell, no process, and closing it must not
+ * ask the backend to remove a terminal that never existed.
+ */
+describe("addView", () => {
+  it("opens a tab when the bench is empty and puts the view in it", async () => {
+    await useBenchStore.getState().addView("w1", { kind: "diff", taskId: "task-1" });
+    const state = useBenchStore.getState();
+    const tabId = state.activeTabId ?? "";
+    // One shell — the tab's own — and the view beside it.
+    expect(state.terminals).toHaveLength(1);
+    expect(JSON.stringify(state.layouts[tabId])).toContain('"kind":"diff"');
+    expect(state.focusedPane[tabId]).toMatch(/^view:/);
+  });
+
+  it("costs no process of its own", async () => {
+    await useBenchStore.getState().addView("w1", { kind: "diff", taskId: "task-1" });
+    const before = created;
+    await useBenchStore.getState().addView("w1", { kind: "diff", taskId: "task-2" });
+    expect(created).toBe(before);
+  });
+
+  it("closes without touching a terminal that never existed", async () => {
+    let removed = 0;
+    handlers.remove_workspace_terminal = () => {
+      removed += 1;
+      return null;
+    };
+    await useBenchStore.getState().addView("w1", { kind: "diff", taskId: "task-1" });
+    const tabId = useBenchStore.getState().activeTabId ?? "";
+    const viewId = useBenchStore.getState().focusedPane[tabId];
+    await useBenchStore.getState().closePane(tabId, viewId);
+    expect(removed).toBe(0);
+    expect(JSON.stringify(useBenchStore.getState().layouts[tabId])).not.toContain('"kind":"diff"');
+  });
+});

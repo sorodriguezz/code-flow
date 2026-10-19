@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   Columns2,
+  GitCompare,
   Pencil,
   Play,
   Plus,
@@ -11,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { benchTabLabel, useBenchStore } from "../../state/benchStore";
+import { useAgentsStore } from "../../state/agentsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -20,6 +22,7 @@ import { TerminalPane } from "../terminal/TerminalPane";
 import { agentFromCommand } from "../../lib/agentInTerminal";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { PaneTree } from "./PaneTree";
+import { ViewPane } from "./ViewPane";
 import { ContextMenu } from "../common/ContextMenu";
 import { listShellProfiles } from "../../lib/tauri/commands";
 import type { BenchTerminal, ShellProfile } from "../../types/domain";
@@ -267,6 +270,8 @@ export function TerminalBench() {
   /** Which tab is being renamed in place — in the store, because the list in the left panel starts
    *  it too. See `benchStore.renamingTabId`. */
   const renaming = useBenchStore((s) => s.renamingTabId);
+  /** The task a diff pane would show — the one open in the console beside this bench. */
+  const selectedTaskId = useAgentsStore((s) => s.selectedId);
   const setRenaming = useBenchStore((s) => s.startRenameTab);
 
   /**
@@ -345,6 +350,20 @@ export function TerminalBench() {
           <Rows2 size={13} />
         </ToolButton>
         <ShellMenu onPick={(profileId) => split("row", profileId)} disabled={!activeTabId} label={t("bench.splitWith")} />
+        {/* The one pane that is not a shell. Disabled with no task selected rather than hidden: the
+            arrangement is the point of this bench, and an action that appears and disappears with
+            the selection would be hard to find again. */}
+        <ToolButton
+          onClick={() => {
+            const taskId = useAgentsStore.getState().selectedId;
+            if (!workspaceId || !taskId) return;
+            void useBenchStore.getState().addView(workspaceId, { kind: "diff", taskId }).catch(fail);
+          }}
+          title={t("bench.splitDiff")}
+          disabled={!workspaceId || !selectedTaskId}
+        >
+          <GitCompare size={13} />
+        </ToolButton>
 
         <span className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" />
 
@@ -386,16 +405,30 @@ export function TerminalBench() {
                     node={node}
                     path=""
                     onResize={(path, ratio) => useBenchStore.getState().resize(tab.id, path, ratio)}
-                    renderPane={(terminalId) => {
-                      const terminal = byId.get(terminalId);
+                    renderPane={(pane) => {
+                      const close = () => void useBenchStore.getState().closePane(tab.id, pane.id).catch(fail);
+                      const focus = () => useBenchStore.getState().focusPane(tab.id, pane.id);
+                      // A view pane has no shell behind it — see `PaneView`. It is drawn by the same
+                      // tile chrome so that four panes read as four panes, whatever is inside them.
+                      if (pane.view) {
+                        return (
+                          <ViewPane
+                            view={pane.view}
+                            focused={focusedPane[tab.id] === pane.id}
+                            onFocus={focus}
+                            onClose={close}
+                          />
+                        );
+                      }
+                      const terminal = byId.get(pane.id);
                       if (!terminal) return null;
                       return (
                         <Pane
                           terminal={terminal}
                           visible={visible}
-                          focused={focusedPane[tab.id] === terminalId}
-                          onFocus={() => useBenchStore.getState().focusPane(tab.id, terminalId)}
-                          onClose={() => void useBenchStore.getState().closePane(tab.id, terminalId).catch(fail)}
+                          focused={focusedPane[tab.id] === pane.id}
+                          onFocus={focus}
+                          onClose={close}
                         />
                       );
                     }}
