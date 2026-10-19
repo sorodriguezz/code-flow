@@ -221,6 +221,17 @@ así que no hay dos listas que mantener sincronizadas.
   el mensaje exacto que va a enviar, que puedes editar antes de que salga.
 - **Revisa lo que hizo** contra el diff real de ese repositorio, igual que revisarías tu propio
   trabajo.
+- **Comenta el diff y devuélveselo.** La pestaña **Cambios** de cada tarea lista lo que tocó, y un
+  clic en cualquier línea del diff deja un comentario ahí. Se acumulan, y «Enviar revisión» los pone
+  delante del agente como el siguiente turno — no hay un segundo canal hacia un agente, así que una
+  revisión se escribe en la conversación como cualquier otra cosa que digas. Una tarea en su propio
+  worktree también se revisa aquí, que es el único lugar donde sus cambios se pueden leer.
+- **Corre varios agentes sobre un mismo objetivo.** Marca más agentes en el diálogo de nueva tarea y
+  cada uno recibe el mismo objetivo en un worktree propio, todos marcados como una carrera. La
+  carrera se abre en columnas — agente, rama, estado y el diff que produjo cada uno — con una línea
+  de entrada que corre un comando en **todos** los worktrees a la vez (`pnpm test` en tres árboles,
+  lado a lado en el banco). «Quedarme con esta» descarta las demás; no se mergea nada, y la rama que
+  quedó es para las vistas git.
 - **Sube de modelo a mitad de conversación** cuando el trabajo resulta más difícil de lo que parecía.
 - **Un paso que falla se reintenta, y luego pasa a tus manos.** Se reenvía hasta tres veces,
   esperando más cada vez; después la cadena **se detiene y espera** — reintentar, saltar o abortar.
@@ -233,6 +244,43 @@ así que no hay dos listas que mantener sincronizadas.
 > antes de empezar — restaurable desde la vista de la propia tarea — y solo corre un agente por
 > repositorio a la vez. Pero son tus archivos, no un sandbox. Para trabajar en paralelo, reparte el
 > trabajo entre repositorios.
+
+## 🖼️ Modo diseño: señala el bug
+
+La descripción más corta de un bug de interfaz es el elemento del que habla, y escribirlo en un
+prompt — «la segunda tarjeta de la barra lateral, la del título cortado» — es más lento que señalarlo
+y menos preciso que su marcado.
+
+Así que el **modo diseño** abre tu app en una ventana propia, en la dirección que elijas (te ofrece lo
+que esté escuchando en esta máquina, que es lo único que la app no puede adivinar). Mantén **alt** y
+el elemento bajo el puntero se resalta; haz clic y su **selector, su marcado y sus estilos
+calculados** llegan a la tarea en la que trabajas, como una tarjeta sobre el composer: mándasela al
+agente, o descártala.
+
+A la vista previa **no se le da acceso a la app**. La página que carga es de otro — la de un dev
+server — así que el selector entrega su contenido como datos que la app se niega a navegar, y ese es
+todo el canal: la página puede contarle a CodeFlow sobre un elemento y no puede pedirle nada. Una
+sola ventana, construida cuando se pide y destruida al cerrarla, porque una vista previa es un motor
+de navegador entero.
+
+## ⌨️ `cf`: el comando del agente
+
+Un agente que corre en una terminal de CodeFlow ya puede hacer todo lo que puede un shell. Lo que no
+puede es alcanzar la ventana — así que `cf` lo hace, en cuatro verbos y nada más:
+
+```sh
+cf notify "los tests pasan"    # una línea en la app, estés donde estés
+cf ask "¿borro la columna?"    # bloquea; imprime tu respuesta, sale 1 si la descartas
+cf status                      # qué tiene la app en foco, como JSON
+cf review                      # abre el diff de la tarea dueña de esta carpeta
+```
+
+`cf ask` es el que cambia cómo trabaja un agente: `cf ask "¿sigo?" && rm -rf dist` es una frase que
+un shell entiende, y la pregunta aparece delante de ti con la ventana traída al frente.
+
+Solo le responde a los shells que esta app abrió (llevan un token en su entorno), escucha en loopback
+y en ningún otro sitio, y no puede leer un repositorio, correr git ni tocar el llavero — alcanza la
+*interfaz*, para un proceso que ya tiene todo lo demás.
 
 ## 🌳 Git, visualmente
 
@@ -318,6 +366,25 @@ El mismo Monaco que ya conoces, conectado al repositorio que tiene alrededor.
   una sonda HTTP que responde o una línea que aparece en el log. Leen los archivos `.env` que les
   indiques y usan el virtualenv o el wrapper de Maven/Gradle del propio proyecto; las terminales
   buscan (⌘F), abren enlaces y en Windows muestran cada distribución de WSL como perfil.
+
+### Terminales que aportan
+
+El panel de agentes tiene un **banco**: pestañas de shells en mosaico, divididas como quieras, y un
+panel que no tiene por qué ser un shell.
+
+- **Disposiciones guardadas.** «dev» es un server, un watcher de tests y un agente — una carpeta y un
+  comando por panel, nombrados una vez y abiertos con un clic. Nada arranca solo: una disposición
+  levanta procesos, y hacerlo porque apareció una ventana es una ayuda que nadie pidió.
+- **Los scripts del propio repositorio** están en el mismo menú, resueltos con el gestor de paquetes
+  que ese repositorio usa de verdad.
+- **Un panel puede ser un diff.** Lo que quieres al lado del shell que corre los tests es el diff del
+  que van los tests, no un segundo shell — así que un panel puede llevar los cambios de la tarea
+  abierta, con el mismo cromo y sin proceso detrás.
+- **La salida vuelve al agente.** Un shell parado en el worktree de una tarea sabe de quién es el
+  trabajo que está probando: «Enviar a «tarea»» le entrega el comando, su código de salida y su
+  salida a ese agente como el siguiente turno, que es el bucle que antes era un copiar y pegar.
+- **Un comando, todos los worktrees.** Desde una carrera, una línea escrita una vez abre un panel por
+  worktree con el shell ya parado en él.
 
 ## 🚦 La build que viene detrás del push
 

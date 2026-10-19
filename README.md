@@ -219,6 +219,16 @@ two lists to keep in step.
   message it's about to send, which you can edit before it goes.
 - **Review what it did** against the real diff of that repository, the same way you'd review your
   own work.
+- **Comment on the diff and send it back.** A task's own **Changes** tab lists what it touched, and a
+  click on any line of the diff leaves a comment there. They collect, and «Send review» puts the lot
+  in front of the agent as the next turn — there is no second channel to an agent, so a review is
+  written into the conversation like anything else you say. A task in a worktree of its own is
+  reviewed here too, which is the one place its edits can be read at all.
+- **Race several agents on one goal.** Tick more agents in the new-task dialog and each one gets the
+  same objective in a worktree of its own, all stamped as one race. The race opens as columns —
+  agent, branch, status and the diff each one produced — with one line of input that runs a command
+  in *every* worktree at once (`pnpm test` in three trees, side by side in the bench). «Keep this
+  one» discards the others; nothing is merged, and the branch it kept is left for the git views.
 - **Move up a model mid-conversation** when the job turns out harder than it looked.
 - **A failed step is retried, then handed to you.** It is re-sent up to three times, waiting longer
   each time; after that the chain **stops and waits** — retry, skip or abort. Out of quota, a
@@ -229,6 +239,43 @@ two lists to keep in step.
 > ⚠️ Agents edit your working copy **for real**. Every turn takes a restore point before it starts —
 > restorable from the task's own view — and only one agent runs per repository at a time. But these
 > are your files, not a sandbox. To work in parallel, split the work across repositories.
+
+## 🖼️ Design mode: point at the bug
+
+The shortest description of a UI bug is the element it is about, and typing one into a prompt — "the
+second card in the sidebar, the one with the truncated title" — is slower than pointing at it and
+less precise than its markup.
+
+So **Design mode** opens your app in a window of its own, at an address you pick (it offers whatever
+is listening on this machine, which is the one thing the app cannot guess). Hold **alt** and the
+element under the pointer is outlined; click it and its **selector, its markup and its computed
+styles** arrive in the task you are working in, as a card above the composer: send it to the agent,
+or dismiss it.
+
+The preview is given **no access to the app**. The page it loads is somebody else's — a dev server's
+— so the picker hands its payload over as data the app refuses to navigate to, and that is the whole
+channel: the page can tell CodeFlow about an element and ask it for nothing. One window ever, built
+when it is asked for and destroyed when it is closed, because a preview is a whole browser engine.
+
+## ⌨️ `cf`: the agent's own command
+
+An agent running in one of CodeFlow's shells can already do everything a shell can. What it cannot do
+is reach the window — so `cf` does, in four verbs and nothing more:
+
+```sh
+cf notify "the tests are green"   # a line in the app, wherever you are
+cf ask "drop the column?"         # blocks; prints your answer, exits 1 if dismissed
+cf status                         # what the app has in focus, as JSON
+cf review                         # opens the diff of the task this folder belongs to
+```
+
+`cf ask` is the one that changes how an agent works: `cf ask "go ahead?" && rm -rf dist` is a
+sentence a shell understands, and the question appears in front of you with the window brought
+forward.
+
+It answers **only** to shells this app opened (they carry a token in their environment), it listens on
+loopback and nowhere else, and it cannot read a repository, run git or touch the keyring — it reaches
+the *interface*, for a process that already has everything else.
 
 ## 🌳 Git, visually
 
@@ -307,6 +354,25 @@ The same Monaco you already know, wired to the repository around it.
   probe that answers, or a line that appears in the log. They read the `.env` files you give them
   and use the project's own virtualenv or Maven/Gradle wrapper; terminals search (⌘F), open links,
   and on Windows list every WSL distribution as a profile.
+
+### Terminals that pull their weight
+
+The agents' panel has a **bench**: tabs of tiled shells, split any way you like, and a pane that need
+not be a shell at all.
+
+- **Saved arrangements.** "dev" is a server, a test watcher and an agent — a folder and a command per
+  pane, named once and opened with a click. Nothing starts by itself: an arrangement launches
+  processes, and doing that because a window appeared is help nobody asked for.
+- **The repository's own scripts** are in the same menu, resolved with the package manager that
+  repository actually uses.
+- **A pane can be a diff.** What you want beside the shell running the tests is the diff those tests
+  are about, not a second shell — so a pane may hold the open task's changes, with the same tile
+  chrome and no process behind it.
+- **The output goes back to the agent.** A shell standing in a task's worktree knows whose work it is
+  testing: «Send to «task»» hands the command, its exit code and its output to that agent as the next
+  turn, which is the loop that used to be a copy-paste.
+- **One command, every worktree.** From a race, a line typed once opens a pane per worktree with the
+  shell already standing in it.
 
 ## 🚦 The build that follows the push
 
