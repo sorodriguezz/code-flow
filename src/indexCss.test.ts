@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 // Read as a file: `?raw` CSS imports are empty under vitest.
-const css = readFileSync(new URL("./index.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./index.css", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 /** The declarations of the first rule whose selector is exactly `selector`. */
 function rule(selector: string): string {

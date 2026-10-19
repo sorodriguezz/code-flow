@@ -63,6 +63,24 @@ export const GIT_ERROR = {
 
 export type Translate = (key: TranslationKey, params?: Record<string, string>) => string;
 
+/**
+ * Whether a failure is libgit2 losing a race with the filesystem, rather than something wrong.
+ *
+ * `diff_file.c` raises **"file changed before we could read it"** when a file's content moves — or
+ * the file goes — between the delta being computed and its blob being read. Deleting a file, or a
+ * whole repository, does exactly that to a refresh that was already in flight, which is why this was
+ * a red toast every time something was deleted: the app reported a race it had already recovered
+ * from, because the deletion itself triggers the watcher and the next read is correct.
+ *
+ * Matched on the message because libgit2 gives it no distinct class — the error arrives as a generic
+ * one with that text. Narrow on purpose: it must never swallow a read that failed for a reason the
+ * next refresh will not fix.
+ */
+export function isReadRace(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error ?? "");
+  return text.toLowerCase().includes("changed before we could read it");
+}
+
 export function hasTag(error: unknown, prefix: string): boolean {
   return String(error).includes(prefix);
 }

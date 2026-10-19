@@ -25,6 +25,23 @@ export type ActivityEntry =
   | { type: "job"; job: Job; runs: Job[] }
   | { type: "chat"; conv: ChatConversationSummary; live: ChatSession | null };
 
+/**
+ * What a chat of the **workspace itself** carries where a repository chat carries its project.
+ *
+ * The Inbox lists both: a repository's conversations (`activity_log`, one bucket per project) and
+ * the workspace chat's (`chat_conversations`, scoped to the workspace and bound to no repository).
+ * The second kind used to be listed nowhere at all — a conversation somebody spent a day in left no
+ * trace in the panel that is supposed to be the history of everything. An empty project id is what
+ * tells the two apart in one list: it is not a project that could not be found, it is the absence of
+ * one, which is this chat's defining property.
+ */
+export const WORKSPACE_CHAT_PROJECT = "";
+
+/** Whether this row is a chat of the workspace rather than of one of its repositories. */
+export function isWorkspaceChat(entry: ActivityEntry): boolean {
+  return entry.type === "chat" && entry.conv.project_id === WORKSPACE_CHAT_PROJECT;
+}
+
 /** Turns a conversation that exists only in memory into a row Activity can render, so a chat is
  * listed from its first question rather than from its first answer. */
 function summaryOfLive(session: ChatSession): ChatConversationSummary {

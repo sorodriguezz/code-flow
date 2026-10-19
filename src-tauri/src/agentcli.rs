@@ -42,7 +42,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -273,6 +273,9 @@ async fn handle(body: &str, app: &AppHandle, token: &str) -> Reply {
             if let Ok(mut held) = pending().lock() {
                 held.insert(id.clone(), sender);
             }
+            // A shell is blocked on the answer, so the window has to be where it can be seen: an
+            // agent that asked from behind another application would otherwise look hung.
+            raise(app);
             let _ = app.emit("agentcli:ask", AskEvent { id: id.clone(), question: question.to_string() });
             match tokio::time::timeout(ASK_TIMEOUT, receiver).await {
                 Ok(Ok(Some(answer))) => Reply::ok(answer),
@@ -299,11 +302,27 @@ async fn handle(body: &str, app: &AppHandle, token: &str) -> Reply {
             // The app matches the folder to a task — the same rule the terminal's menu uses — and
             // opens its diff. Answered as soon as it is asked for: the window may be behind another
             // app, and an agent should not block on a view it cannot see.
+            // Asked for *by name* — "show me this" — so the window comes forward with it. Switching
+            // view inside a window nobody is looking at is a no-op the agent cannot tell apart from
+            // success.
+            raise(app);
             let _ = app.emit("agentcli:review", cwd.to_string());
             Reply::ok("")
         }
         other => Reply::no(format!("unknown verb: {other}")),
     }
+}
+
+/// Brings the main window forward: unminimised, shown, focused.
+///
+/// Best effort on every step. A window the platform refuses to focus — macOS does this when the app
+/// is not the active one and has no user gesture behind the request — is still unminimised and
+/// shown, which is the part that matters for a question nobody can otherwise answer.
+fn raise(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else { return };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
 }
 
 #[cfg(test)]

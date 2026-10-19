@@ -1,16 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { LayoutGrid, Play, Save, Trash2 } from "lucide-react";
+import { LayoutGrid, Play, Settings2 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { Tooltip } from "../common/Tooltip";
 import { useBenchStore } from "../../state/benchStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { usePackageManagerStore } from "../../state/packageManagerStore";
-import { promptAction } from "../../state/promptStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { readFileText } from "../../lib/tauri/commands";
 import { PACKAGE_JSON, isRunnableScriptName, scriptCommandLine } from "../../lib/packageScripts";
-import type { LayoutPane } from "../../lib/bench/layouts";
+import { BenchLayoutEditor } from "./BenchLayoutEditor";
 
 /**
  * The bench's saved arrangements, and the repository's own scripts.
@@ -35,10 +34,9 @@ export function BenchLayoutMenu({ disabled }: { disabled: boolean }) {
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const project = useWorkspaceStore((s) => s.activeProject());
   const layouts = useBenchStore((s) => s.savedLayouts);
-  const terminals = useBenchStore((s) => s.terminals);
-  const activeTabId = useBenchStore((s) => s.activeTabId);
   const manager = usePackageManagerStore((s) => s.choice);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [editing, setEditing] = useState(false);
   const [scripts, setScripts] = useState<string[]>([]);
   const button = useRef<HTMLButtonElement>(null);
 
@@ -75,24 +73,6 @@ export function BenchLayoutMenu({ disabled }: { disabled: boolean }) {
     if (rect) setMenu({ x: rect.right - 4, y: rect.bottom + 2 });
   };
 
-  /** The open tab's panes, as a layout would record them: where each shell is and what it is called. */
-  const currentPanes = (): LayoutPane[] =>
-    terminals
-      .filter((terminal) => terminal.tab_id === activeTabId)
-      .map((terminal) => ({ cwd: terminal.cwd, ...(terminal.title ? { title: terminal.title } : {}) }));
-
-  const saveCurrent = () => {
-    const panes = currentPanes();
-    if (!workspaceId || panes.length === 0) return;
-    void promptAction(t("bench.layoutName"), { confirmLabel: t("bench.layoutSave") }).then((name) => {
-      if (!name?.trim()) return;
-      // The commands are not recorded: the bench knows where each shell is, not what was typed into
-      // it half an hour ago. The layout opens the arrangement, and the user adds the commands to it
-      // by editing the row — which is also why saving twice under one name replaces it.
-      void useBenchStore.getState().saveLayout(workspaceId, { name: name.trim(), panes }).catch(fail);
-    });
-  };
-
   const items: MenuItem[] = [
     ...layouts.map((layout) => ({
       label: layout.name,
@@ -101,27 +81,13 @@ export function BenchLayoutMenu({ disabled }: { disabled: boolean }) {
         if (workspaceId) void useBenchStore.getState().runLayout(workspaceId, layout.name).catch(fail);
       },
     })),
-    ...(layouts.length > 0
-      ? [
-          {
-            label: t("bench.layoutForget"),
-            icon: Trash2,
-            danger: true,
-            onClick: () => {
-              if (!workspaceId) return;
-              void promptAction(t("bench.layoutForgetWhich"), { initial: layouts[0]?.name ?? "" }).then((name) => {
-                if (name?.trim()) void useBenchStore.getState().removeLayout(workspaceId, name.trim()).catch(fail);
-              });
-            },
-          },
-        ]
-      : []),
     {
-      label: t("bench.layoutSaveCurrent"),
-      icon: Save,
-      separated: true,
-      disabled: activeTabId === null || currentPanes().length === 0,
-      onClick: saveCurrent,
+      // One door for all of it: a layout is a name and a list of (folder, command) rows, and the
+      // rows are why this is a dialog rather than two prompts — see `BenchLayoutEditor`.
+      label: t("bench.layoutEditor"),
+      icon: Settings2,
+      separated: layouts.length > 0,
+      onClick: () => setEditing(true),
     },
     // The repository's own, under the user's. `scriptCommandLine` is the same resolver the explorer's
     // play buttons use, so a pnpm repo gets `pnpm run x` here too.
@@ -156,6 +122,7 @@ export function BenchLayoutMenu({ disabled }: { disabled: boolean }) {
         </button>
       </Tooltip>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={items} onClose={() => setMenu(null)} />}
+      {editing && <BenchLayoutEditor onClose={() => setEditing(false)} />}
     </>
   );
 }

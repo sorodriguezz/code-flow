@@ -163,6 +163,15 @@ export function openWorkspaceChat(
 /** One row of the Inbox's history. */
 export async function openActivityEntry(entry: ActivityEntry): Promise<boolean> {
   if (entry.type === "chat") {
+    // A chat of the workspace itself carries no repository — see `WORKSPACE_CHAT_PROJECT`. It opens
+    // in the panel's workspace tab, which is a different store and a different tab kind from a
+    // repository's chat.
+    if (entry.conv.project_id === "") {
+      const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+      if (!workspaceId) return false;
+      useAiPanelStore.getState().open({ kind: "wsChat", workspaceId, conversationId: entry.conv.session_id });
+      return true;
+    }
     await openChat(entry.conv.project_id, entry.conv.session_id);
     return true;
   }

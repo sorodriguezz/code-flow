@@ -269,7 +269,10 @@ describe("detectFormat", () => {
  */
 describe("our own Bitwarden export, read back", () => {
   const fixture = (name: string) =>
-    readFileSync(new URL(`./fixtures/codeflow-export.bitwarden.${name}`, import.meta.url), "utf8");
+    readFileSync(new URL(`./fixtures/codeflow-export.bitwarden.${name}`, import.meta.url), "utf8").replace(
+      /\r\n/g,
+      "\n",
+    );
 
   it("from JSON keeps every secret, the hidden flag and the folder path", () => {
     const result = importVaultExport(fixture("json"), "export.json");

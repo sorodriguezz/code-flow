@@ -128,10 +128,25 @@ describe("RacePanel", () => {
     expect(render()).toContain("This race has no tasks left");
   });
 
-  /** The panel compares; it never decides. Keeping one is an act for the git views, with the branch
-   *  and the working copy in front of the person doing it. */
-  it("offers no merge, commit or delete", () => {
-    const text = render().replace(/<[^>]*>/g, " ");
-    expect(text).not.toMatch(/\b(merge|commit|delete|discard)\b/i);
+  /**
+   * The panel compares, and the only thing it decides is which racers to *stop* keeping. It never
+   * moves a branch: merging is an act for the git views, with the branch and the working copy in
+   * front of the person doing it.
+   */
+  it("offers to keep one, and never to merge or commit", () => {
+    const html = render();
+    expect(html).toContain('aria-label="Keep this one"');
+    const text = html.replace(/<[^>]*>/g, ' ');
+    expect(text).not.toMatch(/\b(merge|commit|rebase|push)\b/i);
+  });
+
+  /** With a single racer there is nothing to discard, so the action is drawn **dead** rather than
+   *  destructive by one click — present, so the column reads the same whatever the race holds. */
+  it("leaves keeping dead when there is only one racer", () => {
+    tasks = [task("1")];
+    const html = render();
+    const keep = /<button[^>]*aria-label="Keep this one"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(keep).not.toBe("");
+    expect(keep).toContain("disabled");
   });
 });

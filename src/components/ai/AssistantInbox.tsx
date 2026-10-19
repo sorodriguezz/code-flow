@@ -28,7 +28,9 @@ import {
   entryTimestamp,
   entryTitle,
   entryVisual,
+  isWorkspaceChat,
   mergeActivityEntries,
+  WORKSPACE_CHAT_PROJECT,
   type ActivityEntry,
 } from "../../lib/activityEntries";
 import { workspaceActivityKey } from "../../lib/prTarget";
@@ -48,19 +50,23 @@ import { NewChatMenu, ReviewPrMenu } from "./PanelTabStrip";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { EMPTY_JOBS, useJobsStore, type Job } from "../../state/jobsStore";
 import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activityStore";
+import { useWorkspaceChatStore } from "../../state/workspaceChatStore";
+import type { ChatConversation } from "../../lib/tauri/chatCommands";
 import { liveSessionsOf, useChatStore, type ChatSession } from "../../state/chatStore";
 import { EMPTY_TRACKED, usePrWatchStore } from "../../state/prWatchStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { chatTabKey, useAiPanelStore, type UnreadMark } from "../../state/aiPanelStore";
 import { followTarget } from "../../state/notificationStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { useLanguageStore, useT } from "../../state/languageStore";
+import { translate, useLanguageStore, useT } from "../../state/languageStore";
 import type { ChatConversationSummary, Project } from "../../types/domain";
 
 type Filter = "all" | "chat" | "pr" | "analysis";
 type Scope = "repo" | "workspace";
 
 const EMPTY_PROJECTS: Project[] = [];
+/** Stable empty, so a workspace with no chats of its own does not re-render the list every tick. */
+const EMPTY_WS_CHATS: ChatConversation[] = [];
 
 /**
  * The assistant's Inbox — the first tab, and the one place that answers "what is the AI doing, and
@@ -103,7 +109,10 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     for (const bucket of buckets) void loadJobs(bucket);
     for (const project of scopedProjects) void loadHistory(project.id);
-  }, [buckets, scopedProjects, loadJobs, loadHistory]);
+    // The workspace's own chats, which belong to no repository and are therefore in none of the
+    // buckets above — see `WORKSPACE_CHAT_PROJECT`.
+    void useWorkspaceChatStore.getState().loadList(workspaceId);
+  }, [buckets, scopedProjects, loadJobs, loadHistory, workspaceId]);
   useEffect(() => {
     void loadWatch(workspaceId);
   }, [workspaceId, loadWatch]);
@@ -112,18 +121,31 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
   const jobsByBucket = useJobsStore((s) => s.byProject);
   const hasMore = useJobsStore((s) => buckets.some((b) => s.hasMore[b] === true));
   const historyByProject = useChatHistoryStore((s) => s.byProject);
+  const workspaceChats = useWorkspaceChatStore((s) => s.listByWorkspace[workspaceId] ?? EMPTY_WS_CHATS);
   const byConversation = useChatStore((s) => s.byConversation);
   const tracked = usePrWatchStore((s) => s.byWorkspace[workspaceId] ?? EMPTY_TRACKED);
   const unread = useAiPanelStore((s) => s.unread);
 
   const entries = useMemo(() => {
     const jobs: Job[] = buckets.flatMap((bucket) => jobsByBucket[bucket] ?? EMPTY_JOBS);
-    const conversations: ChatConversationSummary[] = scopedProjects.flatMap(
-      (project) => historyByProject[project.id] ?? EMPTY_CONVERSATIONS,
-    );
+    const conversations: ChatConversationSummary[] = [
+      ...scopedProjects.flatMap((project) => historyByProject[project.id] ?? EMPTY_CONVERSATIONS),
+      // The workspace's own, as the same row shape — and only in the workspace scope: «this repo»
+      // is a question about a repository, and a chat that belongs to none is not an answer to it.
+      // `turn_count` is not kept for these (the list they come from is the sidebar's, which counts
+      // nothing) and a chat row does not draw it.
+      ...(scope === "workspace" ? workspaceChats : []).map((row) => ({
+        session_id: row.id,
+        project_id: WORKSPACE_CHAT_PROJECT,
+        title: row.title,
+        created_at: row.createdAt,
+        updated_at: row.updatedAt,
+        turn_count: 0,
+      })),
+    ];
     const live: ChatSession[] = scopedProjects.flatMap((project) => liveSessionsOf(byConversation, project.id));
     return mergeActivityEntries(jobs, conversations, live);
-  }, [buckets, jobsByBucket, scopedProjects, historyByProject, byConversation]);
+  }, [buckets, jobsByBucket, scope, scopedProjects, historyByProject, workspaceChats, byConversation]);
 
   const projectName = (id: string) => projects.find((p) => p.id === id)?.name ?? "";
   const showRepo = scope === "workspace" && projects.length > 1;
@@ -581,6 +603,9 @@ function RecentList({
 }
 
 function projectOf(entry: ActivityEntry, projectName: (id: string) => string): string | null {
+  // Named after the workspace rather than left blank: a row with no sub-label in a list where every
+  // other row has one reads as a chat whose repository could not be found.
+  if (isWorkspaceChat(entry)) return translate("inbox.workspaceChat");
   if (entry.type === "chat") return projectName(entry.conv.project_id) || null;
   return entryIsGlobal(entry) ? null : projectName(entry.job.projectId) || null;
 }
@@ -604,13 +629,25 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
     const next = value.trim();
     setMode("idle");
     if (!next || next === title) return;
-    if (entry.type === "chat") await useChatHistoryStore.getState().rename(bucket, entry.conv.session_id, next);
-    else await useJobsStore.getState().rename(bucket, entry.job.id, next);
+    if (entry.type === "chat") {
+      // A workspace chat has no rename of its own — its title is written by its first answer — so
+      // the row does not offer one, and this cannot be reached for it.
+      if (!isWorkspaceChat(entry)) {
+        await useChatHistoryStore.getState().rename(bucket, entry.conv.session_id, next);
+      }
+      return;
+    }
+    await useJobsStore.getState().rename(bucket, entry.job.id, next);
   };
 
   const remove = async () => {
     setMode("idle");
     if (entry.type === "chat") {
+      if (isWorkspaceChat(entry)) {
+        // Its own store owns the row, the tab and the transcript.
+        await useWorkspaceChatStore.getState().remove(entry.conv.session_id);
+        return;
+      }
       // Both halves at once: the persisted list and this session's memory — and the tab, since a
       // deleted conversation has nothing left to show.
       useChatStore.getState().discard(entry.conv.session_id);

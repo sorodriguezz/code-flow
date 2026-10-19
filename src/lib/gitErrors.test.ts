@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   describeGitError,
   GIT_ERROR,
+  isReadRace,
   isValidRemoteName,
   looksLikeGitUrl,
   remoteFailure,
@@ -129,5 +130,26 @@ describe("the newer git features' refusals", () => {
     const { tagBody } = await import("./gitErrors");
     expect(tagBody("HOOK_FAILED: line one\nline two", GIT_ERROR.hookFailed)).toBe("line one\nline two");
     expect(tagBody("something else", GIT_ERROR.hookFailed)).toBeNull();
+  });
+});
+
+/**
+ * libgit2 raises «file changed before we could read it» from `diff_file.c` when a file's content
+ * moves — or the file goes — between the delta being computed and its blob being read. Deleting a
+ * file, or a whole repository, does exactly that to a refresh already in flight, and the app used to
+ * report the losing read as an error it had in fact already recovered from.
+ */
+describe("isReadRace", () => {
+  it("recognises libgit2 losing a race with the filesystem", () => {
+    expect(isReadRace(new Error("file changed before we could read it"))).toBe(true);
+    // As it arrives from the IPC boundary: a string, with the path libgit2 puts around it.
+    expect(isReadRace("src/app.ts: file changed before we could read it")).toBe(true);
+  });
+
+  it("leaves every other failure alone", () => {
+    expect(isReadRace(new Error("could not find repository"))).toBe(false);
+    expect(isReadRace("1 conflict prevents checkout")).toBe(false);
+    expect(isReadRace(null)).toBe(false);
+    expect(isReadRace(undefined)).toBe(false);
   });
 });

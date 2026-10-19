@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Flag, FolderGit2, GitBranch, GitCompare, RefreshCw, TerminalSquare } from "lucide-react";
+import { Crown, Flag, FolderGit2, GitBranch, GitCompare, RefreshCw, TerminalSquare } from "lucide-react";
 import { AGENT_STATUS } from "./agentStatus";
 import { agentName } from "./agentName";
 import { buttonClass, iconButtonClass } from "../common/Button";
@@ -10,6 +10,7 @@ import { reviewOf, useTaskReviewStore } from "../../state/taskReviewStore";
 import { useBenchStore } from "../../state/benchStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { confirmAction } from "../../state/confirmStore";
 import { fieldClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { openPathAsProject } from "../../lib/openAsProject";
@@ -83,14 +84,14 @@ export function RacePanel({ batchId }: { batchId: string }) {
           each, and a diff summary stops being one below about 240. */}
       <div className="flex min-h-0 flex-1 gap-2 overflow-x-auto p-3">
         {racers.map((task) => (
-          <RaceColumn key={task.id} task={task} />
+          <RaceColumn key={task.id} task={task} rivals={racers.filter((other) => other.id !== task.id)} />
         ))}
       </div>
     </div>
   );
 }
 
-function RaceColumn({ task }: { task: AgentTask }) {
+function RaceColumn({ task, rivals }: { task: AgentTask; rivals: AgentTask[] }) {
   const t = useT();
   const review = useTaskReviewStore((s) => reviewOf(s, task.id));
   const sending = useAgentsStore((s) => s.live[task.id]?.sending ?? false);
@@ -197,6 +198,32 @@ function RaceColumn({ task }: { task: AgentTask }) {
             className={iconButtonClass({ size: "sm" })}
           >
             <FolderGit2 size={14} />
+          </button>
+        </Tooltip>
+        {/* Keeping one is *discarding the others* and nothing else: no merge, no commit, no branch
+            moved. What it leaves behind is this racer's worktree and its branch, which is what the
+            git views are for. The rivals' tasks go, and with each one its worktree — but only when
+            that worktree is clean, which `delete_agent_task` decides and says. */}
+        <Tooltip label={t("agents.race.keepHint", { n: rivals.length })}>
+          <button
+            type="button"
+            disabled={rivals.length === 0}
+            aria-label={t("agents.race.keep")}
+            onClick={() => {
+              void confirmAction(
+                t("agents.race.keepConfirm", { name: agentName(task.agent_name, task.provider, t), n: rivals.length }),
+                true,
+                t("agents.race.keepAction"),
+              ).then((ok) => {
+                if (!ok) return;
+                // One by one: each delete takes its own worktree with it, and a failure on one must
+                // not stop the rest — the store reports each.
+                for (const rival of rivals) void useAgentsStore.getState().remove(rival.id);
+              });
+            }}
+            className={iconButtonClass({ size: "sm" })}
+          >
+            <Crown size={14} />
           </button>
         </Tooltip>
       </div>

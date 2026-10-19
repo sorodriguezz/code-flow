@@ -26,6 +26,7 @@ import { ChainStrip } from "./ChainStrip";
 import { ContinueWithModal } from "./ContinueWithModal";
 import { RacePanel } from "./RacePanel";
 import { TaskReviewPanel } from "./TaskReviewPanel";
+import { DesignOpenModal } from "./DesignOpenModal";
 import { useChainStore } from "../../state/chainStore";
 import { AiRunLog } from "../ai/AiRunLog";
 import { CheckpointsModal } from "../ai/CheckpointsModal";
@@ -51,7 +52,6 @@ import { revealInFileManager } from "../../lib/tauri/commands";
 import { openPathAsProject } from "../../lib/openAsProject";
 import { buildDesignNote, shortLabel } from "../../lib/agents/designNote";
 import { useDesignStore } from "../../state/designStore";
-import { promptAction } from "../../state/promptStore";
 
 /**
  * One task, open: who is doing it, where, what has been said so far, and the box to say the next
@@ -77,6 +77,8 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
    *  not placed yet. */
   const [tab, setTab] = useState<TaskTab>("chat");
   const [continuing, setContinuing] = useState(false);
+  /** Whether the «where is the app running» dialog is open — see `DesignOpenModal`. */
+  const [designing, setDesigning] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -205,18 +207,7 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
       // one thing this app cannot know — and remembered for next time.
       label: t("design.open"),
       icon: Frame,
-      onClick: () => {
-        const store = useDesignStore.getState();
-        void promptAction(t("design.urlPrompt"), {
-          initial: store.lastUrl || "http://localhost:1420",
-          placeholder: "http://localhost:1420",
-          confirmLabel: t("design.openAction"),
-          validate: (value) =>
-            /^https?:\/\/\S+$/.test(value.trim()) ? null : t("design.urlInvalid"),
-        }).then((url) => {
-          if (url) void store.show(url);
-        });
-      },
+      onClick: () => setDesigning(true),
     },
     ...(repoPath
       ? [
@@ -430,6 +421,7 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={overflow} onClose={() => setMenu(null)} />}
       {continuing && <ContinueWithModal taskId={taskId} onClose={() => setContinuing(false)} />}
+      {designing && <DesignOpenModal onClose={() => setDesigning(false)} />}
       {checkpointsOpen && repoPath && (
         <CheckpointsModal repoPath={repoPath} onClose={() => setCheckpointsOpen(false)} />
       )}

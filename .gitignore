@@ -56,6 +56,12 @@ src-tauri/resources/mobile/*
 src-tauri/resources/llama/*
 !src-tauri/resources/llama/README.md
 
+# `cf`, the agent's command — built by `scripts/build-cf-sidecar.mjs`. The README is kept so the
+# directory exists in a fresh clone: `tauri-build` refuses a resource path that is not there, and
+# this one is filled by a build step rather than by the repository.
+src-tauri/resources/cf/*
+!src-tauri/resources/cf/README.md
+
 # Built by scripts/build-drawio-webapp.mjs: the draw.io webapp the Diagrams workspace embeds
 # (~98 MB, Apache-2.0, pinned by version and hash in that script). A build output like the IRIS
 # runtime above — vendored third-party code has no business in the history, and `pnpm drawio:webapp`

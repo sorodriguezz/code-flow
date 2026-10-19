@@ -14,6 +14,7 @@ import {
   describeGitError,
   GIT_ERROR,
   hasTag,
+  isReadRace,
   looksLikeGitUrl,
   operationLabel,
   stoppedOperation,
@@ -317,6 +318,11 @@ async function guarded(
     await fn();
     return true;
   } catch (e) {
+    // The watcher's hot path goes through here (`refreshStatus`), so this is where a delete used to
+    // become a red toast: libgit2 losing a race with the filesystem is not a failure to report, and
+    // it must not leave the banner's `error` set either — the refresh that follows the deletion is
+    // correct. See `reportReadFailure`.
+    if (isReadRace(e)) return false;
     const message = describeError(e);
     set({ error: message });
     pushErrorToast(message);
@@ -450,6 +456,22 @@ function describeError(e: unknown): string {
   return describeGitError(e, translate);
 }
 
+/**
+ * Reports a failure that happened while **reading** the repository, and says nothing when it is
+ * libgit2 losing a race with the filesystem.
+ *
+ * Deleting a file — or a whole repository — while a refresh is in flight makes libgit2 raise "file
+ * changed before we could read it" (see `isReadRace`). Nothing is wrong: the deletion is what
+ * triggers the watcher, and the read that follows it is correct. Reporting the losing read put a red
+ * toast on an ordinary delete, for a state the app had already recovered from.
+ *
+ * Only for reads. A user's own action — a commit, a checkout, a push — reports whatever it hit.
+ */
+function reportReadFailure(e: unknown): void {
+  if (isReadRace(e)) return;
+  pushErrorToast(describeError(e));
+}
+
 /** The branch a merge/stash would land on, named the way the confirmation should say it. */
 function currentTargetLabel(get: () => RepoState): string {
   return get().status?.current_branch ?? translate("statusbar.detachedHead");
@@ -571,7 +593,7 @@ const autoFetchFailing = new Set<string>();
 async function landOnConflicts(get: () => RepoState, kind: OperationKind): Promise<void> {
   await get()
     .refreshAll()
-    .catch((e: unknown) => pushErrorToast(describeError(e)));
+    .catch(reportReadFailure);
   useUiStore.getState().setActiveView("changes");
   useToastStore
     .getState()
@@ -901,7 +923,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         //
         // The other six still ran and still wrote what they fetched: `Promise.all` doesn't cancel
         // its siblings. So this is a partial load reported as one, not a load abandoned.
-        pushErrorToast(describeError(e));
+        reportReadFailure(e);
       } finally {
         // Guards against a stale resolution: if the user already switched to another repo
         // while this fetch was in flight, don't clear the new repo's loading state.
@@ -1143,7 +1165,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       set({ busy: false });
     }
     // Either way: a continue that failed half-way (a rebase) has still moved things.
-    await get().refreshAll().catch((e: unknown) => pushErrorToast(describeError(e)));
+    await get().refreshAll().catch(reportReadFailure);
   },
 
   abortOperation: async () => {

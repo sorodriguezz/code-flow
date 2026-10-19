@@ -23,7 +23,8 @@ import {
 
 /** Written by Python's `json` exactly as `nbformat.write` calls it — see the generator's notes in
  *  the fixtures' own shape: split lines, indent 1, sorted keys, `ensure_ascii=False`, newline. */
-const fixture = (name: string) => readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), "utf8");
+const fixture = (name: string) =>
+  readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 describe("json", () => {
   it("keeps number text a JS number would not reproduce", () => {

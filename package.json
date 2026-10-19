@@ -14,6 +14,8 @@
     "build:mobile": "vite build --config vite.mobile.config.ts",
     "tauri": "tauri",
     "jdbc:bridge": "node scripts/build-jdbc-bridge.mjs",
+    "cf:sidecar": "node scripts/build-cf-sidecar.mjs --release",
+    "cf:sidecar:dev": "node scripts/build-cf-sidecar.mjs --optional",
     "llama:runtime": "node scripts/build-llama-runtime.mjs",
     "llama:runtime:dev": "node scripts/build-llama-runtime.mjs --optional",
     "jdbc:bridge:dev": "node scripts/build-jdbc-bridge.mjs --optional",

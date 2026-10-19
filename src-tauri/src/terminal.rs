@@ -290,15 +290,21 @@ fn profile_start(profile_cwd: &str, requested: Option<&str>, home: Option<&std::
 /// Appended and not prepended, deliberately: a user who has their own `cf` on the path keeps it.
 /// The folder is the one the app's own binary is in, which is where a bundle puts its sidecars and
 /// where `cargo` leaves both binaries during development.
-fn cli_path() -> Option<String> {
-    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+fn cli_path(app: &AppHandle) -> Option<String> {
     let name = if cfg!(windows) { "cf.exe" } else { "cf" };
-    if !dir.join(name).exists() {
-        // No sidecar in this build — a `cargo run` of the lib tests, or a bundle built without it.
-        // The shells then carry the plain `PATH` and `cf` simply is not a command, which is the
-        // same thing that happens outside the app.
-        return None;
-    }
+    // Two places, in this order, because there are two ways the binary gets onto a machine.
+    //
+    // **The bundle** ships it as a resource (`resources/cf/`, see `scripts/build-cf-sidecar.mjs`),
+    // which Tauri unpacks under the resource directory — `Contents/Resources/` inside a `.app`, and
+    // beside the executable on Windows. In `tauri dev` the resource directory *is* `src-tauri/`, so
+    // the same lookup finds what the build step just wrote there.
+    //
+    // **A plain `cargo build`** leaves both binaries in `target/<profile>/`, which is where someone
+    // working on the Rust side will have it and nowhere else.
+    let resources = app.path().resource_dir().ok().map(|dir| dir.join("cf"));
+    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
+    let dir = [resources, beside].into_iter().flatten().find(|dir| dir.join(name).exists())?;
+
     let current = std::env::var("PATH").unwrap_or_default();
     let separator = if cfg!(windows) { ";" } else { ":" };
     Some(if current.is_empty() {
@@ -352,7 +358,7 @@ pub fn open_terminal(
     // before the account's layer and after the profile's, so a profile cannot switch it off by
     // accident and an account's variables still outrank it; see `agentcli`.
     env.extend(crate::agentcli::shell_env());
-    if let Some(path) = cli_path() {
+    if let Some(path) = cli_path(&app) {
         env.push(("PATH".to_string(), path));
     }
     let mut env_remove: Vec<String> = crate::shell_integration::INTERNAL_VARS.iter().map(|v| v.to_string()).collect();
