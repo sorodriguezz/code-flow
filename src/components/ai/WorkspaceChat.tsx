@@ -308,78 +308,81 @@ export function WorkspaceChat({
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col">
       <ChatFindBar find={find} />
-      <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
-        <div className="mb-2.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+      {/* Outside the scroller on purpose: this strip says which repositories the chat can see, and
+          carries find, export, history and "new chat". Inside it, it was the first thing to scroll
+          away — so a conversation long enough to be worth searching was exactly the one whose
+          search button had gone. */}
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
+        <span
+          className="inline-flex min-w-0 items-center gap-1 truncate"
+          title={snapshot?.text ?? t("assistant.wsChatHint")}
+        >
+          <FolderGit2 size={11} className="shrink-0" />
+          <span className="truncate">{t("assistant.wsChatRepos", { n: snapshot?.repos ?? repoCount })}</span>
+        </span>
+        {snapshot && snapshot.inFlight > 0 && (
           <span
-            className="inline-flex min-w-0 items-center gap-1 truncate"
-            title={snapshot?.text ?? t("assistant.wsChatHint")}
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
+            title={snapshot.text}
           >
-            <FolderGit2 size={11} className="shrink-0" />
-            <span className="truncate">{t("assistant.wsChatRepos", { n: snapshot?.repos ?? repoCount })}</span>
+            <Workflow size={9} />
+            {t("assistant.wsChatInFlight", { n: snapshot.inFlight })}
           </span>
-          {snapshot && snapshot.inFlight > 0 && (
-            <span
-              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
-              title={snapshot.text}
-            >
-              <Workflow size={9} />
-              {t("assistant.wsChatInFlight", { n: snapshot.inFlight })}
-            </span>
-          )}
-          {focusChain && (
-            <span className="inline-flex min-w-0 items-center gap-1 truncate" title={t("assistant.wsChatFocusHint")}>
-              <Link2 size={10} className="shrink-0" />
-              <span className="truncate">{focusChain.title}</span>
-            </span>
-          )}
-          {session.plan && (
-            <span
-              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
-              title={t("assistant.planModeHint")}
-            >
-              <ListChecks size={9} />
-              {t("assistant.planModeBadge")}
-            </span>
-          )}
-          <span className="ml-auto" />
-          {session.messages.length > 0 && (
-            <button
-              type="button"
-              onClick={find.show}
-              title={t("chat.find")}
-              aria-label={t("chat.find")}
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-            >
-              <Search size={12} />
-            </button>
-          )}
-          {canExport && (
-            <button
-              type="button"
-              onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                setExportMenu({ x: rect.right - 4, y: rect.bottom + 2 });
-              }}
-              title={t("chat.export")}
-              aria-label={t("chat.export")}
-              aria-haspopup="menu"
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-            >
-              <Download size={12} />
-            </button>
-          )}
-          <HistoryMenu workspaceId={workspaceId} current={conversationId} />
+        )}
+        {focusChain && (
+          <span className="inline-flex min-w-0 items-center gap-1 truncate" title={t("assistant.wsChatFocusHint")}>
+            <Link2 size={10} className="shrink-0" />
+            <span className="truncate">{focusChain.title}</span>
+          </span>
+        )}
+        {session.plan && (
+          <span
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
+            title={t("assistant.planModeHint")}
+          >
+            <ListChecks size={9} />
+            {t("assistant.planModeBadge")}
+          </span>
+        )}
+        <span className="ml-auto" />
+        {session.messages.length > 0 && (
           <button
             type="button"
-            onClick={() => openWorkspaceChat(workspaceId)}
-            title={t("assistant.wsChatNew")}
-            aria-label={t("assistant.wsChatNew")}
+            onClick={find.show}
+            title={t("chat.find")}
+            aria-label={t("chat.find")}
             className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
-            <SquarePen size={12} />
+            <Search size={12} />
           </button>
-        </div>
-
+        )}
+        {canExport && (
+          <button
+            type="button"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setExportMenu({ x: rect.right - 4, y: rect.bottom + 2 });
+            }}
+            title={t("chat.export")}
+            aria-label={t("chat.export")}
+            aria-haspopup="menu"
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+          >
+            <Download size={12} />
+          </button>
+        )}
+        <HistoryMenu workspaceId={workspaceId} current={conversationId} />
+        <button
+          type="button"
+          onClick={() => openWorkspaceChat(workspaceId)}
+          title={t("assistant.wsChatNew")}
+          aria-label={t("assistant.wsChatNew")}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        >
+          <SquarePen size={12} />
+        </button>
+      </div>
+      <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
         {exportMenu && (
           <ContextMenu
             x={exportMenu.x}

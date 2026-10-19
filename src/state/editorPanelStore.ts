@@ -53,6 +53,17 @@ interface EditorPanelState {
   canCheckProject: boolean;
   /** A project-wide check in flight. */
   checkingProject: boolean;
+  /**
+   * Why no compiler is answering for this project, when none is — the sentence `ts_start` refused
+   * with ("No TypeScript in …/node_modules", "Could not start tsserver with node: …").
+   *
+   * Kept and shown rather than swallowed: without a server there are *no* type diagnostics at all
+   * (Monaco's isolated worker has semantic validation off on purpose — see `monacoSetup`), so a
+   * failure to start looks exactly like a file with nothing wrong in it. An unused import that
+   * stops fading and a misspelt name that stops being underlined are the same event, and the one
+   * thing that explains both is this line.
+   */
+  tsUnavailable: string | null;
   /** Opens on `tab`, or closes when that tab is already what is showing — the status line's toggle. */
   toggle: (tab: EditorPanelTab) => void;
   close: () => void;
@@ -60,7 +71,7 @@ interface EditorPanelState {
   showResults: (results: ResultSet) => void;
   showHierarchy: (request: HierarchyRequest) => void;
   toggleSeverity: (severity: ProblemSeverity) => void;
-  setProjectCheck: (state: { canCheckProject?: boolean; checkingProject?: boolean }) => void;
+  setProjectCheck: (state: { canCheckProject?: boolean; checkingProject?: boolean; tsUnavailable?: string | null }) => void;
 }
 
 export const useEditorPanelStore = create<EditorPanelState>((set) => ({
@@ -71,6 +82,7 @@ export const useEditorPanelStore = create<EditorPanelState>((set) => ({
   show: { error: true, warning: true, info: true },
   canCheckProject: false,
   checkingProject: false,
+  tsUnavailable: null,
 
   toggle: (tab) => set((state) => (state.open && state.tab === tab ? { open: false } : { open: true, tab })),
   close: () => set({ open: false }),

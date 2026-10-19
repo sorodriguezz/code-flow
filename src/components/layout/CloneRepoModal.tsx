@@ -131,7 +131,7 @@ export function CloneRepoModal({
   useDialog(panelRef, true, cloning ? null : onClose);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={cloning ? undefined : onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={cloning ? undefined : onClose}>
       <div
         ref={panelRef}
         role="dialog"

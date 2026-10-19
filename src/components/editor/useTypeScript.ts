@@ -1201,14 +1201,18 @@ export function useTypeScript(
         // Every editor already on screen asked for hints before there was a server to answer.
         if (fresh) refreshInlayHints?.();
         scheduleOpenFileDiagnostics();
-        useEditorPanelStore.getState().setProjectCheck({ canCheckProject: true });
+        useEditorPanelStore.getState().setProjectCheck({ canCheckProject: true, tsUnavailable: null });
       })
-      .catch(() => {
-        // No TypeScript in the project. Not an error to surface: it is the ordinary state of a repo
-        // that is not a TypeScript project, and a toast on every file opened would be noise. Not
-        // gated on `alive`: `ts_start` stopped whatever server was running before it failed.
+      .catch((e: unknown) => {
+        // No compiler for this project — which is the ordinary state of a repo that is not a
+        // TypeScript one, so it is not a toast. It is kept, though, and shown in the Problems
+        // toolbar: without a server there are no type diagnostics at all, and the only thing that
+        // tells "this file is clean" apart from "nothing is checking it" is this sentence.
+        // Not gated on `alive`: `ts_start` stopped whatever server was running before it failed.
         setTsRunning(null);
-        useEditorPanelStore.getState().setProjectCheck({ canCheckProject: false, checkingProject: false });
+        useEditorPanelStore
+          .getState()
+          .setProjectCheck({ canCheckProject: false, checkingProject: false, tsUnavailable: String(e) });
       });
     return () => {
       alive = false;

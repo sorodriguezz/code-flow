@@ -131,10 +131,19 @@ import { useSectionFold } from "../../state/sidebarFoldStore";
 // The hover-revealed actions on a project row: the same square chip the "clone"/"add repository"
 // buttons above the list wear, so every icon-only control in the sidebar answers the pointer the
 // same way. Reveal stays tied to the row's own `group` hover.
+//
+// `hidden` until then, not `opacity-0`: invisible at full width, these three squares were sixty-odd
+// pixels of permanently reserved strip, and the name — the one thing a project row is for — was
+// truncated to make room for buttons nobody was looking at. Out of the layout, the name has the
+// whole row until the pointer arrives, which is the moment there is something to make room for.
+// `group-focus-within` keeps them reachable from the keyboard: `display: none` cannot be focused,
+// so tabbing to the row's own name button is what brings them out (opacity-0 left them tabbable
+// while invisible, which is worse than either).
+//
 // `relative` so the action sits above the selected row's sliding fill, which is absolutely
 // positioned over the whole row — see `ActivePill`.
 const ROW_ACTION_CLASS =
-  "relative flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover:opacity-100";
+  "relative hidden h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] group-hover:flex group-focus-within:flex";
 
 /**
  * The last row of a capped list: reveals the next page, and says how much list is left behind it.

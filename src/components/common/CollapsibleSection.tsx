@@ -71,9 +71,15 @@ export function CollapsibleSection({
   return (
     <div>
       <div className={`flex items-center justify-between ${dense ? "mb-0.5" : "mb-1"}`}>
+        {/* The whole bar is the target, not the words on it. A header's label is a handful of short
+            uppercase letters, so a fold that only answered on the text left most of its own row
+            dead: the pointer lands an inch to the right of "STASHES (0)", inside the header, and
+            nothing happens. `flex-1` with the row's own hover fill makes the hit area the thing you
+            can actually see — the same bargain the "+" beside it already offered. The negative
+            margin is so the title stays where it was drawn before the padding existed. */}
         <button
           onClick={() => change(!open)}
-          className={`flex min-w-0 items-center gap-1 font-semibold uppercase text-[var(--cf-text-faint)] hover:text-[var(--cf-text)] ${
+          className={`-mx-1 flex min-w-0 flex-1 items-center gap-1 rounded-md px-1 py-0.5 text-left font-semibold uppercase text-[var(--cf-text-faint)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] ${
             dense ? "text-[10.5px] tracking-[0.08em]" : "text-[11px] tracking-[0.06em]"
           }`}
         >

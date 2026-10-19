@@ -2112,7 +2112,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
   // previous one's, and every server they came from was stopped with it.
   useEffect(() => {
     useProblemsStore.getState().clear();
-    useEditorPanelStore.getState().setProjectCheck({ canCheckProject: false, checkingProject: false });
+    useEditorPanelStore.getState().setProjectCheck({ canCheckProject: false, checkingProject: false, tsUnavailable: null });
   }, [project?.local_path]);
 
   // "Formatear al guardar" and word wrap are read when the editor first needs them rather than at

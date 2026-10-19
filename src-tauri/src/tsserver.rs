@@ -80,9 +80,39 @@ fn current() -> Option<Arc<Session>> {
 /// `tsserver.js` run through `node` rather than the `.bin/tsserver` shim: the shim is a shell script
 /// on Unix and a `.cmd` on Windows, so spawning it means either a shell or a platform branch, and
 /// the file it ultimately runs is this one.
+///
+/// Searched up the folders above the repository too, and not only in its own `node_modules`. A
+/// package of a monorepo opened on its own — `packages/api`, `apps/web` — has its TypeScript
+/// installed once at the workspace root, which is where pnpm and npm workspaces put it; looking
+/// only at the folder that was opened answered "no TypeScript here" for the arrangement most
+/// repositories this app opens actually use. The walk stops at the first hit, so a package that
+/// does pin its own compiler still wins over the root's.
 fn tsserver_script(root: &str) -> Option<PathBuf> {
-    let path = Path::new(root).join("node_modules").join("typescript").join("lib").join("tsserver.js");
-    path.exists().then_some(path)
+    let mut dir = Some(Path::new(root));
+    // A handful of levels: enough for `apps/web` or `packages/x/y`, and not a walk to the drive root.
+    for _ in 0..6 {
+        let at = dir?;
+        let path = at.join("node_modules").join("typescript").join("lib").join("tsserver.js");
+        if path.exists() {
+            return Some(path);
+        }
+        dir = at.parent();
+    }
+    None
+}
+
+/// The `node` to run `tsserver.js` with.
+///
+/// `Command::new("node")` resolves against the `PATH` *this process* was started with, and a GUI
+/// app on Windows or macOS is started by the desktop shell, not by a terminal — so a Node installed
+/// through nvm, fnm or Volta, whose `PATH` entry is written by a shell profile, is simply not there.
+/// The spawn then fails with "program not found" and the editor quietly has no diagnostics at all.
+/// `scaffold::tools` already resolves programs the way the user's own shell would (and caches it),
+/// so the lookup is shared with the rest of the app rather than re-invented here. Falls back to the
+/// bare name, which is still right whenever the inherited `PATH` does name Node.
+fn node_program() -> PathBuf {
+    let path = crate::scaffold::tools::current_path(false);
+    crate::scaffold::tools::which_in(&path, "node").unwrap_or_else(|| PathBuf::from("node"))
 }
 
 /// What the reader does with one message off the wire.
@@ -131,15 +161,24 @@ pub async fn ts_start(app: AppHandle, repo_path: String) -> Result<String, Strin
     }
     ts_stop().await;
 
-    let script = tsserver_script(&repo_path)
-        .ok_or_else(|| format!("No TypeScript in {repo_path}/node_modules — install it to get completions"))?;
+    // Blocking, both of them: `tsserver_script` stats a few folders and `node_program` can ask a
+    // login shell for its `PATH`. Off the async runtime rather than on a worker thread it would
+    // hold for as long as that shell takes to start.
+    let repo = repo_path.clone();
+    let (script, node) = tokio::task::spawn_blocking(move || (tsserver_script(&repo), node_program()))
+        .await
+        .map_err(|e| e.to_string())?;
+    let script = script
+        .ok_or_else(|| {
+            format!("No TypeScript in {repo_path}/node_modules, nor in the folders above it — install it to get diagnostics and completions")
+        })?;
 
     // `proc::command`, not `Command::new`: on Windows every console child this app starts gets
     // its own `conhost` window unless `CREATE_NO_WINDOW` is set, and `node` is a console binary.
     // Starting a TypeScript project flashed a black window on screen every time. See `proc.rs`,
     // whose whole reason for existing is that a spawn site added later must not be able to
     // reintroduce this by forgetting the flag.
-    let mut child = crate::proc::command("node")
+    let mut child = crate::proc::command(&node)
         .arg(&script)
         // Single-threaded is deliberate: the separate syntax/semantic servers buy responsiveness in
         // an editor with many open files and cost a second process plus its own project load, which
@@ -151,7 +190,7 @@ pub async fn ts_start(app: AppHandle, repo_path: String) -> Result<String, Strin
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| format!("Could not start tsserver: {e}"))?;
+        .map_err(|e| format!("Could not start tsserver with {}: {e}", node.display()))?;
 
     let stdin = child.stdin.take().ok_or("tsserver gave no stdin")?;
     let stdout = child.stdout.take().ok_or("tsserver gave no stdout")?;
@@ -328,6 +367,22 @@ mod tests {
         let repo = Path::new(root).parent().expect("src-tauri has a parent");
         assert!(tsserver_script(&repo.to_string_lossy()).is_some());
         assert!(tsserver_script("/definitely/not/a/project").is_none());
+    }
+
+    #[test]
+    fn a_workspace_package_is_served_by_the_compiler_at_the_root() {
+        // What pnpm and npm workspaces produce: one TypeScript at the root, packages with none of
+        // their own. Opening `apps/web` on its own used to answer "no TypeScript here".
+        let root = std::env::temp_dir().join(format!("cf-ts-{}", std::process::id()));
+        let package = root.join("apps").join("web").join("src");
+        std::fs::create_dir_all(&package).expect("temp package");
+        let lib = root.join("node_modules").join("typescript").join("lib");
+        std::fs::create_dir_all(&lib).expect("temp node_modules");
+        std::fs::write(lib.join("tsserver.js"), "").expect("temp tsserver");
+
+        let found = tsserver_script(&package.to_string_lossy());
+        assert_eq!(found, Some(lib.join("tsserver.js")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

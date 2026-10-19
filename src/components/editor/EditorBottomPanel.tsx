@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, CircleX, Info, ListChecks, Loader2, TriangleAlert, X } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleX, Info, ListChecks, Loader2, TriangleAlert, X, Unplug } from "lucide-react";
 import { FileGlyph } from "../common/FileGlyph";
 import { Tooltip } from "../common/Tooltip";
 import { Segmented } from "../common/Segmented";
@@ -190,6 +190,7 @@ export function EditorBottomPanel({
   const toggleSeverity = useEditorPanelStore((s) => s.toggleSeverity);
   const canCheckProject = useEditorPanelStore((s) => s.canCheckProject);
   const checkingProject = useEditorPanelStore((s) => s.checkingProject);
+  const tsUnavailable = useEditorPanelStore((s) => s.tsUnavailable);
   const byOwner = useProblemsStore((s) => s.byOwner);
   const counts = useMemo(() => countProblems(byOwner), [byOwner]);
   const total = counts.error + counts.warning + counts.info;
@@ -237,6 +238,22 @@ export function EditorBottomPanel({
                   </Tooltip>
                 );
               })}
+              {/* Why the list is empty, when it is empty because nothing is checking. The reason the
+                  compiler gave is the description: "No TypeScript in …/node_modules" and "Could not
+                  start tsserver with node: …" need different answers, and only the sentence says
+                  which. */}
+              {!canCheckProject && tsUnavailable && (
+                <Tooltip
+                  side="top"
+                  label={t("editor.problemsNoTs")}
+                  description={`${t("editor.problemsNoTsTip")}\n\n${tsUnavailable}`}
+                >
+                  <span className="inline-flex h-[22px] shrink-0 items-center gap-1 rounded-md px-1.5 text-[var(--cf-warning)]">
+                    <Unplug size={12} />
+                    <span className="text-[11px]">{t("editor.problemsNoTs")}</span>
+                  </span>
+                </Tooltip>
+              )}
               {canCheckProject && (
                 <Tooltip side="top" label={t("editor.problemsCheckProject")} description={t("editor.problemsCheckProjectTip")}>
                   <button

@@ -53,6 +53,7 @@ import { ensureMeetingEvents, useMeetingsStore } from "../../../state/meetingsSt
 import { useLanguageStore, useT } from "../../../state/languageStore";
 import { useConfirmStore } from "../../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../../state/toastStore";
+import { promptAction } from "../../../state/promptStore";
 
 /**
  * «Reuniones» in a note: the options to start one, the bar while it records, and — once it is done
@@ -117,6 +118,11 @@ export const MeetingSection = memo(function MeetingSection({
     </>
   );
 });
+
+/** The largest meeting the "how many people" prompt accepts. Not a limit of the clustering, which
+ *  takes any count — a ceiling on typos, since the number entered is what the voices are split
+ *  into and "200" is a slip, not a meeting. */
+const MAX_SPEAKERS = 99;
 
 const LANGUAGES = [
   { value: "es", label: "Español" },
@@ -630,8 +636,31 @@ function MeetingPanel({
     }
   };
 
+  /**
+   * "How many were there?" for a meeting the short list cannot name.
+   *
+   * The list used to stop at eight, which quietly made eight the largest meeting the app believed
+   * in: a twelve-person call could only be told "eight" or "I don't know", and the clustering was
+   * then asked for the wrong answer. The list now covers the sizes a fixed list is actually good
+   * for and hands the rest to this.
+   */
+  const askSpeakerCount = async () => {
+    const answer = await promptAction(t("meetings.peopleOtherPrompt"), {
+      initial: String(meeting.speakersHint > 0 ? meeting.speakersHint : 8),
+      confirmLabel: t("meetings.reseparate"),
+      validate: (value) => {
+        const n = Number(value.trim());
+        return Number.isInteger(n) && n >= 1 && n <= MAX_SPEAKERS ? null : t("meetings.peopleOtherInvalid", { max: MAX_SPEAKERS });
+      },
+    });
+    if (answer === null) return;
+    void useMeetingsStore.getState().reprocess(meeting.id, false, Number(answer.trim()));
+  };
+
   const actions = (x: number, y: number) => {
-    const counts = [0, 2, 3, 4, 5, 6, 8];
+    // One to five, then "I don't know", then everything else through the prompt: past five, a
+    // fixed list is a guess at which sizes exist rather than a choice the user is making.
+    const counts = [1, 2, 3, 4, 5, 0];
     const items: MenuItem[] = [
       {
         label: t("meetings.retranscribe"),
@@ -644,10 +673,13 @@ function MeetingPanel({
         icon: Users,
         disabled: busy || !meeting.audioFile || !voicesInstalled,
         onClick: () => {},
-        children: counts.map((n) => ({
-          label: n === 0 ? t("meetings.peopleUnknown") : t("meetings.people", { n }),
-          onClick: () => void useMeetingsStore.getState().reprocess(meeting.id, false, n),
-        })),
+        children: [
+          ...counts.map((n) => ({
+            label: n === 0 ? t("meetings.peopleUnknown") : t("meetings.people", { n }),
+            onClick: () => void useMeetingsStore.getState().reprocess(meeting.id, false, n),
+          })),
+          { label: t("meetings.peopleOther"), separated: true, onClick: () => void askSpeakerCount() },
+        ],
       },
       {
         label: t("meetings.exportAudio"),

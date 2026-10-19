@@ -153,8 +153,19 @@ fn diff_paths(repo: &Repository, commit: &git2::Commit) -> Result<Vec<String>, S
     let tree = commit.tree().map_err(|e| e.message().to_string())?;
     let mut opts = DiffOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true).include_typechange(true);
+    // Tree against the working tree, with the index left out of it.
+    //
+    // `..._with_index` reaches the working tree *through* the staging area, and the staging area
+    // has nothing to do with the question being asked here — "what on disk differs from this
+    // snapshot". In a repository somebody has been working in, the index holds HEAD's version of
+    // files the snapshot already contains in their edited form, and routing the comparison through
+    // it reported every one of those as changed: a turn that touched two files answered with the
+    // two hundred the user had edited before it ever ran (user report, 2026-10-19: "dice que
+    // cambió todos esos archivos pero en verdad no cambió nada"). It is also what `restore` acts
+    // on, and restoring writes blobs straight into the working tree — so the index was never part
+    // of this operation at either end.
     let diff = repo
-        .diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))
+        .diff_tree_to_workdir(Some(&tree), Some(&mut opts))
         .map_err(|e| e.message().to_string())?;
 
     // Deduplicated through a set rather than `paths.contains(&path)`: a typechange or a
@@ -184,7 +195,7 @@ fn diff_paths(repo: &Repository, commit: &git2::Commit) -> Result<Vec<String>, S
 /// paying for every other row's working-tree walk.
 ///
 /// Exists because [`list`] computes this for all [`MAX_CHECKPOINTS`] entries eagerly, and each one
-/// is a full `diff_tree_to_workdir_with_index` with recursive untracked scanning — up to twenty
+/// is a full `diff_tree_to_workdir` with recursive untracked scanning — up to twenty
 /// walks of the whole working tree in a single call. On a large repo that is the slowest thing the
 /// checkpoints modal does. Splitting it out lets the frontend fetch the paths per row instead;
 /// [`list`] keeps filling `changed_paths` until it does, so nothing is lost in the meantime.
@@ -464,8 +475,10 @@ fn diff_at(path: &str, refname: &str, max_chars: usize) -> Result<String, String
     let tree = commit.tree().map_err(|e| e.message().to_string())?;
     let mut opts = DiffOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true).context_lines(3);
+    // Without the index, for the reason `diff_paths` is — this is the patch form of the same
+    // question, and a review of what a run did must not open with the user's own earlier edits.
     let diff = repo
-        .diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))
+        .diff_tree_to_workdir(Some(&tree), Some(&mut opts))
         .map_err(|e| e.message().to_string())?;
 
     let mut per_file: Vec<(String, String)> = Vec::new();
@@ -648,6 +661,37 @@ mod tests {
         restore(path, &id).unwrap();
         assert_eq!(fs::read_to_string(dir.join("untracked.txt")).unwrap(), "untracked content\n");
         assert_eq!(fs::read_to_string(dir.join("staged.txt")).unwrap(), "staged content\n");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The bug behind "this turn changed 269 files" on a repository whose files were edited long
+    /// before the turn: those edits are *in* the snapshot, so nothing about them changed during the
+    /// run — but they sat between the checkpoint's tree and the working tree in the shape of a
+    /// stale index, and a diff that routed through the index reported every one of them.
+    #[test]
+    fn work_that_was_already_there_is_not_what_the_run_changed() {
+        let (dir, repo) = fixture();
+        let path = dir.to_str().unwrap();
+
+        // Before the run: an edit the user made themselves, unstaged, plus a file they staged and
+        // then edited again — the index and the working tree disagreeing, which is the ordinary
+        // state of a repository somebody is working in.
+        fs::write(dir.join("tracked.txt"), "edited by hand, hours ago\n").unwrap();
+        fs::write(dir.join("staged.txt"), "staged\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("staged.txt")).unwrap();
+            index.write().unwrap();
+        }
+        fs::write(dir.join("staged.txt"), "staged, then edited again\n").unwrap();
+
+        let id = create(path, "chat").unwrap();
+
+        // A turn that wrote one file answers with that one file, not with the user's own work.
+        assert!(changed_paths(path, &id).unwrap().is_empty());
+        fs::write(dir.join("tracked.txt"), "rewritten by the agent\n").unwrap();
+        assert_eq!(changed_paths(path, &id).unwrap(), vec!["tracked.txt"]);
 
         fs::remove_dir_all(&dir).ok();
     }

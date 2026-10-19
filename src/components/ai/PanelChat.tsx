@@ -553,6 +553,71 @@ export function PanelChat({
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col">
       <ChatFindBar find={find} />
+      {/* Above the scroller, not in it: find, export and "move to the chat workspace" are needed
+          most in a long conversation, which is exactly the one that had scrolled them off the
+          top. Same strip, same place, as the workspace chat's. */}
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
+        <span className="min-w-0 truncate">{repoName}</span>
+        {planMode ? (
+          <span
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
+            title={t("assistant.planModeHint")}
+          >
+            <ListChecks size={9} />
+            {t("assistant.planModeBadge")}
+          </span>
+        ) : (
+          <span
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-warning)]"
+            title={t("assistant.canEditHint", { repo: repoName })}
+          >
+            <FilePen size={9} />
+            {t("assistant.canEdit")}
+          </span>
+        )}
+        {session.messages.length > 0 && (
+          <button
+            type="button"
+            onClick={find.show}
+            title={t("chat.find")}
+            aria-label={t("chat.find")}
+            className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+          >
+            <Search size={12} />
+          </button>
+        )}
+        {/* Out as a file, once there is a conversation on disk to write out — the export reads
+            what was recorded, not what this tab happens to be holding. */}
+        {session.persisted && session.messages.length > 0 && (
+          <button
+            type="button"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setExportMenu({ x: rect.right - 4, y: rect.bottom + 2 });
+            }}
+            title={t("chat.export")}
+            aria-label={t("chat.export")}
+            aria-haspopup="menu"
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+          >
+            <Download size={12} />
+          </button>
+        )}
+        {/* To the chat workspace, for good — with everything it holds, still on this repository.
+            Not while a turn runs or messages wait: they belong to the session it is in. */}
+        {session.persisted && session.messages.length > 0 && (
+          <button
+            type="button"
+            onClick={() => void moveChatToApp(projectId, conversationId)}
+            disabled={session.sending || queuedMessages.length > 0}
+            title={session.sending || queuedMessages.length > 0 ? t("assistant.moveBusy") : t("assistant.moveToChat")}
+            aria-label={t("assistant.moveToChat")}
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <MessageSquareShare size={12} />
+          </button>
+        )}
+      </div>
       <div
         ref={scrollRef}
         onScroll={onScroll}
@@ -561,68 +626,6 @@ export function PanelChat({
         onContextMenu={textMenu.onText}
         className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none"
       >
-        <div className="mb-2.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
-          <span className="min-w-0 truncate">{repoName}</span>
-          {planMode ? (
-            <span
-              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
-              title={t("assistant.planModeHint")}
-            >
-              <ListChecks size={9} />
-              {t("assistant.planModeBadge")}
-            </span>
-          ) : (
-            <span
-              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-warning)]"
-              title={t("assistant.canEditHint", { repo: repoName })}
-            >
-              <FilePen size={9} />
-              {t("assistant.canEdit")}
-            </span>
-          )}
-          {session.messages.length > 0 && (
-            <button
-              type="button"
-              onClick={find.show}
-              title={t("chat.find")}
-              aria-label={t("chat.find")}
-              className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-            >
-              <Search size={12} />
-            </button>
-          )}
-          {/* Out as a file, once there is a conversation on disk to write out — the export reads
-              what was recorded, not what this tab happens to be holding. */}
-          {session.persisted && session.messages.length > 0 && (
-            <button
-              type="button"
-              onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                setExportMenu({ x: rect.right - 4, y: rect.bottom + 2 });
-              }}
-              title={t("chat.export")}
-              aria-label={t("chat.export")}
-              aria-haspopup="menu"
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-            >
-              <Download size={12} />
-            </button>
-          )}
-          {/* To the chat workspace, for good — with everything it holds, still on this repository.
-              Not while a turn runs or messages wait: they belong to the session it is in. */}
-          {session.persisted && session.messages.length > 0 && (
-            <button
-              type="button"
-              onClick={() => void moveChatToApp(projectId, conversationId)}
-              disabled={session.sending || queuedMessages.length > 0}
-              title={session.sending || queuedMessages.length > 0 ? t("assistant.moveBusy") : t("assistant.moveToChat")}
-              aria-label={t("assistant.moveToChat")}
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40 disabled:hover:bg-transparent"
-            >
-              <MessageSquareShare size={12} />
-            </button>
-          )}
-        </div>
         {exportMenu && (
           <ContextMenu
             x={exportMenu.x}
