@@ -1,8 +1,16 @@
 import { useEffect, useState } from "react";
 import { providerDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "./ProviderGlyph";
-import { useT } from "../../state/languageStore";
-import { formatResetIn, formatUsed, quotaKey, severityOf, useQuotaStore } from "../../state/quotaStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
+import {
+  formatResetAt,
+  formatResetIn,
+  formatUsed,
+  quotaKey,
+  severityOf,
+  useQuotaStore,
+  type ResetAt,
+} from "../../state/quotaStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import type { AccountNamer } from "../../lib/aiAccounts";
 import type { AiAccount } from "../../lib/tauri/accountCommands";
@@ -159,8 +167,14 @@ function ProviderBlock({
 
 function LimitRow({ limit, narrowed }: { limit: QuotaLimit; narrowed: Set<string> }) {
   const t = useT();
+  // The app's language names the day and the month; the instant itself is resolved against the OS
+  // timezone by `Date`. So a Spanish window on an English machine reads "mañana 09:00" at the hour
+  // the machine's own clock will show.
+  const language = useLanguageStore((s) => s.language);
   const used = limit.used_percent;
-  const resetsIn = formatResetIn(limit.resets_at);
+  const now = Date.now();
+  const resetsIn = formatResetIn(limit.resets_at, now);
+  const resetsAt = formatResetAt(limit.resets_at, now, language);
 
   return (
     <div>
@@ -187,10 +201,22 @@ function LimitRow({ limit, narrowed }: { limit: QuotaLimit; narrowed: Set<string
       {resetsIn && (
         <p className="mt-0.5 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
           {t("quota.resetsIn", { time: resetsIn })}
+          {resetsAt && ` · ${resetAtLabel(resetsAt, t)}`}
         </p>
       )}
     </div>
   );
+}
+
+/** When the window rolls over, said as a day and a clock reading.
+ *
+ * Only today and tomorrow are named in words: those are the two days a reader resolves instantly,
+ * and "Thursday" four days out is worse than the date it would replace. Anything further carries its
+ * own date, so it needs no wrapping sentence. */
+function resetAtLabel(at: ResetAt, t: Translate): string {
+  if (at.day === "today") return t("quota.resetsAtToday", { time: at.text });
+  if (at.day === "tomorrow") return t("quota.resetsAtTomorrow", { time: at.text });
+  return at.text;
 }
 
 /** What to call one window.

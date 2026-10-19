@@ -311,6 +311,60 @@ export function formatResetIn(resetsAt: string, now: number = Date.now()): strin
   return `${minutes}m`;
 }
 
+/** The day a reset instant falls on, in the machine's own timezone, and the clock reading to show
+ *  for it. */
+export interface ResetAt {
+  /** `today` and `tomorrow` are the two days worth naming in words; everything else carries its
+   *  date in `text`. */
+  day: "today" | "tomorrow" | "other";
+  /** `09:00` for today or tomorrow, `Mon 27 Oct, 09:00` for any other day — the clock reading, with
+   *  the date in front of it only where the word alone would not say which day. */
+  text: string;
+}
+
+/** The provider's reset instant as a wall-clock time on *this* machine — the companion to
+ * [`formatResetIn`], which says how long away it is but never when.
+ *
+ * Both are shown together because they answer different questions: a countdown is what you read to
+ * decide whether to wait, and a time is what you read to decide what else to do today. "7d 1h" on
+ * its own is the one that cannot be acted on at all.
+ *
+ * The instant is RFC 3339 from the provider, so the conversion is exact: `Date` resolves it against
+ * the OS timezone, which is why no offset arithmetic appears here and why a machine that travels
+ * says the right thing without anything being recomputed. `null` on the same conditions as the
+ * countdown — nothing to count to, or a window that has already rolled over.
+ */
+export function formatResetAt(resetsAt: string, now: number = Date.now(), locale?: string): ResetAt | null {
+  if (!resetsAt) return null;
+  const at = Date.parse(resetsAt);
+  if (Number.isNaN(at) || at - now <= 0) return null;
+
+  const when = new Date(at);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  // `toDateString` compares calendar days in local time, which is the comparison the reader is
+  // making. Arithmetic on the millisecond difference would call 23:00 → 01:00 "in a day".
+  const day =
+    when.toDateString() === new Date(now).toDateString()
+      ? "today"
+      : when.toDateString() === tomorrow.toDateString()
+        ? "tomorrow"
+        : "other";
+
+  if (day !== "other") return { day, text: when.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }) };
+  // One call rather than a date and a time joined here: the order of the parts and the separator
+  // between them differ by locale, and `Intl` is the only thing that knows which. No year — every
+  // window any provider publishes rolls over inside a month, so a year would be noise.
+  const text = when.toLocaleString(locale, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return { day, text };
+}
+
 /** `justo ahora`, `hace 4 min`, `hace 2 h` — how old the numbers on screen are.
  *
  * The durable half of the refresh feedback. The spinner says a read is happening; this says one
