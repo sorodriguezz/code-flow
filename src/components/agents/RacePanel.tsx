@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { Flag, FolderGit2, GitBranch, GitCompare, RefreshCw } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Flag, FolderGit2, GitBranch, GitCompare, RefreshCw, TerminalSquare } from "lucide-react";
 import { AGENT_STATUS } from "./agentStatus";
 import { agentName } from "./agentName";
 import { buttonClass, iconButtonClass } from "../common/Button";
@@ -7,7 +7,10 @@ import { EmptyState } from "../common/EmptyState";
 import { Tooltip } from "../common/Tooltip";
 import { useAgentsStore } from "../../state/agentsStore";
 import { reviewOf, useTaskReviewStore } from "../../state/taskReviewStore";
+import { useBenchStore } from "../../state/benchStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { pushErrorToast } from "../../state/toastStore";
+import { fieldClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { openPathAsProject } from "../../lib/openAsProject";
 import { raceRunning, racersOf, tally } from "../../lib/agents/race";
@@ -73,6 +76,8 @@ export function RacePanel({ batchId }: { batchId: string }) {
           </button>
         </Tooltip>
       </div>
+
+      <RunAcross racers={racers} />
 
       {/* Columns, scrolled sideways rather than squeezed: three agents on a 900px pane is 300px
           each, and a diff summary stops being one below about 240. */}
@@ -195,6 +200,72 @@ function RaceColumn({ task }: { task: AgentTask }) {
           </button>
         </Tooltip>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One line, run in every racer's worktree at once.
+ *
+ * This is the answer to "what is a terminal for, here": `pnpm test` typed once lands as one bench
+ * tab with a pane per worktree, each shell already standing in the right folder and named after its
+ * branch. The alternative — three shells opened by hand, `cd` typed into each, the command typed
+ * three times — is the work the comparison is supposed to save.
+ *
+ * It opens the bench rather than the repository dock on purpose: the bench is in *this* view, so the
+ * panes appear where the columns they belong to are.
+ */
+function RunAcross({ racers }: { racers: AgentTask[] }) {
+  const t = useT();
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const [command, setCommand] = useState("");
+  const [running, setRunning] = useState(false);
+  const folders = racers.filter((task) => (task.worktree_path ?? "") !== "");
+
+  if (folders.length === 0) return null;
+
+  const run = () => {
+    if (!workspaceId || command.trim() === "" || running) return;
+    setRunning(true);
+    const bench = useBenchStore.getState();
+    void bench
+      .runAcross(
+        workspaceId,
+        folders.map((task) => ({ cwd: task.worktree_path ?? "", title: task.worktree_branch || task.title })),
+        command,
+      )
+      .then((tabId) => {
+        // Shown only once there is something to show: `show` with no tab would open an empty bench
+        // over the comparison.
+        if (tabId) void bench.show(workspaceId, tabId);
+      })
+      .catch((error: unknown) => pushErrorToast(String(error)))
+      .finally(() => setRunning(false));
+  };
+
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+      <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+      <input
+        value={command}
+        onChange={(event) => setCommand(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.nativeEvent.isComposing) run();
+        }}
+        placeholder={t("agents.race.runPlaceholder")}
+        aria-label={t("agents.race.runPlaceholder")}
+        className={fieldClass({ size: "sm", className: "min-w-0 flex-1 font-mono" })}
+      />
+      <Tooltip label={t("agents.race.runHint", { n: folders.length })}>
+        <button
+          type="button"
+          disabled={command.trim() === "" || running}
+          onClick={run}
+          className={buttonClass({ variant: "secondary", size: "sm" })}
+        >
+          {t("agents.race.runAll", { n: folders.length })}
+        </button>
+      </Tooltip>
     </div>
   );
 }

@@ -10,6 +10,7 @@ import {
   renameWorkspaceTerminal,
   resumeWorkspaceTerminal,
   setBenchLayout,
+  writeTerminal,
 } from "../lib/tauri/commands";
 import {
   paneIds,
@@ -94,6 +95,22 @@ interface BenchState {
    *  editing a label on a screen the tab is not on is editing something nobody can see. */
   startRenameTab: (tabId: string | null) => void;
   renameTerminal: (id: string, title: string) => Promise<void>;
+  /**
+   * One tab, one pane per folder, the same line typed into all of them.
+   *
+   * What a race is read with: `pnpm test` in each of three worktrees, side by side, instead of
+   * three shells opened by hand and the same command typed three times with the cwd changed. The
+   * tab is new every time rather than reused — the panes are *these* folders, and a second run
+   * against a different race would be typing into the wrong trees.
+   *
+   * Returns the tab it made, or `null` when there was nothing to run it in. Does not wait for the
+   * commands: the point of the arrangement is watching them run.
+   */
+  runAcross: (
+    workspaceId: string,
+    panes: readonly { cwd: string; title?: string }[],
+    command: string,
+  ) => Promise<string | null>;
   /** Starts a shell for a pane that has none. */
   resume: (id: string) => Promise<void>;
   /** Empties the bench. Irreversible; the caller is expected to have confirmed. */
@@ -340,6 +357,40 @@ export const useBenchStore = create<BenchState>((set, get) => ({
   },
 
   startRenameTab: (tabId) => set({ renamingTabId: tabId }),
+
+  runAcross: async (workspaceId, panes, command) => {
+    const folders = panes.filter((pane) => pane.cwd.trim() !== "");
+    const line = command.trim();
+    if (folders.length === 0 || line === "") return null;
+
+    await get().addTab(workspaceId, folders[0].cwd);
+    const tabId = get().activeTabId;
+    // A workspace switch inside the round trip leaves `addTab` deliberately unpublished — see the
+    // guard inside it — and there is then no tab here to split.
+    if (!tabId || !get().layouts[tabId]) return null;
+    const ids = [get().focusedPane[tabId]].filter(Boolean) as string[];
+
+    for (const pane of folders.slice(1)) {
+      // `row` throughout: the panes are being *compared*, and columns of a few lines each are not a
+      // comparison. The user can rearrange them afterwards like any other split.
+      await get().split(workspaceId, tabId, pane.cwd, "row");
+      const created = get().focusedPane[tabId];
+      if (created) ids.push(created);
+    }
+
+    // Named after what each one is standing in, so the tab reads as the race rather than as four
+    // shells. Best-effort: a rename that fails costs a label, not the run.
+    for (const [at, id] of ids.entries()) {
+      const title = folders[at]?.title?.trim();
+      if (title) await get().renameTerminal(id, title).catch(() => undefined);
+    }
+
+    // Carriage return and not a newline: a pty is a terminal, and what it receives when Enter
+    // is pressed is a CR — the same point `terminalStore.runCommand` makes. Written with no wait
+    // for a prompt, as it does.
+    for (const id of ids) await writeTerminal(id, `${line}\r`).catch(() => undefined);
+    return tabId;
+  },
 
   renameTerminal: async (id, title) => {
     const trimmed = title.trim();

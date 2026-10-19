@@ -37,7 +37,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushSuccessToast } from "../../state/toastStore";
 import { AiSparkles } from "../common/AiGlyph";
 import { findFileRefs, quotePath, resolveRef } from "./fileLinks";
-import { installShellIntegration, type ShellIntegration } from "./shellIntegration";
+import { installShellIntegration, type FinishedCommand, type ShellIntegration } from "./shellIntegration";
 import { formatDuration } from "./shellMarks";
 import { useThemeStore } from "../../state/themeStore";
 import { useGlassStore } from "../../state/glassStore";
@@ -313,6 +313,15 @@ export function TerminalPane({
     onRestart: () => void;
     onNewHere: (cwd: string) => void;
     onAskAi: (text: string) => void;
+    /**
+     * The agent whose worktree this shell is standing in, by the folder it is in *now* — `null`
+     * when it is not in one. Asked as the menu opens rather than held as a prop: the shell moves
+     * (`OSC 7`), and a label naming the task the pane was opened in would go on naming it three
+     * `cd`s later.
+     */
+    agentHere?: (cwd: string) => { id: string; title: string } | null;
+    /** Sends a command and its output to that agent as its next turn. */
+    onSendToAgent?: (taskId: string, body: { command: string | null; exit: number | null; output: string }) => void;
     /** The other sessions typing should reach too — empty unless the split broadcasts. Read on
      *  every keystroke, so it is a function rather than a prop that would rebuild the terminal. */
     broadcastTo: () => string[];
@@ -362,6 +371,8 @@ export function TerminalPane({
 
   /** Whether the "Copied" badge is showing. */
   const [copied, setCopied] = useState(false);
+  /** The last command the shell marked as finished — its line and its exit code. */
+  const lastDoneRef = useRef<FinishedCommand | null>(null);
   /** The open right-click menu and where it goes. `hasSelection` is sampled when the menu opens
    *  rather than read during render, because it lives in xterm, not in React. */
   const [menu, setMenu] = useState<{
@@ -369,6 +380,9 @@ export function TerminalPane({
     y: number;
     hasSelection: boolean;
     selection: string;
+    /** The agent whose worktree this shell is in, sampled as the menu opens — see `dock.agentHere`. */
+    agent: { id: string; title: string } | null;
+    lastDone: FinishedCommand | null;
     /** What the last finished command printed — `null` for a shell that marks no commands. */
     lastOutput: string | null;
   } | null>(null);
@@ -647,7 +661,12 @@ export function TerminalPane({
         cwdRef.current = cwd;
         dockRef.current?.onCwd(cwd);
       },
-      onFinished: (done) => notifyIfUnwatched(done),
+      onFinished: (done) => {
+        // Kept for the menu: «send to the agent» states the command and its exit code, and both are
+        // gone from the screen by the time anyone right-clicks.
+        lastDoneRef.current = done;
+        notifyIfUnwatched(done);
+      },
       colors: () => {
         const styles = getComputedStyle(document.documentElement);
         return {
@@ -1142,6 +1161,8 @@ export function TerminalPane({
           hasSelection: termRef.current?.hasSelection() ?? false,
           selection: termRef.current?.getSelection() ?? "",
           lastOutput: shellRef.current?.lastOutput() ?? null,
+          agent: dockRef.current?.agentHere?.(cwdRef.current ?? dockRef.current.cwd) ?? null,
+          lastDone: lastDoneRef.current,
         });
       }}
     >
@@ -1238,6 +1259,26 @@ export function TerminalPane({
                         menu.selection || menu.lastOutput || allText().split("\n").slice(-60).join("\n"),
                       ),
                   },
+                  ...(dock.onSendToAgent && menu.agent
+                    ? [
+                        {
+                          // Only in an agent's own worktree, and named after the task: this sends a
+                          // turn to something that edits files, so it must be obvious *whose* turn
+                          // it is before it is clicked.
+                          label: t("terminal.sendToAgent", { name: menu.agent.title }),
+                          leading: <AiSparkles size={13} />,
+                          onClick: () =>
+                            dock.onSendToAgent?.(menu.agent?.id ?? "", {
+                              command: menu.lastDone?.command ?? null,
+                              exit: menu.lastDone?.exit ?? null,
+                              // The same ladder «ask the AI» uses: what you selected, else what the
+                              // last command printed, else what is on screen.
+                              output:
+                                menu.selection || menu.lastOutput || allText().split("\n").slice(-60).join("\n"),
+                            }),
+                        },
+                      ]
+                    : []),
                   {
                     label: t("terminal.newHere"),
                     icon: FolderPlus,

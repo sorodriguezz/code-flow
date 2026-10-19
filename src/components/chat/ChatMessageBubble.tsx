@@ -608,12 +608,18 @@ function AssistantAvatar({
 
   if (!copySession) return mark;
   return (
+    // `self-start` and the mark's own size, both load-bearing. This is a cell of the turn's grid,
+    // and a grid item stretches by default: a button with no height of its own grew to the height
+    // of the whole answer, which centred the glyph in the middle of a long turn instead of beside
+    // its first line — and left the tooltip to appear at the edge of a box several screens tall,
+    // which is what "the tooltip shows up wherever it likes" was. The plain `mark` never did this
+    // because its height is fixed.
     <button
       type="button"
       onClick={copySession}
       title={t("chat.copySession")}
       aria-label={t("chat.copySession")}
-      className="flex shrink-0 cursor-pointer items-center justify-center rounded-full"
+      className={`flex ${box} shrink-0 cursor-pointer items-center justify-center self-start rounded-full`}
     >
       {mark}
     </button>

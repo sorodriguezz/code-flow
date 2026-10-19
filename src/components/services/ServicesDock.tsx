@@ -46,7 +46,9 @@ import {
 } from "../../state/terminalStore";
 import { translate } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
+import { useAgentsStore } from "../../state/agentsStore";
+import { buildCommandReport, tailLines, taskForCwd } from "../../lib/agents/terminalTask";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { isMainWindow } from "../../lib/windowIdentity";
 import { folderName, relativeInside } from "../../lib/folderPath";
@@ -122,6 +124,26 @@ const DockPane = memo(function DockPane({
         void useTerminalStore.getState().openNew(projectId, here).catch((e: unknown) => pushErrorToast(String(e))),
       onAskAi: (text: string) =>
         askInRepoChat(projectId, `${translate("terminal.askAiPrompt")}\n\n\`\`\`\n${text.trim()}\n\`\`\`\n`),
+      // Who is working where, asked at the moment the menu opens — see `taskForCwd` for why only a
+      // task with a worktree of its own ever answers.
+      agentHere: (here: string) => {
+        const task = taskForCwd(useAgentsStore.getState().tasks, here);
+        return task ? { id: task.id, title: task.title } : null;
+      },
+      onSendToAgent: (taskId: string, body: { command: string | null; exit: number | null; output: string }) => {
+        const message = buildCommandReport(
+          { ...body, output: tailLines(body.output) },
+          {
+            intro: translate("terminal.sendToAgentIntro"),
+            exit: translate("terminal.sendToAgentExit", { code: String(body.exit ?? "") }),
+            output: translate("terminal.sendToAgentOutput"),
+          },
+        );
+        if (!message) return;
+        // The store's own guards answer for themselves — a turn already running, another task
+        // holding the repository — and each says so in a toast naming it.
+        if (useAgentsStore.getState().send(taskId, message)) pushSuccessToast(translate("terminal.sentToAgent"));
+      },
       broadcastTo: () => {
         const proj = useTerminalStore.getState().byProject[projectId];
         const group = proj?.groups.find((g) => g.ids.includes(tabId));
