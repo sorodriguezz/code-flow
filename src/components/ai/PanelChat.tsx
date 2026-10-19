@@ -1,5 +1,5 @@
 import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ImagePlus, ListChecks, ListPlus, MessageSquareShare, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ListChecks, ListPlus, MessageSquareShare, Paperclip, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
 import { SkillChip } from "../chat/ChatComposer";
@@ -8,7 +8,7 @@ import { MentionMenu, useMentions } from "../chat/MentionMenu";
 import { TurnReview } from "./TurnReview";
 import { useTextMenu } from "../common/TextMenu";
 import { useModelReadsImages } from "../../lib/useModelReadsImages";
-import { IMAGE_EXTENSIONS, useImageDrop } from "../../lib/useImageDrop";
+import { isImagePath, useImageDrop } from "../../lib/useImageDrop";
 import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import type { ChatAttachment } from "../../lib/tauri/chatCommands";
 import { McpMenu } from "../chat/McpMenu";
@@ -17,7 +17,7 @@ import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQu
 import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openChat, openNewChat, takePendingSend } from "../../lib/aiPanelNav";
 import { moveChatToApp } from "../../lib/moveChatToApp";
 import { openTerminal } from "../../lib/tauri/commands";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { registerDictationSend } from "../../state/dictationStore";
 import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
 import { useIsQueued, repoHolder } from "../../lib/repoQueue";
@@ -27,7 +27,7 @@ import { ChatFindBar, useChatFind } from "../chat/ChatFind";
 import { ContextMeter, type ContextReading } from "../chat/ContextMeter";
 import { insertCodeAtCaret, useApplyCodeStore } from "../../lib/codeToEditor";
 import { estimateTokens } from "../../lib/contextWindow";
-import { providerCapabilities } from "../../lib/aiProviders";
+import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
 import { branchChatConversation } from "../../lib/tauri/commands";
 import { useConversationStore } from "../../state/conversationStore";
 import { exportMenuItems, exportRepoConversation } from "../chat/exportChat";
@@ -360,25 +360,41 @@ export function PanelChat({
   useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()));
   const dictating = useDictatingHere(boxRef);
 
-  // ── Images ────────────────────────────────────────────────────────────────────────────────
-  // Offered only where the model can look at one (`useModelReadsImages`): copied into this
-  // conversation's own folder when picked or pasted, sent with the next question.
+  // ── Attachments ───────────────────────────────────────────────────────────────────────────
+  // Any file, not only images: copied into this conversation's own folder when picked, pasted or
+  // dropped, and named to the engine with the next question (`ai::attachment_note`), which reads
+  // it with its own file-reading tool. The specification, the log, the CSV somebody sent — none of
+  // those live in the repository, and before this the only way to show one was to copy it in.
+  //
+  // `readsImages` no longer decides whether attaching is offered at all; it decides what the chip
+  // promises about an *image*, which is the one kind of file some engines cannot look at.
   const readsImages = useModelReadsImages(provider, model);
   const staged = useChatStore((s) => s.attachments[conversationId]) ?? NO_FILES;
   const attachPaths = async (paths: string[]) => {
-    for (const path of paths) await useChatStore.getState().attachImagePath(conversationId, path);
+    for (const path of paths) await useChatStore.getState().attachFilePath(conversationId, path);
     boxRef.current?.focus();
   };
-  const attachImages = async () => {
-    const picked = await openDialog({ multiple: true, filters: [{ name: t("assistant.images"), extensions: IMAGE_EXTENSIONS }] });
+  const attachFiles = async () => {
+    // No extension filter, like the Chat workspace's composer: the engines read files, so narrowing
+    // the dialog to images offered the half that works in fewer places.
+    const picked = await openDialog({ multiple: true });
     await attachPaths(typeof picked === "string" ? [picked] : Array.isArray(picked) ? picked : []);
   };
-  /** Images dragged from the desktop onto the composer. */
+  /** Files dragged from the desktop onto the composer — the same as the button's picks. */
   const composerRef = useRef<HTMLDivElement>(null);
-  const dropOver = useImageDrop(composerRef, (paths) => {
-    if (readsImages) void attachPaths(paths);
-    else pushErrorToast(t("assistant.imagesUnsupported"));
-  });
+  const dropOver = useImageDrop(
+    composerRef,
+    (paths) => {
+      // An image dropped on an engine that cannot look at one is kept, not refused: the file is
+      // still there to be read, and the notice says what will happen to it rather than pretending
+      // the drop failed.
+      if (!readsImages && paths.some(isImagePath)) {
+        useToastStore.getState().pushToast(t("chat.attachImageBlind", { provider: providerDisplayLabel(provider, t) }), "info");
+      }
+      void attachPaths(paths);
+    },
+    () => true,
+  );
   /** A screenshot pasted into the box becomes an attachment — or, for a model that cannot see one,
    *  is said not to be rather than vanishing. Text pastes are left alone. */
   const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -392,7 +408,7 @@ export function PanelChat({
     }
     const extension = (file.type.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
     void file.arrayBuffer().then((buffer) =>
-      useChatStore.getState().attachImageBytes(conversationId, `pegado.${extension}`, new Uint8Array(buffer)),
+      useChatStore.getState().attachFileBytes(conversationId, `pegado.${extension}`, new Uint8Array(buffer)),
     );
   };
   /** Right-click: Copy on a selected passage, Cut / Copy / Paste in the box. */
@@ -806,6 +822,7 @@ export function PanelChat({
           <AttachmentBar
             files={staged}
             canSeeImages={readsImages}
+            providerLabel={providerDisplayLabel(provider, t)}
             onRemove={(id) => useChatStore.getState().removeAttachment(conversationId, id)}
           />
           {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
@@ -879,19 +896,18 @@ export function PanelChat({
             </button>
             {/* The CLI's own MCP servers, switched for this repository. */}
             <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />
-            {/* Absent, not disabled, for a model that cannot look at an image — the same rule as the
-                chat workspace's controls: a button that cannot do anything is worse than none. */}
-            {readsImages && (
-              <button
-                type="button"
-                onClick={() => void attachImages()}
-                title={t("assistant.attachImage")}
-                aria-label={t("assistant.attachImage")}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-              >
-                <ImagePlus size={13} />
-              </button>
-            )}
+            {/* Always here now: every engine can read a file it is given the path to, so the button
+                has something to do whatever the model is. The title is what changes — on a model
+                that cannot look at an image, it says files are read rather than seen. */}
+            <button
+              type="button"
+              onClick={() => void attachFiles()}
+              title={readsImages ? t("chat.attach") : t("chat.attachTextOnly", { provider: providerDisplayLabel(provider, t) })}
+              aria-label={t("chat.attach")}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            >
+              <Paperclip size={13} />
+            </button>
             <span className="flex-1" />
             {session.sending ? (
               <>

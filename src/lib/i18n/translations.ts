@@ -5569,8 +5569,6 @@ const en = {
   "textMenu.copy": "Copy",
   "textMenu.paste": "Paste",
   "textMenu.selectAll": "Select all",
-  "assistant.attachImage": "Attach image",
-  "assistant.images": "Images",
   "assistant.imagesUnsupported": "This model can't read images",
   "chat.mcpTitle": "MCP servers",
   "chat.mcpHeading": "Your MCP servers",

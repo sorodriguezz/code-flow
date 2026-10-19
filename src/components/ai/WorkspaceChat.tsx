@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Bot, Check, Download, FolderGit2, History, ImagePlus, Link2, ListChecks, ListPlus, Play, Search, SquarePen, Square, Trash2, Workflow } from "lucide-react";
+import { ArrowDown, ArrowUp, Bot, Check, Download, FolderGit2, History, Link2, ListChecks, ListPlus, Paperclip, Play, Search, SquarePen, Square, Trash2, Workflow } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
@@ -7,6 +7,7 @@ import { menuRowClass, useDismiss } from "./docParts";
 import { AttachmentBar } from "../chat/AttachmentBar";
 import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
 import { ChatFindBar, useChatFind } from "../chat/ChatFind";
+import { ContextMeter, type ContextReading } from "../chat/ContextMeter";
 import { SkillChip } from "../chat/ChatComposer";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
 import { exportChatConversation, exportMenuItems } from "../chat/exportChat";
@@ -22,9 +23,11 @@ import { useTextMenu } from "../common/TextMenu";
 import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
 import { openWorkspaceChat } from "../../lib/aiPanelNav";
 import { resolveAccount } from "../../lib/aiAccounts";
+import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
+import { estimateTokens } from "../../lib/contextWindow";
 import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import { useEffortSupported } from "../../lib/useEffortSupport";
-import { IMAGE_EXTENSIONS, useImageDrop } from "../../lib/useImageDrop";
+import { isImagePath, useImageDrop } from "../../lib/useImageDrop";
 import { useModelReadsImages } from "../../lib/useModelReadsImages";
 import { listWorkspaceAgents } from "../../lib/tauri/commands";
 import { workspaceChatSnapshot, type ChatAttachment, type SkillPick, type WorkspaceChatSnapshot } from "../../lib/tauri/chatCommands";
@@ -35,9 +38,10 @@ import { useAiRunStore } from "../../state/aiRunStore";
 import { useChainStore } from "../../state/chainStore";
 import { useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
 import { confirmAction } from "../../state/confirmStore";
+import { useConversationStore } from "../../state/conversationStore";
 import { registerDictationSend } from "../../state/dictationStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { EMPTY_WS_CHAT, EMPTY_WS_LIST, useWorkspaceChatStore, wsChatQueueKey } from "../../state/workspaceChatStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { WorkspaceAgent } from "../../types/domain";
@@ -229,6 +233,21 @@ export function WorkspaceChat({
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
+  /**
+   * An option picked on the question card at the end of an answer, sent as the next message.
+   *
+   * The card is drawn by the bubble either way; without this it drew its options disabled, so a
+   * turn that ended by asking something offered three buttons that did nothing and the only way
+   * through was to retype the answer (user report, 2026-10-19: "tampoco me deja hacer clic sobre
+   * eso para responder"). The repository chat has had this since the card existed — this is the
+   * same wiring for the workspace one.
+   */
+  const answerQuestion = (text: string) => {
+    useWorkspaceChatStore.getState().submit(conversationId, text);
+    useAiPanelStore.getState().markChatStarted(tabKey);
+    toBottom();
+  };
+
   /** «Ejecutar el plan»: plan mode off, and the go-ahead as the next question. */
   const runPlan = () => {
     useWorkspaceChatStore.getState().setPlan(conversationId, false);
@@ -236,6 +255,51 @@ export function WorkspaceChat({
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
+  // ── Context ───────────────────────────────────────────────────────────────────────────────
+  // The same gauge the repository chat carries, on the same two sources: the engine's own figure
+  // when it reports one (Claude), and an estimate over the turns since the last `/clear` when it
+  // does not. A chat that spans several repositories fills a window faster than one that does not,
+  // so this is if anything the one that needed it more.
+  const windowByModel = useConversationStore((s) => s.windowByModel);
+  const meterModel = session.model || model;
+  useEffect(() => {
+    if (meterModel) useConversationStore.getState().ensureContextWindow(meterModel);
+  }, [meterModel]);
+  const wasSending = useRef(session.sending);
+  useEffect(() => {
+    if (wasSending.current && !session.sending && meterModel) useConversationStore.getState().ensureContextWindow(meterModel, true);
+    wasSending.current = session.sending;
+  }, [session.sending, meterModel]);
+  const contextReading = useMemo<ContextReading | undefined>(() => {
+    if (session.messages.length === 0) return undefined;
+    // The whole thread: this chat has no `/clear`, so there is no point to count from but the
+    // start — unlike the repository chat, which slices from its last reset.
+    const counted = session.messages.map((m) => m.content).join("\n\n");
+    const measured = session.contextTokens;
+    return {
+      tokens: measured ?? estimateTokens(counted),
+      measured: measured !== null,
+      window: meterModel ? (windowByModel[meterModel] ?? null) : null,
+      resumes: providerCapabilities(session.provider || provider).resumesSessions && Boolean(session.engineSessionId),
+      compactedTurns: 0,
+      autoCompacts: false,
+      summary: "",
+      compacting: false,
+      // `/compact` is Claude's own, sent as the next turn. Through the store rather than the
+      // composer's `submit`, which would first look for an app command by that name.
+      onCompact:
+        (session.provider || provider) === "claude"
+          ? () => {
+              useWorkspaceChatStore.getState().submit(conversationId, "/compact");
+              toBottom();
+            }
+          : undefined,
+      onUncompact: () => {},
+    };
+    // `toBottom` only touches refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.messages, session.contextTokens, session.engineSessionId, session.provider, provider, meterModel, windowByModel, conversationId]);
+
   /** The `/` menu is open while the draft is one token that begins with a slash. */
   const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
   const menuOpen = slash !== null && !slash.includes(" ");
@@ -247,17 +311,19 @@ export function WorkspaceChat({
   const dictating = useDictatingHere(boxRef);
   const textMenu = useTextMenu();
 
-  // ── Images ────────────────────────────────────────────────────────────────────────────────
-  // The repository chat's rule: offered only where the model can look at one, picked, pasted or
-  // dropped onto the composer, and sent with the next question.
+  // ── Attachments ───────────────────────────────────────────────────────────────────────────
+  // The repository chat's rule: any file, picked, pasted or dropped onto the composer, copied under
+  // this conversation's folder and named to the engine with the next question, which reads it with
+  // its own file-reading tool. `readsImages` says what the chip may promise about an image, not
+  // whether attaching is offered.
   const readsImages = useModelReadsImages(provider, model);
   const staged = useWorkspaceChatStore((s) => s.attachments[conversationId]) ?? NO_FILES;
   const attachPaths = async (paths: string[]) => {
-    for (const path of paths) await useWorkspaceChatStore.getState().attachImagePath(conversationId, path);
+    for (const path of paths) await useWorkspaceChatStore.getState().attachFilePath(conversationId, path);
     boxRef.current?.focus();
   };
-  const attachImages = async () => {
-    const picked = await openDialog({ multiple: true, filters: [{ name: t("assistant.images"), extensions: IMAGE_EXTENSIONS }] });
+  const attachFiles = async () => {
+    const picked = await openDialog({ multiple: true });
     await attachPaths(typeof picked === "string" ? [picked] : Array.isArray(picked) ? picked : []);
   };
   const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -271,14 +337,23 @@ export function WorkspaceChat({
     }
     const extension = (file.type.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
     void file.arrayBuffer().then((buffer) =>
-      useWorkspaceChatStore.getState().attachImageBytes(conversationId, `pegado.${extension}`, new Uint8Array(buffer)),
+      useWorkspaceChatStore.getState().attachFileBytes(conversationId, `pegado.${extension}`, new Uint8Array(buffer)),
     );
   };
   const composerRef = useRef<HTMLDivElement>(null);
-  const dropOver = useImageDrop(composerRef, (paths) => {
-    if (readsImages) void attachPaths(paths);
-    else pushErrorToast(t("assistant.imagesUnsupported"));
-  });
+  const dropOver = useImageDrop(
+    composerRef,
+    (paths) => {
+      // An image dropped on an engine that cannot look at one is kept, not refused: the file is
+      // still there to be read, and the notice says what will happen to it rather than pretending
+      // the drop failed.
+      if (!readsImages && paths.some(isImagePath)) {
+        useToastStore.getState().pushToast(t("chat.attachImageBlind", { provider: providerDisplayLabel(provider, t) }), "info");
+      }
+      void attachPaths(paths);
+    },
+    () => true,
+  );
 
   const queueKey = wsChatQueueKey(conversationId);
   const queuedMessages = useChatQueue(queueKey);
@@ -408,7 +483,18 @@ export function WorkspaceChat({
                 )}
                 <ChatMessageBubble
                   message={message}
-                  actions={message.isError && !agent ? { onPickModel: (next) => pickEngine(provider, next) } : undefined}
+                  actions={{
+                    ...(message.isError && !agent ? { onPickModel: (next: string) => pickEngine(provider, next) } : {}),
+                    // Only the last answer, and only while nothing is running: an option clicked on
+                    // an older card would be answering a question the conversation moved past.
+                    onAnswer:
+                      message.role === "assistant" &&
+                      !message.isError &&
+                      i === session.messages.length - 1 &&
+                      !session.sending
+                        ? answerQuestion
+                        : undefined,
+                  }}
                 />
                 {message.role === "assistant" &&
                   message.changes?.map((change) => (
@@ -499,6 +585,7 @@ export function WorkspaceChat({
           <AttachmentBar
             files={staged}
             canSeeImages={readsImages}
+            providerLabel={providerDisplayLabel(provider, t)}
             onRemove={(id) => useWorkspaceChatStore.getState().removeAttachment(conversationId, id)}
           />
           {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
@@ -550,6 +637,7 @@ export function WorkspaceChat({
                 onPick={(level) => void useWorkspaceChatStore.getState().setEffort(conversationId, level)}
               />
               <AnswerLengthPicker compact />
+              {contextReading && <ContextMeter reading={contextReading} />}
               {/* Plan mode: read-only turns that answer with a plan, then «Ejecutar el plan». */}
               <button
                 type="button"
@@ -577,17 +665,16 @@ export function WorkspaceChat({
                   onPick={(id) => void useWorkspaceChatStore.getState().setAgent(conversationId, id)}
                 />
               )}
-              {readsImages && (
-                <button
-                  type="button"
-                  onClick={() => void attachImages()}
-                  title={t("assistant.attachImage")}
-                  aria-label={t("assistant.attachImage")}
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-                >
-                  <ImagePlus size={13} />
-                </button>
-              )}
+              {/* Always offered: a file is something every engine can read, whatever it can see. */}
+              <button
+                type="button"
+                onClick={() => void attachFiles()}
+                title={readsImages ? t("chat.attach") : t("chat.attachTextOnly", { provider: providerDisplayLabel(provider, t) })}
+                aria-label={t("chat.attach")}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+              >
+                <Paperclip size={13} />
+              </button>
               <span className="flex-1" />
               {session.sending ? (
                 <>

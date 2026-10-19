@@ -466,17 +466,17 @@ interface ChatState {
     conversationId: string,
     message: string,
     skill?: ChatSkillPick | null,
-    /** This question's own images — a queued message's. Absent: whatever the composer has staged. */
+    /** This question's own files — a queued message's. Absent: whatever the composer has staged. */
     files?: ChatAttachment[],
   ) => void;
   /**
-   * Images staged in each conversation's composer, already copied under the app's own root
-   * (`repoChatAttach*`) — so a chip is a file that exists, and removing it deletes the copy. They go
-   * with the next question and leave the box when it is sent or queued.
+   * Files staged in each conversation's composer — any file, not only images — already copied under
+   * the app's own root (`repoChatAttach*`), so a chip is a file that exists and removing it deletes
+   * the copy. They go with the next question and leave the box when it is sent or queued.
    */
   attachments: Record<string, ChatAttachment[]>;
-  attachImagePath: (conversationId: string, sourcePath: string) => Promise<void>;
-  attachImageBytes: (conversationId: string, name: string, data: Uint8Array) => Promise<void>;
+  attachFilePath: (conversationId: string, sourcePath: string) => Promise<void>;
+  attachFileBytes: (conversationId: string, name: string, data: Uint8Array) => Promise<void>;
   removeAttachment: (conversationId: string, attachmentId: string) => void;
   /** Takes a queued message out for good — and the copies of its images with it. */
   discardQueued: (conversationId: string, itemId: string) => void;
@@ -568,7 +568,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   planByConversation: {},
   attachments: {},
 
-  attachImagePath: async (conversationId, sourcePath) => {
+  attachFilePath: async (conversationId, sourcePath) => {
     try {
       const file = await repoChatAttachFile(conversationId, sourcePath);
       set((s) => ({ attachments: { ...s.attachments, [conversationId]: [...(s.attachments[conversationId] ?? []), file] } }));
@@ -577,7 +577,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  attachImageBytes: async (conversationId, name, data) => {
+  attachFileBytes: async (conversationId, name, data) => {
     try {
       const file = await repoChatAttachBytes(conversationId, name, Array.from(data));
       set((s) => ({ attachments: { ...s.attachments, [conversationId]: [...(s.attachments[conversationId] ?? []), file] } }));

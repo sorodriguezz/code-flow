@@ -143,14 +143,14 @@ describe("workspace chat", () => {
     const id = "44444444-4444-4444-8444-444444444444";
     const store = useWorkspaceChatStore.getState();
     store.prepare(id, "ws-1");
-    await store.attachImagePath(id, "/Users/me/shot.png");
+    await store.attachFilePath(id, "/Users/me/shot.png");
     store.submit(id, "what is this?");
     await flush();
     // Taken off the composer the moment it was asked, and shown on the question.
     expect(useWorkspaceChatStore.getState().attachments[id]).toEqual([]);
     expect(useWorkspaceChatStore.getState().byConversation[id].messages[0].attachments?.map((f) => f.name)).toEqual(["shot.png"]);
 
-    await store.attachImagePath(id, "/Users/me/next.png");
+    await store.attachFilePath(id, "/Users/me/next.png");
     store.submit(id, "and this one?");
     expect(useWorkspaceChatStore.getState().attachments[id]).toEqual([]);
     backend.sends[0].resolve(reply("a chart"));
@@ -163,7 +163,7 @@ describe("workspace chat", () => {
     const id = "55555555-5555-4555-8555-555555555555";
     const store = useWorkspaceChatStore.getState();
     store.prepare(id, "ws-1");
-    await store.attachImagePath(id, "/Users/me/shot.png");
+    await store.attachFilePath(id, "/Users/me/shot.png");
     store.removeAttachment(id, "x-shot.png");
     expect(useWorkspaceChatStore.getState().attachments[id]).toEqual([]);
     expect(backend.calls.find((c) => c.name === "chat_remove_attachment")?.args).toEqual({ conversationId: id, attachmentId: "x-shot.png" });

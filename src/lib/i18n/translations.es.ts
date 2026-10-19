@@ -5443,8 +5443,6 @@ export const es = {
   "textMenu.copy": "Copiar",
   "textMenu.paste": "Pegar",
   "textMenu.selectAll": "Seleccionar todo",
-  "assistant.attachImage": "Adjuntar imagen",
-  "assistant.images": "Imágenes",
   "assistant.imagesUnsupported": "Este modelo no lee imágenes",
   "chat.mcpTitle": "Servidores MCP",
   "chat.mcpHeading": "Tus servidores MCP",

@@ -430,29 +430,24 @@ fn adopt_into(from: &Path, to: &Path) -> Result<Vec<ChatAttachment>, String> {
 
 // ===================== the repository chat =====================
 //
-// The assistant panel's conversation about a repository takes **images only** — what it lacked was
-// a way to show the model a screenshot; the repository itself is already the files it reads. Same
-// copy-under-our-root rule as the chat workspace, under a root of its own (see
-// `paths::repo_chat_attachments_dir` for why it cannot share one), offered by the composer only
-// where the model can look at an image.
+// The assistant panel's conversation about a repository takes **any file**, like the chat
+// workspace. It began as images only, on the reasoning that the repository is already the files the
+// model reads — which is true of the repository and of nothing else: the specification somebody was
+// sent, last night's log, the CSV a colleague mailed over are all outside it, and the only way to
+// bring one into the conversation was to copy it into the repository first. Every engine here has a
+// file-reading tool, so a document is the case that works on all of them; an image is the narrower
+// one, which only some can see (`is_image`, and the chip in the composer that says so).
+//
+// Same copy-under-our-root rule as the chat workspace, under a root of its own (see
+// `paths::repo_chat_attachments_dir` for why it cannot share one).
 
 fn safe_repo_conversation_dir(conversation_id: &str) -> Result<PathBuf, String> {
     safe_id(conversation_id)?;
     Ok(crate::paths::repo_chat_conversation_attachments_dir(conversation_id))
 }
 
-/// Refuses anything that is not an image, by the same extension rule that decides `is_image`.
-fn image_only(name: &str) -> Result<(), String> {
-    if is_image(name) {
-        Ok(())
-    } else {
-        Err(format!("only images can be attached here ({})", IMAGE_EXTENSIONS.join(", ")))
-    }
-}
-
 #[tauri::command]
 pub fn repo_chat_attach_file(conversation_id: String, source_path: String) -> Result<ChatAttachment, String> {
-    image_only(&source_path)?;
     store_file(&safe_repo_conversation_dir(&conversation_id)?, &source_path)
 }
 
@@ -463,7 +458,6 @@ pub fn repo_chat_attach_bytes(
     name: String,
     data: Vec<u8>,
 ) -> Result<ChatAttachment, String> {
-    image_only(&name)?;
     store_bytes(&safe_repo_conversation_dir(&conversation_id)?, &name, data)
 }
 
@@ -472,7 +466,7 @@ pub fn repo_chat_remove_attachment(conversation_id: String, attachment_id: Strin
     remove_from(&safe_repo_conversation_dir(&conversation_id)?, &attachment_id)
 }
 
-/// Every image a repository conversation has — what `send_chat_message` resolves a turn's ids
+/// Every file a repository conversation has — what `send_chat_message` resolves a turn's ids
 /// against, so the frontend never names a path itself.
 pub fn repo_conversation_attachments(conversation_id: &str) -> Vec<ChatAttachment> {
     safe_repo_conversation_dir(conversation_id).map(|dir| list_dir(&dir)).unwrap_or_default()

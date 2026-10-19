@@ -57,9 +57,10 @@ import { pushErrorToast } from "./toastStore";
  * - **Every turn is stamped with its workspace before the first await** (run isolation): the run
  *   row, the notification and the unread mark name the workspace the question was asked in.
  * - **Enter keeps working while a turn runs** — the same queue the other chats use (`chatQueueStore`).
- * - **Images, like the repository chat** — staged per conversation, offered only where the model
- *   reads them. Copied under the chat workspace's root (`chat_attach_*`), because `chat_send` is
- *   what resolves the ids; a queued question carries its own.
+ * - **Attachments, like the repository chat** — any file, staged per conversation and named to the
+ *   engine with the question, which reads it with its own tool. Copied under the chat workspace's
+ *   root (`chat_attach_*`), because `chat_send` is what resolves the ids; a queued question carries
+ *   its own.
  */
 
 export interface WsChatSession {
@@ -91,6 +92,18 @@ export interface WsChatSession {
   /** Plan mode: each turn runs read-only and answers with a plan. Kept in memory, like the
    *  repository chat's. */
   plan: boolean;
+  /**
+   * What the engine said it was holding at the end of its last turn, or `null` when none has said.
+   *
+   * **Measured, never computed** — the meter falls back to an estimate over the transcript and
+   * says which of the two it is showing (`ContextMeter`). Carried on the session because it comes
+   * back on the reply and is written to the row, and the composer needs it without re-reading the
+   * conversation.
+   */
+  contextTokens: number | null;
+  /** The engine's own resume token for the last turn, `null` before one lands. The meter reads it
+   *  to say whether the next turn continues that session or replays the thread. */
+  engineSessionId: string | null;
 }
 
 interface WsChatState {
@@ -98,8 +111,8 @@ interface WsChatState {
   listByWorkspace: Record<string, ChatConversation[]>;
   /** Images waiting in each conversation's composer, sent with its next question. */
   attachments: Record<string, ChatAttachment[]>;
-  attachImagePath: (conversationId: string, sourcePath: string) => Promise<void>;
-  attachImageBytes: (conversationId: string, name: string, data: Uint8Array) => Promise<void>;
+  attachFilePath: (conversationId: string, sourcePath: string) => Promise<void>;
+  attachFileBytes: (conversationId: string, name: string, data: Uint8Array) => Promise<void>;
   removeAttachment: (conversationId: string, attachmentId: string) => void;
   /** Opens a session in memory — a fresh one, or one read back from disk. */
   prepare: (conversationId: string, workspaceId: string, opts?: { focusChainId?: string | null }) => void;
@@ -143,6 +156,8 @@ export const EMPTY_WS_CHAT: WsChatSession = {
   streamText: "",
   restored: null,
   plan: false,
+  contextTokens: null,
+  engineSessionId: null,
 };
 
 export const EMPTY_WS_LIST: ChatConversation[] = [];
@@ -222,6 +237,8 @@ export function sessionFromRow(row: ChatConversation): WsChatSession {
     effort: row.effort,
     agentId: row.agentId ?? "",
     focusChainId: row.focusChainId ?? "",
+    contextTokens: row.contextTokens,
+    engineSessionId: row.engineSessionId,
     persisted: true,
   };
 }
@@ -287,7 +304,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
     listByWorkspace: {},
     attachments: {},
 
-    attachImagePath: async (conversationId, sourcePath) => {
+    attachFilePath: async (conversationId, sourcePath) => {
       try {
         const file = await chatAttachFile(conversationId, sourcePath);
         set((s) => ({ attachments: { ...s.attachments, [conversationId]: [...(s.attachments[conversationId] ?? []), file] } }));
@@ -296,7 +313,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       }
     },
 
-    attachImageBytes: async (conversationId, name, data) => {
+    attachFileBytes: async (conversationId, name, data) => {
       try {
         const file = await chatAttachBytes(conversationId, name, Array.from(data));
         set((s) => ({ attachments: { ...s.attachments, [conversationId]: [...(s.attachments[conversationId] ?? []), file] } }));
@@ -596,6 +613,10 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             runId: null,
             runStartedAt: null,
             streamText: "",
+            // `undefined` from an engine that does not report it leaves the last measurement
+            // standing, the way the row does — emptying the gauge would read as "no context".
+            contextTokens: reply.context_tokens ?? s.contextTokens,
+            engineSessionId: reply.session_id ?? s.engineSessionId,
           }));
           notify({
             source: "chat",
