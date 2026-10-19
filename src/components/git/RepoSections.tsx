@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
+  Bot,
   Boxes,
   CloudOff,
   CloudUpload,
@@ -14,6 +15,10 @@ import {
   Trash2,
 } from "lucide-react";
 import { CollapsibleSection } from "../common/CollapsibleSection";
+import { ThinkingOrb } from "../common/ThinkingOrb";
+import { useAgentsStore } from "../../state/agentsStore";
+import { useTaskReviewStore } from "../../state/taskReviewStore";
+import { taskForCwd } from "../../lib/agents/terminalTask";
 import { buttonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 import { Segmented } from "../common/Segmented";
@@ -248,13 +253,33 @@ export function WorktreesSection() {
   const [adding, setAdding] = useState(false);
   const linked = worktrees.filter((w) => !w.is_main);
   const blocked = pending !== null;
+  /**
+   * How many of these folders have an agent writing in them right now.
+   *
+   * A primitive out of the selector, for the reason every agent-aware row here gives: the store
+   * moves several times a second while a turn runs, and anything but a number would redraw the whole
+   * section on each of them.
+   */
+  const working = useAgentsStore((s) =>
+    worktrees.reduce((count, wt) => {
+      const owner = taskForCwd(s.tasks, wt.path);
+      const live = owner ? (s.live[owner.id]?.sending ?? false) || owner.status === "running" : false;
+      return count + (live ? 1 : 0);
+    }, 0),
+  );
 
   return (
     <>
       <CollapsibleSection
         {...fold}
         icon={FolderTree}
-        title={linked.length > 0 ? `${t("worktrees.title")} (${linked.length})` : t("worktrees.title")}
+        // How many, and how many of them are busy — the question a folded section is asked while a
+        // race is running, and the one reason to unfold it.
+        title={
+          linked.length > 0
+            ? `${t("worktrees.title")} (${linked.length}${working > 0 ? ` · ${t("worktrees.working", { n: working })}` : ""})`
+            : t("worktrees.title")
+        }
         action={({ expand }) => (
           <button
             onClick={() => {
@@ -318,6 +343,14 @@ function WorktreeRow({
 }) {
   const name = worktree.path.split(/[\\/]/).filter(Boolean).pop() ?? worktree.path;
   const label = worktree.branch ?? (worktree.head_oid ? worktree.head_oid.slice(0, 7) : "—");
+  // The task whose worktree this is, by the same path match the terminal's own menu uses — so "my
+  // worktree" means one thing everywhere. `null` for a worktree somebody made by hand.
+  const task = useAgentsStore((s) => taskForCwd(s.tasks, worktree.path));
+  // A primitive out of the selector: this row is redrawn whenever any task's live state moves.
+  const working = useAgentsStore((s) => {
+    const owner = taskForCwd(s.tasks, worktree.path);
+    return owner ? (s.live[owner.id]?.sending ?? false) || owner.status === "running" : false;
+  });
   return (
     <div
       style={pageDelay(at)}
@@ -326,11 +359,35 @@ function WorktreeRow({
         .filter(Boolean)
         .join("\n")}
     >
-      <GitBranch size={10} className={`shrink-0 ${worktree.is_current ? "opacity-100 text-[var(--cf-accent)]" : "opacity-40"}`} />
+      {working ? (
+        // An agent is writing in this folder *now*. The orb replaces the branch glyph rather than
+        // sitting beside it: the row has one mark, and this is what it should be saying.
+        <span className="flex h-2.5 w-2.5 shrink-0 items-center justify-center">
+          <ThinkingOrb size="sm" />
+        </span>
+      ) : (
+        <GitBranch size={10} className={`shrink-0 ${worktree.is_current ? "opacity-100 text-[var(--cf-accent)]" : "opacity-40"}`} />
+      )}
       <span className={`min-w-0 flex-1 truncate ${worktree.prunable ? "line-through opacity-60" : ""}`}>
         {label}
         <span className="ml-1.5 font-mono text-[11px] text-[var(--cf-text-faint)]">{name}</span>
       </span>
+      {/* Whose it is, where the eye already is: a linked worktree here is almost always an agent's —
+          it is what «In a worktree of its own» makes, and what a race gives each of its runners.
+          Opens that task on its diff, which is what somebody looking at this row wants next. */}
+      {task && (
+        <button
+          title={t("worktrees.openTask", { name: task.title })}
+          onClick={() => {
+            useTaskReviewStore.getState().requestTab(task.id, "review");
+            void useAgentsStore.getState().select(task.id);
+            useUiStore.getState().setActiveView("agents");
+          }}
+          className={`${hoverButton} hover:text-[var(--cf-accent)]`}
+        >
+          <Bot size={12} />
+        </button>
+      )}
       {!worktree.is_current && !worktree.prunable && (
         <button title={t("worktrees.open")} onClick={onOpen} className={`${hoverButton} hover:text-[var(--cf-accent)]`}>
           <FolderOpen size={12} />
