@@ -1336,6 +1336,13 @@ pub trait AiEngine: Send + Sync {
     /// Turn a finished run into its reply (plus session/model) or a user-facing error. `success`
     /// is the process exit status; `stdout`/`stderr` are lossy-UTF-8 decoded.
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String>;
+    /// Lets an engine read settings of its own, where they are available.
+    ///
+    /// Called by whoever resolves a provider's configuration, with the same `{provider}_{suffix}`
+    /// reader it uses for the binary path and the model. Every engine but the custom one ignores it:
+    /// their arguments are a property of a verified binary, not of what the user typed.
+    fn configure(&mut self, _get: &dyn Fn(&str) -> Option<String>) {}
+
     /// CLI args that make the binary print its available models, one id per line — or `None` if the
     /// CLI has no such command, in which case the frontend falls back to a curated list. This is
     /// how the model picker shows what's *actually* installed/configured rather than a hardcoded
@@ -1894,6 +1901,9 @@ pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
         // the engine that can still talk to that endpoint.
         "cline" | "ollama" | "local" | "openai" => Box::new(crate::cline::ClineEngine),
         crate::local_agent::PROVIDER_ID => Box::new(crate::local_agent::CodeFlowEngine),
+        // Whatever the user configured — see `custom`. Its argument line is read in `configure`,
+        // because only the caller that resolves settings has them.
+        crate::custom::PROVIDER_ID => Box::new(crate::custom::CustomEngine::default()),
         _ => Box::new(crate::claude::ClaudeEngine),
     }
 }

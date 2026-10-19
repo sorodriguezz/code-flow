@@ -3616,6 +3616,10 @@ export const es = {
 
   "settings.aiSectionTitle": "Motores de IA",
   "settings.aiSectionHint": "Qué motores puede usar CodeFlow, con qué cuentas, y cuánto han gastado.",
+  "settings.customProvider": "Cualquier otro CLI",
+  "settings.customArgs": "Argumentos",
+  "settings.customArgsHint": "La línea tal como la escribirías en un shell. {prompt} es la pregunta y {model} el modelo configurado; un argumento cuyo marcador quede vacío se descarta. Las comillas agrupan palabras.",
+  "settings.customNote": "La app corre este binario, le pasa los datos por stdin y lee la respuesta de stdout. No afirma nada más sobre él: sin sesión que retomar, sin lista de modelos y sin lista de herramientas permitidas — lo que el CLI haga por defecto es lo que pasa.",
   "settings.binaryLabel": "Ruta al binario del CLI",
   "settings.binaryHint": "Déjalo con el nombre por defecto si ya está en tu PATH.",
   "ai.billingMessage": "Tu proveedor rechazó la petición por falta de saldo.",

@@ -226,6 +226,25 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     headlessSlashCommands: false,
     acceptsImages: false,
   },
+  // Any other CLI agent: the one the user configures themselves — a binary and an argument line.
+  //
+  // The engines above are written against a *verified* binary: every flag in `claude.rs`, `grok.rs`
+  // and the rest was read off the real CLI, which is what makes them trustworthy and also what stops
+  // this app from supporting the next agent that appears. This is the honest version of "every CLI
+  // agent": the app runs what the user names, pipes the data in and reads the answer off stdout, and
+  // claims nothing it cannot verify — no session to resume, no model list, no tool vocabulary. See
+  // `src-tauri/src/custom.rs`.
+  {
+    id: "custom",
+    labelKey: "settings.customProvider",
+    icon: SquareTerminal,
+    available: true,
+    defaultBinary: "",
+    streamsTokens: false,
+    resumesSessions: false,
+    headlessSlashCommands: false,
+    acceptsImages: false,
+  },
 ];
 
 export const DEFAULT_AI_PROVIDER = "claude";

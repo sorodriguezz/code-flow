@@ -3654,6 +3654,10 @@ const en = {
 
   "settings.aiSectionTitle": "AI engines",
   "settings.aiSectionHint": "Which engines CodeFlow can use, with which accounts, and what they have spent.",
+  "settings.customProvider": "Any other CLI",
+  "settings.customArgs": "Arguments",
+  "settings.customArgsHint": "The line as you would type it in a shell. {prompt} is the ask, {model} the configured model; an argument whose placeholder is empty is dropped. Quotes group words.",
+  "settings.customNote": "The app runs this binary, pipes the data in and reads the answer off stdout. It claims nothing else about it: no session to resume, no model list, and no tool allow-list — whatever the CLI does by default is what happens.",
   "settings.binaryLabel": "Path to the CLI binary",
   "settings.binaryHint": "Leave it as the default name if it's already on your PATH.",
   "ai.billingMessage": "Your provider rejected the request for lack of balance.",

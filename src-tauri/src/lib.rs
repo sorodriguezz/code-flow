@@ -23,6 +23,7 @@ mod boot_guard;
 mod caveman;
 mod agentcli;
 mod chain_memory;
+mod custom;
 mod design;
 mod chat_mcp;
 mod archify_suggest;

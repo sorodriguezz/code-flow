@@ -337,11 +337,14 @@ pub(crate) fn load_ai_config_in(
     // stored per task and appended to every run of it (`ai::run`). The key mirrors
     // `taskInstructionsKey` in `src/lib/aiPrompts.ts`.
     let instructions = queries::get_setting(conn, &format!("task_instructions_{}", task.key())).map_err(|e| e.to_string())?;
-    let engine = ai::engine_for_task(&provider, account.clone(), instructions);
+    let mut engine = ai::engine_for_task(&provider, account.clone(), instructions);
 
     let get = |suffix: &str| -> Result<Option<String>, String> {
         queries::get_setting(conn, &format!("{provider}_{suffix}")).map_err(|e| e.to_string())
     };
+    // Settings an engine reads for itself — the custom CLI's argument line, and nothing else today.
+    // A failed read is treated as "unset", like every other setting here.
+    engine.configure(&|suffix: &str| get(suffix).ok().flatten());
     // A stored setting that's blank counts as "unset" — falls through to the next fallback.
     let nonblank = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
 
@@ -389,10 +392,12 @@ pub(crate) fn load_ai_config_as(
     workspace_id: Option<&str>,
 ) -> Result<AiConfig, String> {
     let account = ai_accounts::resolve(conn, provider, task.map(|t| t.key()), workspace_id, choice);
-    let engine = ai::engine_as(provider, account.clone());
+    let mut engine = ai::engine_as(provider, account.clone());
     let get = |suffix: &str| -> Result<Option<String>, String> {
         queries::get_setting(conn, &format!("{provider}_{suffix}")).map_err(|e| e.to_string())
     };
+    // See the note in `load_ai_config_in`.
+    engine.configure(&|suffix: &str| get(suffix).ok().flatten());
     let nonblank = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
     let binary = nonblank(get("binary_path")?).unwrap_or_else(|| engine.default_binary().to_string());
     let tools = get("allowed_tools")?

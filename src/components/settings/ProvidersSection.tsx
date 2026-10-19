@@ -249,6 +249,8 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
 
   const [expanded, setExpanded] = useState(false);
   const [binaryPath, setBinaryPath] = useState("");
+  /** The custom CLI's argument line — only that provider has one. See `src-tauri/src/custom.rs`. */
+  const [args, setArgs] = useState("");
   const [choice, setChoice] = useState("");
   const [custom, setCustom] = useState("");
   const [tools, setTools] = useState<string[]>([]);
@@ -268,12 +270,16 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [storedBinary, storedModel, storedTools] = await Promise.all([
+      const [storedBinary, storedModel, storedTools, storedArgs] = await Promise.all([
         getSetting(providerKey(provider.id, "binary_path")).catch(() => null),
         getSetting(providerKey(provider.id, "model")).catch(() => null),
         getSetting(providerKey(provider.id, "allowed_tools")).catch(() => null),
+        // Read with the rest rather than on expand: it is one more settings row, and the field has
+        // to open filled or it reads as "no arguments configured".
+        provider.id === "custom" ? getSetting(providerKey(provider.id, "args")).catch(() => null) : null,
       ]);
       if (cancelled) return;
+      setArgs(storedArgs ?? "");
       setBinaryPath(storedBinary || defaultBinaryFor(provider.id));
       const parsed = parseModel(storedModel, modelOptionsFor(provider.id, []).map((o) => o.id));
       setChoice(parsed.choice);
@@ -442,6 +448,25 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                   </button>
                 </div>
               </Field>
+              )}
+
+              {provider.id === "custom" && (
+                <>
+                  <Field label={t("settings.customArgs")} hint={t("settings.customArgsHint")}>
+                    <input
+                      value={args}
+                      placeholder="-p {prompt}"
+                      onChange={(e) => setArgs(e.target.value)}
+                      onBlur={(e) => void setSetting(providerKey(provider.id, "args"), e.target.value.trim())}
+                      className={inputClass}
+                    />
+                  </Field>
+                  {/* What this engine does *not* claim, said where it is configured: everything else
+                      in this pane is a flag read off a verified binary, and this one is not. */}
+                  <p className="rounded-md border border-[var(--cf-border)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
+                    {t("settings.customNote")}
+                  </p>
+                </>
               )}
 
               <Field
