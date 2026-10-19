@@ -30,6 +30,7 @@ import { TitleTooltips } from "./components/common/TitleTooltips";
 import { NotificationPopups } from "./components/layout/NotificationPopups";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
+import { AgentAskModal } from "./components/agents/AgentAskModal";
 import { RevisionCompareHost } from "./components/git/RevisionCompareHost";
 import { TourOverlay } from "./components/tour/TourOverlay";
 import { DialogSkeleton, PaletteSkeleton, SettingsSkeleton, ViewSkeleton } from "./components/common/ViewSkeleton";
@@ -66,6 +67,7 @@ import { useThinkingDesignStore } from "./state/thinkingDesignStore";
 import { useGlassStore } from "./state/glassStore";
 import { useMotionStore } from "./state/motionStore";
 import { startDesignMode } from "./state/designStore";
+import { startAgentCli } from "./state/agentCliStore";
 import { useLanguageOverrideStore } from "./state/languageOverrideStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
@@ -686,6 +688,9 @@ export default function App() {
         // Design mode's one subscription, and the address the preview was last pointed at. Cheap
         // and idempotent: no window is opened here — see `designStore.init`.
         Promise.resolve(startDesignMode()),
+        // `cf`'s three listeners and the focus it reports back. One socket's worth of plumbing,
+        // already bound by the time the window appears — see `agentCliStore`.
+        Promise.resolve(startAgentCli()),
         useLanguageOverrideStore.getState().init(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
@@ -1362,6 +1367,9 @@ export default function App() {
       <NotificationPopups />
       <ConfirmModal />
       <PromptModal />
+      {/* A question an agent asked with `cf ask`. Beside the other two because it is the same kind
+          of thing: a process is blocked on the answer. See `agentCliStore`. */}
+      <AgentAskModal />
       <RevisionCompareHost />
       {/* Every plain `title` in the window, drawn as the app's own tooltip — see the component. */}
       <TitleTooltips />

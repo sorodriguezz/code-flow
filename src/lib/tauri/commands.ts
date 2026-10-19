@@ -3032,6 +3032,17 @@ export const deleteWorkItemReview = (id: string) => invoke<void>("delete_work_it
 // open a pairing window, move the port, or revoke the device sitting next to it.
 
 /** Everything the settings panel draws, in one read. */
+/** The answer to the question `cf ask` is waiting on; `null` dismisses it (and `cf` exits 1). */
+export const agentCliAnswer = (id: string, answer: string | null) =>
+  invoke<void>("agentcli_answer", { id, answer });
+
+/** What the window has in focus, so `cf status` can answer. Pushed on change — see `agentCliStore`. */
+export const agentCliFocus = (workspace: string, project: string, task: string) =>
+  invoke<void>("agentcli_focus", { workspace, project, task });
+
+/** The port `cf` talks to, or `null` when the endpoint could not bind. */
+export const agentCliEndpoint = () => invoke<number | null>("agentcli_endpoint");
+
 /** Opens design mode's preview on an address, or points the one that is open at it. One window
  *  ever — see `src-tauri/src/design.rs`. */
 export const designOpen = (url: string) => invoke<void>("design_open", { url });

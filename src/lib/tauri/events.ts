@@ -364,3 +364,19 @@ export interface DesignPick {
 
 export const onDesignPick = (handler: (event: DesignPick) => void) =>
   listen<DesignPick>("design:pick", (e) => handler(e.payload));
+
+/** A question `cf ask` is waiting on — see `src-tauri/src/agentcli.rs`. */
+export interface AgentCliAsk {
+  id: string;
+  question: string;
+}
+
+export const onAgentCliNotify = (handler: (text: string) => void) =>
+  listen<string>("agentcli:notify", (e) => handler(e.payload));
+
+export const onAgentCliAsk = (handler: (ask: AgentCliAsk) => void) =>
+  listen<AgentCliAsk>("agentcli:ask", (e) => handler(e.payload));
+
+/** The folder `cf review` was run in. */
+export const onAgentCliReview = (handler: (cwd: string) => void) =>
+  listen<string>("agentcli:review", (e) => handler(e.payload));

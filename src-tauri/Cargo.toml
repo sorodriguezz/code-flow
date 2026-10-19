@@ -32,6 +32,17 @@ name = "codeflow_lib"
 # `tauri android init` / `tauri ios init` — with them, not before.
 crate-type = ["rlib"]
 
+# `cf`: the command an agent runs inside one of this app's shells to reach the window — see
+# `src/bin/cf.rs` and `src/agentcli.rs`.
+#
+# A binary of its own rather than a subcommand of the app, because it has to start instantly from a
+# shell that is already waiting on it, and because the app's own binary opens a window. It depends
+# on nothing — sixty lines of `std::net` — so it adds no crates to the build and stays a few hundred
+# kilobytes.
+[[bin]]
+name = "cf"
+path = "src/bin/cf.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

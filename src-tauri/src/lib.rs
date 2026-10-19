@@ -21,6 +21,7 @@ mod backup;
 /// Opening the database at startup without a panic, and the watchdog for a frontend that never loads.
 mod boot_guard;
 mod caveman;
+mod agentcli;
 mod chain_memory;
 mod design;
 mod chat_mcp;
@@ -558,6 +559,9 @@ pub fn run() {
             // The handle design mode's navigation hook reports a pick through. Set once, here,
             // because the hook outlives the call that builds the preview window — see `design`.
             design::remember(app.handle());
+            // The loopback endpoint `cf` calls: one socket and one task, bound to 127.0.0.1 on a
+            // port the OS picks. See `agentcli`.
+            agentcli::start(app.handle());
             // The active flows' triggers: schedules, webhooks, watchers, pollers, chords. After the
             // takeover check, so a launch that is only answering a recovery question arms nothing.
             flows::triggers::start(app.handle());
@@ -968,6 +972,9 @@ sharded_invoke_handler! {
         commands::backup_cmd::backup_restore_onedrive,
         commands::backup_cmd::backup_pick_folder,
         commands::backup_cmd::backup_reveal_folder,
+        agentcli::agentcli_answer,
+        agentcli::agentcli_endpoint,
+        agentcli::agentcli_focus,
         design::design_open,
         design::design_close,
         design::design_is_open,

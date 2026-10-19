@@ -284,6 +284,30 @@ fn profile_start(profile_cwd: &str, requested: Option<&str>, home: Option<&std::
 
 /// A profile's own variables as pairs, blank keys dropped — a half-typed row in Settings is not a
 /// variable named "".
+/// This process's `PATH` with the folder `cf` sits in **appended**, or `None` when there is nothing
+/// to add.
+///
+/// Appended and not prepended, deliberately: a user who has their own `cf` on the path keeps it.
+/// The folder is the one the app's own binary is in, which is where a bundle puts its sidecars and
+/// where `cargo` leaves both binaries during development.
+fn cli_path() -> Option<String> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let name = if cfg!(windows) { "cf.exe" } else { "cf" };
+    if !dir.join(name).exists() {
+        // No sidecar in this build — a `cargo run` of the lib tests, or a bundle built without it.
+        // The shells then carry the plain `PATH` and `cf` simply is not a command, which is the
+        // same thing that happens outside the app.
+        return None;
+    }
+    let current = std::env::var("PATH").unwrap_or_default();
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    Some(if current.is_empty() {
+        dir.display().to_string()
+    } else {
+        format!("{current}{separator}{}", dir.display())
+    })
+}
+
 fn profile_env(profile: &ShellProfile) -> Vec<(String, String)> {
     profile
         .env
@@ -323,6 +347,13 @@ pub fn open_terminal(
             args = launch.args;
             env.extend(launch.env);
         }
+    }
+    // Where to reach this window, and where `cf` lives — for an agent started in this shell. Added
+    // before the account's layer and after the profile's, so a profile cannot switch it off by
+    // accident and an account's variables still outrank it; see `agentcli`.
+    env.extend(crate::agentcli::shell_env());
+    if let Some(path) = cli_path() {
+        env.push(("PATH".to_string(), path));
     }
     let mut env_remove: Vec<String> = crate::shell_integration::INTERNAL_VARS.iter().map(|v| v.to_string()).collect();
     if let Some(account) = account {
