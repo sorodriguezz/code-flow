@@ -4,6 +4,7 @@ import { isRepoBusy } from "../lib/tauri/commands";
 import {
   chatAttachBytes,
   chatAttachFile,
+  chatCompact,
   chatCreateWorkspaceConversation,
   chatDeleteConversation,
   chatGetConversation,
@@ -123,6 +124,19 @@ interface WsChatState {
   setEffort: (conversationId: string, effort: string) => Promise<void>;
   setAgent: (conversationId: string, agentId: string) => Promise<void>;
   setPlan: (conversationId: string, on: boolean) => void;
+  /** Conversations whose summary is being written right now — the meter's spinner. */
+  compacting: Record<string, boolean>;
+  /**
+   * Replaces the turns so far with a summary the thread's own engine writes (`chat_compact`), so
+   * the next question starts from a fraction of the context.
+   *
+   * The app's own compaction, not Claude's `/compact`. Sending that word as a question is what the
+   * repository chat does, where the CLI session is resumed and the CLI acts on it; this chat
+   * replays its prefix instead, so the same word simply reached the model as a question and was
+   * answered as one (user report, 2026-10-19). The backend already compacts these conversations by
+   * itself when a turn would overflow — this is the same operation, asked for.
+   */
+  compact: (conversationId: string) => Promise<void>;
   /** Sends now, or queues behind the turn that is running. */
   submit: (conversationId: string, text: string, opts?: { skill?: SkillPick | null }) => void;
   /** `files` are a queued question's own images; absent, the composer's staged ones go. */
@@ -431,6 +445,34 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
     },
 
     setPlan: (conversationId, on) => patch(conversationId, (s) => ({ ...s, plan: on })),
+
+    compacting: {},
+
+    compact: async (conversationId) => {
+      const session = get().byConversation[conversationId];
+      // Nothing to summarise, or something already using this conversation's lease: the backend
+      // refuses both as well, and refusing here is what keeps the button from looking broken.
+      if (!session || !session.persisted || session.sending || get().compacting[conversationId]) return;
+      const runId = newRunId("chat");
+      set((s) => ({ compacting: { ...s.compacting, [conversationId]: true } }));
+      useAiRunStore.getState().start(runId, {
+        kindKey: "chat.compacting",
+        detail: session.title,
+        target: { openAiPanel: true, select: { kind: "workspaceChat", id: `${session.workspaceId}::${conversationId}` } },
+        workspaceId: session.workspaceId,
+      });
+      try {
+        await chatCompact(conversationId, runId);
+        // What was measured described the context that has just been replaced, and the session it
+        // was measured in is gone with it — `chat_compact` clears both on the row.
+        patch(conversationId, (s) => ({ ...s, contextTokens: null, engineSessionId: null }));
+        await get().loadList(session.workspaceId);
+      } catch (e: unknown) {
+        pushErrorToast(String(e));
+      } finally {
+        set((s) => ({ compacting: { ...s.compacting, [conversationId]: false } }));
+      }
+    },
 
     setAgent: async (conversationId, agentId) => {
       const session = get().byConversation[conversationId];

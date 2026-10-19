@@ -1281,6 +1281,12 @@ pub async fn send_chat_message(
         if plan {
             engine_message.push_str(ai::PLAN_MODE_NOTE);
         }
+        // A command for the CLI goes to it as the user wrote it: everything appended above is
+        // addressed to a model answering a question, and it is exactly what stopped `/compact`
+        // from being read as a command. Same rule, same reason, as in `chat_cmd::chat_send`.
+        if super::chat_cmd::is_cli_command(&asked) {
+            engine_message = asked.clone();
+        }
     }
     // Claude Code denies, in `-p`, any tool nobody pre-approved, and `Skill` is the one that opens a
     // skill — so the panel's chat has it whatever the saved tool list says, as the free chat does.

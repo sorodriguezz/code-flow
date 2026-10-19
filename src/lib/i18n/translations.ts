@@ -5282,6 +5282,9 @@ const en = {
   "terminal.closeAnyway": "Close anyway",
 
   "chat.copyMessage": "Copy message",
+  "chat.copySession": "Copy this conversation's session id",
+  "chat.sessionCopied": "Copied session {id} from {provider}",
+  "chat.sessionCopiedPlain": "Copied session {id}",
   "chat.placeholder": "⌘L to focus chat",
   "chat.reviewWithClaude": "Review with AI",
   "chat.reviewing": "Reviewing…",

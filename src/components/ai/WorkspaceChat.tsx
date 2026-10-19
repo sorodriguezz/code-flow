@@ -261,6 +261,7 @@ export function WorkspaceChat({
   // does not. A chat that spans several repositories fills a window faster than one that does not,
   // so this is if anything the one that needed it more.
   const windowByModel = useConversationStore((s) => s.windowByModel);
+  const compacting = useWorkspaceChatStore((s) => s.compacting[conversationId] ?? false);
   const meterModel = session.model || model;
   useEffect(() => {
     if (meterModel) useConversationStore.getState().ensureContextWindow(meterModel);
@@ -284,21 +285,14 @@ export function WorkspaceChat({
       compactedTurns: 0,
       autoCompacts: false,
       summary: "",
-      compacting: false,
-      // `/compact` is Claude's own, sent as the next turn. Through the store rather than the
-      // composer's `submit`, which would first look for an app command by that name.
-      onCompact:
-        (session.provider || provider) === "claude"
-          ? () => {
-              useWorkspaceChatStore.getState().submit(conversationId, "/compact");
-              toBottom();
-            }
-          : undefined,
+      compacting,
+      // The app's own compaction, which works on any engine, and not the word `/compact` sent as a
+      // question — this chat replays its prefix rather than resuming a CLI session, so that word
+      // reached the model and was answered as the question it looked like.
+      onCompact: session.persisted ? () => void useWorkspaceChatStore.getState().compact(conversationId) : undefined,
       onUncompact: () => {},
     };
-    // `toBottom` only touches refs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.messages, session.contextTokens, session.engineSessionId, session.provider, provider, meterModel, windowByModel, conversationId]);
+  }, [session.messages, session.contextTokens, session.engineSessionId, session.provider, session.persisted, provider, meterModel, windowByModel, conversationId, compacting]);
 
   /** The `/` menu is open while the draft is one token that begins with a slash. */
   const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
@@ -483,6 +477,7 @@ export function WorkspaceChat({
                 )}
                 <ChatMessageBubble
                   message={message}
+                  sessionId={session.engineSessionId}
                   actions={{
                     ...(message.isError && !agent ? { onPickModel: (next: string) => pickEngine(provider, next) } : {}),
                     // Only the last answer, and only while nothing is running: an option clicked on

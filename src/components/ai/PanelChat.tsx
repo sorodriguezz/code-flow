@@ -681,6 +681,7 @@ export function PanelChat({
                 )}
                 <ChatMessageBubble
                   message={message}
+                  sessionId={session.sessionId}
                   actions={actions[i]}
                   codeTarget={project ? codeTarget : undefined}
                   emptyText={

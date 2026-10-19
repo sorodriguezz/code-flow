@@ -26,7 +26,7 @@ import { bodyForBlock, fileNameForBlock, pathFromFirstLine } from "../../lib/cod
 import { OutputBar } from "./OutputBar";
 import type { ChatOutput } from "../../lib/tauri/chatCommands";
 import { writeFileBytes } from "../../lib/tauri/commands";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { findTheme } from "../../lib/codeThemes";
 import { useThemeStore } from "../../state/themeStore";
 
@@ -147,6 +147,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   outputs,
   emptyText,
   codeTarget,
+  sessionId,
 }: {
   message: ChatBubbleMessage;
   variant?: ChatBubbleVariant;
@@ -158,6 +159,13 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
    *  markdown once, when it is whole. */
   streamText?: string;
   actions?: ChatBubbleActions;
+  /**
+   * The engine's resume token for this conversation, when it has one — what the mark beside the
+   * answer copies on a click. It is the one identifier a user needs outside this app (`claude
+   * --resume <id>` in a terminal, a bug report about one turn) and the only place it was visible
+   * was the context meter's tooltip.
+   */
+  sessionId?: string | null;
   /**
    * Files this turn wrote, and the conversation to save them out of.
    *
@@ -302,7 +310,14 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
    */
   const assistantTurn = (content: ReactNode) => (
     <div className={`group grid grid-cols-[auto_minmax(0,1fr)] ${reading ? "gap-x-3" : "gap-x-2.5"}`}>
-      <AssistantAvatar reading={reading} landedAt={message.createdAt} failed={!!message.isError} speaking={speakingHere} />
+      <AssistantAvatar
+        reading={reading}
+        landedAt={message.createdAt}
+        failed={!!message.isError}
+        speaking={speakingHere}
+        sessionId={sessionId}
+        provider={message.provider ?? undefined}
+      />
       <div className={`min-w-0 space-y-1.5 ${reading ? "pt-[5px]" : "pt-[2px]"}`}>
         {traceLog}
         {content}
@@ -525,11 +540,17 @@ function AssistantAvatar({
   landedAt,
   failed,
   speaking,
+  sessionId,
+  provider,
 }: {
   reading: boolean;
   landedAt?: string;
   failed: boolean;
   speaking: boolean;
+  /** The engine's resume token for this conversation; the mark copies it on a click. */
+  sessionId?: string | null;
+  /** Which engine answered, for the line that confirms the copy. */
+  provider?: string;
 }) {
   const [settling, setSettling] = useState(() => {
     const when = parseStamp(landedAt);
@@ -544,7 +565,29 @@ function AssistantAvatar({
     return () => clearTimeout(timer);
   }, [settling, design]);
   const box = reading ? "h-8 w-8" : "h-[22px] w-[22px]";
-  return (
+  const t = useT();
+
+  /**
+   * The mark is the one thing beside every answer, so it is where the turn's identity belongs: a
+   * click copies the engine's session id. Only where there is one — a thread that has never
+   * resumed, or whose session a compaction replaced, has nothing to copy, and a control that
+   * copies an empty string is worse than no control.
+   */
+  const copySession = sessionId?.trim()
+    ? () => {
+        const id = sessionId.trim();
+        void navigator.clipboard.writeText(id);
+        // Which engine's session, because a resume token is only good to the CLI that minted it.
+        // Without a provider on the turn — an old row — the line says the id and stops there
+        // rather than naming an engine it does not know.
+        const engine = providerDisplayLabel(provider ?? "", t);
+        useToastStore
+          .getState()
+          .pushToast(engine ? t("chat.sessionCopied", { id, provider: engine }) : t("chat.sessionCopiedPlain", { id }), "success");
+      }
+    : null;
+
+  const mark = (
     <span className={`flex ${box} shrink-0 items-center justify-center`}>
       {speaking ? (
         <ThinkingOrb size={reading ? "card" : "md"} activity={SPEAKING} />
@@ -561,6 +604,19 @@ function AssistantAvatar({
         </span>
       )}
     </span>
+  );
+
+  if (!copySession) return mark;
+  return (
+    <button
+      type="button"
+      onClick={copySession}
+      title={t("chat.copySession")}
+      aria-label={t("chat.copySession")}
+      className="flex shrink-0 cursor-pointer items-center justify-center rounded-full"
+    >
+      {mark}
+    </button>
   );
 }
 

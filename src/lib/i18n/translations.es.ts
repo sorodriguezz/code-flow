@@ -5211,6 +5211,9 @@ export const es = {
   "terminal.closeAnyway": "Cerrar de todos modos",
 
   "chat.copyMessage": "Copiar mensaje",
+  "chat.copySession": "Copiar el id de sesión de esta conversación",
+  "chat.sessionCopied": "Se copió sesión {id} de {provider}",
+  "chat.sessionCopiedPlain": "Se copió sesión {id}",
   "chat.placeholder": "⌘L para enfocar el chat",
   "chat.reviewWithClaude": "Revisar con IA",
   "chat.reviewing": "Revisando…",

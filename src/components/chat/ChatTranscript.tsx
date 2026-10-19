@@ -459,6 +459,11 @@ const TranscriptTurn = memo(function TranscriptTurn({
     [message],
   );
 
+  // The engine's resume token for this thread, for the mark beside each answer to copy.
+  const engineSessionId = useConversationStore(
+    (s) => s.conversations.find((c) => c.id === conversationId)?.engineSessionId ?? null,
+  );
+
   const actions = useMemo<ChatBubbleActions>(
     () => ({
       onRegenerate: canAct && message.role === "assistant" ? () => regenerate(message.turn) : undefined,
@@ -496,7 +501,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
       {/* `group` here and not on the bubble: the hover row lives inside the bubble component but
           must reveal on hover of the whole turn, divider excluded. */}
       <div className="group">
-        <ChatMessageBubble message={bubble} variant="reading" actions={actions} outputs={produced} />
+        <ChatMessageBubble message={bubble} variant="reading" actions={actions} outputs={produced} sessionId={engineSessionId} />
         {revealing && (
           // The typewriter is a courtesy, not a rule. An answer that is already whole on disk and
           // merely being uncovered at reading speed must always be skippable, or the kindness

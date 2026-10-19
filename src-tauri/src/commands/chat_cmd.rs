@@ -1648,6 +1648,19 @@ pub async fn chat_send(
         Default::default()
     };
 
+    /*
+     * A slash command is sent **exactly as written**, with none of the notes below.
+     *
+     * The CLIs read a prompt as one of their own commands only when the prompt *is* that command.
+     * Everything this function appends — the style rules, the workspace's live block, the presence
+     * note — turned `/compact` into a long piece of text that merely began with the word, so the
+     * CLI passed it to the model, which answered it as the question it then looked like ("`/compact`
+     * es un comando del propio Claude Code y no lo puedo ejecutar desde aquí" — user report,
+     * 2026-10-19). Long enough, and it stopped even being the `-p` argument (`INLINE_ASK_LIMIT`),
+     * which made it certain.
+     */
+    let is_cli_command = is_cli_command(&asked);
+
     // What the engine is actually asked, which is the user's question plus the style rules when the
     // conversation is in a mode. Built here, after the question has been persisted above, so the
     // two can never be confused: `message` is what was asked, `engine_message` is what was sent.
@@ -1701,6 +1714,12 @@ pub async fn chat_send(
     }
     if plan {
         engine_message.push_str(ai::PLAN_MODE_NOTE);
+    }
+    // Everything appended above is addressed to a model answering a question. A command is not one
+    // — see the note where `is_cli_command` is decided — so it goes as the user wrote it, and the
+    // CLI can recognise it. Last, so no note added later can quietly re-break this.
+    if is_cli_command {
+        engine_message = asked.clone();
     }
 
     let started = std::time::Instant::now();
@@ -2429,6 +2448,18 @@ async fn auto_compact_if_full(
 /// Split from [`auto_compact_if_full`] so the decision can be tested without an engine: everything
 /// above is plumbing, and this is the part that decides whether the user pays for an extra turn.
 /// The two branches are measured against completely different things — see the doc there.
+/// Whether a question is really one of the engine CLI's own commands, and must therefore reach it
+/// untouched (see where this is called, in `chat_send`).
+///
+/// The first character, not a list of known commands: a custom command is a prompt file the CLI
+/// expands by name, so appending to one corrupts it exactly as much as appending to `/compact`, and
+/// this app cannot enumerate what every engine's install happens to define. The cost is that a
+/// question which genuinely begins with `/` — a bare absolute path — goes without the style rules
+/// for that one turn.
+pub(crate) fn is_cli_command(asked: &str) -> bool {
+    asked.trim_start().starts_with('/')
+}
+
 fn needs_compacting(
     conn: &Connection,
     conversation: &ChatConversation,
@@ -3659,6 +3690,24 @@ mod tests {
             !needs_compacting(&conn, &after, "claude-sonnet-4-5", false),
             "the transcript is still long; what gets sent is not"
         );
+    }
+
+    /// A command reaches the CLI as itself, and a question that merely mentions one does not.
+    ///
+    /// What this guards is the decoration in `chat_send`: the style rules and the workspace's live
+    /// block turned `/compact` into prose beginning with that word, and the model answered it as a
+    /// question instead of the CLI running it.
+    #[test]
+    fn a_slash_command_is_recognised_whatever_follows_it() {
+        assert!(is_cli_command("/compact"));
+        // With arguments, and with the whitespace a paste leaves in front of it.
+        assert!(is_cli_command("/compact guarda las decisiones de la API"));
+        assert!(is_cli_command("  /clear"));
+        assert!(is_cli_command("/mi-comando-propio"));
+        // A question *about* a command is a question.
+        assert!(!is_cli_command("¿qué hace /compact?"));
+        assert!(!is_cli_command("explica el compact"));
+        assert!(!is_cli_command(""));
     }
 
     /// Claude's built-ins are the verified ones, each with its slash exactly once and a description
