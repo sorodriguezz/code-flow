@@ -11,7 +11,18 @@ import {
   resumeWorkspaceTerminal,
   setBenchLayout,
   writeTerminal,
+  getSetting,
+  setSetting,
 } from "../lib/tauri/commands";
+import {
+  layoutNamed,
+  parseLayouts,
+  serializeLayouts,
+  withLayout,
+  withoutLayout,
+  type BenchLayout,
+  type LayoutPane,
+} from "../lib/bench/layouts";
 import {
   paneAt,
   paneIds,
@@ -124,6 +135,19 @@ interface BenchState {
     panes: readonly { cwd: string; title?: string }[],
     command: string,
   ) => Promise<string | null>;
+  /**
+   * The general form: one tab, one pane per entry, each with its own folder, name and — optionally —
+   * its own command. What a saved layout runs, and what [`runAcross`] is one line of.
+   */
+  runPanes: (workspaceId: string, panes: readonly LayoutPane[]) => Promise<string | null>;
+  /** The workspace's saved arrangements — see `lib/bench/layouts`. */
+  savedLayouts: BenchLayout[];
+  loadSavedLayouts: (workspaceId: string) => Promise<void>;
+  /** Saves one under its name, replacing a layout of the same name. */
+  saveLayout: (workspaceId: string, layout: BenchLayout) => Promise<void>;
+  removeLayout: (workspaceId: string, name: string) => Promise<void>;
+  /** Opens a saved arrangement. Nothing is started unless this is called — see `lib/bench/layouts`. */
+  runLayout: (workspaceId: string, name: string) => Promise<string | null>;
   /** Starts a shell for a pane that has none. */
   resume: (id: string) => Promise<void>;
   /** Empties the bench. Irreversible; the caller is expected to have confirmed. */
@@ -179,6 +203,11 @@ function persist(tabId: string, node: PaneNode | null): void {
   void setBenchLayout(tabId, serializeLayout(node)).catch(() => {});
 }
 
+/** One settings row per workspace — the same scoping `packageManagerStore` uses for its override. */
+function layoutsKey(workspaceId: string): string {
+  return `bench_layouts:${workspaceId}`;
+}
+
 export const useBenchStore = create<BenchState>((set, get) => ({
   open: false,
   workspaceId: null,
@@ -187,6 +216,7 @@ export const useBenchStore = create<BenchState>((set, get) => ({
   activeTabId: null,
   focusedPane: {},
   renamingTabId: null,
+  savedLayouts: [],
   layouts: {},
   loading: false,
 
@@ -397,9 +427,23 @@ export const useBenchStore = create<BenchState>((set, get) => ({
   startRenameTab: (tabId) => set({ renamingTabId: tabId }),
 
   runAcross: async (workspaceId, panes, command) => {
-    const folders = panes.filter((pane) => pane.cwd.trim() !== "");
     const line = command.trim();
-    if (folders.length === 0 || line === "") return null;
+    if (line === "") return null;
+    // The same line in every pane — the race's case. Everything else about it is `runPanes`, with
+    // one rule of its own: a racer with no worktree gets no pane. `runPanes` keeps a pane that has
+    // a command and no folder (a layout may want one at home); a race is *about* the folders, and a
+    // task running in the repository's own working copy is not one of them.
+    return get().runPanes(
+      workspaceId,
+      panes
+        .filter((pane) => pane.cwd.trim() !== "")
+        .map((pane) => ({ cwd: pane.cwd, title: pane.title, command: line })),
+    );
+  },
+
+  runPanes: async (workspaceId, panes) => {
+    const folders = panes.filter((pane) => pane.cwd.trim() !== "" || (pane.command ?? "").trim() !== "");
+    if (folders.length === 0) return null;
 
     await get().addTab(workspaceId, folders[0].cwd);
     const tabId = get().activeTabId;
@@ -426,7 +470,40 @@ export const useBenchStore = create<BenchState>((set, get) => ({
     // Carriage return and not a newline: a pty is a terminal, and what it receives when Enter
     // is pressed is a CR — the same point `terminalStore.runCommand` makes. Written with no wait
     // for a prompt, as it does.
-    for (const id of ids) await writeTerminal(id, `${line}\r`).catch(() => undefined);
+    // A pane with no command of its own is left at its prompt.
+    for (const [at, id] of ids.entries()) {
+      const line = (folders[at]?.command ?? "").trim();
+      if (line !== "") await writeTerminal(id, `${line}\r`).catch(() => undefined);
+    }
+    return tabId;
+  },
+
+  loadSavedLayouts: async (workspaceId) => {
+    const raw = await getSetting(layoutsKey(workspaceId)).catch(() => null);
+    // Re-checked after the read: a workspace switch inside it would otherwise publish this
+    // workspace's layouts into the menu of the one now on screen — the guard `addTab` carries.
+    if (get().workspaceId !== workspaceId) return;
+    set({ savedLayouts: parseLayouts(raw) });
+  },
+
+  saveLayout: async (workspaceId, layout) => {
+    const next = withLayout(get().savedLayouts, layout);
+    set({ savedLayouts: next });
+    await setSetting(layoutsKey(workspaceId), serializeLayouts(next)).catch(() => undefined);
+  },
+
+  removeLayout: async (workspaceId, name) => {
+    const next = withoutLayout(get().savedLayouts, name);
+    set({ savedLayouts: next });
+    await setSetting(layoutsKey(workspaceId), serializeLayouts(next)).catch(() => undefined);
+  },
+
+  runLayout: async (workspaceId, name) => {
+    const layout = layoutNamed(get().savedLayouts, name);
+    if (!layout) return null;
+    const tabId = await get().runPanes(workspaceId, layout.panes);
+    // Named after the layout, so a bench holding two of them says which is which.
+    if (tabId) await get().renameTab(tabId, layout.name).catch(() => undefined);
     return tabId;
   },
 

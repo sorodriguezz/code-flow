@@ -281,6 +281,8 @@ export function WorkspaceChat({
     return {
       tokens: measured ?? estimated,
       measured: measured !== null,
+      // A measurement from an earlier turn is drawn as an approximation rather than as a fact.
+      stale: session.contextStale,
       conversationTokens: estimated,
       window: meterModel ? (windowByModel[meterModel] ?? null) : null,
       resumes: providerCapabilities(session.provider || provider).resumesSessions && Boolean(session.engineSessionId),
@@ -294,7 +296,7 @@ export function WorkspaceChat({
       onCompact: session.persisted ? () => void useWorkspaceChatStore.getState().compact(conversationId) : undefined,
       onUncompact: () => {},
     };
-  }, [session.messages, session.contextTokens, session.engineSessionId, session.provider, session.persisted, provider, meterModel, windowByModel, conversationId, compacting]);
+  }, [session.messages, session.contextTokens, session.contextStale, session.engineSessionId, session.provider, session.persisted, provider, meterModel, windowByModel, conversationId, compacting]);
 
   /** The `/` menu is open while the draft is one token that begins with a slash. */
   const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;

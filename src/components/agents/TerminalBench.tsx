@@ -23,6 +23,7 @@ import { agentFromCommand } from "../../lib/agentInTerminal";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { PaneTree } from "./PaneTree";
 import { ViewPane } from "./ViewPane";
+import { BenchLayoutMenu } from "./BenchLayoutMenu";
 import { ContextMenu } from "../common/ContextMenu";
 import { listShellProfiles } from "../../lib/tauri/commands";
 import type { BenchTerminal, ShellProfile } from "../../types/domain";
@@ -366,6 +367,8 @@ export function TerminalBench() {
         </ToolButton>
 
         <span className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" />
+
+        <BenchLayoutMenu disabled={!workspaceId} />
 
         <ToolButton onClick={() => newTab()} title={t("bench.newTab")} disabled={!workspaceId}>
           <Plus size={13} />

@@ -138,3 +138,78 @@ describe("addView", () => {
     expect(JSON.stringify(useBenchStore.getState().layouts[tabId])).not.toContain('"kind":"diff"');
   });
 });
+
+/**
+ * A saved arrangement: panes with folders *and* commands of their own, which is what makes
+ * «dev = server + tests + agent» one click instead of three shells and three command lines.
+ */
+describe("runPanes", () => {
+  it("gives each pane its own folder and its own command", async () => {
+    await useBenchStore.getState().runPanes("w1", [
+      { cwd: "/repo", title: "server", command: "pnpm dev" },
+      { cwd: "/repo", title: "tests", command: "pnpm test --watch" },
+    ]);
+    expect(opened).toEqual(["/repo", "/repo"]);
+    expect(writes.map((write) => write.data)).toEqual(["pnpm dev\r", "pnpm test --watch\r"]);
+  });
+
+  it("leaves a pane with no command of its own at its prompt", async () => {
+    await useBenchStore.getState().runPanes("w1", [
+      { cwd: "/repo", command: "pnpm dev" },
+      { cwd: "/repo" },
+    ]);
+    expect(useBenchStore.getState().terminals).toHaveLength(2);
+    expect(writes).toHaveLength(1);
+  });
+
+  it("keeps a pane that has a command and no folder — a shell at home, running something", async () => {
+    await useBenchStore.getState().runPanes("w1", [{ cwd: "", command: "htop" }]);
+    expect(writes.map((write) => write.data)).toEqual(["htop\r"]);
+  });
+
+  it("runs nothing at all for an empty arrangement", async () => {
+    expect(await useBenchStore.getState().runPanes("w1", [])).toBeNull();
+    expect(tabs).toBe(0);
+  });
+});
+
+describe("saved layouts", () => {
+  it("round-trips through the settings row", async () => {
+    const stored: Record<string, string> = {};
+    handlers.set_setting = (args) => {
+      stored[String(args.key)] = String(args.value);
+      return null;
+    };
+    handlers.get_setting = (args) => stored[String(args.key)] ?? null;
+
+    await useBenchStore.getState().saveLayout("w1", {
+      name: "dev",
+      panes: [{ cwd: "/repo", command: "pnpm dev" }],
+    });
+    useBenchStore.setState({ savedLayouts: [] });
+    await useBenchStore.getState().loadSavedLayouts("w1");
+    expect(useBenchStore.getState().savedLayouts).toEqual([
+      { name: "dev", panes: [{ cwd: "/repo", command: "pnpm dev" }] },
+    ]);
+  });
+
+  it("runs one, and names the tab after it", async () => {
+    let renamed = "";
+    handlers.rename_bench_tab = (args) => {
+      renamed = String(args.title);
+      return null;
+    };
+    useBenchStore.setState({
+      savedLayouts: [{ name: "dev", panes: [{ cwd: "/repo", command: "pnpm dev" }] }],
+    });
+    const tabId = await useBenchStore.getState().runLayout("w1", "dev");
+    expect(tabId).toBe("tab-1");
+    expect(renamed).toBe("dev");
+    expect(writes.map((write) => write.data)).toEqual(["pnpm dev\r"]);
+  });
+
+  it("does nothing for a name nobody saved", async () => {
+    expect(await useBenchStore.getState().runLayout("w1", "nope")).toBeNull();
+    expect(tabs).toBe(0);
+  });
+});

@@ -102,6 +102,17 @@ export interface WsChatSession {
    * conversation.
    */
   contextTokens: number | null;
+  /**
+   * Whether {@link contextTokens} describes the **last** turn or an earlier one.
+   *
+   * A turn that reports no usage — and they happen: a cancelled run, a `/compact`, an output format
+   * the parser did not recognise — leaves the previous figure standing, both here and on the
+   * conversation row (`update_session` writes `COALESCE(new, old)`). That is the right thing to keep
+   * and the wrong thing to present as current: the meter showed one number with full confidence
+   * while the conversation had grown by several turns underneath it. `true` makes it read as the
+   * approximation it is — see `ContextMeter`.
+   */
+  contextStale: boolean;
   /** The engine's own resume token for the last turn, `null` before one lands. The meter reads it
    *  to say whether the next turn continues that session or replays the thread. */
   engineSessionId: string | null;
@@ -171,6 +182,9 @@ export const EMPTY_WS_CHAT: WsChatSession = {
   restored: null,
   plan: false,
   contextTokens: null,
+  // Nothing has been measured yet, so there is nothing to be stale about; the meter falls back to
+  // the estimate and says so.
+  contextStale: false,
   engineSessionId: null,
 };
 
@@ -252,6 +266,9 @@ export function sessionFromRow(row: ChatConversation): WsChatSession {
     agentId: row.agentId ?? "",
     focusChainId: row.focusChainId ?? "",
     contextTokens: row.contextTokens,
+    // Read off the row, which is the last measurement there has ever been — so until a turn runs
+    // here, what it holds is by definition from an earlier one.
+    contextStale: row.contextTokens !== null,
     engineSessionId: row.engineSessionId,
     persisted: true,
   };
@@ -658,6 +675,8 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             // `undefined` from an engine that does not report it leaves the last measurement
             // standing, the way the row does — emptying the gauge would read as "no context".
             contextTokens: reply.context_tokens ?? s.contextTokens,
+            // This turn measured itself, or it did not — see `contextStale`.
+            contextStale: reply.context_tokens == null,
             engineSessionId: reply.session_id ?? s.engineSessionId,
           }));
           notify({
