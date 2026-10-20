@@ -423,7 +423,10 @@ export function ChatView() {
     const resumes =
       providerCapabilities(session.provider).resumesSessions && Boolean(session.sessionId);
     return {
-      tokens: measured ?? estimated,
+      // A stale figure is a floor, not the answer: the context only grows between compactions, so
+      // a thread that has talked on since (on an engine that reports nothing) holds at least what
+      // its own text now adds up to.
+      tokens: measured === null ? estimated : stale ? Math.max(measured, estimated) : measured,
       measured: measured !== null,
       stale,
       // What the transcript itself accounts for, so the panel can say how much of a measured prompt

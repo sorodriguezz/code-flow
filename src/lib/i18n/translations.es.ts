@@ -14933,4 +14933,7 @@ export const es = {
   "learning.evaluateNeedsGguf": "Descarga {base} en Modelo local: el motor integrado sirve sobre ella el adaptador entrenado en NVIDIA.",
   "learning.baseNoServe": "no se puede servir",
   "learning.envDownloadsPython": "Sin preparar — no hay Python: Preparar descarga Python 3.12 (≈{mb} MB) en la carpeta de entrenamiento",
+  "knowledge.clear": "Vaciar índice",
+  "knowledge.clearHint": "Borra los pasajes y vectores de este workspace y libera el espacio en disco; la próxima búsqueda los reconstruye.",
+  "knowledge.clearConfirm": "¿Vaciar el índice de este workspace? Se borran sus pasajes y vectores, y se reconstruyen la próxima vez que algo busque. Tus carpetas y ajustes se mantienen.",
 } satisfies Record<TranslationKey, string>;

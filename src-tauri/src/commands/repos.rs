@@ -192,8 +192,13 @@ pub fn reorder_workspaces(db: State<Db>, ids: Vec<String>) -> Result<(), String>
 
 #[tauri::command]
 pub fn delete_workspace(db: State<Db>, id: String) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::delete_workspace(&conn, &id).map_err(|e| e.to_string())
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::delete_workspace(&conn, &id).map_err(|e| e.to_string())?;
+    }
+    // Its repositories' and folders' passages in the knowledge index go too (off this thread).
+    crate::knowledge::prune_in_background();
+    Ok(())
 }
 
 #[tauri::command]
@@ -465,6 +470,8 @@ pub fn delete_project(db: State<Db>, id: String) -> Result<(), String> {
     if let Some(path) = path {
         std::thread::spawn(move || crate::review::checkout::discard(&path, &id));
     }
+    // And its passages in the knowledge index.
+    crate::knowledge::prune_in_background();
     Ok(())
 }
 

@@ -15092,6 +15092,9 @@ const en = {
   "learning.evaluateNeedsGguf": "Download {base} under Local model: an adapter trained on NVIDIA is served over it by the integrated engine.",
   "learning.baseNoServe": "can't be served",
   "learning.envDownloadsPython": "Not prepared — no Python here: Prepare downloads Python 3.12 (≈{mb} MB) into the training folder",
+  "knowledge.clear": "Empty index",
+  "knowledge.clearHint": "Deletes this workspace's passages and vectors and frees the disk space; the next search rebuilds them.",
+  "knowledge.clearConfirm": "Empty this workspace's index? Its passages and vectors are deleted and rebuilt the next time something searches. Your folders and settings stay.",
 } as const;
 
 export type Language = "en" | "es";

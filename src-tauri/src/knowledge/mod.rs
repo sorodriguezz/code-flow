@@ -108,6 +108,80 @@ pub fn remove_collection(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// What [`prune`] removed.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pruned {
+    pub collections: usize,
+    pub vectors: usize,
+}
+
+/// The ids the index's collections may still point at: every project (`repo:<id>`) and every added
+/// folder (`folder:<id>`), whatever their workspace.
+pub fn alive_ids(main: &Connection) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let mut alive = std::collections::HashSet::new();
+    for sql in ["SELECT id FROM projects", "SELECT id FROM ai_knowledge_collections"] {
+        let mut stmt = main.prepare(sql)?;
+        for id in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            alive.insert(id?);
+        }
+    }
+    Ok(alive)
+}
+
+/// Drops what nothing points at any more: the passages and vectors of a deleted project or folder —
+/// alone or with its workspace — of a checkout indexed by path that is gone from disk, and the
+/// vectors of a bundled embedding model no longer downloaded.
+pub fn prune(index: &Connection, alive: &std::collections::HashSet<String>) -> rusqlite::Result<Pruned> {
+    let mut pruned = Pruned::default();
+    for key in index::collection_keys(index)? {
+        let orphan = if let Some(root) = key.strip_prefix("repo:path:") {
+            !std::path::Path::new(root).is_dir()
+        } else if let Some(id) = key.strip_prefix("repo:").or_else(|| key.strip_prefix("folder:")) {
+            !alive.contains(id)
+        } else {
+            false
+        };
+        if orphan {
+            index::remove_collection(index, &key)?;
+            pruned.collections += 1;
+        }
+    }
+    for entry in crate::localai::embedder::EMBED_CATALOGUE {
+        if !crate::localai::models::is_installed(&entry.spec) {
+            pruned.vectors += index::remove_space(index, &format!("{}@", entry.spec.id))?;
+        }
+    }
+    Ok(pruned)
+}
+
+/// [`prune`] off the caller's thread, the ids read first (briefly holding the app's connection):
+/// after a project, workspace or folder is deleted, and once at launch for what older builds left.
+pub fn prune_in_background() {
+    let Some(Ok(alive)) = crate::ai_usage::with_conn(alive_ids) else { return };
+    std::thread::spawn(move || {
+        if let Ok(index) = index::global() {
+            if let Ok(pruned) = prune(&index, &alive) {
+                if pruned.collections > 0 {
+                    let _ = index::compact(&index);
+                }
+            }
+        }
+    });
+}
+
+/// Empties a workspace's part of the index (its repositories and folders) and whatever nothing
+/// points at; the next search rebuilds it. Returns how many collections went.
+pub fn clear(index: &Connection, scope: &Scope, alive: &std::collections::HashSet<String>) -> rusqlite::Result<usize> {
+    let keys = scope.keys();
+    for key in &keys {
+        index::remove_collection(index, key)?;
+    }
+    let pruned = prune(index, alive)?;
+    index::compact(index)?;
+    Ok(keys.len() + pruned.collections)
+}
+
 pub fn repo_key(project_id: &str) -> String {
     format!("repo:{project_id}")
 }
@@ -128,7 +202,7 @@ pub struct Scope {
 }
 
 impl Scope {
-    fn keys(&self) -> Vec<String> {
+    pub fn keys(&self) -> Vec<String> {
         self.repos.iter().map(|(id, _, _)| repo_key(id)).chain(self.folders.iter().map(|(id, _, _)| folder_key(id))).collect()
     }
 
@@ -572,6 +646,58 @@ mod tests {
         let text = wrap_untrusted(&as_text(&[f]));
         assert!(text.contains("1. docs/adr.md:3-9 — Storage [inventory]"));
         assert!(text.starts_with("<retrieved_content"));
+    }
+
+    /// An index holding one file, one chunk and one vector in each of `keys`.
+    fn index_with(keys: &[&str]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        index::init(&conn).unwrap();
+        for (i, key) in keys.iter().enumerate() {
+            conn.execute("INSERT INTO sources (id, collection, path) VALUES (?1, ?2, 'a.md')", rusqlite::params![i as i64 + 1, key]).unwrap();
+            conn.execute("INSERT INTO chunks (id, source_id, start_line, end_line, text) VALUES (?1, ?1, 1, 2, 'texto')", rusqlite::params![i as i64 + 1]).unwrap();
+            conn.execute("INSERT INTO vectors (chunk_id, space, data) VALUES (?1, 'qwen3_embed@abc', x'00')", rusqlite::params![i as i64 + 1]).unwrap();
+            conn.execute("INSERT INTO collections_meta (collection, root, refreshed_at) VALUES (?1, '/', 1)", rusqlite::params![key]).unwrap();
+        }
+        conn
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn prune_drops_what_nothing_points_at_and_its_passages_and_vectors() {
+        let here = std::env::temp_dir().to_string_lossy().to_string();
+        let kept_path = format!("repo:path:{here}");
+        let conn = index_with(&["repo:p1", "repo:gone", "folder:f1", "folder:gone", "repo:path:/nowhere/at/all", &kept_path]);
+        let alive: std::collections::HashSet<String> = ["p1", "f1"].iter().map(|s| s.to_string()).collect();
+        let pruned = prune(&conn, &alive).unwrap();
+        assert_eq!(pruned.collections, 3);
+        let mut left = index::collection_keys(&conn).unwrap();
+        left.sort();
+        let mut want = vec!["folder:f1".to_string(), "repo:p1".to_string(), kept_path];
+        want.sort();
+        assert_eq!(left, want);
+        assert_eq!(count(&conn, "chunks"), 3, "the cascade takes the chunks");
+        assert_eq!(count(&conn, "vectors"), 3, "and their vectors");
+        assert_eq!(index::search_fts(&conn, &["repo:gone".to_string()], "texto", 5).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_space_is_removed_by_prefix_not_by_like() {
+        let conn = index_with(&["repo:p1"]);
+        conn.execute("INSERT INTO vectors (chunk_id, space, data) VALUES (1, 'qwen3Xembed@abc', x'00')", []).unwrap();
+        assert_eq!(index::remove_space(&conn, "qwen3_embed@").unwrap(), 1, "`_` is not a wildcard");
+        assert_eq!(count(&conn, "vectors"), 1);
+    }
+
+    #[test]
+    fn clearing_a_workspace_empties_its_part_and_compacts() {
+        let conn = index_with(&["repo:p1", "folder:f1", "repo:other"]);
+        let scope = Scope { repos: vec![("p1".into(), "p".into(), PathBuf::from("/"))], folders: vec![("f1".into(), "f".into(), PathBuf::from("/"))], ..Scope::default() };
+        let alive: std::collections::HashSet<String> = ["p1", "f1", "other"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(clear(&conn, &scope, &alive).unwrap(), 2);
+        assert_eq!(index::collection_keys(&conn).unwrap(), vec!["repo:other".to_string()]);
     }
 
     #[test]

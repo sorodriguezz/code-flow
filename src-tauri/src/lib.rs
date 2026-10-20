@@ -583,9 +583,6 @@ pub fn run() {
             keep_awake::start(app.handle());
             // «Reuniones»: meetings a crash or a quit cut short, the audio retention, the call detector.
             commands::meetings_cmd::start(app.handle());
-            // Fine-tuning: a run a quit cut short becomes resumable, an idle adapter server is
-            // stopped, and the assisted/supervised modes find their window. See `learning`.
-            commands::learning_cmd::start(app.handle());
             // The main window, built here from its own entry in `tauri.conf.json` (which says
             // `"create": false`) rather than by Tauri before `setup` runs — the one difference being
             // `enable_clipboard_access`, which that config has no field for. Without it WebView2 (and
@@ -719,6 +716,14 @@ pub fn run() {
             // with an `AppHandle`, and the recording point is deep inside `ai::run`, where threading
             // one down would mean an extra argument on every operation in `ai.rs`.
             ai_usage::attach(app.handle().clone());
+            // After `ai_usage::attach`: both read the database through `ai_usage::with_conn`, which
+            // answers nothing before it.
+            // Fine-tuning: a run a quit cut short becomes resumable, an idle adapter server is
+            // stopped, and the assisted/supervised modes find their window. See `learning`.
+            commands::learning_cmd::start(app.handle());
+            // The knowledge index's leftovers: projects, workspaces and folders deleted before the
+            // index learned to follow them, and vectors of an embedding model since removed.
+            knowledge::prune_in_background();
             // The same trick for the local completion engine: it announces every move between
             // off / warming / ready / failed, and the editor's status bar draws it. See
             // `localai::engine::attach`.
@@ -2137,6 +2142,7 @@ sharded_invoke_handler! {
         commands::knowledge_cmd::knowledge_add_folder,
         commands::knowledge_cmd::knowledge_update_folder,
         commands::knowledge_cmd::knowledge_remove_folder,
+        commands::knowledge_cmd::knowledge_clear,
         commands::knowledge_cmd::knowledge_set_cloud,
         commands::knowledge_cmd::knowledge_set_embed_model,
         commands::knowledge_cmd::knowledge_reindex,

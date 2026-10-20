@@ -138,6 +138,12 @@ pub struct ChatReply {
     /// What a workspace chat's turn changed, per repository — JSON `[{"repo", "path", "id",
     /// "paths"}]`, as filed in `chat_turn_checkpoints`. `None` for every other turn.
     checkpoints: Option<String>,
+    /// The prompt this turn's last step sent, in tokens, when the engine reports it (Claude, the
+    /// «CodeFlow» provider) — what the context meter shows. `None` from an engine that says
+    /// nothing. The row keeps the last figure there has ever been (`COALESCE` in `update_session`);
+    /// this is the turn's own, and without it the meter could only ever read the row, so it stayed
+    /// on whatever the last measured turn had said.
+    context_tokens: Option<i64>,
 }
 
 /// A slash command the composer's `/` menu can offer for a provider. See
@@ -1958,6 +1964,7 @@ pub async fn chat_send(
         // about what this turn made.
         outputs: produced_paths,
         checkpoints: turn_checkpoints,
+        context_tokens: run.context_tokens,
     })
 }
 
@@ -2096,6 +2103,8 @@ async fn flow_turn(
         compacted: false,
         outputs: Vec::new(),
         checkpoints: None,
+        // A flow is no model with a window to fill.
+        context_tokens: None,
     })
 }
 

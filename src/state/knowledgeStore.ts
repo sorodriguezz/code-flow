@@ -5,6 +5,7 @@ import {
   knowledgeDeleteModel,
   knowledgeDownloadModel,
   knowledgeOverview,
+  knowledgeClear,
   knowledgeReindex,
   knowledgeRemoveFolder,
   knowledgeSetCloud,
@@ -30,6 +31,8 @@ interface KnowledgeStore {
   progress: Record<string, LocalAiDownloadEvent>;
   load: (workspaceId: string) => Promise<void>;
   reindex: () => Promise<void>;
+  /** Empties the workspace's part of the index; the next search rebuilds it. */
+  clear: () => Promise<void>;
   setCloud: (allowed: boolean) => Promise<void>;
   addFolder: (path: string, localOnly: boolean) => Promise<void>;
   updateFolder: (id: string, patch: { localOnly?: boolean; enabled?: boolean }) => Promise<void>;
@@ -83,6 +86,14 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
       if (!ws) return;
       set({ reindexing: true });
       await guard(() => knowledgeReindex(ws));
+      set({ reindexing: false });
+    },
+
+    clear: async () => {
+      const ws = get().workspaceId;
+      if (!ws) return;
+      set({ reindexing: true });
+      await guard(() => knowledgeClear(ws));
       set({ reindexing: false });
     },
 

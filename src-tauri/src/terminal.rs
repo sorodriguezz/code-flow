@@ -292,8 +292,7 @@ fn profile_start(profile_cwd: &str, requested: Option<&str>, home: Option<&std::
 /// or `None` when there is nothing to add.
 ///
 /// Appended and not prepended, deliberately: a user who has their own `cf` on the path keeps it.
-/// The folder is the one the app's own binary is in, which is where a bundle puts its sidecars and
-/// where `cargo` leaves both binaries during development.
+/// The folder is the one the app's own binary is in, which is where a bundle puts its sidecars.
 /// The `cf` binary this app ships, wherever this build put it — see [`cli_path`] for the two places.
 pub fn cf_binary(app: &AppHandle) -> Option<std::path::PathBuf> {
     let name = if cfg!(windows) { "cf.exe" } else { "cf" };
@@ -312,8 +311,9 @@ fn cli_path(app: &AppHandle, base: &str) -> Option<String> {
     // is `target/debug/` itself, so a `cf/` folder there sits exactly where cargo writes the `cf`
     // binary, and the next build fails with "failed to remove file target/debug/cf".
     //
-    // **A plain `cargo build`** leaves both binaries in `target/<profile>/`, which is where someone
-    // working on the Rust side will have it and nowhere else.
+    // **Beside the executable**, where a copy put by hand would be. `cf` is a package of its own
+    // (`src-tauri/cf/`), so a `cargo build` of the app no longer leaves it in `target/<profile>/`;
+    // `tauri dev` gets it through the resource copy above (`pnpm cf:sidecar:dev`).
     let resources = app.path().resource_dir().ok().map(|dir| dir.join("cf-cli"));
     let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
     let dir = [resources, beside].into_iter().flatten().find(|dir| dir.join(name).exists())?;

@@ -4,20 +4,20 @@
 //
 // # Why this is needed at all
 //
-// During development both binaries land in the same `target/` directory, so the app finds `cf` next
-// to its own executable and everything works. An **installed** app has no `target/` — the binary
-// simply would not exist, and `cf` would be "not a command" for every user who did not build from
-// source.
+// `cf` is a package of its own (`src-tauri/cf/`), so building the app does not build it, and an
+// **installed** app has no `target/` anyway — without this the binary would not exist, and `cf` would
+// be "not a command" for every user. It is its own package because, as a `[[bin]]` of the app, it
+// dragged the whole app's library into its build: a release compiled CodeFlow twice (see
+// `src-tauri/cf/Cargo.toml`). On its own it has no dependencies and builds in seconds.
 //
 // # Why a resource and not `externalBin`
 //
-// `externalBin` is Tauri's own slot for a second executable, and it would be the right one — except
-// that `tauri-build` checks that it exists on **every** build of this package, including the build
-// that produces the sidecar. That is a cycle with no way out: `cargo build --bin cf` fails because
-// `cf` has not been built yet. A resource has no such check as long as its directory is there, which
-// is why `resources/cf/README.md` is committed — the same trick the JDBC bridge and the llama runtime
-// next door use. `terminal.rs::cli_path` looks in the resource directory and then beside the app's
-// own binary, so both the bundle and a plain `cargo build` are covered.
+// `externalBin` is Tauri's own slot for a second executable. It was ruled out while `cf` was a
+// `[[bin]]` of the app: `tauri-build` checks that it exists on every build of the package, including
+// the one that produced it — a cycle. A resource has no such check as long as its directory is there,
+// which is why `resources/cf/README.md` is committed — the same trick the JDBC bridge and the llama
+// runtime next door use — and it needs no per-target file names, so it stays. `terminal.rs::cli_path`
+// looks in the resource directory and then beside the app's own binary.
 //
 // Run it directly (`pnpm cf:sidecar`) or let `tauri build`/`tauri dev` do it. `--optional`
 // downgrades every failure to a warning, which is what `tauri dev` passes: someone working on the
@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TAURI = join(HERE, "..", "src-tauri");
+const PACKAGE = join(TAURI, "cf");
 const OUT = join(TAURI, "resources", "cf");
 
 const optional = process.argv.includes("--optional");
@@ -39,9 +40,9 @@ const release = process.argv.includes("--release");
 async function main() {
   const suffix = process.platform === "win32" ? ".exe" : "";
   const profile = release ? "release" : "debug";
-  const built = join(TAURI, "target", profile, `cf${suffix}`);
+  const built = join(PACKAGE, "target", profile, `cf${suffix}`);
   const target = join(OUT, `cf${suffix}`);
-  const source = join(TAURI, "src", "bin", "cf.rs");
+  const source = join(PACKAGE, "src", "main.rs");
 
   // Already current: the copy is newer than the source it was built from. Checked rather than always
   // rebuilt because this runs before *every* `tauri dev`, and cargo's own freshness check still
@@ -54,12 +55,12 @@ async function main() {
     }
   }
 
-  const build = spawnSync("cargo", ["build", "--bin", "cf", ...(release ? ["--release"] : [])], {
-    cwd: TAURI,
+  const build = spawnSync("cargo", ["build", ...(release ? ["--release"] : [])], {
+    cwd: PACKAGE,
     stdio: "inherit",
     shell: process.platform === "win32",
   });
-  if (build.status !== 0) throw new Error("cargo build --bin cf failed");
+  if (build.status !== 0) throw new Error("cargo build of src-tauri/cf failed");
   if (!existsSync(built)) throw new Error(`cargo produced no ${built}`);
 
   await mkdir(OUT, { recursive: true });

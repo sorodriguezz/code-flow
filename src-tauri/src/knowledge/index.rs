@@ -220,6 +220,24 @@ pub fn remove_collection(conn: &Connection, collection: &str) -> rusqlite::Resul
     Ok(())
 }
 
+/// Every collection the index holds something of.
+pub fn collection_keys(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT collection FROM sources UNION SELECT collection FROM collections_meta")?;
+    let keys = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(keys)
+}
+
+/// Drops the vectors of every embedding space whose name starts with `prefix` — compared as text,
+/// not with `LIKE`, where the `_` of a model id would be a wildcard.
+pub fn remove_space(conn: &Connection, prefix: &str) -> rusqlite::Result<usize> {
+    conn.execute("DELETE FROM vectors WHERE substr(space, 1, length(?1)) = ?1", params![prefix])
+}
+
+/// Gives the pages a large delete freed back to the disk: SQLite keeps them in the file otherwise.
+pub fn compact(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+}
+
 /// One collection's size, for the Knowledge pane.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -70,6 +70,8 @@ export const knowledgeRemoveFolder = (id: string) => invoke<void>("knowledge_rem
 export const knowledgeSetCloud = (workspaceId: string, allowed: boolean) => invoke<void>("knowledge_set_cloud", { workspaceId, allowed });
 export const knowledgeSetEmbedModel = (model: string | null) => invoke<void>("knowledge_set_embed_model", { model });
 export const knowledgeReindex = (workspaceId: string) => invoke<[string, KnowledgeRefreshed][]>("knowledge_reindex", { workspaceId });
+/** Empties the workspace's part of the index (rebuilt by the next search); resolves to the collections removed. */
+export const knowledgeClear = (workspaceId: string) => invoke<number>("knowledge_clear", { workspaceId });
 export const knowledgeSearch = (workspaceId: string, query: string, limit?: number) =>
   invoke<KnowledgeFound[]>("knowledge_search", { workspaceId, query, limit: limit ?? null });
 export const knowledgeDownloadModel = (modelId: string) => invoke<void>("knowledge_download_model", { modelId });

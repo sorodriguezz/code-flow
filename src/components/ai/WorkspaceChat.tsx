@@ -279,7 +279,8 @@ export function WorkspaceChat({
     const measured = session.contextTokens;
     const estimated = estimateTokens(counted);
     return {
-      tokens: measured ?? estimated,
+      // An earlier turn's figure is a floor once the thread has talked on: see `ChatView`.
+      tokens: measured === null ? estimated : session.contextStale ? Math.max(measured, estimated) : measured,
       measured: measured !== null,
       // A measurement from an earlier turn is drawn as an approximation rather than as a fact.
       stale: session.contextStale,

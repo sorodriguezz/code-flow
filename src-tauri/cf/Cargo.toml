@@ -1,0 +1,20 @@
+# `cf`: the command an agent runs inside one of this app's shells to reach the window — see
+# `src/main.rs` and `../src/agentcli.rs`.
+#
+# A package of its own, not a `[[bin]]` of the app's: every binary of a package depends on that
+# package's library, so `cargo build --bin cf` used to compile all of CodeFlow (~330k lines and its
+# dependencies) for a sixty-line `std::net` client — and with features and environment that differ
+# from `tauri build`'s, so a release compiled the whole app twice (Release run 39345250461, macOS:
+# 32m41s for `cf`, then 36m53s for the app). Here it depends on nothing and builds in seconds.
+# `scripts/build-cf-sidecar.mjs` builds it and copies it into `resources/cf/` for the bundle.
+[package]
+name = "cf"
+version = "0.1.0"
+edition = "2021"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+
+[profile.release]
+strip = true

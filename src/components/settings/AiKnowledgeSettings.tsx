@@ -40,7 +40,7 @@ export function AiKnowledgeSettings() {
   const t = useT();
   const ask = useConfirmStore((s) => s.ask);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const { overview, reindexing, progress, load, reindex, setCloud, addFolder, updateFolder, removeFolder, useModel, download, cancelDownload, removeModel } =
+  const { overview, reindexing, progress, load, reindex, clear, setCloud, addFolder, updateFolder, removeFolder, useModel, download, cancelDownload, removeModel } =
     useKnowledgeStore();
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<KnowledgeFound[] | null>(null);
@@ -121,6 +121,20 @@ export function AiKnowledgeSettings() {
           <button type="button" disabled={reindexing} onClick={() => void reindex()} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {reindexing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
             {t("knowledge.reindex")}
+          </button>
+          <button
+            type="button"
+            disabled={reindexing}
+            title={t("knowledge.clearHint")}
+            onClick={() =>
+              void ask({ message: t("knowledge.clearConfirm"), confirmLabel: t("knowledge.clear"), danger: true }).then((ok) => {
+                if (ok) void clear();
+              })
+            }
+            className={buttonClass({ variant: "ghost", size: "sm" })}
+          >
+            <Trash2 size={13} />
+            {t("knowledge.clear")}
           </button>
         </div>
         <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">

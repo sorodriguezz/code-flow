@@ -150,6 +150,22 @@ pub fn knowledge_remove_folder(db: State<'_, Db>, id: String) -> Result<(), Stri
     knowledge::remove_collection(&conn, &id).map_err(|e| e.to_string())
 }
 
+/// Empties the workspace's part of the index (and whatever nothing points at), giving the space
+/// back to the disk; the next search rebuilds it. Returns how many collections went.
+#[tauri::command]
+pub async fn knowledge_clear(db: State<'_, Db>, workspace_id: String) -> Result<usize, String> {
+    let (scope, alive) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        (workspace_scope(&conn, &workspace_id)?, knowledge::alive_ids(&conn).map_err(|e| e.to_string())?)
+    };
+    tokio::task::spawn_blocking(move || {
+        let index = index::global()?;
+        knowledge::clear(&index, &scope, &alive).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn knowledge_set_cloud(db: State<'_, Db>, workspace_id: String, allowed: bool) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -220,5 +236,15 @@ pub async fn knowledge_delete_model(registry: State<'_, LocalAiRegistry>, model_
     if path.exists() {
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
+    // Its vectors go with it: nothing can compare a question against them any more.
+    let id = model_id.clone();
+    let _ = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let index = index::global()?;
+        if index::remove_space(&index, &format!("{id}@")).map_err(|e| e.to_string())? > 0 {
+            index::compact(&index).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await;
     Ok(())
 }
