@@ -12,6 +12,7 @@ import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { resolveAccount } from "../../lib/aiAccounts";
+import { scrollMoves } from "../../lib/scrollMoves";
 
 const WIDTH = 236;
 const GAP = 6;
@@ -88,11 +89,11 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    // A fixed menu doesn't follow its anchor, so an *outside* scroll would strand it — but
-    // scrolling the menu's own list must not dismiss it.
+    // A fixed menu doesn't follow its anchor, so a scroll that moves the trigger would strand it —
+    // but scrolling the menu's own list must not dismiss it, and neither must a scroller elsewhere
+    // (a chat following its answer scrolls on every token).
     const onScroll = (e: Event) => {
-      if (menuRef.current?.contains(e.target as Node)) return;
-      setOpen(false);
+      if (scrollMoves(e, triggerRef.current, [menuRef.current])) setOpen(false);
     };
     const onResize = () => setOpen(false);
     window.addEventListener("mousedown", onClickOutside);

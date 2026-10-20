@@ -194,6 +194,8 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("ai.chat", Ai, "messages-square", 7).group("aiTasks"),
     node("ai.embed", Ai, "binary", 9).group("aiRag"),
     node("ai.vectors", Ai, "database-zap", 9).group("aiRag"),
+    node("app.knowledge", App, "library-big", 12).shown_in(Ai).group("aiRag"),
+    node("app.memory", App, "brain", 12).shown_in(Ai).group("aiRag"),
     // Code — processes and the embedded JavaScript sandbox.
     node("code.shell", Code, "square-terminal", 1),
     node("code.python", Code, "file-code", 1),
@@ -213,6 +215,7 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("ai.review", Ai, "eye", 3).shown_in(Git).group("gitRepo"),
     node("files.version", Files, "tag", 12).shown_in(Git).group("gitRepo"),
     node("app.search", App, "file-search", 12).shown_in(Git).group("gitRepo"),
+    node("app.codemap", App, "waypoints", 12).shown_in(Git).group("gitRepo"),
     node("app.audit", App, "shield-half", 12).shown_in(Git).group("gitRepo"),
     node("app.prList", App, "git-pull-request-arrow", 10).shown_in(Git).group("gitPrs"),
     node("files.pr", Files, "git-pull-request", 4).shown_in(Git).group("gitPrs"),
@@ -338,6 +341,7 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("app.agent", App, "bot", 3),
     node("app.open", App, "external-link", 4),
     node("app.terminal", App, "monitor", 4),
+    node("app.terminalOutput", App, "logs", 12),
     node("app.clipboard", App, "clipboard-list", 4),
     node("app.vault", App, "key-round", 4),
     node("app.apiRequest", App, "send", 7),
@@ -471,9 +475,9 @@ mod tests {
     fn the_catalogue_has_the_families_the_plan_lists() {
         let count = |family: Family| CATALOG.iter().filter(|d| d.family == family).count();
         assert_eq!(count(Trigger), 35);
-        assert_eq!(count(Ai), 16);
+        assert_eq!(count(Ai), 18);
         assert_eq!(count(Code), 12);
-        assert_eq!(count(Git), 16);
+        assert_eq!(count(Git), 17);
         assert_eq!(count(Net), 15);
         assert_eq!(count(Messaging), 4);
         assert_eq!(count(Apps), 3);
@@ -481,8 +485,8 @@ mod tests {
         assert_eq!(count(Files), 14);
         assert_eq!(count(Logic), 13);
         assert_eq!(count(Transform), 20);
-        assert_eq!(count(App), 16);
-        assert_eq!(CATALOG.len(), 174);
+        assert_eq!(count(App), 17);
+        assert_eq!(CATALOG.len(), 178);
     }
 
     #[test]

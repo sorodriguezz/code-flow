@@ -10,8 +10,15 @@
 //! map of the folder its run works in and of nothing else. The token dies with the run ([`Grant`]).
 //! A request that came through a public tunnel is refused — this is for agents on this machine.
 //!
-//! Read-only by construction: every tool is a query over the map. That is why a read-only run (a
-//! review, a chat in plan mode) gets it too — it is the one server such a run may load.
+//! **Queries for every run, actions only for a run that may act.** The map, knowledge and memory
+//! tools — and the app's read tools: a service's log, waiting for one, another terminal's output, the
+//! local model — are queries; that is why a read-only run (a review, a chat in plan mode) gets this
+//! server too, the one server such a run may load. A run that may act also gets what `cf` gives an
+//! agent in a terminal (`crate::agentcli`): restarting a service, opening a file for the user, a
+//! notification, a proposed memory, a draft task, and the saved credentials the app *uses* for it —
+//! a database connection, an API request, a Llavero entry — each use approved by the user in the
+//! window, nothing secret ever in the answer. Which of the two a token gets is fixed when its run
+//! starts ([`Access`]); a token written into a file (agy, Grok) only ever gets the queries.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -31,7 +38,25 @@ const SUPPORTED: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 /// Characters of the project map a client is sent.
 const MAP_CHARS: usize = 12_000;
 
-static RUNS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static RUNS: LazyLock<Mutex<HashMap<String, Access>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// What one token opens: its run's repository, and whether that run may act.
+#[derive(Clone, Debug)]
+struct Access {
+    root: String,
+    /// Not a read-only run, and the token travels with the run (a header) rather than sitting in a
+    /// file any process on the machine could read while the run lasts.
+    acts: bool,
+    /// What "allow in this terminal" is keyed by for this run's approvals — the run, so an allowance
+    /// lasts the turn it was given in.
+    session: String,
+}
+
+impl Access {
+    fn new(root: &str, acts: bool, token: &str) -> Self {
+        Access { root: root.to_string(), acts, session: format!("mcp:{}", &token[..token.len().min(16)]) }
+    }
+}
 
 /// A run's access to the map of its repository. Dropping it revokes the token.
 pub struct Grant {
@@ -48,11 +73,12 @@ impl Drop for Grant {
 
 /// The server entry for a run in `root`, and the grant that keeps it valid — `None` when the
 /// webhook server cannot listen (its port is taken), in which case the run simply goes without.
-pub fn for_run(root: &str) -> Option<(LiveServer, Grant)> {
+/// `acts`: the run may act, so it gets the app's action tools as well as the queries.
+pub fn for_run(root: &str, acts: bool) -> Option<(LiveServer, Grant)> {
     let app = crate::ai_usage::app()?;
     crate::flows::triggers::webhook::ensure_server(app).ok()?;
     let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-    RUNS.lock().ok()?.insert(token.clone(), root.to_string());
+    RUNS.lock().ok()?.insert(token.clone(), Access::new(root, acts, &token));
     let server = LiveServer {
         name: SERVER_NAME.to_string(),
         transport: "http".to_string(),
@@ -257,7 +283,8 @@ fn install(client: FileClient, root: &std::path::Path, port: u16) -> Option<File
     drop(runs);
     // From here every way out releases this run's hold.
     let grant = FileGrant { client, root: root.to_path_buf() };
-    RUNS.lock().ok()?.insert(token.clone(), root.to_string_lossy().to_string());
+    // Queries only: this token sits in a file in the repository while the run lasts.
+    RUNS.lock().ok()?.insert(token.clone(), Access::new(&root.to_string_lossy(), false, &token));
     client.write(root, &format!("http://127.0.0.1:{port}{PATH}/{token}"))?;
     if crate::git_exclude::exclude(root, &client.exclude_line()).unwrap_or(false) {
         if let Some(entry) = FILE_RUNS.lock().ok()?.get_mut(&key) {
@@ -280,11 +307,12 @@ pub fn loadable(servers: &[LiveServer], read_only: bool) -> Vec<LiveServer> {
 
 /// The server for a CLI run in `cwd`, when that is a repository's working tree and the user has
 /// not switched it off (Settings › Herramientas de IA › MCP). The grant must outlive the run.
-pub fn for_repository(cwd: &str) -> Option<(LiveServer, Grant)> {
+/// `acts`: the run is not read-only — see [`Access::acts`].
+pub fn for_repository(cwd: &str, acts: bool) -> Option<(LiveServer, Grant)> {
     if !enabled() {
         return None;
     }
-    for_run(&repository_root(cwd)?.to_string_lossy())
+    for_run(&repository_root(cwd)?.to_string_lossy(), acts)
 }
 
 fn respond(status: StatusCode, value: Option<Value>) -> Response {
@@ -299,10 +327,9 @@ fn respond(status: StatusCode, value: Option<Value>) -> Response {
     builder.body(body).unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
-/// The repository a request may read: its bearer token's, or — for a client whose HTTP transport
-/// sends no headers (the Antigravity CLI) — the token as the last segment of the path,
-/// `/mcp/code/<token>`.
-fn root_for(headers: &HeaderMap, path: &str) -> Option<String> {
+/// What a request may reach: its bearer token's run, or — for a client whose HTTP transport sends no
+/// headers (the Antigravity CLI) — the token as the last segment of the path, `/mcp/code/<token>`.
+fn access_for(headers: &HeaderMap, path: &str) -> Option<Access> {
     let from_header = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -323,7 +350,7 @@ pub async fn handle(method: &Method, path: &str, headers: &HeaderMap, body: &Byt
     if tunnelled {
         return respond(StatusCode::FORBIDDEN, Some(json!({"error": "the code map is only served on this machine"})));
     }
-    let Some(root) = root_for(headers, path) else {
+    let Some(access) = access_for(headers, path) else {
         return respond(StatusCode::UNAUTHORIZED, Some(json!({"error": "a run's bearer token is required"})));
     };
     if method != Method::POST {
@@ -340,7 +367,7 @@ pub async fn handle(method: &Method, path: &str, headers: &HeaderMap, body: &Byt
         Value::Array(batch) => {
             let mut replies = Vec::new();
             for one in batch {
-                if let Some(reply) = answer(&root, one).await {
+                if let Some(reply) = answer(&access, one).await {
                     replies.push(reply);
                 }
             }
@@ -350,7 +377,7 @@ pub async fn handle(method: &Method, path: &str, headers: &HeaderMap, body: &Byt
                 respond(StatusCode::OK, Some(Value::Array(replies)))
             }
         }
-        one => match answer(&root, one).await {
+        one => match answer(&access, one).await {
             Some(reply) => respond(StatusCode::OK, Some(reply)),
             None => respond(StatusCode::ACCEPTED, None),
         },
@@ -497,7 +524,217 @@ pub async fn call_tool(root: &str, name: &str, args: &Value) -> Result<String, S
     .map_err(|e| e.to_string())?
 }
 
-async fn answer(root: &str, message: Value) -> Option<Value> {
+/// The tools a run gets: the map and knowledge queries and the app's read tools always, the app's
+/// action tools only when it may act.
+pub fn tools_for(acts: bool) -> Vec<Value> {
+    let mut all = tools();
+    all.extend(app_read_tools().into_iter().map(read_only));
+    if acts {
+        all.extend(app_action_tools());
+    }
+    all
+}
+
+/// The app's tools that only look — the `cf` verbs that change nothing.
+fn app_read_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "service_logs",
+            "description": "The recent output of a service CodeFlow runs for this workspace (a dev server, a worker, a compose stack) — what you cannot see from your own shell, because the app runs them, not you. Without a name: the workspace's services, their state and ports.",
+            "inputSchema": {"type": "object", "properties": {
+                "service": {"type": "string", "description": "The service's name as the Services dock shows it. Optional."},
+                "tail": {"type": "integer", "description": "How many of the last lines (default 100)"}
+            }},
+        }),
+        json!({
+            "name": "service_wait",
+            "description": "Waits until a service CodeFlow runs is ready (its readiness check passed), and says so — or that it failed or stopped, with its last lines. Use it after a restart, before testing against the service.",
+            "inputSchema": {"type": "object", "properties": {
+                "service": {"type": "string", "description": "The service's name"},
+                "timeout_seconds": {"type": "integer", "description": "How long to wait (default 120)"}
+            }, "required": ["service"]},
+        }),
+        json!({
+            "name": "terminal_output",
+            "description": "The recent output of a terminal in CodeFlow's agents panel — a test watcher, a build, another agent. Without a name: the workspace's terminals.",
+            "inputSchema": {"type": "object", "properties": {
+                "terminal": {"type": "string", "description": "The terminal's title, or its number from the list. Optional."},
+                "tail": {"type": "integer", "description": "How many of the last lines (default 100)"}
+            }},
+        }),
+        json!({
+            "name": "local_llm",
+            "description": "Asks the local model on this machine (nothing leaves it) — for work too cheap or too long for you: summarising a long log, sorting a list, extracting fields. Long material is read in parts and the answers merged.",
+            "inputSchema": {"type": "object", "properties": {
+                "instruction": {"type": "string", "description": "What to do with the material"},
+                "material": {"type": "string", "description": "The text to work on. Optional."}
+            }, "required": ["instruction"]},
+        }),
+    ]
+}
+
+/// The app's tools that act — offered only to a run that may act ([`Access::acts`]).
+fn app_action_tools() -> Vec<Value> {
+    let acts = |mut tool: Value, destructive: bool, open_world: bool| {
+        tool["annotations"] = json!({ "readOnlyHint": false, "destructiveHint": destructive, "idempotentHint": false, "openWorldHint": open_world });
+        tool
+    };
+    vec![
+        acts(json!({
+            "name": "service_restart",
+            "description": "Restarts a service CodeFlow runs (its dependents first, as the Services dock does). Follow it with service_wait.",
+            "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "description": "The service's name"}}, "required": ["service"]},
+        }), false, false),
+        acts(json!({
+            "name": "open_in_editor",
+            "description": "Opens a file of this repository in CodeFlow's editor, at a line, in front of the user — to show them what you are talking about.",
+            "inputSchema": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path relative to the repository root"},
+                "line": {"type": "integer", "description": "The line to show. Optional."}
+            }, "required": ["path"]},
+        }), false, false),
+        acts(json!({
+            "name": "notify",
+            "description": "Puts a line in front of the user in CodeFlow, wherever they are in the app.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "One short line"}}, "required": ["text"]},
+        }), false, false),
+        acts(json!({
+            "name": "propose_memory",
+            "description": "Proposes a memory for this project — a decision, convention or preference worth keeping. It is a candidate: models read it only after the user approves it in CodeFlow.",
+            "inputSchema": {"type": "object", "properties": {"fact": {"type": "string", "description": "The fact, first line as its title"}}, "required": ["fact"]},
+        }), false, false),
+        acts(json!({
+            "name": "add_task",
+            "description": "Adds a draft task to this project's task tree in CodeFlow, for an agent of the workspace's roster. Nothing starts it: the user does.",
+            "inputSchema": {"type": "object", "properties": {
+                "title": {"type": "string", "description": "What the task is, in a line"},
+                "prompt": {"type": "string", "description": "What to do, in full. Optional: the title otherwise."},
+                "agent": {"type": "string", "description": "The roster agent's name. Optional: the first one ready otherwise."}
+            }, "required": ["title"]},
+        }), false, false),
+        acts(json!({
+            "name": "db_query",
+            "description": "Runs SQL on a database connection the user saved in CodeFlow, returning the rows as a table. The app connects with the saved password, which you never see; the user approves every statement in the app first (reads can be allowed for the rest of this turn).",
+            "inputSchema": {"type": "object", "properties": {
+                "connection": {"type": "string", "description": "The saved connection's name"},
+                "sql": {"type": "string", "description": "The statement(s)"},
+                "max_rows": {"type": "integer", "description": "At most this many rows (default 200)"}
+            }, "required": ["connection", "sql"]},
+        }), true, true),
+        acts(json!({
+            "name": "http_request",
+            "description": "Sends a request saved in CodeFlow's API client, with its environment, auth and scripts, and returns the answer with every credential removed. The user approves it in the app first.",
+            "inputSchema": {"type": "object", "properties": {
+                "request": {"type": "string", "description": "Collection/Folder/Request, or the request's name"},
+                "environment": {"type": "string", "description": "The environment's name. Optional: the active one."}
+            }, "required": ["request"]},
+        }), true, true),
+        acts(json!({
+            "name": "run_with_secret",
+            "description": "Runs a shell command in this repository with an entry of the user's CodeFlow keyring (Llavero) in an environment variable named after it (GitHub token → $GITHUB_TOKEN). CodeFlow runs it, not you, after the user approves the exact command; the output comes back with the secret removed, and the value never reaches you.",
+            "inputSchema": {"type": "object", "properties": {
+                "entry": {"type": "string", "description": "The keyring entry's title"},
+                "command": {"type": "string", "description": "The shell command, using the variable"},
+                "field": {"type": "string", "description": "Which field of the entry. Optional."},
+                "env": {"type": "string", "description": "Another variable name. Optional."}
+            }, "required": ["entry", "command"]},
+        }), true, true),
+    ]
+}
+
+/// A tool that reaches the app rather than the map: the `cf` verb behind it, run as this run
+/// (`agentcli::run_verb`). `None` for a name that is not one of these.
+async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<String, String>> {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let number = |key: &str| args.get(key).and_then(Value::as_u64).map(|n| n.to_string());
+    let need = |key: &str| {
+        let value = text(key);
+        if value.is_empty() { Err(format!("{key} is required")) } else { Ok(value) }
+    };
+    let mut list: Vec<String> = Vec::new();
+    let mut stdin = String::new();
+    let (verb, acting) = match name {
+        "service_logs" => {
+            list.extend((!text("service").is_empty()).then(|| text("service")));
+            list.extend(number("tail").into_iter().flat_map(|n| ["--tail".to_string(), n]));
+            ("logs", false)
+        }
+        "service_wait" => {
+            list.push(match need("service") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            list.extend(number("timeout_seconds").into_iter().flat_map(|n| ["--timeout".to_string(), n]));
+            ("wait", false)
+        }
+        "terminal_output" => {
+            list.extend((!text("terminal").is_empty()).then(|| text("terminal")));
+            list.extend(number("tail").into_iter().flat_map(|n| ["--tail".to_string(), n]));
+            ("term", false)
+        }
+        "local_llm" => {
+            list.push(match need("instruction") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            stdin = text("material");
+            ("llm", false)
+        }
+        "service_restart" => {
+            list.push(match need("service") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            ("restart", true)
+        }
+        "open_in_editor" => {
+            let path = match need("path") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            list.push(match number("line") { Some(line) => format!("{path}:{line}"), None => path });
+            ("open", true)
+        }
+        "notify" => {
+            list.push(match need("text") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            ("notify", true)
+        }
+        "propose_memory" => {
+            list.push(match need("fact") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            ("remember", true)
+        }
+        "add_task" => {
+            list.push(match need("title") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            if !text("agent").is_empty() {
+                list.extend(["--agent".to_string(), text("agent")]);
+            }
+            if !text("prompt").is_empty() {
+                list.extend(["--".to_string(), text("prompt")]);
+            }
+            ("task", true)
+        }
+        "db_query" => {
+            list.push(match need("connection") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            list.extend(number("max_rows").into_iter().flat_map(|n| ["--max-rows".to_string(), n]));
+            list.push(match need("sql") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            ("db", true)
+        }
+        "http_request" => {
+            list.push(match need("request") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            if !text("environment").is_empty() {
+                list.extend(["--env".to_string(), text("environment")]);
+            }
+            ("http", true)
+        }
+        "run_with_secret" => {
+            list.push(match need("entry") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            for key in ["field", "env"] {
+                if !text(key).is_empty() {
+                    list.extend([format!("--{key}"), text(key)]);
+                }
+            }
+            list.push("--".to_string());
+            list.push(match need("command") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            ("secret", true)
+        }
+        _ => return None,
+    };
+    if acting && !access.acts {
+        return Some(Err(format!("{name} is not available to a read-only run")));
+    }
+    let Some(app) = crate::ai_usage::app() else { return Some(Err("CodeFlow is not ready yet".to_string())) };
+    Some(crate::agentcli::run_verb(app, verb, list, stdin, &access.root, &access.session).await)
+}
+
+async fn answer(access: &Access, message: Value) -> Option<Value> {
     let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or_default().to_string();
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -511,18 +748,24 @@ async fn answer(root: &str, message: Value) -> Option<Value> {
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "codeflow-map", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "CodeFlow's map of this repository: where each symbol is declared and which files really use it (imports resolved, namesakes left out). Prefer find_symbol over a text search to locate a definition, and find_usages before changing a signature.",
+                    "instructions": "CodeFlow's map of this repository: where each symbol is declared and which files really use it (imports resolved, namesakes left out). Prefer find_symbol over a text search to locate a definition, and find_usages before changing a signature. It also reaches the CodeFlow app around you: the logs of the services it runs and another terminal's output, the local model for cheap work, and — when this run may act — restarting a service, opening a file for the user, notifying them, proposing a memory or a task, and using the database connections, API requests and keyring entries the user saved, which the app uses for you after the user approves and never shows you.",
                 }),
             )
         }
         "ping" => result_reply(id, json!({})),
-        "tools/list" => result_reply(id, json!({"tools": tools()})),
+        "tools/list" => result_reply(id, json!({"tools": tools_for(access.acts)})),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            if let Some(result) = app_tool(access, name, &args).await {
+                return Some(match result {
+                    Ok(text) => text_result(id, text, false),
+                    Err(error) => text_result(id, error, true),
+                });
+            }
             // Everything served here goes to a CLI engine — a cloud model: knowledge is searched with
             // the workspace's cloud rules (local-only folders out, the switch obeyed).
-            match call_tool_as(root, name, &args, true).await {
+            match call_tool_as(&access.root, name, &args, true).await {
                 Ok(text) => text_result(id, text, false),
                 Err(error) => text_result(id, error, true),
             }
@@ -536,8 +779,12 @@ mod tests {
     use super::*;
 
     fn with_token(root: &str) -> (HeaderMap, Grant) {
+        with_access(root, false)
+    }
+
+    fn with_access(root: &str, acts: bool) -> (HeaderMap, Grant) {
         let token = "test-token-".to_string() + &uuid::Uuid::new_v4().simple().to_string();
-        RUNS.lock().unwrap().insert(token.clone(), root.to_string());
+        RUNS.lock().unwrap().insert(token.clone(), Access::new(root, acts, &token));
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
         (headers, Grant { token })
@@ -548,6 +795,46 @@ mod tests {
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    fn tool_names(reply: &Value) -> Vec<String> {
+        reply["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// A read-only run gets the queries — the map's and the app's — and none of the tools that act.
+    #[tokio::test]
+    async fn the_action_tools_are_only_listed_for_a_run_that_may_act() {
+        let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let (reader, _r) = with_access("/tmp/repo", false);
+        let (_, reply) = post(&reader, list.clone()).await;
+        let names = tool_names(&reply);
+        for query in ["find_symbol", "search_knowledge", "service_logs", "service_wait", "terminal_output", "local_llm"] {
+            assert!(names.contains(&query.to_string()), "{query} missing from {names:?}");
+        }
+        for action in ["service_restart", "open_in_editor", "notify", "propose_memory", "add_task", "db_query", "http_request", "run_with_secret"] {
+            assert!(!names.contains(&action.to_string()), "{action} offered to a read-only run");
+        }
+        let (actor, _a) = with_access("/tmp/repo", true);
+        let (_, reply) = post(&actor, list).await;
+        let names = tool_names(&reply);
+        assert!(names.contains(&"db_query".to_string()) && names.contains(&"run_with_secret".to_string()), "{names:?}");
+        let tools = reply["result"]["tools"].as_array().unwrap();
+        let annotation = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].as_bool();
+        assert_eq!(annotation("service_logs"), Some(true));
+        assert_eq!(annotation("db_query"), Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_read_only_run_cannot_call_an_action_tool_and_arguments_are_checked() {
+        let (reader, _r) = with_access("/tmp/repo", false);
+        let call = |name: &str, arguments: Value| json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": arguments}});
+        let (_, reply) = post(&reader, call("db_query", json!({"connection": "prod", "sql": "select 1"}))).await;
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("read-only"), "{reply}");
+        let (actor, _a) = with_access("/tmp/repo", true);
+        let (_, reply) = post(&actor, call("run_with_secret", json!({"entry": "GitHub token"}))).await;
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(reply["result"]["content"][0]["text"], "command is required");
     }
 
     #[tokio::test]
@@ -562,7 +849,8 @@ mod tests {
 
         let (status, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 6);
+        // The six map and knowledge queries and the app's four read tools — no actions for this token.
+        assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 10);
 
         let (_, reply) = post(
             &headers,
@@ -581,7 +869,8 @@ mod tests {
 
     #[test]
     fn every_tool_says_it_only_reads() {
-        for tool in tools() {
+        // Everything a read-only run is offered, the app's read tools included.
+        for tool in tools_for(false) {
             assert_eq!(tool["annotations"]["readOnlyHint"], true, "{}", tool["name"]);
         }
     }
@@ -629,7 +918,7 @@ mod tests {
         let url = text.lines().find_map(|l| l.strip_prefix("url = \"")).and_then(|rest| rest.strip_suffix('"')).unwrap();
         assert!(url.starts_with("http://127.0.0.1:47811/mcp/code/"), "{url}");
         let token = url.rsplit('/').next().unwrap();
-        assert_eq!(RUNS.lock().unwrap().get(token).map(String::as_str), Some(root.to_string_lossy().as_ref()));
+        assert_eq!(RUNS.lock().unwrap().get(token).map(|access| access.root.clone()).as_deref(), Some(root.to_string_lossy().as_ref()));
         assert!(excluded(&root).lines().any(|l| l == "/.grok/config.toml"));
         drop(first);
         assert!(file.exists(), "another run still holds it");
@@ -745,7 +1034,7 @@ mod live {
     async fn run(engine: &dyn AiEngine, binary: &str, model: &str, root: &str, port: u16, read_only: bool) -> Run {
         let (server, _grant) = {
             let token = format!("live-{}", uuid::Uuid::new_v4().simple());
-            RUNS.lock().unwrap().insert(token.clone(), root.to_string());
+            RUNS.lock().unwrap().insert(token.clone(), Access::new(root, false, &token));
             let server = LiveServer {
                 name: SERVER_NAME.to_string(),
                 transport: "http".to_string(),

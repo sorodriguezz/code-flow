@@ -30,7 +30,8 @@ export interface Meeting {
 }
 
 export type MeetingMode = "light" | "balanced" | "full";
-export type MeetingStatus = "recording" | "paused" | "queued" | "processing" | "ready" | "failed" | "interrupted";
+/** `recorded`: stopped and stored, waiting for the user to transcribe it («Transcribir»). */
+export type MeetingStatus = "recording" | "paused" | "queued" | "processing" | "ready" | "failed" | "interrupted" | "recorded";
 
 /** `LineRow`: one line of the transcript. `speaker` is a key: `me`, `others`, `p0`, `p1`… */
 export interface MeetingLine {
@@ -141,7 +142,10 @@ export const meetingsMonitor = (on: boolean, system = false) => invoke<void>("me
 export const meetingsSetMicMuted = (muted: boolean) => invoke<void>("meetings_set_mic_muted", { muted });
 export const meetingsSetMicGain = (gain: number) => invoke<void>("meetings_set_mic_gain", { gain });
 export const meetingsPause = (meetingId: string, paused: boolean) => invoke<void>("meetings_pause", { meetingId, paused });
-export const meetingsStop = (meetingId: string) => invoke<Meeting>("meetings_stop", { meetingId });
+/** `transcribe` overrides the «Al detener» setting for this recording; omitted, the setting decides. */
+export const meetingsStop = (meetingId: string, transcribe?: boolean) => invoke<Meeting>("meetings_stop", { meetingId, transcribe });
+/** Transcribes a recording that was kept for later. */
+export const meetingsTranscribe = (meetingId: string) => invoke<void>("meetings_transcribe", { meetingId });
 export const meetingsDiscard = (meetingId: string) => invoke<void>("meetings_discard", { meetingId });
 export const meetingsDelete = (meetingId: string) => invoke<void>("meetings_delete", { meetingId });
 export const meetingsCancelJob = (meetingId: string) => invoke<void>("meetings_cancel_job", { meetingId });
@@ -156,6 +160,8 @@ export const meetingsDetail = (meetingId: string) => invoke<MeetingDetail>("meet
 export const meetingsAudio = (meetingId: string) => invoke<ArrayBuffer>("meetings_audio", { meetingId });
 export const meetingsPeaks = (meetingId: string) => invoke<Record<string, number[]>>("meetings_peaks", { meetingId });
 export const meetingsExportAudio = (meetingId: string, path: string) => invoke<void>("meetings_export_audio", { meetingId, path });
+/** Deletes the meeting's audio now; the transcript, speakers and note stay. */
+export const meetingsDeleteAudio = (meetingId: string) => invoke<void>("meetings_delete_audio", { meetingId });
 
 export const meetingsUpdateLine = (meetingId: string, seq: number, text: string) => invoke<void>("meetings_update_line", { meetingId, seq, text });
 export const meetingsSetLineSpeaker = (meetingId: string, seq: number, speaker: string) =>

@@ -3,25 +3,36 @@
 //! # What this is for
 //!
 //! An agent in one of this app's shells can already do anything a shell can — it has the working
-//! copy, git, and the whole machine. What it *cannot* do is reach the window: it cannot say "I am
-//! about to do something irreversible, ask the user", it cannot put a line in front of somebody who
-//! is looking at another view, and it cannot open the diff it just wrote. That is the entire purpose
-//! of this surface, and the reason it is four verbs and not a second command registry.
+//! copy, git, and the whole machine. What it *cannot* do is reach what only the app has: the window
+//! (ask the user, put a line in front of them, open the diff it just wrote or a file at a line), what
+//! the app runs (a service's log, a restart, another terminal's output), what the app knows (the code
+//! map, the knowledge index, memories, the task tree, the local model), and what the app keeps
+//! (saved database connections, API requests, Llavero entries) — the last *used* on the agent's
+//! behalf after the user approves, never handed over. `cf help` lists the verbs; the ones that need
+//! more than a few lines live in `agentcli/`:
+//!
+//! - `work.rs` — services, terminals, opening files, the agent's card, tasks;
+//! - `knowhow.rs` — the code map, knowledge, memory and the local model;
+//! - `vault.rs` — saved credentials, used and never shown;
+//! - `place.rs` — which project and workspace the folder `cf` ran in belongs to.
 //!
 //! ```text
 //!   cf notify "tests are green"      a line in the app, wherever the user is
 //!   cf ask "drop the column?"        blocks; exits 0 on Yes, 1 on No
+//!   cf choose "which db?" pg mysql   blocks; prints the option picked
 //!   cf status                        what the app has in focus, as JSON
 //!   cf review                        opens the diff of the task this folder belongs to
 //!   cf hook <agent> <event>          an agent's status hook (stdin: its JSON); never prints
+//!   cf guard                         a destructive shell command, held for the user's approval
 //! ```
 //!
 //! # Why this is not `remotectl`
 //!
 //! That one is the phone's bridge: pairing, TLS, device tokens, and a dispatch table that is an
-//! explicit security boundary over ~40 of the app's commands. This has no overlap with it — it
-//! cannot read a repository, run git, or touch the keyring. It reaches the *interface*, for a
-//! process that already has everything else.
+//! explicit security boundary over ~40 of the app's commands. This has no overlap with it — it does
+//! not run git or edit a repository for the agent, which can do both itself. What it reads is what
+//! the app already shows the user; what it *uses* of the app's secrets it uses only with the user's
+//! approval in the window, and the secret itself never travels back to the agent.
 //!
 //! # What it costs
 //!
@@ -38,6 +49,11 @@
 //! exactly as strong as "you were started by this app" and no stronger. Bound to loopback, so
 //! nothing off this machine can even connect.
 
+mod knowhow;
+mod place;
+mod vault;
+mod work;
+
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -52,8 +68,9 @@ use tokio::net::{TcpListener, TcpStream};
 /// of the process.
 const ASK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// The largest request this reads. A verb and a sentence; anything bigger is not one of ours.
-const MAX_REQUEST: usize = 64 * 1024;
+/// The largest request this reads. A verb and a sentence — except `cf llm`, which carries what was
+/// piped into it, cut by `cf` at 2 MB (escaping can grow it, hence the margin).
+const MAX_REQUEST: usize = 3 << 20;
 
 /// Where the endpoint is listening and the token that opens it. `None` until `start` has bound.
 static ENDPOINT: OnceLock<(u16, String)> = OnceLock::new();
@@ -67,6 +84,9 @@ static ENDPOINT: OnceLock<(u16, String)> = OnceLock::new();
 struct Answer {
     yes: bool,
     text: String,
+    /// "Allow in this terminal": the same use, by the same terminal, is not asked again until the app
+    /// restarts. Read only where the question offered it (see [`AskEvent::always`]).
+    always: bool,
 }
 
 type AnswerSender = tokio::sync::oneshot::Sender<Answer>;
@@ -95,14 +115,21 @@ pub fn shell_env() -> Vec<(String, String)> {
 struct Request {
     token: String,
     verb: String,
+    /// The arguments joined by spaces, for the verbs that take a sentence.
     #[serde(default)]
     text: String,
-    /// The folder the agent is in, for `review`.
+    /// The arguments as given, for the verbs that take several (`choose`, `logs --tail 20`, …).
+    #[serde(default)]
+    args: Vec<String>,
+    /// What was piped into `cf llm`. Empty for every other verb.
+    #[serde(default)]
+    stdin: String,
+    /// The folder the agent is in.
     #[serde(default)]
     cwd: String,
-    /// `hook` only: the pty session the agent runs in (`CODEFLOW_SESSION`), the agent, and the few
-    /// fields of its hook payload a card can use — picked out by `cf`, so a reply of any length
-    /// never has to fit in a request.
+    /// The pty session the agent runs in (`CODEFLOW_SESSION`) — sent by every verb, empty in a shell
+    /// that has none. For `hook`, also the agent and the few fields of its hook payload a card can
+    /// use — picked out by `cf`, so a reply of any length never has to fit in a request.
     #[serde(default)]
     session: String,
     #[serde(default)]
@@ -133,13 +160,87 @@ impl Reply {
 }
 
 /// A question the app is showing, on its way to the window.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 struct AskEvent {
     id: String,
+    /// What the modal is for: `ask` (yes or no), `choose` (one of `options`), `guard` (a destructive
+    /// command), `secret`, `db` or `http` (a saved credential about to be used).
+    kind: &'static str,
     question: String,
     /// The folder `cf` ran in. Several agents can ask at once (a race is several of them), and an
     /// answer given to the wrong worktree is the failure that matters.
     cwd: String,
+    /// `choose`: the answers to pick from.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    options: Vec<String>,
+    /// The exact thing being approved — the command, the SQL, the request — shown verbatim, because
+    /// approving a summary of a command is not approving the command.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    detail: String,
+    /// Offer "allow in this terminal". Never for the guard or a Llavero secret: each of those is a
+    /// different command every time, and one click must not approve the next one unseen.
+    always: bool,
+}
+
+impl AskEvent {
+    fn new(kind: &'static str, question: impl Into<String>, cwd: &str) -> Self {
+        AskEvent { id: uuid::Uuid::new_v4().to_string(), kind, question: question.into(), cwd: cwd.trim().to_string(), ..Default::default() }
+    }
+}
+
+/// Uses a terminal has been allowed for the rest of the app's run: `session|kind|target`.
+static ALLOWED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+/// Puts a question in front of the user and waits for the answer — the one door every verb that needs
+/// a human goes through. `None` when nobody answered in [`ASK_TIMEOUT`] or the window went away.
+async fn ask_user(app: &AppHandle, event: AskEvent) -> Option<Answer> {
+    let id = event.id.clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    if let Ok(mut held) = pending().lock() {
+        held.insert(id.clone(), sender);
+    }
+    // A shell is blocked on the answer, so the window has to be where it can be seen: an agent that
+    // asked from behind another application would otherwise look hung.
+    raise(app);
+    let _ = app.emit("agentcli:ask", event);
+    match tokio::time::timeout(ASK_TIMEOUT, receiver).await {
+        Ok(Ok(answer)) => Some(answer),
+        // The window went away, or the question timed out: the entry goes either way, which is the
+        // only thing here that could have grown without bound.
+        _ => {
+            if let Ok(mut held) = pending().lock() {
+                held.remove(&id);
+            }
+            None
+        }
+    }
+}
+
+/// The user's approval for one use of something the app keeps, or the refusal to send back.
+///
+/// `target` names what is being used (a connection, a request): with `event.always` set, an "allow in
+/// this terminal" answer lets the same terminal use the same target again without asking. A shell
+/// with no session is keyed by its folder.
+async fn approve(app: &AppHandle, request: &Request, target: &str, event: AskEvent) -> Result<(), Reply> {
+    let who = if request.session.is_empty() { request.cwd.as_str() } else { request.session.as_str() };
+    let key = format!("{who}|{}|{target}", event.kind);
+    let allowed = || ALLOWED.get_or_init(Default::default);
+    if event.always && allowed().lock().is_ok_and(|held| held.contains(&key)) {
+        return Ok(());
+    }
+    let offered = event.always;
+    match ask_user(app, event).await {
+        Some(answer) if answer.yes => {
+            if offered && answer.always {
+                if let Ok(mut held) = allowed().lock() {
+                    held.insert(key);
+                }
+            }
+            Ok(())
+        }
+        Some(answer) => Err(reply_for(answer)),
+        None => Err(Reply::no("no answer")),
+    }
 }
 
 /// What `cf status` prints — whatever the window has in focus. Filled by the UI, which is the only
@@ -170,12 +271,13 @@ pub fn agentcli_focus(workspace: String, project: String, task: String) {
 }
 
 /// The answer to a question `cf ask` is waiting on: `yes` is what `cf` exits 0 on, and `text` is
-/// printed either way. Dismissing is a no with nothing typed.
+/// printed either way. Dismissing is a no with nothing typed. `always` is "allow in this terminal",
+/// read only where the question offered it.
 #[tauri::command]
-pub fn agentcli_answer(id: String, yes: bool, text: String) {
+pub fn agentcli_answer(id: String, yes: bool, text: String, always: Option<bool>) {
     let sender = pending().lock().ok().and_then(|mut held| held.remove(&id));
     if let Some(sender) = sender {
-        let _ = sender.send(Answer { yes, text });
+        let _ = sender.send(Answer { yes, text, always: always.unwrap_or(false) });
     }
 }
 
@@ -297,7 +399,36 @@ async fn handle(body: &str, app: &AppHandle, token: &str) -> Reply {
     if request.token != token {
         return Reply::no("not from this app");
     }
+    dispatch(request, app).await
+}
 
+/// A verb on behalf of a chat's MCP call (`codemap::mcp`) instead of a `cf` in a shell — the same
+/// code, answered as a `Result`. `cwd` is the run's repository; `session` keys "allow in this
+/// terminal", and a chat passes its run there, so an allowance lasts the turn that was given it.
+pub(crate) async fn run_verb(app: &AppHandle, verb: &str, args: Vec<String>, stdin: String, cwd: &str, session: &str) -> Result<String, String> {
+    let request = Request {
+        token: String::new(),
+        verb: verb.to_string(),
+        text: args.join(" "),
+        args,
+        stdin,
+        cwd: cwd.to_string(),
+        session: session.to_string(),
+        agent: String::new(),
+        prompt: String::new(),
+        reply: String::new(),
+        tool: String::new(),
+    };
+    let reply = dispatch(request, app).await;
+    match (reply.ok, reply.text) {
+        (true, text) => Ok(text),
+        (false, text) if text.is_empty() => Err("no".to_string()),
+        (false, text) => Err(text),
+    }
+}
+
+/// One verb, from a request that is known to be the app's own.
+async fn dispatch(request: Request, app: &AppHandle) -> Reply {
     match request.verb.as_str() {
         "notify" => {
             let text = request.text.trim();
@@ -312,30 +443,53 @@ async fn handle(body: &str, app: &AppHandle, token: &str) -> Reply {
             if question.is_empty() {
                 return Reply::no("nothing to ask");
             }
-            let id = uuid::Uuid::new_v4().to_string();
-            let (sender, receiver) = tokio::sync::oneshot::channel();
-            if let Ok(mut held) = pending().lock() {
-                held.insert(id.clone(), sender);
-            }
-            // A shell is blocked on the answer, so the window has to be where it can be seen: an
-            // agent that asked from behind another application would otherwise look hung.
-            raise(app);
-            let _ = app.emit(
-                "agentcli:ask",
-                AskEvent { id: id.clone(), question: question.to_string(), cwd: request.cwd.trim().to_string() },
-            );
-            match tokio::time::timeout(ASK_TIMEOUT, receiver).await {
-                Ok(Ok(answer)) => reply_for(answer),
-                // The window went away, or the question timed out: the entry goes either way, which
-                // is the only thing here that could have grown without bound.
-                _ => {
-                    if let Ok(mut held) = pending().lock() {
-                        held.remove(&id);
-                    }
-                    Reply::no("no answer")
-                }
+            match ask_user(app, AskEvent::new("ask", question, &request.cwd)).await {
+                Some(answer) => reply_for(answer),
+                None => Reply::no("no answer"),
             }
         }
+        // One of several answers. The option picked is printed — and anything typed instead of
+        // picking, which is the user's answer too.
+        "choose" => {
+            let [question, options @ ..] = request.args.as_slice() else {
+                return Reply::no("usage: cf choose <question> <option> <option> ...");
+            };
+            let options: Vec<String> = options.iter().map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect();
+            if question.trim().is_empty() || options.len() < 2 {
+                return Reply::no("usage: cf choose <question> <option> <option> ...");
+            }
+            let mut event = AskEvent::new("choose", question.trim(), &request.cwd);
+            event.options = options;
+            match ask_user(app, event).await {
+                Some(answer) => reply_for(answer),
+                None => Reply::no("no answer"),
+            }
+        }
+        // `cf guard`, the PreToolUse hook: a destructive command the agent is about to run. `text` is
+        // the command, the one argument why `cf` held it.
+        "guard" => {
+            let reason = request.args.first().map(String::as_str).unwrap_or_default();
+            let mut event = AskEvent::new("guard", reason, &request.cwd);
+            event.detail = request.text.trim().to_string();
+            match ask_user(app, event).await {
+                Some(answer) => reply_for(answer),
+                None => Reply::no("no answer"),
+            }
+        }
+        "open" => work::open(&request, app),
+        "logs" => work::logs(&request, app),
+        "restart" => work::restart(&request, app).await,
+        "wait" => work::wait(&request, app).await,
+        "term" => work::term(&request, app),
+        "progress" => work::progress(&request),
+        "done" => work::done(&request, app),
+        "task" => work::task(&request, app),
+        "symbol" | "usages" | "outline" | "map" | "search" | "recall" => knowhow::tool(&request, app).await,
+        "remember" => knowhow::remember(&request, app),
+        "llm" => knowhow::llm(&request).await,
+        "secret" => vault::secret(&request, app).await,
+        "db" => vault::db(&request, app).await,
+        "http" => vault::http(&request, app).await,
         "status" => {
             let snapshot = focus().lock().ok().map(|held| held.clone()).unwrap_or_default();
             Reply::ok(serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into()))
@@ -377,6 +531,22 @@ async fn handle(body: &str, app: &AppHandle, token: &str) -> Reply {
         }
         other => Reply::no(format!("unknown verb: {other}")),
     }
+}
+
+/// The one item whose name is `wanted` — exactly (any case), else by prefix, else by substring. On
+/// no match or several, the names that matched at the closest level (none: empty).
+pub(crate) fn pick<T>(items: Vec<T>, wanted: &str, name: impl Fn(&T) -> &str) -> Result<T, Vec<String>> {
+    let wanted = wanted.trim().to_lowercase();
+    let tests: [&dyn Fn(&str) -> bool; 3] = [&|n| n == wanted, &|n| n.starts_with(&wanted), &|n| n.contains(&wanted)];
+    for test in tests {
+        let matching: Vec<usize> = items.iter().enumerate().filter(|(_, item)| test(&name(item).to_lowercase())).map(|(i, _)| i).collect();
+        match matching.as_slice() {
+            [] => continue,
+            [one] => return Ok(items.into_iter().nth(*one).expect("index from the same list")),
+            many => return Err(many.iter().map(|i| name(&items[*i]).to_string()).collect()),
+        }
+    }
+    Err(Vec::new())
 }
 
 /// Brings the main window forward: unminimised, shown, focused.
@@ -435,16 +605,16 @@ mod tests {
     /// because the user pressed No, and a Yes with a note is still a yes.
     #[test]
     fn the_verdict_decides_the_exit_code_not_the_text() {
-        let yes = reply_for(Answer { yes: true, text: " go ahead ".into() });
+        let yes = reply_for(Answer { yes: true, text: " go ahead ".into(), always: false });
         assert!(yes.ok);
         assert_eq!(yes.text, "go ahead");
-        let typed_no = reply_for(Answer { yes: false, text: "not the prod table".into() });
+        let typed_no = reply_for(Answer { yes: false, text: "not the prod table".into(), always: false });
         assert!(!typed_no.ok);
         assert_eq!(typed_no.text, "not the prod table");
-        let dismissed = reply_for(Answer { yes: false, text: String::new() });
+        let dismissed = reply_for(Answer { yes: false, text: String::new(), always: false });
         assert!(!dismissed.ok);
         assert_eq!(dismissed.text, "no");
-        assert!(!reply_for(Answer { yes: true, text: "no".into() }).text.is_empty(), "a yes keeps what was typed");
+        assert!(!reply_for(Answer { yes: true, text: "no".into(), always: false }).text.is_empty(), "a yes keeps what was typed");
     }
 
     #[test]

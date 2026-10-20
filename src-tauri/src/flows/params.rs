@@ -2277,6 +2277,35 @@ const CODE_SEARCH: &[ParamSpec] = &[
     p("searchOutput", select(&["perMatch", "perFile"]), "\"perMatch\"").literal(),
 ];
 
+/// «Mapa del código»: the repository's map — the one the AI agents read over MCP.
+const CODEMAP: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("codemapOp", select(&["mapSymbol", "mapUsages", "mapOutline", "mapProject"]), "\"mapSymbol\"").literal(),
+    p("symbolName", text("applyDiscount"), "\"\"").when("codemapOp", &["mapSymbol", "mapUsages"]),
+    p("outlinePath", text("src/app.ts"), "\"\"").when("codemapOp", &["mapOutline"]),
+];
+
+/// «Buscar en el conocimiento»: the app's knowledge index over a project.
+const KNOWLEDGE: &[ParamSpec] = &[
+    p("project", Kind::Project, "\"\"").literal(),
+    p("knowledgeQuery", text("¿Cómo se emite un reembolso?"), "\"\""),
+    p("maxResults", COUNT, "8").literal(),
+];
+
+/// «Memoria»: the memories the user approved, or one proposed for them to approve.
+const MEMORY: &[ParamSpec] = &[
+    p("memoryOp", select(&["memoryRecall", "memoryPropose"]), "\"memoryRecall\"").literal(),
+    p("project", Kind::Project, "\"\"").literal(),
+    p("memoryTopic", text("despliegues"), "\"\"").when("memoryOp", &["memoryRecall"]),
+    p("memoryFact", long_text("Los despliegues a producción se hacen los martes."), "\"\"").when("memoryOp", &["memoryPropose"]),
+];
+
+/// «Salida de terminal»: a bench terminal's recent output.
+const TERMINAL_OUTPUT: &[ParamSpec] = &[
+    p("terminalName", text("tests"), "\"\""),
+    p("lines", COUNT, "100").literal(),
+];
+
 /// «Vulnerabilidades de dependencias»: the project's lockfiles against OSV.dev.
 const AUDIT: &[ParamSpec] = &[
     p("project", Kind::Project, "\"\"").literal(),
@@ -2638,6 +2667,10 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "net.wol" => WOL,
         "files.version" => VERSION,
         "app.search" => CODE_SEARCH,
+        "app.codemap" => CODEMAP,
+        "app.knowledge" => KNOWLEDGE,
+        "app.memory" => MEMORY,
+        "app.terminalOutput" => TERMINAL_OUTPUT,
         "app.audit" => AUDIT,
         "data.table" => TABLE,
         "data.fake" => FAKE,

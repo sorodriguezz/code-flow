@@ -825,6 +825,27 @@ pub fn set_agent(session: &str, agent: &str) -> bool {
     })
 }
 
+/// `cf progress <text>`: the agent's own words for where it is ("3/7 tests"), as the card's line.
+/// A later report from the program itself (OSC 7501) replaces it, which is the newer word.
+pub fn progress(session: &str, text: &str) -> bool {
+    with(session, |tracker, now| {
+        tracker.msg = clip(text);
+        tracker.hook = Some(Explicit { state: AgentState::Working, kind: None, at: now });
+    })
+}
+
+/// `cf done [text]`: the agent says its work is finished — the card goes to Done with its words.
+pub fn done(session: &str, text: &str) -> bool {
+    with(session, |tracker, now| {
+        tracker.hook = Some(Explicit { state: AgentState::Done, kind: None, at: now });
+        tracker.worked = true;
+        if !text.trim().is_empty() {
+            tracker.msg = clip(text);
+            tracker.reply = clip(text);
+        }
+    })
+}
+
 /// The session ended: its card line goes.
 pub fn forget(session: &str) {
     let gone_snapshot = {

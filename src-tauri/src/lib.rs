@@ -2080,6 +2080,8 @@ sharded_invoke_handler! {
         commands::meetings_cmd::meetings_stop,
         commands::meetings_cmd::meetings_discard,
         commands::meetings_cmd::meetings_delete,
+        commands::meetings_cmd::meetings_delete_audio,
+        commands::meetings_cmd::meetings_transcribe,
         commands::meetings_cmd::meetings_cancel_job,
         commands::meetings_cmd::meetings_reprocess,
         commands::meetings_cmd::meetings_import,

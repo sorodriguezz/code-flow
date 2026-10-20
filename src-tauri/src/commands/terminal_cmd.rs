@@ -192,10 +192,18 @@ const CLAUDE_HOOK_EVENTS: &[&str] =
 
 /// The `hooks` block of Claude Code's settings, each event a `<cf> hook claude <event>`. The tool
 /// events take a `matcher`; the others have none to take.
+///
+/// `PreToolUse` also runs `<cf> guard` on the shell tool: a destructive command waits for the user's
+/// approval in the app (see `cf/src/guard.rs`). Its timeout is the app's own wait for an answer
+/// (`agentcli::ASK_TIMEOUT`, ten minutes) and a margin — a hook Claude Code kills is a hook that
+/// decided nothing.
 fn claude_hook_settings(cf: &str) -> serde_json::Value {
     let entry = |event: &str| {
         let command = serde_json::json!({ "type": "command", "command": format!("{cf} hook claude {event}"), "timeout": 10 });
-        if matches!(event, "PreToolUse" | "PostToolUse" | "PermissionRequest") {
+        if event == "PreToolUse" {
+            let guard = serde_json::json!({ "type": "command", "command": format!("{cf} guard"), "timeout": 660 });
+            serde_json::json!([{ "matcher": "*", "hooks": [command] }, { "matcher": "Bash", "hooks": [guard] }])
+        } else if matches!(event, "PostToolUse" | "PermissionRequest") {
             serde_json::json!([{ "matcher": "*", "hooks": [command] }])
         } else {
             serde_json::json!([{ "hooks": [command] }])
@@ -207,14 +215,18 @@ fn claude_hook_settings(cf: &str) -> serde_json::Value {
 }
 
 /// What an agent started from the «Worktrees» rail is told about `cf`, so it uses it on its own: asks
-/// before anything irreversible, says when it is done or stuck. One line, plain ASCII and free of
-/// quotes, `$` and backticks — Codex takes it as a command-line argument in whatever shell the
-/// terminal runs.
-pub const CF_NOTE: &str = "You are running inside a CodeFlow terminal, which gives you the cf command to reach the user. \
+/// before anything irreversible, says when it is done or stuck — and that `cf help` has the rest.
+/// The rest is not listed here: this note rides every turn, and twenty verbs in it would be paid for
+/// on each one by an agent that needs two of them. One line, plain ASCII and free of quotes, `$` and
+/// backticks — Codex takes it as a command-line argument in whatever shell the terminal runs.
+pub const CF_NOTE: &str = "You are running inside a CodeFlow terminal, which gives you the cf command to reach the user and the app. \
 Before anything destructive or irreversible (deleting files or data, force-pushing, rewriting history, dropping tables, \
 installing system-wide) run cf ask <question> and go ahead only if it exits 0, which means the user said yes; \
-it prints whatever the user typed. When you finish, or when you are blocked and need the user, run cf notify <one line>. \
-cf review opens the diff of your work in the app, and cf status prints what the app has open as JSON.";
+it prints whatever the user typed. When you finish, run cf done <one line>; when you are blocked and need the user, \
+run cf notify <one line>. Run cf help once to see the rest: multiple-choice questions, the logs and restarts of the \
+services the app runs, the output of other terminals, opening a file for the user, code-map lookups, a local model \
+for cheap work, and saved database connections, API requests and keyring entries the app uses for you without \
+showing you their secrets.";
 
 /// Where a launch reads its extras from — see [`agent_launch_files`].
 #[derive(serde::Serialize)]

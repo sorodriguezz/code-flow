@@ -18,6 +18,7 @@ import {
   Trash2,
   UserPlus,
   Users,
+  VolumeX,
 } from "lucide-react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { ContextMenu, type MenuItem } from "../../common/ContextMenu";
@@ -34,6 +35,7 @@ import { writeFileBytes } from "../../../lib/tauri/commands";
 import { channelsOf, clock, duration, speakerColor, speakerName } from "./meetingLabels";
 import {
   meetingsAddSpeaker,
+  meetingsDeleteAudio,
   meetingsExportAudio,
   meetingsMergeSpeakers,
   meetingsMonitor,
@@ -295,6 +297,7 @@ function RecordBar({ meetingId }: { meetingId: string }) {
   const levels = useMeetingsStore((s) => s.levels);
   const lag = useMeetingsStore((s) => s.lag);
   const detail = useMeetingsStore((s) => s.details[meetingId]);
+  const transcribeOnStop = useMeetingsStore((s) => s.settings.transcribeOnStop);
   const elapsed = useElapsed();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const list = useRef<HTMLDivElement>(null);
@@ -365,10 +368,18 @@ function RecordBar({ meetingId }: { meetingId: string }) {
           y={menu.y}
           onClose={() => setMenu(null)}
           items={[
+            // The other way of stopping than the button: transcribe this one later when the setting
+            // transcribes at once, or at once when the setting keeps recordings for later.
+            {
+              label: transcribeOnStop ? t("meetings.stopKeep") : t("meetings.stopTranscribe"),
+              icon: Square,
+              onClick: () => void useMeetingsStore.getState().stop(meetingId, !transcribeOnStop),
+            },
             {
               label: t("meetings.discard"),
               icon: Trash2,
               danger: true,
+              separated: true,
               onClick: () => {
                 void useConfirmStore
                   .getState()
@@ -473,6 +484,7 @@ const STAGES: Record<string, string> = {
   voices: "meetings.stage.voices",
   finish: "meetings.stage.finish",
   compress: "meetings.stage.compress",
+  store: "meetings.stage.store",
 };
 
 function MeetingPanel({
@@ -690,6 +702,21 @@ function MeetingPanel({
             .then((path) => (path ? meetingsExportAudio(meeting.id, path) : undefined))
             .catch((e) => pushErrorToast(String(e))),
       },
+      // The audio only, now — for the meeting whose audio should not wait out the retention. The
+      // transcript, the speakers and the note stay; re-transcribing needs the audio and turns off.
+      {
+        label: t("meetings.deleteAudio"),
+        icon: VolumeX,
+        danger: true,
+        // A recording kept for later has no transcript yet: its audio is the whole meeting.
+        disabled: busy || !meeting.audioFile || meeting.status === "recorded",
+        onClick: () =>
+          void useConfirmStore
+            .getState()
+            .ask({ message: t("meetings.deleteAudioConfirm"), confirmLabel: t("meetings.deleteAudio"), danger: true })
+            .then((ok) => (ok ? meetingsDeleteAudio(meeting.id).then(reload) : undefined))
+            .catch((e) => pushErrorToast(String(e))),
+      },
       {
         label: t("meetings.exportTranscript"),
         icon: FileText,
@@ -725,7 +752,9 @@ function MeetingPanel({
         : t("meetings.failed")
       : meeting.status === "interrupted"
         ? t("meetings.interrupted")
-        : "";
+        : meeting.status === "recorded"
+          ? t("meetings.recordedPending")
+          : "";
 
   return (
     <div className="flex shrink-0 flex-col border-b border-[var(--cf-border)]">
@@ -762,6 +791,11 @@ function MeetingPanel({
         {busy && (
           <button type="button" className={buttonClass({ variant: "ghost", size: "sm" })} onClick={() => void import("../../../lib/tauri/meetingsCommands").then(({ meetingsCancelJob }) => meetingsCancelJob(meeting.id))}>
             {t("common.cancel")}
+          </button>
+        )}
+        {meeting.status === "recorded" && (
+          <button type="button" className={buttonClass({ variant: "primary", size: "sm" })} onClick={() => void useMeetingsStore.getState().transcribe(meeting.id)}>
+            {t("meetings.transcribeNow")}
           </button>
         )}
         {(meeting.status === "failed" || meeting.status === "interrupted") && (

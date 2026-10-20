@@ -134,6 +134,19 @@ export function MeetingsSettings() {
             </div>
           </Row>
           <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t(`meetings.mode.${settings.mode || settings.bench?.recommended || "balanced"}Hint`)}</p>
+          <Row label={t("meetings.settings.afterStop")} hint={t("meetings.settings.afterStopHint")}>
+            <div className="w-[260px]">
+              <Select
+                size="sm"
+                value={settings.transcribeOnStop ? "transcribe" : "keep"}
+                onChange={(v) => void save("afterStop", v)}
+                options={[
+                  { value: "transcribe", label: t("meetings.settings.afterStopTranscribe") },
+                  { value: "keep", label: t("meetings.settings.afterStopKeep") },
+                ]}
+              />
+            </div>
+          </Row>
           <Bench />
           <Row label={t("meetings.settings.threads")} hint={t("meetings.settings.threadsHint")}>
             <div className="w-[260px]">

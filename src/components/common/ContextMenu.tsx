@@ -16,6 +16,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode 
 import { createPortal } from "react-dom";
 import { ChevronRight, Loader2, type LucideIcon } from "lucide-react";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
+import { scrollMoves } from "../../lib/scrollMoves";
 
 export interface MenuItem {
   label: string;
@@ -167,16 +168,26 @@ export function ContextMenu({
   // no button to re-open it from, so the panel is the whole of "inside".
   useDismissOnOutside(true, onClose, [ref, subRef]);
 
+  /** What the menu points at: the element the right-click landed on, or the middle of the trigger it
+   *  hangs from. Found under the menu, before anything has had a chance to move. */
+  const pinnedRef = useRef<Element | null>(null);
+  useLayoutEffect(() => {
+    const px = anchor ? (anchor.left + anchor.right) / 2 : x;
+    const py = anchor ? (anchor.top + anchor.bottom) / 2 : y;
+    pinnedRef.current =
+      document.elementsFromPoint?.(px, py).find((el) => !ref.current?.contains(el) && !subRef.current?.contains(el)) ?? null;
+  }, [x, y, anchor?.top, anchor?.bottom, anchor?.left, anchor?.right]);
+
   useEffect(() => {
     window.addEventListener("resize", onClose);
     // Capture phase: the scroll that matters happens inside the sidebar, not on the window, and
-    // a menu left floating over rows that have moved on points at the wrong node. Except the
-    // menu's own: a long submenu scrolled — by the wheel or by its scrollbar — is the menu being
-    // used, and closing on it made the list impossible to reach the end of.
+    // a menu left floating over rows that have moved on points at the wrong node. Only the scroller
+    // holding that node, though: a chat following a model's answer scrolls on every token, and a
+    // menu opened in the editor's tree meanwhile closed before it could be used. Never the menu's
+    // own: a long submenu scrolled — by the wheel or by its scrollbar — is the menu being used, and
+    // closing on it made the list impossible to reach the end of.
     const onScroll = (event: Event) => {
-      const target = event.target as Node | null;
-      if (target && (ref.current?.contains(target) || subRef.current?.contains(target))) return;
-      onClose();
+      if (scrollMoves(event, pinnedRef.current, [ref.current, subRef.current])) onClose();
     };
     window.addEventListener("scroll", onScroll, true);
     return () => {

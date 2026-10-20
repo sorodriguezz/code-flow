@@ -238,6 +238,9 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
         "table.get" | "table.list" | "table.write" | "table.delete" | "table.clear" => table_op(host, op, &args),
         "note.read" | "note.search" | "note.replace" => note_op(host, op, &args),
         "vault.totp" => vault_totp(host, &args),
+        "knowledge.search" => knowledge_search(host, &args).await,
+        "memory.recall" | "memory.propose" => memory_op(host, op, &args),
+        "terminal.output" => terminal_output(host, &args),
         "diagram.save" | "diagram.read" => diagram_op(host, op, &args),
         "story.review" | "doc.generate" | "doc.publish" => story_op(host, op, &args, cancel).await,
         "ai.usage" => ai_usage(host, &args),
@@ -569,6 +572,109 @@ async fn chat_turn(host: &AppHost, args: &Value, cancel: CancellationToken) -> R
         "model": reply.get("model"),
         "responseTimeMs": reply.get("response_time_ms"),
     }))
+}
+
+// -------------------------------------------------------------------- knowledge, memory, terminals
+
+/// The project a node names, as the database has it.
+fn project_row(host: &AppHost, id: &str) -> Result<crate::db::models::Project, String> {
+    let state = db(host);
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    crate::db::queries::get_project(&conn, id).map_err(|e| e.to_string())?.ok_or_else(|| "That repository is no longer in CodeFlow".to_string())
+}
+
+/// «Buscar en el conocimiento»: the passages of the project's knowledge (its files and docs, the
+/// workspace's folders and notes) that answer a question, best first. Searched with the cloud rules —
+/// local-only folders out — because a flow can hand what it finds to any node, a cloud model included.
+async fn knowledge_search(host: &AppHost, args: &Value) -> Result<Value, String> {
+    let project = project_row(host, &arg(args, "projectId"))?;
+    let scope = {
+        let state = db(host);
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::knowledge::scope_for_repo(&conn, &project.local_path, true)
+    }
+    .ok_or_else(|| "That repository has no knowledge index".to_string())?;
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1, 50) as usize;
+    let found = crate::knowledge::search(&scope, &arg(args, "query"), limit).await?;
+    serde_json::to_value(found).map_err(|e| e.to_string())
+}
+
+/// «Memoria»: `memory.recall` lists the approved memories for the project (or the workspace, or the
+/// global ones), most relevant to the topic first; `memory.propose` files a candidate the user
+/// approves in Settings. Recalled with the cloud rules, for the same reason as the knowledge.
+fn memory_op(host: &AppHost, op: &str, args: &Value) -> Result<Value, String> {
+    let project_id = arg(args, "projectId");
+    let project = if project_id.trim().is_empty() { None } else { Some(project_row(host, project_id.trim())?) };
+    let workspace = project.as_ref().map(|p| p.workspace_id.clone()).or_else(|| Some(arg(args, "workspaceId")).filter(|w| !w.trim().is_empty()));
+    let state = db(host);
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    if op == "memory.recall" {
+        let found = crate::ai_memory::relevant(&conn, workspace.as_deref(), project.as_ref().map(|p| p.id.as_str()), &arg(args, "topic"), true, 12_000).map_err(|e| e.to_string())?;
+        return serde_json::to_value(found).map_err(|e| e.to_string());
+    }
+    let fact = arg(args, "fact");
+    let first = fact.lines().next().unwrap_or(&fact).trim();
+    let title = if first.chars().count() > 80 { format!("{}…", first.chars().take(80).collect::<String>()) } else { first.to_string() };
+    let scope = match (&project, &workspace) {
+        (Some(_), _) => crate::ai_memory::Scope::Project,
+        (None, Some(_)) => crate::ai_memory::Scope::Workspace,
+        (None, None) => crate::ai_memory::Scope::Global,
+    };
+    let memory = crate::ai_memory::create(
+        &conn,
+        crate::ai_memory::NewMemory {
+            scope: Some(scope),
+            workspace_id: workspace,
+            project_id: project.map(|p| p.id),
+            title,
+            body: fact.trim().to_string(),
+            approved: false,
+            source: Some("flow".to_string()),
+            ..Default::default()
+        },
+    )?;
+    serde_json::to_value(memory).map_err(|e| e.to_string())
+}
+
+/// «Salida de terminal»: a bench terminal's last lines, found by its title (exact, then prefix, then
+/// inside) or its number — or, with no name, the workspace's terminals. Escape sequences out, and any
+/// credential a program printed scrubbed, as `cf term` does.
+fn terminal_output(host: &AppHost, args: &Value) -> Result<Value, String> {
+    let workspace = arg(args, "workspaceId");
+    if workspace.trim().is_empty() {
+        return Err("This flow belongs to no workspace, so it has no terminals".to_string());
+    }
+    let rows = {
+        let state = db(host);
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::db::queries::list_workspace_terminals(&conn, &workspace).map_err(|e| e.to_string())?
+    };
+    let live = crate::terminal::recorded_state(&host.app.state::<crate::terminal::TerminalRegistry>());
+    let wanted = arg(args, "terminal");
+    if wanted.trim().is_empty() {
+        return Ok(Value::Array(
+            rows.iter()
+                .enumerate()
+                .map(|(i, row)| json!({ "number": i + 1, "title": row.title, "running": live.contains_key(&row.id) }))
+                .collect(),
+        ));
+    }
+    let count = rows.len();
+    let row = match wanted.trim().parse::<usize>() {
+        Ok(n) if (1..=count).contains(&n) => rows.into_iter().nth(n - 1).ok_or("no such terminal")?,
+        _ => crate::agentcli::pick(rows, &wanted, |row| row.title.as_str()).map_err(|names| {
+            if names.is_empty() {
+                format!("No terminal named {wanted} in this workspace's agents panel")
+            } else {
+                format!("{wanted} matches several terminals: {} — use its number", names.join(", "))
+            }
+        })?,
+    };
+    let raw = live.get(&row.id).map(|(_, buffer)| buffer.clone()).unwrap_or(row.transcript);
+    let text = crate::secret_scan::redact(&crate::services::log::strip_ansi(&raw)).0;
+    let wanted_lines = args.get("lines").and_then(Value::as_u64).unwrap_or(100) as usize;
+    let shown = last_lines(text.trim_end(), wanted_lines);
+    Ok(json!({ "terminal": row.title, "running": live.contains_key(&row.id), "text": shown, "lines": shown.lines().count() }))
 }
 
 // ------------------------------------------------------------------------------- service logs

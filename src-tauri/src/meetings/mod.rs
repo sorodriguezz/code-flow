@@ -65,6 +65,9 @@ pub mod key {
     pub const THREADS: &str = "meetings_threads";
     /// Days the audio is kept: `0` = for good, `-1` = deleted once transcribed.
     pub const AUDIO_DAYS: &str = "meetings_audio_days";
+    /// What «Detener» does: `transcribe` (the default) queues the transcription at once; `keep` stores
+    /// the recording to be transcribed when the user asks.
+    pub const AFTER_STOP: &str = "meetings_after_stop";
     /// `1` to suggest taking notes when a call app is using the microphone.
     pub const DETECT: &str = "meetings_detect";
     /// The last measurement of this machine (`bench::Measured`, JSON).
@@ -135,6 +138,8 @@ pub struct Settings {
     pub device: String,
     pub vocabulary: String,
     pub mic_gain: f32,
+    /// «Detener» transcribes at once, unless the user chose to keep recordings for later.
+    pub transcribe_on_stop: bool,
 }
 
 pub fn load_settings(conn: &Connection) -> Settings {
@@ -150,6 +155,7 @@ pub fn load_settings(conn: &Connection) -> Settings {
         device: get(key::DEVICE),
         vocabulary: get(key::VOCABULARY),
         mic_gain: get(key::MIC_GAIN).trim().parse().unwrap_or(1.0),
+        transcribe_on_stop: get(key::AFTER_STOP).trim() != "keep",
     }
 }
 
@@ -395,6 +401,18 @@ pub fn clock(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// «Detener» transcribes at once unless the user chose to keep recordings for later.
+    #[test]
+    fn stopping_transcribes_unless_the_setting_keeps_recordings() {
+        let db = crate::db::init_scratch().unwrap();
+        let conn = db.0.lock().unwrap();
+        assert!(load_settings(&conn).transcribe_on_stop, "unset: transcribe at once");
+        crate::db::queries::set_setting(&conn, key::AFTER_STOP, "keep").unwrap();
+        assert!(!load_settings(&conn).transcribe_on_stop);
+        crate::db::queries::set_setting(&conn, key::AFTER_STOP, "transcribe").unwrap();
+        assert!(load_settings(&conn).transcribe_on_stop);
+    }
 
     #[test]
     fn modes_round_trip() {

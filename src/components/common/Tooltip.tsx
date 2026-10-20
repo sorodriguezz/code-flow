@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { scrollMoves } from "../../lib/scrollMoves";
 
 /**
  * The app's own tooltip, in place of the browser's `title`.
@@ -185,13 +186,17 @@ export function Tooltip({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") hide();
     };
-    // Capture, because the scroll that matters is usually some panel's, not the window's.
-    window.addEventListener("scroll", hide, true);
+    // Capture, because the scroll that matters is usually some panel's, not the window's — and only
+    // the one holding the trigger: a chat streaming beside it scrolls on every token.
+    const onScroll = (e: Event) => {
+      if (scrollMoves(e, wrapRef.current)) hide();
+    };
+    window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", hide);
     window.addEventListener("blur", hide);
     window.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", hide);
       window.removeEventListener("blur", hide);
       window.removeEventListener("keydown", onKey);

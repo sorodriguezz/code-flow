@@ -587,6 +587,13 @@ pub fn codex_args(servers: &[LiveServer]) -> (Vec<String>, Vec<(String, String)>
             args.push("-c".into());
             args.push(format!("{key}.default_tools_approval_mode={}", quote("approve")));
         }
+        // The app's own server can wait on the user: a saved credential is used only once they
+        // approve it in the window, and the app gives them ten minutes (`agentcli::ASK_TIMEOUT`).
+        // Codex's default of 60 s per tool call would end the call while the question is on screen.
+        if server.name == crate::codemap::mcp::SERVER_NAME {
+            args.push("-c".into());
+            args.push(format!("{key}.tool_timeout_sec=660"));
+        }
         match server.transport.as_str() {
             "stdio" => {
                 args.push("-c".into());

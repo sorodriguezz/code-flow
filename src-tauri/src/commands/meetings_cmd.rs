@@ -78,6 +78,12 @@ struct JobRequest {
     retranscribe: bool,
     /// An imported file to decode first.
     import: Option<PathBuf>,
+    /// `false`: only store the recording — compressed, kept until the user transcribes it — and
+    /// leave it `recorded` (the «Detener» that transcribes later).
+    transcribe: bool,
+    /// The recording was kept for later and is being transcribed now: its audio's retention starts
+    /// here, as it would have when it was recorded and transcribed at once.
+    start_retention: bool,
 }
 
 #[derive(Default)]
@@ -681,9 +687,14 @@ fn stop_active(active: Active) -> (i64, bool) {
     (elapsed, complete)
 }
 
-/// Stops the recording and queues it to be finished.
+/// Stops the recording and queues it to be finished — transcribed at once, or (`transcribe: false`,
+/// or the setting when it is not given) only stored, to be transcribed when the user asks.
 #[tauri::command]
-pub async fn meetings_stop(app: AppHandle, state: State<'_, MeetingsState>, meeting_id: String) -> Result<MeetingRow, String> {
+pub async fn meetings_stop(app: AppHandle, state: State<'_, MeetingsState>, meeting_id: String, transcribe: Option<bool>) -> Result<MeetingRow, String> {
+    let transcribe = match transcribe {
+        Some(choice) => choice,
+        None => with_db(&app, |conn| Ok(meetings::load_settings(conn).transcribe_on_stop))?,
+    };
     let active = {
         let mut slot = state.active.lock().map_err(db_err)?;
         match slot.as_ref() {
@@ -696,7 +707,11 @@ pub async fn meetings_stop(app: AppHandle, state: State<'_, MeetingsState>, meet
     let dir = meetings::meeting_dir(&meeting_id);
     let duration = [Channel::Mic, Channel::System].iter().map(|c| meetings::audio::channel_ms(&dir, *c)).max().unwrap_or(0);
     with_db(&app, |conn| q::finish_recording(conn, &meeting_id, duration, complete))?;
-    enqueue(&app, JobRequest { meeting_id: meeting_id.clone(), retranscribe: false, import: None });
+    if !transcribe {
+        // The stage says what the job is for, so a quit before it runs resumes the same job at launch.
+        set_status(&app, &meeting_id, "queued", STORE_STAGE, "");
+    }
+    enqueue(&app, JobRequest { meeting_id: meeting_id.clone(), retranscribe: false, import: None, transcribe, start_retention: false });
     let meeting = with_db(&app, |conn| q::get_meeting(conn, &meeting_id))?.ok_or("The meeting vanished")?;
     emit_state(&app, &meeting);
     Ok(meeting)
@@ -776,10 +791,12 @@ async fn worker(app: AppHandle) {
             *current = None;
         }
         match result {
-            Ok(()) => {
+            Ok(true) => {
                 set_status(&app, &id, "ready", "", "");
                 announce_ready(&app, &id);
             }
+            // Stored for later: nothing to announce — there is no transcript yet.
+            Ok(false) => set_status(&app, &id, "recorded", "", ""),
             Err(error) if error == "cancelled" || control.cancel.load(Ordering::SeqCst) => set_status(&app, &id, "failed", "", "cancelled"),
             Err(error) => {
                 crate::applog::warn(&format!("meetings: finishing {id}: {error}"));
@@ -877,7 +894,20 @@ pub fn meetings_reprocess(app: AppHandle, meeting_id: String, retranscribe: bool
         q::set_processing_choices(conn, &meeting_id, &transcriber, speakers.max(0))
     })?;
     set_status(&app, &meeting_id, "queued", "", "");
-    enqueue(&app, JobRequest { meeting_id, retranscribe, import: None });
+    enqueue(&app, JobRequest { meeting_id, retranscribe, import: None, transcribe: true, start_retention: false });
+    Ok(())
+}
+
+/// Transcribes a recording that was kept for later (`recorded`): the whole pass, from the stored
+/// audio, and the audio's retention counted from now.
+#[tauri::command]
+pub fn meetings_transcribe(app: AppHandle, meeting_id: String) -> Result<(), String> {
+    let meeting = with_db(&app, |conn| q::get_meeting(conn, &meeting_id))?.ok_or("The meeting no longer exists")?;
+    if meeting.status != "recorded" {
+        return Err("This meeting is not waiting to be transcribed".into());
+    }
+    set_status(&app, &meeting_id, "queued", "", "");
+    enqueue(&app, JobRequest { meeting_id, retranscribe: true, import: None, transcribe: true, start_retention: true });
     Ok(())
 }
 
@@ -905,7 +935,7 @@ pub fn meetings_import(app: AppHandle, note_id: String, workspace_id: String, pa
         )
     })?;
     emit_state(&app, &meeting);
-    enqueue(&app, JobRequest { meeting_id: meeting.id.clone(), retranscribe: true, import: Some(file) });
+    enqueue(&app, JobRequest { meeting_id: meeting.id.clone(), retranscribe: true, import: Some(file), transcribe: true, start_retention: false });
     Ok(meeting)
 }
 
@@ -943,7 +973,8 @@ impl pipeline::Host for Reporter {
     }
 }
 
-async fn process(app: &AppHandle, request: JobRequest, control: Arc<JobControl>) -> Result<(), String> {
+/// Finishes one meeting. `Ok(true)`: transcribed; `Ok(false)`: only stored, to be transcribed later.
+async fn process(app: &AppHandle, request: JobRequest, control: Arc<JobControl>) -> Result<bool, String> {
     let id = request.meeting_id.clone();
     let meeting = with_db(app, |conn| q::get_meeting(conn, &id))?.ok_or("The meeting no longer exists")?;
     let (settings, local_only, voices) = {
@@ -954,10 +985,14 @@ async fn process(app: &AppHandle, request: JobRequest, control: Arc<JobControl>)
         let voices = q::voice_embeddings(&conn, meetings::EMBEDDING_MODEL_ID).map_err(db_err)?;
         (settings, local_only, voices)
     };
-    set_status(app, &id, "processing", "detect", "");
     let dir = meetings::meeting_dir(&id);
     let channels: Vec<Channel> = serde_json::from_str::<Vec<String>>(&meeting.channels).unwrap_or_default().iter().filter_map(|c| Channel::parse(c)).collect();
     let channels = if channels.is_empty() { vec![Channel::Mic] } else { channels };
+    if !request.transcribe {
+        store_for_later(app, &id, &dir, &channels).await?;
+        return Ok(false);
+    }
+    set_status(app, &id, "processing", "detect", "");
 
     if let Some(file) = &request.import {
         set_status(app, &id, "processing", "decode", "");
@@ -1061,11 +1096,7 @@ async fn process(app: &AppHandle, request: JobRequest, control: Arc<JobControl>)
         match compressed {
             Ok(file) => {
                 let bytes = std::fs::metadata(dir.join(&file)).map(|m| m.len() as i64).unwrap_or(0);
-                let expires = match settings.audio_days {
-                    0 => String::new(),
-                    days if days < 0 => chrono::Utc::now().to_rfc3339(),
-                    days => (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339(),
-                };
+                let expires = expiry(settings.audio_days);
                 with_db(app, |conn| q::set_audio(conn, &id, &file, bytes, &expires))?;
                 pipeline::drop_pieces(&dir, &channels);
                 if settings.audio_days < 0 {
@@ -1077,6 +1108,51 @@ async fn process(app: &AppHandle, request: JobRequest, control: Arc<JobControl>)
     } else {
         // A second pass decoded the kept file back into pieces: they go again.
         pipeline::drop_pieces(&dir, &channels);
+        // A recording kept for later is transcribed only now: its retention starts here.
+        if request.start_retention && !meeting.audio_file.is_empty() {
+            let expires = expiry(settings.audio_days);
+            with_db(app, |conn| q::set_audio(conn, &id, &meeting.audio_file, meeting.audio_bytes, &expires))?;
+            if settings.audio_days < 0 {
+                sweep_audio(app);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// The stage of a job that only stores a recording for later — persisted with the status, so a job
+/// cut short by a quit is resumed as the same job at launch.
+const STORE_STAGE: &str = "store";
+
+/// When audio compressed now expires under the retention setting: `0` never, `-1` at once.
+fn expiry(days: i64) -> String {
+    match days {
+        0 => String::new(),
+        days if days < 0 => chrono::Utc::now().to_rfc3339(),
+        days => (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339(),
+    }
+}
+
+/// The «transcribe later» half of «Detener»: the pieces compressed into the meeting's audio file and
+/// dropped, nothing transcribed. The audio has no expiry — it is the whole meeting until it is
+/// transcribed, and the retention sweep must never take it ([`meetings_transcribe`] starts the clock).
+/// A compression that fails keeps the pieces, which a later transcription reads just as well.
+async fn store_for_later(app: &AppHandle, id: &str, dir: &std::path::Path, channels: &[Channel]) -> Result<(), String> {
+    set_status(app, id, "processing", STORE_STAGE, "");
+    let (dir2, channels2) = (dir.to_path_buf(), channels.to_vec());
+    let compressed = tokio::task::spawn_blocking(move || {
+        pipeline::write_peaks(&dir2, &channels2);
+        meetings::encode::compress(&dir2, &channels2)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match compressed {
+        Ok(file) => {
+            let bytes = std::fs::metadata(dir.join(&file)).map(|m| m.len() as i64).unwrap_or(0);
+            with_db(app, |conn| q::set_audio(conn, id, &file, bytes, ""))?;
+            pipeline::drop_pieces(dir, channels);
+        }
+        Err(error) => crate::applog::warn(&format!("meetings: storing {id} for later: {error}")),
     }
     Ok(())
 }
@@ -1190,7 +1266,7 @@ fn byte_range(header: &str, size: u64) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod audio_range_tests {
-    use super::byte_range;
+    use super::{byte_range, expiry, meetings, remove_audio, Channel};
 
     #[test]
     fn reads_the_three_shapes_of_a_range() {
@@ -1201,6 +1277,31 @@ mod audio_range_tests {
         assert_eq!(byte_range("bytes=1000-", 1000), None);
         assert_eq!(byte_range("items=0-1", 1000), None);
         assert_eq!(byte_range("bytes=0-", 0), None);
+    }
+
+    /// A recording kept for later is stored with no expiry; once transcribed, the setting applies.
+    #[test]
+    fn the_retention_is_counted_from_when_the_audio_is_transcribed() {
+        assert_eq!(expiry(0), "", "kept for good");
+        let now = chrono::Utc::now();
+        let at = |days| chrono::DateTime::parse_from_rfc3339(&expiry(days)).unwrap().with_timezone(&chrono::Utc);
+        assert!((at(30) - now).num_days() >= 29);
+        assert!(at(-1) <= chrono::Utc::now(), "deleted once transcribed");
+    }
+
+    #[test]
+    fn deleting_the_audio_leaves_everything_but_the_audio() {
+        let dir = std::env::temp_dir().join(format!("codeflow-meeting-audio-{}", uuid::Uuid::new_v4()));
+        let pieces = meetings::audio::channel_dir(&dir, Channel::Mic);
+        std::fs::create_dir_all(&pieces).unwrap();
+        std::fs::write(pieces.join("000000.wav"), b"pcm").unwrap();
+        std::fs::write(dir.join("audio.m4a"), b"aac").unwrap();
+        std::fs::write(dir.join("peaks.json"), b"{}").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"kept").unwrap();
+        remove_audio(&dir, "audio.m4a");
+        assert!(!dir.join("audio.m4a").exists() && !dir.join("peaks.json").exists() && !pieces.exists());
+        assert!(dir.join("notes.txt").exists(), "only the audio goes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -1225,6 +1326,44 @@ pub fn meetings_export_audio(db: State<Db>, meeting_id: String, path: String) ->
     }
     std::fs::copy(meetings::meeting_dir(&meeting_id).join(&file), &path).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Deletes the meeting's audio now and keeps everything else: transcript, speakers, the note. The
+/// retention does the same on a timer (`sweep_audio`); this is the meeting whose audio the user does
+/// not want kept that long. Refused while the meeting is recorded or processed — the pipeline reads
+/// the pieces and writes the compressed file — and the menu offers it only once it is done.
+#[tauri::command]
+pub fn meetings_delete_audio(app: AppHandle, state: State<'_, MeetingsState>, meeting_id: String) -> Result<(), String> {
+    if state.active.lock().map_err(db_err)?.as_ref().is_some_and(|a| a.meeting_id == meeting_id) {
+        return Err("This meeting is still being recorded".into());
+    }
+    let meeting = with_db(&app, |conn| q::get_meeting(conn, &meeting_id))?.ok_or("The meeting vanished")?;
+    if matches!(meeting.status.as_str(), "queued" | "processing" | "recording" | "paused") {
+        return Err("This meeting is still being processed; its audio can be deleted once it is done".into());
+    }
+    if meeting.status == "recorded" {
+        return Err("This recording has not been transcribed yet: its audio is all there is. Transcribe it first, or delete the meeting".into());
+    }
+    remove_audio(&meetings::meeting_dir(&meeting_id), &meeting.audio_file);
+    with_db(&app, |conn| q::set_audio(conn, &meeting_id, "", 0, ""))?;
+    // The window re-reads the meeting on its state event: the player goes, the menu's audio entries
+    // turn off, and the transcript stays where it was.
+    if let Some(meeting) = with_db(&app, |conn| q::get_meeting(conn, &meeting_id))? {
+        emit_state(&app, &meeting);
+    }
+    Ok(())
+}
+
+/// A meeting's audio off the disk: the compressed file, the waveform drawn from it, and any pieces a
+/// pass left behind. The transcript lives in the database and is not touched.
+fn remove_audio(dir: &std::path::Path, file: &str) {
+    if !file.is_empty() {
+        let _ = std::fs::remove_file(dir.join(file));
+    }
+    let _ = std::fs::remove_file(dir.join("peaks.json"));
+    for channel in [Channel::Mic, Channel::System] {
+        let _ = std::fs::remove_dir_all(meetings::audio::channel_dir(dir, channel));
+    }
 }
 
 #[tauri::command]
@@ -1449,7 +1588,11 @@ pub fn start(app: &AppHandle) {
     }
     if let Ok(pending) = with_db(app, |conn| q::meetings_with_status(conn, &["queued", "processing"])) {
         for meeting in pending {
-            enqueue(app, JobRequest { meeting_id: meeting.id, retranscribe: false, import: None });
+            // A recording that was being stored for later is stored again, not transcribed; a kept
+            // one whose transcription was cut short (stored, no expiry yet) still starts its retention.
+            let transcribe = meeting.stage != STORE_STAGE;
+            let start_retention = transcribe && !meeting.audio_file.is_empty() && meeting.audio_expires_at.is_empty();
+            enqueue(app, JobRequest { meeting_id: meeting.id, retranscribe: false, import: None, transcribe, start_retention });
         }
     }
     // Off the boot path: deleting a folder of audio is seconds on a slow disk, and nothing waits

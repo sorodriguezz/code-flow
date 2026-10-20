@@ -1335,6 +1335,12 @@ fn stored_secret_values(db: &Db, store: &dyn SecretStore) -> Result<Vec<String>,
     Ok(secret_values(&auths, &variables))
 }
 
+/// Every stored API credential, longest first — what `cf http` scrubs from a response before an agent
+/// sees it (`agentcli::vault`), the same list stored history is redacted with.
+pub(crate) fn stored_secrets(db: &Db) -> Vec<String> {
+    stored_secret_values(db, &os_store()).map(scrub_list).unwrap_or_default()
+}
+
 /// Rewrites stored history without its credentials, a page at a time so the database lock is never
 /// held across the parsing. Conditional on the snapshot being unchanged since it was read.
 fn redact_stored_history(db: &Db, store: &dyn SecretStore) -> Result<usize, String> {

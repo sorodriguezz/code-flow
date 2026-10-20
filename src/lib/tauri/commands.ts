@@ -3058,8 +3058,9 @@ export const deleteWorkItemReview = (id: string) => invoke<void>("delete_work_it
 
 /** Everything the settings panel draws, in one read. */
 /** The answer to a question `cf ask` is waiting on: `yes` is what `cf` exits 0 on; `text` is printed. */
-export const agentCliAnswer = (id: string, yes: boolean, text: string) =>
-  invoke<void>("agentcli_answer", { id, yes, text });
+/** `always`: "allow in this terminal", read only where the question offered it. */
+export const agentCliAnswer = (id: string, yes: boolean, text: string, always = false) =>
+  invoke<void>("agentcli_answer", { id, yes, text, always });
 
 /** What the window has in focus, so `cf status` can answer. Pushed on change — see `agentCliStore`. */
 export const agentCliFocus = (workspace: string, project: string, task: string) =>

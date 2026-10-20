@@ -11,7 +11,7 @@ a backlog, and let AI write your commits, find your bugs and resolve your confli
 native app. Then test the endpoint you just changed, query the database behind it and SSH into the
 box it runs on without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-2.3.49-6C5CE7)
+![version](https://img.shields.io/badge/version-2.3.50-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -243,22 +243,53 @@ two lists to keep in step.
 ## ⌨️ `cf`: the agent's own command
 
 An agent running in one of CodeFlow's shells can already do everything a shell can. What it cannot do
-is reach the window — so `cf` does, in four verbs and nothing more:
+is reach what only the app has — the window, what the app runs, what it knows and what it keeps — so
+`cf` does. `cf help` lists everything; the agent is told only that, so twenty verbs cost nothing on
+the turns that use two.
 
 ```sh
-cf notify "the tests are green"   # a line in the app, wherever you are
-cf ask "drop the column?"         # blocks; exits 0 on Yes, 1 on No, prints what you typed
-cf status                         # what the app has in focus, as JSON
-cf review                         # opens the diff of the task this folder belongs to
+cf ask "drop the column?"           # blocks; exits 0 on Yes, 1 on No, prints what you typed
+cf choose "which db?" postgres sqlite   # blocks; prints the option you picked
+cf notify "the tests are green"     # a line in the app, wherever you are
+cf done "migration ready"           # the agent's card turns Done and you are told
+cf review                           # the diff of the task this folder belongs to
+cf open src/app.ts:42               # that file, at that line, in the editor
+
+cf logs api --tail 50               # what a service the app runs has printed
+cf restart api && cf wait api       # restart it, and block until it is ready
+cf term tests                       # another terminal's recent output
+
+cf symbol PaymentService            # the code map: definitions, usages, outlines, the project map
+cf search "how is a refund issued?" # the project's code, docs and notes, ranked
+cf remember "we never mock the DB"  # a memory proposed — models read it once you approve it
+cf task "add rate limiting"         # a draft task for an agent of the roster
+cat build.log | cf llm "why did this fail?"   # the local model, for cheap work; nothing leaves the machine
+
+cf db "Prod replica" "select count(*) from orders"   # a saved connection, its password never shown
+cf http "Billing/Invoices/List"                      # a saved API request, sent with its environment
+cf secret "GitHub token" -- 'gh api user -H "Authorization: token $GITHUB_TOKEN"'
 ```
 
 `cf ask` is the one that changes how an agent works: `cf ask "go ahead?" && rm -rf dist` is a
 sentence a shell understands, and the question appears in front of you with the window brought
-forward.
+forward. For Claude Code the app goes further: a hook holds every destructive shell command — a
+recursive delete, a force push, `git reset --hard`, a `DROP TABLE`, a publish — for your approval,
+whether or not the agent remembered to ask.
 
-It answers **only** to shells this app opened (they carry a token in their environment), it listens on
-loopback and nowhere else, and it cannot read a repository, run git or touch the keyring — it reaches
-the *interface*, for a process that already has everything else.
+**Saved credentials are used, never handed over.** `cf db`, `cf http` and `cf secret` wait for your
+approval in the window, showing the exact SQL, request or command. The app connects, sends or runs it
+itself and returns the result with the credential scrubbed — a Llavero entry reaches the command's
+environment, never the agent. A database read or a given request can be allowed for the rest of a
+terminal's session; writes and Llavero entries are asked every time.
+
+**The AI chats get the same, without a shell.** A chat's model runs headless, so instead of `cf` it
+is handed the app's own MCP server for its turn: the code map, knowledge and memories, a service's
+log, another terminal's output and the local model in every chat — and, in a chat that may act
+(not plan mode), restarting a service, opening a file, notifying you, proposing a memory or a task,
+and the same approved use of saved database connections, API requests and keyring entries.
+
+It answers **only** to shells this app opened (they carry a token in their environment) and listens on
+loopback and nowhere else.
 
 ## 🌳 Git, visually
 

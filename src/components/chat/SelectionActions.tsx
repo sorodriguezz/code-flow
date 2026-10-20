@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { MessageSquarePlus, Quote } from "lucide-react";
 import { useT } from "../../state/languageStore";
+import { scrollMoves } from "../../lib/scrollMoves";
 import { buttonClass } from "../common/Button";
 
 /** How far above the selection the bar floats, in pixels. Enough to clear the text's own
@@ -138,14 +139,18 @@ export function SelectionActions({
     document.addEventListener("mouseup", onUp);
     document.addEventListener("keyup", onKey);
     document.addEventListener("selectionchange", onSelectionChange);
-    // Capture, because the scroller that moves is a descendant and its scroll does not bubble.
-    window.addEventListener("scroll", dismiss, true);
+    // Capture, because the scroller that moves is a descendant and its scroll does not bubble. The
+    // transcript's, though, not a terminal printing or another chat answering somewhere else.
+    const onScroll = (event: Event) => {
+      if (scrollMoves(event, scope.current)) dismiss();
+    };
+    window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", dismiss);
     return () => {
       document.removeEventListener("mouseup", onUp);
       document.removeEventListener("keyup", onKey);
       document.removeEventListener("selectionchange", onSelectionChange);
-      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", dismiss);
     };
   }, [scope]);

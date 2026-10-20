@@ -365,11 +365,33 @@ export const onLspExited = (handler: (event: { session_id: string }) => void) =>
 export const onLspRefresh = (handler: (event: { session_id: string; what: string }) => void) =>
   listen<{ session_id: string; what: string }>("lsp:refresh", (e) => handler(e.payload));
 
-/** A question `cf ask` is waiting on — see `src-tauri/src/agentcli.rs`. */
+/** A question `cf` is waiting on — see `src-tauri/src/agentcli.rs`. */
 export interface AgentCliAsk {
   id: string;
+  /** `ask` (yes or no), `choose` (one of `options`), `guard` (a destructive command), or a saved
+   *  credential about to be used: `secret`, `db`, `http`. */
+  kind: "ask" | "choose" | "guard" | "secret" | "db" | "http";
   question: string;
   /** The folder `cf` ran in. */
+  cwd: string;
+  /** `choose`: the answers to pick from. */
+  options?: string[];
+  /** The exact command, SQL or request being approved, shown verbatim. */
+  detail?: string;
+  /** Offer "allow in this terminal" — never for the guard or a Llavero entry. */
+  always: boolean;
+}
+
+/** `cf open`: a file of a project, relative to its folder, and the line to show. */
+export interface AgentCliOpen {
+  projectId: string;
+  path: string;
+  line: number | null;
+}
+
+/** `cf done`: the agent's last word, and the folder it ran in. */
+export interface AgentCliDone {
+  text: string;
   cwd: string;
 }
 
@@ -382,3 +404,9 @@ export const onAgentCliAsk = (handler: (ask: AgentCliAsk) => void) =>
 /** The folder `cf review` was run in. */
 export const onAgentCliReview = (handler: (cwd: string) => void) =>
   listen<string>("agentcli:review", (e) => handler(e.payload));
+
+export const onAgentCliOpen = (handler: (open: AgentCliOpen) => void) =>
+  listen<AgentCliOpen>("agentcli:open", (e) => handler(e.payload));
+
+export const onAgentCliDone = (handler: (done: AgentCliDone) => void) =>
+  listen<AgentCliDone>("agentcli:done", (e) => handler(e.payload));

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { WORKSPACE_COLORS } from "../../lib/workspaceColors";
+import { scrollMoves } from "../../lib/scrollMoves";
 
 // A curated palette rather than a freeform picker, for the reason `workspaceColors` documents at
 // length: one hex has to hold up on both themes, and most of the colour space doesn't.
@@ -116,16 +117,20 @@ export function ColorSwatchPicker({
       if (btnRef.current?.contains(target) || popRef.current?.contains(target)) return;
       setOpen(false);
     };
-    // A fixed popover doesn't follow its anchor, so any scroll (in any ancestor, hence capture)
-    // would leave it stranded — close instead of tracking.
-    const onScroll = () => setOpen(false);
+    // A fixed popover doesn't follow its anchor, so a scroll that moves the button (in any ancestor,
+    // hence capture) would leave it stranded — close instead of tracking. Not a scroller elsewhere:
+    // a chat following its answer scrolls on every token.
+    const onScroll = (e: Event) => {
+      if (scrollMoves(e, btnRef.current, [popRef.current])) setOpen(false);
+    };
+    const onResize = () => setOpen(false);
     window.addEventListener("mousedown", onClickOutside);
     window.addEventListener("scroll", onScroll, true);
-    window.addEventListener("resize", onScroll);
+    window.addEventListener("resize", onResize);
     return () => {
       window.removeEventListener("mousedown", onClickOutside);
       window.removeEventListener("scroll", onScroll, true);
-      window.removeEventListener("resize", onScroll);
+      window.removeEventListener("resize", onResize);
     };
   }, [open]);
 

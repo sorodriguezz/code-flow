@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Kbd } from "./Button";
 import { OPEN_DELAY, TooltipBubble, tooltipClosed, tooltipIsWarm } from "./Tooltip";
+import { scrollMoves } from "../../lib/scrollMoves";
 
 /**
  * Every `title` in the window, drawn as the app's own tooltip.
@@ -69,6 +70,8 @@ export function TitleTooltips() {
     let pressed: HTMLElement | null = null;
     let timer: number | null = null;
     let shown = false;
+    /** The element the bubble on screen belongs to — the held one, or one reached by keyboard. */
+    let pinned: HTMLElement | null = null;
 
     const cancel = () => {
       if (timer !== null) {
@@ -110,6 +113,7 @@ export function TitleTooltips() {
       const rect = el.getBoundingClientRect();
       if (!text || (!rect.width && !rect.height)) return;
       shown = true;
+      pinned = el;
       setTip({ rect, ...readTitle(text) });
     };
 
@@ -176,8 +180,13 @@ export function TitleTooltips() {
     document.addEventListener("focusin", onFocus);
     document.addEventListener("focusout", hide);
     window.addEventListener("keydown", onKey);
-    // Pinned to coordinates taken once, so anything that moves the page moves it out of date.
-    window.addEventListener("scroll", hide, true);
+    // Pinned to coordinates taken once, so anything that moves the page moves it out of date — but
+    // only a scroller holding the element, or a chat streaming elsewhere would cancel every bubble
+    // before its delay ran out.
+    const onScroll = (e: Event) => {
+      if (scrollMoves(e, shown ? pinned : held)) hide();
+    };
+    window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", hide);
     window.addEventListener("blur", hide);
     return () => {
@@ -189,7 +198,7 @@ export function TitleTooltips() {
       document.removeEventListener("focusin", onFocus);
       document.removeEventListener("focusout", hide);
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", hide);
       window.removeEventListener("blur", hide);
     };

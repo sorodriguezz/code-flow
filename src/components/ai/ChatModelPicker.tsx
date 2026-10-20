@@ -13,6 +13,7 @@ import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore"
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { SYSTEM_ACCOUNT, resolveAccount, validPreference } from "../../lib/aiAccounts";
 import { AI_TASKS } from "../../lib/aiTasks";
+import { scrollMoves } from "../../lib/scrollMoves";
 
 const WIDTH = 236;
 const GAP = 6;
@@ -262,11 +263,11 @@ export function ChatModelPicker({
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    // A fixed menu doesn't follow its anchor, so an *outside* scroll would strand it — but
-    // scrolling the menu's own list must not dismiss it.
+    // A fixed menu doesn't follow its anchor, so a scroll that moves the trigger would strand it —
+    // but scrolling the menu's own list must not dismiss it, and neither must a scroller elsewhere
+    // (a chat following its answer scrolls on every token).
     const onScroll = (e: Event) => {
-      if (menuRef.current?.contains(e.target as Node)) return;
-      setOpen(false);
+      if (scrollMoves(e, triggerRef.current, [menuRef.current])) setOpen(false);
     };
     const onResize = () => setOpen(false);
     window.addEventListener("mousedown", onClickOutside);

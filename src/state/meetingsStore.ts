@@ -14,6 +14,7 @@ import {
   meetingsStart,
   meetingsStatus,
   meetingsStop,
+  meetingsTranscribe,
   meetingsSystemAudioSettings,
   MIC_DENIED,
   NO_CLOUD_KEY,
@@ -74,6 +75,7 @@ export const KEYS = {
   vocabulary: "meetings_vocabulary",
   consent: "meetings_consent_seen",
   micGain: "meetings_mic_gain",
+  afterStop: "meetings_after_stop",
 } as const;
 
 export interface MeetingSettings {
@@ -92,6 +94,8 @@ export interface MeetingSettings {
   consentSeen: boolean;
   /** The microphone's gain, linear (1 = as the device hears it). */
   micGain: number;
+  /** «Detener» transcribes at once; `false` keeps the recording to be transcribed later. */
+  transcribeOnStop: boolean;
 }
 
 const DEFAULT_SETTINGS: MeetingSettings = {
@@ -108,6 +112,7 @@ const DEFAULT_SETTINGS: MeetingSettings = {
   bench: null,
   consentSeen: false,
   micGain: 1,
+  transcribeOnStop: true,
 };
 
 /** How many levels each channel keeps for the waveform. */
@@ -163,7 +168,10 @@ interface MeetingsState {
   loadNotesWith: (workspaceId: string | null) => Promise<void>;
   start: (args: { noteId: string; workspaceId: string; kind: "virtual" | "room"; mode?: MeetingMode; language: string }) => Promise<boolean>;
   pause: (meetingId: string, paused: boolean) => Promise<void>;
-  stop: (meetingId: string) => Promise<void>;
+  /** `transcribe` overrides the «Al detener» setting for this one recording. */
+  stop: (meetingId: string, transcribe?: boolean) => Promise<void>;
+  /** Transcribes a recording that was kept for later. */
+  transcribe: (meetingId: string) => Promise<void>;
   discard: (meetingId: string) => Promise<void>;
   remove: (meetingId: string) => Promise<void>;
   reprocess: (meetingId: string, retranscribe: boolean, speakers: number, cloud?: boolean) => Promise<void>;
@@ -218,6 +226,7 @@ function parseSettings(raw: Record<string, string>): MeetingSettings {
     bench,
     consentSeen: raw[KEYS.consent] === "1",
     micGain: Number.parseFloat(raw[KEYS.micGain] ?? "") || 1,
+    transcribeOnStop: raw[KEYS.afterStop] !== "keep",
   };
 }
 
@@ -375,9 +384,9 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
     }
   },
 
-  stop: async (meetingId) => {
+  stop: async (meetingId, transcribe) => {
     try {
-      const meeting = await meetingsStop(meetingId);
+      const meeting = await meetingsStop(meetingId, transcribe);
       set((state) => ({ byNote: withMeeting(state.byNote, meeting), levels: { mic: [], system: [] }, meter: EMPTY_METER, micMuted: false, lag: null }));
       await get().refreshStatus();
     } catch (error) {
@@ -398,6 +407,15 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
   remove: async (meetingId) => {
     try {
       await meetingsDelete(meetingId);
+      await get().refreshStatus();
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  transcribe: async (meetingId) => {
+    try {
+      await meetingsTranscribe(meetingId);
       await get().refreshStatus();
     } catch (error) {
       pushErrorToast(String(error));

@@ -185,7 +185,7 @@ function projectName(projectId: string, repoPath: string): string {
 
 /** Puts the main window on the project, and on the Editor — the return button's promise is that
  *  the file is on screen afterwards, not merely somewhere. */
-async function focusEditorOn(projectId: string): Promise<void> {
+export async function focusEditorOn(projectId: string): Promise<void> {
   const workspaces = useWorkspaceStore.getState();
   if (workspaces.activeProjectId !== projectId) {
     const workspaceId =

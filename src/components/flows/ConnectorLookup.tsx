@@ -5,6 +5,7 @@ import { iconButtonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 import { flowsConnectorOptions, type FlowChoice } from "../../lib/tauri/flowsCommands";
 import { useT } from "../../state/languageStore";
+import { scrollMoves } from "../../lib/scrollMoves";
 
 /**
  * A connector field picked from what the service has — Linear's teams, a board's lists, the
@@ -143,18 +144,22 @@ function ChoicePopover({
   useEffect(() => {
     box.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
   }, [active]);
-  // A press anywhere else, or the panel scrolling under it, closes it.
+  // A press anywhere else, or the panel scrolling under it, closes it — the panel holding the
+  // field, not any scroller in the window.
   useEffect(() => {
     const away = (event: Event) => {
       const target = event.target as Node | null;
       if (target && (box.current?.contains(target) || anchor?.contains(target))) return;
       onClose();
     };
+    const onScroll = (event: Event) => {
+      if (scrollMoves(event, anchor, [box.current, anchor])) onClose();
+    };
     window.addEventListener("pointerdown", away, true);
-    window.addEventListener("scroll", away, true);
+    window.addEventListener("scroll", onScroll, true);
     return () => {
       window.removeEventListener("pointerdown", away, true);
-      window.removeEventListener("scroll", away, true);
+      window.removeEventListener("scroll", onScroll, true);
     };
   }, [anchor, onClose]);
 

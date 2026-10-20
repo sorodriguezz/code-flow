@@ -322,7 +322,7 @@ pub fn db_clear_history(db: State<Db>, workspace_id: String) -> Result<(), Strin
 ///
 /// The DB lock is taken and released before anything touches the network — holding it across a
 /// connect would block every other query in the app behind one unreachable host.
-fn resolve_config(db: &State<Db>, connection_id: &str) -> Result<DbConnectionConfig, String> {
+pub(crate) fn resolve_config(db: &State<Db>, connection_id: &str) -> Result<DbConnectionConfig, String> {
     let row = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::get_connection(&conn, connection_id)

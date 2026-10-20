@@ -2816,7 +2816,8 @@ async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Resu
     };
     let _map_grant = match inv.cwd {
         Some(cwd) if matches!(engine.id(), "claude" | "codex" | "opencode" | "cline") && !inv.app_mcp.iter().any(|s| s.name == crate::codemap::mcp::SERVER_NAME) => {
-            crate::codemap::mcp::for_repository(cwd).map(|(server, grant)| {
+            // A run that is not read-only also gets the app's action tools (`codemap::mcp::Access`).
+            crate::codemap::mcp::for_repository(cwd, !inv.read_only).map(|(server, grant)| {
                 inv.app_mcp.push(server);
                 grant
             })

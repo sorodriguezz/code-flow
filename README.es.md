@@ -12,7 +12,7 @@ una sola app nativa y rápida. Después prueba el endpoint que acabas de cambiar
 datos que hay detrás y entra por SSH a la máquina donde corre, sin salir de la ventana. **Tú decides
 qué modelo hace qué.**
 
-![versión](https://img.shields.io/badge/versión-2.3.49-6C5CE7)
+![versión](https://img.shields.io/badge/versión-2.3.50-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-EN%20%7C%20ES-0984E3)
@@ -248,21 +248,54 @@ así que no hay dos listas que mantener sincronizadas.
 ## ⌨️ `cf`: el comando del agente
 
 Un agente que corre en una terminal de CodeFlow ya puede hacer todo lo que puede un shell. Lo que no
-puede es alcanzar la ventana — así que `cf` lo hace, en cuatro verbos y nada más:
+puede es alcanzar lo que solo tiene la app — la ventana, lo que la app corre, lo que sabe y lo que
+guarda —, así que `cf` lo hace. `cf help` lista todo; al agente solo se le dice eso, así que veinte
+verbos no cuestan nada en los turnos que usan dos.
 
 ```sh
-cf notify "los tests pasan"    # una línea en la app, estés donde estés
-cf ask "¿borro la columna?"    # bloquea; sale 0 con Sí y 1 con No, imprime lo que escribas
-cf status                      # qué tiene la app en foco, como JSON
-cf review                      # abre el diff de la tarea dueña de esta carpeta
+cf ask "¿borro la columna?"         # bloquea; sale 0 con Sí y 1 con No, imprime lo que escribas
+cf choose "¿qué base?" postgres sqlite   # bloquea; imprime la opción que elijas
+cf notify "los tests pasan"         # una línea en la app, estés donde estés
+cf done "migración lista"           # la tarjeta del agente pasa a Listo y te avisa
+cf review                           # el diff de la tarea dueña de esta carpeta
+cf open src/app.ts:42               # ese archivo, en esa línea, en el editor
+
+cf logs api --tail 50               # lo que imprimió un servicio que corre la app
+cf restart api && cf wait api       # reiniciarlo y esperar a que esté listo
+cf term tests                       # la salida reciente de otra terminal
+
+cf symbol PaymentService            # el mapa del código: definiciones, usos, esquemas, el mapa del proyecto
+cf search "¿cómo se emite un reembolso?"   # el código, los docs y las notas del proyecto, ordenados
+cf remember "nunca mockeamos la base"      # un recuerdo propuesto: los modelos lo leen cuando lo apruebes
+cf task "agregar rate limiting"     # una tarea en borrador para un agente del equipo
+cat build.log | cf llm "¿por qué falló?"   # el modelo local, para el trabajo barato; nada sale de la máquina
+
+cf db "Réplica prod" "select count(*) from orders"   # una conexión guardada, sin mostrar su contraseña
+cf http "Facturación/Facturas/Listar"                # una petición guardada, enviada con su entorno
+cf secret "GitHub token" -- 'gh api user -H "Authorization: token $GITHUB_TOKEN"'
 ```
 
 `cf ask` es el que cambia cómo trabaja un agente: `cf ask "¿sigo?" && rm -rf dist` es una frase que
-un shell entiende, y la pregunta aparece delante de ti con la ventana traída al frente.
+un shell entiende, y la pregunta aparece delante de ti con la ventana traída al frente. Con Claude Code
+la app va más allá: un hook detiene todo comando de shell destructivo — un borrado recursivo, un push
+forzado, `git reset --hard`, un `DROP TABLE`, un publish — hasta que lo apruebes, se acuerde o no el
+agente de preguntar.
 
-Solo le responde a los shells que esta app abrió (llevan un token en su entorno), escucha en loopback
-y en ningún otro sitio, y no puede leer un repositorio, correr git ni tocar el llavero — alcanza la
-*interfaz*, para un proceso que ya tiene todo lo demás.
+**Las credenciales guardadas se usan, nunca se entregan.** `cf db`, `cf http` y `cf secret` esperan tu
+aprobación en la ventana, mostrando el SQL, la petición o el comando exactos. La app conecta, envía o
+ejecuta por su cuenta y devuelve el resultado sin la credencial: una entrada del Llavero llega al
+entorno del comando, nunca al agente. Una lectura de base de datos o una petición concreta se pueden
+permitir por el resto de la sesión de una terminal; las escrituras y el Llavero se preguntan siempre.
+
+**Los chats de IA reciben lo mismo, sin shell.** El modelo de un chat corre sin terminal, así que en
+vez de `cf` recibe el servidor MCP propio de la app durante su turno: el mapa del código, el
+conocimiento y los recuerdos, el log de un servicio, la salida de otra terminal y el modelo local en
+todo chat — y, en un chat que puede actuar (fuera del modo plan), reiniciar un servicio, abrir un
+archivo, avisarte, proponer un recuerdo o una tarea, y el mismo uso aprobado de conexiones de base de
+datos, peticiones API y entradas del Llavero guardadas.
+
+Solo le responde a los shells que esta app abrió (llevan un token en su entorno) y escucha en loopback
+y en ningún otro sitio.
 
 ## 🌳 Git, visualmente
 
