@@ -818,6 +818,11 @@ pub struct ActivityLogEntry {
     /// that changed nothing, and for turns recorded before this was kept.
     #[serde(default)]
     pub checkpoint: Option<String>,
+    /// What CodeFlow put in front of the engine for this turn, as JSON `[{kind, label, path,
+    /// lines}]` — the editor's file, selection, unsaved buffer, diagnostics, mentions, memories,
+    /// knowledge — for the «Contexto usado» chips. `None` for turns before this was kept.
+    #[serde(default)]
+    pub context: Option<String>,
 }
 
 /// A finished PR review or pre-commit analysis run — `meta` is a small JSON blob (e.g.

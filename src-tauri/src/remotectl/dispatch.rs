@@ -1118,6 +1118,8 @@ pub async fn dispatch(
                     None,
                     // Nor plan mode: a phone's turn runs as the chat always has.
                     None,
+                    // Nor an editor: no open file, selection or unsaved buffer to tell about.
+                    None,
                 )
                 .await?,
                 Invalidate::Chat,

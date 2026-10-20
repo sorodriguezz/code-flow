@@ -35,6 +35,10 @@ export function cliLine(
   extra: {
     /** Claude Code's `--settings` file: the status hooks that tell the rail what it is doing. */
     settings?: string;
+    /** Claude Code's `--append-system-prompt-file`: what `cf` is for, added to its system prompt. */
+    noteFile?: string;
+    /** The same note as text — Codex takes it as `developer_instructions`, beside its own. */
+    note?: string;
     /** The first thing to ask, when the CLI takes it on its command line (see `promptInLine`). */
     prompt?: string;
   } = {},
@@ -44,6 +48,10 @@ export function cliLine(
   const head = windows && quoted !== binary ? `& ${quoted}` : quoted;
   const parts = [head];
   if (provider === "claude" && extra.settings) parts.push(`--settings ${quotePath(extra.settings, windows)}`);
+  if (provider === "claude" && extra.noteFile) parts.push(`--append-system-prompt-file ${quotePath(extra.noteFile, windows)}`);
+  // A `-c` value that is not TOML is taken as a plain string — which the note, with no quotes in it,
+  // always is; quoting it as TOML would need quotes that PowerShell mangles on the way to a program.
+  if (provider === "codex" && extra.note) parts.push(`-c ${quotePath(`developer_instructions=${extra.note}`, windows)}`);
   if (canResume(provider, resume)) parts.push(`--resume ${quotePath(resume.sessionId ?? "", windows)}`);
   const prompt = extra.prompt?.trim() ?? "";
   if (prompt && promptInLine(provider, windows)) parts.push(quotePath(prompt, windows));
@@ -63,3 +71,13 @@ export function promptInLine(provider: string, windows: boolean): boolean {
 export function canResume(provider: string, resume: { sessionId: string | null; accountId?: string | null }): boolean {
   return provider === "claude" && !!resume.sessionId?.trim() && !(resume.accountId ?? "").trim();
 }
+
+/**
+ * Whether `provider`'s CLI is told about `cf` on its command line (Claude's system-prompt file,
+ * Codex's developer instructions). The rest have no flag that *adds* to their own instructions —
+ * Grok's and Cline's replace them — so they get the note at the head of their first prompt instead.
+ */
+export function noteInLine(provider: string): boolean {
+  return provider === "claude" || provider === "codex";
+}
+

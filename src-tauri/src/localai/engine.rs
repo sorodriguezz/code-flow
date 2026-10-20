@@ -475,7 +475,7 @@ fn spawn_reaper() {
 /// picking up whatever `llama-server` a developer happens to have installed means completions come
 /// from a build nobody chose, with flags this code did not write, and a bug report that cannot be
 /// reproduced. When it is missing, the honest answer is that this install does not have it.
-pub(super) fn locate() -> Result<PathBuf, String> {
+pub(crate) fn locate() -> Result<PathBuf, String> {
     let name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
 
     // A packaged app. `resource_dir()` is `None` under `cargo test` and in some dev runs, which is
@@ -556,7 +556,7 @@ pub fn list_devices() -> Option<String> {
 /// port before the server binds it. That race is real and is handled where it shows up: a server
 /// that cannot bind exits immediately, `await_ready` notices within a poll, and the next completion
 /// request starts a fresh one on a fresh port.
-pub(super) fn free_port() -> Result<u16, String> {
+pub(crate) fn free_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| format!("Couldn't find a free local port for the completion engine: {e}"))?;
     let port = listener

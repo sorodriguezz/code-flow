@@ -271,7 +271,8 @@ async fn local_on(app: &tauri::AppHandle, host: Option<&AppHost>, call: LocalCal
                 _ = ai_runs::cancelled(&mut stop) => {}
             }
         };
-        local_llm::chat(&endpoint, &request, |_| {}, stopped).await
+        // A flow runs unattended: background work in the local-model queue.
+        crate::hybrid::scheduler::background(local_llm::chat(&endpoint, &request, |_| {}, stopped)).await
     };
     let outcome = ai_runs::scoped(app.clone(), Some(run_id.clone()), work).await;
     let outcome = match outcome {
@@ -338,7 +339,7 @@ async fn converse(
                 _ = ai_runs::cancelled(&mut stop) => {}
             }
         };
-        local_llm::converse(endpoint, &request, stopped).await
+        crate::hybrid::scheduler::background(local_llm::converse(endpoint, &request, stopped)).await
     };
     let outcome = match ai_runs::scoped(app.clone(), Some(run_id.to_string()), work).await {
         Ok(outcome) => outcome,

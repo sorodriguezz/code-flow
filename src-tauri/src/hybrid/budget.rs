@@ -198,6 +198,31 @@ pub fn gpu_share(shape: &Shape, ctx: u32, also_resident: u64, machine: &Machine)
     (room as f64 / resident.max(1) as f64).clamp(0.0, 1.0)
 }
 
+/// How many of a mixture's layers should keep their experts in RAM (llama.cpp's `--n-cpu-moe`) so
+/// the rest fits a discrete card: 0 when it fits, or when the model is dense or the GPU shares RAM.
+///
+/// A card that cannot hold a mixture is better used for the attention and the routing while the
+/// experts — most of the bytes, few of them read per token — sit in RAM: a 30B-A3B on a 24 GB card
+/// writes far faster that way than with whole layers split off by `--fit`. The experts' bytes are
+/// what the model does not read per token (`1 − active_share`), spread evenly over its MoE layers.
+pub fn cpu_moe_layers(shape: &Shape, moe_layers: u32, ctx: u32, also_resident: u64, machine: &Machine) -> u32 {
+    if moe_layers == 0 || machine.gpu != GpuKind::Discrete {
+        return 0;
+    }
+    let Some(gpu_bytes) = machine.gpu_bytes else { return 0 };
+    let room = gpu_bytes.saturating_sub(GPU_MARGIN + WORKING_OVERHEAD + also_resident);
+    let resident = shape.bytes + shape.kv_bytes_per_token * u64::from(ctx);
+    if resident <= room {
+        return 0;
+    }
+    let experts = shape.bytes as f64 * (1.0 - shape.active_share.clamp(0.0, 1.0));
+    let per_layer = experts / f64::from(moe_layers);
+    if per_layer <= 0.0 {
+        return 0;
+    }
+    (((resident - room) as f64 / per_layer).ceil() as u32).min(moe_layers)
+}
+
 /// Tokens a second `shape` writes on `machine` at `ctx`, estimated: the bytes each token reads,
 /// split between the memories the model's parts live in, each at its bandwidth.
 ///
@@ -499,5 +524,32 @@ mod tests {
         assert_eq!(ctx_options(Some(32_768)), vec![8_192, 16_384, 32_768]);
         assert_eq!(ctx_options(Some(4_096)), vec![4_096]);
         assert_eq!(ctx_options(None), vec![8_192, 16_384, 32_768]);
+    }
+
+    #[test]
+    fn a_mixture_too_big_for_the_card_keeps_some_experts_in_ram() {
+        // A 24.3 GB build of Nemotron 3 Nano 30B-A3B (3.6 of 31.6B active, 23 MoE layers) on a 24 GiB
+        // card. (The 22.4 GB Q4_K_M of the catalogue fits whole: its hybrid cache is 6 KiB a token.)
+        let card = Machine {
+            ram_bytes: 64 * GIB,
+            ram_bandwidth: Some(60 * GB),
+            gpu: GpuKind::Discrete,
+            gpu_bytes: Some(24 * GIB),
+            gpu_name: Some("NVIDIA GeForce RTX 4090".into()),
+            gpu_bandwidth: Some(1_008 * GB),
+        };
+        let shape = Shape { bytes: 24_271_934_866, kv_bytes_per_token: 6_144, active_share: 3.6 / 31.6 };
+        assert_eq!(cpu_moe_layers(&shape, 23, 16_384, 0, &card), 1);
+        assert_eq!(cpu_moe_layers(&shape, 23, 262_144, 0, &card), 2, "a bigger window leaves less room for experts");
+        let catalogue = Shape { bytes: 22_421_827_488, ..shape };
+        assert_eq!(cpu_moe_layers(&catalogue, 23, 262_144, 0, &card), 0);
+        // Dense models and shared memory never.
+        assert_eq!(cpu_moe_layers(&shape, 0, 16_384, 0, &card), 0);
+        let mut mac = card.clone();
+        mac.gpu = GpuKind::Unified;
+        assert_eq!(cpu_moe_layers(&shape, 23, 16_384, 0, &mac), 0);
+        // A model that fits keeps everything on the card.
+        let small = Shape { bytes: 8 * GIB, kv_bytes_per_token: 6_144, active_share: 0.1 };
+        assert_eq!(cpu_moe_layers(&small, 23, 16_384, 0, &card), 0);
     }
 }

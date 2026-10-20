@@ -4098,6 +4098,7 @@ pub fn add_activity_log(
         engine_version: meta.engine_version.map(str::to_string),
         account_id: meta.account_id.map(str::to_string),
         checkpoint: None,
+        context: None,
     };
     conn.execute(
         "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id)
@@ -4122,6 +4123,12 @@ pub fn add_activity_log(
     Ok(entry)
 }
 
+/// What CodeFlow put in front of the engine for a turn (`crate::context::ContextSource` as JSON).
+pub fn set_activity_context(conn: &Connection, id: &str, context: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE activity_log SET context = ?1 WHERE id = ?2", params![context, id])?;
+    Ok(())
+}
+
 /// What a chat turn changed on disk — `{"id": <checkpoint>, "paths": [...]}` — written after the row,
 /// once the turn is known to have touched files. See `claude_cmd::send_chat_message`.
 pub fn set_activity_checkpoint(conn: &Connection, id: &str, checkpoint: &str) -> rusqlite::Result<()> {
@@ -4136,7 +4143,7 @@ pub fn set_activity_checkpoint(conn: &Connection, id: &str, checkpoint: &str) ->
 /// go through [`conversation_turns`] instead, because `trace` is the heaviest column in the
 /// database and reading it to build a list of titles is pure waste.
 const ACTIVITY_COLUMNS: &str =
-    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint";
+    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context";
 
 /// [`ACTIVITY_COLUMNS`] with `trace` replaced by [`TRACE_PRESENCE`], so [`read_activity_row`] can
 /// read it unchanged and the turn comes back with `trace: Some("")` when it has one, `None` when not.
@@ -4147,7 +4154,7 @@ const ACTIVITY_COLUMNS: &str =
 const ACTIVITY_COLUMNS_NO_TRACE: &str =
     "id, project_id, session_id, engine_session_id, question, answer, \
      CASE WHEN trace IS NULL OR trace = '' OR trace = '[]' THEN NULL ELSE '' END, \
-     created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint";
+     created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context";
 
 fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> {
     Ok(ActivityLogEntry {
@@ -4166,6 +4173,7 @@ fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> 
         engine_version: row.get(12)?,
         account_id: row.get(13)?,
         checkpoint: row.get(14)?,
+        context: row.get(15)?,
     })
 }
 
@@ -5848,6 +5856,7 @@ mod tests {
             engine_version: None,
             account_id: account.map(str::to_string),
             checkpoint: None,
+            context: None,
         }
     }
 

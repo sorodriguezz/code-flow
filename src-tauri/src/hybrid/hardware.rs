@@ -442,6 +442,60 @@ pub fn measure_ram_bandwidth(ram_bytes: u64) -> Option<u64> {
     (seconds > 0.0).then(|| (size as f64 / seconds) as u64)
 }
 
+/// How hard the system is pressed for memory right now — read when a model is about to be loaded
+/// or the pane is open, never on a timer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Pressure {
+    Normal,
+    /// The system is compressing or paging: a model loaded now will crowd it further.
+    Warning,
+    /// Close to out of memory: loading a model now risks the system swapping hard.
+    Critical,
+    Unknown,
+}
+
+/// The system's memory pressure: macOS's own level (`kern.memorystatus_vm_pressure_level`: 1
+/// normal, 2 warning, 4 critical) where there is one, else how much RAM is still available.
+pub fn memory_pressure() -> Pressure {
+    #[cfg(target_os = "macos")]
+    {
+        let mut level: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        let name = c"kern.memorystatus_vm_pressure_level";
+        // SAFETY: a valid NUL-terminated name, an out-buffer of exactly `size` bytes.
+        let ok = unsafe {
+            libc::sysctlbyname(name.as_ptr(), (&mut level as *mut libc::c_int).cast(), &mut size, std::ptr::null_mut(), 0)
+        } == 0;
+        if ok {
+            return match level {
+                1 => Pressure::Normal,
+                2 => Pressure::Warning,
+                4 => Pressure::Critical,
+                _ => Pressure::Unknown,
+            };
+        }
+    }
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    pressure_from_available(system.available_memory(), system.total_memory())
+}
+
+/// The fallback reading: under 8 % of RAM available is critical, under 15 % a warning.
+pub fn pressure_from_available(available: u64, total: u64) -> Pressure {
+    if total == 0 {
+        return Pressure::Unknown;
+    }
+    let share = available as f64 / total as f64;
+    if share < 0.08 {
+        Pressure::Critical
+    } else if share < 0.15 {
+        Pressure::Warning
+    } else {
+        Pressure::Normal
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,4 +588,13 @@ mod tests {
         assert!(measured < 2_000 * GB, "{measured} B/s");
     }
 
+
+    #[test]
+    fn pressure_is_read_from_what_is_left() {
+        assert_eq!(pressure_from_available(1, 100), Pressure::Critical);
+        assert_eq!(pressure_from_available(10, 100), Pressure::Warning);
+        assert_eq!(pressure_from_available(50, 100), Pressure::Normal);
+        assert_eq!(pressure_from_available(0, 0), Pressure::Unknown);
+        assert_ne!(memory_pressure(), Pressure::Unknown, "this machine reports something");
+    }
 }

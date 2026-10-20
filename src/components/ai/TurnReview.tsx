@@ -6,6 +6,7 @@ import { lineHunks, type LineHunk } from "../../lib/liveGutter";
 import type { TurnChanges } from "../../state/chatStore";
 import { useUiStore } from "../../state/uiStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { recordExperience } from "../../lib/tauri/experiencesCommands";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -79,6 +80,16 @@ export function TurnReview({
     next.add(key);
     setKept(next);
     writeKept(changes.checkpointId, next);
+    // A hunk kept is the turn's change accepted — evidence the backend keeps (`crate::experiences`).
+    // Discards are recorded by the restore itself.
+    const [path] = key.split(":");
+    recordExperience({
+      source: "turn_review",
+      signal: "accepted",
+      runRef: `checkpoint:${changes.checkpointId}`,
+      repoPath,
+      detail: { checkpoint: changes.checkpointId, path, hunk: key },
+    });
   };
 
   const discardAll = async () => {

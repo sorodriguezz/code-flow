@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canResume, cliLine, hasCli, promptInLine } from "./cliLaunch";
+import { canResume, cliLine, hasCli, noteInLine, promptInLine } from "./cliLaunch";
 
 describe("cliLine", () => {
   it("is the bare binary when there is nothing to resume", () => {
@@ -30,6 +30,19 @@ describe("cliLine extras", () => {
     expect(cliLine("codex", "codex", { sessionId: null }, false, { settings: "/x.json", prompt: "hola" })).toBe("codex hola");
     // An agent that does not take a prompt on its line gets it typed in later.
     expect(cliLine("grok", "grok", { sessionId: null }, false, { prompt: "hola" })).toBe("grok");
+  });
+
+  it("tells Claude and Codex about cf on their command line, each its own way", () => {
+    const extra = { settings: "/h/s.json", noteFile: "/h/cf-note.md", note: "Use cf ask <question> first." };
+    expect(cliLine("claude", "claude", { sessionId: null }, false, extra)).toBe(
+      "claude --settings /h/s.json --append-system-prompt-file /h/cf-note.md",
+    );
+    expect(cliLine("codex", "codex", { sessionId: null }, false, extra)).toBe(
+      "codex -c 'developer_instructions=Use cf ask <question> first.'",
+    );
+    // The others take it with their first prompt instead.
+    expect(cliLine("gemini", "agy", { sessionId: null }, false, extra)).toBe("agy");
+    expect([noteInLine("claude"), noteInLine("codex"), noteInLine("grok")]).toEqual([true, true, false]);
   });
 
   it("never puts a prompt on a Windows command line", () => {

@@ -27,7 +27,7 @@ macro_rules! or_next {
     };
 }
 
-mod ai;
+pub(crate) mod ai;
 mod app;
 pub(crate) mod binary;
 mod browser;

@@ -49,7 +49,7 @@ const MAX_DIFF_CHARS: usize = crate::ai::MAX_REVIEW_DIFF_CHARS;
 /// A commit message is written from at most this much diff, as in the Changes panel.
 const MAX_COMMIT_DIFF_CHARS: usize = crate::ai::MAX_DIFF_CHARS;
 
-mod extra;
+pub(crate) mod extra;
 
 pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     match ctx.node.type_id.as_str() {

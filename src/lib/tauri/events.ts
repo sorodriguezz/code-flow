@@ -7,6 +7,8 @@ import type {
 import type { DbDriverProgress } from "../../types/database";
 import type { StackFrame } from "./commands";
 import { WINDOW } from "../windowIdentity";
+import type { EvalEvent } from "./evalsCommands";
+import type { LearningEvent } from "./learningCommands";
 
 export const onGitProgress = (handler: (event: GitProgressEvent) => void) =>
   listen<GitProgressEvent>("git:progress", (e) => handler(e.payload));
@@ -55,6 +57,13 @@ export interface LocalAiDownloadEvent {
 
 export const onLocalAiDownload = (handler: (event: LocalAiDownloadEvent) => void) =>
   listen<LocalAiDownloadEvent>("localai:download", (e) => handler(e.payload));
+
+/** A bench run's progress and outcome. See `commands/evals_cmd.rs`. */
+export const onAiEval = (handler: (event: EvalEvent) => void) => listen<EvalEvent>("ai:eval", (e) => handler(e.payload));
+
+/** Fine-tuning: the environment's install, a training run's lines and progress, an adapter's evaluation. */
+export const onAiLearning = (handler: (event: LearningEvent) => void) =>
+  listen<LearningEvent>("ai:learning", (e) => handler(e.payload));
 
 /** A database driver's download — its files, or the Java runtime first. See `datasource/drivers.rs`. */
 export const onDbDriverDownload = (handler: (event: DbDriverProgress) => void) =>

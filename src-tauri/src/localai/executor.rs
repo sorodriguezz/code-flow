@@ -83,7 +83,13 @@ pub struct Launch {
     /// `--reasoning-budget 0`: thinking models answer without a thinking phase. Spends nothing on
     /// models that have none.
     pub no_reasoning: bool,
+    /// `--n-cpu-moe N`: the first N MoE layers keep their experts in RAM so the rest fits a discrete
+    /// card. 0 leaves placement to llama.cpp's `--fit`.
+    pub cpu_moe_layers: u32,
 }
+
+/// How long a request for another model waits for the running one's requests to finish.
+const SWAP_WAIT: Duration = Duration::from_secs(15 * 60);
 
 pub struct ExecEngine {
     pub launch: Launch,
@@ -119,6 +125,11 @@ impl ExecEngine {
         self.alive.load(Ordering::SeqCst)
     }
 
+    /// The server's process id — what the bench reads its resident memory from.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.lock().ok().and_then(|child| child.id())
+    }
+
     /// Marks a request as started. Keep the guard alive until the response has been read.
     pub fn begin(&self) -> InFlight {
         self.in_flight.fetch_add(1, Ordering::SeqCst);
@@ -140,13 +151,33 @@ pub async fn ensure_ready(entry: &ExecModelSpec, model_path: PathBuf, launch: La
         ));
     }
     let slot = ENGINE.get_or_init(|| AsyncMutex::new(None));
-    let mut guard = slot.lock().await;
-
-    if let Some(existing) = guard.as_ref() {
-        if existing.is_alive() && existing.launch == launch {
-            existing.last_used.store(engine::now_millis(), Ordering::Relaxed);
-            return Ok(existing.clone());
+    // A different launch (another model, window or reasoning setting) is another process, and the
+    // slot holds one. While the running one still has requests in flight it is not stopped under
+    // them: this waits for them to finish — another job's whole run, when that job holds its
+    // session — and gives up after `SWAP_WAIT` rather than waiting forever on a stuck one.
+    let waited_since = std::time::Instant::now();
+    let mut guard = loop {
+        let guard = slot.lock().await;
+        match guard.as_ref() {
+            Some(existing) if existing.is_alive() && existing.launch == launch => {
+                existing.last_used.store(engine::now_millis(), Ordering::Relaxed);
+                return Ok(existing.clone());
+            }
+            Some(existing) if existing.is_alive() && existing.in_flight.load(Ordering::SeqCst) > 0 => {
+                if waited_since.elapsed() > SWAP_WAIT {
+                    return Err(format!(
+                        "The local engine is still busy with {} for another task. Try again when it finishes.",
+                        existing.launch.model_id
+                    ));
+                }
+                drop(guard);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            _ => break guard,
         }
+    };
+
+    if guard.is_some() {
         stop_locked(&mut guard).await;
     }
 
@@ -225,6 +256,9 @@ impl ExecEngine {
             .arg("--no-webui");
         if launch.no_reasoning {
             command.arg("--reasoning-budget").arg("0");
+        }
+        if launch.cpu_moe_layers > 0 {
+            command.arg("--n-cpu-moe").arg(launch.cpu_moe_layers.to_string());
         }
         let mut child = command
             .stdin(std::process::Stdio::null())
@@ -350,11 +384,12 @@ mod tests {
 
     #[test]
     fn launches_compare_by_every_field_that_needs_a_new_process() {
-        let a = Launch { model_id: "m".into(), ctx: 16_384, no_reasoning: true };
+        let a = Launch { model_id: "m".into(), ctx: 16_384, no_reasoning: true, cpu_moe_layers: 0 };
         assert_eq!(a, a.clone());
         assert_ne!(a, Launch { ctx: 32_768, ..a.clone() });
         assert_ne!(a, Launch { model_id: "other".into(), ..a.clone() });
         assert_ne!(a, Launch { no_reasoning: false, ..a.clone() });
+        assert_ne!(a, Launch { cpu_moe_layers: 4, ..a.clone() });
     }
 
     #[test]
@@ -369,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_model_file_is_refused_before_anything_spawns() {
         let entry = super::super::exec_catalogue::find("qwen2.5-coder-7b-instruct").unwrap();
-        let launch = Launch { model_id: entry.spec.id.into(), ctx: 8_192, no_reasoning: true };
+        let launch = Launch { model_id: entry.spec.id.into(), ctx: 8_192, no_reasoning: true, cpu_moe_layers: 0 };
         let error = ensure_ready(entry, PathBuf::from("/nonexistent/model.gguf"), launch)
             .await
             .err()

@@ -28,6 +28,7 @@ import { SymbolPalette } from "./SymbolPalette";
 import { CompareFilesModal } from "./CompareFilesModal";
 import { useCompareStore } from "../../state/compareStore";
 import { useEditorStatusStore } from "../../state/editorStatusStore";
+import { mentionedPaths, setEditorContextProvider, type EditorContextPayload } from "../../lib/editorContext";
 import { SearchPanel } from "./SearchPanel";
 import { AnchorsPanel } from "./AnchorsPanel";
 import { BookmarksPanel } from "./BookmarksPanel";
@@ -45,7 +46,7 @@ import { EditorStatusLine } from "./EditorStatusLine";
 import { EditorBottomPanel } from "./EditorBottomPanel";
 import { formatModel } from "./formatDocument";
 import { ChangesPanel } from "../git/ChangesPanel";
-import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
+import { MODEL_SCHEME, modelPathFor, relPathFromModelUri } from "../../lib/editorModel";
 import { setDefinitionContext } from "../../lib/goToDefinition";
 import { syncClose, syncOpen, syncSave } from "../../lib/lsp/client";
 import {
@@ -1575,6 +1576,48 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     },
     [commitTabs],
   );
+
+  // What an AI turn about this project is told about the editor — see `lib/editorContext`. The
+  // focused pane's file and caret come from the status line's store; the rest from Monaco's models.
+  const contextProjectId = project?.id ?? null;
+  useEffect(() => {
+    if (!contextProjectId) return;
+    setEditorContextProvider(contextProjectId, (message) => {
+      const ours = monaco.editor.getModels().filter((model) => relPathFromModelUri(model.uri, contextProjectId) !== null);
+      if (ours.length === 0) return null;
+      const status = useEditorStatusStore.getState().status;
+      const activeModel = status ? ours.find((model) => model.uri.toString() === monaco.Uri.parse(status.fileKey).toString()) : undefined;
+      const activePath = activeModel ? relPathFromModelUri(activeModel.uri, contextProjectId) : null;
+      let selection: NonNullable<EditorContextPayload["selection"]> | null = null;
+      if (activeModel && activePath) {
+        const editor = monaco.editor.getEditors().find((e) => e.getModel() === activeModel);
+        const range = editor?.getSelection();
+        if (range && !range.isEmpty()) {
+          selection = { path: activePath, startLine: range.startLineNumber, endLine: range.endLineNumber, text: activeModel.getValueInRange(range) };
+        }
+      }
+      // The active buffer and those the question names: the backend keeps the ones that differ
+      // from the disk, so a saved file costs nothing.
+      const wanted = new Set([...(activePath ? [activePath] : []), ...mentionedPaths(message)]);
+      const unsaved = ours
+        .map((model) => ({ model, path: relPathFromModelUri(model.uri, contextProjectId) ?? "" }))
+        .filter(({ path }) => wanted.has(path))
+        .slice(0, 4)
+        .map(({ model, path }) => ({ path, content: model.getValue() }));
+      const severity = (value: monaco.MarkerSeverity) =>
+        value === monaco.MarkerSeverity.Error ? "error" : value === monaco.MarkerSeverity.Warning ? "warning" : value === monaco.MarkerSeverity.Info ? "info" : "hint";
+      const diagnostics =
+        activeModel && activePath
+          ? monaco.editor
+              .getModelMarkers({ resource: activeModel.uri })
+              .filter((marker) => marker.severity >= monaco.MarkerSeverity.Warning)
+              .slice(0, 40)
+              .map((marker) => ({ path: activePath, line: marker.startLineNumber, severity: severity(marker.severity), message: marker.message }))
+          : [];
+      return { activePath, cursorLine: activePath ? (status?.line ?? null) : null, selection, unsaved, diagnostics };
+    });
+    return () => setEditorContextProvider(contextProjectId, null);
+  }, [contextProjectId]);
 
   useEffect(() => {
     useEditorStatusStore.getState().setFileActions({

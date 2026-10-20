@@ -271,6 +271,18 @@ pub struct LocalModel {
     pub params: Option<String>,
     /// e.g. "Q4_K_M".
     pub quant: Option<String>,
+    /// Ollama's content digest of the weights — what identifies the model across renames and
+    /// re-pulls. `None` where the server does not publish one.
+    pub digest: Option<String>,
+}
+
+/// Whether a model name is one of Ollama's cloud models (`…:cloud`, `…-cloud`): it would run on
+/// Ollama's servers, not this machine. CodeFlow is local only, so these are never listed, chosen
+/// or pulled — the user's rule, 2026-10-19.
+pub fn is_cloud_name(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    let tag = name.rsplit_once(':').map_or("", |(_, tag)| tag);
+    tag == "cloud" || tag.ends_with("-cloud") || name.ends_with("-cloud")
 }
 
 /// The models `endpoint` offers. Not for [`BackendKind::Bundled`], whose list is the catalogue.
@@ -301,12 +313,19 @@ pub fn parse_model_list(body: &Value) -> Vec<LocalModel> {
             .iter()
             .filter_map(|model| {
                 let id = model.get("name").or_else(|| model.get("model")).and_then(Value::as_str)?;
+                // Ollama's cloud models are listed beside the pulled ones, carrying where they
+                // really run; CodeFlow never offers them.
+                let remote = model.get("remote_host").is_some_and(|v| !v.is_null()) || model.get("remote_model").is_some_and(|v| !v.is_null());
+                if remote || is_cloud_name(id) {
+                    return None;
+                }
                 let details = model.get("details");
                 Some(LocalModel {
                     id: id.to_string(),
                     size_bytes: model.get("size").and_then(Value::as_u64),
                     params: details.and_then(|d| d.get("parameter_size")).and_then(Value::as_str).map(str::to_string),
                     quant: details.and_then(|d| d.get("quantization_level")).and_then(Value::as_str).map(str::to_string),
+                    digest: model.get("digest").and_then(Value::as_str).filter(|d| !d.is_empty()).map(str::to_string),
                 })
             })
             .collect();
@@ -315,6 +334,7 @@ pub fn parse_model_list(body: &Value) -> Vec<LocalModel> {
         return data
             .iter()
             .filter_map(|model| model.get("id").and_then(Value::as_str))
+            .filter(|id| !is_cloud_name(id))
             .map(|id| LocalModel { id: id.to_string(), ..Default::default() })
             .collect();
     }
@@ -339,6 +359,10 @@ pub struct ModelDetails {
     pub active_share: Option<f32>,
     /// The model has a thinking phase that can be switched off (Ollama's `thinking` capability).
     pub thinking: bool,
+    /// Everything the server declares the model can do (Ollama's `capabilities`: `completion`,
+    /// `tools`, `thinking`, `vision`, `insert`, `embedding`). Declared, not verified — see
+    /// `crate::model_registry`.
+    pub capabilities: Vec<String>,
 }
 
 /// Reads [`ModelDetails`] for `model`. Never fails: missing metadata is `None` fields, and the
@@ -441,31 +465,42 @@ pub fn parse_ollama_show(body: &Value) -> ModelDetails {
     };
     let max_ctx = number(find(".context_length")).map(|n| n as u32);
     let layers = number(find(".block_count"));
-    let kv_heads = number(find(".attention.head_count_kv"));
+    // KV heads are summed over the layers when they come per layer: a hybrid Mamba-Transformer
+    // (Nemotron-H, 0 heads on every Mamba layer) caches only on its few attention layers, and
+    // "largest × every layer" overstated Nemotron 3 Nano's cache tenfold (2026-10-19).
+    let kv_heads_total = match find(".attention.head_count_kv") {
+        Some(Value::Array(per_layer)) => Some(per_layer.iter().filter_map(Value::as_u64).sum::<u64>()),
+        other => match (number(other), layers) {
+            (Some(heads), Some(layers)) => Some(heads * layers),
+            _ => None,
+        },
+    };
     let heads = number(find(".attention.head_count"));
     let width = number(find(".embedding_length"));
     let head_dim = number(find(".attention.key_length")).or_else(|| match (width, heads) {
         (Some(width), Some(heads)) if heads > 0 => Some(width / heads),
         _ => None,
     });
-    let kv_bytes_per_token = match (layers, kv_heads, head_dim) {
-        (Some(layers), Some(kv_heads), Some(head_dim)) => Some(2 * layers * kv_heads * head_dim * 2),
+    let kv_bytes_per_token = match (kv_heads_total, head_dim) {
+        (Some(heads), Some(head_dim)) if heads > 0 => Some(2 * heads * head_dim * 2),
         _ => None,
     };
     let params_b = body
         .pointer("/details/parameter_size")
         .and_then(Value::as_str)
         .and_then(parse_params_b);
-    let thinking = body
+    let capabilities: Vec<String> = body
         .get("capabilities")
         .and_then(Value::as_array)
-        .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("thinking")));
+        .map(|caps| caps.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
+    let thinking = capabilities.iter().any(|cap| cap == "thinking");
     let active_share = mixture_share(
         number(find(".expert_count")),
         number(find(".expert_used_count")),
         number(find(".expert_shared_count")),
     );
-    ModelDetails { max_ctx, ctx_fixed_by_server: false, kv_bytes_per_token, params_b, size_bytes: None, active_share, thinking }
+    ModelDetails { max_ctx, ctx_fixed_by_server: false, kv_bytes_per_token, params_b, size_bytes: None, active_share, thinking, capabilities }
 }
 
 /// The share of a mixture of experts read per token, from the GGUF's expert counts: the experts a
@@ -666,8 +701,10 @@ pub struct ChatRequest<'a> {
     pub num_ctx: Option<u32>,
     pub max_tokens: u32,
     pub temperature: f32,
-    /// Ollama only, and only for a model with a thinking phase: `Some(false)` switches it off.
-    /// `None` sends nothing, which is what a model without one needs.
+    /// For a model with a thinking phase: `Some(false)` switches it off, `Some(true)` on. Ollama's
+    /// `think`, the bundled engine's `enable_thinking` (see [`apply_template_thinking`]). `None`
+    /// sends nothing, which is what a model without one needs. Decided by
+    /// `crate::model_registry::think_for`.
     pub think: Option<bool>,
     /// Ollama only: how long the model stays loaded after this request.
     pub keep_alive: Option<&'a str>,
@@ -719,7 +756,6 @@ where
     F: FnMut(&str),
     C: Future<Output = ()>,
 {
-    let started = Instant::now();
     let client = client_for(&endpoint.base_url);
     let messages = json!([
         { "role": "system", "content": request.system },
@@ -756,11 +792,20 @@ where
                 body["response_format"] =
                     json!({ "type": "json_schema", "json_schema": { "name": "answer", "strict": true, "schema": schema } });
             }
+            apply_template_thinking(&mut body, endpoint.kind, request.think);
             with_auth(client.post(format!("{}/v1/chat/completions", endpoint.base_url)), endpoint).json(&body)
         }
     };
 
     tokio::pin!(cancel);
+    // This server's turn first (see `super::scheduler`): a Stop while queued ends the wait.
+    let _turn = tokio::select! {
+        biased;
+        _ = &mut cancel => return Err(LocalError::Cancelled),
+        turn = super::scheduler::acquire(&endpoint.base_url) => turn,
+    };
+    // Timed from the turn, so a wait in the queue is not read as a slow model.
+    let started = Instant::now();
     let mut response = tokio::select! {
         biased;
         _ = &mut cancel => return Err(LocalError::Cancelled),
@@ -802,6 +847,16 @@ where
 
 // ------------------------------------------------------------------ a conversation with tools
 
+/// The bundled engine's per-request reasoning switch: llama.cpp hands `chat_template_kwargs` to the
+/// model's own template, where Qwen3 and Nemotron read `enable_thinking`. Sent only to the bundled
+/// engine — another OpenAI-compatible server may reject a field it does not know. A template that
+/// has no such switch ignores it, and a server started with `--reasoning-budget 0` thinks never.
+fn apply_template_thinking(body: &mut Value, kind: BackendKind, think: Option<bool>) {
+    if let (BackendKind::Bundled, Some(think)) = (kind, think) {
+        body["chat_template_kwargs"] = json!({ "enable_thinking": think });
+    }
+}
+
 /// One turn of a conversation that may call tools, or that carries remembered turns — the flows'
 /// «Modelo local» with other flows as tools. **Not streamed**: a tool call is only usable whole,
 /// and the node waits for the whole answer anyway.
@@ -824,7 +879,7 @@ pub struct ConverseRequest<'a> {
     pub max_tokens: u32,
     pub temperature: f32,
     pub keep_alive: Option<&'a str>,
-    /// Ollama only, as in [`ChatRequest`]: `Some(false)` switches a thinking model's phase off.
+    /// As in [`ChatRequest`]: `Some(false)` switches a thinking model's phase off.
     /// Measured on qwen3:8b driving `crate::local_agent`: 338 s to fix a one-line bug with it on.
     pub think: Option<bool>,
 }
@@ -984,10 +1039,17 @@ where
                     body["tool_choice"] = json!("none");
                 }
             }
+            apply_template_thinking(&mut body, endpoint.kind, request.think);
             with_auth(client.post(format!("{}/v1/chat/completions", endpoint.base_url)), endpoint).json(&body)
         }
     };
     tokio::pin!(cancel);
+    // This server's turn first (see `super::scheduler`): a Stop while queued ends the wait.
+    let _turn = tokio::select! {
+        biased;
+        _ = &mut cancel => return Err(LocalError::Cancelled),
+        turn = super::scheduler::acquire(&endpoint.base_url) => turn,
+    };
     let response = tokio::select! {
         biased;
         _ = &mut cancel => return Err(LocalError::Cancelled),
@@ -1298,6 +1360,49 @@ mod tests {
         assert_eq!(details.params_b, Some(7.6));
         assert_eq!(details.active_share, None, "a dense model reads all of itself");
         assert!(!details.thinking);
+    }
+
+    /// Nemotron 3 Nano 4B's header (GGUF metadata, 2026-10-19): 42 layers, 8 KV heads on 4 of
+    /// them and 0 on the Mamba layers. Summed, that is 16 KiB a token — taking the largest entry
+    /// times every layer said 168 KiB and offered a tenth of the context that really fits.
+    #[test]
+    fn a_hybrid_model_caches_only_its_attention_layers() {
+        let mut per_layer = vec![0u64; 42];
+        for layer in [12, 17, 24, 32] {
+            per_layer[layer] = 8;
+        }
+        let body = json!({
+            "model_info": {
+                "nemotron_h.block_count": 42,
+                "nemotron_h.attention.head_count": 40,
+                "nemotron_h.attention.head_count_kv": per_layer,
+                "nemotron_h.attention.key_length": 128,
+                "nemotron_h.embedding_length": 3136,
+                "nemotron_h.context_length": 1_048_576
+            },
+            "capabilities": ["completion", "tools", "thinking"]
+        });
+        let details = parse_ollama_show(&body);
+        assert_eq!(details.kv_bytes_per_token, Some(16_384));
+        assert!(details.thinking);
+        assert_eq!(details.capabilities, vec!["completion", "tools", "thinking"]);
+    }
+
+    #[test]
+    fn cloud_models_are_never_listed() {
+        let ollama = json!({ "models": [
+            { "name": "qwen3:8b", "size": 5_200_000_000u64, "digest": "500a1f067a9f" },
+            { "name": "nemotron-3-ultra:cloud", "remote_host": "https://ollama.com:443", "remote_model": "nemotron-3-ultra" },
+            { "name": "gpt-oss:120b-cloud" },
+            { "name": "custom-remote", "remote_model": "x" }
+        ]});
+        let models = parse_model_list(&ollama);
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["qwen3:8b"]);
+        assert_eq!(models[0].digest.as_deref(), Some("500a1f067a9f"));
+        assert!(is_cloud_name("nemotron-3-super:cloud"));
+        assert!(is_cloud_name("qwen3-coder:480b-cloud"));
+        assert!(!is_cloud_name("nemotron-3-nano:30b"));
+        assert!(!is_cloud_name("qwen2.5-coder:7b"));
     }
 
     #[test]

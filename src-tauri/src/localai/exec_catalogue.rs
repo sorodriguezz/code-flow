@@ -8,8 +8,9 @@
 //!    continues the text instead of answering it. Inline completion wants exactly the reverse,
 //!    which is why its catalogue refuses `-Instruct`.
 //!
-//! 2. **A licence this app can point at**, the same rule as the completion catalogue and enforced
-//!    by the same kind of test. Qwen2.5-Coder-3B is `qwen-research` (non-commercial) and is absent
+//! 2. **A licence this app can point at**, enforced by a test: SPDX (Apache-2.0, MIT), or — since
+//!    2026-10-19, the user's decision — the NVIDIA model licences for Nemotron and OpenMDW for Bolt,
+//!    each with the link the row shows. Qwen2.5-Coder-3B is `qwen-research` (non-commercial) and is absent
 //!    for that reason; the 7B/14B/32B, Qwen3-Coder-30B-A3B and Qwen3-4B-Instruct-2507 are
 //!    Apache-2.0, and Phi-4-mini-instruct is MIT. The last two fill the 3B hole for machines the
 //!    7B is too much for (user's ask, 2026-10-10) — general instruct models rather than coder
@@ -49,6 +50,32 @@ pub struct ExecModelSpec {
     /// experts and the shared layers for a mixture. What the writing speed is estimated from — a
     /// token costs the bytes it reads, not the bytes that are resident.
     pub active_params_b: f32,
+    /// Which model family the weights belong to: what a fine-tuning pipeline and the chat template
+    /// are matched by. Two families never share an adapter.
+    pub family: Family,
+    /// The chat template takes tools — *declared*; whether the model calls them well is what the
+    /// bench's conformance suite verifies (see `crate::model_registry`).
+    pub tools: bool,
+    /// The model has a reasoning phase that can be switched on and off.
+    pub thinking: bool,
+    /// The weights use a quantisation llama.cpp only implements on CUDA. The bundled engine is a
+    /// Metal build on macOS and a Vulkan one on Windows, so such a model runs only through Ollama on
+    /// an NVIDIA card — the entry stays for its architecture and the row says what it needs.
+    pub cuda_only: bool,
+    /// Where the licence text lives when [`ModelSpec::licence`] is not an SPDX identifier.
+    pub licence_url: &'static str,
+    /// Layers that hold experts (0 for a dense model): what `--n-cpu-moe` counts, read off the GGUF
+    /// header — see `crate::hybrid::budget::cpu_moe_layers`.
+    pub moe_layers: u32,
+}
+
+/// Which family a model belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Family {
+    Qwen,
+    Phi,
+    Nemotron,
 }
 
 /// Everything on offer, smallest first — the first row a hesitant user reads is the one that
@@ -74,6 +101,12 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         kv_bytes_per_token: 2 * 32 * 8 * 128 * 2,
         params_b: 3.8,
         active_params_b: 3.8,
+        family: Family::Phi,
+        tools: true,
+        thinking: false,
+        cuda_only: false,
+        licence_url: "",
+        moe_layers: 0,
     },
     ExecModelSpec {
         spec: ModelSpec {
@@ -94,6 +127,38 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         kv_bytes_per_token: 2 * 36 * 8 * 128 * 2,
         params_b: 4.0,
         active_params_b: 4.0,
+        family: Family::Qwen,
+        tools: true,
+        thinking: false,
+        cuda_only: false,
+        licence_url: "",
+        moe_layers: 0,
+    },
+    ExecModelSpec {
+        spec: ModelSpec {
+            id: "nemotron-3-nano-4b",
+            label: "Nemotron 3 Nano 4B",
+            tier: Tier::Light,
+            repo: "nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF",
+            file: "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf",
+            size_bytes: 2_837_072_864,
+            sha256: "be5d9a656a51922f24f1f09a759cebb694e1f5d9728bf0ef9f8c972c5a0b5ef2",
+            params: "4.0B · Q4_K_M",
+            min_ram_gb: 6,
+            licence: "NVIDIA-Nemotron-Open-Model-License",
+        },
+        max_ctx: 1_048_576,
+        // Hybrid Mamba-2/Transformer: of 42 layers only 4 hold a KV cache (8 heads each, head_dim 128),
+        // read off the GGUF header — 16 KiB a token, a tenth of what all-attention would cost.
+        kv_bytes_per_token: 2 * 32 * 128 * 2,
+        params_b: 4.0,
+        active_params_b: 4.0,
+        family: Family::Nemotron,
+        tools: true,
+        thinking: true,
+        cuda_only: false,
+        licence_url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-nemotron-open-model-license/",
+        moe_layers: 0,
     },
     ExecModelSpec {
         spec: ModelSpec {
@@ -113,6 +178,12 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         kv_bytes_per_token: 2 * 28 * 4 * 128 * 2,
         params_b: 7.6,
         active_params_b: 7.6,
+        family: Family::Qwen,
+        tools: true,
+        thinking: false,
+        cuda_only: false,
+        licence_url: "",
+        moe_layers: 0,
     },
     ExecModelSpec {
         spec: ModelSpec {
@@ -132,6 +203,38 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         kv_bytes_per_token: 2 * 48 * 8 * 128 * 2,
         params_b: 14.8,
         active_params_b: 14.8,
+        family: Family::Qwen,
+        tools: true,
+        thinking: false,
+        cuda_only: false,
+        licence_url: "",
+        moe_layers: 0,
+    },
+    ExecModelSpec {
+        spec: ModelSpec {
+            id: "nemotron-cascade-2-30b-a3b",
+            label: "Nemotron Cascade 2 30B-A3B",
+            tier: Tier::Large,
+        // IQ4_XS rather than Q4_K_M (24.7 GB): it fits a 32 GB Mac's Metal working set with room for context.
+            repo: "bartowski/nvidia_Nemotron-Cascade-2-30B-A3B-GGUF",
+            file: "nvidia_Nemotron-Cascade-2-30B-A3B-IQ4_XS.gguf",
+            size_bytes: 18_166_698_432,
+            sha256: "871a80bfd682289f2efa1b4fdee899576b5a768681f2b2ad74a15b59af6a510e",
+            params: "31.6B (3.6B activos) · IQ4_XS",
+            min_ram_gb: 24,
+            licence: "NVIDIA-Open-Model-License",
+        },
+        max_ctx: 262_144,
+        // 52 layers, 6 with attention at 2 KV heads × 128: 6 KiB a token. 128 experts, 6 routed + 1 shared.
+        kv_bytes_per_token: 2 * 12 * 128 * 2,
+        params_b: 31.6,
+        active_params_b: 3.6,
+        family: Family::Nemotron,
+        tools: true,
+        thinking: true,
+        cuda_only: false,
+        licence_url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
+        moe_layers: 23,
     },
     ExecModelSpec {
         spec: ModelSpec {
@@ -156,6 +259,37 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         params_b: 30.5,
         // "30.5B in total and 3.3B activated" — the model card.
         active_params_b: 3.3,
+        family: Family::Qwen,
+        tools: true,
+        thinking: false,
+        cuda_only: false,
+        licence_url: "",
+        moe_layers: 48,
+    },
+    ExecModelSpec {
+        spec: ModelSpec {
+            id: "nemotron-3.5-lightning-30b-a3b",
+            label: "Nemotron 3.5 Lightning 30B-A3B",
+            tier: Tier::Large,
+            repo: "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF",
+            file: "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf",
+            size_bytes: 18_898_091_584,
+            sha256: "61f87e75974e4b535dcdf9aad056541a9514f1dfa4538b463b081d19b7a00e3c",
+            params: "31.6B (3.6B activos) · Q4_0",
+            min_ram_gb: 24,
+            licence: "NVIDIA-Open-Model-License",
+        },
+        max_ctx: 1_048_576,
+        // Same backbone as Nano 30B-A3B: 6 attention layers of 52, 2 KV heads × 128.
+        kv_bytes_per_token: 2 * 12 * 128 * 2,
+        params_b: 31.6,
+        active_params_b: 3.6,
+        family: Family::Nemotron,
+        tools: true,
+        thinking: true,
+        cuda_only: false,
+        licence_url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
+        moe_layers: 23,
     },
     ExecModelSpec {
         spec: ModelSpec {
@@ -175,6 +309,89 @@ pub const EXEC_CATALOGUE: &[ExecModelSpec] = &[
         kv_bytes_per_token: 2 * 64 * 8 * 128 * 2,
         params_b: 32.8,
         active_params_b: 32.8,
+        family: Family::Qwen,
+        tools: true,
+        thinking: false,
+        cuda_only: false,
+        licence_url: "",
+        moe_layers: 0,
+    },
+    ExecModelSpec {
+        spec: ModelSpec {
+            id: "nemotron-3.5-bolt-74b-a9b",
+            label: "Nemotron 3.5 Bolt 74B-A9B",
+            tier: Tier::Large,
+        // NVIDIA's 24 GB packing: IQ2_XXS experts and NVFP4 elsewhere, which llama.cpp runs on CUDA only.
+            repo: "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF",
+            file: "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf",
+            size_bytes: 22_018_326_528,
+            sha256: "91d63363e782c8a3d5f4be42816eba8e0d42dd2530bd07a7d0d2dc440599af75",
+            params: "74B (9B activos) · IQ2/NVFP4",
+            min_ram_gb: 32,
+            licence: "OpenMDW-1.1",
+        },
+        max_ctx: 262_144,
+        // 88 layers, 8 with attention at 2 KV heads × 128: 8 KiB a token.
+        kv_bytes_per_token: 2 * 16 * 128 * 2,
+        params_b: 74.0,
+        active_params_b: 9.0,
+        family: Family::Nemotron,
+        tools: true,
+        thinking: true,
+        cuda_only: true,
+        licence_url: "https://openmdw.ai/license/1-1/",
+        moe_layers: 40,
+    },
+    ExecModelSpec {
+        spec: ModelSpec {
+            id: "nemotron-3-nano-30b-a3b",
+            label: "Nemotron 3 Nano 30B-A3B",
+            tier: Tier::Large,
+            repo: "ggml-org/NVIDIA-Nemotron-3-Nano-30B-A3B-GGUF",
+            file: "NVIDIA-Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf",
+            size_bytes: 22_421_827_488,
+            sha256: "0f111a0d49777a2a0178758b1aee14e5365c495987499401ef3ebe87754322a8",
+            params: "31.6B (3.6B activos) · Q4_K_M",
+            min_ram_gb: 32,
+            licence: "NVIDIA-Open-Model-License",
+        },
+        max_ctx: 1_048_576,
+        // 52 layers, 6 with attention at 2 KV heads × 128: 6 KiB a token.
+        kv_bytes_per_token: 2 * 12 * 128 * 2,
+        params_b: 31.6,
+        active_params_b: 3.6,
+        family: Family::Nemotron,
+        tools: true,
+        thinking: true,
+        cuda_only: false,
+        licence_url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
+        moe_layers: 23,
+    },
+    ExecModelSpec {
+        spec: ModelSpec {
+            id: "nemotron-3.5-super-120b-a12b",
+            label: "Nemotron 3.5 Super 120B-A12B",
+            tier: Tier::Large,
+            repo: "ggml-org/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF",
+            file: "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-Q4_0.gguf",
+            size_bytes: 71_933_775_808,
+            sha256: "73aabf5646b250c32b0690f3996a0c30f3b50f3d531dcdb03fbafe311139dc83",
+            params: "120B (12B activos) · Q4_0",
+            min_ram_gb: 96,
+            licence: "NVIDIA-Open-Model-License",
+        },
+        max_ctx: 1_048_576,
+        // 88 layers, 8 with attention at 2 KV heads × 128: 8 KiB a token. Text only — the vision
+        // projector is a separate file this catalogue does not fetch.
+        kv_bytes_per_token: 2 * 16 * 128 * 2,
+        params_b: 120.0,
+        active_params_b: 12.0,
+        family: Family::Nemotron,
+        tools: true,
+        thinking: true,
+        cuda_only: false,
+        licence_url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
+        moe_layers: 40,
     },
 ];
 
@@ -202,23 +419,36 @@ pub struct OllamaTag {
     /// Every layer of the registry manifest, summed — what the pull downloads. Read from
     /// `registry.ollama.ai/v2/library/<name>/manifests/<tag>` on 2026-10-02.
     pub size_bytes: u64,
+    /// The tag's weights are the catalogue file itself (within a few MB). `false` when Ollama
+    /// publishes another quantisation of the same model: the entry still stands for its
+    /// architecture (window, KV per token, active share) and the tag's own size is what is judged.
+    /// Read by the catalogue test that holds same-file tags to the entry's size.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub same_file: bool,
 }
 
 pub const OLLAMA_TAGS: &[OllamaTag] = &[
     // Read on 2026-10-10, like the two GGUFs they stand for.
-    OllamaTag { tag: "phi4-mini:3.8b", catalogue_id: "phi-4-mini-instruct", size_bytes: 2_491_876_363 },
-    OllamaTag { tag: "qwen3:4b-instruct", catalogue_id: "qwen3-4b-instruct-2507", size_bytes: 2_497_293_316 },
-    OllamaTag { tag: "qwen2.5-coder:7b", catalogue_id: "qwen2.5-coder-7b-instruct", size_bytes: 4_683_087_074 },
-    OllamaTag { tag: "qwen2.5-coder:14b", catalogue_id: "qwen2.5-coder-14b-instruct", size_bytes: 8_988_123_810 },
-    OllamaTag { tag: "qwen3-coder:30b", catalogue_id: "qwen3-coder-30b-a3b-instruct", size_bytes: 18_556_700_222 },
-    OllamaTag { tag: "qwen2.5-coder:32b", catalogue_id: "qwen2.5-coder-32b-instruct", size_bytes: 19_851_349_410 },
+    OllamaTag { tag: "phi4-mini:3.8b", catalogue_id: "phi-4-mini-instruct", size_bytes: 2_491_876_363, same_file: true },
+    OllamaTag { tag: "qwen3:4b-instruct", catalogue_id: "qwen3-4b-instruct-2507", size_bytes: 2_497_293_316, same_file: true },
+    OllamaTag { tag: "qwen2.5-coder:7b", catalogue_id: "qwen2.5-coder-7b-instruct", size_bytes: 4_683_087_074, same_file: true },
+    OllamaTag { tag: "qwen2.5-coder:14b", catalogue_id: "qwen2.5-coder-14b-instruct", size_bytes: 8_988_123_810, same_file: true },
+    OllamaTag { tag: "qwen3-coder:30b", catalogue_id: "qwen3-coder-30b-a3b-instruct", size_bytes: 18_556_700_222, same_file: true },
+    OllamaTag { tag: "qwen2.5-coder:32b", catalogue_id: "qwen2.5-coder-32b-instruct", size_bytes: 19_851_349_410, same_file: true },
+    // Read on 2026-10-19. Ollama's own quantisations of the Nemotron rows above.
+    OllamaTag { tag: "nemotron-3-nano:4b", catalogue_id: "nemotron-3-nano-4b", size_bytes: 2_837_597_147, same_file: true },
+    OllamaTag { tag: "nemotron-cascade-2:30b", catalogue_id: "nemotron-cascade-2-30b-a3b", size_bytes: 24_272_443_719, same_file: false },
+    OllamaTag { tag: "nemotron-3-nano:30b", catalogue_id: "nemotron-3-nano-30b-a3b", size_bytes: 24_271_934_866, same_file: false },
+    OllamaTag { tag: "nemotron-3.5-lightning:30b", catalogue_id: "nemotron-3.5-lightning-30b-a3b", size_bytes: 25_430_749_387, same_file: false },
+    OllamaTag { tag: "nemotron-3.5-bolt:74b-a9b", catalogue_id: "nemotron-3.5-bolt-74b-a9b", size_bytes: 24_750_264_767, same_file: false },
+    OllamaTag { tag: "nemotron-3.5-super:120b", catalogue_id: "nemotron-3.5-super-120b-a12b", size_bytes: 90_153_518_373, same_file: false },
 ];
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn every_ollama_tag_stands_for_a_catalogue_entry_of_its_size() {
-        for tag in super::OLLAMA_TAGS {
+        for tag in super::OLLAMA_TAGS.iter().filter(|tag| tag.same_file) {
             let entry = super::find(tag.catalogue_id).unwrap_or_else(|| panic!("{} names no entry", tag.tag));
             // The same weights: within a few MB of the GGUF (the rest is Ollama's template layers).
             let gap = tag.size_bytes.abs_diff(entry.spec.size_bytes);
@@ -248,14 +478,25 @@ mod tests {
 
     #[test]
     fn every_model_is_offerable() {
-        const ALLOWED: &[&str] = &["Apache-2.0", "MIT"];
+        // SPDX licences, and the model licences the user accepted for the catalogue on 2026-10-19
+        // (NVIDIA's for Nemotron, OpenMDW for Bolt) — those always carry the link the row shows.
+        const SPDX: &[&str] = &["Apache-2.0", "MIT"];
+        const LINKED: &[&str] = &["NVIDIA-Open-Model-License", "NVIDIA-Nemotron-Open-Model-License", "OpenMDW-1.1"];
         for entry in EXEC_CATALOGUE {
+            let licence = entry.spec.licence;
             assert!(
-                ALLOWED.contains(&entry.spec.licence),
-                "{} is licensed {}, which this app cannot offer from a menu",
+                SPDX.contains(&licence) || (LINKED.contains(&licence) && entry.licence_url.starts_with("https://")),
+                "{} is licensed {licence}, which this app cannot offer from a menu",
                 entry.spec.id,
-                entry.spec.licence,
             );
+        }
+    }
+
+    #[test]
+    fn every_ollama_tag_names_an_entry() {
+        for tag in OLLAMA_TAGS {
+            assert!(find(tag.catalogue_id).is_some(), "{} names no entry", tag.tag);
+            assert!(!tag.tag.contains("cloud"), "{} is not a local model", tag.tag);
         }
     }
 
@@ -263,7 +504,9 @@ mod tests {
     fn every_entry_is_an_instruct_model_and_a_single_file() {
         for entry in EXEC_CATALOGUE {
             let file = entry.spec.file.to_ascii_lowercase();
-            assert!(file.contains("instruct"), "{} is not an instruct model", entry.spec.file);
+            // NVIDIA publishes only the chat-tuned Nemotron weights as GGUF, without "instruct" in
+            // the name; every other family must say it.
+            assert!(entry.family == Family::Nemotron || file.contains("instruct"), "{} is not an instruct model", entry.spec.file);
             assert!(!file.contains("-of-"), "{} is one part of a split GGUF", entry.spec.file);
             assert!(file.ends_with(".gguf"));
         }
@@ -301,5 +544,15 @@ mod tests {
         // The small two hold more context per token than the 7B — 128 and 144 KiB.
         assert_eq!(find("phi-4-mini-instruct").unwrap().kv_bytes_per_token, 131_072);
         assert_eq!(find("qwen3-4b-instruct-2507").unwrap().kv_bytes_per_token, 147_456);
+        // Hybrid Mamba models: only the attention layers hold a cache (GGUF headers, 2026-10-19).
+        assert_eq!(find("nemotron-3-nano-4b").unwrap().kv_bytes_per_token, 16_384);
+        assert_eq!(find("nemotron-3-nano-30b-a3b").unwrap().kv_bytes_per_token, 6_144);
+        assert_eq!(find("nemotron-3.5-super-120b-a12b").unwrap().kv_bytes_per_token, 8_192);
+    }
+
+    #[test]
+    fn only_bolt_needs_cuda() {
+        let cuda_only: Vec<&str> = EXEC_CATALOGUE.iter().filter(|e| e.cuda_only).map(|e| e.spec.id).collect();
+        assert_eq!(cuda_only, vec!["nemotron-3.5-bolt-74b-a9b"]);
     }
 }

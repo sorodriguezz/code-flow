@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { getSetting, listAiModels, setSetting } from "../lib/tauri/commands";
-import { PROVIDER_MODELS } from "../lib/aiProviders";
+import { PROVIDER_MODELS, registerAdapterNames } from "../lib/aiProviders";
+import { ADAPTER_PREFIX, learningAdapterNames } from "../lib/tauri/learningCommands";
 
 /** Model ids the user has typed into a "Custom" field for this provider. Kept as CSV in settings.
  * This is what keeps Claude Code and Codex current: neither CLI can enumerate its models, so
@@ -115,6 +116,10 @@ export const useAiModelsStore = create<AiModelsState>((set, get) => ({
           listAiModels(id).catch(() => [] as string[]),
           loadRemembered(id),
         ]);
+        // CodeFlow lists fine-tuned adapters by id; their names come from the learning tables.
+        if (id === "codeflow" && live.some((model) => model.startsWith(ADAPTER_PREFIX))) {
+          await learningAdapterNames().then(registerAdapterNames).catch(() => {});
+        }
         const kept = pruneRemembered(live, remembered);
         // Written back, not just filtered out of this render: the CSV is what the *next* session
         // reads, and a list only cleaned in memory grows its dead entries back the first time the

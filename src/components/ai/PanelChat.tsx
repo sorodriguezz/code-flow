@@ -6,6 +6,7 @@ import { SkillChip } from "../chat/ChatComposer";
 import { AttachmentBar } from "../chat/AttachmentBar";
 import { MentionMenu, useMentions } from "../chat/MentionMenu";
 import { TurnReview } from "./TurnReview";
+import { ContextSources } from "./ContextSources";
 import { useTextMenu } from "../common/TextMenu";
 import { useModelReadsImages } from "../../lib/useModelReadsImages";
 import { isImagePath, useImageDrop } from "../../lib/useImageDrop";
@@ -694,6 +695,7 @@ export function PanelChat({
                       : undefined
                   }
                 />
+                {message.role === "assistant" && message.context && <ContextSources sources={message.context} />}
                 {message.role === "assistant" && message.changes && project && (
                   <TurnReview repoPath={project.local_path} changes={message.changes} />
                 )}

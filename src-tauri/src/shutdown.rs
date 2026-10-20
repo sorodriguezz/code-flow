@@ -126,6 +126,11 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // parent, and this one can be holding twenty gigabytes; the sweep at the next launch would
         // find it, but only after it had sat in memory for however long the app was closed.
         tauri::async_runtime::block_on(crate::localai::executor::shutdown());
+        tauri::async_runtime::block_on(crate::localai::embedder::shutdown());
+        // A training run and the adapter server: Python processes that would otherwise keep the
+        // GPU and gigabytes of weights after the app is gone.
+        crate::learning::trainer::shutdown();
+        crate::learning::serving::shutdown();
         // And the editor completion's `llama-server`, for the same reason: the quit ends in
         // `process::exit`, where no destructor runs, so `kill_on_drop` never fires and the server
         // sat on its gigabyte until the next launch's sweep.

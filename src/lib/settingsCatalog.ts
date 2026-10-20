@@ -92,6 +92,9 @@ import {
   Volume2,
   Waypoints,
   Wrench,
+  FlaskConical,
+  Library,
+  Brain,
 } from "lucide-react";
 import type { TranslationKey } from "./i18n/translations";
 import type { SettingsSectionId } from "../state/uiStore";
@@ -453,6 +456,37 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         // user, 2026-10-01 — the AI gradient "no tiene nada que ver" outside one).
         icon: Sparkles,
         searchKey: "settings.searchTermsCompletion",
+      },
+      // The local AI platform (2026-10-19): what CodeFlow measures, knows, remembers and learns —
+      // owned by the app, not by whichever model is loaded.
+      {
+        id: "diagnostics",
+        labelKey: "evals.title",
+        hintKey: "evals.hint",
+        headingKey: "settings.railLocalAi",
+        icon: FlaskConical,
+        searchKey: "settings.searchTermsDiagnostics",
+      },
+      {
+        id: "knowledge",
+        labelKey: "knowledge.title",
+        hintKey: "knowledge.hint",
+        icon: Library,
+        searchKey: "settings.searchTermsKnowledge",
+      },
+      {
+        id: "memory",
+        labelKey: "memory.paneTitle",
+        hintKey: "memory.hint",
+        icon: Brain,
+        searchKey: "settings.searchTermsMemory",
+      },
+      {
+        id: "learning",
+        labelKey: "learning.title",
+        hintKey: "learning.hint",
+        icon: GraduationCap,
+        searchKey: "settings.searchTermsLearning",
       },
       // The two that configure nothing; they read back the consequences of the ones above.
       {

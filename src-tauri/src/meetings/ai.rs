@@ -114,7 +114,8 @@ impl Runner<'_> {
                     crate::ai_runs::emit_engine(&scope, "local", label, model, None);
                     stop = crate::ai_runs::subscribe(&scope.run_id);
                 }
-                let outcome = local_llm::chat(endpoint, &request, |_| {}, crate::ai_runs::cancelled(&mut stop)).await;
+                // Minutes are read later, not watched: background work in the local-model queue.
+                let outcome = crate::hybrid::scheduler::background(local_llm::chat(endpoint, &request, |_| {}, crate::ai_runs::cancelled(&mut stop))).await;
                 match outcome {
                     Ok(outcome) => {
                         let usage = crate::ai::AiUsage {

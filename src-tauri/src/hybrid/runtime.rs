@@ -237,6 +237,7 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
                     size_bytes: Some(entry.spec.size_bytes),
                     params: Some(entry.spec.params.to_string()),
                     quant: None,
+                    digest: Some(entry.spec.sha256.to_string()),
                 })
                 .collect();
             let model = settings
@@ -247,6 +248,9 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
             let installed = entry.is_some_and(|e| models::is_installed(&e.spec));
             let error = if !engine::is_available() {
                 Some(("engine-missing", "This install is missing its local model engine (llama-server).".to_string()))
+            } else if entry.is_some_and(|e| e.cuda_only) {
+                // The bundled engine is Metal/Vulkan; these weights load only on a CUDA build.
+                Some(("needs-cuda", format!("{} runs only on an NVIDIA card, through Ollama.", entry.map(|e| e.spec.label).unwrap_or("This model"))))
             } else if !installed {
                 Some(("not-downloaded", format!("{} isn't downloaded yet.", entry.map(|e| e.spec.label).unwrap_or("The model"))))
             } else {
@@ -260,7 +264,12 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
                     params_b: Some(e.params_b),
                     size_bytes: Some(e.spec.size_bytes),
                     active_share: Some(e.active_share() as f32),
-                    thinking: false,
+                    thinking: e.thinking,
+                    capabilities: std::iter::once("completion")
+                        .chain(e.tools.then_some("tools"))
+                        .chain(e.thinking.then_some("thinking"))
+                        .map(str::to_string)
+                        .collect(),
                 })
                 .unwrap_or_default();
             (error.is_none(), None, error, available, Some(model), details)
@@ -282,8 +291,13 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
                         Err(failure) => (Vec::new(), Some((failure.code(), failure.sentence()))),
                     };
                     let model = pick_model(settings.model_for(kind).as_deref(), &available);
+                    let chosen_cloud = settings.model_for(kind).as_deref().is_some_and(local_llm::is_cloud_name);
                     let error = list_error.or_else(|| {
-                        if available.is_empty() {
+                        if chosen_cloud {
+                            // A cloud model chosen before CodeFlow refused them: say so rather than
+                            // silently running a different model.
+                            Some(("cloud-model", "That model runs on Ollama's servers; CodeFlow only runs models on this machine.".to_string()))
+                        } else if available.is_empty() {
                             Some(("no-models", "The server answers but lists no models.".to_string()))
                         } else {
                             None
@@ -373,6 +387,44 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
     }
 }
 
+/// Before a request to an Ollama model, unloads the other models Ollama keeps resident when keeping
+/// them would push this one off the GPU or out of memory.
+///
+/// Ollama evicts on its own when a model cannot load at all, but a model that *partly* fits is
+/// loaded split between the GPU and the CPU — several times slower — while an idle model it no
+/// longer needs holds the rest of the card. Requests to one server are queued
+/// (`super::scheduler`), so nothing of this app's is mid-answer on the models it unloads.
+pub async fn make_room(resolved: &Resolved) {
+    if resolved.kind != BackendKind::Ollama {
+        return;
+    }
+    let (Some(model), Some(need)) = (resolved.model.as_deref(), resolved.need_bytes) else { return };
+    let endpoint = Endpoint::new(resolved.kind, &resolved.url, None);
+    let others: Vec<(String, u64)> = local_llm::ollama_residency(&endpoint)
+        .await
+        .into_iter()
+        .filter(|(name, _, _)| name != model)
+        .map(|(name, size, _)| (name, size))
+        .collect();
+    let others_bytes: u64 = others.iter().map(|(_, size)| *size).sum();
+    if crowded(need, others_bytes, resolved.also_resident, &resolved.machine) {
+        for (name, _) in others {
+            local_llm::ollama_unload(&endpoint, &name).await;
+        }
+    }
+}
+
+/// Whether models already resident (`others_bytes`) turn a model that fits on its own into one
+/// that spills to the CPU or does not fit.
+pub fn crowded(need: u64, others_bytes: u64, also_resident: u64, machine: &Machine) -> bool {
+    if others_bytes == 0 {
+        return false;
+    }
+    let alone = budget::fit(need, also_resident, machine);
+    let together = budget::fit(need + others_bytes, also_resident, machine);
+    matches!(alone, Fit::Comfortable | Fit::Tight) && matches!(together, Fit::SpillsToCpu | Fit::DoesNotFit)
+}
+
 /// The completion engine's model, when it is loaded: it shares the same memory as the executor.
 pub fn completion_engine_bytes() -> u64 {
     match engine::status() {
@@ -397,7 +449,18 @@ pub async fn connect(kind: BackendKind, url: &str, model: &str, ctx: u32) -> Res
     match kind {
         BackendKind::Bundled => {
             let entry = exec_catalogue::find(model).ok_or_else(|| format!("Unknown local model: {model}"))?;
-            let launch = executor::Launch { model_id: model.to_string(), ctx, no_reasoning: true };
+            let machine = hardware::machine().await;
+            let shape = budget::Shape {
+                bytes: entry.spec.size_bytes,
+                kv_bytes_per_token: entry.kv_bytes_per_token,
+                active_share: entry.active_share(),
+            };
+            let launch = executor::Launch {
+                model_id: model.to_string(),
+                ctx,
+                no_reasoning: !crate::model_registry::server_reasoning(),
+                cpu_moe_layers: budget::cpu_moe_layers(&shape, entry.moe_layers, ctx, completion_engine_bytes(), &machine),
+            };
             let engine = executor::ensure_ready(entry, models::path_of(&entry.spec), launch).await?;
             Ok(Live {
                 endpoint: Endpoint::new(BackendKind::Bundled, &engine.base_url(), None),
@@ -476,7 +539,7 @@ mod live {
     async fn the_bundled_executor_serves_chat_with_an_exact_window() {
         let Ok(gguf) = std::env::var("CODEFLOW_LIVE_GGUF") else { return };
         let entry = exec_catalogue::find("qwen2.5-coder-7b-instruct").unwrap();
-        let launch = executor::Launch { model_id: entry.spec.id.to_string(), ctx: 16_384, no_reasoning: true };
+        let launch = executor::Launch { model_id: entry.spec.id.to_string(), ctx: 16_384, no_reasoning: true, cpu_moe_layers: 0 };
         let engine = executor::ensure_ready(entry, std::path::PathBuf::from(gguf), launch).await.expect("engine");
         let endpoint = Endpoint::new(BackendKind::Bundled, &engine.base_url(), None);
 
@@ -549,3 +612,31 @@ mod tests {
         assert_eq!(pick_model(None, &[]), None);
     }
 }
+
+#[cfg(test)]
+mod room_tests {
+    use super::*;
+    use crate::hybrid::hardware::GpuKind;
+
+    #[test]
+    fn idle_models_are_unloaded_only_when_they_crowd_the_new_one_out() {
+        let gib = 1u64 << 30;
+        let card = Machine {
+            ram_bytes: 64 * gib,
+            ram_bandwidth: Some(60_000_000_000),
+            gpu: GpuKind::Discrete,
+            gpu_bytes: Some(24 * gib),
+            gpu_name: Some("NVIDIA GeForce RTX 4090".into()),
+            gpu_bandwidth: Some(1_008_000_000_000),
+        };
+        // 14 GB wanted, 11 GB idle beside it on a 24 GB card: together they spill.
+        assert!(crowded(14 * gib, 11 * gib, 0, &card));
+        // Room for both: nothing to unload.
+        assert!(!crowded(6 * gib, 4 * gib, 0, &card));
+        // Nothing else resident.
+        assert!(!crowded(14 * gib, 0, 0, &card));
+        // Too big even alone: unloading would not make it fit on the card, so it is left to Ollama.
+        assert!(!crowded(30 * gib, 4 * gib, 0, &card));
+    }
+}
+

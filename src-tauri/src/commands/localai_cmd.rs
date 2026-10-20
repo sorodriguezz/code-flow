@@ -115,7 +115,7 @@ pub async fn localai_download_model(
     model_id: String,
 ) -> Result<(), String> {
     let spec = catalogue::find(&model_id).ok_or_else(|| format!("Unknown model: {model_id}"))?;
-    let cancel = registry.register_download(model_id.clone());
+    let cancel = registry.register_download(model_id.clone())?;
     let result = download::fetch(&app, spec, &models::dir(), cancel).await;
     registry.clear_download(&model_id);
     result.map(|_| ())

@@ -1,3 +1,4 @@
+import type { ContextSource, EditorContextPayload } from "../editorContext";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActivityLogEntry,
@@ -672,8 +673,9 @@ export const terminalForeground = (id: string) => invoke<string | null>("termina
 export const terminalAgentStates = () => invoke<TerminalAgent[]>("terminal_agent_states");
 /** Names the agent the window just typed into session `id`. */
 export const terminalSetAgent = (id: string, agent: string) => invoke<boolean>("terminal_set_agent", { id, agent });
-/** The settings file a launched `claude` gets with `--settings`: its status hooks. Returns its path. */
-export const agentHookSettings = () => invoke<string>("agent_hook_settings");
+/** What a launched agent CLI is given: Claude's hooks file (`--settings`) and the note on `cf`, as a
+ *  file for Claude (`--append-system-prompt-file`) and as text for the others. */
+export const agentLaunchFiles = () => invoke<{ settings: string; note_file: string; note: string }>("agent_launch_files");
 /** A worktree of its own for an agent run in a terminal — no task behind it. */
 export const createAgentWorktree = (projectId: string, name: string) =>
   invoke<{ path: string; branch: string }>("create_agent_worktree", { projectId, name });
@@ -1513,6 +1515,10 @@ export interface ChatReply {
   checkpoint?: string | null;
   /** What the engine held in context on the last step of this turn, when it reports it (Claude). */
   context_tokens?: number | null;
+  /** What CodeFlow put in front of the engine besides the question — «Contexto usado». */
+  context?: ContextSource[];
+  /** The memory a "recuerda que…" in the question saved, approved. */
+  learned_memory?: string | null;
 }
 
 /** `sessionId` is the engine's resume token; `conversationId` is *our* identity for the chat and
@@ -1547,6 +1553,8 @@ export const sendChatMessage = (
   effort?: string | null,
   /** Plan mode: the turn runs read-only and answers with a plan. */
   plan?: boolean,
+  /** The editor's state for this question — see `lib/editorContext`. */
+  editor?: EditorContextPayload | null,
 ) =>
   invoke<ChatReply>("send_chat_message", {
     projectId,
@@ -1563,6 +1571,7 @@ export const sendChatMessage = (
     attachments: attachments && attachments.length > 0 ? attachments : null,
     effort: effort || null,
     plan: plan ?? null,
+    editor: editor ?? null,
   });
 
 // ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------

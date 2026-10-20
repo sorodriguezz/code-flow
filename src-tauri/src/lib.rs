@@ -11,6 +11,7 @@ mod autostart;
 mod api;
 mod appmenu;
 mod ai_locks;
+mod ai_memory;
 mod ai_accounts;
 mod ai_prompt_files;
 mod ai_quota;
@@ -28,6 +29,7 @@ mod custom;
 mod chat_mcp;
 mod archify_suggest;
 mod codemap;
+mod context;
 mod chat_title;
 mod git_exclude;
 mod ci;
@@ -41,6 +43,8 @@ mod datasource;
 mod db;
 mod debugger;
 mod dictation;
+mod evals;
+mod experiences;
 mod meetings;
 mod speech;
 mod flows;
@@ -58,12 +62,15 @@ mod bitbucket;
 mod github;
 mod gitlab;
 mod jupyter;
+mod knowledge;
+mod learning;
 mod json_schemas;
 mod npm;
 mod localai;
 mod local_history;
 mod hybrid;
 mod mcp_registry;
+mod model_registry;
 mod lsp;
 mod migrate;
 mod native_dialog;
@@ -109,6 +116,7 @@ mod keep_awake;
 mod keyvault;
 mod known_hosts;
 mod terminal;
+mod tool_gateway;
 mod tsserver;
 mod tray;
 /// The update check that needs no webview: the tray's "Check for updates…" and the boot watchdog.
@@ -404,6 +412,9 @@ pub fn run() {
     // The hybrid task's executor is a second `llama-server` with a pidfile of its own, and the
     // same reasoning applies to it — with a model that can be twenty gigabytes.
     localai::executor::sweep_stale();
+    localai::embedder::sweep_stale();
+    // The fine-tuning pane's `mlx_lm server`, by the same reasoning (checked to be our venv's Python).
+    learning::serving::sweep_stale();
 
     // And the prompt files a session that never ran its destructors left behind — every brief a
     // killed run wrote for its CLI, diffs included. Only a dead process's are touched, which is
@@ -572,6 +583,9 @@ pub fn run() {
             keep_awake::start(app.handle());
             // «Reuniones»: meetings a crash or a quit cut short, the audio retention, the call detector.
             commands::meetings_cmd::start(app.handle());
+            // Fine-tuning: a run a quit cut short becomes resumable, an idle adapter server is
+            // stopped, and the assisted/supervised modes find their window. See `learning`.
+            commands::learning_cmd::start(app.handle());
             // The main window, built here from its own entry in `tauri.conf.json` (which says
             // `"create": false`) rather than by Tauri before `setup` runs — the one difference being
             // `enable_clipboard_access`, which that config has no field for. Without it WebView2 (and
@@ -1633,7 +1647,7 @@ sharded_invoke_handler! {
         commands::terminal_cmd::terminal_foreground,
         commands::terminal_cmd::terminal_agent_states,
         commands::terminal_cmd::terminal_set_agent,
-        commands::terminal_cmd::agent_hook_settings,
+        commands::terminal_cmd::agent_launch_files,
         commands::terminal_cmd::list_workspace_terminals,
         commands::terminal_cmd::add_workspace_terminal,
         commands::terminal_cmd::resume_workspace_terminal,
@@ -2100,6 +2114,62 @@ sharded_invoke_handler! {
         commands::localexec_cmd::local_exec_ollama_pull,
         commands::localexec_cmd::local_exec_ollama_cancel_pull,
         commands::localexec_cmd::local_exec_ollama_delete,
+        commands::evals_cmd::ai_eval_run,
+        commands::evals_cmd::ai_eval_status,
+        commands::evals_cmd::ai_eval_cancel,
+        commands::evals_cmd::ai_eval_list,
+        commands::evals_cmd::ai_eval_delete,
+        commands::evals_cmd::ai_eval_compare,
+        commands::evals_cmd::ai_model_registry_list,
+        commands::evals_cmd::ai_tool_audit_list,
+        commands::evals_cmd::ai_runtime_status,
+        commands::experiences_cmd::ai_experience_record,
+        commands::experiences_cmd::ai_experiences_list,
+        commands::experiences_cmd::ai_experience_get,
+        commands::experiences_cmd::ai_experiences_counts,
+        commands::experiences_cmd::ai_experience_set_quality,
+        commands::experiences_cmd::ai_experience_delete,
+        commands::experiences_cmd::ai_experiences_clear,
+        commands::experiences_cmd::ai_experiences_export,
+        commands::experiences_cmd::ai_training_allowed,
+        commands::experiences_cmd::ai_set_training_allowed,
+        commands::knowledge_cmd::knowledge_overview,
+        commands::knowledge_cmd::knowledge_add_folder,
+        commands::knowledge_cmd::knowledge_update_folder,
+        commands::knowledge_cmd::knowledge_remove_folder,
+        commands::knowledge_cmd::knowledge_set_cloud,
+        commands::knowledge_cmd::knowledge_set_embed_model,
+        commands::knowledge_cmd::knowledge_reindex,
+        commands::knowledge_cmd::knowledge_search,
+        commands::knowledge_cmd::knowledge_download_model,
+        commands::knowledge_cmd::knowledge_cancel_download,
+        commands::knowledge_cmd::knowledge_delete_model,
+        commands::learning_cmd::learning_overview,
+        commands::learning_cmd::learning_serving,
+        commands::learning_cmd::learning_adapter_names,
+        commands::learning_cmd::learning_set_mode,
+        commands::learning_cmd::learning_prepare_env,
+        commands::learning_cmd::learning_build_dataset,
+        commands::learning_cmd::learning_delete_dataset,
+        commands::learning_cmd::learning_start_run,
+        commands::learning_cmd::learning_resume_run,
+        commands::learning_cmd::learning_cancel_run,
+        commands::learning_cmd::learning_delete_run,
+        commands::learning_cmd::learning_run_log,
+        commands::learning_cmd::learning_evaluate,
+        commands::learning_cmd::learning_cancel_evaluation,
+        commands::learning_cmd::learning_publish,
+        commands::learning_cmd::learning_rollback,
+        commands::learning_cmd::learning_rename_adapter,
+        commands::learning_cmd::learning_delete_adapter,
+        commands::learning_cmd::learning_stop_serving,
+        commands::memory_cmd::ai_memory_list,
+        commands::memory_cmd::ai_memory_create,
+        commands::memory_cmd::ai_memory_edit,
+        commands::memory_cmd::ai_memory_set_status,
+        commands::memory_cmd::ai_memory_delete,
+        commands::memory_cmd::ai_memory_revisions,
+        commands::memory_cmd::ai_memory_propose,
         commands::hybrid_cmd::create_hybrid_task,
         commands::hybrid_cmd::hybrid_triage,
         commands::hybrid_cmd::upsert_hybrid_template,

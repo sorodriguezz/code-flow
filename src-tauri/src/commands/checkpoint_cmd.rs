@@ -31,7 +31,24 @@ pub fn ai_checkpoint_changed_paths(repo_path: String, checkpoint_id: String) -> 
 #[tauri::command(async)]
 pub fn restore_ai_checkpoint(repo_path: String, checkpoint_id: String) -> Result<Vec<String>, String> {
     let _write = crate::git::write_lock();
-    checkpoint::restore(&repo_path, &checkpoint_id)
+    let restored = checkpoint::restore(&repo_path, &checkpoint_id)?;
+    record_revert(&repo_path, &checkpoint_id, &restored);
+    Ok(restored)
+}
+
+/// An AI change undone is the plainest "that answer was wrong" there is: kept as an experience
+/// (`crate::experiences`), pointing at the turn by its checkpoint.
+fn record_revert(repo_path: &str, checkpoint_id: &str, paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    crate::experiences::capture_at(
+        repo_path,
+        crate::experiences::Source::CheckpointRestore,
+        crate::experiences::Signal::Reverted,
+        Some(format!("checkpoint:{checkpoint_id}")),
+        serde_json::json!({ "checkpoint": checkpoint_id, "paths": paths }),
+    );
 }
 
 #[tauri::command(async)]
@@ -69,5 +86,7 @@ pub fn ai_checkpoint_file(repo_path: String, checkpoint_id: String, path: String
 #[tauri::command(async)]
 pub fn restore_ai_checkpoint_paths(repo_path: String, checkpoint_id: String, paths: Vec<String>) -> Result<Vec<String>, String> {
     let _write = crate::git::write_lock();
-    checkpoint::restore_paths(&repo_path, &checkpoint_id, &paths)
+    let restored = checkpoint::restore_paths(&repo_path, &checkpoint_id, &paths)?;
+    record_revert(&repo_path, &checkpoint_id, &restored);
+    Ok(restored)
 }

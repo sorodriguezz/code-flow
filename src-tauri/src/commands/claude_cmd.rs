@@ -49,7 +49,14 @@ pub struct ChatReply {
     /// What the engine held in context on the last step of this turn, when it reports it (Claude)
     /// — the composer's meter. See `AiRun::context_tokens`.
     context_tokens: Option<i64>,
+    /// What CodeFlow put in front of the engine besides the question — «Contexto usado».
+    context: Vec<crate::context::ContextSource>,
+    /// The memory a "recuerda que…" in the question saved, approved — the panel says so.
+    learned_memory: Option<String>,
 }
+
+/// How much of a turn's message the approved memories may take.
+const MEMORY_NOTE_CHARS: usize = 3_000;
 
 /// The active AI provider id, from the `ai_provider` setting. Falls back to Claude when unset or
 /// blank so a fresh install (or a cleared setting) always has a working engine.
@@ -873,6 +880,7 @@ pub(crate) async fn resolve_finding_on(
         let Some(command) = verify_command.as_deref() else { return Ok(fixed) };
         let repo = std::path::Path::new(&project.local_path);
         let first = super::fix_verify::run(command, repo).await?;
+        record_verification(&project.local_path, command, first.passed, 1);
         if first.passed {
             return Ok(format!("{fixed}\n\n✅ Verificado: `{command}` pasó."));
         }
@@ -880,6 +888,7 @@ pub(crate) async fn resolve_finding_on(
         let repair = super::fix_verify::repair_prompt(&finding_prompt, command, &first);
         let repaired = ai::apply_finding_fix(&*config.engine, &config.binary, &config.model, &repair, &project.local_path).await?;
         let second = super::fix_verify::run(command, repo).await?;
+        record_verification(&project.local_path, command, second.passed, 2);
         Ok(if second.passed {
             format!("{fixed}\n\n🔁 La primera versión no pasaba `{command}`; se ajustó y ahora pasa.\n{repaired}")
         } else {
@@ -1055,8 +1064,14 @@ pub async fn send_chat_message(
     // The composer's plan mode: this turn is read-only and answers with a plan — see
     // `ai::PLAN_MODE_NOTE`.
     plan: Option<bool>,
+    // The editor's state when the question was sent: open file, selection, unsaved buffers,
+    // diagnostics — see `crate::context`.
+    editor: Option<crate::context::EditorContext>,
 ) -> Result<ChatReply, String> {
     let plan = plan.unwrap_or(false);
+    let editor = editor.unwrap_or_default();
+    let mut context_sources: Vec<crate::context::ContextSource> = Vec::new();
+    let mut learned_memory: Option<String> = None;
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         // Moved to the chat workspace (`chat_cmd::chat_move_from_panel`): it lives there now, and a
@@ -1279,10 +1294,57 @@ pub async fn send_chat_message(
         if let Ok(conn) = db.0.lock() {
             engine_message.push_str(&ai::chat_turn_rules(&conn));
         }
-        if let Some(note) = ai::mention_note(&ai::mentioned_paths(&asked, &project.local_path)) {
+        let mentioned = ai::mentioned_paths(&asked, &project.local_path);
+        context_sources.extend(crate::context::mention_sources(&mentioned));
+        if let Some(note) = ai::mention_note(&mentioned) {
             engine_message.push_str(&note);
         }
-        engine_message.push_str(&special_mention_notes(&asked, &project.local_path));
+        let diffs = special_mention_notes(&asked, &project.local_path);
+        if !diffs.is_empty() {
+            context_sources.push(crate::context::ContextSource::new(crate::context::SourceKind::Diff, "diff", None));
+        }
+        engine_message.push_str(&diffs);
+        let (editor_note, editor_sources) = crate::context::editor_note(&editor, std::path::Path::new(&project.local_path));
+        engine_message.push_str(&editor_note);
+        context_sources.extend(editor_sources);
+        // Memories the user approved for this project (`crate::ai_memory`) — a cloud engine gets only
+        // the ones not marked local-only — and a "recuerda que…" in the question becomes one.
+        if let Ok(conn) = db.0.lock() {
+            let cloud = config.provider != crate::local_agent::PROVIDER_ID;
+            if let Some(rule) = crate::ai_memory::remember_request(&asked) {
+                if let Ok(memory) = crate::ai_memory::create(
+                    &conn,
+                    crate::ai_memory::NewMemory {
+                        scope: Some(crate::ai_memory::Scope::Project),
+                        workspace_id: Some(workspace_id.clone()),
+                        project_id: Some(project_id.clone()),
+                        kind: Some(crate::ai_memory::Kind::Preference),
+                        title: rule,
+                        approved: true,
+                        source: Some("user".into()),
+                        ..Default::default()
+                    },
+                ) {
+                    learned_memory = Some(memory.title);
+                }
+            }
+            if let Ok(found) = crate::ai_memory::relevant(&conn, Some(&workspace_id), Some(&project_id), &asked, cloud, MEMORY_NOTE_CHARS) {
+                if let Some((note, sources)) = crate::ai_memory::note(&found) {
+                    engine_message.push_str(&note);
+                    context_sources.extend(sources);
+                }
+            }
+        }
+        // A read-only Gemini or Grok run refuses MCP tools, so it cannot call `search_knowledge`:
+        // the best passages ride the question instead (`knowledge::prompt_note`).
+        if analysis && matches!(config.provider.as_str(), "gemini" | "grok") {
+            if let Ok(conn) = db.0.lock() {
+                if let Some((note, sources)) = crate::knowledge::prompt_note(&conn, &project.local_path, &asked) {
+                    engine_message.push_str(&note);
+                    context_sources.extend(sources);
+                }
+            }
+        }
         if plan {
             engine_message.push_str(ai::PLAN_MODE_NOTE);
         }
@@ -1338,7 +1400,8 @@ pub async fn send_chat_message(
     });
     // Kept for the title run below; `app` moves into the run's scope.
     let title_app = app.clone();
-    let (result, trace) = ai_runs::scoped_with_trace(app, run_id, async {
+    let unsaved = crate::context::unsaved_in(&editor, std::path::Path::new(&project.local_path));
+    let (result, trace) = ai_runs::scoped_with_trace(app, run_id, crate::context::with_unsaved(unsaved, async {
         ai::chat_with_repo(
             &*config.engine,
             &config.binary,
@@ -1364,7 +1427,7 @@ pub async fn send_chat_message(
             effort.as_deref().map(str::trim).filter(|e| ai::effort::valid(e)),
         )
         .await
-    })
+    }))
     .await;
     let response_time_ms = started.elapsed().as_millis() as i64;
     // Kept, with the files it differs in, when the turn changed something — the per-turn review
@@ -1424,6 +1487,25 @@ pub async fn send_chat_message(
                     );
                 }
             }
+            // A failed or stopped turn is evidence about the engine and the question — see
+            // `crate::experiences`.
+            crate::experiences::record_global(crate::experiences::NewExperience {
+                workspace_id: Some(workspace_id.clone()),
+                project_id: Some(project_id.clone()),
+                source: Some(crate::experiences::Source::Chat),
+                signal: Some(if e.starts_with(ai_runs::CANCELLED_MARKER) {
+                    crate::experiences::Signal::Cancelled
+                } else {
+                    crate::experiences::Signal::Error
+                }),
+                provider: Some(config.provider.clone()),
+                model: Some(config.model.clone()).filter(|m| !m.is_empty()),
+                task: Some(ai::task::CHAT.to_string()),
+                run_ref: Some(format!("conversation:{conversation_id}")),
+                prompt: Some(asked.clone()),
+                detail: serde_json::json!({ "error": e.chars().take(400).collect::<String>(), "at": chrono::Utc::now().timestamp_millis() }),
+                ..Default::default()
+            });
             return Err(e);
         }
     };
@@ -1471,6 +1553,9 @@ pub async fn send_chat_message(
             if let Some(checkpoint) = turn_checkpoint.as_deref() {
                 let _ = queries::set_activity_checkpoint(&conn, &entry.id, checkpoint);
             }
+            if !context_sources.is_empty() {
+                let _ = queries::set_activity_context(&conn, &entry.id, &serde_json::to_string(&context_sources).unwrap_or_default());
+            }
             entry.created_at
         })
         // The reply is already in hand; a failed *write* shouldn't cost the user their answer, so
@@ -1506,6 +1591,8 @@ pub async fn send_chat_message(
         account_changed,
         checkpoint: turn_checkpoint,
         context_tokens: run.context_tokens,
+        context: context_sources,
+        learned_memory,
     })
 }
 
@@ -1614,6 +1701,8 @@ async fn run_hybrid_execute(
                 account_changed: false,
                 checkpoint: None,
                 context_tokens: None,
+                context: Vec::new(),
+                learned_memory: None,
             })
         }
     }
@@ -1790,3 +1879,16 @@ mod tests {
         assert!(routed_providers(&conn).unwrap().contains("claude"));
     }
 }
+
+/// A fix's verification, kept as an experience: whether the command passed after the model's change
+/// (`attempt` 2 is after the one repair turn).
+fn record_verification(repo: &str, command: &str, passed: bool, attempt: u8) {
+    crate::experiences::capture_at(
+        repo,
+        crate::experiences::Source::FixVerify,
+        if passed { crate::experiences::Signal::Passed } else { crate::experiences::Signal::Failed },
+        None,
+        serde_json::json!({ "command": command, "attempt": attempt, "at": chrono::Utc::now().timestamp_millis() }),
+    );
+}
+

@@ -1,3 +1,4 @@
+import { isMac } from "../../lib/platform";
 import { useEffect, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -543,6 +544,11 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                   <span>
                     <span className="block text-[13px] font-medium">{t("codeflow.allowCommands")}</span>
                     <span className="block text-[11px] text-[var(--cf-text-muted)]">{t("codeflow.allowCommandsHint")}</span>
+                    {/* What protects the machine when a model runs a command — `tool_gateway`. Said
+                        on the platform where it is not there, too, rather than left to be assumed. */}
+                    <span className="mt-0.5 block text-[11px] text-[var(--cf-text-muted)]">
+                      {t(isMac() ? "codeflow.commandsSandboxed" : "codeflow.commandsNotSandboxed")}
+                    </span>
                   </span>
                 </label>
               )}

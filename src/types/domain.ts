@@ -917,6 +917,8 @@ export interface ActivityLogEntry {
   account_id?: string | null;
   /** What the turn changed on disk, as JSON `{"id", "paths"}` — see `parseTurnChanges`. */
   checkpoint?: string | null;
+  /** What CodeFlow put in front of the engine for the turn, as JSON — see `lib/editorContext`. */
+  context?: string | null;
 }
 
 export interface JobHistoryEntry {

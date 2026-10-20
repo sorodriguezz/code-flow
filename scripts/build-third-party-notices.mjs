@@ -1450,6 +1450,26 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, m
     "| Piper voice en_GB «northern_english_male» | CC-BY-SA-4.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |",
     "",
   );
+  // Settings › Aprendizaje's «Preparar»: a Python environment of the app's own under
+  // `training/`, never in the installer. The self-contained CPython is pinned by release and SHA-256
+  // in `learning/env.rs`; pip installs the trainers into that environment.
+  w(
+    "### Fine-tuning: Python and the trainers",
+    "",
+    "Downloaded only when training is prepared from Settings › Learning, into a folder of the app's own",
+    "data directory. A machine with no Python 3.9 or newer gets a self-contained CPython first, pinned by",
+    "release and digest in [`src-tauri/src/learning/env.rs`](src-tauri/src/learning/env.rs); pip then installs the trainer for",
+    "the machine — and whatever those packages require — from the Python Package Index.",
+    "",
+    "| Component | Licence (SPDX) | Published at |",
+    "|---|---|---|",
+    "| CPython (python-build-standalone builds; the libraries a build bundles keep their own licences) | PSF-2.0 | <https://github.com/astral-sh/python-build-standalone> |",
+    "| MLX and mlx-lm (Apple Silicon) | MIT | <https://github.com/ml-explore/mlx-lm> |",
+    "| PyTorch (NVIDIA) | BSD-3-Clause | <https://github.com/pytorch/pytorch> |",
+    "| Transformers, PEFT, TRL, Datasets, Accelerate (NVIDIA) | Apache-2.0 | <https://github.com/huggingface> |",
+    "| bitsandbytes (NVIDIA) | MIT | <https://github.com/bitsandbytes-foundation/bitsandbytes> |",
+    "",
+  );
 
   // -- Keeping it honest ---------------------------------------------------
 

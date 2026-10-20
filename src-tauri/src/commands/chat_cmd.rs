@@ -1711,6 +1711,15 @@ pub async fn chat_send(
         if let Some(note) = ai::workspace_mention_note(&ai::workspace_mentioned_paths(&asked, &named)) {
             engine_message.push_str(&note);
         }
+        // The workspace's and the global memories the user approved (`crate::ai_memory`). This chat
+        // runs on CLI engines, so the local-only ones stay out.
+        if let Ok(conn) = db.0.lock() {
+            if let Ok(found) = crate::ai_memory::relevant(&conn, Some(&conversation.workspace_id), None, &asked, true, 3_000) {
+                if let Some((note, _)) = crate::ai_memory::note(&found) {
+                    engine_message.push_str(&note);
+                }
+            }
+        }
     }
     if plan {
         engine_message.push_str(ai::PLAN_MODE_NOTE);

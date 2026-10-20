@@ -2022,6 +2022,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_chat_turn_checkpoints(conn)?;
     add_notes_fts(conn)?;
     add_batch_to_agent_tasks(conn)?;
+    add_context_to_activity_log(conn)?;
+    add_ai_platform_tables(conn)?;
     Ok(())
 }
 
@@ -4515,6 +4517,14 @@ fn add_engine_meta_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
 
 /// What a chat turn changed on disk — see `ActivityLogEntry::checkpoint`. Rows written before stay
 /// NULL and simply offer no per-turn review.
+/// The «Contexto usado» of a turn: what CodeFlow put in front of the engine — see `crate::context`.
+fn add_context_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "activity_log", "context")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE activity_log ADD COLUMN context TEXT;")
+}
+
 fn add_checkpoint_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
     if has_column(conn, "activity_log", "checkpoint")? {
         return Ok(());
@@ -5063,3 +5073,200 @@ mod tests {
         assert_eq!(natural_cmp("Paso", "Paso 1"), Less);
     }
 }
+
+/// The local AI platform's own tables — see `crate::model_registry`, `crate::evals`,
+/// `crate::experiences`, `crate::ai_memory`, `crate::knowledge`, `crate::tool_gateway` and
+/// `crate::learning`.
+///
+/// `workspace_id` / `project_id` are nullable with a cascading reference: `NULL` is "global" (a
+/// null never violates the reference, unlike the `''` the older scoped tables could not use), and a
+/// row that belongs to a workspace or a repository dies with it. Large artefacts (datasets,
+/// adapters, the knowledge index) live in files under the app's roots; these rows only point at
+/// them. The knowledge index itself is a cache database of its own (`knowledge::index`), so it is
+/// rebuilt rather than backed up.
+pub(crate) fn add_ai_platform_tables(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS ai_model_registry (
+            id              TEXT PRIMARY KEY,
+            backend         TEXT NOT NULL,
+            model           TEXT NOT NULL,
+            digest          TEXT,
+            family          TEXT,
+            declared        TEXT NOT NULL DEFAULT '{}',
+            tools_verified  INTEGER,
+            verified_digest TEXT,
+            conformance     TEXT,
+            updated_at      INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_evaluations (
+            id           TEXT PRIMARY KEY,
+            backend      TEXT NOT NULL,
+            model        TEXT NOT NULL,
+            digest       TEXT,
+            adapter_id   TEXT,
+            machine      TEXT NOT NULL DEFAULT '{}',
+            score        REAL NOT NULL,
+            tools_passed INTEGER,
+            tools_total  INTEGER,
+            report       TEXT NOT NULL,
+            created_at   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_evaluations_model ON ai_evaluations(backend, model, created_at);
+
+        CREATE TABLE IF NOT EXISTS ai_experiences (
+            id               TEXT PRIMARY KEY,
+            created_at       INTEGER NOT NULL,
+            workspace_id     TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+            project_id       TEXT REFERENCES projects(id) ON DELETE CASCADE,
+            source           TEXT NOT NULL,
+            signal           TEXT NOT NULL,
+            provider         TEXT,
+            model            TEXT,
+            digest           TEXT,
+            task             TEXT,
+            run_ref          TEXT,
+            prompt           TEXT,
+            response         TEXT,
+            detail           TEXT NOT NULL DEFAULT '{}',
+            training_allowed INTEGER NOT NULL DEFAULT 0,
+            quality          TEXT NOT NULL DEFAULT 'unreviewed',
+            fingerprint      TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_experiences_ws ON ai_experiences(workspace_id, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_experiences_fp ON ai_experiences(fingerprint) WHERE fingerprint IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS ai_memories (
+            id           TEXT PRIMARY KEY,
+            scope        TEXT NOT NULL,
+            workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+            project_id   TEXT REFERENCES projects(id) ON DELETE CASCADE,
+            task_ref     TEXT,
+            kind         TEXT NOT NULL,
+            title        TEXT NOT NULL,
+            body         TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            source       TEXT NOT NULL DEFAULT 'user',
+            evidence     TEXT NOT NULL DEFAULT '[]',
+            supersedes   TEXT,
+            local_only   INTEGER NOT NULL DEFAULT 0,
+            expires_at   INTEGER,
+            created_at   INTEGER NOT NULL,
+            updated_at   INTEGER NOT NULL,
+            used_at      INTEGER,
+            use_count    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_memories_scope ON ai_memories(status, scope, workspace_id, project_id);
+        CREATE VIRTUAL TABLE IF NOT EXISTS ai_memories_fts USING fts5(
+            memory_id UNINDEXED,
+            title,
+            body,
+            tokenize = 'unicode61 remove_diacritics 2'
+        );
+        CREATE TRIGGER IF NOT EXISTS ai_memories_fts_insert AFTER INSERT ON ai_memories BEGIN
+            DELETE FROM ai_memories_fts WHERE memory_id = new.id;
+            INSERT INTO ai_memories_fts (memory_id, title, body) VALUES (new.id, new.title, new.body);
+        END;
+        CREATE TRIGGER IF NOT EXISTS ai_memories_fts_update AFTER UPDATE OF title, body ON ai_memories BEGIN
+            DELETE FROM ai_memories_fts WHERE memory_id = old.id;
+            INSERT INTO ai_memories_fts (memory_id, title, body) VALUES (new.id, new.title, new.body);
+        END;
+        CREATE TRIGGER IF NOT EXISTS ai_memories_fts_delete AFTER DELETE ON ai_memories BEGIN
+            DELETE FROM ai_memories_fts WHERE memory_id = old.id;
+        END;
+
+        CREATE TABLE IF NOT EXISTS ai_memory_revisions (
+            id        TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL REFERENCES ai_memories(id) ON DELETE CASCADE,
+            at        INTEGER NOT NULL,
+            action    TEXT NOT NULL,
+            title     TEXT NOT NULL DEFAULT '',
+            body      TEXT NOT NULL DEFAULT '',
+            actor     TEXT NOT NULL DEFAULT 'user'
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_memory_revisions ON ai_memory_revisions(memory_id, at);
+
+        CREATE TABLE IF NOT EXISTS ai_knowledge_collections (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            kind         TEXT NOT NULL,
+            path         TEXT NOT NULL DEFAULT '',
+            local_only   INTEGER NOT NULL DEFAULT 0,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            created_at   INTEGER NOT NULL,
+            updated_at   INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_tool_audit (
+            id           TEXT PRIMARY KEY,
+            at           INTEGER NOT NULL,
+            run_ref      TEXT,
+            workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+            project_id   TEXT REFERENCES projects(id) ON DELETE CASCADE,
+            provider     TEXT NOT NULL DEFAULT 'codeflow',
+            model        TEXT,
+            tool         TEXT NOT NULL,
+            level        TEXT NOT NULL,
+            args         TEXT NOT NULL DEFAULT '{}',
+            outcome      TEXT NOT NULL,
+            exit_code    INTEGER,
+            duration_ms  INTEGER,
+            detail       TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_tool_audit_at ON ai_tool_audit(at);
+
+        CREATE TABLE IF NOT EXISTS ai_datasets (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            family      TEXT NOT NULL,
+            path        TEXT NOT NULL,
+            train_count INTEGER NOT NULL DEFAULT 0,
+            valid_count INTEGER NOT NULL DEFAULT 0,
+            test_count  INTEGER NOT NULL DEFAULT 0,
+            manifest    TEXT NOT NULL DEFAULT '{}',
+            created_at  INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_training_runs (
+            id          TEXT PRIMARY KEY,
+            dataset_id  TEXT REFERENCES ai_datasets(id) ON DELETE SET NULL,
+            base_model  TEXT NOT NULL,
+            base_sha    TEXT NOT NULL DEFAULT '',
+            family      TEXT NOT NULL,
+            worker      TEXT NOT NULL,
+            method      TEXT NOT NULL,
+            params      TEXT NOT NULL DEFAULT '{}',
+            status      TEXT NOT NULL,
+            progress    TEXT NOT NULL DEFAULT '{}',
+            log_path    TEXT NOT NULL DEFAULT '',
+            out_dir     TEXT NOT NULL DEFAULT '',
+            adapter_id  TEXT,
+            error       TEXT,
+            created_at  INTEGER NOT NULL,
+            started_at  INTEGER,
+            finished_at INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_model_adapters (
+            id                TEXT PRIMARY KEY,
+            name              TEXT NOT NULL,
+            base_model        TEXT NOT NULL,
+            base_sha          TEXT NOT NULL DEFAULT '',
+            family            TEXT NOT NULL,
+            dataset_id        TEXT REFERENCES ai_datasets(id) ON DELETE SET NULL,
+            run_id            TEXT REFERENCES ai_training_runs(id) ON DELETE SET NULL,
+            path              TEXT NOT NULL,
+            format            TEXT NOT NULL,
+            framework_version TEXT NOT NULL DEFAULT '',
+            metrics           TEXT NOT NULL DEFAULT '{}',
+            status            TEXT NOT NULL,
+            evaluation_id     TEXT,
+            created_at        INTEGER NOT NULL,
+            published_at      INTEGER
+        );
+        "#,
+    )
+}
+

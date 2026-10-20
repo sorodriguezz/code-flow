@@ -5,6 +5,8 @@ import { chipClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import type { LocalAiTier } from "../../lib/tauri/localaiCommands";
 import type { LocalAiDownloadEvent } from "../../lib/tauri/events";
+import { openExternalUrl } from "../../lib/tauri/commands";
+import { pushErrorToast } from "../../state/toastStore";
 
 /**
  * One downloadable model, as both local-model panes draw it: the editor's autocomplete
@@ -61,6 +63,9 @@ export interface DownloadableModel {
   min_ram_gb: number;
   installed: boolean;
   partial_bytes: number | null;
+  /** The licence text, when {@link DownloadableModel.licence} is not an SPDX identifier: the name
+   *  becomes a link to it. */
+  licence_url?: string | null;
 }
 
 export function ModelDownloadRow({
@@ -73,6 +78,7 @@ export function ModelDownloadRow({
   onCancel,
   onUse,
   onDelete,
+  blocked,
 }: {
   model: DownloadableModel;
   active: boolean;
@@ -88,6 +94,8 @@ export function ModelDownloadRow({
    *  feature picks from its own pane. */
   onUse?: () => void;
   onDelete: () => void;
+  /** Why this machine cannot run the model, when it cannot: the download button gives way to it. */
+  blocked?: string;
 }) {
   const t = useT();
   const busy = progress?.phase === "downloading" || progress?.phase === "verifying";
@@ -122,7 +130,17 @@ export function ModelDownloadRow({
             <span aria-hidden>·</span>
             <span>{t("localai.needsRam", { gb: String(model.min_ram_gb) })}</span>
             <span aria-hidden>·</span>
-            <span>{model.licence}</span>
+            {model.licence_url ? (
+              <button
+                type="button"
+                onClick={() => void openExternalUrl(model.licence_url ?? "").catch((e: unknown) => pushErrorToast(String(e)))}
+                className="underline decoration-dotted underline-offset-2 hover:text-[var(--cf-text)]"
+              >
+                {model.licence}
+              </button>
+            ) : (
+              <span>{model.licence}</span>
+            )}
           </div>
         </div>
 
@@ -142,6 +160,8 @@ export function ModelDownloadRow({
                 <Trash2 size={13} />
               </button>
             </>
+          ) : blocked ? (
+            <span className="text-[11px] text-[var(--cf-warning)]">{blocked}</span>
           ) : (
             <button onClick={onDownload} className={buttonClass({ variant: "secondary", size: "sm" })}>
               <Download size={13} />

@@ -1,3 +1,4 @@
+import { collectEditorContext, parseContextSources, type ContextSource } from "../lib/editorContext";
 import { create } from "zustand";
 import { speakAnswer } from "../lib/speech/speakAnswer";
 import {
@@ -12,7 +13,7 @@ import {
 import { useChatHistoryStore } from "./activityStore";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { translate } from "./languageStore";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
@@ -113,6 +114,9 @@ export interface ChatMessage {
   /** On an answer: the files the turn changed and the checkpoint taken before it — the per-turn
    *  review under the bubble. Read back from the row, so a reopened conversation keeps it. */
   changes?: TurnChanges;
+  /** On an answer: what CodeFlow put in front of the engine — «Contexto usado». Read back from the
+   *  row too. */
+  context?: ContextSource[];
 }
 
 /** What a chat turn changed on disk: the checkpoint from before it, and the files that differed
@@ -302,6 +306,10 @@ export function turnsToMessages(entries: ActivityLogEntry[], cleared: readonly n
         trace: parseTrace(e.trace),
         traceId: traceIdOf(e.trace, e.id),
         changes: parseTurnChanges(e.checkpoint),
+        context: (() => {
+          const sources = parseContextSources(e.context);
+          return sources.length > 0 ? sources : undefined;
+        })(),
       },
     ];
   });
@@ -723,6 +731,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         files.map((file) => file.id),
         get().effortByConversation[conversationId] ?? null,
         plan,
+        collectEditorContext(projectId, trimmed),
       ),
     )
       .then((reply) => {
@@ -745,6 +754,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               trace: trace.length > 0 ? trace : undefined,
               plan: plan || undefined,
               changes: parseTurnChanges(reply.checkpoint),
+              context: reply.context && reply.context.length > 0 ? reply.context : undefined,
             },
           ],
           sessionId: reply.session_id,
@@ -758,6 +768,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           streamText: "",
         }));
         void useChatHistoryStore.getState().load(projectId);
+        // Said only when a memory was really saved — never to suggest the model itself learned.
+        if (reply.learned_memory) pushSuccessToast(translate("memory.learned", { title: reply.learned_memory }));
         // The turn is persisted by the time this resolves, so a phone can go and read it. Nothing
         // about a chat turn moves a byte on disk, and its output stream is one no phone subscribes
         // to unless it already knows the run — so this emit is the only thing that tells one the

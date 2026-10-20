@@ -89,6 +89,9 @@ export interface BackupInclude {
   reviews: boolean;
   agentWork: boolean;
   cookies: boolean;
+  /** Memories, knowledge folders, experiences and bench reports — the local AI platform's own
+   *  record, which is what makes a second machine (or a reinstall) start already knowing. */
+  aiLearning: boolean;
 }
 
 /** The order the panel lists the switches in — matches `GROUPS` in `snapshot.rs`. */
@@ -105,6 +108,7 @@ export const INCLUDE_KEYS: readonly (keyof BackupInclude)[] = [
   "requestHistory",
   "conversations",
   "reviews",
+  "aiLearning",
   "agentWork",
   "cookies",
 ];

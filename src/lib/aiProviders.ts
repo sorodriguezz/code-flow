@@ -361,6 +361,9 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
   // account can actually reach. Which ids those are depends on the plan, so this is deliberately
   // just the one every account has.
   grok: [{ id: "grok-4.5", label: "Grok 4.5" }],
+  // The local models themselves come from the server (`local_agent::available_models`); «auto» is
+  // CodeFlow's own choice among them — the best the bench measured on this machine for the task.
+  codeflow: [{ id: "auto", labelKey: "codeflow.modelAuto" }],
   // opencode addresses models as `provider/model`, and which are available depends entirely on the
   // providers configured inside it — so these are just format examples, including one of each of
   // its own services (Zen pay-as-you-go vs Go subscription). The live list from `opencode models`
@@ -401,6 +404,9 @@ export function modelDisplayLabel(
 ): string {
   const trimmed = modelId.trim();
   if (!trimmed) return t("ai.modelDefault");
+  if (providerId === "codeflow" && trimmed.startsWith(ADAPTER_PREFIX)) {
+    return adapterNames.get(trimmed.slice(ADAPTER_PREFIX.length)) ?? t("codeflow.modelAdapter");
+  }
   // Claude Code's `[1m]` names the 1M-context variant of a model (`claude-opus-4-6[1m]`), and a run
   // reports it back that way. The bracket is not part of the family, so it is matched without it
   // and said after the label rather than turning a known model into a raw id.
@@ -413,6 +419,18 @@ export function modelDisplayLabel(
   const label = known.label ?? (known.labelKey ? t(known.labelKey) : base);
   if (!variant) return label;
   return variant.toLowerCase() === "[1m]" ? `${label} · 1M` : `${label} ${variant}`;
+}
+
+/** The prefix of a fine-tuned adapter among CodeFlow's models (`learning::serving::PREFIX`). */
+const ADAPTER_PREFIX = "adapter:";
+
+/** The names of the published adapters, by id — an adapter's model id is `adapter:<uuid>`, which
+ *  nobody should have to read. Filled by `aiModelsStore` whenever it fetches CodeFlow's list. */
+const adapterNames = new Map<string, string>();
+
+export function registerAdapterNames(names: [string, string][]): void {
+  adapterNames.clear();
+  for (const [id, name] of names) adapterNames.set(id, name);
 }
 
 /** Whether a catalog id is a previous generation — see `AiModelOption.legacy`. */

@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
-use tokio::sync::{watch, Notify, Semaphore};
+use tokio::sync::{watch, Notify};
 
 use super::apply;
 use super::budget;
@@ -36,10 +36,6 @@ pub const LOCAL_UNAVAILABLE_MARKER: &str = "LOCAL_MODEL_UNAVAILABLE::";
 pub const ITEM_EVENT: &str = "hybrid:item";
 /// A task is being written: live token count. Not stored anywhere.
 pub const PROGRESS_EVENT: &str = "hybrid:progress";
-
-/// One generation at a time on this machine, across every run in every window. Two runs feeding
-/// one local server would each get half a GPU and twice the memory pressure; queueing is honest.
-static LOCAL_GATE: Semaphore = Semaphore::const_new(1);
 
 /// Each reference is cut to this many lines before the budget is even consulted — a reference is
 /// for reading a signature or a pattern, not a second copy of a module.
@@ -166,6 +162,11 @@ fn kilo(tokens: i64) -> String {
 /// Runs the plan. `Ok` is the report the review reads (never empty); `Err` is a failure for the
 /// chain — prefixed [`LOCAL_UNAVAILABLE_MARKER`] to pause it, or the cancel marker after a Stop.
 pub async fn run<R: Runtime>(job: Job<'_, R>) -> Result<String, String> {
+    // Background work for the local-model queue: nobody is waiting on any one executor request.
+    super::scheduler::background(run_inner(job)).await
+}
+
+async fn run_inner<R: Runtime>(job: Job<'_, R>) -> Result<String, String> {
     let cancel_id = ai_runs::current().map(|ctx| ctx.run_id.clone()).unwrap_or_default();
     let mut rx = ai_runs::subscribe(&cancel_id);
 
@@ -222,18 +223,8 @@ pub async fn run<R: Runtime>(job: Job<'_, R>) -> Result<String, String> {
 
     let started = Instant::now();
     if !local.is_empty() {
-        // Queue behind any other run that has the local model.
-        let _permit = match LOCAL_GATE.try_acquire() {
-            Ok(permit) => permit,
-            Err(_) => {
-                log("Waiting: the local model is busy with another hybrid task.");
-                tokio::select! {
-                    biased;
-                    _ = ai_runs::cancelled(&mut rx) => return Err(cancelled_error()),
-                    permit = LOCAL_GATE.acquire() => permit.map_err(|e| e.to_string())?,
-                }
-            }
-        };
+        // One generation at a time per local server: each request below takes its turn in
+        // `hybrid::scheduler`, as background work (see `run`), so a chat in the meantime goes first.
 
         log(&format!("Connecting to {} · {} · context {}", backend_label(kind), run.model, run.ctx));
         let live = runtime::connect(kind, &run.base_url, &run.model, run.ctx as u32)
@@ -243,6 +234,9 @@ pub async fn run<R: Runtime>(job: Job<'_, R>) -> Result<String, String> {
             if let Err(failure) = local_llm::ping(&live.endpoint).await {
                 return Err(format!("{LOCAL_UNAVAILABLE_MARKER}{}", failure.sentence()));
             }
+        }
+        if super::scheduler::waiting(&live.endpoint.base_url) > 0 {
+            log("Waiting: other requests to the local model are ahead in the queue.");
         }
         let _presence: Vec<_> = job
             .repos
@@ -620,7 +614,7 @@ async fn attempt_item<R: Runtime>(
             num_ctx: (kind == BackendKind::Ollama).then_some(run.ctx as u32),
             max_tokens: run.budget_output.max(256) as u32,
             temperature: 0.1,
-            think: run.thinking.then_some(false),
+            think: crate::model_registry::think_switch(crate::model_registry::reasoning(), run.thinking, crate::model_registry::TaskClass::Executor),
             keep_alive: (kind == BackendKind::Ollama).then_some("10m"),
             schema: None,
         };
@@ -781,6 +775,14 @@ async fn run_checks<R: Runtime>(
             CheckEnd::Stopped => return Err(cancelled_error()),
         };
         log(&format!("  {}", if passed { "passed" } else { "failed" }));
+        // A check after the local model's changes is evidence about them — see `crate::experiences`.
+        crate::experiences::capture_at(
+            &repo.path,
+            crate::experiences::Source::HybridCheck,
+            if passed { crate::experiences::Signal::Passed } else { crate::experiences::Signal::Failed },
+            Some(format!("chain:{}", job.chain_id)),
+            serde_json::json!({ "command": command, "at": chrono::Utc::now().timestamp_millis() }),
+        );
         let command = if job.multi() { format!("{}: {command}", repo.name) } else { command.clone() };
         out.push(CheckResult { command, passed, output: clamp(&output, CHECK_OUTPUT_MAX) });
     }

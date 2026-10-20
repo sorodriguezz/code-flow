@@ -14,7 +14,7 @@ use tauri::{AppHandle, State};
 use crate::db::Db;
 use crate::hybrid::budget::{self, Budget, Delegate, Fit, Machine, Pace, Shape};
 use crate::hybrid::config::{self, OnFail, ReviewMode};
-use crate::hybrid::local_llm::{self, BackendKind, ChatRequest, ModelDetails};
+use crate::hybrid::local_llm::{self, BackendKind, ModelDetails};
 use crate::hybrid::runtime::{self, Detected, Freshness};
 use crate::localai::{catalogue, download, engine, exec_catalogue, executor, models, LocalAiRegistry};
 
@@ -40,6 +40,15 @@ pub struct ModelRow {
     pub pace: Pace,
     /// The row the pane points at as the one for this machine — see [`budget::recommend`].
     pub recommended: bool,
+    /// Catalogue family (bundled rows), for the chips and the fine-tuning pane.
+    pub family: Option<exec_catalogue::Family>,
+    /// Declared: the chat template takes tools / the model can reason.
+    pub tools: Option<bool>,
+    pub thinking: Option<bool>,
+    /// Link to the licence text when it is not an SPDX identifier.
+    pub licence_url: Option<String>,
+    /// What this machine lacks to run it (`cuda`: only an NVIDIA card through Ollama can).
+    pub needs: Option<&'static str>,
 }
 
 /// A model Ollama's library has that this server has not pulled yet, and how it would sit here.
@@ -56,6 +65,12 @@ pub struct PullableRow {
     pub write_tps: Option<f64>,
     pub pace: Pace,
     pub recommended: bool,
+    pub family: exec_catalogue::Family,
+    pub tools: bool,
+    pub thinking: bool,
+    pub licence: String,
+    pub licence_url: Option<String>,
+    pub needs: Option<&'static str>,
 }
 
 /// The progress id of an Ollama pull — kept apart from the bundled catalogue's ids.
@@ -120,6 +135,10 @@ pub struct LocalExecState {
     pub on_fail: OnFail,
     pub unload: bool,
     pub review_mode: ReviewMode,
+    /// When a thinking model may think — `model_registry::Reasoning`.
+    pub reasoning: crate::model_registry::Reasoning,
+    /// The system's memory pressure now: a warning under the memory line when it is pressed.
+    pub pressure: crate::hybrid::hardware::Pressure,
     /// The bundled executor's process.
     pub engine: engine::Status,
     pub engine_available: bool,
@@ -174,6 +193,11 @@ pub async fn local_exec_state(db: State<'_, Db>, fresh: Option<bool>) -> Result<
                 write_tps: None,
                 pace: Pace::Unknown,
                 recommended: false,
+                family: None,
+                tools: None,
+                thinking: None,
+                licence_url: None,
+                needs: None,
             })
             .collect(),
     };
@@ -216,6 +240,13 @@ pub async fn local_exec_state(db: State<'_, Db>, fresh: Option<bool>) -> Result<
         on_fail: settings.on_fail,
         unload: settings.unload,
         review_mode: settings.review_mode,
+        pressure: crate::hybrid::hardware::memory_pressure(),
+        reasoning: {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            crate::model_registry::Reasoning::from_setting(
+                crate::db::queries::get_setting(&conn, crate::model_registry::KEY_REASONING).ok().flatten().as_deref(),
+            )
+        },
         engine: executor::status(),
         engine_available: engine::is_available(),
         models_dir: models::dir().to_string_lossy().into_owned(),
@@ -232,6 +263,13 @@ const ROW_CTX: u32 = 16_384;
 
 /// How a model of `size_bytes` from the catalogue entry `entry` sits on `machine` at [`ROW_CTX`]:
 /// its fit, and how fast it would write — no speed for one that does not fit at all.
+/// What `machine` lacks to run `entry` on `via_ollama` (`true`) or the bundled engine.
+fn needs(entry: &exec_catalogue::ExecModelSpec, machine: &Machine, via_ollama: bool) -> Option<&'static str> {
+    let nvidia = machine.gpu == crate::hybrid::hardware::GpuKind::Discrete
+        && machine.gpu_name.as_deref().is_some_and(|name| name.to_ascii_lowercase().contains("nvidia"));
+    (entry.cuda_only && !(via_ollama && nvidia)).then_some("cuda")
+}
+
 fn judge(entry: &exec_catalogue::ExecModelSpec, size_bytes: u64, machine: &Machine) -> (Fit, Option<f64>) {
     let also_resident = runtime::completion_engine_bytes();
     let need = budget::memory_need(size_bytes, entry.kv_bytes_per_token, ROW_CTX);
@@ -248,7 +286,10 @@ fn pullable_rows(available: &[local_llm::LocalModel], machine: &Machine) -> Vec<
         .iter()
         .filter_map(|tag| {
             let entry = exec_catalogue::find(tag.catalogue_id)?;
-            let (fit, write_tps) = judge(entry, tag.size_bytes, machine);
+            let (fit, write_tps) = match needs(entry, machine, true) {
+                Some(_) => (Fit::DoesNotFit, None),
+                None => judge(entry, tag.size_bytes, machine),
+            };
             Some((tag, entry, fit, write_tps))
         })
         .collect();
@@ -270,6 +311,12 @@ fn pullable_rows(available: &[local_llm::LocalModel], machine: &Machine) -> Vec<
             write_tps,
             pace: budget::pace(write_tps),
             recommended: best == Some(index),
+            family: entry.family,
+            tools: entry.tools,
+            thinking: entry.thinking,
+            licence: entry.spec.licence.to_string(),
+            licence_url: (!entry.licence_url.is_empty()).then(|| entry.licence_url.to_string()),
+            needs: needs(entry, machine, true),
         })
         .collect()
 }
@@ -302,9 +349,13 @@ pub async fn local_exec_ollama_pull(
     if !valid_tag(&tag) {
         return Err(format!("\"{tag}\" is not a model name Ollama knows how to pull."));
     }
+    if local_llm::is_cloud_name(&tag) {
+        // The user's rule: CodeFlow runs models on this machine only.
+        return Err("cloud-model".to_string());
+    }
     let endpoint = ollama_endpoint(&db)?;
     let id = pull_id(&tag);
-    let cancel = registry.register_download(id.clone());
+    let cancel = registry.register_download(id.clone())?;
     let emit = |phase: download::Phase, done: u64, total: u64, error: Option<String>| {
         let _ = app.emit(download::EVENT, download::Progress { model_id: id.clone(), phase, done, total, error });
     };
@@ -375,7 +426,11 @@ fn bundled_rows(machine: &Machine) -> Vec<ModelRow> {
         .iter()
         .map(|entry| {
             let spec = &entry.spec;
-            let (fit, write_tps) = judge(entry, spec.size_bytes, machine);
+            let lacks = needs(entry, machine, false);
+            let (fit, write_tps) = match lacks {
+                Some(_) => (Fit::DoesNotFit, None),
+                None => judge(entry, spec.size_bytes, machine),
+            };
             ModelRow {
                 id: spec.id.to_string(),
                 label: spec.label.to_string(),
@@ -391,6 +446,11 @@ fn bundled_rows(machine: &Machine) -> Vec<ModelRow> {
                 write_tps,
                 pace: budget::pace(write_tps),
                 recommended: false,
+                family: Some(entry.family),
+                tools: Some(entry.tools),
+                thinking: Some(entry.thinking),
+                licence_url: (!entry.licence_url.is_empty()).then(|| entry.licence_url.to_string()),
+                needs: lacks,
             }
         })
         .collect();
@@ -402,28 +462,9 @@ fn bundled_rows(machine: &Machine) -> Vec<ModelRow> {
     rows
 }
 
-/// Ordinary code up to about `target_tokens`, then a small request.
-///
-/// Sized from the budget rather than fixed: the failure this button exists to catch is a server
-/// whose real window is smaller than the one configured here (LM Studio and llama.cpp both start
-/// at 4k unless told otherwise), and only a prompt longer than that window exposes it. Capped by
-/// the caller so prompt evaluation stays well under a minute on a laptop.
-fn probe_prompt(target_tokens: u64) -> String {
-    let mut prompt = String::from("Reference code (do not repeat it):\n\n```ts\n");
-    for i in 0.. {
-        if budget::estimate_tokens(&prompt) >= target_tokens {
-            break;
-        }
-        prompt.push_str(&format!(
-            "export function normalizeRecord{i}(input: Record<string, unknown>): Record<string, string> {{\n  const out: Record<string, string> = {{}};\n  for (const [key, value] of Object.entries(input)) {{\n    out[key.trim().toLowerCase()] = String(value ?? \"\").trim();\n  }}\n  return out;\n}}\n\n"
-        ));
-    }
-    prompt.push_str("```\n\nTask: write a TypeScript function `sumAll(values: number[]): number` that returns the sum. Answer with one fenced code block and nothing else.");
-    prompt
-}
-
 /// Measures the chosen model: how fast it reads, how fast it writes, how much of it is on the GPU,
-/// and whether the server cut the prompt.
+/// and whether the server cut the prompt. The measurement is the bench's own
+/// ([`crate::evals::speed`]), so **Probar** and a bench report never disagree.
 #[tauri::command]
 pub async fn local_exec_probe(db: State<'_, Db>) -> Result<ProbeResult, String> {
     let settings = read_settings(&db)?;
@@ -434,32 +475,22 @@ pub async fn local_exec_probe(db: State<'_, Db>) -> Result<ProbeResult, String> 
 
     let live = runtime::connect(resolved.kind, &resolved.url, &model, resolved.ctx).await?;
     let _in_flight = live.engine.as_ref().map(|engine| engine.begin());
-    let system = "You write code. Answer with exactly one fenced code block.";
-    let user = probe_prompt(u64::from(resolved.budget.input.saturating_sub(256)).clamp(1_024, 6_000));
-    let sent_tokens = match local_llm::count_tokens(&live.endpoint, &format!("{system}\n{user}")).await {
-        Some(exact) => exact,
-        None => budget::estimate_tokens(system) + budget::estimate_tokens(&user),
-    };
-    let request = ChatRequest {
+    let probe = crate::evals::speed::Probe {
+        endpoint: &live.endpoint,
         model: &live.model,
-        system,
-        user: &user,
-        num_ctx: (resolved.kind == BackendKind::Ollama).then_some(resolved.ctx),
-        max_tokens: 160,
-        temperature: 0.0,
-        think: resolved.details.thinking.then_some(false),
-        keep_alive: None,
-        schema: None,
+        kind: resolved.kind,
+        ctx: resolved.ctx,
+        input_budget: resolved.budget.input,
+        think: crate::model_registry::think_for(&resolved, crate::model_registry::TaskClass::Text),
     };
     let at = chrono::Utc::now().timestamp_millis();
-    let outcome = local_llm::chat(&live.endpoint, &request, |_| {}, std::future::pending::<()>()).await;
-    let result = match outcome {
+    let result = match crate::evals::speed::measure(&probe).await {
         Err(failure) => ProbeResult {
             ok: false,
             backend: resolved.kind,
             model: model.clone(),
             ctx: resolved.ctx,
-            sent_tokens,
+            sent_tokens: 0,
             prompt_tokens: None,
             completion_tokens: None,
             prompt_tps: None,
@@ -470,45 +501,28 @@ pub async fn local_exec_probe(db: State<'_, Db>) -> Result<ProbeResult, String> 
             error_code: Some(failure.code()),
             at,
         },
-        Ok(outcome) => {
-            let truncated = budget::truncated(sent_tokens, outcome.prompt_tokens);
-            let prompt_ms = outcome.prompt_ms.or(outcome.first_token_ms);
-            let gen_ms = outcome
-                .gen_ms
-                .or_else(|| outcome.first_token_ms.map(|first| outcome.total_ms.saturating_sub(first)));
-            let rate = |tokens: Option<u64>, ms: Option<u64>| match (tokens, ms) {
-                (Some(tokens), Some(ms)) if ms > 0 && tokens > 0 => Some(tokens as f64 * 1000.0 / ms as f64),
-                _ => None,
-            };
-            let gpu_share = local_llm::ollama_residency(&live.endpoint)
-                .await
-                .into_iter()
-                .find(|(name, _, _)| name == &model)
-                .filter(|(_, size, _)| *size > 0)
-                .map(|(_, size, vram)| (vram as f64 / size as f64).clamp(0.0, 1.0));
-            ProbeResult {
-                ok: !truncated,
-                backend: resolved.kind,
-                model: model.clone(),
-                ctx: resolved.ctx,
-                sent_tokens,
-                prompt_tokens: outcome.prompt_tokens,
-                completion_tokens: outcome.completion_tokens,
-                prompt_tps: rate(outcome.prompt_tokens.or(Some(sent_tokens)), prompt_ms),
-                gen_tps: rate(outcome.completion_tokens, gen_ms),
-                gpu_share,
-                truncated,
-                error: truncated.then(|| {
-                    format!(
-                        "The server processed {} of ~{} tokens: it is cutting prompts. Raise the server's context or lower this one.",
-                        outcome.prompt_tokens.unwrap_or(0),
-                        sent_tokens
-                    )
-                }),
-                error_code: truncated.then_some("truncated"),
-                at,
-            }
-        }
+        Ok(sample) => ProbeResult {
+            ok: !sample.truncated,
+            backend: resolved.kind,
+            model: model.clone(),
+            ctx: resolved.ctx,
+            sent_tokens: sample.sent_tokens,
+            prompt_tokens: sample.prompt_tokens,
+            completion_tokens: sample.completion_tokens,
+            prompt_tps: sample.prompt_tps,
+            gen_tps: sample.gen_tps,
+            gpu_share: sample.gpu_share,
+            truncated: sample.truncated,
+            error: sample.truncated.then(|| {
+                format!(
+                    "The server processed {} of ~{} tokens: it is cutting prompts. Raise the server's context or lower this one.",
+                    sample.prompt_tokens.unwrap_or(0),
+                    sample.sent_tokens
+                )
+            }),
+            error_code: sample.truncated.then_some("truncated"),
+            at,
+        },
     };
     if let Ok(mut cache) = probes().lock() {
         cache.insert(probe_key(resolved.kind, &resolved.url, &model, resolved.ctx), result.clone());
@@ -523,7 +537,10 @@ pub async fn local_exec_download_model(
     model_id: String,
 ) -> Result<(), String> {
     let entry = exec_catalogue::find(&model_id).ok_or_else(|| format!("Unknown model: {model_id}"))?;
-    let cancel = registry.register_download(model_id.clone());
+    if entry.cuda_only {
+        return Err("needs-cuda".to_string());
+    }
+    let cancel = registry.register_download(model_id.clone())?;
     let result = download::fetch(&app, &entry.spec, &models::dir(), cancel).await;
     registry.clear_download(&model_id);
     result.map(|_| ())
@@ -578,7 +595,7 @@ mod tests {
 
     #[test]
     fn the_probe_prompt_reaches_its_target_and_stops_there() {
-        let tokens = budget::estimate_tokens(&probe_prompt(6_000));
+        let tokens = budget::estimate_tokens(&crate::evals::speed::probe_prompt(6_000));
         assert!(tokens > 6_000, "{tokens} estimated tokens would not expose a 4k server window");
         assert!(tokens < 6_600, "{tokens} estimated tokens is more than the probe asked for");
     }
@@ -599,15 +616,37 @@ mod tests {
 
     #[test]
     fn the_model_to_pull_is_chosen_among_all_of_them() {
-        // The mixture is the one for a machine whose model lives in RAM.
+        // A mixture is the one for a machine whose model lives in RAM: since the Nemotron rows
+        // (2026-10-19) the largest comfortable one is Nemotron 3 Nano 30B-A3B (3.6B of 31.6B read
+        // a token), ahead of Qwen3-Coder 30B-A3B at the same speed.
         let machine = pc_without_card();
         let rows = pullable_rows(&[], &machine);
-        assert_eq!(rows.iter().filter(|row| row.recommended).map(|row| row.tag.as_str()).collect::<Vec<_>>(), ["qwen3-coder:30b"]);
+        let chosen: Vec<&str> = rows.iter().filter(|row| row.recommended).map(|row| row.tag.as_str()).collect();
+        assert_eq!(chosen, ["nemotron-3-nano:30b"]);
+        let entry = exec_catalogue::find("nemotron-3-nano-30b-a3b").unwrap();
+        assert!(entry.active_share() < 0.2);
         // Already on the server, it is not offered — and the badge does not move to a worse one.
-        let pulled = [local_llm::LocalModel { id: "qwen3-coder:30b".into(), ..Default::default() }];
+        let pulled = [local_llm::LocalModel { id: "nemotron-3-nano:30b".into(), ..Default::default() }];
         let rows = pullable_rows(&pulled, &machine);
         assert_eq!(rows.len(), exec_catalogue::OLLAMA_TAGS.len() - 1);
         assert!(rows.iter().all(|row| !row.recommended));
+    }
+
+    #[test]
+    fn a_cuda_only_model_says_what_it_needs() {
+        let mac = pc_without_card();
+        let bolt = pullable_rows(&[], &mac).into_iter().find(|row| row.tag == "nemotron-3.5-bolt:74b-a9b").unwrap();
+        assert_eq!(bolt.needs, Some("cuda"));
+        assert_eq!(bolt.fit, Fit::DoesNotFit);
+        let mut nvidia = pc_without_card();
+        nvidia.gpu = budget::GpuKind::Discrete;
+        nvidia.gpu_bytes = Some(24 << 30);
+        nvidia.gpu_name = Some("NVIDIA GeForce RTX 4090".into());
+        let bolt = pullable_rows(&[], &nvidia).into_iter().find(|row| row.tag == "nemotron-3.5-bolt:74b-a9b").unwrap();
+        assert_eq!(bolt.needs, None, "Ollama on an NVIDIA card runs it");
+        // The bundled engine never can: it is a Metal/Vulkan build.
+        let bundled = bundled_rows(&nvidia).into_iter().find(|row| row.id == "nemotron-3.5-bolt-74b-a9b").unwrap();
+        assert_eq!(bundled.needs, Some("cuda"));
     }
 
     #[test]

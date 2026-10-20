@@ -187,6 +187,16 @@ pub const TABLES: &[&str] = &[
     // A hybrid run's configuration and its plan, both hanging off the chain they belong to.
     "hybrid_runs",
     "hybrid_items",
+    // The local AI platform: what the user approved as memory (with its history), the document
+    // folders they added as knowledge, the evidence kept about AI answers, and the bench's reports
+    // with the tool verdicts they gave — a report from the 4090 compared with one from the Mac is
+    // the point of carrying them. See the `aiLearning` group.
+    "ai_memories",
+    "ai_memory_revisions",
+    "ai_knowledge_collections",
+    "ai_experiences",
+    "ai_model_registry",
+    "ai_evaluations",
 ];
 
 /// Tables that are deliberately *not* in a backup, and the only sanctioned way to be absent from
@@ -251,6 +261,20 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     "flow_waits",
     "flow_run_days",
     "chat_turn_checkpoints",
+    // The memories' search index and its shadow tables: derived from `ai_memories` by triggers.
+    "ai_memories_fts",
+    "ai_memories_fts_data",
+    "ai_memories_fts_idx",
+    "ai_memories_fts_content",
+    "ai_memories_fts_docsize",
+    "ai_memories_fts_config",
+    // The bench's reason, three times over: what an agent ran on *this* machine, and datasets,
+    // training runs and adapters whose files live under this machine's state root, which a backup
+    // does not carry. A row restored without its file is a dataset that opens empty.
+    "ai_tool_audit",
+    "ai_datasets",
+    "ai_training_runs",
+    "ai_model_adapters",
 ];
 
 // ---------------------------------------------------------------------------
@@ -406,6 +430,10 @@ pub const GROUPS: &[Group] = &[
     },
     Group { key: "reviews", tables: &["review_runs"] },
     Group {
+        key: "aiLearning",
+        tables: &["ai_memories", "ai_memory_revisions", "ai_knowledge_collections", "ai_experiences", "ai_model_registry", "ai_evaluations"],
+    },
+    Group {
         key: "agentWork",
         tables: &[
             "agent_tasks",
@@ -456,6 +484,8 @@ pub struct Selection {
     pub reviews: bool,
     pub agent_work: bool,
     pub cookies: bool,
+    /// Memories, knowledge folders, experiences and bench reports — see the `aiLearning` group.
+    pub ai_learning: bool,
 }
 
 impl Default for Selection {
@@ -475,6 +505,7 @@ impl Default for Selection {
             reviews: true,
             agent_work: true,
             cookies: true,
+            ai_learning: true,
         }
     }
 }
@@ -495,6 +526,7 @@ impl Selection {
             "reviews" => self.reviews,
             "agentWork" => self.agent_work,
             "cookies" => self.cookies,
+            "aiLearning" => self.ai_learning,
             // A group added to `GROUPS` without a field here would silently never be written.
             // Defaulting to "included" makes that failure a too-large backup rather than a
             // too-small one, which is the direction with a symptom.

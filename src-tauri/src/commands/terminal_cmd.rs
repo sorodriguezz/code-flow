@@ -206,15 +206,39 @@ fn claude_hook_settings(cf: &str) -> serde_json::Value {
     serde_json::json!({ "hooks": hooks })
 }
 
-/// The settings file a `claude` started from the «Worktrees» rail is given with `--settings`: its
-/// status hooks, each one a `cf hook claude <event>`.
+/// What an agent started from the «Worktrees» rail is told about `cf`, so it uses it on its own: asks
+/// before anything irreversible, says when it is done or stuck. One line, plain ASCII and free of
+/// quotes, `$` and backticks — Codex takes it as a command-line argument in whatever shell the
+/// terminal runs.
+pub const CF_NOTE: &str = "You are running inside a CodeFlow terminal, which gives you the cf command to reach the user. \
+Before anything destructive or irreversible (deleting files or data, force-pushing, rewriting history, dropping tables, \
+installing system-wide) run cf ask <question> and go ahead only if it exits 0, which means the user said yes; \
+it prints whatever the user typed. When you finish, or when you are blocked and need the user, run cf notify <one line>. \
+cf review opens the diff of your work in the app, and cf status prints what the app has open as JSON.";
+
+/// Where a launch reads its extras from — see [`agent_launch_files`].
+#[derive(serde::Serialize)]
+pub struct AgentLaunchFiles {
+    /// Claude Code's `--settings`: its status hooks.
+    settings: String,
+    /// Claude Code's `--append-system-prompt-file`: [`CF_NOTE`].
+    note_file: String,
+    /// [`CF_NOTE`] itself, for the CLIs that take it some other way.
+    note: String,
+}
+
+/// The files an agent CLI started from the «Worktrees» rail is given:
 ///
-/// Passed per launch rather than written into `~/.claude/settings.json`: the user's own settings are
-/// theirs, and a `claude` typed by hand in one of this app's shells still reports its state through
-/// the terminal (OSC 7501) — the hooks only add the prompt and the reply. Written on every call, so a
-/// moved or updated app never leaves a file pointing at an old `cf`.
+/// - **`--settings`** for Claude Code: its status hooks, each one a `cf hook claude <event>`.
+/// - **`--append-system-prompt-file`** for Claude Code: what `cf` is for — appended to its system
+///   prompt, not replacing it.
+///
+/// Passed per launch rather than written into `~/.claude`: the user's own settings are theirs, and a
+/// `claude` typed by hand in one of this app's shells still reports its state through the terminal
+/// (OSC 7501) — the hooks only add the prompt and the reply. Written on every call, so a moved or
+/// updated app never leaves a file pointing at an old `cf`.
 #[tauri::command]
-pub fn agent_hook_settings(app: AppHandle) -> Result<String, String> {
+pub fn agent_launch_files(app: AppHandle) -> Result<AgentLaunchFiles, String> {
     let cf = match terminal::cf_binary(&app) {
         Some(path) => {
             let path = path.display().to_string();
@@ -226,13 +250,18 @@ pub fn agent_hook_settings(app: AppHandle) -> Result<String, String> {
         }
         None => "cf".to_string(),
     };
-    let settings = claude_hook_settings(&cf);
     let dir = crate::paths::state_dir().join("agent-hooks");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("claude-settings.json");
-    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    Ok(path.display().to_string())
+    let settings = dir.join("claude-settings.json");
+    let text = serde_json::to_string_pretty(&claude_hook_settings(&cf)).map_err(|e| e.to_string())?;
+    std::fs::write(&settings, text).map_err(|e| e.to_string())?;
+    let note_file = dir.join("cf-note.md");
+    std::fs::write(&note_file, CF_NOTE).map_err(|e| e.to_string())?;
+    Ok(AgentLaunchFiles {
+        settings: settings.display().to_string(),
+        note_file: note_file.display().to_string(),
+        note: CF_NOTE.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +593,17 @@ pub fn spawn_transcript_flush(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Codex gets the note as a command-line argument: nothing in it may mean something to a shell.
+    #[test]
+    fn the_cf_note_is_one_shell_safe_line() {
+        assert!(!CF_NOTE.contains('\n'));
+        assert!(CF_NOTE.is_ascii());
+        for forbidden in ['"', '\'', '$', '`', '\\', '!'] {
+            assert!(!CF_NOTE.contains(forbidden), "{forbidden:?} in the note");
+        }
+        assert!(CF_NOTE.contains("cf ask") && CF_NOTE.contains("cf notify"));
+    }
 
     /// The shape Claude Code reads: an array of matcher groups per event, each with its commands.
     #[test]

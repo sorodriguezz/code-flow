@@ -403,10 +403,61 @@ pub fn tools() -> Vec<Value> {
             "description": "An overview of the repository: its folders, what each file declares (small projects) or the most-used declarations and where they live (large ones).",
             "inputSchema": {"type": "object", "properties": {}},
         }),
+        json!({
+            "name": "recall",
+            "description": "The memories the user approved in CodeFlow for this repository and workspace: decisions, conventions and preferences to respect. Call it at the start of a task, or with a topic to get the memories about it.",
+            "inputSchema": {"type": "object", "properties": {
+                "topic": {"type": "string", "description": "What the task is about. Optional: without it, the standing preferences and conventions."}
+            }},
+        }),
+        json!({
+            "name": "search_knowledge",
+            "description": "Search this workspace's knowledge for a question: the repository's files and documentation (architecture decisions, READMEs, specs), the document folders the user added and their notes. Returns the most relevant passages with file:line citations. Use it for questions about why or how the project does something, before guessing.",
+            "inputSchema": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "The question or the words to look for, in any language"},
+                "limit": {"type": "integer", "description": "How many passages (default 8, at most 20)"}
+            }, "required": ["query"]},
+        }),
     ]
     .into_iter()
     .map(read_only)
     .collect()
+}
+
+/// [`call_tool`], plus the tools that are not map queries (`search_knowledge`, `recall`). `cloud`:
+/// the caller is a cloud engine, so knowledge and memories it may not see are left out.
+pub async fn call_tool_as(root: &str, name: &str, args: &Value, cloud: bool) -> Result<String, String> {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    match name {
+        "search_knowledge" => {
+            let query = text("query");
+            if query.is_empty() {
+                return Err("query is empty".to_string());
+            }
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+            crate::knowledge::tool_answer(root, &query, limit, cloud).await
+        }
+        "recall" => {
+            let topic = text("topic");
+            let root = root.to_string();
+            tokio::task::spawn_blocking(move || {
+                crate::ai_usage::with_conn(|conn| {
+                    let (project, workspace): (Option<String>, Option<String>) = conn
+                        .query_row("SELECT id, workspace_id FROM projects WHERE local_path = ?1", [root.trim_end_matches(['/', '\\'])], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .unwrap_or((None, None));
+                    let found = crate::ai_memory::relevant(conn, workspace.as_deref(), project.as_deref(), &topic, cloud, 6_000).unwrap_or_default();
+                    match crate::ai_memory::note(&found) {
+                        Some((note, _)) => note.trim_start_matches("\n\n---\n").to_string(),
+                        None => "No approved memories for this repository.".to_string(),
+                    }
+                })
+                .unwrap_or_else(|| "Memories are not available here.".to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())
+        }
+        _ => call_tool(root, name, args).await,
+    }
 }
 
 /// Runs one tool against `root`'s map — shared by the MCP server and anything else that wants the
@@ -469,7 +520,9 @@ async fn answer(root: &str, message: Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            match call_tool(root, name, &args).await {
+            // Everything served here goes to a CLI engine — a cloud model: knowledge is searched with
+            // the workspace's cloud rules (local-only folders out, the switch obeyed).
+            match call_tool_as(root, name, &args, true).await {
                 Ok(text) => text_result(id, text, false),
                 Err(error) => text_result(id, error, true),
             }
@@ -509,7 +562,7 @@ mod tests {
 
         let (status, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 4);
+        assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 6);
 
         let (_, reply) = post(
             &headers,

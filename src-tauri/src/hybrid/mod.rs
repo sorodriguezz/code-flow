@@ -40,6 +40,7 @@ pub mod local_llm;
 pub mod plan;
 pub mod prompts;
 pub mod runtime;
+pub mod scheduler;
 pub mod triage;
 
 #[cfg(test)]

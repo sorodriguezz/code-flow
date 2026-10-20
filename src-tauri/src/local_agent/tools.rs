@@ -67,6 +67,15 @@ pub struct Toolbox {
     /// Declarations this run renamed or removed — checked again before it may finish
     /// ([`Toolbox::dangling`]).
     renamed: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Files open in the editor with unsaved changes, by repository-relative path: read from here
+    /// instead of the disk, and never edited — the user is still typing in them
+    /// (`crate::context::with_unsaved`).
+    unsaved: std::collections::HashMap<String, String>,
+    /// The repository's trusted checks (`hybrid_checks:<project>`): what `run_check` may run, by
+    /// name — level L3 of `crate::tool_gateway`, without the free shell.
+    checks: Vec<String>,
+    /// The model driving the run, for the audit log.
+    model: String,
 }
 
 /// One tool call's result: the text the model reads, and a short line for the run log.
@@ -103,6 +112,34 @@ impl Toolbox {
             read: Default::default(),
             map: true,
             renamed: Default::default(),
+            unsaved: crate::context::current_unsaved().into_iter().map(|b| (b.path, b.content)).collect(),
+            checks: crate::ai_usage::with_conn(|conn| {
+                crate::experiences::project_for_path(conn, root)
+                    .map(|(project, _)| crate::db::hybrid_queries::trusted_checks(conn, &project))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default(),
+            model: String::new(),
+        })
+    }
+
+    /// The model driving the run, for the audit log.
+    pub fn with_model(mut self, model: &str) -> Self {
+        self.model = model.to_string();
+        self
+    }
+
+    /// The access level this run has — see `crate::tool_gateway`.
+    pub fn level(&self) -> crate::tool_gateway::Level {
+        crate::tool_gateway::Level::of(self.grants.write, !self.checks.is_empty(), self.grants.run)
+    }
+
+    /// The refusal for a write to a file the editor holds unsaved changes in.
+    fn unsaved_refusal(&self, rel: &str) -> Option<Outcome> {
+        self.unsaved.contains_key(rel).then(|| {
+            Outcome::err(format!(
+                "{rel} has unsaved changes in the editor. Don't edit it: describe the change and let the user save first."
+            ))
         })
     }
 
@@ -125,7 +162,22 @@ impl Toolbox {
         let root = self.root_str.clone();
         let built = tokio::task::spawn_blocking(move || crate::codemap::snapshot(&root)).await.ok().and_then(Result::ok);
         match built {
-            Some((map, info)) if !files.is_empty() => (crate::codemap::summary::project_map(&map, &files, budget), Some(info)),
+            Some((map, info)) if !files.is_empty() => {
+                let mut text = crate::codemap::summary::project_map(&map, &files, budget);
+                // The map is of code. Documentation is where "why" and "what was decided" live, and a
+                // model that cannot see `docs/adr/` never opens it (measured: Qwen3 4B answered "not
+                // specified" about a decision written there, without a single tool call).
+                let docs: Vec<&str> = files
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|f| matches!(crate::knowledge::chunker::kind_of(f), crate::knowledge::chunker::Kind::Markdown | crate::knowledge::chunker::Kind::Text))
+                    .take(40)
+                    .collect();
+                if !docs.is_empty() {
+                    text.push_str(&format!("\n\nDocumentation files:\n{}", docs.join("\n")));
+                }
+                (text, Some(info))
+            }
             _ => (format!("Project files:\n{}", self.file_map(MAP_FALLBACK_FILES)), None),
         }
     }
@@ -179,6 +231,12 @@ impl Toolbox {
                 &["path"],
             ));
         }
+        tools.push(tool(
+            "search_knowledge",
+            "Search the project's knowledge for a question: its documentation (READMEs, docs/, architecture decisions), the document folders the user added and their notes, plus the code. Returns passages with path:lines. Use it for questions about why or how the project does something, or what was decided.",
+            json!({ "query": { "type": "string", "description": "The question, or the words to look for." } }),
+            &["query"],
+        ));
         tools.extend(vec![
             tool(
                 "list_files",
@@ -235,6 +293,15 @@ impl Toolbox {
                 &["path", "content"],
             ));
         }
+        if self.grants.write && !self.checks.is_empty() {
+            let list = self.checks.iter().enumerate().map(|(i, c)| format!("{}: {c}", i + 1)).collect::<Vec<_>>().join("; ");
+            tools.push(tool(
+                "run_check",
+                &format!("Run one of this repository's approved checks (tests, build, lint) and get its exit code and the end of its output. Available: {list}."),
+                json!({ "check": { "type": "string", "description": "The check's number or its exact command." } }),
+                &["check"],
+            ));
+        }
         if self.grants.run {
             tools.push(tool(
                 "run_command",
@@ -249,6 +316,32 @@ impl Toolbox {
     /// Runs one call. Never panics and never returns `Err`: a failure is an answer the model reads
     /// and can correct, exactly like a CLI agent's tool error.
     pub async fn call(&self, name: &str, args: &Value, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
+        let started = std::time::Instant::now();
+        let mut outcome = self.dispatch(name, args, cancel).await;
+        // Content from the project that talks to an AI is marked as data before the model reads it.
+        if matches!(name, "read_file" | "search" | "run_command" | "run_check" | "search_knowledge") && outcome.ok {
+            if let Some(warning) = crate::tool_gateway::injection_warning(&outcome.content) {
+                outcome.content = format!("{warning}{}", outcome.content);
+            }
+        }
+        if matches!(name, "edit_file" | "write_file" | "run_command" | "run_check") {
+            crate::tool_gateway::audit(crate::tool_gateway::Action {
+                root: &self.root_str,
+                run_ref: crate::ai_runs::current().map(|ctx| ctx.run_id),
+                model: (!self.model.is_empty()).then_some(self.model.as_str()),
+                tool: name,
+                level: self.level(),
+                args: args.clone(),
+                outcome: if outcome.ok { "ok" } else { "error" },
+                exit_code: None,
+                duration_ms: started.elapsed().as_millis() as u64,
+                detail: &outcome.summary,
+            });
+        }
+        outcome
+    }
+
+    async fn dispatch(&self, name: &str, args: &Value, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
         let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
         match name {
             "list_files" => self.list_files(&text("path")),
@@ -256,6 +349,7 @@ impl Toolbox {
             "read_file" => self.read_file(&text("path"), line_arg(args, "start_line"), line_arg(args, "end_line")),
             "search" => self.search(&text("query"), args.get("regex").and_then(Value::as_bool).unwrap_or(false), &text("include")),
             "find_symbol" | "find_usages" | "outline" if self.map => self.map_tool(name, args).await,
+            "search_knowledge" => self.search_knowledge(&text("query")).await,
             "edit_file" | "write_file" if !self.grants.write => {
                 Outcome::err("this conversation is read-only: files cannot be changed here")
             }
@@ -267,8 +361,31 @@ impl Toolbox {
             ),
             "write_file" => self.write_file(&text("path"), &text("content")),
             "run_command" if !self.grants.run => Outcome::err("commands cannot be run in this conversation"),
-            "run_command" => self.run_command(&text("command"), cancel).await,
+            "run_command" => self.run_command(&text("command"), true, cancel).await,
+            "run_check" if !self.grants.write => Outcome::err("checks cannot be run in this conversation"),
+            "run_check" => match self.check_named(&text("check")) {
+                Some(check) => self.run_command(&check, false, cancel).await,
+                None => Outcome::err(format!(
+                    "there is no approved check called {:?}. Approved: {}",
+                    text("check"),
+                    self.checks.iter().enumerate().map(|(i, c)| format!("{}: {c}", i + 1)).collect::<Vec<_>>().join("; ")
+                )),
+            },
             other => Outcome::err(format!("there is no tool named {other:?}")),
+        }
+    }
+
+    /// The knowledge search, with everything a local model may see (`crate::knowledge`).
+    async fn search_knowledge(&self, query: &str) -> Outcome {
+        if query.trim().is_empty() {
+            return Outcome::err("query is empty");
+        }
+        match crate::knowledge::tool_answer(&self.root_str, query, 6, false).await {
+            Ok(text) => {
+                let count = text.lines().filter(|line| line.split_once(". ").is_some_and(|(n, _)| n.parse::<u32>().is_ok())).count();
+                Outcome::ok(text, format!("{query} · {count}"))
+            }
+            Err(error) => Outcome::err(error),
         }
     }
 
@@ -349,9 +466,13 @@ impl Toolbox {
         if full.is_dir() {
             return Outcome::err(format!("{rel} is a folder — use list_files"));
         }
-        let bytes = match std::fs::read(&full) {
-            Ok(bytes) => bytes,
-            Err(error) => return Outcome::err(format!("{rel}: {error}")),
+        // The editor's version when the user has unsaved changes in it: that is the file they mean.
+        let bytes = match self.unsaved.get(&rel) {
+            Some(text) => text.clone().into_bytes(),
+            None => match std::fs::read(&full) {
+                Ok(bytes) => bytes,
+                Err(error) => return Outcome::err(format!("{rel}: {error}")),
+            },
         };
         if search::looks_binary(&bytes) {
             return Outcome::err(format!("{rel} is a binary file"));
@@ -419,6 +540,9 @@ impl Toolbox {
         let rel = clean_rel(path);
         if old.is_empty() {
             return Outcome::err("old_text is empty — use write_file to create a file");
+        }
+        if let Some(refusal) = self.unsaved_refusal(&rel) {
+            return refusal;
         }
         let full = match fsops::resolve_existing_for_write(&self.root_str, &rel) {
             Ok(full) => full,
@@ -539,6 +663,9 @@ impl Toolbox {
         if rel.is_empty() {
             return Outcome::err("path is empty");
         }
+        if let Some(refusal) = self.unsaved_refusal(&rel) {
+            return refusal;
+        }
         let existing = fsops::resolve_existing_for_write(&self.root_str, &rel).ok().filter(|full| full.is_file());
         let (full, original) = match existing {
             Some(full) => {
@@ -628,22 +755,25 @@ impl Toolbox {
         self.read.lock().is_ok_and(|read| read.contains(rel))
     }
 
-    async fn run_command(&self, command: &str, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
+    /// A trusted check by its number (1-based) or its exact command.
+    fn check_named(&self, wanted: &str) -> Option<String> {
+        let wanted = wanted.trim();
+        if let Ok(n) = wanted.parse::<usize>() {
+            return self.checks.get(n.checked_sub(1)?).cloned();
+        }
+        self.checks.iter().find(|c| c.trim() == wanted).cloned()
+    }
+
+    /// Runs `command` in the project root through `crate::tool_gateway`: no secrets in its
+    /// environment, its output read with a ceiling, and — for a free command (`sandbox`) on macOS —
+    /// under Seatbelt, writing only inside the repository with no network but localhost.
+    async fn run_command(&self, command: &str, sandbox: bool, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
         let command = command.trim();
         if command.is_empty() {
             return Outcome::err("command is empty");
         }
-        let mut cmd = if cfg!(windows) {
-            let mut cmd = tokio::process::Command::new("cmd");
-            cmd.arg("/C").arg(command);
-            cmd
-        } else {
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c").arg(command);
-            cmd
-        };
-        cmd.current_dir(&self.root)
-            .stdin(std::process::Stdio::null())
+        let mut cmd = crate::tool_gateway::shell_command(command, &self.root, sandbox);
+        cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -658,24 +788,20 @@ impl Toolbox {
         let _live = child.id().map(|pid| crate::ai_runs::register_process(pid, run_id.as_deref()));
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let read = |pipe: Option<tokio::process::ChildStdout>| async move {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = pipe {
-                use tokio::io::AsyncReadExt;
-                let _ = pipe.read_to_end(&mut buf).await;
+        // Four times what the model is shown, so the tail it gets is whole lines of the real end.
+        let ceiling = COMMAND_OUTPUT_CHARS * 4;
+        let out_task = tokio::spawn(async move {
+            match stdout {
+                Some(pipe) => crate::tool_gateway::read_tail(pipe, ceiling).await,
+                None => Vec::new(),
             }
-            buf
-        };
-        let read_err = |pipe: Option<tokio::process::ChildStderr>| async move {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = pipe {
-                use tokio::io::AsyncReadExt;
-                let _ = pipe.read_to_end(&mut buf).await;
+        });
+        let err_task = tokio::spawn(async move {
+            match stderr {
+                Some(pipe) => crate::tool_gateway::read_tail(pipe, ceiling).await,
+                None => Vec::new(),
             }
-            buf
-        };
-        let out_task = tokio::spawn(read(stdout));
-        let err_task = tokio::spawn(read_err(stderr));
+        });
         let status = tokio::select! {
             status = child.wait() => status.ok(),
             _ = crate::ai_runs::cancelled(cancel) => {
@@ -975,6 +1101,27 @@ mod tests {
         assert!(!dir.path().parent().unwrap().join("escaped.txt").exists());
         let outcome = tools.call("read_file", &json!({ "path": "../../etc/passwd" }), &mut None).await;
         assert!(!outcome.ok);
+    }
+
+    #[tokio::test]
+    async fn unsaved_buffers_are_read_and_never_edited() {
+        let dir = std::env::temp_dir().join(format!("codeflow-unsaved-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "on disk\n").unwrap();
+        let buffers = vec![crate::context::UnsavedBuffer { path: "a.txt".into(), content: "in the editor\n".into() }];
+        let root = dir.to_string_lossy().to_string();
+        crate::context::with_unsaved(buffers, async {
+            let toolbox = Toolbox::new(&root, Grants { write: true, run: false }).unwrap();
+            let read = toolbox.read_file("a.txt", None, None);
+            assert!(read.content.contains("in the editor"), "{}", read.content);
+            let edit = toolbox.edit_file("a.txt", "in the editor", "changed", false);
+            assert!(!edit.ok && edit.content.contains("unsaved"), "{}", edit.content);
+            let write = toolbox.write_file("a.txt", "replaced");
+            assert!(!write.ok);
+        })
+        .await;
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "on disk\n");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

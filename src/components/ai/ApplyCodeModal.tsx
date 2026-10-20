@@ -9,6 +9,7 @@ import { useApplyCodeStore, type ApplyCodeRequest } from "../../lib/codeToEditor
 import { useThemeStore } from "../../state/themeStore";
 import { useUiStore } from "../../state/uiStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { recordExperience } from "../../lib/tauri/experiencesCommands";
 import { useT } from "../../state/languageStore";
 import "../../lib/monacoSetup";
 
@@ -78,7 +79,16 @@ export function ApplyCodeModal({ request, repoPath }: { request: ApplyCodeReques
     setBusy(true);
     try {
       if (missing) await createFile(repoPath, target);
-      await writeFileText(repoPath, target, modifiedRef.current());
+      const applied = modifiedRef.current();
+      await writeFileText(repoPath, target, applied);
+      // Code from an answer, applied as reviewed: an accepted solution (`crate::experiences`).
+      recordExperience({
+        source: "apply_code",
+        signal: "accepted",
+        repoPath,
+        response: applied,
+        detail: { path: target, created: missing },
+      });
       useUiStore.getState().openInEditor(target);
       close();
     } catch (e) {

@@ -40,7 +40,15 @@ export type LocalExecErrorCode =
   | "engine-missing"
   | "not-downloaded"
   | "no-models"
-  | "truncated";
+  | "truncated"
+  | "needs-cuda"
+  | "cloud-model";
+
+/** A catalogue model's family. Matches `localai::exec_catalogue::Family`. */
+export type LocalModelFamily = "qwen" | "phi" | "nemotron";
+
+/** When a thinking model may think. Matches `model_registry::Reasoning`. */
+export type LocalReasoning = "off" | "analysis" | "always";
 
 export interface LocalExecModelRow {
   id: string;
@@ -62,6 +70,15 @@ export interface LocalExecModelRow {
   /** The one the pane points at for this machine: the largest that fits with room and writes at a
    *  usable pace (`budget::recommend`). */
   recommended: boolean;
+  /** Bundled catalogue only. */
+  family: LocalModelFamily | null;
+  /** Declared by the catalogue: the template takes tools / the model can reason. */
+  tools: boolean | null;
+  thinking: boolean | null;
+  /** The licence text, when `licence` is not an SPDX identifier. */
+  licence_url: string | null;
+  /** What this machine lacks to run it: `cuda` = only Ollama on an NVIDIA card can. */
+  needs: "cuda" | null;
 }
 
 export interface LocalExecDetails {
@@ -72,6 +89,8 @@ export interface LocalExecDetails {
   params_b: number | null;
   size_bytes: number | null;
   thinking: boolean;
+  /** What the server declares the model can do (`tools`, `thinking`, `vision`, `insert`…). */
+  capabilities: string[];
 }
 
 /** A model Ollama's library has that this server has not pulled. Mirrors `PullableRow`. */
@@ -86,6 +105,12 @@ export interface LocalExecPullable {
   write_tps: number | null;
   pace: LocalPace;
   recommended: boolean;
+  family: LocalModelFamily;
+  tools: boolean;
+  thinking: boolean;
+  licence: string;
+  licence_url: string | null;
+  needs: "cuda" | null;
 }
 
 export interface LocalExecBudget {
@@ -156,6 +181,9 @@ export interface LocalExecState {
   on_fail: LocalOnFail;
   unload: boolean;
   review_mode: HybridReviewMode;
+  reasoning: LocalReasoning;
+  /** The system's memory pressure when this was read. Matches `hybrid::hardware::Pressure`. */
+  pressure: "normal" | "warning" | "critical" | "unknown";
   /** The bundled executor's process. */
   engine: LocalAiEngineStatus;
   engine_available: boolean;
@@ -180,6 +208,8 @@ export const LOCAL_EXEC_KEYS = {
   onFail: "local_exec_on_fail",
   unload: "local_exec_unload",
   reviewMode: "hybrid_review_mode",
+  /** {@link LocalReasoning}; read by `model_registry::reasoning`. */
+  reasoning: "local_exec_reasoning",
 } as const;
 
 export const isLocalExecKey = (key: string) =>

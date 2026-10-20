@@ -1,6 +1,10 @@
 import { useLayoutEffect, useRef } from "react";
 import { AiAccountsSettings } from "./AiAccountsSettings";
 import { AiCompletionSettings } from "./AiCompletionSettings";
+import { AiDiagnosticsSettings } from "./AiDiagnosticsSettings";
+import { AiKnowledgeSettings } from "./AiKnowledgeSettings";
+import { AiMemorySettings } from "./AiMemorySettings";
+import { AiLearningSettings } from "./AiLearningSettings";
 import { LocalModelSettings } from "./LocalModelSettings";
 import { useT } from "../../state/languageStore";
 import { ProvidersSection } from "./ProvidersSection";
@@ -102,6 +106,10 @@ export function ClaudeSettings() {
             {tab === "accounts" && <AiAccountsSettings />}
             {tab === "localModel" && <LocalModelSettings />}
             {tab === "completion" && <AiCompletionSettings />}
+            {tab === "diagnostics" && <AiDiagnosticsSettings />}
+            {tab === "knowledge" && <AiKnowledgeSettings />}
+            {tab === "memory" && <AiMemorySettings />}
+            {tab === "learning" && <AiLearningSettings />}
             {tab === "limits" && <QuotaSection />}
             {tab === "usage" && <UsageStatsSection />}
           </Panel>

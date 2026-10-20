@@ -1,9 +1,9 @@
-import { agentHookSettings, getSetting, terminalSetAgent, writeTerminal } from "../tauri/commands";
+import { agentLaunchFiles, getSetting, terminalSetAgent, writeTerminal } from "../tauri/commands";
 import { AI_PROVIDERS } from "../aiProviders";
 import { currentPlatform } from "../platform";
 import { useBenchStore } from "../../state/benchStore";
 import { useTerminalAgentStore } from "../../state/terminalAgentStore";
-import { cliLine, promptInLine } from "./cliLaunch";
+import { cliLine, noteInLine, promptInLine } from "./cliLaunch";
 
 /**
  * Starts an agent's own CLI in a new terminal of the bench, standing in `path` — what every «run
@@ -16,6 +16,8 @@ import { cliLine, promptInLine } from "./cliLaunch";
  * - **who it is**, said to the backend before the program prints anything, so the card shows the
  *   agent from the first frame;
  * - **Claude Code's status hooks** (`--settings`), which add its prompt and its reply to the card;
+ * - **what `cf` is for**, so the agent asks before anything irreversible and says when it is done —
+ *   on the command line for Claude and Codex, at the head of the first prompt for the rest;
  * - **the first prompt** — on the command line where the CLI takes one (`promptInLine`), otherwise
  *   typed in once the program has drawn itself and gone quiet.
  */
@@ -32,10 +34,17 @@ export async function startAgentCli(options: {
   const windows = currentPlatform() === "windows";
   const stored = (await getSetting(`${provider}_binary_path`).catch(() => null))?.trim() ?? "";
   const binary = stored || AI_PROVIDERS.find((candidate) => candidate.id === provider)?.defaultBinary || provider;
-  // A missing hooks file costs the card its prompt and reply, not the launch.
-  const settings = provider === "claude" ? await agentHookSettings().catch(() => "") : "";
-  const prompt = options.prompt?.trim() ?? "";
-  const line = cliLine(provider, binary, options.resume ?? { sessionId: null }, windows, { settings, prompt });
+  // Missing files cost the card its prompt and reply, and the agent its note on `cf` — not the launch.
+  const files = await agentLaunchFiles().catch(() => ({ settings: "", note_file: "", note: "" }));
+  const asked = options.prompt?.trim() ?? "";
+  // No flag adds to these CLIs' own instructions, so the note rides at the head of the first prompt.
+  const prompt = asked && files.note && !noteInLine(provider) ? `${files.note}\n\n${asked}` : asked;
+  const line = cliLine(provider, binary, options.resume ?? { sessionId: null }, windows, {
+    settings: files.settings,
+    noteFile: files.note_file,
+    note: files.note,
+    prompt,
+  });
 
   const bench = useBenchStore.getState();
   await bench.addTab(workspaceId, path);

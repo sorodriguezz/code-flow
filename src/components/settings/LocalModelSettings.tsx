@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { CircleStop, Download, FolderOpen, Gauge, HardDrive, Loader2, X } from "lucide-react";
+import { CircleStop, Download, FolderOpen, Gauge, HardDrive, Loader2, ShieldCheck, X } from "lucide-react";
 import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Segmented } from "../common/Segmented";
@@ -11,6 +11,8 @@ import { Note, Status } from "../api/settingsChrome";
 import { Bar, formatBytes, ModelDownloadRow } from "./localModelRow";
 import { useT } from "../../state/languageStore";
 import { pullId, useLocalExecStore } from "../../state/localExecStore";
+import { useEvalStore } from "../../state/evalStore";
+import { currentVerdict } from "../../lib/tauri/evalsCommands";
 import type { LocalAiDownloadEvent } from "../../lib/tauri/events";
 import { useConfirmStore } from "../../state/confirmStore";
 import { revealInFileManager } from "../../lib/tauri/commands";
@@ -25,6 +27,7 @@ import {
   type LocalExecState,
   type LocalFit,
   type LocalPace,
+  type LocalReasoning,
 } from "../../lib/tauri/localExecCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -53,7 +56,54 @@ const ERROR_KEY: Partial<Record<LocalExecErrorCode, TranslationKey>> = {
   "engine-missing": "localexec.errEngineMissing",
   "not-downloaded": "localexec.errNotDownloaded",
   "no-models": "localexec.errNoModels",
+  "needs-cuda": "localexec.errNeedsCuda",
+  "cloud-model": "localexec.errCloudModel",
 };
+
+/** What the catalogue declares a model can do, as chips: whether it calls tools and whether it can
+ *  reason. Declared — the bench verifies tool calling (Diagnóstico). */
+function CapabilityChips({ tools, thinking }: { tools: boolean | null; thinking: boolean | null }) {
+  const t = useT();
+  return (
+    <>
+      {tools && <span className={chipClass("neutral")}>{t("localexec.capTools")}</span>}
+      {thinking && <span className={chipClass("neutral")}>{t("localexec.capThinking")}</span>}
+    </>
+  );
+}
+
+/** The registry's verdict on the chosen model's tool calling, and the button that measures it. */
+function ToolsLine({ state }: { state: LocalExecState }) {
+  const t = useT();
+  const { registry, running, progress, load, run } = useEvalStore();
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const record = registry.find((r) => r.id === `${state.backend}|${state.model ?? ""}`);
+  const verdict = currentVerdict(record);
+  const canRun = state.reachable && state.model !== null && !running;
+  return (
+    <div className="flex flex-wrap items-center gap-2 pt-[2px]">
+      <Status tone={verdict === true ? "success" : verdict === false ? "warning" : "muted"}>
+        {verdict === true
+          ? t("evals.toolsVerified")
+          : verdict === false
+            ? t("evals.toolsFailed")
+            : t("evals.toolsUntested")}
+        {record?.conformance && ` · ${record.conformance.passed}/${record.conformance.total}`}
+      </Status>
+      <button
+        type="button"
+        disabled={!canRun}
+        onClick={() => void run({ suites: ["tools"] })}
+        className={buttonClass({ variant: "secondary", size: "sm" })}
+      >
+        {running ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />}
+        {running && progress ? t("evals.step", { done: String(progress.done + 1), total: String(progress.total), step: progress.step }) : t("evals.verifyTools")}
+      </button>
+    </div>
+  );
+}
 
 /**
  * Why the local model cannot run, in the reader's language. The backend's sentence is English — it
@@ -253,6 +303,9 @@ function MemoryLine({ state }: { state: LocalExecState }) {
       <Status tone={FIT_TONE[state.fit]} wrap>
         {t(FIT_KEY[state.fit])}
       </Status>
+      {(state.pressure === "warning" || state.pressure === "critical") && (
+        <Note tone="warning">{t(state.pressure === "critical" ? "localexec.pressureCritical" : "localexec.pressureWarning")}</Note>
+      )}
     </div>
   );
 }
@@ -364,6 +417,7 @@ function OllamaPulls({ state }: { state: LocalExecState }) {
                         {row.label} <span className="font-mono text-[11px] text-[var(--cf-text-muted)]">{row.tag}</span>
                       </span>
                       {row.recommended && <span className={chipClass("ok")}>{t("localexec.forThisMachine")}</span>}
+                      <CapabilityChips tools={row.tools} thinking={row.thinking} />
                     </div>
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-[var(--cf-text-muted)]">
                       <RowVerdict fit={row.fit} tps={row.write_tps} pace={row.pace} machine={state.machine} />
@@ -374,6 +428,10 @@ function OllamaPulls({ state }: { state: LocalExecState }) {
                     <button type="button" onClick={() => void cancelPull(row.tag)} className={buttonClass({ variant: "ghost", size: "sm" })}>
                       <X size={13} /> {t("localai.cancel")}
                     </button>
+                  ) : row.needs === "cuda" ? (
+                    <Tooltip label={t("localexec.needsCudaHint")}>
+                      <span className="text-[11px] text-[var(--cf-warning)]">{t("localexec.needsCuda")}</span>
+                    </Tooltip>
                   ) : (
                     <button type="button" onClick={() => void pull(row.tag)} className={buttonClass({ variant: "secondary", size: "sm" })}>
                       <Download size={13} /> {t("localai.download")}
@@ -640,13 +698,16 @@ export function LocalModelSettings() {
                         min_ram_gb: model.min_ram_gb ?? 0,
                         installed: model.installed === true,
                         partial_bytes: model.partial_bytes,
+                        licence_url: model.licence_url,
                       }}
                       active={model.id === state.model && model.installed === true}
                       badge={
-                        model.recommended ? (
-                          <span className={chipClass("ok")}>{t("localexec.forThisMachine")}</span>
-                        ) : undefined
+                        <>
+                          {model.recommended && <span className={chipClass("ok")}>{t("localexec.forThisMachine")}</span>}
+                          <CapabilityChips tools={model.tools} thinking={model.thinking} />
+                        </>
                       }
+                      blocked={model.needs === "cuda" ? t("localexec.needsCuda") : undefined}
                       note={
                         model.fit && model.fit !== "unknown" ? (
                           <RowVerdict fit={model.fit} tps={model.write_tps} pace={model.pace} machine={state.machine} />
@@ -763,6 +824,26 @@ export function LocalModelSettings() {
 
           <Row label={t("localexec.speed")}>
             <ProbeLine state={state} />
+          </Row>
+
+          <Row label={t("localexec.tools")} hint={t("localexec.toolsHint")}>
+            <ToolsLine state={state} />
+          </Row>
+
+          <Row label={t("localexec.reasoning")} hint={t("localexec.reasoningHint")}>
+            <Segmented
+              options={[
+                { value: "off" as LocalReasoning, label: t("localexec.reasoningOff") },
+                { value: "analysis" as LocalReasoning, label: t("localexec.reasoningAnalysis") },
+                { value: "always" as LocalReasoning, label: t("localexec.reasoningAlways") },
+              ]}
+              value={state.reasoning}
+              onChange={(value) => void set(LOCAL_EXEC_KEYS.reasoning, value === "off" ? "" : value)}
+              layoutId="cf-local-exec-reasoning"
+              size="sm"
+              ariaLabel={t("localexec.reasoning")}
+              className="self-start"
+            />
           </Row>
 
           <Row label={t("localexec.delegate")} hint={t("localexec.delegateHint")}>

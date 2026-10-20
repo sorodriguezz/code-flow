@@ -33,6 +33,7 @@
 pub mod catalogue;
 pub mod complete;
 pub mod download;
+pub mod embedder;
 pub mod engine;
 pub mod exec_catalogue;
 pub mod executor;
@@ -65,12 +66,17 @@ pub struct LocalAiRegistry {
 }
 
 impl LocalAiRegistry {
-    pub fn register_download(&self, id: String) -> oneshot::Receiver<()> {
+    /// Claims `id`'s download. Refused while another download of the same id is running: two would
+    /// write the same `.part` file, and the second registration used to orphan the first's cancel
+    /// channel, so its Cancel button stopped nothing.
+    pub fn register_download(&self, id: String) -> Result<oneshot::Receiver<()>, String> {
         let (tx, rx) = oneshot::channel();
-        if let Ok(mut map) = self.downloads.lock() {
-            map.insert(id, tx);
+        let mut map = self.downloads.lock().map_err(|e| e.to_string())?;
+        if map.get(&id).is_some_and(|running| !running.is_closed()) {
+            return Err("already-downloading".to_string());
         }
-        rx
+        map.insert(id, tx);
+        Ok(rx)
     }
 
     /// Fires the download's cancel channel. Safe on an id that is not running — a Cancel click can
@@ -143,5 +149,21 @@ impl LocalAiRegistry {
 pub async fn cancelled(rx: tokio::sync::oneshot::Receiver<()>) {
     if rx.await.is_err() {
         std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_download_of_the_same_model_is_refused_until_the_first_ends() {
+        let registry = LocalAiRegistry::default();
+        let first = registry.register_download("m".into()).expect("first");
+        assert_eq!(registry.register_download("m".into()).unwrap_err(), "already-downloading");
+        assert!(registry.register_download("other".into()).is_ok(), "other models download alongside");
+        registry.clear_download("m");
+        drop(first);
+        assert!(registry.register_download("m".into()).is_ok());
     }
 }

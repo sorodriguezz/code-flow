@@ -249,6 +249,42 @@ pub fn scan_diff(files: &[FileDiffInfo]) -> Vec<SecretHit> {
     hits
 }
 
+/// `text` with every credential-looking value replaced by `[REDACTED:<rule>]`, and how many were.
+///
+/// The same rules as [`scan_diff`], over any text: what CodeFlow keeps of an AI interaction (the
+/// experiences a dataset is built from, memories, the knowledge index) goes through this first, so a
+/// key pasted into a chat never becomes training data or a retrievable chunk.
+pub fn redact(text: &str) -> (String, usize) {
+    let mut out = String::with_capacity(text.len());
+    let mut count = 0;
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        let mut line = line.to_string();
+        for rule in rules() {
+            // Every match on the line, not only the first: one line can carry a key and its id.
+            loop {
+                let Some(caps) = rule.re.captures(&line) else { break };
+                let whole = caps.get(0).unwrap();
+                let value = caps.name("val").unwrap_or(whole);
+                // An earlier replacement read back by a generic `token = …` rule would loop forever.
+                if value.as_str().contains("[REDACTED:")
+                    || (rule.check_placeholder && is_placeholder(value.as_str()))
+                    || (rule.skip_trivial && is_trivial(value.as_str()))
+                {
+                    break;
+                }
+                let replacement = format!("[REDACTED:{}]", rule.id);
+                line.replace_range(value.range(), &replacement);
+                count += 1;
+            }
+        }
+        out.push_str(&line);
+    }
+    (out, count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,4 +463,23 @@ mod tests {
             assert_eq!(rule_of(line), None, "should not flag: {line}");
         }
     }
+
+    #[test]
+    fn redact_masks_secrets_in_any_text_and_leaves_prose() {
+        // Keys are built at run time so the source never holds a key-shaped literal: GitHub's push
+        // protection rejected a commit for a made-up Stripe key written out here.
+        let token = ["ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"].concat();
+        let text = format!("deploy with {token} please\nnothing secret here");
+        let (out, count) = redact(&text);
+        assert_eq!(count, 1);
+        assert!(!out.contains(&token[..10]));
+        assert!(out.contains("[REDACTED:"));
+        assert!(out.ends_with("nothing secret here"));
+        let (clean, none) = redact("password = changeme\nAPI_TOKEN_TTL=3600");
+        assert_eq!(none, 0, "placeholders and numbers are not secrets: {clean}");
+        // A generic assignment rule does not re-read its own replacement.
+        let (again, n) = redact(&format!("API_TOKEN={}", ["sk_live_", "51Habcdefghijklmnopqrstuvwx"].concat()));
+        assert!(n >= 1 && again.contains("[REDACTED:"), "{again}");
+    }
 }
+

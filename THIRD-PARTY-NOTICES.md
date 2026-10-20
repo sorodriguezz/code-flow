@@ -1670,6 +1670,21 @@ own data directory, each pinned by its digest in [`src-tauri/src/dictation/mod.r
 | Piper voice en_GB «cori» (LibriVox recordings) | LicenseRef-PublicDomain | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
 | Piper voice en_GB «northern_english_male» | CC-BY-SA-4.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
 
+### Fine-tuning: Python and the trainers
+
+Downloaded only when training is prepared from Settings › Learning, into a folder of the app's own
+data directory. A machine with no Python 3.9 or newer gets a self-contained CPython first, pinned by
+release and digest in [`src-tauri/src/learning/env.rs`](src-tauri/src/learning/env.rs); pip then installs the trainer for
+the machine — and whatever those packages require — from the Python Package Index.
+
+| Component | Licence (SPDX) | Published at |
+|---|---|---|
+| CPython (python-build-standalone builds; the libraries a build bundles keep their own licences) | PSF-2.0 | <https://github.com/astral-sh/python-build-standalone> |
+| MLX and mlx-lm (Apple Silicon) | MIT | <https://github.com/ml-explore/mlx-lm> |
+| PyTorch (NVIDIA) | BSD-3-Clause | <https://github.com/pytorch/pytorch> |
+| Transformers, PEFT, TRL, Datasets, Accelerate (NVIDIA) | Apache-2.0 | <https://github.com/huggingface> |
+| bitsandbytes (NVIDIA) | MIT | <https://github.com/bitsandbytes-foundation/bitsandbytes> |
+
 ## Licence texts
 
 Every licence named in this file is published verbatim by SPDX at

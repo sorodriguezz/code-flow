@@ -21,10 +21,26 @@ import {
   type LocalExecProbe,
   type LocalExecState,
   type LocalOnFail,
+  type LocalReasoning,
 } from "../lib/tauri/localExecCommands";
 import { onLocalAiDownload, onLocalExecEngine, type LocalAiDownloadEvent } from "../lib/tauri/events";
 import { watchSettings } from "../lib/settingsSync";
 import { pushErrorToast } from "./toastStore";
+import { translate } from "./languageStore";
+import type { TranslationKey } from "../lib/i18n/translations";
+
+/** The codes a local-model command refuses with, in the reader's language; anything else as sent. */
+const REFUSAL_KEY: Record<string, TranslationKey> = {
+  "already-downloading": "localexec.errAlreadyDownloading",
+  "needs-cuda": "localexec.needsCudaHint",
+  "cloud-model": "localexec.errCloudModel",
+};
+
+export function localExecErrorText(error: unknown): string {
+  const text = String(error);
+  const key = REFUSAL_KEY[text];
+  return key ? translate(key) : text;
+}
 
 /**
  * The hybrid task's local model: which server, which model, what fits, how fast.
@@ -92,6 +108,8 @@ export function withChoice(state: LocalExecState, key: string, value: string): L
       return { ...state, review_mode: value as HybridReviewMode };
     case LOCAL_EXEC_KEYS.unload:
       return { ...state, unload: value !== "0" };
+    case LOCAL_EXEC_KEYS.reasoning:
+      return { ...state, reasoning: (value || "off") as LocalReasoning };
     case LOCAL_EXEC_KEYS.ctx: {
       const ctx = Number(value);
       return value !== "" && Number.isFinite(ctx) ? { ...state, ctx, ctx_chosen: true } : { ...state, ctx_chosen: false };
@@ -175,7 +193,7 @@ export const useLocalExecStore = create<LocalExecStore>((set, get) => ({
     try {
       await setSetting(key, value);
     } catch (error) {
-      pushErrorToast(String(error));
+      pushErrorToast(localExecErrorText(error));
     }
     await get().refresh(isDiscoveryKey(key));
   },
@@ -218,7 +236,7 @@ export const useLocalExecStore = create<LocalExecStore>((set, get) => ({
     try {
       await localExecCancelDownload(modelId);
     } catch (error) {
-      pushErrorToast(String(error));
+      pushErrorToast(localExecErrorText(error));
     }
   },
 
@@ -226,7 +244,7 @@ export const useLocalExecStore = create<LocalExecStore>((set, get) => ({
     try {
       await localExecDeleteModel(modelId);
     } catch (error) {
-      pushErrorToast(String(error));
+      pushErrorToast(localExecErrorText(error));
     }
     set((current) => {
       const { [modelId]: _gone, ...rest } = current.progress;
@@ -258,7 +276,7 @@ export const useLocalExecStore = create<LocalExecStore>((set, get) => ({
     try {
       await localExecOllamaCancelPull(tag);
     } catch (error) {
-      pushErrorToast(String(error));
+      pushErrorToast(localExecErrorText(error));
     }
   },
 
@@ -266,7 +284,7 @@ export const useLocalExecStore = create<LocalExecStore>((set, get) => ({
     try {
       await localExecOllamaDelete(tag);
     } catch (error) {
-      pushErrorToast(String(error));
+      pushErrorToast(localExecErrorText(error));
     }
     await get().refresh();
   },
@@ -275,7 +293,7 @@ export const useLocalExecStore = create<LocalExecStore>((set, get) => ({
     try {
       await localExecStopEngine();
     } catch (error) {
-      pushErrorToast(String(error));
+      pushErrorToast(localExecErrorText(error));
     }
     await get().refresh();
   },
@@ -284,7 +302,7 @@ export const useLocalExecStore = create<LocalExecStore>((set, get) => ({
     try {
       await localExecSetKey(key);
     } catch (error) {
-      pushErrorToast(String(error));
+      pushErrorToast(localExecErrorText(error));
     }
     await get().refresh(true);
   },

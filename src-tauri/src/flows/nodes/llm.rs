@@ -553,30 +553,7 @@ impl Embedder {
     }
 }
 
-pub fn embed_request(provider: &str, base: &str, model: &str, texts: &[String]) -> (String, Value) {
-    match provider {
-        "gemini" => {
-            let model = model.trim_start_matches("models/");
-            let requests: Vec<Value> = texts.iter().map(|t| json!({"model": format!("models/{model}"), "content": {"parts": [{"text": t}]}})).collect();
-            (format!("{base}/models/{model}:batchEmbedContents"), json!({"requests": requests}))
-        }
-        "ollama" => (format!("{base}/api/embed"), json!({"model": model, "input": texts})),
-        _ => (format!("{base}/embeddings"), json!({"model": model, "input": texts})),
-    }
-}
-
-pub fn read_vectors(provider: &str, answer: &Value) -> Vec<Vec<f32>> {
-    let floats = |v: &Value| v.as_array().map(|list| list.iter().filter_map(Value::as_f64).map(|f| f as f32).collect::<Vec<f32>>());
-    match provider {
-        "gemini" => answer["embeddings"].as_array().into_iter().flatten().filter_map(|e| floats(&e["values"])).collect(),
-        "ollama" => answer["embeddings"].as_array().into_iter().flatten().filter_map(floats).collect(),
-        _ => {
-            let mut data: Vec<&Value> = answer["data"].as_array().into_iter().flatten().collect();
-            data.sort_by_key(|d| d["index"].as_u64().unwrap_or(0));
-            data.into_iter().filter_map(|d| floats(&d["embedding"])).collect()
-        }
-    }
-}
+pub use crate::knowledge::embed::{embed_request, read_vectors};
 
 async fn embed_node(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
@@ -607,57 +584,8 @@ async fn embed_node(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 // ----------------------------------------------------------------------------------- vector store
 
-/// Cosine similarity; 0 for vectors that cannot be compared.
-pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
-    for (x, y) in a.iter().zip(b) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
-    }
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na.sqrt() * nb.sqrt()) }
-}
-
-/// A text cut into pieces of about `size` characters, overlapping by `overlap`, each ending where a
-/// paragraph, line, sentence or word does when one is near — what retrieval stores, one vector each.
-pub fn chunks(text: &str, size: usize, overlap: usize) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    if size == 0 || chars.len() <= size {
-        return if text.trim().is_empty() { Vec::new() } else { vec![text.trim().to_string()] };
-    }
-    let overlap = overlap.min(size / 2);
-    let mut out = Vec::new();
-    let mut start = 0;
-    while start < chars.len() {
-        let hard_end = (start + size).min(chars.len());
-        let mut end = hard_end;
-        if hard_end < chars.len() {
-            let window: String = chars[start..hard_end].iter().collect();
-            let floor = size / 2;
-            for breaker in ["\n\n", "\n", ". ", " "] {
-                if let Some(at) = window.rfind(breaker) {
-                    let at_chars = window[..at].chars().count() + breaker.chars().count();
-                    if at_chars >= floor {
-                        end = start + at_chars;
-                        break;
-                    }
-                }
-            }
-        }
-        let piece: String = chars[start..end].iter().collect();
-        if !piece.trim().is_empty() {
-            out.push(piece.trim().to_string());
-        }
-        if end >= chars.len() {
-            break;
-        }
-        start = end.saturating_sub(overlap).max(start + 1);
-    }
-    out
-}
+pub use crate::knowledge::chunker::chunks;
+pub use crate::knowledge::embed::cosine;
 
 /// An id for a text with none given: the same text is the same document, stored once.
 fn id_of(text: &str) -> String {
@@ -682,13 +610,7 @@ pub struct Hit {
     pub score: f32,
 }
 
-fn to_blob(vector: &[f32]) -> Vec<u8> {
-    vector.iter().flat_map(|f| f.to_le_bytes()).collect()
-}
-
-fn from_blob(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
-}
+use crate::knowledge::embed::{from_blob, to_blob};
 
 /// `text` as a `LIKE` pattern that matches it literally (with `ESCAPE '\\'`): `_` and `%` are wildcards, and
 /// `doc_1` must not take `docX1` with it.
