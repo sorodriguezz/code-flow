@@ -196,6 +196,13 @@ async fn spawn(entry: &EmbedModelSpec, model_path: PathBuf) -> Result<Embedder, 
         .arg(entry.ctx.to_string())
         .arg("-ub")
         .arg(entry.ctx.to_string())
+        // No prompt cache in RAM. b10587 keeps up to 8 GB of it by default (`--cache-ram 8192`), and
+        // with the automatic slots (4, unified KV) every chunk embedded leaves its state there: a
+        // vector is never asked for twice, so it is memory that only grows. Measured 2026-10-20 on
+        // an M4 with these flags: +95 MB per batch of 32 chunks, 5 GB after 40 — Qwen3-Embedding
+        // reached ~9 GB in the app — and flat at 0.9 GB with it off, at the same speed.
+        .arg("--cache-ram")
+        .arg("0")
         .arg("--no-webui");
     let mut child = command
         .stdin(std::process::Stdio::null())
