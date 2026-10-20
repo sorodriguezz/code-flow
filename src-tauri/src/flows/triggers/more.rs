@@ -213,25 +213,9 @@ pub fn connector(app: &AppHandle, flow_id: &str, node_id: &str, params: &Value, 
 
 // ---------------------------------------------------------------------------------------- clipboard
 
-/// What is on the clipboard as text, or `None` when it holds none (or cannot be read).
+/// The clipboard's text with trailing line breaks dropped, which is what the trigger compares.
 fn read_clipboard() -> Option<String> {
-    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
-        &[("pbpaste", &[])]
-    } else if cfg!(windows) {
-        &[("powershell", &["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw"])]
-    } else {
-        &[("wl-paste", &["--no-newline"]), ("xclip", &["-selection", "clipboard", "-o"]), ("xsel", &["--clipboard", "--output"])]
-    };
-    for (program, args) in candidates {
-        let mut command = crate::proc::std_command(program);
-        command.args(*args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        if let Ok(output) = command.output() {
-            if output.status.success() {
-                return Some(String::from_utf8_lossy(&output.stdout).trim_end_matches(['\r', '\n']).to_string());
-            }
-        }
-    }
-    None
+    crate::clipboard_text::read_clipboard().map(|text| text.trim_end_matches(['\r', '\n']).to_string())
 }
 
 /// Windows says when the clipboard changed without anyone reading it.

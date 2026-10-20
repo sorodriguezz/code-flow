@@ -23,18 +23,28 @@
 //! ```
 //!
 //! `{prompt}` is the ask, `{model}` is the configured model and `{session}` is the conversation (see
-//! below). An argument that mentions a placeholder with nothing behind it is **dropped whole** — with
-//! no model configured, `--model {model}` disappears rather than being sent as an empty string,
-//! which is the shape most CLIs reject. Quotes group words the way a shell does, so
-//! `--system "be brief"` is two arguments and not three.
+//! below). An argument that mentions a placeholder with nothing behind it is **dropped whole**, and
+//! so is the flag right before it — with no model configured, `--model {model}` disappears rather
+//! than being sent as an empty string, or as a bare `--model` that would swallow the next argument
+//! as its value. Quotes group words the way a shell does, so `--system "be brief"` is two arguments
+//! and not three.
+//!
+//! The placeholders are filled in **one pass**: a `{model}` or `{session}` that is part of the
+//! *prompt* (code, a template, a question about this very syntax) is text, and stays text.
 //!
 //! # Resuming, when the CLI can
 //!
-//! A second line declares how this binary continues a conversation — `--resume {session}`,
-//! `--session-id {session}`, whatever it spells it. With one, the app **names the session itself**
-//! and passes the same name on every turn of that conversation, which is how a CLI that takes an
-//! arbitrary session name gets multi-turn memory here. Without one, every turn is a fresh run and
-//! the chat replays its prefix, which is what the other session-less engines do.
+//! `{session}` in the main line is how the CLI learns the conversation's name — `--session-id
+//! {session}`, `--name {session}`, whatever it spells it. With it, the app **names the session
+//! itself** on the first turn and passes the same name on every later one, which is how a CLI that
+//! takes an arbitrary session name gets multi-turn memory here. Without it nothing can tell the CLI
+//! which conversation a turn belongs to, so every turn is a fresh run and the chat replays its
+//! prefix, which is what the other session-less engines do — a name minted and stored but never
+//! given to the CLI would be resumed into a conversation that does not exist.
+//!
+//! An optional second line is for the CLIs that start and continue with **different** flags
+//! (`--session-id {session}` to start, `--resume {session}` to continue): on a turn that continues,
+//! it replaces whatever the main line said about the session.
 //!
 //! The name is minted here rather than read out of the CLI's output, because there is no output
 //! format to read: this engine deliberately knows nothing about what it is running. So it reports
@@ -63,6 +73,43 @@ pub struct CustomEngine {
     /// survive from building the command to reading the answer, and an engine is built per run, so
     /// "written once" is exactly its lifetime.
     session: std::sync::OnceLock<String>,
+}
+
+impl CustomEngine {
+    fn template(&self) -> &str {
+        if self.args.trim().is_empty() { DEFAULT_ARGS } else { self.args.as_str() }
+    }
+
+    /// Whether the CLI can be told which conversation a turn belongs to — see the module note.
+    fn names_sessions(&self) -> bool {
+        self.template().contains("{session}")
+    }
+
+    /// The arguments for one run, recording the session it used (see [`Self::session`]).
+    fn argv(&self, prompt: &str, model: &str, resume_session_id: Option<&str>) -> Vec<String> {
+        let template = self.template();
+        // The session this run belongs to: the one the app is resuming, or a new name for a
+        // conversation that does not have one yet — and only when the main line can hand that name
+        // to the CLI. Otherwise there is no session, and `{session}` placeholders are dropped like
+        // any other unfilled one.
+        let session = if self.names_sessions() {
+            let id = resume_session_id.map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let _ = self.session.set(id.clone());
+            id
+        } else {
+            String::new()
+        };
+
+        if resume_session_id.is_some() && !session.is_empty() && !self.resume.trim().is_empty() {
+            // A continuing turn with a resume line of its own: the main line minus what it says
+            // about the session (that was how to *start* one), then the resume line.
+            let mut args = render_args_with(template, prompt, model, "");
+            args.extend(render_args_with(&self.resume, prompt, model, &session));
+            args
+        } else {
+            render_args_with(template, prompt, model, &session)
+        }
+    }
 }
 
 impl AiEngine for CustomEngine {
@@ -96,26 +143,14 @@ impl AiEngine for CustomEngine {
         self.resume = get("resume").unwrap_or_default();
     }
 
-    fn build_command(&self, binary: &str, inv: &AiInvocation) -> Command {
-        let template = if self.args.trim().is_empty() { DEFAULT_ARGS } else { self.args.as_str() };
-        // The session this run belongs to: the one the app is resuming, or a new name for a
-        // conversation that does not have one yet. Only when the user said this CLI can resume —
-        // otherwise there is no session, and `{session}` in the main line is dropped like any other
-        // unfilled placeholder.
-        let session = if self.resume.trim().is_empty() {
-            String::new()
-        } else {
-            let id = inv.resume_session_id.map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let _ = self.session.set(id.clone());
-            id
-        };
+    /// Only when the main line can name the session — see the module note. Otherwise the chat must
+    /// send its context on every turn, because the CLI starts from nothing each time.
+    fn resumes_sessions(&self) -> bool {
+        self.names_sessions()
+    }
 
-        let mut args = render_args_with(template, inv.prompt, inv.model, &session);
-        // The resume line is appended rather than merged into the main one: the user wrote two
-        // separate things, and a run that is *not* resuming must not carry half of the second.
-        if !session.is_empty() && inv.resume_session_id.is_some() {
-            args.extend(render_args_with(&self.resume, inv.prompt, inv.model, &session));
-        }
+    fn build_command(&self, binary: &str, inv: &AiInvocation) -> Command {
+        let args = self.argv(inv.prompt, inv.model, inv.resume_session_id);
 
         let mut command = Command::new(binary);
         command.args(args);
@@ -167,25 +202,63 @@ pub fn render_args(template: &str, prompt: &str, model: &str) -> Vec<String> {
 
 /// [`render_args`], with the session name too.
 pub fn render_args_with(template: &str, prompt: &str, model: &str, session: &str) -> Vec<String> {
-    split_words(template)
-        .into_iter()
-        .filter_map(|word| {
-            // An argument that mentions a placeholder nothing was given for is dropped whole:
-            // `--model {model}` with no model is two arguments most CLIs refuse, and one of them is
-            // empty. The prompt is never empty in practice, but it is treated the same way for the
-            // same reason.
-            if word.contains("{model}") && model.trim().is_empty() {
-                return None;
+    let mut out: Vec<String> = Vec::new();
+    // Whether the last word pushed was a flag written as such in the template — the one an empty
+    // placeholder right after it takes along.
+    let mut last_was_flag = false;
+    for word in split_words(template) {
+        // An argument that mentions a placeholder nothing was given for is dropped whole:
+        // `--model {model}` with no model is two arguments most CLIs refuse, and one of them is
+        // empty. The prompt is never empty in practice, but it is treated the same way for the
+        // same reason.
+        let empty = (word.contains("{model}") && model.trim().is_empty())
+            || (word.contains("{prompt}") && prompt.is_empty())
+            || (word.contains("{session}") && session.trim().is_empty());
+        if empty {
+            // ...and so is the flag it was the value of. Left behind, `--model` would take the
+            // *next* argument — usually the prompt — as the model.
+            if last_was_flag {
+                out.pop();
             }
-            if word.contains("{prompt}") && prompt.is_empty() {
-                return None;
+            last_was_flag = false;
+            continue;
+        }
+        last_was_flag = word.starts_with('-') && !word.contains('=') && !has_placeholder(&word);
+        out.push(fill(&word, prompt, model, session));
+    }
+    out
+}
+
+const PLACEHOLDERS: [&str; 3] = ["{prompt}", "{model}", "{session}"];
+
+fn has_placeholder(word: &str) -> bool {
+    PLACEHOLDERS.iter().any(|placeholder| word.contains(placeholder))
+}
+
+/// Every placeholder in `word` replaced, in one pass over the *template's* text: what goes in is
+/// never searched again, so a prompt that contains `{model}` keeps it.
+fn fill(word: &str, prompt: &str, model: &str, session: &str) -> String {
+    let mut out = String::with_capacity(word.len() + prompt.len());
+    let mut rest = word;
+    while let Some(at) = rest.find('{') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let hit = [("{prompt}", prompt), ("{model}", model), ("{session}", session)]
+            .into_iter()
+            .find(|(placeholder, _)| tail.starts_with(placeholder));
+        match hit {
+            Some((placeholder, value)) => {
+                out.push_str(value);
+                rest = &tail[placeholder.len()..];
             }
-            if word.contains("{session}") && session.trim().is_empty() {
-                return None;
+            None => {
+                out.push('{');
+                rest = &tail[1..];
             }
-            Some(word.replace("{prompt}", prompt).replace("{model}", model).replace("{session}", session))
-        })
-        .collect()
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Splits on whitespace, with single and double quotes grouping — the shell's rule, as far as a
@@ -237,14 +310,24 @@ mod tests {
     /// otherwise be sent empty, which is the shape most CLIs reject.
     #[test]
     fn drops_an_argument_whose_placeholder_is_empty() {
-        assert_eq!(
-            render_args("run --model {model} {prompt}", "hola", ""),
-            vec!["run".to_string(), "--model".to_string(), "hola".to_string()]
-        );
+        // The flag goes with its value: a bare `--model` would take "hola" as the model.
+        assert_eq!(render_args("run --model {model} {prompt}", "hola", ""), vec!["run".to_string(), "hola".to_string()]);
+        // A placeholder glued to its flag is one argument, dropped alone.
+        assert_eq!(render_args("run --model={model} {prompt}", "hola", ""), vec!["run".to_string(), "hola".to_string()]);
         assert_eq!(
             render_args("run --model {model} {prompt}", "hola", "fast-1"),
             vec!["run".to_string(), "--model".to_string(), "fast-1".to_string(), "hola".to_string()]
         );
+    }
+
+    /// What is filled in is never searched again: a prompt about this very syntax arrives intact.
+    #[test]
+    fn a_placeholder_inside_the_prompt_is_text() {
+        assert_eq!(
+            render_args_with("-m {model} -p {prompt}", "usa `${model}` y {session}", "fast-1", "abc"),
+            vec!["-m".to_string(), "fast-1".to_string(), "-p".to_string(), "usa `${model}` y {session}".to_string()]
+        );
+        assert_eq!(fill("{prompt}", "{x} {", "", ""), "{x} {");
     }
 
     #[test]
@@ -300,9 +383,45 @@ mod resume_tests {
 
     #[test]
     fn drops_the_session_placeholder_when_there_is_no_session() {
+        assert_eq!(render_args_with("run --session {session} {prompt}", "hola", "", ""), vec!["run".to_string(), "hola".to_string()]);
+    }
+
+    fn engine(args: &str, resume: &str) -> CustomEngine {
+        CustomEngine { args: args.into(), resume: resume.into(), ..Default::default() }
+    }
+
+    fn argv(engine: &CustomEngine, resume_session_id: Option<&str>) -> Vec<String> {
+        engine.argv("hola", "", resume_session_id)
+    }
+
+    /// The first turn hands the CLI the name it will be resumed under — or there is no session at
+    /// all. A name stored but never given to the CLI is a conversation that does not exist.
+    #[test]
+    fn the_first_turn_names_the_session_or_claims_none() {
+        let named = engine("--session-id {session} -p {prompt}", "");
+        let first = argv(&named, None);
+        let minted = named.session.get().cloned().expect("a name was minted");
+        assert_eq!(first, vec!["--session-id".to_string(), minted.clone(), "-p".to_string(), "hola".to_string()]);
+        assert!(named.resumes_sessions());
+
+        let unnamed = engine("-p {prompt}", "--resume {session}");
+        assert_eq!(argv(&unnamed, None), vec!["-p".to_string(), "hola".to_string()]);
+        assert!(unnamed.session.get().is_none(), "the CLI was never told a name, so none is claimed");
+        assert!(!unnamed.resumes_sessions());
+    }
+
+    /// A resume line replaces the main line's session flag on a continuing turn.
+    #[test]
+    fn a_resume_line_replaces_how_the_session_was_started() {
+        let both = engine("--session-id {session} -p {prompt}", "--resume {session}");
         assert_eq!(
-            render_args_with("run --session {session} {prompt}", "hola", "", ""),
-            vec!["run".to_string(), "--session".to_string(), "hola".to_string()]
+            argv(&both, Some("abc")),
+            vec!["-p".to_string(), "hola".to_string(), "--resume".to_string(), "abc".to_string()]
+        );
+        let one_line = engine("--session {session} -p {prompt}", "");
+        assert_eq!(
+            argv(&one_line, Some("abc")),
+            vec!["--session".to_string(), "abc".to_string(), "-p".to_string(), "hola".to_string()]
         );
     }
 

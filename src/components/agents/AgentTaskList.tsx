@@ -36,6 +36,7 @@ import {
   tabCountClass,
 } from "../common/recipes";
 import { Segmented } from "../common/Segmented";
+import { LayoutSwitch } from "./worktrees/LayoutSwitch";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Tooltip } from "../common/Tooltip";
 import { chordLabel } from "../../lib/keys";
@@ -243,6 +244,7 @@ export function AgentTaskList({
 
   return (
     <div data-tour="agents-tree" style={{ width }} className={`${explorerClass} h-full overflow-hidden`}>
+      <LayoutSwitch />
       {/* One primary action, and the three toggles. Creating is what this panel is for, so it gets
           the one filled button; the other three ways to create (a chain, a story run, a folder)
           fold into its caret rather than standing beside it as four look-alike glyphs. What stays

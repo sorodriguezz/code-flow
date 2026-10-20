@@ -478,18 +478,27 @@ export function TerminalBench() {
  * anywhere in a pane — including into its terminal — makes it the one the toolbar acts on, which is
  * what stops "split" from surprising you by dividing whichever pane you last used a button on.
  */
+/** One bench shell with its header — exported for the «Worktrees» layout, which shows the same
+ *  terminals inside a worktree's own tabs. */
+export function BenchTerminalPane(props: Parameters<typeof Pane>[0]) {
+  return <Pane {...props} />;
+}
+
 function Pane({
   terminal,
   visible,
   focused,
   onFocus,
   onClose,
+  bare = false,
 }: {
   terminal: BenchTerminal;
   visible: boolean;
   focused: boolean;
   onFocus: () => void;
   onClose: () => void;
+  /** Without the tile's own header — where a tab above it already names the shell and closes it. */
+  bare?: boolean;
 }) {
   const t = useT();
   const [editing, setEditing] = useState(false);
@@ -510,7 +519,7 @@ function Pane({
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       style={{ boxShadow: focused ? "inset 2px 0 0 var(--cf-accent)" : undefined }}
     >
-      <div className="group flex shrink-0 items-center gap-1.5 px-2 py-0.5 text-[11px] text-[var(--cf-text-muted)]">
+      <div className={`group flex shrink-0 items-center gap-1.5 px-2 py-0.5 text-[11px] text-[var(--cf-text-muted)] ${bare ? "hidden" : ""}`}>
         <span
           aria-hidden
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${

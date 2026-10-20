@@ -262,3 +262,34 @@ describe("a task that goes", () => {
     expect(useTaskReviewStore.getState().byTask.t2).toBeUndefined();
   });
 });
+
+describe("sendReviewToTerminal", () => {
+  it("pastes the whole review into the agent's terminal, then presses Enter, then forgets it", async () => {
+    const writes: Array<{ id: string; data: string }> = [];
+    handlers = { write_terminal: (args) => void writes.push({ id: String(args.id), data: String(args.data) }) };
+    useTaskReviewStore.setState({ byTask: {} });
+    useTaskReviewStore.getState().addComment("wt:/w/login", { path: "src/a.ts", side: "new", lineno: 3, code: "+ x", body: "usa una constante" });
+    const sent = await useTaskReviewStore.getState().sendReviewToTerminal("wt:/w/login", LABELS, "pty-1");
+    expect(sent).toBe(true);
+    expect(writes.map((write) => write.id)).toEqual(["pty-1", "pty-1"]);
+    // One bracketed paste holding every line, and Enter on its own.
+    expect(writes[0].data.startsWith("\x1b[200~")).toBe(true);
+    expect(writes[0].data.endsWith("\x1b[201~")).toBe(true);
+    expect(writes[0].data).toContain("usa una constante");
+    expect(writes[1].data).toBe("\r");
+    expect(reviewOf(useTaskReviewStore.getState(), "wt:/w/login").comments).toEqual([]);
+  });
+
+  it("keeps the comments when the terminal is gone", async () => {
+    handlers = {
+      write_terminal: () => {
+        throw new Error("no such terminal session");
+      },
+    };
+    useTaskReviewStore.setState({ byTask: {} });
+    useTaskReviewStore.getState().addComment("wt:/w/login", { path: "src/a.ts", side: "new", lineno: 3, code: "+ x", body: "otra vez" });
+    expect(await useTaskReviewStore.getState().sendReviewToTerminal("wt:/w/login", LABELS, "gone")).toBe(false);
+    expect(reviewOf(useTaskReviewStore.getState(), "wt:/w/login").comments).toHaveLength(1);
+  });
+});
+

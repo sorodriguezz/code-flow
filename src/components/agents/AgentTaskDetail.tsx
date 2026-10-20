@@ -7,7 +7,6 @@ import {
   GitCompare,
   History,
   Flag,
-  Frame,
   Link2,
   MessagesSquare,
   MoreHorizontal,
@@ -26,7 +25,6 @@ import { ChainStrip } from "./ChainStrip";
 import { ContinueWithModal } from "./ContinueWithModal";
 import { RacePanel } from "./RacePanel";
 import { TaskReviewPanel } from "./TaskReviewPanel";
-import { DesignOpenModal } from "./DesignOpenModal";
 import { useChainStore } from "../../state/chainStore";
 import { AiRunLog } from "../ai/AiRunLog";
 import { CheckpointsModal } from "../ai/CheckpointsModal";
@@ -50,8 +48,6 @@ import { useT } from "../../state/languageStore";
 import { scrollBehavior } from "../../lib/motion";
 import { revealInFileManager } from "../../lib/tauri/commands";
 import { openPathAsProject } from "../../lib/openAsProject";
-import { buildDesignNote, shortLabel } from "../../lib/agents/designNote";
-import { useDesignStore } from "../../state/designStore";
 
 /**
  * One task, open: who is doing it, where, what has been said so far, and the box to say the next
@@ -77,13 +73,8 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
    *  not placed yet. */
   const [tab, setTab] = useState<TaskTab>("chat");
   const [continuing, setContinuing] = useState(false);
-  /** Whether the «where is the app running» dialog is open — see `DesignOpenModal`. */
-  const [designing, setDesigning] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  const messages = live?.messages ?? [];
   const sending = live?.sending ?? false;
   // The working copy the turns edit — where its restore points live. Read off the task's own
   // workspace rather than the one on screen: a task opened from a notification can belong to
@@ -94,9 +85,6 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
   // A task with a worktree of its own edits that folder, so its restore points are there too.
   const worktree = task?.worktree_path ?? "";
   const repoPath = worktree || (repo?.local_path ?? "");
-  // Another task already running in this repository — the Run button waits for it like the
-  // composer's send does.
-  const repoTaken = useAgentsStore((s) => (task ? s.runningInProject(task.project_id, task.id) !== null : false));
   /** What the review tab has waiting to be sent — drawn on its segment, so a review left half
    *  written is visible from the transcript. */
   const pendingNotes = useTaskReviewStore((s) => {
@@ -113,10 +101,6 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
     const asked = takeOpenRequest(taskId);
     if (asked) setTab(asked);
   }, [takeOpenRequest, taskId]);
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: scrollBehavior() });
-  }, [messages.length, sending, taskId]);
 
   // The overflow menu portals to `document.body`, and this view is hidden rather than unmounted —
   // left open, it would float over whatever the user switched to.
@@ -201,14 +185,6 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
             },
           },
         ]),
-    {
-      // Design mode: the app this task is editing, in a window, with alt-click picking the element
-      // to talk about. The address is asked for rather than guessed — a dev server's port is the
-      // one thing this app cannot know — and remembered for next time.
-      label: t("design.open"),
-      icon: Frame,
-      onClick: () => setDesigning(true),
-    },
     ...(repoPath
       ? [
           {
@@ -373,58 +349,85 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
       ) : reviewing ? (
         <TaskReviewPanel taskId={taskId} repoPath={repoPath} />
       ) : (
-        <>
-          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-            {/* One column of a readable width, like every transcript in the app. */}
-            <div className="mx-auto w-full max-w-[760px] space-y-3.5">
-              {messages.length === 0 && !sending && (
-                <div className="rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3.5 py-3">
-                  <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--cf-text-muted)]">{task.goal}</p>
-                  {/* A task that has never run — its first turn was refused because the repository was
-                      busy, or it was never sent — has its goal on screen and nothing that sends it. The
-                      composer below would work, but only by retyping the goal into it. */}
-                  {task.turns === 0 && live?.loaded !== false && (
-                    <Tooltip label={repoTaken ? t("agents.busyInRepo", { name: repo?.name ?? "" }) : t("agents.runTaskHint")}>
-                      <button
-                        type="button"
-                        disabled={repoTaken || !task.goal.trim()}
-                        onClick={() => void useAgentsStore.getState().send(taskId, task.goal)}
-                        className={buttonClass({ variant: "primary", size: "sm", className: "mt-2.5" })}
-                      >
-                        <Play size={12} />
-                        {t("agents.runTask")}
-                      </button>
-                    </Tooltip>
-                  )}
-                </div>
-              )}
-              {messages.map((message, i) => (
-                // The panel's own bubble, lifted into `components/chat` and shared by all three
-                // transcripts. `stamp="compact"` is what this thread has always drawn: the header above
-                // already names the agent, the repository and the model, and repeating the duration and
-                // the CLI version under every turn was noise here in a way it is not in the AI panel.
-                <ChatMessageBubble key={i} message={message} stamp="compact" />
-              ))}
-              {sending && live?.runId && (
-                <AiRunLog
-                  runId={live.runId}
-                  running
-                  startedAt={live.runStartedAt}
-                />
-              )}
-            </div>
-          </div>
-          <DesignPickCard taskId={taskId} />
-          <AgentComposer taskId={taskId} />
-        </>
+        <TaskConversation taskId={taskId} />
       )}
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={overflow} onClose={() => setMenu(null)} />}
       {continuing && <ContinueWithModal taskId={taskId} onClose={() => setContinuing(false)} />}
-      {designing && <DesignOpenModal onClose={() => setDesigning(false)} />}
       {checkpointsOpen && repoPath && (
         <CheckpointsModal repoPath={repoPath} onClose={() => setCheckpointsOpen(false)} />
       )}
+    </>
+  );
+}
+
+/**
+ * A task's transcript and its composer — the conversation half of the detail pane, on its own so
+ * the «Worktrees» layout can put it under a header of its own without a second copy of either.
+ */
+export function TaskConversation({ taskId }: { taskId: string }) {
+  const t = useT();
+  const task = useAgentsStore((s) => s.tasks.find((candidate) => candidate.id === taskId) ?? null);
+  const live = useAgentsStore((s) => s.live[taskId]);
+  const repo = useWorkspaceStore((s) =>
+    task ? ((s.projectsByWorkspace[task.workspace_id] ?? []).find((p) => p.id === task.project_id) ?? null) : null,
+  );
+  // Another task already running in this repository — the Run button waits for it like the
+  // composer's send does.
+  const repoTaken = useAgentsStore((s) => (task ? s.runningInProject(task.project_id, task.id) !== null : false));
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const messages = live?.messages ?? [];
+  const sending = live?.sending ?? false;
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: scrollBehavior() });
+  }, [messages.length, sending, taskId]);
+
+  if (!task) return null;
+
+  return (
+    <>
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        {/* One column of a readable width, like every transcript in the app. */}
+        <div className="mx-auto w-full max-w-[760px] space-y-3.5">
+          {messages.length === 0 && !sending && (
+            <div className="rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3.5 py-3">
+              <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--cf-text-muted)]">{task.goal}</p>
+              {/* A task that has never run — its first turn was refused because the repository was
+                  busy, or it was never sent — has its goal on screen and nothing that sends it. The
+                  composer below would work, but only by retyping the goal into it. */}
+              {task.turns === 0 && live?.loaded !== false && (
+                <Tooltip label={repoTaken ? t("agents.busyInRepo", { name: repo?.name ?? "" }) : t("agents.runTaskHint")}>
+                  <button
+                    type="button"
+                    disabled={repoTaken || !task.goal.trim()}
+                    onClick={() => void useAgentsStore.getState().send(taskId, task.goal)}
+                    className={buttonClass({ variant: "primary", size: "sm", className: "mt-2.5" })}
+                  >
+                    <Play size={12} />
+                    {t("agents.runTask")}
+                  </button>
+                </Tooltip>
+              )}
+            </div>
+          )}
+          {messages.map((message, i) => (
+            // The panel's own bubble, lifted into `components/chat` and shared by all three
+            // transcripts. `stamp="compact"` is what this thread has always drawn: the header above
+            // already names the agent, the repository and the model, and repeating the duration and
+            // the CLI version under every turn was noise here in a way it is not in the AI panel.
+            <ChatMessageBubble key={i} message={message} stamp="compact" />
+          ))}
+          {sending && live?.runId && (
+            <AiRunLog
+              runId={live.runId}
+              running
+              startedAt={live.runStartedAt}
+            />
+          )}
+        </div>
+      </div>
+      <AgentComposer taskId={taskId} />
     </>
   );
 }
@@ -575,58 +578,6 @@ function AgentComposer({ taskId }: { taskId: string }) {
           )}
         </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * The element picked in design mode, offered to this task.
- *
- * It sits directly above the composer because that is what it becomes: a turn. Drawn only while
- * there is a pick, and cleared by sending it or by dismissing it — see `designStore` for why only
- * the last one is kept.
- */
-function DesignPickCard({ taskId }: { taskId: string }) {
-  const t = useT();
-  const pick = useDesignStore((s) => s.pick);
-  const sending = useAgentsStore((s) => s.live[taskId]?.sending ?? false);
-  if (!pick) return null;
-
-  const send = () => {
-    const message = buildDesignNote(pick, {
-      intro: t("design.noteIntro"),
-      markup: t("design.noteMarkup"),
-      styles: t("design.noteStyles"),
-      where: t("design.noteWhere"),
-    });
-    // Cleared only on a send the store took: a refused turn that dropped the pick would mean
-    // walking back to the preview and picking it again.
-    if (message && useAgentsStore.getState().send(taskId, message)) useDesignStore.getState().clear();
-  };
-
-  return (
-    <div className="shrink-0 px-4 pt-2">
-      <div className="mx-auto flex w-full max-w-[760px] items-center gap-2 rounded-lg border border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] px-3 py-1.5">
-        <Frame size={13} className="shrink-0 text-[var(--cf-accent)]" />
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-[var(--cf-text)]">
-          {shortLabel(pick.selector)}
-        </span>
-        <button
-          type="button"
-          disabled={sending}
-          onClick={send}
-          className={buttonClass({ variant: "primary", size: "sm" })}
-        >
-          {t("design.sendToAgent")}
-        </button>
-        <button
-          type="button"
-          onClick={() => useDesignStore.getState().clear()}
-          className={buttonClass({ variant: "ghost", size: "sm" })}
-        >
-          {t("design.dismiss")}
-        </button>
       </div>
     </div>
   );

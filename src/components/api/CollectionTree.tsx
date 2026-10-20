@@ -55,6 +55,7 @@ import { useT } from "../../state/languageStore";
 import { encodeInvite, syncCollection } from "../../lib/api/sync";
 import { riseDelay } from "../../lib/rise";
 import { supabaseAnonKey } from "../../lib/tauri/apiCommands";
+import { writeClipboardText } from "../../lib/clipboard";
 import { defaultRequestSpec } from "../../types/api";
 import type { ApiFolder, ApiProtocol, ApiRequestRow, SavedExample } from "../../types/api";
 
@@ -1077,7 +1078,7 @@ export function CollectionTree() {
     const url = useCollabStore.getState().shareFor(collectionId)?.project_url ?? "";
     if (url === "") return;
     const key = (await supabaseAnonKey(url).catch(() => null)) ?? "";
-    await navigator.clipboard.writeText(encodeInvite({ url, key, token, name }));
+    await writeClipboardText(encodeInvite({ url, key, token, name }));
     pushToast(t("api.collab.inviteCopied"), "success");
   };
 

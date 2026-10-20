@@ -126,6 +126,35 @@ describe("TaskReviewPanel", () => {
     expect(render()).toContain("Binary file");
   });
 
+  it("is read-only where no agent works: no comment button, no composer", () => {
+    seed({
+      selected: "src/a.ts",
+      diff: {
+        old_path: "src/a.ts",
+        new_path: "src/a.ts",
+        status: "modified",
+        binary: false,
+        hunks: [{ header: "@@ -1 +1 @@", lines: [{ origin: "+", content: "const b = 2", old_lineno: null, new_lineno: 1 }] }],
+      },
+    });
+    const html = renderToStaticMarkup(<TaskReviewPanel taskId="t1" repoPath="/tmp/wt/login" sendTo={{ kind: "none" }} />);
+    expect(html).toContain("const b = 2");
+    expect(html).not.toContain("Comment on this line");
+    expect(html).not.toContain("Send review");
+    expect(html).not.toContain("Show the comments");
+  });
+
+  it("names the terminal agent the review goes to", () => {
+    const html = renderToStaticMarkup(
+      <TaskReviewPanel
+        taskId="t1"
+        repoPath="/tmp/wt/login"
+        sendTo={{ kind: "terminal", agents: [{ sessionId: "pty-1", label: "Claude Code" }] }}
+      />,
+    );
+    expect(html).toContain("Send to Claude Code");
+  });
+
   // A `//` line placed between JSX tags is not a comment — React renders it as text.
   it("renders no source comments as text", () => {
     expect(render().replace(/<[^>]*>/g, "")).not.toMatch(/\/\/|\/\*/);

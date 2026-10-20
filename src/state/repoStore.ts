@@ -310,7 +310,11 @@ let statusRun = 0;
 async function guarded(
   set: (partial: Partial<RepoState>) => void,
   fn: () => Promise<void>,
-  options?: RefreshOptions,
+  options?: RefreshOptions & {
+    /** `fn` only reads the repository, so libgit2 losing a race with the filesystem is not a
+     *  failure — see `reportReadFailure`. Never set for a user's own action. */
+    read?: boolean;
+  },
 ): Promise<boolean> {
   const silent = options?.silent === true;
   if (!silent) set({ busy: true, error: null });
@@ -321,8 +325,9 @@ async function guarded(
     // The watcher's hot path goes through here (`refreshStatus`), so this is where a delete used to
     // become a red toast: libgit2 losing a race with the filesystem is not a failure to report, and
     // it must not leave the banner's `error` set either — the refresh that follows the deletion is
-    // correct. See `reportReadFailure`.
-    if (isReadRace(e)) return false;
+    // correct. See `reportReadFailure`. Reads only: a Stage all or a commit that hit the same race
+    // did not do what was asked, and swallowing that made the click look like it did nothing.
+    if (options?.read && isReadRace(e)) return false;
     const message = describeError(e);
     set({ error: message });
     pushErrorToast(message);
@@ -966,7 +971,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         if (token !== statusRun || get().repoPath !== repoPath) return;
         set({ status, workingDiff, stagedDiff });
       },
-      options,
+      { ...options, read: true },
     );
   },
 

@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import type { GitProgressEvent } from "../../types/domain";
+import type { GitProgressEvent, TerminalAgent } from "../../types/domain";
 import type {
   StreamMessage as ApiStreamMessage,
   StreamStatusEvent as ApiStreamStatusEvent,
@@ -24,6 +24,10 @@ export const onTerminalOutput = (handler: (event: TerminalOutputEvent) => void) 
 
 export const onTerminalExit = (handler: (event: { id: string; code?: number | null }) => void) =>
   listen<{ id: string; code?: number | null }>("terminal:exit", (e) => handler(e.payload));
+
+/** An agent in a terminal changed what it is doing — see `TerminalAgent`. */
+export const onTerminalAgent = (handler: (agent: TerminalAgent) => void) =>
+  listen<TerminalAgent>("terminal:agent", (e) => handler(e.payload));
 
 /** How far along a file transfer is. `total` covers the *whole* transfer, not the current file —
  *  a folder of two hundred files gets one bar that fills once. */
@@ -352,23 +356,12 @@ export const onLspExited = (handler: (event: { session_id: string }) => void) =>
 export const onLspRefresh = (handler: (event: { session_id: string; what: string }) => void) =>
   listen<{ session_id: string; what: string }>("lsp:refresh", (e) => handler(e.payload));
 
-/** An element picked in design mode's preview window — see `src-tauri/src/design.rs`. */
-export interface DesignPick {
-  url: string;
-  selector: string;
-  html: string;
-  css: string;
-  /** `x,y,w,h` in CSS pixels. */
-  rect: string;
-}
-
-export const onDesignPick = (handler: (event: DesignPick) => void) =>
-  listen<DesignPick>("design:pick", (e) => handler(e.payload));
-
 /** A question `cf ask` is waiting on — see `src-tauri/src/agentcli.rs`. */
 export interface AgentCliAsk {
   id: string;
   question: string;
+  /** The folder `cf` ran in. */
+  cwd: string;
 }
 
 export const onAgentCliNotify = (handler: (text: string) => void) =>

@@ -42,7 +42,16 @@ beforeEach(() => {
     add_workspace_terminal: (args) => {
       created += 1;
       opened.push(String(args.cwd));
-      return { id: `term-${created}`, workspace_id: "w1", tab_id: String(args.tabId), cwd: String(args.cwd), title: "" };
+      // The row and the shell behind it have different ids, as the backend's do: a write addressed to
+      // the row instead of the session is the bug that sent every command nowhere.
+      return {
+        id: `term-${created}`,
+        workspace_id: "w1",
+        tab_id: String(args.tabId),
+        cwd: String(args.cwd),
+        title: "",
+        session_id: `pty-${created}`,
+      };
     },
     set_bench_layout: () => null,
     rename_workspace_terminal: () => null,
@@ -71,7 +80,8 @@ describe("runAcross", () => {
 
   it("types the command into every one of them", async () => {
     await useBenchStore.getState().runAcross("w1", PANES, "  pnpm test  ");
-    expect(writes.map((write) => write.id)).toEqual(["term-1", "term-2", "term-3"]);
+    // Into each pane's shell — the session, never the bench row.
+    expect(writes.map((write) => write.id)).toEqual(["pty-1", "pty-2", "pty-3"]);
     // A pty is a terminal: Enter is a carriage return, and the line arrives trimmed.
     expect(new Set(writes.map((write) => write.data))).toEqual(new Set(["pnpm test\r"]));
   });

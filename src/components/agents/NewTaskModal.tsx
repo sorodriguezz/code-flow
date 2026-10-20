@@ -83,6 +83,8 @@ export function NewTaskModal({
   initialAgentProjectId = "",
   templateId = null,
   suspended = false,
+  initialProjectId = "",
+  initialWorktree = false,
 }: {
   onClose: () => void;
   onManageAgents: () => void;
@@ -96,6 +98,10 @@ export function NewTaskModal({
    * neither can stop the other's, so a single Escape meant to back out of the editor was closing
    * this one underneath it — taking the typed goal with it. */
   suspended?: boolean;
+  /** The repository to start ticked — the «Worktrees» layout's «new agent» on a repository's block. */
+  initialProjectId?: string;
+  /** Start with «in a worktree of its own» ticked — what a new agent in the «Worktrees» layout is. */
+  initialWorktree?: boolean;
 }) {
   const t = useT();
   const roster = useAgentsStore((s) => s.roster);
@@ -116,7 +122,11 @@ export function NewTaskModal({
    * the repository the user is already in, so the single-repository case is unchanged. */
   const [projectIds, setProjectIds] = useState<string[]>(() => {
     const first =
-      (activeProjectId && projects.some((p) => p.id === activeProjectId) ? activeProjectId : projects[0]?.id) ?? "";
+      (initialProjectId && projects.some((p) => p.id === initialProjectId)
+        ? initialProjectId
+        : activeProjectId && projects.some((p) => p.id === activeProjectId)
+          ? activeProjectId
+          : projects[0]?.id) ?? "";
     return first ? [first] : [];
   });
   /**
@@ -141,7 +151,7 @@ export function NewTaskModal({
   const [gate, setGate] = useState(true);
   /** Each task in a linked worktree of its own, on a new branch — tasks in one repository then run
    *  side by side instead of taking turns at its working copy. */
-  const [worktree, setWorktree] = useState(false);
+  const [worktree, setWorktree] = useState(initialWorktree);
   /** Several repositories, one plan across them — when the planner's CLI can see them all. */
   const [onePlan, setOnePlan] = useState(true);
   /** Commands that validate the change, one per line: approved by typing them. */

@@ -10,9 +10,10 @@
 //!
 //! ```text
 //!   cf notify "tests are green"      a line in the app, wherever the user is
-//!   cf ask "drop the column?"        blocks, prints what the user answered
+//!   cf ask "drop the column?"        blocks; exits 0 on Yes, 1 on No
 //!   cf status                        what the app has in focus, as JSON
 //!   cf review                        opens the diff of the task this folder belongs to
+//!   cf hook <agent> <event>          an agent's status hook (stdin: its JSON); never prints
 //! ```
 //!
 //! # Why this is not `remotectl`
@@ -57,10 +58,23 @@ const MAX_REQUEST: usize = 64 * 1024;
 /// Where the endpoint is listening and the token that opens it. `None` until `start` has bound.
 static ENDPOINT: OnceLock<(u16, String)> = OnceLock::new();
 
-/// Questions waiting on a human, by id.
-static PENDING: OnceLock<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Option<String>>>>> = OnceLock::new();
+/// What the user said to a `cf ask`: yes or no, and whatever they typed with it.
+///
+/// The verdict is its own field and never read out of the text: `cf ask "drop it?" && …` runs the
+/// second half on a zero exit, so an answer box where typing "no" and pressing Enter counted as a
+/// reply — and so as success — was a yes to everything.
+#[derive(Debug)]
+struct Answer {
+    yes: bool,
+    text: String,
+}
 
-fn pending() -> &'static Mutex<HashMap<String, tokio::sync::oneshot::Sender<Option<String>>>> {
+type AnswerSender = tokio::sync::oneshot::Sender<Answer>;
+
+/// Questions waiting on a human, by id.
+static PENDING: OnceLock<Mutex<HashMap<String, AnswerSender>>> = OnceLock::new();
+
+fn pending() -> &'static Mutex<HashMap<String, AnswerSender>> {
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -86,6 +100,19 @@ struct Request {
     /// The folder the agent is in, for `review`.
     #[serde(default)]
     cwd: String,
+    /// `hook` only: the pty session the agent runs in (`CODEFLOW_SESSION`), the agent, and the few
+    /// fields of its hook payload a card can use — picked out by `cf`, so a reply of any length
+    /// never has to fit in a request.
+    #[serde(default)]
+    session: String,
+    #[serde(default)]
+    agent: String,
+    #[serde(default)]
+    prompt: String,
+    #[serde(default)]
+    reply: String,
+    #[serde(default)]
+    tool: String,
 }
 
 /// What the app answers. `ok` is what `cf` turns into its exit code.
@@ -110,6 +137,9 @@ impl Reply {
 struct AskEvent {
     id: String,
     question: String,
+    /// The folder `cf` ran in. Several agents can ask at once (a race is several of them), and an
+    /// answer given to the wrong worktree is the failure that matters.
+    cwd: String,
 }
 
 /// What `cf status` prints — whatever the window has in focus. Filled by the UI, which is the only
@@ -139,12 +169,26 @@ pub fn agentcli_focus(workspace: String, project: String, task: String) {
     }
 }
 
-/// The answer to a question `cf ask` is waiting on, or `None` when the user dismissed it.
+/// The answer to a question `cf ask` is waiting on: `yes` is what `cf` exits 0 on, and `text` is
+/// printed either way. Dismissing is a no with nothing typed.
 #[tauri::command]
-pub fn agentcli_answer(id: String, answer: Option<String>) {
+pub fn agentcli_answer(id: String, yes: bool, text: String) {
     let sender = pending().lock().ok().and_then(|mut held| held.remove(&id));
     if let Some(sender) = sender {
-        let _ = sender.send(answer);
+        let _ = sender.send(Answer { yes, text });
+    }
+}
+
+/// What `cf` is told for an answer. A no with nothing typed still says "no", so a script that
+/// prints the reply never prints an empty line for a refusal.
+fn reply_for(answer: Answer) -> Reply {
+    let text = answer.text.trim().to_string();
+    if answer.yes {
+        Reply::ok(text)
+    } else if text.is_empty() {
+        Reply::no("no")
+    } else {
+        Reply::no(text)
     }
 }
 
@@ -276,10 +320,12 @@ async fn handle(body: &str, app: &AppHandle, token: &str) -> Reply {
             // A shell is blocked on the answer, so the window has to be where it can be seen: an
             // agent that asked from behind another application would otherwise look hung.
             raise(app);
-            let _ = app.emit("agentcli:ask", AskEvent { id: id.clone(), question: question.to_string() });
+            let _ = app.emit(
+                "agentcli:ask",
+                AskEvent { id: id.clone(), question: question.to_string(), cwd: request.cwd.trim().to_string() },
+            );
             match tokio::time::timeout(ASK_TIMEOUT, receiver).await {
-                Ok(Ok(Some(answer))) => Reply::ok(answer),
-                Ok(Ok(None)) => Reply::no("dismissed"),
+                Ok(Ok(answer)) => reply_for(answer),
                 // The window went away, or the question timed out: the entry goes either way, which
                 // is the only thing here that could have grown without bound.
                 _ => {
@@ -308,6 +354,26 @@ async fn handle(body: &str, app: &AppHandle, token: &str) -> Reply {
             raise(app);
             let _ = app.emit("agentcli:review", cwd.to_string());
             Reply::ok("")
+        }
+        // An agent's status hook: what it is doing, for its line on the «Worktrees» rail. Never
+        // raises the window — this is the agent talking about itself on every turn, not to the user.
+        "hook" => {
+            let event = request.text.trim();
+            if event.is_empty() || request.session.trim().is_empty() {
+                return Reply::no("no session");
+            }
+            if crate::agentstatus::hook(
+                request.session.trim(),
+                request.agent.trim(),
+                event,
+                &request.prompt,
+                &request.reply,
+                request.tool.trim(),
+            ) {
+                Reply::ok("")
+            } else {
+                Reply::no("no such terminal")
+            }
         }
         other => Reply::no(format!("unknown verb: {other}")),
     }
@@ -363,6 +429,22 @@ mod tests {
     fn reads_exactly_what_was_declared() {
         let raw = b"POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}trailing".to_vec();
         assert_eq!(body_of(&raw), Some("{}"));
+    }
+
+    /// The exit code is the verdict, never the words: "no" typed into the box is still a no only
+    /// because the user pressed No, and a Yes with a note is still a yes.
+    #[test]
+    fn the_verdict_decides_the_exit_code_not_the_text() {
+        let yes = reply_for(Answer { yes: true, text: " go ahead ".into() });
+        assert!(yes.ok);
+        assert_eq!(yes.text, "go ahead");
+        let typed_no = reply_for(Answer { yes: false, text: "not the prod table".into() });
+        assert!(!typed_no.ok);
+        assert_eq!(typed_no.text, "not the prod table");
+        let dismissed = reply_for(Answer { yes: false, text: String::new() });
+        assert!(!dismissed.ok);
+        assert_eq!(dismissed.text, "no");
+        assert!(!reply_for(Answer { yes: true, text: "no".into() }).text.is_empty(), "a yes keeps what was typed");
     }
 
     #[test]

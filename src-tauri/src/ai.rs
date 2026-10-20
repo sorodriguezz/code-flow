@@ -1977,6 +1977,11 @@ impl AiEngine for AccountEngine {
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
         self.with(|e| e.interpret(success, status_label, stdout, stderr))
     }
+    // Forwarded like the rest: left to the trait's no-op, a custom CLI run with an account or with
+    // task instructions lost its argument line and ran the default `-p {prompt}`.
+    fn configure(&mut self, get: &dyn Fn(&str) -> Option<String>) {
+        self.inner.configure(get);
+    }
     fn list_models_args(&self) -> Option<Vec<String>> {
         self.with(|e| e.list_models_args())
     }

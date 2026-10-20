@@ -6,11 +6,28 @@ import { EmptyState } from "../common/EmptyState";
 import { FileGlyph } from "../common/FileGlyph";
 import { Tooltip } from "../common/Tooltip";
 import { fieldClass, rowClass } from "../common/recipes";
+import { Select } from "../common/Select";
 import { reviewOf, useTaskReviewStore } from "../../state/taskReviewStore";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useT } from "../../state/languageStore";
 import { anchorOf, type ReviewComment, type ReviewSide } from "../../lib/agents/reviewNote";
 import type { DiffLine } from "../../types/domain";
+
+/**
+ * Where a review goes. A task's chat by default; for a working copy whose agents run in terminals,
+ * typed into one of those CLIs; and nowhere when nobody works there — then the diff is read-only,
+ * because a comment that cannot be sent is a note written to no one.
+ */
+export type ReviewTarget =
+  | { kind: "task" }
+  | {
+      kind: "terminal";
+      /** The agents at work in the copy's terminals; the first is preselected. */
+      agents: readonly { sessionId: string; label: string }[];
+      /** After it went — to put that agent's terminal on screen. */
+      onSent?: (sessionId: string) => void;
+    }
+  | { kind: "none" };
 
 /**
  * Reviewing an agent's work where the work happened: its diff, with a comment on any line, sent
@@ -27,10 +44,25 @@ import type { DiffLine } from "../../types/domain";
  * reveal the folder in the file manager. Reading the diff from a *path* makes the worktree case the
  * same as the ordinary one.
  */
-export function TaskReviewPanel({ taskId, repoPath }: { taskId: string; repoPath: string }) {
+export function TaskReviewPanel({
+  taskId,
+  repoPath,
+  sendTo = { kind: "task" },
+}: {
+  /** The review's key: a task's id — or, for a worktree no task owns, any stable key of its own. */
+  taskId: string;
+  repoPath: string;
+  sendTo?: ReviewTarget;
+}) {
   const t = useT();
   const review = useTaskReviewStore((s) => reviewOf(s, taskId));
   const sending = useAgentsStore((s) => s.live[taskId]?.sending ?? false);
+  const canComment = sendTo.kind !== "none";
+  const terminals = sendTo.kind === "terminal" ? sendTo.agents : [];
+  /** The terminal agent the review goes to, when it goes to one. */
+  const [pickedSession, setPickedSession] = useState("");
+  const session = terminals.some((agent) => agent.sessionId === pickedSession) ? pickedSession : (terminals[0]?.sessionId ?? "");
+  const [delivering, setDelivering] = useState(false);
   const load = useTaskReviewStore((s) => s.load);
 
   // Re-read when the panel opens and whenever the working copy under it changes — a turn that just
@@ -44,14 +76,22 @@ export function TaskReviewPanel({ taskId, repoPath }: { taskId: string; repoPath
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex min-h-0 flex-1">
-        <FileRail taskId={taskId} />
+        <FileRail taskId={taskId} canComment={canComment} />
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {review.error !== "" ? (
             <EmptyState icon={FileDiff} title={t("agents.review.failed")} subtitle={review.error} />
           ) : review.selected === null ? (
-            <CommentSummary taskId={taskId} />
+            canComment ? (
+              <CommentSummary taskId={taskId} />
+            ) : (
+              <EmptyState
+                icon={FileDiff}
+                title={review.files.length === 0 ? t("agents.review.noChanges") : t("agents.review.pickFile")}
+                subtitle={t("agents.review.readOnlyHint")}
+              />
+            )
           ) : (
-            <DiffPane taskId={taskId} />
+            <DiffPane taskId={taskId} canComment={canComment} />
           )}
         </div>
       </div>
@@ -59,40 +99,78 @@ export function TaskReviewPanel({ taskId, repoPath }: { taskId: string; repoPath
       {/* The footer is the review's own composer: the note that belongs to no line, and the send.
           The task's normal composer is hidden while this tab is up — two boxes that both send a
           turn, one of which silently discards the comments, is the one shape worth avoiding. */}
-      <div className="shrink-0 border-t border-[var(--cf-border)] px-4 py-2.5">
-        <div className="flex items-end gap-2">
-          <textarea
-            rows={2}
-            value={review.general}
-            onChange={(e) => useTaskReviewStore.getState().setGeneral(taskId, e.target.value)}
-            placeholder={t("agents.review.generalPlaceholder")}
-            aria-label={t("agents.review.generalPlaceholder")}
-            className={fieldClass({ size: "sm", className: "min-w-0 flex-1 resize-none leading-relaxed" })}
-          />
-          <Tooltip label={pending === 0 ? t("agents.review.nothingToSend") : t("agents.review.sendHint")}>
-            <button
-              type="button"
-              disabled={pending === 0 || sending}
-              onClick={() =>
-                useTaskReviewStore.getState().sendReview(taskId, {
-                  intro: t("agents.review.intro", { n: review.comments.length }),
-                  general: t("agents.review.generalHeading"),
-                })
+      {canComment && (
+        <div className="shrink-0 border-t border-[var(--cf-border)] px-4 py-2.5">
+          <div className="flex items-end gap-2">
+            <textarea
+              rows={2}
+              value={review.general}
+              onChange={(e) => useTaskReviewStore.getState().setGeneral(taskId, e.target.value)}
+              placeholder={t("agents.review.generalPlaceholder")}
+              aria-label={t("agents.review.generalPlaceholder")}
+              className={fieldClass({ size: "sm", className: "min-w-0 flex-1 resize-none leading-relaxed" })}
+            />
+            {/* Several agents in the copy's terminals: which one reads the review. */}
+            {terminals.length > 1 && (
+              <div className="w-[150px] shrink-0">
+                <Select
+                  value={session}
+                  onChange={setPickedSession}
+                  options={terminals.map((agent) => ({ value: agent.sessionId, label: agent.label }))}
+                  size="compact"
+                  ariaLabel={t("agents.review.sendToWho")}
+                />
+              </div>
+            )}
+            <Tooltip
+              label={
+                pending === 0
+                  ? t("agents.review.nothingToSend")
+                  : sendTo.kind === "terminal"
+                    ? t("agents.review.sendTerminalHint")
+                    : t("agents.review.sendHint")
               }
-              className={buttonClass({ variant: "primary", size: "sm", className: "shrink-0" })}
             >
-              <Send size={12} />
-              {pending === 0 ? t("agents.review.send") : t("agents.review.sendN", { n: pending })}
-            </button>
-          </Tooltip>
+              <button
+                type="button"
+                disabled={pending === 0 || sending || delivering || (sendTo.kind === "terminal" && session === "")}
+                onClick={() => {
+                  const labels = {
+                    intro: t("agents.review.intro", { n: review.comments.length }),
+                    general: t("agents.review.generalHeading"),
+                  };
+                  if (sendTo.kind !== "terminal") {
+                    useTaskReviewStore.getState().sendReview(taskId, labels);
+                    return;
+                  }
+                  setDelivering(true);
+                  void useTaskReviewStore
+                    .getState()
+                    .sendReviewToTerminal(taskId, labels, session)
+                    .then((sent) => {
+                      if (sent) sendTo.onSent?.(session);
+                    })
+                    .finally(() => setDelivering(false));
+                }}
+                className={buttonClass({ variant: "primary", size: "sm", className: "shrink-0" })}
+              >
+                <Send size={12} />
+                {sendTo.kind === "terminal" && terminals.length === 1
+                  ? t("agents.review.sendTo", { name: terminals[0].label })
+                  : pending === 0
+                    ? t("agents.review.send")
+                    : t("agents.review.sendN", { n: pending })}
+              </button>
+            </Tooltip>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
 
 /** The changed files, and the way back to the list of comments. */
-function FileRail({ taskId }: { taskId: string }) {
+function FileRail({ taskId, canComment }: { taskId: string; canComment: boolean }) {
   const t = useT();
   const review = useTaskReviewStore((s) => reviewOf(s, taskId));
 
@@ -144,7 +222,7 @@ function FileRail({ taskId }: { taskId: string }) {
         })}
       </div>
 
-      {review.selected !== null && (
+      {review.selected !== null && canComment && (
         <button
           type="button"
           onClick={() => void useTaskReviewStore.getState().selectFile(taskId, null)}
@@ -226,7 +304,7 @@ function RemoveComment({ taskId, commentId }: { taskId: string; commentId: strin
 type Draft = { side: ReviewSide; lineno: number | null; code: string };
 
 /** The open file's diff, every line of it commentable. */
-function DiffPane({ taskId }: { taskId: string }) {
+function DiffPane({ taskId, canComment }: { taskId: string; canComment: boolean }) {
   const t = useT();
   const review = useTaskReviewStore((s) => reviewOf(s, taskId));
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -267,7 +345,11 @@ function DiffPane({ taskId }: { taskId: string }) {
                   line={line}
                   lines={hunk.lines}
                   index={lineAt}
-                  onComment={() => setDraft({ side, lineno, code: `${line.origin}${line.content}`.replace(/\n$/, "") })}
+                  onComment={
+                    canComment
+                      ? () => setDraft({ side, lineno, code: `${line.origin}${line.content}`.replace(/\n$/, "") })
+                      : undefined
+                  }
                   commentLabel={t("agents.review.commentOnLine")}
                 />
                 {commentsFor(side, lineno).map((comment) => (
@@ -317,7 +399,8 @@ function DiffRow({
   line: DiffLine;
   lines: DiffLine[];
   index: number;
-  onComment: () => void;
+  /** Absent where a comment has nowhere to go: the gutter keeps its width, with no button in it. */
+  onComment?: () => void;
   commentLabel: string;
 }) {
   const tint =
@@ -338,15 +421,19 @@ function DiffRow({
       {/* The affordance lives in the gutter rather than at the end of the line: a diff line can be
           hundreds of columns wide, and a button at its end is off screen exactly when the line is
           the interesting one. */}
-      <button
-        type="button"
-        onClick={onComment}
-        title={commentLabel}
-        aria-label={commentLabel}
-        className="mt-[1px] flex h-4 w-4 shrink-0 items-center justify-center rounded bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] opacity-0 transition-opacity duration-100 group-hover:opacity-100 focus-visible:opacity-100"
-      >
-        <MessageSquarePlus size={11} />
-      </button>
+      {onComment ? (
+        <button
+          type="button"
+          onClick={onComment}
+          title={commentLabel}
+          aria-label={commentLabel}
+          className="mt-[1px] flex h-4 w-4 shrink-0 items-center justify-center rounded bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] opacity-0 transition-opacity duration-100 group-hover:opacity-100 focus-visible:opacity-100"
+        >
+          <MessageSquarePlus size={11} />
+        </button>
+      ) : (
+        <span className="w-4 shrink-0" />
+      )}
       <span className="w-3 shrink-0 select-none text-center text-[var(--cf-text-faint)]">{line.origin.trim()}</span>
       <span className="min-w-0 flex-1 whitespace-pre-wrap break-all pr-3">
         <InlineContent line={line} lines={lines} index={index} />

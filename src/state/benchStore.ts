@@ -37,6 +37,7 @@ import {
   type PaneView,
 } from "../lib/bench/layout";
 import type { BenchTab, BenchTerminal } from "../types/domain";
+import { startTerminalRouter } from "./terminalStore";
 
 /**
  * The agent console's terminal bench: tabs, and a tiled arrangement of shells inside each.
@@ -296,6 +297,10 @@ export const useBenchStore = create<BenchState>((set, get) => ({
   },
 
   addTab: async (workspaceId, cwd, profileId) => {
+    // Listening before the shell exists: a session's first output is only held for its pane if the
+    // router is up when it arrives, and an agent's CLI draws its whole screen once, at startup — a
+    // shell started from the «Worktrees» layout before any pane had ever mounted came up blank.
+    startTerminalRouter();
     const tab = await addBenchTab(workspaceId);
     const created = await addWorkspaceTerminal(workspaceId, tab.id, cwd, profileId);
     const node = { kind: "leaf" as const, id: created.id };
@@ -320,6 +325,7 @@ export const useBenchStore = create<BenchState>((set, get) => ({
   },
 
   split: async (workspaceId, tabId, cwd, dir, profileId) => {
+    startTerminalRouter();
     const target = get().focusedPane[tabId];
     const current = get().layouts[tabId];
     if (!target || !current) return;
@@ -471,9 +477,12 @@ export const useBenchStore = create<BenchState>((set, get) => ({
     // is pressed is a CR — the same point `terminalStore.runCommand` makes. Written with no wait
     // for a prompt, as it does.
     // A pane with no command of its own is left at its prompt.
+    // Into each pane's *shell* (its session), not its row: `write_terminal` takes the pty's id, and
+    // a row id was refused in silence — every layout and race command used to go nowhere.
     for (const [at, id] of ids.entries()) {
       const line = (folders[at]?.command ?? "").trim();
-      if (line !== "") await writeTerminal(id, `${line}\r`).catch(() => undefined);
+      const session = get().terminals.find((terminal) => terminal.id === id)?.session_id;
+      if (line !== "" && session) await writeTerminal(session, `${line}\r`).catch(() => undefined);
     }
     return tabId;
   },
@@ -517,6 +526,7 @@ export const useBenchStore = create<BenchState>((set, get) => ({
   },
 
   resume: async (id) => {
+    startTerminalRouter();
     // Both halves of the reply are applied, and the transcript is not optional. Resuming rewrites
     // the history — the backend seeds the new shell's recording with the old output, a reset of the
     // terminal modes the previous process left armed, and a rule marking the seam — and the pane

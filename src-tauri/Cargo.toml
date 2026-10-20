@@ -7,6 +7,9 @@ edition = "2021"
 license-file = "../LICENSE"
 repository = "https://github.com/sorodriguezz/code-flow"
 publish = false
+# Two binaries (`codeflow` and `cf`, below): without this `cargo run` — which is what `tauri dev`
+# runs — cannot tell which one is the app.
+default-run = "codeflow"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

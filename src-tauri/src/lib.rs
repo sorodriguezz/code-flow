@@ -22,9 +22,9 @@ mod backup;
 mod boot_guard;
 mod caveman;
 mod agentcli;
+mod agentstatus;
 mod chain_memory;
 mod custom;
-mod design;
 mod chat_mcp;
 mod archify_suggest;
 mod codemap;
@@ -46,6 +46,7 @@ mod speech;
 mod flows;
 mod fsops;
 mod explorer_bridge;
+mod clipboard_text;
 mod codex;
 mod gdrive;
 mod gemini;
@@ -557,9 +558,6 @@ pub fn run() {
             if boot_guard::take_over(app.handle()) {
                 return Ok(());
             }
-            // The handle design mode's navigation hook reports a pick through. Set once, here,
-            // because the hook outlives the call that builds the preview window — see `design`.
-            design::remember(app.handle());
             // The loopback endpoint `cf` calls: one socket and one task, bound to 127.0.0.1 on a
             // port the OS picks. See `agentcli`.
             agentcli::start(app.handle());
@@ -976,9 +974,6 @@ sharded_invoke_handler! {
         agentcli::agentcli_answer,
         agentcli::agentcli_endpoint,
         agentcli::agentcli_focus,
-        design::design_open,
-        design::design_close,
-        design::design_is_open,
         windows::open_satellite,
         windows::focus_satellite,
         windows::list_satellites,
@@ -1329,6 +1324,7 @@ sharded_invoke_handler! {
         commands::agents_cmd::list_agent_tasks,
         commands::agents_cmd::get_agent_task,
         commands::agents_cmd::create_agent_task,
+        commands::agents_cmd::create_agent_worktree,
         commands::agents_cmd::update_agent_task_run,
         commands::agents_cmd::set_agent_task_project,
         commands::agents_cmd::rename_agent_task,
@@ -1599,6 +1595,8 @@ sharded_invoke_handler! {
         commands::fs_cmd::copy_external_path,
         explorer_bridge::system_clipboard_files,
         explorer_bridge::system_clipboard_stamp,
+        clipboard_text::clipboard_write_text,
+        clipboard_text::clipboard_read_text,
         explorer_bridge::window_under_cursor,
         commands::fs_cmd::dir_tree,
         commands::fs_cmd::create_dir,
@@ -1633,6 +1631,9 @@ sharded_invoke_handler! {
         commands::terminal_cmd::close_terminal,
         commands::terminal_cmd::terminal_path_kinds,
         commands::terminal_cmd::terminal_foreground,
+        commands::terminal_cmd::terminal_agent_states,
+        commands::terminal_cmd::terminal_set_agent,
+        commands::terminal_cmd::agent_hook_settings,
         commands::terminal_cmd::list_workspace_terminals,
         commands::terminal_cmd::add_workspace_terminal,
         commands::terminal_cmd::resume_workspace_terminal,

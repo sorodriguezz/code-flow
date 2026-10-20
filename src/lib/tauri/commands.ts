@@ -75,6 +75,7 @@ import type {
   Bench,
   BenchTab,
   BenchTerminal,
+  TerminalAgent,
   ResumedTerminal,
   TerminalOpened,
   ThreadCloseOutcome,
@@ -666,6 +667,16 @@ export const terminalPathKinds = (paths: string[]) => invoke<number[]>("terminal
 /** What a terminal is running in its foreground other than its shell — `null` at the prompt. Closing
  *  its tab ends it, so the tab asks first. */
 export const terminalForeground = (id: string) => invoke<string | null>("terminal_foreground", { id });
+
+/** Every terminal with an agent in it — later changes come as `terminal:agent`. */
+export const terminalAgentStates = () => invoke<TerminalAgent[]>("terminal_agent_states");
+/** Names the agent the window just typed into session `id`. */
+export const terminalSetAgent = (id: string, agent: string) => invoke<boolean>("terminal_set_agent", { id, agent });
+/** The settings file a launched `claude` gets with `--settings`: its status hooks. Returns its path. */
+export const agentHookSettings = () => invoke<string>("agent_hook_settings");
+/** A worktree of its own for an agent run in a terminal — no task behind it. */
+export const createAgentWorktree = (projectId: string, name: string) =>
+  invoke<{ path: string; branch: string }>("create_agent_worktree", { projectId, name });
 
 // ---------- terminal: the agent console's bench ----------
 
@@ -2102,6 +2113,11 @@ export const systemClipboardFiles = () => invoke<SystemClipboardFiles>("system_c
 /** The system clipboard's change counter alone, recorded by the explorer's own Copy. */
 export const systemClipboardStamp = () => invoke<number | null>("system_clipboard_stamp");
 
+/** Text on the system clipboard through the platform's own tool — `lib/clipboard.ts` falls back to
+ *  these when the webview refuses `navigator.clipboard`. */
+export const clipboardWriteText = (text: string) => invoke<void>("clipboard_write_text", { text });
+export const clipboardReadText = () => invoke<string>("clipboard_read_text");
+
 /** Which other window of the app is under the pointer, and where in its page (CSS pixels). */
 export interface WindowPoint {
   label: string;
@@ -3032,9 +3048,9 @@ export const deleteWorkItemReview = (id: string) => invoke<void>("delete_work_it
 // open a pairing window, move the port, or revoke the device sitting next to it.
 
 /** Everything the settings panel draws, in one read. */
-/** The answer to the question `cf ask` is waiting on; `null` dismisses it (and `cf` exits 1). */
-export const agentCliAnswer = (id: string, answer: string | null) =>
-  invoke<void>("agentcli_answer", { id, answer });
+/** The answer to a question `cf ask` is waiting on: `yes` is what `cf` exits 0 on; `text` is printed. */
+export const agentCliAnswer = (id: string, yes: boolean, text: string) =>
+  invoke<void>("agentcli_answer", { id, yes, text });
 
 /** What the window has in focus, so `cf status` can answer. Pushed on change — see `agentCliStore`. */
 export const agentCliFocus = (workspace: string, project: string, task: string) =>
@@ -3042,14 +3058,6 @@ export const agentCliFocus = (workspace: string, project: string, task: string) 
 
 /** The port `cf` talks to, or `null` when the endpoint could not bind. */
 export const agentCliEndpoint = () => invoke<number | null>("agentcli_endpoint");
-
-/** Opens design mode's preview on an address, or points the one that is open at it. One window
- *  ever — see `src-tauri/src/design.rs`. */
-export const designOpen = (url: string) => invoke<void>("design_open", { url });
-
-export const designClose = () => invoke<void>("design_close");
-
-export const designIsOpen = () => invoke<boolean>("design_is_open");
 
 export const remotectlStatus = () => invoke<RemoteStatus>("remotectl_status");
 

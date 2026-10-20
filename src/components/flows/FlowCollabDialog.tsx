@@ -14,6 +14,7 @@ import { Button, iconButtonClass } from "../common/Button";
 import { fieldClass, underlineStripClass, underlineTabClass } from "../common/recipes";
 import { projectHost, projectRef } from "../../lib/api/projects";
 import { supabaseInstallSql } from "../../lib/tauri/apiCommands";
+import { writeClipboardText } from "../../lib/clipboard";
 import type { FlowShareRow } from "../../lib/tauri/flowsCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { confirmAction } from "../../state/confirmStore";
@@ -115,7 +116,7 @@ function ProjectPane() {
 
   const copySql = async (url?: string) => {
     try {
-      await navigator.clipboard.writeText(await supabaseInstallSql(url));
+      await writeClipboardText(await supabaseInstallSql(url));
       pushSuccessToast(t("api.collab.sqlCopied"));
     } catch (error) {
       pushErrorToast(String(error));
@@ -197,7 +198,7 @@ function ShareLine({ row }: { row: FlowShareRow }) {
     run(async () => {
       const code = await store().inviteCode(row.flowId);
       if (!code) return pushErrorToast(t("flows.collab.noCode"));
-      await navigator.clipboard.writeText(code);
+      await writeClipboardText(code);
       pushSuccessToast(t("flows.share.copied"));
     });
   const leave = () =>

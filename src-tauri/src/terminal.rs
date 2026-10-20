@@ -236,6 +236,10 @@ pub struct PtyHooks {
     /// Once, when the pty has closed and the session is gone from the registry, with the exit code
     /// if one could be collected. Called before `terminal:exit` is emitted.
     pub on_exit: Option<Box<dyn FnOnce(Option<i32>) + Send>>,
+    /// Follow the agent CLIs run in this session (`crate::agentstatus`): scan its output, answer the
+    /// status protocol's probe, and export `CODEFLOW_SESSION` so `cf hook` can say which terminal it
+    /// came from. Desk shells only — a phone's session or a supervised service has no card to draw.
+    pub agent_status: bool,
 }
 
 /// Which shell to run is decided by [`crate::shell_profiles`]; this only turns the answer into a
@@ -284,33 +288,41 @@ fn profile_start(profile_cwd: &str, requested: Option<&str>, home: Option<&std::
 
 /// A profile's own variables as pairs, blank keys dropped — a half-typed row in Settings is not a
 /// variable named "".
-/// This process's `PATH` with the folder `cf` sits in **appended**, or `None` when there is nothing
-/// to add.
+/// `base` — the `PATH` the shell would otherwise get — with the folder `cf` sits in **appended**,
+/// or `None` when there is nothing to add.
 ///
 /// Appended and not prepended, deliberately: a user who has their own `cf` on the path keeps it.
 /// The folder is the one the app's own binary is in, which is where a bundle puts its sidecars and
 /// where `cargo` leaves both binaries during development.
-fn cli_path(app: &AppHandle) -> Option<String> {
+/// The `cf` binary this app ships, wherever this build put it — see [`cli_path`] for the two places.
+pub fn cf_binary(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) { "cf.exe" } else { "cf" };
+    let resources = app.path().resource_dir().ok().map(|dir| dir.join("cf-cli"));
+    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
+    [resources, beside].into_iter().flatten().map(|dir| dir.join(name)).find(|path| path.exists())
+}
+
+fn cli_path(app: &AppHandle, base: &str) -> Option<String> {
     let name = if cfg!(windows) { "cf.exe" } else { "cf" };
     // Two places, in this order, because there are two ways the binary gets onto a machine.
     //
     // **The bundle** ships it as a resource (`resources/cf/`, see `scripts/build-cf-sidecar.mjs`),
-    // which Tauri unpacks under the resource directory — `Contents/Resources/` inside a `.app`, and
-    // beside the executable on Windows. In `tauri dev` the resource directory *is* `src-tauri/`, so
-    // the same lookup finds what the build step just wrote there.
+    // which Tauri unpacks as `cf-cli/` under the resource directory — `Contents/Resources/` inside a
+    // `.app`, and beside the executable on Windows. Not `cf/`: in `tauri dev` the resource directory
+    // is `target/debug/` itself, so a `cf/` folder there sits exactly where cargo writes the `cf`
+    // binary, and the next build fails with "failed to remove file target/debug/cf".
     //
     // **A plain `cargo build`** leaves both binaries in `target/<profile>/`, which is where someone
     // working on the Rust side will have it and nowhere else.
-    let resources = app.path().resource_dir().ok().map(|dir| dir.join("cf"));
+    let resources = app.path().resource_dir().ok().map(|dir| dir.join("cf-cli"));
     let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
     let dir = [resources, beside].into_iter().flatten().find(|dir| dir.join(name).exists())?;
 
-    let current = std::env::var("PATH").unwrap_or_default();
     let separator = if cfg!(windows) { ";" } else { ":" };
-    Some(if current.is_empty() {
+    Some(if base.is_empty() {
         dir.display().to_string()
     } else {
-        format!("{current}{separator}{}", dir.display())
+        format!("{base}{separator}{}", dir.display())
     })
 }
 
@@ -334,6 +346,7 @@ pub fn open_terminal(
 ) -> Result<String, String> {
     let requested = start_dir(&cwd);
     let start = profile_start(&profile.cwd, requested.as_deref(), dirs::home_dir().as_deref()).or(requested);
+    let desk = owner.is_none();
     if let Some(account) = account {
         // The folder has to exist before the shell hands it to a CLI — see `ensure_dirs`.
         account.ensure_dirs();
@@ -358,7 +371,18 @@ pub fn open_terminal(
     // before the account's layer and after the profile's, so a profile cannot switch it off by
     // accident and an account's variables still outrank it; see `agentcli`.
     env.extend(crate::agentcli::shell_env());
-    if let Some(path) = cli_path(&app) {
+    // Appended to the PATH the shell would have had — the profile's own when it sets one — and not
+    // to this process's: built from the app's PATH, the folder used to replace a profile's toolchain
+    // with whatever the app was launched with.
+    let is_path = |key: &str| if cfg!(windows) { key.eq_ignore_ascii_case("PATH") } else { key == "PATH" };
+    let base = env
+        .iter()
+        .rev()
+        .find(|(key, _)| is_path(key))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+    if let Some(path) = cli_path(&app, &base) {
+        env.retain(|(key, _)| !is_path(key));
         env.push(("PATH".to_string(), path));
     }
     let mut env_remove: Vec<String> = crate::shell_integration::INTERNAL_VARS.iter().map(|v| v.to_string()).collect();
@@ -383,7 +407,7 @@ pub fn open_terminal(
         },
         // A shell opened *as an account*: every `claude`, `codex`, `grok` or `opencode` typed into it
         // runs as that account, because the variable is in the shell's own environment.
-        PtyHooks { env, env_remove, ..PtyHooks::default() },
+        PtyHooks { env, env_remove, agent_status: desk, ..PtyHooks::default() },
     )
 }
 
@@ -457,7 +481,7 @@ pub fn open_pty<R: Runtime>(
     origin: Origin,
     hooks: PtyHooks,
 ) -> Result<String, String> {
-    let PtyHooks { env, env_remove, on_output, on_exit } = hooks;
+    let PtyHooks { env, env_remove, on_output, on_exit, agent_status } = hooks;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -495,12 +519,16 @@ pub fn open_pty<R: Runtime>(
     for (key, value) in &env {
         cmd.env(key, value);
     }
+    // Minted before the spawn so the shell can carry it: a hook an agent runs in this terminal names
+    // the session it belongs to, which no folder can do — several shells share one.
+    let id = Uuid::new_v4().to_string();
+    if agent_status {
+        cmd.env("CODEFLOW_SESSION", &id);
+    }
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-
-    let id = Uuid::new_v4().to_string();
+    let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
 
     // `dirty: true` from the start, so the seeded history reaches the database even if this shell
     // never prints anything — a terminal resumed and then left alone must not lose what it had.
@@ -516,7 +544,7 @@ pub fn open_pty<R: Runtime>(
         sessions.insert(
             id.clone(),
             TerminalSession {
-                writer: Arc::new(Mutex::new(writer)),
+                writer: Arc::clone(&writer),
                 master: Some(pair.master),
                 child: Arc::new(Mutex::new(child)),
                 transcript: transcript.clone(),
@@ -527,8 +555,27 @@ pub fn open_pty<R: Runtime>(
 
     let outbox = Arc::new((Mutex::new(Outbox::default()), Condvar::new()));
 
+    // The agent in this terminal, followed from the reader: it sees every byte first, so the status
+    // probe is answered before the pane has even been sent the chunk that asked — and therefore
+    // before xterm answers the DA1 query the program sends right after it, which is the order the
+    // program reads as "this terminal speaks the protocol".
+    let status = if agent_status {
+        let status_app = app.clone();
+        crate::agentstatus::watch(
+            &id,
+            cwd.unwrap_or_default(),
+            Arc::new(move |snapshot| {
+                let _ = status_app.emit("terminal:agent", snapshot);
+            }),
+        );
+        Some((id.clone(), crate::agentstatus::OscScanner::default(), Arc::clone(&writer)))
+    } else {
+        None
+    };
+
     let reader_outbox = Arc::clone(&outbox);
     std::thread::spawn(move || {
+        let mut status = status;
         // 64 KB rather than 4 KB: a `read` returns as soon as *any* byte is available, so a lone
         // keystroke still comes back as one byte and echoes instantly, while a build that has
         // filled the pty's buffer comes back in one call instead of sixteen.
@@ -554,6 +601,15 @@ pub fn open_pty<R: Runtime>(
                     if let Some(transcript) = &transcript {
                         if let Ok(mut recorded) = transcript.lock() {
                             recorded.push(&data);
+                        }
+                    }
+                    if let Some((session, scanner, writer)) = &mut status {
+                        let events = scanner.feed(data.as_bytes());
+                        if crate::agentstatus::observe(session, &events) {
+                            if let Ok(mut writer) = writer.lock() {
+                                let _ = writer.write_all(crate::agentstatus::QUERY_REPLY.as_bytes());
+                                let _ = writer.flush();
+                            }
                         }
                     }
                     lock_outbox(lock).pending.push_str(&data);
@@ -654,6 +710,7 @@ pub fn open_pty<R: Runtime>(
         if let Some(on_exit) = on_exit {
             on_exit(code);
         }
+        crate::agentstatus::forget(&emitter_id);
         let _ = emitter_app.emit(
             "terminal:exit",
             TerminalExitEvent { id: emitter_id, owner: emitter_owner, code, seconds: session_started.elapsed().as_secs_f64().round() },
@@ -782,6 +839,8 @@ pub fn write_terminal(registry: &TerminalRegistry, id: &str, data: &str) -> Resu
     let mut writer = writer.lock().map_err(|e| e.to_string())?;
     writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
     writer.flush().map_err(|e| e.to_string())?;
+    // What the program prints next is likely this keystroke's echo, not the agent at work.
+    crate::agentstatus::input(id);
     Ok(())
 }
 
@@ -1255,6 +1314,57 @@ mod tests {
     /// A real shell in a real pty: while a command runs it is the foreground, and closing the tab
     /// ends it *and* a background job that ignores the hang-up — which `child.kill()` alone left
     /// running.
+    /// The status protocol's probe is answered from the reader, the session id reaches the shell,
+    /// and a report the program prints lands in `agentstatus` — the three things the «Worktrees»
+    /// rail needs from a real pty.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_answers_the_status_probe_and_follows_the_agent() {
+        use tauri::Manager;
+        let app = tauri::test::mock_app();
+        app.manage(TerminalRegistry::default());
+        let registry = app.state::<TerminalRegistry>();
+        let script = "printf 'SESSION=%s\\n' \"$CODEFLOW_SESSION\"; stty -icanon -echo min 1; \
+                      printf '\\033]7501;?\\033\\\\'; reply=$(dd bs=1 count=12 2>/dev/null); \
+                      printf 'GOT[%s]\\n' \"$reply\"; printf '\\033]7501;state=working:app=claude-code\\033\\\\'; sleep 3";
+        let id = open_pty(
+            app.handle().clone(),
+            &registry,
+            "/bin/sh",
+            &["-c".to_string(), script.to_string()],
+            None,
+            Some(Recording { key: Some("probe-test".into()), seed: String::new() }),
+            Origin { cwd: String::new(), profile: "sh".into(), owner: None },
+            PtyHooks { agent_status: true, ..PtyHooks::default() },
+        )
+        .unwrap();
+        let printed = || -> String {
+            let sessions = registry.0.lock().unwrap();
+            let transcript = sessions.get(&id).and_then(|session| session.transcript.clone());
+            transcript.map(|t| t.lock().unwrap().buf.clone()).unwrap_or_default()
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !printed().contains("GOT[") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let out = printed();
+        assert!(out.contains(&format!("SESSION={id}")), "{out:?}");
+        assert!(out.contains("GOT[\u{1b}]7501;?:sta]"), "the probe was not answered: {out:?}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let working = || {
+            crate::agentstatus::states().into_iter().any(|snapshot| {
+                snapshot.session_id == id
+                    && snapshot.agent.as_deref() == Some("claude")
+                    && snapshot.state == Some(crate::agentstatus::AgentState::Working)
+            })
+        };
+        while !working() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(working(), "the report did not reach the tracker");
+        close_terminal(&registry, &id).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn closing_a_tab_ends_everything_it_started() {

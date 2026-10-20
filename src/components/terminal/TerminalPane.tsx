@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { resizeTerminal, terminalPathKinds, writeTerminal } from "../../lib/tauri/commands";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
+import { readClipboardText, writeClipboardText } from "../../lib/clipboard";
 import { edgeMoving, whenEdgeSettles } from "../../lib/useEdgeSlide";
 import { elementAtDropPoint } from "../../lib/useImageDrop";
 import { definitionProject, openDefinitionTarget } from "../../lib/goToDefinition";
@@ -436,8 +437,7 @@ export function TerminalPane({
     const term = termRef.current;
     const selection = term?.getSelection();
     if (!selection) return false;
-    void navigator.clipboard
-      .writeText(selection)
+    void writeClipboardText(selection)
       .then(() => {
         flashCopied();
         // **The highlight is cleared once it is on the clipboard**, which is what makes the wash
@@ -459,8 +459,7 @@ export function TerminalPane({
    *  input goes: `term.paste()` would echo locally and hand the shell a line it never saw typed. */
   const pasteClipboard = useCallback(() => {
     if (readOnlyRef.current) return;
-    void navigator.clipboard
-      .readText()
+    void readClipboardText()
       .then((text) => {
         if (text) return writeTerminal(sessionId, text);
       })
@@ -506,8 +505,7 @@ export function TerminalPane({
 
   const copyText = useCallback(
     (text: string) => {
-      void navigator.clipboard
-        .writeText(text)
+      void writeClipboardText(text)
         .then(flashCopied)
         .catch((e: unknown) => pushErrorToast(String(e)));
     },

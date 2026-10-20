@@ -1,5 +1,6 @@
 import { useAgentsStore } from "../../state/agentsStore";
 import { useBenchStore } from "../../state/benchStore";
+import { useWorktreeViewStore, type ConsoleLayout } from "../../state/worktreeViewStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
 import { useDbModalStore, type DbModal } from "../../state/dbModalStore";
 import { useDiagramsStore } from "../../state/diagramsStore";
@@ -48,6 +49,12 @@ export interface TourStage {
    * query per step. An empty bench still shows what a bench *is*, which is what the step is for.
    */
   agentsBench?: boolean;
+  /**
+   * Which layout the agent console is in. The agents tour is about the task list, so its steps ask
+   * for `tasks`; written onto the store like the panels, never persisted, and put back from the
+   * snapshot.
+   */
+  agentsLayout?: ConsoleLayout;
   /**
    * The database workspace's Data sources dialog, open on the whole set.
    *
@@ -118,6 +125,7 @@ export interface AppSnapshot {
   dockView: DockView;
   agentsRosterOpen: boolean;
   agentsBenchOpen: boolean;
+  agentsLayout: ConsoleLayout;
   dbModal: DbModal | null;
   diagramsAiOpen: boolean;
   flowsPalette: { at: [number, number] | null } | null;
@@ -155,6 +163,7 @@ export function captureAppState(): AppSnapshot {
     dockView: useTerminalStore.getState().dockView,
     agentsRosterOpen: useAgentsStore.getState().rosterOpen,
     agentsBenchOpen: useBenchStore.getState().open,
+    agentsLayout: useWorktreeViewStore.getState().layout,
     dbModal: useDbModalStore.getState().modal,
     diagramsAiOpen: useDiagramsStore.getState().aiOpen,
     flowsPalette: useFlowsStore.getState().palette,
@@ -177,6 +186,7 @@ export function restoreAppState(snapshot: AppSnapshot): void {
   useTerminalStore.setState({ panelOpen: snapshot.terminalOpen, dockView: snapshot.dockView });
   useAgentsStore.setState({ rosterOpen: snapshot.agentsRosterOpen });
   useBenchStore.setState({ open: snapshot.agentsBenchOpen });
+  useWorktreeViewStore.setState({ layout: snapshot.agentsLayout });
   useDbModalStore.setState({ modal: snapshot.dbModal });
   useDiagramsStore.setState({ aiOpen: snapshot.diagramsAiOpen });
   useFlowsStore.setState({ palette: snapshot.flowsPalette });
@@ -221,6 +231,7 @@ export function applyStage(stage: TourStage | undefined): void {
   useTerminalStore.setState(stage?.terminal ? { panelOpen: true, dockView: "terminal" } : { panelOpen: false });
   useAgentsStore.setState({ rosterOpen: stage?.agentsRoster ?? false });
   useBenchStore.setState({ open: stage?.agentsBench ?? false });
+  if (stage?.agentsLayout) useWorktreeViewStore.setState({ layout: stage.agentsLayout });
   // `kind: "connections"` is the dialog opened from the workspace rather than from one connection's
   // menu — nothing preselected, which is the state a tour wants: the list first, then the form.
   useDbModalStore.setState({ modal: stage?.dbDataSources ? { kind: "connections" } : null });

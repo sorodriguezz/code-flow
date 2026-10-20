@@ -341,6 +341,38 @@ pub async fn create_agent_task(
     .map_err(|e| e.to_string())
 }
 
+/// A working copy made for an agent run in a terminal: where it went and its branch.
+#[derive(serde::Serialize)]
+pub struct AgentWorktree {
+    pub path: String,
+    pub branch: String,
+}
+
+/// A worktree of its own for an agent the user runs in a terminal — what «Nuevo espacio» makes. The
+/// same folder and branch scheme as a task's own worktree, with no task behind it: the terminal is
+/// the agent, and the rail finds it by its folder.
+#[tauri::command]
+pub async fn create_agent_worktree(db: State<'_, Db>, project_id: String, name: String) -> Result<AgentWorktree, String> {
+    let project = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_project(&conn, &project_id).map_err(|e| e.to_string())?.ok_or_else(|| "Project not found".to_string())?
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let (path, branch) = task_worktree_names(&project.name, &id, &name);
+    let repo = project.local_path.clone();
+    let target = path.clone();
+    let branch_name = branch.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = std::path::Path::new(&target).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        crate::git::worktree::add(&repo, &target, &branch_name, true, None)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(AgentWorktree { path, branch })
+}
+
 /// The folder and the branch of a task's own worktree. The branch reads as the task — its title,
 /// slugged — with the id's head so two tasks named alike never collide.
 fn task_worktree_names(repo_name: &str, id: &str, title: &str) -> (String, String) {

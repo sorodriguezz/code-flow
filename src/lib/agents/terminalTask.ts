@@ -23,6 +23,23 @@ function normalize(path: string): string {
   return path.trim().replace(/[\\/]+/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
+/** A folder in the spelling paths are compared and keyed by — what the rail files a working copy's
+ *  status, pin and name under. */
+export function pathKey(path: string): string {
+  return normalize(path);
+}
+
+/** Whether `inner` is the folder `outer` or anywhere inside it, compared segment by segment. */
+export function isWithin(outer: string, inner: string): boolean {
+  return contains(normalize(outer), normalize(inner));
+}
+
+/** Whether two paths name the same folder, in the spelling `normalize` compares. */
+export function samePath(a: string, b: string): boolean {
+  const left = normalize(a);
+  return left !== "" && left === normalize(b);
+}
+
 /** Whether `inner` is `outer` or sits inside it. Compared segment by segment, so `/wt/login` does
  *  not match `/wt/login-old`. */
 function contains(outer: string, inner: string): boolean {

@@ -207,6 +207,9 @@ interface AgentsState {
   toggleRoster: () => void;
   toggleOpen: (key: string) => void;
   select: (taskId: string | null) => Promise<void>;
+  /** Reads a task's transcript back from disk if it is not in memory, **without** selecting it —
+   *  for a surface that shows several at once (the «Worktrees» grid). */
+  ensureLoaded: (taskId: string) => Promise<void>;
   create: (input: {
     projectId: string;
     agent: WorkspaceAgent;
@@ -398,6 +401,10 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     if (!taskId) return;
     touchTask(taskId);
     pruneLive();
+    await get().ensureLoaded(taskId);
+  },
+
+  ensureLoaded: async (taskId) => {
     const task = get().tasks.find((candidate) => candidate.id === taskId);
     if (!task || get().live[taskId]?.loaded) return;
     // Mark it loaded up front so a second click while the read is in flight doesn't start another.

@@ -11,7 +11,7 @@ a backlog, and let AI write your commits, find your bugs and resolve your confli
 native app. Then test the endpoint you just changed, query the database behind it and SSH into the
 box it runs on without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-2.3.45-6C5CE7)
+![version](https://img.shields.io/badge/version-2.3.46-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -240,23 +240,6 @@ two lists to keep in step.
 > restorable from the task's own view — and only one agent runs per repository at a time. But these
 > are your files, not a sandbox. To work in parallel, split the work across repositories.
 
-## 🖼️ Design mode: point at the bug
-
-The shortest description of a UI bug is the element it is about, and typing one into a prompt — "the
-second card in the sidebar, the one with the truncated title" — is slower than pointing at it and
-less precise than its markup.
-
-So **Design mode** opens your app in a window of its own, at an address you pick (it offers whatever
-is listening on this machine, which is the one thing the app cannot guess). Hold **alt** and the
-element under the pointer is outlined; click it and its **selector, its markup and its computed
-styles** arrive in the task you are working in, as a card above the composer: send it to the agent,
-or dismiss it.
-
-The preview is given **no access to the app**. The page it loads is somebody else's — a dev server's
-— so the picker hands its payload over as data the app refuses to navigate to, and that is the whole
-channel: the page can tell CodeFlow about an element and ask it for nothing. One window ever, built
-when it is asked for and destroyed when it is closed, because a preview is a whole browser engine.
-
 ## ⌨️ `cf`: the agent's own command
 
 An agent running in one of CodeFlow's shells can already do everything a shell can. What it cannot do
@@ -264,7 +247,7 @@ is reach the window — so `cf` does, in four verbs and nothing more:
 
 ```sh
 cf notify "the tests are green"   # a line in the app, wherever you are
-cf ask "drop the column?"         # blocks; prints your answer, exits 1 if dismissed
+cf ask "drop the column?"         # blocks; exits 0 on Yes, 1 on No, prints what you typed
 cf status                         # what the app has in focus, as JSON
 cf review                         # opens the diff of the task this folder belongs to
 ```

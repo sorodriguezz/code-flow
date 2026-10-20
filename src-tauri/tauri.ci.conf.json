@@ -1,5 +1,5 @@
 {
   "build": {
-    "beforeBuildCommand": "pnpm jdbc:bridge && pnpm llama:runtime"
+    "beforeBuildCommand": "pnpm jdbc:bridge && pnpm llama:runtime && pnpm cf:sidecar"
   }
 }

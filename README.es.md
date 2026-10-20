@@ -12,7 +12,7 @@ una sola app nativa y rápida. Después prueba el endpoint que acabas de cambiar
 datos que hay detrás y entra por SSH a la máquina donde corre, sin salir de la ventana. **Tú decides
 qué modelo hace qué.**
 
-![versión](https://img.shields.io/badge/versión-2.3.45-6C5CE7)
+![versión](https://img.shields.io/badge/versión-2.3.46-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-EN%20%7C%20ES-0984E3)
@@ -245,24 +245,6 @@ así que no hay dos listas que mantener sincronizadas.
 > repositorio a la vez. Pero son tus archivos, no un sandbox. Para trabajar en paralelo, reparte el
 > trabajo entre repositorios.
 
-## 🖼️ Modo diseño: señala el bug
-
-La descripción más corta de un bug de interfaz es el elemento del que habla, y escribirlo en un
-prompt — «la segunda tarjeta de la barra lateral, la del título cortado» — es más lento que señalarlo
-y menos preciso que su marcado.
-
-Así que el **modo diseño** abre tu app en una ventana propia, en la dirección que elijas (te ofrece lo
-que esté escuchando en esta máquina, que es lo único que la app no puede adivinar). Mantén **alt** y
-el elemento bajo el puntero se resalta; haz clic y su **selector, su marcado y sus estilos
-calculados** llegan a la tarea en la que trabajas, como una tarjeta sobre el composer: mándasela al
-agente, o descártala.
-
-A la vista previa **no se le da acceso a la app**. La página que carga es de otro — la de un dev
-server — así que el selector entrega su contenido como datos que la app se niega a navegar, y ese es
-todo el canal: la página puede contarle a CodeFlow sobre un elemento y no puede pedirle nada. Una
-sola ventana, construida cuando se pide y destruida al cerrarla, porque una vista previa es un motor
-de navegador entero.
-
 ## ⌨️ `cf`: el comando del agente
 
 Un agente que corre en una terminal de CodeFlow ya puede hacer todo lo que puede un shell. Lo que no
@@ -270,7 +252,7 @@ puede es alcanzar la ventana — así que `cf` lo hace, en cuatro verbos y nada 
 
 ```sh
 cf notify "los tests pasan"    # una línea en la app, estés donde estés
-cf ask "¿borro la columna?"    # bloquea; imprime tu respuesta, sale 1 si la descartas
+cf ask "¿borro la columna?"    # bloquea; sale 0 con Sí y 1 con No, imprime lo que escribas
 cf status                      # qué tiene la app en foco, como JSON
 cf review                      # abre el diff de la tarea dueña de esta carpeta
 ```

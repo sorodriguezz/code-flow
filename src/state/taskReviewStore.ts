@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { getFileDiff, getStagedDiff, getWorkingDiff } from "../lib/tauri/commands";
+import { getFileDiff, getStagedDiff, getWorkingDiff, writeTerminal } from "../lib/tauri/commands";
 import { useAgentsStore } from "./agentsStore";
 import { buildReviewMessage, diffStats, type ReviewComment, type ReviewMessageLabels } from "../lib/agents/reviewNote";
 import type { FileDiffInfo } from "../types/domain";
@@ -101,6 +101,13 @@ interface TaskReviewState {
    * write.
    */
   sendReview: (taskId: string, labels: ReviewMessageLabels) => boolean;
+  /**
+   * The same review, typed into an agent CLI running in a terminal (`sessionId` is the pty's) — for a
+   * working copy whose agent is a terminal rather than a chat task. Pasted as one bracketed paste and
+   * then Enter, so the CLI takes the whole message as one turn instead of sending its first line.
+   * Answers whether it went.
+   */
+  sendReviewToTerminal: (taskId: string, labels: ReviewMessageLabels, sessionId: string) => Promise<boolean>;
   /** Asks for `taskId` to open on one of its tabs. Pairs with {@link takeOpenRequest}. */
   requestTab: (taskId: string, tab: TaskTab) => void;
   /** The tab asked for, once, for the task the request named; clears it. */
@@ -219,6 +226,24 @@ export const useTaskReviewStore = create<TaskReviewState>((set, get) => ({
     const message = buildReviewMessage(review.comments, review.general, labels);
     if (!message) return false;
     if (!useAgentsStore.getState().send(taskId, message)) return false;
+    get().clearComments(taskId);
+    return true;
+  },
+
+  sendReviewToTerminal: async (taskId, labels, sessionId) => {
+    const review = reviewOf(get(), taskId);
+    const message = buildReviewMessage(review.comments, review.general, labels);
+    if (!message) return false;
+    try {
+      // Bracketed paste: every agent TUI the rail knows turns it on, and without it each newline of
+      // the review would be an Enter — the first line sent alone, the rest typed into the next turn.
+      await writeTerminal(sessionId, `\x1b[200~${message}\x1b[201~`);
+      // Enter on its own, a beat later, so it is not read as the last character of the paste.
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await writeTerminal(sessionId, "\r");
+    } catch {
+      return false;
+    }
     get().clearComments(taskId);
     return true;
   },

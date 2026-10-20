@@ -15,9 +15,9 @@ import { useWorkspaceStore } from "./workspaceStore";
  * Three things arrive from the endpoint (`src-tauri/src/agentcli.rs`) and one goes back:
  *
  * - `notify` becomes a line in the app, wherever the user is.
- * - `ask` becomes a question in front of them; the answer is what `cf ask` prints, and what its exit
- *   code is. One at a time: a second question while one is open is refused by the endpoint's own
- *   timeout rather than stacked, because a shell that asked twice is waiting on the first.
+ * - `ask` becomes a question in front of them: Yes or No is the exit code, what they typed is what
+ *   `cf ask` prints. Questions queue — several agents can ask at once (a race is several of them)
+ *   and each shell is blocked on its own, so a second one must never take the first one's place.
  * - `review` opens the diff of the task that owns the folder the agent is standing in — the same
  *   match the terminal's own menu makes, so "my worktree" means one thing everywhere.
  * - and what the window has in focus goes the other way, so `cf status` can answer.
@@ -27,17 +27,17 @@ import { useWorkspaceStore } from "./workspaceStore";
  */
 
 interface AgentCliState {
-  /** The question `cf ask` is waiting on, or `null`. */
-  ask: AgentCliAsk | null;
+  /** The questions `cf ask` is waiting on, oldest first. The first is the one on screen. */
+  asks: AgentCliAsk[];
   init: () => void;
-  /** Sends the answer and closes the question. `null` is "dismissed", which `cf` exits 1 on. */
-  answer: (text: string | null) => void;
+  /** Answers the question on screen and shows the next. `yes` is what `cf` exits 0 on. */
+  answer: (yes: boolean, text: string) => void;
 }
 
 let started = false;
 
 export const useAgentCliStore = create<AgentCliState>((set, get) => ({
-  ask: null,
+  asks: [],
 
   init: () => {
     if (started || !isMainWindow()) return;
@@ -49,7 +49,7 @@ export const useAgentCliStore = create<AgentCliState>((set, get) => ({
       useToastStore.getState().pushToast(text, "info");
     });
 
-    void onAgentCliAsk((ask) => set({ ask }));
+    void onAgentCliAsk((ask) => set((state) => ({ asks: [...state.asks, ask] })));
 
     void onAgentCliReview((cwd) => {
       const task = taskForCwd(useAgentsStore.getState().tasks, cwd);
@@ -84,11 +84,11 @@ export const useAgentCliStore = create<AgentCliState>((set, get) => ({
     });
   },
 
-  answer: (text) => {
-    const open = get().ask;
+  answer: (yes, text) => {
+    const [open, ...rest] = get().asks;
     if (!open) return;
-    set({ ask: null });
-    void agentCliAnswer(open.id, text).catch(() => undefined);
+    set({ asks: rest });
+    void agentCliAnswer(open.id, yes, text).catch(() => undefined);
   },
 }));
 

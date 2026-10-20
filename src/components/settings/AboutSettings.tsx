@@ -8,6 +8,7 @@ import { Tooltip } from "../common/Tooltip";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { revealInFileManager } from "../../lib/tauri/commands";
+import { writeClipboardText } from "../../lib/clipboard";
 import {
   appDiagnostics,
   diagnosticsReport,
@@ -42,7 +43,7 @@ export function AboutPane() {
   const copy = async () => {
     setCopying(true);
     try {
-      await navigator.clipboard.writeText(await diagnosticsReport());
+      await writeClipboardText(await diagnosticsReport());
       pushSuccessToast(t("about.copied"));
     } catch (e) {
       pushErrorToast(String(e));

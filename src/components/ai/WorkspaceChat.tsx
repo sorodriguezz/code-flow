@@ -753,7 +753,7 @@ function AgentMenu({
         {current && <span className="min-w-0 truncate">{current.name}</span>}
       </button>
       {open && (
-        <div role="menu" className={`absolute bottom-full left-0 z-40 mb-1 w-60 ${popoverClass}`}>
+        <div role="menu" className={`absolute bottom-full right-0 z-40 mb-1 w-60 max-w-[calc(100vw-16px)] ${popoverClass}`}>
           <button role="menuitem" onClick={() => pick("")} className={menuRowClass(!current)}>
             <Check size={13} className={`mt-0.5 shrink-0 ${current ? "invisible" : ""}`} />
             <span className="min-w-0 truncate">{t("assistant.wsChatNoAgent")}</span>

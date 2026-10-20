@@ -487,7 +487,8 @@ const DB_TOUR: TourStep[] = [
   closingStep("db", "tour.chapter.db", "tour.db.done.title", "tour.db.done.body", DB_STAGE),
 ];
 
-const AGENTS_STAGE: TourStage = { view: "agents" };
+// The tour walks the task list, so it shows that layout whichever one the user had open.
+const AGENTS_STAGE: TourStage = { view: "agents", agentsLayout: "tasks" };
 
 const AGENTS_TOUR: TourStep[] = [
   {

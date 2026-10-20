@@ -1,6 +1,6 @@
 // Puts `cf` — the command an agent runs inside one of CodeFlow's shells — where Tauri can bundle it:
 //
-//   src-tauri/resources/cf/cf[.exe]
+//   src-tauri/resources/cf/cf[.exe]   (installed as `cf-cli/` — `cf/` would collide with the binary in target/)
 //
 // # Why this is needed at all
 //

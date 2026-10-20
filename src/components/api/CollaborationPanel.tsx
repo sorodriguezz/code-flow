@@ -41,6 +41,7 @@ import {
   supabaseSetAnonKey,
 } from "../../lib/tauri/apiCommands";
 import { openExternalUrl } from "../../lib/tauri/commands";
+import { writeClipboardText } from "../../lib/clipboard";
 import { keyNeededBy } from "../../lib/collabKeys";
 import { encodeInvite, syncCollection } from "../../lib/api/sync";
 import {
@@ -306,7 +307,7 @@ export function CollaborationPanel() {
    *  collections it already shares there, so re-running it cannot leave them up for grabs. */
   const copySql = async (url?: string) => {
     try {
-      await navigator.clipboard.writeText(await supabaseInstallSql(url));
+      await writeClipboardText(await supabaseInstallSql(url));
       pushToast(t("api.collab.sqlCopied"), "success");
     } catch (e) {
       pushErrorToast(String(e));
@@ -1164,7 +1165,7 @@ function ShareRow({
       // use, and failing loudly beats handing out a code that silently does not work.
       const key = await supabaseAnonKey(url);
       if (!key) throw new Error(t("api.collab.noKeyForInvite"));
-      await navigator.clipboard.writeText(encodeInvite({ url, key, token, name }));
+      await writeClipboardText(encodeInvite({ url, key, token, name }));
       pushToast(t("api.collab.inviteCopied"), "success");
     });
 

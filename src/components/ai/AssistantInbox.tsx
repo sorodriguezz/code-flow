@@ -630,11 +630,9 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
     setMode("idle");
     if (!next || next === title) return;
     if (entry.type === "chat") {
-      // A workspace chat has no rename of its own — its title is written by its first answer — so
-      // the row does not offer one, and this cannot be reached for it.
-      if (!isWorkspaceChat(entry)) {
-        await useChatHistoryStore.getState().rename(bucket, entry.conv.session_id, next);
-      }
+      // A workspace chat's row belongs to its own store, like its delete below.
+      if (isWorkspaceChat(entry)) await useWorkspaceChatStore.getState().rename(entry.conv.session_id, next);
+      else await useChatHistoryStore.getState().rename(bucket, entry.conv.session_id, next);
       return;
     }
     await useJobsStore.getState().rename(bucket, entry.job.id, next);
@@ -723,8 +721,9 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
         >
           <Pencil size={13} />
         </button>
-        {/* A repository conversation can move to the chat workspace, for good. */}
-        {entry.type === "chat" && (
+        {/* A repository conversation can move to the chat workspace, for good. A workspace chat has
+            no repository to move out of. */}
+        {entry.type === "chat" && !isWorkspaceChat(entry) && (
           <button
             onClick={() => void moveChatToApp(bucket, entry.conv.session_id)}
             title={t("assistant.moveToChat")}

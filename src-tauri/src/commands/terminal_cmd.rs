@@ -172,6 +172,69 @@ pub fn terminal_foreground(registry: State<TerminalRegistry>, id: String) -> Opt
     terminal::foreground_process(&registry, &id)
 }
 
+/// Every terminal with an agent in it, as the rail draws it — for a window that just opened. Later
+/// changes arrive as `terminal:agent` events. See `crate::agentstatus`.
+#[tauri::command]
+pub fn terminal_agent_states() -> Vec<crate::agentstatus::Snapshot> {
+    crate::agentstatus::states()
+}
+
+/// The window just typed `agent`'s CLI into session `id`: name it before the program has a chance
+/// to, so the card shows who is there from the first keystroke.
+#[tauri::command]
+pub fn terminal_set_agent(id: String, agent: String) -> bool {
+    crate::agentstatus::set_agent(&id, agent.trim())
+}
+
+/// The Claude Code events whose hooks tell the rail what the agent is doing.
+const CLAUDE_HOOK_EVENTS: &[&str] =
+    &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Stop", "SessionEnd"];
+
+/// The `hooks` block of Claude Code's settings, each event a `<cf> hook claude <event>`. The tool
+/// events take a `matcher`; the others have none to take.
+fn claude_hook_settings(cf: &str) -> serde_json::Value {
+    let entry = |event: &str| {
+        let command = serde_json::json!({ "type": "command", "command": format!("{cf} hook claude {event}"), "timeout": 10 });
+        if matches!(event, "PreToolUse" | "PostToolUse" | "PermissionRequest") {
+            serde_json::json!([{ "matcher": "*", "hooks": [command] }])
+        } else {
+            serde_json::json!([{ "hooks": [command] }])
+        }
+    };
+    let hooks: serde_json::Map<String, serde_json::Value> =
+        CLAUDE_HOOK_EVENTS.iter().map(|event| (event.to_string(), entry(event))).collect();
+    serde_json::json!({ "hooks": hooks })
+}
+
+/// The settings file a `claude` started from the «Worktrees» rail is given with `--settings`: its
+/// status hooks, each one a `cf hook claude <event>`.
+///
+/// Passed per launch rather than written into `~/.claude/settings.json`: the user's own settings are
+/// theirs, and a `claude` typed by hand in one of this app's shells still reports its state through
+/// the terminal (OSC 7501) — the hooks only add the prompt and the reply. Written on every call, so a
+/// moved or updated app never leaves a file pointing at an old `cf`.
+#[tauri::command]
+pub fn agent_hook_settings(app: AppHandle) -> Result<String, String> {
+    let cf = match terminal::cf_binary(&app) {
+        Some(path) => {
+            let path = path.display().to_string();
+            if cfg!(windows) {
+                format!("\"{path}\"")
+            } else {
+                format!("'{}'", path.replace('\'', "'\\''"))
+            }
+        }
+        None => "cf".to_string(),
+    };
+    let settings = claude_hook_settings(&cf);
+    let dir = crate::paths::state_dir().join("agent-hooks");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("claude-settings.json");
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
 // ---------------------------------------------------------------------------
 // The agent console's terminal bench
 // ---------------------------------------------------------------------------
@@ -501,6 +564,21 @@ pub fn spawn_transcript_flush(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The shape Claude Code reads: an array of matcher groups per event, each with its commands.
+    #[test]
+    fn claude_hooks_call_cf_for_every_event_with_a_matcher_only_on_tool_events() {
+        let settings = claude_hook_settings("'/Applications/Code Flow.app/cf'");
+        let hooks = settings["hooks"].as_object().unwrap();
+        assert_eq!(hooks.len(), CLAUDE_HOOK_EVENTS.len());
+        let stop = &hooks["Stop"][0];
+        assert!(stop.get("matcher").is_none());
+        assert_eq!(stop["hooks"][0]["type"], "command");
+        assert_eq!(stop["hooks"][0]["command"], "'/Applications/Code Flow.app/cf' hook claude Stop");
+        assert_eq!(hooks["PreToolUse"][0]["matcher"], "*");
+        assert_eq!(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], 10);
+    }
+
     use super::*;
 
     #[test]

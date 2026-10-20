@@ -251,6 +251,8 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
   const [binaryPath, setBinaryPath] = useState("");
   /** The custom CLI's argument line — only that provider has one. See `src-tauri/src/custom.rs`. */
   const [args, setArgs] = useState("");
+  /** …and the line it continues a conversation with, when that differs from how it starts one. */
+  const [resume, setResume] = useState("");
   const [choice, setChoice] = useState("");
   const [custom, setCustom] = useState("");
   const [tools, setTools] = useState<string[]>([]);
@@ -270,16 +272,18 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [storedBinary, storedModel, storedTools, storedArgs] = await Promise.all([
+      const [storedBinary, storedModel, storedTools, storedArgs, storedResume] = await Promise.all([
         getSetting(providerKey(provider.id, "binary_path")).catch(() => null),
         getSetting(providerKey(provider.id, "model")).catch(() => null),
         getSetting(providerKey(provider.id, "allowed_tools")).catch(() => null),
         // Read with the rest rather than on expand: it is one more settings row, and the field has
         // to open filled or it reads as "no arguments configured".
         provider.id === "custom" ? getSetting(providerKey(provider.id, "args")).catch(() => null) : null,
+        provider.id === "custom" ? getSetting(providerKey(provider.id, "resume")).catch(() => null) : null,
       ]);
       if (cancelled) return;
       setArgs(storedArgs ?? "");
+      setResume(storedResume ?? "");
       setBinaryPath(storedBinary || defaultBinaryFor(provider.id));
       const parsed = parseModel(storedModel, modelOptionsFor(provider.id, []).map((o) => o.id));
       setChoice(parsed.choice);
@@ -458,6 +462,15 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                       placeholder="-p {prompt}"
                       onChange={(e) => setArgs(e.target.value)}
                       onBlur={(e) => void setSetting(providerKey(provider.id, "args"), e.target.value.trim())}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field label={t("settings.customResume")} hint={t("settings.customResumeHint")}>
+                    <input
+                      value={resume}
+                      placeholder="--resume {session}"
+                      onChange={(e) => setResume(e.target.value)}
+                      onBlur={(e) => void setSetting(providerKey(provider.id, "resume"), e.target.value.trim())}
                       className={inputClass}
                     />
                   </Field>

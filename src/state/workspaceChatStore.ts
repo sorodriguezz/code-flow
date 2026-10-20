@@ -11,6 +11,7 @@ import {
   chatInflightTurns,
   chatListWorkspaceConversations,
   chatRemoveAttachment,
+  chatRenameConversation,
   chatSend,
   chatSetEffort,
   chatSetEngine,
@@ -158,6 +159,8 @@ interface WsChatState {
   editQueued: (conversationId: string, itemId: string) => QueuedChatMessage | null;
   stop: (conversationId: string) => void;
   takeRestored: (conversationId: string) => string | null;
+  /** A title the user chose, in the row, the open chat and the store. */
+  rename: (conversationId: string, title: string) => Promise<void>;
   remove: (conversationId: string) => Promise<void>;
 }
 
@@ -292,18 +295,7 @@ function listen(): void {
   });
   void onChatTitled(({ surface, conversationId, title }) => {
     if (surface !== "chat") return;
-    useWorkspaceChatStore.setState((s) => {
-      const session = s.byConversation[conversationId];
-      const lists = Object.entries(s.listByWorkspace);
-      const touched = lists.some(([, rows]) => rows.some((row) => row.id === conversationId));
-      if (!session && !touched) return s;
-      return {
-        byConversation: session ? { ...s.byConversation, [conversationId]: { ...session, title } } : s.byConversation,
-        listByWorkspace: touched
-          ? Object.fromEntries(lists.map(([ws, rows]) => [ws, rows.map((row) => (row.id === conversationId ? { ...row, title } : row))]))
-          : s.listByWorkspace,
-      };
-    });
+    applyTitle(conversationId, title);
   });
   // A turn another window started ends: its answer is on disk, read it back.
   void onAiDone(({ run_id }) => {
@@ -548,6 +540,11 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       return text;
     },
 
+    rename: async (conversationId, title) => {
+      await chatRenameConversation(conversationId, title);
+      applyTitle(conversationId, title);
+    },
+
     remove: async (conversationId) => {
       const session = get().byConversation[conversationId];
       if (session?.sending) return;
@@ -748,3 +745,19 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
     },
   };
 });
+
+/** A conversation's new title, everywhere this store keeps it — the open chat and every list row. */
+function applyTitle(conversationId: string, title: string): void {
+  useWorkspaceChatStore.setState((s) => {
+    const session = s.byConversation[conversationId];
+    const lists = Object.entries(s.listByWorkspace);
+    const touched = lists.some(([, rows]) => rows.some((row) => row.id === conversationId));
+    if (!session && !touched) return s;
+    return {
+      byConversation: session ? { ...s.byConversation, [conversationId]: { ...session, title } } : s.byConversation,
+      listByWorkspace: touched
+        ? Object.fromEntries(lists.map(([ws, rows]) => [ws, rows.map((row) => (row.id === conversationId ? { ...row, title } : row))]))
+        : s.listByWorkspace,
+    };
+  });
+}

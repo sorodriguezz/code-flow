@@ -1231,6 +1231,36 @@ export interface Bench {
   terminals: BenchTerminal[];
 }
 
+/**
+ * What an agent CLI running in a terminal is doing, as the backend reads it from the terminal
+ * (`src-tauri/src/agentstatus.rs`): the status protocol, the window title, the shell's marks, its
+ * hooks and — for an agent that says nothing — its activity. One per pty session; a snapshot with
+ * neither `agent` nor `state` says the agent left.
+ */
+export interface TerminalAgent {
+  /** The pty session (`BenchTerminal.session_id`). */
+  session_id: string;
+  /** Provider id — `claude`, `codex`, `gemini`, `grok`, `opencode`, `cline` — or `null` for a program
+   *  that reports a state without saying what it is. */
+  agent: string | null;
+  state: TerminalAgentState | null;
+  kind: "permission" | "question" | "auth" | null;
+  /** The program's own line: its status message, else its title without the glyph. */
+  summary: string;
+  /** What the user last asked it, when a hook said so. */
+  prompt: string;
+  /** Its last answer, when a hook said so. */
+  reply: string;
+  /** Where the shell is. */
+  cwd: string;
+  /** Unix ms when `state` last changed. */
+  since: number;
+  /** Unix ms when the current turn started — what "unread" is measured against. */
+  turn: number;
+}
+
+export type TerminalAgentState = "idle" | "working" | "blocked" | "done" | "error";
+
 export interface BenchTerminal {
   id: string;
   workspace_id: string;

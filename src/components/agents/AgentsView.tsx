@@ -13,6 +13,8 @@ import { StoryRealizerModal } from "./StoryRealizerModal";
 import { TemplateDetail } from "./TemplateDetail";
 import { TerminalBench } from "./TerminalBench";
 import { TaskBoard } from "./taskPlanning";
+import { WorktreesView } from "./worktrees/WorktreesView";
+import { useWorktreeViewStore } from "../../state/worktreeViewStore";
 import { useBenchStore } from "../../state/benchStore";
 import { useChainStore } from "../../state/chainStore";
 import { CARD } from "../api/panelChrome";
@@ -62,6 +64,8 @@ export function AgentsView() {
   const rosterWidth = useLayoutStore((s) => s.sizes.agentsRosterWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
+  /** Tasks or worktrees — see `worktreeViewStore`. */
+  const layout = useWorktreeViewStore((s) => s.layout);
 
   /** The agent being created or edited in the modal — `null` when it's closed. `"new"` opens it
    * empty, since an agent that hasn't been saved yet has no row to point at. */
@@ -73,6 +77,9 @@ export function AgentsView() {
   const [composing, setComposing] = useState<string | null>(null);
   /** A hybrid template the task dialog opens as — set only by "use"/"edit" on one. */
   const [composingTemplate, setComposingTemplate] = useState<string | null>(null);
+  /** What the «Worktrees» layout opens the task dialog with: the repository it was opened on, and
+   *  a worktree of its own — a new agent there is a new working copy. `null` from the task list. */
+  const [composeIn, setComposeIn] = useState<{ projectId: string } | null>(null);
   const [chaining, setChaining] = useState<ChainDraft | null>(null);
   /** The folder a new story run should land in, or `null` when the dialog is closed. Same
    * convention as `composing` — a string, because "which folder" is part of what it was opened for. */
@@ -96,6 +103,10 @@ export function AgentsView() {
   useEffect(() => {
     if (benchOpen) setBenchMounted(true);
   }, [benchOpen]);
+
+  useEffect(() => {
+    if (!useWorktreeViewStore.getState().loaded) void useWorktreeViewStore.getState().load();
+  }, []);
 
   useEffect(() => {
     void useAgentsStore.getState().setWorkspace(workspaceId);
@@ -136,6 +147,7 @@ export function AgentsView() {
       }
       e.preventDefault();
       setComposingTemplate(null);
+      setComposeIn(useWorktreeViewStore.getState().layout === "worktrees" ? { projectId: "" } : null);
       setComposing("");
     };
     window.addEventListener("keydown", handler);
@@ -171,35 +183,54 @@ export function AgentsView() {
             the work — so the handles between them are `seamless`, or the edge would be drawn twice
             a pixel apart. */}
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <AgentTaskList
-            width={listWidth}
-            onNewTask={(agentProjectId) => {
-              setComposingTemplate(null);
-              setComposing(agentProjectId);
-            }}
-            onNewChain={(agentProjectId) => setChaining({ agentProjectId, templateId: null })}
-            onNewStory={setStorying}
-            onNewAgent={() => setEditing("new")}
-            onNewProject={() => setEditingProject("new")}
-            onEditProject={setEditingProject}
-            onUseTemplate={openTemplate}
-            onHelp={() => setHelping(true)}
-          />
-          <ResizeHandle
-            axis="x"
-            value={listWidth}
-            min={LIST_MIN}
-            max={LIST_MAX}
-            seamless
-            onChange={(value) => setSize("agentsListWidth", value)}
-            onCommit={(value) => commitSize("agentsListWidth", value)}
-          />
+          {layout === "worktrees" ? (
+            <WorktreesView
+              onNewAgent={(projectId) => {
+                setComposingTemplate(null);
+                setComposeIn({ projectId });
+                setComposing("");
+              }}
+              onHelp={() => setHelping(true)}
+            />
+          ) : (
+            <>
+              <AgentTaskList
+                width={listWidth}
+                onNewTask={(agentProjectId) => {
+                  setComposingTemplate(null);
+                  setComposing(agentProjectId);
+                }}
+                onNewChain={(agentProjectId) => setChaining({ agentProjectId, templateId: null })}
+                onNewStory={setStorying}
+                onNewAgent={() => setEditing("new")}
+                onNewProject={() => setEditingProject("new")}
+                onEditProject={setEditingProject}
+                onUseTemplate={openTemplate}
+                onHelp={() => setHelping(true)}
+              />
+              <ResizeHandle
+                axis="x"
+                value={listWidth}
+                min={LIST_MIN}
+                max={LIST_MAX}
+                seamless
+                onChange={(value) => setSize("agentsListWidth", value)}
+                onCommit={(value) => commitSize("agentsListWidth", value)}
+              />
+            </>
+          )}
 
           {/* A template, a chain and a task are mutually exclusive in the middle column: selecting
               any one clears the other two, so there is exactly one thing on screen and one thing
               the action bar belongs to. All three are keyed, for the same reason — every bit of
-              local state in those panes belongs to one row. */}
-          <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD}`}>
+              local state in those panes belongs to one row. In the «Worktrees» layout this column is
+              only the bench: that layout draws its own right side while the bench is down, and the
+              bench stays mounted here either way. */}
+          <div
+            className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD} ${
+              layout === "worktrees" && !benchOpen ? "hidden" : ""
+            }`}
+          >
             {/* The bench takes the middle column whole rather than docking under it. It is a place
                 you work, not a strip you glance at — several shells, each wanting the height of a
                 real terminal — and the column it displaces holds a task you were reading, which is
@@ -212,6 +243,7 @@ export function AgentsView() {
               </div>
             )}
             {!benchOpen &&
+              layout === "tasks" &&
               (selectedTemplateId ? (
                 <TemplateDetail key={selectedTemplateId} templateId={selectedTemplateId} onUse={openTemplate} />
               ) : selectedChainId ? (
@@ -261,9 +293,12 @@ export function AgentsView() {
           suspended={editing !== null}
           initialAgentProjectId={composing}
           templateId={composingTemplate}
+          initialProjectId={composeIn?.projectId ?? ""}
+          initialWorktree={composeIn !== null}
           onClose={() => {
             setComposing(null);
             setComposingTemplate(null);
+            setComposeIn(null);
           }}
           onManageAgents={() => setEditing("new")}
         />

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { LayoutGrid, Plus, Trash2 } from "lucide-react";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
@@ -90,7 +91,9 @@ export function BenchLayoutEditor({ onClose }: { onClose: () => void }) {
   const setPane = (at: number, patch: Partial<LayoutPane>) =>
     setPanes((current) => current.map((pane, index) => (index === at ? { ...pane, ...patch } : pane)));
 
-  return (
+  // Portalled: the bench that opens it sits in a stacking context of its own, which pinned this
+  // `fixed` overlay inside the panel and let the app rail and the AI panel paint over it.
+  return createPortal(
     <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
       <div
         onClick={(event) => event.stopPropagation()}
@@ -197,7 +200,8 @@ export function BenchLayoutEditor({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
