@@ -210,7 +210,9 @@ export const diagramsCreateFolder = (
   parentId: string | null,
   name: string,
   color: string,
-) => invoke<DiagramFolderRow>("diagrams_create_folder", { workspaceId, parentId, name, color });
+  /** Whose tree it goes in — omitted for Diagramas, `"arch"` for Arquitectura. */
+  app?: string,
+) => invoke<DiagramFolderRow>("diagrams_create_folder", { workspaceId, parentId, name, color, app: app ?? null });
 
 export const diagramsRenameFolder = (id: string, name: string) =>
   invoke<void>("diagrams_rename_folder", { id, name });

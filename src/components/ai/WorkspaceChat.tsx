@@ -177,6 +177,7 @@ export function WorkspaceChat({
   const mentionRepos = useMemo(() => projects.map((p) => ({ name: p.name, path: p.local_path })), [projects]);
   const mentions = useMentions({
     repos: mentionRepos,
+    workspaceId,
     text: draft,
     caret,
     onInsert: (next) => {

@@ -84,7 +84,9 @@ impl AiEngine for CodexEngine {
 
     fn stdin_payload(&self, inv: &AiInvocation) -> String {
         let mut brief = String::new();
-        if let Some(system) = inv.system_prompt {
+        // A text-only run's system prompt replaces Codex's own instructions instead (see
+        // [`text_only_args`]), so it is not said twice.
+        if let Some(system) = inv.system_prompt.filter(|_| !inv.text_only) {
             if !system.trim().is_empty() {
                 brief.push_str(system);
                 brief.push_str("\n\n");
@@ -115,6 +117,9 @@ impl AiEngine for CodexEngine {
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
         }
+        if inv.text_only {
+            return text_only_command(cmd, inv);
+        }
         // Read-only unless the flow may write (chat / fix) — and always for a run marked read-only,
         // whatever else it says. `workspace-write` is the documented successor to the deprecated
         // `--full-auto`, and stays scoped to the repo rather than the whole machine —
@@ -144,7 +149,22 @@ impl AiEngine for CodexEngine {
         // turn is exactly when the caller lists every server — the sandbox confines the model's own
         // tools, not the programs its config starts (`-c mcp_servers={}` merges rather than empties,
         // so each one has to be switched off by name).
-        for server in &inv.mcp_block {
+        //
+        // A read-only run keeps every one of them out whether the caller listed them or not — the
+        // names read from the user's `config.toml`, as Claude Code's `--strict-mcp-config` keeps
+        // its run to the map — and the ChatGPT apps too (`features.apps`): Gmail, Drive, GitHub…
+        // are tools that act outside the sandbox, and on this machine their schemas alone ran to
+        // hundreds of thousands of characters a request.
+        let mut blocked: Vec<String> = inv.mcp_block.clone();
+        if inv.read_only {
+            for name in users_mcp_servers() {
+                if !blocked.contains(&name) {
+                    blocked.push(name);
+                }
+            }
+            cmd.arg("-c").arg("features.apps=false");
+        }
+        for server in &blocked {
             if !server.is_empty() && server.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
                 cmd.arg("-c").arg(format!("mcp_servers.{server}.enabled=false"));
             }
@@ -308,6 +328,126 @@ pub(crate) fn codex_home() -> Option<std::path::PathBuf> {
 /// Being wrong is cheap in the direction that matters. A false negative adds
 /// `--skip-git-repo-check` to a run that did not need it, which changes nothing. A false positive
 /// omits it and Codex says so plainly, on stderr, before spending anything.
+/// A text-only run: the ask and its stdin, answered by the model with none of the agent around it.
+///
+/// What `codex exec` sends with a four-word title when nothing is trimmed, measured on 0.163.0
+/// against a local fake of the Responses API: 17.6k characters of Codex's own instructions, nine tool
+/// schemas (17.8k: a shell, goals, sub-agents, web search…), the skills listing (2.5k) and the
+/// environment block — 39.5k characters before the user's plugins and MCP servers, which a real
+/// install adds on top. On the user's ChatGPT plan the same title cost **15,161 input tokens**
+/// before and **3,877** after (2026-10-21, one real run each). Every key below is a config key, set
+/// with `-c`, so a build that renames one ignores it rather than refusing the run the way an unknown
+/// flag would:
+///
+/// - `model_instructions_file` replaces Codex's instructions with this run's own system prompt (the
+///   task's, or [`crate::claude::TEXT_ONLY_SYSTEM_PROMPT`]); the `include_*` keys drop the blocks
+///   written around them; the `features.*` keys drop the tools; `skills.*` the skills listing.
+/// - `--ignore-user-config` keeps the user's `config.toml` out of the run — its MCP servers, plugins,
+///   hooks and `notify` program (which here launches another app at every turn's end) — while
+///   authentication still comes from `CODEX_HOME`. Not when that file names its own
+///   `model_provider`: then it is how this CLI reaches a model at all, and only the keys above apply.
+/// - An empty scratch directory as the workspace, read-only, and `--ephemeral`: nothing to read,
+///   nothing to resume, no rollout written to the user's history for a commit message.
+fn text_only_command(mut cmd: Command, inv: &AiInvocation) -> Command {
+    let system = inv.system_prompt.filter(|sp| !sp.trim().is_empty()).unwrap_or(crate::claude::TEXT_ONLY_SYSTEM_PROMPT);
+    if let Some(path) = inv.prompt_files.write("codex-instructions", "md", system) {
+        cmd.arg("-c").arg(format!("model_instructions_file={}", toml_string(&path.to_string_lossy())));
+    }
+    for key in TEXT_ONLY_OFF {
+        cmd.arg("-c").arg(format!("{key}=false"));
+    }
+    cmd.arg("-c").arg("web_search=\"disabled\"");
+    if !user_config_names_a_provider() {
+        cmd.arg("--ignore-user-config");
+    }
+    cmd.arg("--ephemeral");
+    cmd.arg("--sandbox").arg("read-only");
+    cmd.arg("-c").arg("approval_policy=\"never\"");
+    cmd.arg("--json");
+    if let Some(schema) = inv.json_schema {
+        if let Some(path) = inv.prompt_files.write("codex-schema", "json", schema) {
+            cmd.arg("--output-schema").arg(path);
+        }
+    }
+    if let Some(dir) = inv.prompt_files.dir("codex-scratch") {
+        cmd.arg("--cd").arg(&dir);
+        cmd.current_dir(&dir);
+    }
+    cmd.arg("--skip-git-repo-check");
+    cmd
+}
+
+/// The config keys a text-only run switches off — see [`text_only_command`].
+const TEXT_ONLY_OFF: &[&str] = &[
+    "include_permissions_instructions",
+    "include_apps_instructions",
+    "include_environment_context",
+    "include_collaboration_mode_instructions",
+    "features.shell_tool",
+    "features.unified_exec",
+    "features.view_image",
+    "features.multi_agent",
+    "features.goals",
+    "features.standalone_web_search",
+    "features.request_permissions_tool",
+    "features.default_mode_request_user_input",
+    "features.apps",
+    "features.memories",
+    "features.image_generation",
+    "features.tool_suggest",
+    "features.plugins",
+    "skills.include_instructions",
+    "skills.bundled.enabled",
+];
+
+/// The MCP servers the user's Codex config declares (`[mcp_servers.<name>]`), by name. Read from the
+/// file rather than `codex mcp list`, which would be a second process before every run; a name that
+/// is not a bare key is left to the caller's own list.
+fn users_mcp_servers() -> Vec<String> {
+    let Some(text) = codex_home().and_then(|h| std::fs::read_to_string(h.join("config.toml")).ok()) else { return Vec::new() };
+    mcp_server_names(&text)
+}
+
+fn mcp_server_names(config: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in config.lines() {
+        let Some(rest) = line.trim().strip_prefix("[mcp_servers.") else { continue };
+        let name = rest.trim_end_matches(']').split('.').next().unwrap_or_default().trim().to_string();
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// A TOML basic string, for a `-c key=value` whose value is a path.
+fn toml_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Whether the user's Codex config chooses its own `model_provider` (an OSS server, a gateway) —
+/// the one thing `--ignore-user-config` cannot take away from a run without leaving it no model.
+fn user_config_names_a_provider() -> bool {
+    let Some(text) = codex_home().and_then(|h| std::fs::read_to_string(h.join("config.toml")).ok()) else { return false };
+    names_a_provider(&text)
+}
+
+/// [`user_config_names_a_provider`] over the file's text: a top-level `model_provider` other than
+/// OpenAI's own. Keys after the first `[table]` belong to that table.
+fn names_a_provider(config: &str) -> bool {
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            return false;
+        }
+        if let Some(value) = line.strip_prefix("model_provider").map(str::trim_start).and_then(|rest| rest.strip_prefix('=')) {
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            return !value.is_empty() && value != "openai";
+        }
+    }
+    false
+}
+
 fn in_git_work_tree(dir: &str) -> bool {
     let mut cur = std::path::Path::new(dir);
     loop {
@@ -794,6 +934,53 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(args.windows(2).any(|pair| pair == ["--sandbox", "read-only"]), "{args:?}");
+    }
+
+    #[test]
+    fn a_text_only_run_brings_its_own_instructions_and_nothing_of_the_agent() {
+        let mut inv = AiInvocation::new("Escribe un título", "la conversación");
+        inv.text_only = true;
+        inv.system_prompt = Some("Eres quien titula.");
+        inv.app_mcp.push(crate::mcp_registry::LiveServer {
+            name: "codeflow_map".into(),
+            transport: "http".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: "http://127.0.0.1:1/mcp/code".into(),
+            headers: Vec::new(),
+        });
+        let cmd = CodexEngine.build_command("codex", &inv);
+        let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let at = args.iter().position(|a| a.starts_with("model_instructions_file=")).expect("its own instructions");
+        let path = args[at].trim_start_matches("model_instructions_file=").trim_matches('"').replace("\\\\", "\\");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "Eres quien titula.");
+        for off in ["features.shell_tool=false", "features.plugins=false", "skills.include_instructions=false", "include_environment_context=false"] {
+            assert!(args.iter().any(|a| a == off), "{off}: {args:?}");
+        }
+        assert!(args.windows(2).any(|pair| pair == ["--sandbox", "read-only"]), "{args:?}");
+        assert!(args.iter().any(|a| a == "--ephemeral") && args.iter().any(|a| a == "--skip-git-repo-check"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("mcp_servers.")), "no MCP server, the app's included: {args:?}");
+        // Said once, in the instructions — not again at the head of the brief.
+        let brief = CodexEngine.stdin_payload(&inv);
+        assert!(!brief.contains("Eres quien titula.") && brief.contains("Escribe un título") && brief.contains("la conversación"), "{brief}");
+        // Its workspace is an empty folder of its own, not wherever the app happened to start.
+        let cwd = cmd.as_std().get_current_dir().expect("a scratch directory");
+        assert_eq!(std::fs::read_dir(cwd).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_users_servers_are_read_from_their_config_by_name() {
+        let config = "model = \"x\"\n[mcp_servers.node_repl]\ncommand = \"n\"\n[mcp_servers.node_repl.env]\nA = \"1\"\n[mcp_servers.computer-use]\nenabled = false\n";
+        assert_eq!(mcp_server_names(config), vec!["node_repl".to_string(), "computer-use".to_string()]);
+    }
+
+    #[test]
+    fn only_a_provider_of_the_users_own_keeps_their_config_in_a_text_only_run() {
+        assert!(!names_a_provider("model = \"gpt-5.6\"\n[mcp_servers.x]\nmodel_provider = \"x\"\n"));
+        assert!(!names_a_provider("model_provider = \"openai\"\n"));
+        assert!(names_a_provider("model = \"qwen3\"\nmodel_provider = \"ollama\"\n"));
+        assert!(names_a_provider("model_provider='azure'\n"));
     }
 
     #[test]

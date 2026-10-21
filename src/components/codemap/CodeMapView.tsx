@@ -22,6 +22,7 @@ import { buttonClass, iconButtonClass } from "../common/Button";
 import { AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
+import { useElementWidth } from "../ai/docParts";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ArchifyTopicDialog, type TopicKind } from "../diagrams/ArchifyTopicDialog";
 import { chipClass, fieldClass, rowClass, sectionLabelClass } from "../common/recipes";
@@ -236,6 +237,12 @@ function CodeMap() {
   /** A leave waits a moment before it un-lights: crossing the gap between two cards would otherwise
    *  flash the whole map bright for a frame. */
   const leaving = useRef<number | undefined>(undefined);
+  // Under this width the mode switch shows its icons only: with words it pushed the toolbar's other
+  // controls over one another (user, 2026-10-21). The rest of the toolbar steps down by container
+  // queries on the same bar.
+  const toolbar = useRef<HTMLDivElement>(null);
+  const toolbarWidth = useElementWidth(toolbar);
+  const compactBar = toolbarWidth > 0 && toolbarWidth < 980;
   useEffect(() => () => window.clearTimeout(leaving.current), []);
   /** Whose lines are lit and whose neighbours stay bright: the hovered node, else the selected one. */
   const spotlit = hovered ?? selected;
@@ -475,7 +482,7 @@ function CodeMap() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--cf-surface)]">
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
+      <div ref={toolbar} className="@container flex h-11 min-w-0 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
         <Segmented<Mode>
           size="sm"
           layoutId="cf-codemap-mode"
@@ -483,12 +490,12 @@ function CodeMap() {
           onChange={setMode}
           ariaLabel={t("codemap.mode")}
           options={[
-            { value: "global", icon: Network, label: t("codemap.modeGlobal") },
-            { value: "folders", icon: FolderTree, label: t("codemap.modeFolders") },
+            { value: "global", icon: Network, label: compactBar ? undefined : t("codemap.modeGlobal"), title: t("codemap.modeGlobal") },
+            { value: "folders", icon: FolderTree, label: compactBar ? undefined : t("codemap.modeFolders"), title: t("codemap.modeFolders") },
           ]}
         />
-        <nav className="flex min-w-0 items-center gap-0.5 text-[12.5px]">
-          <button type="button" onClick={() => setFocus("")} className="shrink-0 rounded px-1.5 py-0.5 font-medium text-[var(--cf-text)] hover:bg-[var(--cf-hover)]">
+        <nav className="flex min-w-0 shrink items-center gap-0.5 overflow-hidden text-[12.5px]">
+          <button type="button" onClick={() => setFocus("")} className="min-w-[40px] shrink truncate rounded px-1.5 py-0.5 font-medium text-[var(--cf-text)] hover:bg-[var(--cf-hover)]">
             {project.name}
           </button>
           {mode === "folders" && crumbs.map((crumb) => (
@@ -506,7 +513,7 @@ function CodeMap() {
         </nav>
         {graph && (
           <Tooltip label={graph.languages.map(([lang, n]) => `${lang}: ${n}`).join(" · ")}>
-            <span className={chipClass("neutral", "tabular-nums")}>
+            <span className={chipClass("neutral", "shrink-0 tabular-nums @max-[1180px]:hidden")}>
               {t("codemap.stats", { files: formatCount(graph.files), symbols: formatCount(graph.symbols) })}
             </span>
           </Tooltip>
@@ -514,7 +521,7 @@ function CodeMap() {
         {loading && <LoaderCircle size={13} className="animate-spin text-[var(--cf-text-muted)]" />}
         <span className="flex-1" />
         <form
-          className="relative w-[260px]"
+          className="relative w-[260px] shrink-0 @max-[1040px]:w-[200px] @max-[820px]:w-[150px]"
           onSubmit={(e) => {
             e.preventDefault();
             if (query.trim()) setPanel({ kind: "search", query: query.trim() });
@@ -537,13 +544,15 @@ function CodeMap() {
             <RefreshCw size={13} />
           </button>
         </Tooltip>
-        <ChatModelPicker
-          task="diagram"
-          variant="tag"
-          liveModel={null}
-          chatActive={false}
-          title={t("codemap.archify.modelHint")}
-        />
+        <span className="shrink-0 @max-[860px]:hidden">
+          <ChatModelPicker
+            task="diagram"
+            variant="tag"
+            liveModel={null}
+            chatActive={false}
+            title={t("codemap.archify.modelHint")}
+          />
+        </span>
         {archifyRun ? (
           <>
             <span className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
@@ -569,17 +578,20 @@ function CodeMap() {
                 const box = event.currentTarget.getBoundingClientRect();
                 setDiagramMenuAt({ x: box.left, y: box.bottom + 4 });
               }}
-              className={buttonClass({ variant: "secondary", size: "sm" })}
+              className={buttonClass({ variant: "secondary", size: "sm", className: "shrink-0" })}
+              aria-label={t("codemap.archify.action")}
             >
               <AiSparkles size={13} />
-              {t("codemap.archify.action")}
+              <span className="@max-[960px]:hidden">{t("codemap.archify.action")}</span>
             </button>
           </Tooltip>
         )}
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        <div className="relative min-w-0 flex-1">
+      {/* Narrow, the side panel goes under the map rather than squeezing it to a strip. */}
+      <div className="@container min-h-0 flex-1">
+      <div className="flex h-full min-h-0 flex-col @[760px]:flex-row">
+        <div className="@container relative min-h-0 min-w-0 flex-1">
           {error ? (
             <p className="p-4 text-[12.5px] text-[var(--cf-danger)]">{error}</p>
           ) : !graph ? (
@@ -640,7 +652,7 @@ function CodeMap() {
             </SpotlightContext.Provider>
           )}
           {build && graph && (
-            <div className="pointer-events-none absolute bottom-2 left-3 flex flex-col gap-1">
+            <div className="pointer-events-none absolute bottom-2 left-3 flex max-w-[calc(100%-240px)] flex-col gap-1 @max-[560px]:max-w-[calc(100%-24px)]">
               {mode === "global" && colors.size > 0 && (
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--cf-text-muted)]">
                   {[...colors.entries()].map(([group, color]) => (
@@ -651,7 +663,7 @@ function CodeMap() {
                   ))}
                 </div>
               )}
-              <p className="text-[11px] text-[var(--cf-text-faint)]">{t(hint)}</p>
+              <p className="text-[11px] text-[var(--cf-text-faint)] @max-[440px]:hidden">{t(hint)}</p>
             </div>
           )}
           {split.hidden.length > 0 && (
@@ -665,7 +677,7 @@ function CodeMap() {
           )}
         </div>
 
-        <aside className="flex w-[320px] shrink-0 flex-col border-l border-[var(--cf-border)]">
+        <aside className="flex h-[45%] w-full shrink-0 flex-col border-t border-[var(--cf-border)] @[760px]:h-auto @[760px]:w-[320px] @[760px]:border-l @[760px]:border-t-0">
           <SidePanel
             root={root}
             panel={panel}
@@ -680,6 +692,7 @@ function CodeMap() {
             }}
           />
         </aside>
+      </div>
       </div>
       {diagramMenuAt && (
         <ContextMenu x={diagramMenuAt.x} y={diagramMenuAt.y} items={diagramMenu()} onClose={() => setDiagramMenuAt(null)} />

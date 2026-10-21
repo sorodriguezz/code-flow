@@ -143,6 +143,15 @@ pub fn snapshot(root: &str) -> Result<(Arc<Snapshot>, BuildInfo), String> {
     map.refresh()
 }
 
+/// The working tree's map as it was last built, without checking the tree or building one — for a
+/// caller that must answer at once and holds the app's database meanwhile (a prompt being assembled).
+/// `None` when nothing has asked for this repository's map yet.
+pub fn snapshot_if_built(root: &str) -> Option<Arc<Snapshot>> {
+    let map = existing(root)?;
+    let map = map.lock().ok()?;
+    map.snapshot.clone()
+}
+
 /// The map of `refname`'s tree, read from git's object database — the working tree is not touched.
 pub fn snapshot_at(root: &str, refname: &str) -> Result<Arc<Snapshot>, String> {
     let map = map_for(root);
@@ -193,8 +202,10 @@ pub fn touch(root: &str, rel: &str) {
     }
 }
 
-/// The watcher saw these paths change.
+/// The watcher saw these paths change. The knowledge index hears it too (`knowledge::fresh`) — even
+/// for a repository whose map nobody has asked for: its passages go stale the same way.
 pub fn changed_paths(root: &str, paths: &[PathBuf]) {
+    crate::knowledge::fresh::changed(Path::new(root), paths);
     let Some(map) = existing(root) else { return };
     let Ok(mut map) = map.lock() else { return };
     for path in paths {
@@ -213,6 +224,7 @@ pub fn changed_paths(root: &str, paths: &[PathBuf]) {
 
 /// The watcher lost track (an overflowed event buffer): walk the tree next time.
 pub fn invalidate(root: &str) {
+    crate::knowledge::fresh::invalidated(Path::new(root));
     if let Some(map) = existing(root) {
         if let Ok(mut map) = map.lock() {
             map.dirty = true;
@@ -223,6 +235,7 @@ pub fn invalidate(root: &str) {
 /// Whether a watcher is reporting this repository's changes — a watched map trusts its last check
 /// for longer.
 pub fn set_watched(root: &str, watched: bool) {
+    crate::knowledge::fresh::watched(Path::new(root), watched);
     let map = map_for(root);
     if let Ok(mut map) = map.lock() {
         map.watched = watched;
@@ -260,29 +273,59 @@ fn cache_key(root: &Path) -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// Deletes the cached maps of repositories that are no longer projects — a removed repository's
-/// index otherwise sat in the cache folder for good. Only files untouched for a month: a map built
-/// for something that is not a project (a review checkout) is kept while it is in use.
-pub fn sweep_cache(project_roots: &[String]) {
+/// Where the maps are cached. Tests index throwaway repositories: their caches go to the temp dir,
+/// never the user's.
+fn cache_base() -> PathBuf {
+    if cfg!(test) { std::env::temp_dir().join("codeflow-codemap-tests") } else { crate::paths::cache_dir().join("codemap") }
+}
+
+/// Deletes the cached maps nothing will read again. A map's file is named by a hash of its root, so
+/// the root is written beside it (`<key>.root`) — without it a cache could only age out, and the map
+/// of a repository deleted from disk sat in the cache folder for a month, or for good when it was a
+/// project's. Now, of the maps that are not a project's: one whose root is gone from disk is
+/// deleted at once, and any other once untouched for a month (a map built for something that is not
+/// a project — a review checkout — is kept while it is in use). A project's map is kept even when
+/// its folder is missing: an unplugged drive comes back. Leftover `.root` and half-written files go
+/// too. Returns how many maps went.
+pub fn sweep_cache(project_roots: &[String]) -> usize {
+    sweep_cache_in(&cache_base(), project_roots)
+}
+
+fn sweep_cache_in(base: &Path, project_roots: &[String]) -> usize {
     let keep: std::collections::HashSet<String> = project_roots.iter().map(|root| cache_key(&canonical(root))).collect();
-    let Ok(entries) = std::fs::read_dir(crate::paths::cache_dir().join("codemap")) else { return };
+    let Ok(entries) = std::fs::read_dir(base) else { return 0 };
     let month = std::time::Duration::from_secs(30 * 24 * 3600);
+    let age_of = |entry: &std::fs::DirEntry| entry.metadata().and_then(|m| m.modified()).ok().and_then(|at| at.elapsed().ok());
+    let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(key) = name.strip_suffix(".json.gz") else { continue };
-        let stale = entry.metadata().and_then(|m| m.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > month);
-        if stale && !keep.contains(key) {
+        if let Some(key) = name.strip_suffix(".json.gz") {
+            if keep.contains(key) {
+                continue;
+            }
+            let root_file = base.join(format!("{key}.root"));
+            let gone = std::fs::read_to_string(&root_file).ok().is_some_and(|root| !Path::new(root.trim()).is_dir());
+            let stale = age_of(&entry).is_some_and(|age| age > month);
+            if gone || stale {
+                let _ = std::fs::remove_file(entry.path());
+                let _ = std::fs::remove_file(root_file);
+                removed += 1;
+            }
+        } else if let Some(key) = name.strip_suffix(".root") {
+            if !base.join(format!("{key}.json.gz")).exists() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        } else if name.contains(".json.tmp-") && age_of(&entry).is_some_and(|age| age > std::time::Duration::from_secs(24 * 3600)) {
+            // A save a quit cut short.
             let _ = std::fs::remove_file(entry.path());
         }
     }
+    removed
 }
 
 impl RepoMap {
     fn cache_path(&self) -> PathBuf {
-        let key = cache_key(&self.root);
-        // Tests index throwaway repositories: their caches go to the temp dir, never the user's.
-        let base = if cfg!(test) { std::env::temp_dir().join("codeflow-codemap-tests") } else { crate::paths::cache_dir().join("codemap") };
-        base.join(format!("{key}.json.gz"))
+        cache_base().join(format!("{}.json.gz", cache_key(&self.root)))
     }
 
     fn load(&mut self) {
@@ -324,7 +367,16 @@ impl RepoMap {
             self.entries.iter().map(|(path, e)| (path.clone(), (e.mtime, e.size, e.blob.clone()))).collect();
         let facts: Vec<(String, Arc<Facts>)> = self.facts.iter().map(|(blob, facts)| (blob.clone(), facts.clone())).collect();
         let target = self.cache_path();
+        // What [`sweep_cache`] reads to know the map's repository is gone: the file name is a hash.
+        let root_file = cache_base().join(format!("{}.root", cache_key(&self.root)));
+        let root = self.root.to_string_lossy().into_owned();
         std::thread::spawn(move || {
+            if std::fs::read_to_string(&root_file).ok().as_deref() != Some(root.as_str()) {
+                if let Some(dir) = root_file.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&root_file, &root);
+            }
             let facts: HashMap<String, Facts> = facts.into_iter().map(|(blob, facts)| (blob, (*facts).clone())).collect();
             let cache = CacheFile { format: CACHE_FORMAT, extractor: extract::VERSION, entries, facts };
             let Ok(json) = serde_json::to_vec(&cache) else { return };
@@ -710,6 +762,32 @@ mod tests {
             std::fs::write(out.join("find-ui.json"), serde_json::to_string(&map.find_symbol("useUiStore", 30)).unwrap()).unwrap();
             std::fs::write(out.join("usages-ui.json"), serde_json::to_string(&map.usages("useUiStore", None, 200)).unwrap()).unwrap();
         }
+    }
+
+    /// The map of a repository deleted from disk used to sit in the cache for a month (for good, if
+    /// it had been a project); now it goes at the next sweep, while a project's map stays even with
+    /// its drive unplugged.
+    #[test]
+    fn the_sweep_drops_maps_whose_repository_is_gone_and_keeps_the_projects() {
+        let base = TempDir::new();
+        let alive = TempDir::new();
+        let project_missing = "/nowhere/unplugged/project";
+        let write = |root: &str| {
+            let key = cache_key(&canonical(root));
+            std::fs::write(base.0.join(format!("{key}.json.gz")), b"x").unwrap();
+            std::fs::write(base.0.join(format!("{key}.root")), root).unwrap();
+            key
+        };
+        let gone = write("/nowhere/deleted/checkout");
+        let kept = write(&alive.0.to_string_lossy());
+        let project = write(project_missing);
+        std::fs::write(base.0.join("orphan.root"), "/x").unwrap();
+        let removed = sweep_cache_in(&base.0, &[project_missing.to_string()]);
+        assert_eq!(removed, 1);
+        assert!(!base.0.join(format!("{gone}.json.gz")).exists() && !base.0.join(format!("{gone}.root")).exists());
+        assert!(base.0.join(format!("{kept}.json.gz")).exists(), "a live checkout's map is in use");
+        assert!(base.0.join(format!("{project}.json.gz")).exists(), "a project's map waits for its drive");
+        assert!(!base.0.join("orphan.root").exists());
     }
 
     #[test]

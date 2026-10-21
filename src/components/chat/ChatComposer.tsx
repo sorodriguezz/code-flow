@@ -86,6 +86,7 @@ export function ChatComposer({
   disabledReason,
   surface = "chat",
   skillScope,
+  mcpHeld,
   queue,
 }: {
   provider: string;
@@ -153,6 +154,9 @@ export function ChatComposer({
   surface?: CommandSurface;
   /** Whose skills the `/` menu offers. Absent where a surface takes no skill (the ask box). */
   skillScope?: { accountId?: string | null; workspaceId?: string | null; conversationId?: string | null };
+  /** MCP switches held for the conversation the first message will create — the empty state's,
+   *  where there is no row to write them to yet. See `McpMenu`'s `held`. */
+  mcpHeld?: { switches: Record<string, boolean>; onSet: (server: string, enabled: boolean) => void };
   /** This conversation's queue — what was sent while a turn ran. Absent where there is no
    *  conversation to wait behind (the empty state), and then a running turn refuses a second
    *  message as it always did. */
@@ -505,6 +509,7 @@ export function ChatComposer({
                   accountId: account === null ? "system" : (account ?? skillScope.accountId ?? null),
                 }}
                 unavailableReason={canWriteFiles ? undefined : t("chat.mcpReadOnly")}
+                held={mcpHeld}
               />
             )}
 

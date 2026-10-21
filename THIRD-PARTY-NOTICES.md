@@ -229,6 +229,40 @@ A licence on a logo set covers the drawings, not the brands: the marks remain th
 trademarks, and CodeFlow uses them only to identify the tools and services they stand for.
 The interface's own icons are Lucide (`lucide-react`), listed with the npm packages below.
 
+## Arquitectura: cloud icons and skills
+
+The architecture diagrams draw the cloud providers' own icons, compacted into
+`src/lib/architecture/icons/packs/` and loaded on demand. They are not under an open licence:
+each provider permits them in architecture diagrams, which is all the app uses them for.
+
+| Source | Terms | Icons |
+|---|---|---|
+| [Azure architecture icons](https://learn.microsoft.com/azure/architecture/icons/) (Microsoft) | Microsoft's icon terms — use permitted in architecture diagrams, training material and documentation | 637 |
+| [AWS Architecture Icons](https://aws.amazon.com/architecture/icons/) (Amazon Web Services) | AWS's icon terms — permitted for creating architecture diagrams | 760 |
+| [Google Cloud icons](https://cloud.google.com/icons) (Google) | Google's icon terms — provided for architecture diagrams | 252 |
+
+The section's AI reads these skills, embedded in the app as text and installed only in its own
+working folder. Each keeps its upstream licence beside it as `LICENSE.txt`.
+
+| Skill | From | Licence (SPDX) |
+|---|---|---|
+| `architecture` | [anthropics/knowledge-work-plugins](https://github.com/anthropics/knowledge-work-plugins) | Apache-2.0 |
+| `architecture-designer` | [jeffallan/claude-skills](https://github.com/jeffallan/claude-skills) | MIT |
+| `aws-well-architected-review` | [aws/agent-toolkit-for-aws](https://github.com/aws/agent-toolkit-for-aws) | Apache-2.0 |
+| `c4-architecture` | [softaworks/agent-toolkit](https://github.com/softaworks/agent-toolkit) | MIT |
+| `cloud-design-patterns` | [github/awesome-copilot](https://github.com/github/awesome-copilot) | MIT |
+| `ddia-systems` | [wondelai/skills](https://github.com/wondelai/skills) | MIT |
+| `design-code-architecture` | [wondelai/skills](https://github.com/wondelai/skills) | MIT |
+| `design-system` | [nextlevelbuilder/ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) | MIT |
+| `documentation-and-adrs` | [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) | MIT |
+| `domain-modeling` | [mattpocock/skills](https://github.com/mattpocock/skills) | MIT |
+| `google-cloud-solution-architecture` | [google/skills](https://github.com/google/skills) | Apache-2.0 |
+| `grilling` | [mattpocock/skills](https://github.com/mattpocock/skills) | MIT |
+| `security-threat-model` | [openai/skills](https://github.com/openai/skills) | Apache-2.0 |
+| `stride-analysis-patterns` | [wshobson/agents](https://github.com/wshobson/agents) | MIT |
+| `system-design` | [wondelai/skills](https://github.com/wondelai/skills) | MIT |
+| `teach` | [mattpocock/skills](https://github.com/mattpocock/skills) | MIT |
+
 ## Notification sounds
 
 Nine notification cues follow [TypeUI's notification catalogue](https://www.typeui.sh/ui-sounds/notifications)

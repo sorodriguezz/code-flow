@@ -41,7 +41,9 @@ import {
 import { traceOf } from "./conversationStore";
 import { translate } from "./languageStore";
 import { notify } from "./notificationStore";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, pushSuccessToast } from "./toastStore";
+import { learnedKey } from "../lib/memoryToast";
+import { leavesContextAsIs } from "../lib/contextWindow";
 
 /**
  * The assistant panel's **workspace chats** — one conversation that talks to every repository of a
@@ -652,10 +654,13 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             // `undefined` from an engine that does not report it leaves the last measurement
             // standing, the way the row does — emptying the gauge would read as "no context".
             contextTokens: reply.context_tokens ?? s.contextTokens,
-            // This turn measured itself, or it did not — see `contextStale`.
-            contextStale: reply.context_tokens == null,
+            // This turn measured itself, or it did not — see `contextStale`. A `/context` or
+            // `/usage` asked the model nothing, so the last figure is as current as it was.
+            contextStale: reply.context_tokens == null ? (leavesContextAsIs(trimmed) ? s.contextStale : true) : false,
             engineSessionId: reply.session_id ?? s.engineSessionId,
           }));
+          // Said only when a memory was really saved — never to suggest the model itself learned.
+          if (reply.learned_memory) pushSuccessToast(translate(learnedKey(reply.learned_outcome), { title: reply.learned_memory }));
           notify({
             source: "chat",
             titleKey: "notifications.chatDone",

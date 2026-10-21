@@ -29,12 +29,15 @@ const STATUS: Record<string, { key: TranslationKey; color: string }> = {
  * take one out. See `chat_mcp.rs`.
  *
  * Draws nothing for an engine with no servers to show, and says so — instead of offering switches —
- * when the conversation cannot use any (a read-only turn loads none).
+ * when the conversation cannot use any (a read-only turn loads none). Before a conversation exists
+ * (the Chat app's empty state) the switches are `held` by the caller and written onto the row the
+ * first message creates.
  */
 export function McpMenu({
   provider,
   scope,
   unavailableReason,
+  held,
 }: {
   provider: string;
   scope: {
@@ -45,14 +48,18 @@ export function McpMenu({
   };
   /** Set when turns here cannot use MCP at all — the switches are then shown, but not offered. */
   unavailableReason?: string;
+  /** Switches for a conversation that does not exist yet, kept by the caller until it does. */
+  held?: { switches: Record<string, boolean>; onSet: (server: string, enabled: boolean) => void };
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [servers, setServers] = useState<McpServerView[]>([]);
   const box = useRef<HTMLDivElement>(null);
   const { accountId = null, workspaceId = null, projectId = null, conversationId = null } = scope;
-  // Switches need somewhere to live: a conversation's row, or a repository's setting.
-  const canSwitch = Boolean(conversationId || projectId) && !unavailableReason;
+  // Switches need somewhere to live: a conversation's row, a repository's setting, or the caller's
+  // hands until the conversation exists.
+  const holding = !conversationId && !projectId ? held : undefined;
+  const canSwitch = Boolean(conversationId || projectId || holding) && !unavailableReason;
 
   const reload = () =>
     void chatMcpServers(provider, { accountId, workspaceId, projectId, conversationId })
@@ -84,11 +91,19 @@ export function McpMenu({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Nothing to show, or nowhere yet to keep a switch (a chat before its first message).
-  if (servers.length === 0 || (!conversationId && !projectId)) return null;
-  const active = servers.filter((server) => server.enabled).length;
+  // Nothing to show, or nowhere yet to keep a switch (a chat before its first message, unless the
+  // caller holds them).
+  if (servers.length === 0 || (!conversationId && !projectId && !holding)) return null;
+  const shown = holding
+    ? servers.map((server) => (server.key in holding.switches ? { ...server, enabled: holding.switches[server.key] } : server))
+    : servers;
+  const active = shown.filter((server) => server.enabled).length;
 
   const toggle = (server: McpServerView, enabled: boolean) => {
+    if (holding) {
+      holding.onSet(server.key, enabled);
+      return;
+    }
     setServers((current) => current.map((s) => (s.key === server.key ? { ...s, enabled } : s)));
     void chatMcpSet({ projectId, conversationId }, server.key, enabled).catch(() => reload());
   };
@@ -118,7 +133,7 @@ export function McpMenu({
             <p className="px-1 pb-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">{unavailableReason}</p>
           )}
           <div className="max-h-[260px] space-y-0.5 overflow-y-auto">
-            {servers.map((server) => {
+            {shown.map((server) => {
               const status = STATUS[server.status];
               return (
                 <label

@@ -53,6 +53,8 @@ const DIAGRAM_EXTENSIONS: [RegExp, DiagramFormat][] = [
   [/\.excalidraw$/i, FORMAT_EXCALIDRAW],
   [/\.(drawio|dio)$/i, FORMAT_MXGRAPH],
   [/\.(mmd|mermaid)$/i, FORMAT_MERMAID],
+  // Arquitectura's documents. Opened in that app, not in Diagramas — see `openFileInDiagrams`.
+  [/\.arch\.json$/i, "arch"],
   // archify's own names for its documents — one per type. A bare `.json` is not claimed, for the
   // reason a bare `.xml` is not: most of it in a repository is not a diagram.
   [/\.(?:architecture|workflow|sequence|dataflow|lifecycle)\.json$/i, FORMAT_ARCHIFY],
@@ -170,8 +172,25 @@ export async function openFileInDiagrams(args: {
     );
     return false;
   }
-  await showDiagramAnywhere(args.workspaceId, diagramId);
+  if (format === "arch") await showArchitectureHere(args.workspaceId, diagramId);
+  else await showDiagramAnywhere(args.workspaceId, diagramId);
   return true;
+}
+
+/**
+ * Puts an architecture document on screen in this window's Arquitectura app. Imported lazily for the
+ * reason `showDiagramHere` gives. A window without the rail (a repository satellite) still switches
+ * the store, so the document is open the next time the app is shown.
+ */
+export async function showArchitectureHere(workspaceId: string, documentId: string): Promise<void> {
+  const { useArchitectureStore } = await import("../state/architectureStore");
+  const workspace = useWorkspaceStore.getState();
+  if (workspace.activeWorkspaceId !== workspaceId) workspace.setActiveWorkspace(workspaceId);
+  const store = useArchitectureStore.getState();
+  if (store.workspaceId !== workspaceId) await store.setWorkspace(workspaceId);
+  else await store.refresh();
+  if (isMainWindow()) useUiStore.getState().setActiveView("architecture");
+  await useArchitectureStore.getState().open(documentId);
 }
 
 /**

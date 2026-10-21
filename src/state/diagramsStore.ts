@@ -537,6 +537,11 @@ let saveTimer: ReturnType<typeof setTimeout> | undefined;
  * them can easily fire in the same tick.
  */
 let pendingFlush: Promise<void> | null = null;
+/** Arquitectura's documents share the table and are that app's alone — this list never shows them. */
+const ownFormat = (d: DiagramMetaRow) => d.format !== "arch";
+/** And so are its folders. */
+const ownFolder = (f: DiagramFolderRow) => (f.app ?? "") === "";
+
 /** Thumbnail ids already requested, so a re-render doesn't re-ask for the same pictures. */
 let requestedThumbnails = new Set<string>();
 
@@ -699,8 +704,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
         // The user may have switched again while all that was in flight.
         if (get().workspaceId !== workspaceId) return;
         set({
-          diagrams: tree.diagrams.map(toDiagram),
-          folders: tree.folders,
+          diagrams: tree.diagrams.filter(ownFormat).map(toDiagram),
+          folders: tree.folders.filter(ownFolder),
           templates: tree.templates.map(toTemplate),
           expanded: parseList(expanded),
           sort: (sort as DiagramSort | null) ?? "manual",
@@ -771,8 +776,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
       const tree = await diagramsLoadTree(workspaceId);
       if (get().workspaceId !== workspaceId) return;
       set({
-        diagrams: tree.diagrams.map(toDiagram),
-        folders: tree.folders,
+        diagrams: tree.diagrams.filter(ownFormat).map(toDiagram),
+        folders: tree.folders.filter(ownFolder),
         templates: tree.templates.map(toTemplate),
       });
     } catch (error) {
@@ -1980,7 +1985,7 @@ void listen<{ workspaceId: string; diagramId?: string }>("diagrams:changed", ({ 
   void diagramsLoadTree(payload.workspaceId)
     .then((tree) => {
       if (useDiagramsStore.getState().workspaceId !== payload.workspaceId) return;
-      useDiagramsStore.setState({ diagrams: tree.diagrams.map(toDiagram), folders: tree.folders });
+      useDiagramsStore.setState({ diagrams: tree.diagrams.filter(ownFormat).map(toDiagram), folders: tree.folders });
     })
     .catch(() => {});
   const draft = state.draft;

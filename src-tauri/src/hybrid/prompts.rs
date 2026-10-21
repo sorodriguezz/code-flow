@@ -330,6 +330,9 @@ pub struct ExecPrompt {
     pub estimate: u64,
     /// How many of the offered references fitted.
     pub references_used: usize,
+    /// Whether the approved memories offered rode along (false when there were none, or when they
+    /// did not fit beside the task).
+    pub memories_used: bool,
 }
 
 /// Estimated tokens of `text`, padded by 15%. The estimate runs low on digit-heavy code (measured:
@@ -345,12 +348,20 @@ pub fn padded_estimate(text: &str) -> u64 {
 /// big for the local model and `Err` says so — never a silently trimmed prompt); then references
 /// are added, most important first, while they fit. A gate note and a retry note ride along when
 /// there are any.
+///
+/// `memories` is the block of approved memories (`ai_memory::note`) that bear on the task — the
+/// project's conventions and the user's preferences, which a CLI's model gets in its message and the
+/// local model used not to. It rides after the instruction when it fits beside the task, ahead of
+/// every reference (a convention outranks an example of the code), and is left out — and said to
+/// be, through [`ExecPrompt::memories_used`] — when it does not.
+#[allow(clippy::too_many_arguments)]
 pub fn executor_prompt(
     item: &HybridItem,
     target: &Target,
     references: &[Reference],
     gate_note: &str,
     retry_note: &str,
+    memories: &str,
     budget_input: u64,
     budget_output: u64,
 ) -> Result<ExecPrompt, String> {
@@ -417,9 +428,17 @@ pub fn executor_prompt(
         ));
     }
 
+    let mut spent = fixed;
+    let memories = memories.trim().trim_start_matches("---").trim();
+    let memories_block = if memories.is_empty() { String::new() } else { format!("\n{memories}\n") };
+    let memories_used = !memories_block.is_empty() && spent + padded_estimate(&memories_block) <= budget_input;
+    if memories_used {
+        spent += padded_estimate(&memories_block);
+        head.push_str(&memories_block);
+    }
+
     let mut references_block = String::new();
     let mut used = 0;
-    let mut spent = fixed;
     for reference in references {
         let block = format!(
             "\n### {}\n```{}\n{}\n```\n",
@@ -443,7 +462,7 @@ pub fn executor_prompt(
     }
     user.push_str(&tail);
     user.push_str(&retry);
-    Ok(ExecPrompt { user, estimate: spent, references_used: used })
+    Ok(ExecPrompt { user, estimate: spent, references_used: used, memories_used })
 }
 
 /// One line of the report's task table.
@@ -619,7 +638,7 @@ mod tests {
         let refs: Vec<Reference> = (0..5)
             .map(|i| Reference { label: format!("ref {i}"), file: "a.ts".into(), text: "x".repeat(3_000) })
             .collect();
-        let prompt = executor_prompt(&item("src/csv.ts"), &Target::Create, &refs, "", "", 3_000, 2_048).expect("fits");
+        let prompt = executor_prompt(&item("src/csv.ts"), &Target::Create, &refs, "", "", "", 3_000, 2_048).expect("fits");
         assert!(prompt.references_used >= 1 && prompt.references_used < 5, "{}", prompt.references_used);
         assert!(prompt.estimate <= 3_000);
         assert!(prompt.user.contains("ref 0") && !prompt.user.contains("ref 4"));
@@ -627,13 +646,28 @@ mod tests {
     }
 
     #[test]
+    fn approved_memories_ride_ahead_of_the_references_when_they_fit() {
+        let memories = "\n\n---\nMemorias que el usuario aprobó en CodeFlow para este proyecto (respétalas; si alguna contradice lo que pide ahora, dilo):\n- [convention] Los montos van en centavos";
+        let refs = vec![Reference { label: "ref 0".into(), file: "a.ts".into(), text: "x".repeat(300) }];
+        let prompt = executor_prompt(&item("src/csv.ts"), &Target::Create, &refs, "", "", memories, 3_000, 2_048).expect("fits");
+        assert!(prompt.memories_used);
+        let at = prompt.user.find("Los montos van en centavos").expect("the memory is in the prompt");
+        assert!(at < prompt.user.find("ref 0").unwrap(), "a convention outranks an example of the code");
+        assert!(!prompt.user.contains("---\nMemorias"), "the separator meant for a chat message is dropped");
+        // No room beside the task: left out, and said to be.
+        let tight = executor_prompt(&item("src/csv.ts"), &Target::Create, &[], "", "", &memories.repeat(40), 700, 2_048).expect("the task alone fits");
+        assert!(!tight.memories_used && !tight.user.contains("centavos"));
+        assert!(!executor_prompt(&item("src/csv.ts"), &Target::Create, &[], "", "", "", 3_000, 2_048).unwrap().memories_used);
+    }
+
+    #[test]
     fn a_target_that_cannot_be_written_back_is_refused_not_trimmed() {
         let big = "let a = 1;\n".repeat(2_000);
-        let error = executor_prompt(&item("src/big.ts"), &Target::Whole { text: &big }, &[], "", "", 50_000, 4_096)
+        let error = executor_prompt(&item("src/big.ts"), &Target::Whole { text: &big }, &[], "", "", "", 50_000, 4_096)
             .err()
             .expect("too long to answer");
         assert!(error.contains("too long for one local answer"), "{error}");
-        let error = executor_prompt(&item("src/x.ts"), &Target::Create, &[], "", "", 50, 4_096).err().expect("over budget");
+        let error = executor_prompt(&item("src/x.ts"), &Target::Create, &[], "", "", "", 50, 4_096).err().expect("over budget");
         assert!(error.contains("budget"), "{error}");
     }
 

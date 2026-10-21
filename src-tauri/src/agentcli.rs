@@ -389,14 +389,20 @@ fn body_of(buffer: &[u8]) -> Option<&str> {
     Some(&body[..length])
 }
 
+/// `a == b` in time that depends only on their lengths.
+fn same_secret(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// One verb.
 async fn handle(body: &str, app: &AppHandle, token: &str) -> Reply {
     let Ok(request) = serde_json::from_str::<Request>(body) else {
         return Reply::no("malformed request");
     };
-    // Constant-time is not the point — the token never leaves this machine and a wrong one is a
-    // process that was not started by the app — but a mismatch must say nothing about the token.
-    if request.token != token {
+    // The token never leaves this machine and a wrong one is a process the app did not start, but
+    // any local process can knock on the port: compared in constant time, so the knocking learns
+    // nothing about it, and a mismatch says nothing either.
+    if !same_secret(&request.token, token) {
         return Reply::no("not from this app");
     }
     dispatch(request, app).await
@@ -424,6 +430,23 @@ pub(crate) async fn run_verb(app: &AppHandle, verb: &str, args: Vec<String>, std
         (true, text) => Ok(text),
         (false, text) if text.is_empty() => Err("no".to_string()),
         (false, text) => Err(text),
+    }
+}
+
+/// The `cf guard` approval for a command the app's own agent is about to run (`local_agent`'s
+/// `run_command`): the same modal, the reason as its question and the command verbatim as what is
+/// approved — which `run_verb` cannot say, since it joins the arguments into one text.
+pub(crate) async fn guard(app: &AppHandle, command: &str, reason: &str, cwd: &str) -> Result<String, String> {
+    let mut event = AskEvent::new("guard", reason, cwd);
+    event.detail = command.trim().to_string();
+    let reply = match ask_user(app, event).await {
+        Some(answer) => reply_for(answer),
+        None => Reply::no("no answer"),
+    };
+    if reply.ok {
+        Ok(reply.text)
+    } else {
+        Err(reply.text)
     }
 }
 

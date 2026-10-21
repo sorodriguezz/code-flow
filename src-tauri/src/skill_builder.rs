@@ -237,7 +237,7 @@ pub fn assemble(focus: &str, sources: &[ReadSource]) -> String {
 
 /// `text`'s first `max` characters, ending on a line, with a note of what was left out. The head and
 /// not the tail: a document says what it is about first.
-fn cut_head(text: &str, max: usize) -> String {
+pub(crate) fn cut_head(text: &str, max: usize) -> String {
     let total = text.chars().count();
     if total <= max {
         return text.to_string();

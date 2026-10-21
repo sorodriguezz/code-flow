@@ -416,4 +416,18 @@ mod tests {
         conn.execute("UPDATE ai_experiences SET created_at = 0 WHERE id = ?1", params![id]).unwrap();
         assert!(list(&conn, &Filter::default()).unwrap().is_empty());
     }
+
+    #[test]
+    fn a_row_inside_the_year_of_retention_is_kept() {
+        let conn = db();
+        assert_eq!(DEFAULT_KEEP_DAYS, 365, "the retention the Learning pane promises");
+        let kept_id = record(&conn, kept("w1", "eleven months")).unwrap().unwrap();
+        let gone_id = record(&conn, kept("w1", "thirteen months")).unwrap().unwrap();
+        let day = 86_400_000;
+        let at = chrono::Utc::now().timestamp_millis();
+        conn.execute("UPDATE ai_experiences SET created_at = ?1 WHERE id = ?2", params![at - 335 * day, kept_id]).unwrap();
+        conn.execute("UPDATE ai_experiences SET created_at = ?1 WHERE id = ?2", params![at - 395 * day, gone_id]).unwrap();
+        let ids: Vec<String> = list(&conn, &Filter::default()).unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![kept_id]);
+    }
 }

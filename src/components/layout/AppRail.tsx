@@ -10,6 +10,7 @@ import {
   NotebookPen,
   Send,
   Waypoints,
+  Network,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -159,6 +160,15 @@ export const APPS: WorkspaceApp[] = [
     icon: Waypoints,
     labelKey: "tabbar.flows",
     descriptionKey: "tabbar.flowsDescription",
+  },
+  // Architecture documents: the system as JSON, drawn, reviewed, simulated and discussed with AI.
+  // Its documents live in the diagrams table, but it is its own app — the user asked for a door of
+  // its own on the rail (2026-10-21).
+  {
+    id: "architecture",
+    icon: Network,
+    labelKey: "tabbar.architecture",
+    descriptionKey: "tabbar.architectureDescription",
   },
 ];
 

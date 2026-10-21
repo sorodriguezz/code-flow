@@ -155,7 +155,11 @@ export async function svgToPdf(svg: string): Promise<Uint8Array> {
       pageSize: page,
       pageMargins: [0, 0, 0, 0],
       info: { creator: "CodeFlow" },
-      content: [{ svg: clean, width: page.width, height: page.height }],
+      // The empty text is what gives the document a font. pdfmake only loads one for its own text
+      // nodes, and the SVG renderer draws `<text>` with the document's current font — none, in a
+      // document that is a single SVG, so any drawing with a label threw "reading 'encode'" of null.
+      // Absolutely positioned, so it takes no line and the drawing stays on its one page.
+      content: [{ text: "", absolutePosition: { x: 0, y: 0 } }, { svg: clean, width: page.width, height: page.height }],
     })
     .getBase64();
   const binary = atob(base64);

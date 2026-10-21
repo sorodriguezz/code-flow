@@ -149,7 +149,9 @@ impl AiEngine for GeminiEngine {
         // Deliver the prompt inline when the command line can carry it, else via a private file agy
         // is told to read. See [`delivery`] for which is which.
         let mut needs_read_permission = false;
-        let file = match delivery(binary, &brief, inv.read_only) {
+        // A text-only run is read-only too: it reads nothing and writes nothing (see below).
+        let read_only = inv.read_only || inv.text_only;
+        let file = match delivery(binary, &brief, read_only) {
             Delivery::Inline => None,
             Delivery::File => write_brief(inv, &brief),
         };
@@ -202,11 +204,11 @@ impl AiEngine for GeminiEngine {
         // agy offers for the one read-only case that still needs the bypass — a brief too large for
         // the command line. See [`AiEngine::enforces_read_only`] for why that is still not a
         // guarantee, which the UI says in so many words.
-        let writes = inv.auto_approve_edits && !inv.read_only;
+        let writes = inv.auto_approve_edits && !read_only;
         if writes || needs_read_permission {
             cmd.arg("--dangerously-skip-permissions");
         }
-        if !writes && (needs_read_permission || inv.read_only) {
+        if !writes && (needs_read_permission || read_only) {
             cmd.arg("--sandbox");
         }
         // Multi-turn chat: resume *this* conversation, by the id the previous turn reported. Only a
@@ -226,7 +228,16 @@ impl AiEngine for GeminiEngine {
         if let Some(schema) = inv.json_schema {
             cmd.arg("--json-schema").arg(schema);
         }
-        if let Some(dir) = inv.cwd {
+        // A text-only run answers from its brief alone, so it is given nothing else to look at: an
+        // empty folder of its own as its workspace, as `cline.rs` does — not the repository, whose
+        // files and `GEMINI.md`/`AGENTS.md` it has no use for. agy has no flag to drop its own agent
+        // prompt; this, the sandbox and no permission bypass are what it allows.
+        let scratch = if inv.text_only { inv.prompt_files.dir("agy-scratch") } else { None };
+        let cwd = match &scratch {
+            Some(dir) => Some(dir.to_string_lossy().to_string()),
+            None => inv.cwd.map(str::to_string),
+        };
+        if let Some(dir) = cwd.as_deref() {
             cmd.current_dir(dir);
             // **And named to agy as a directory it may use**, which `current_dir` alone does not
             // do. `--add-dir` is what scopes this CLI's file access, and until now the only thing
@@ -600,6 +611,21 @@ mod tests {
     /// The whole point of the read-only path: a chat turn's brief — a system prompt joined to a
     /// message, so always multi-line — rides the command line, and with no file to read there is no
     /// permission bypass. agy's print mode then soft-denies what it would have asked about.
+    #[test]
+    fn a_text_only_run_is_read_only_in_an_empty_folder_of_its_own() {
+        let mut inv = AiInvocation::new("Escribe un título", "la conversación");
+        inv.text_only = true;
+        inv.auto_approve_edits = true;
+        inv.cwd = Some("/repo");
+        let cmd = GeminiEngine.build_command("agy", &inv);
+        let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--sandbox"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "/repo"), "the repository is not its workspace: {args:?}");
+        let cwd = cmd.as_std().get_current_dir().expect("a scratch directory");
+        assert_eq!(std::fs::read_dir(cwd).unwrap().count(), 0);
+    }
+
     #[test]
     fn a_read_only_turn_needs_no_permission_bypass() {
         let mut inv = AiInvocation::new("¿qué es esto?", "");

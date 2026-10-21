@@ -158,6 +158,10 @@ const CODEFLOW_TOOLS: Record<string, string> = {
   find_symbol: "Grep",
   find_usages: "Grep",
   outline: "LS",
+  // Knowledge and memories are searches too; the app's own tools (service logs, a note, a saved
+  // request) keep their names — none of them is a file of the repository the chips could name.
+  search_knowledge: "Grep",
+  recall: "Grep",
 };
 
 function codeflowLine(event: Record<string, unknown>): string | null {

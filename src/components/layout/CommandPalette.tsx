@@ -123,6 +123,7 @@ const VIEW_ITEMS: {
   // icon in one palette is how you pick the wrong one.
   { id: "chat", labelKey: "tabbar.chat", icon: MessagesSquare },
   { id: "flows", labelKey: "tabbar.flows", icon: Waypoints },
+  { id: "architecture", labelKey: "tabbar.architecture", icon: Network },
 ];
 
 const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {

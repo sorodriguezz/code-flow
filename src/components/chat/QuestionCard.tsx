@@ -77,7 +77,8 @@ export function QuestionCard({ questions, onAnswer }: { questions: ChatQuestion[
                 }}
                 placeholder={t("chat.question.other")}
                 aria-label={t("chat.question.other")}
-                data-ai-input
+                // No `data-ai-input`: that would float a second microphone here, and the composer's
+                // own, right under the card, already dictates (user, 2026-10-21).
                 className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-0.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
               />
               {instant && (

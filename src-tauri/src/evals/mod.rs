@@ -66,9 +66,15 @@ fn selected<'a>(options: &'a Options) -> impl Iterator<Item = &'static EvalTask>
         .filter(|t| options.only.is_empty() || options.only.iter().any(|id| id == t.id))
 }
 
+/// How many times a task runs: a retrieval task once — no model takes part, so a second run would
+/// only repeat the first.
+fn runs_of(task: &EvalTask, options: &Options) -> usize {
+    if task.suite == Suite::Retrieval { 1 } else { options.runs.max(1) }
+}
+
 /// Steps the run will take, for the progress total.
 pub fn planned_steps(options: &Options) -> usize {
-    let tasks = selected(options).count() * options.runs.max(1);
+    let tasks: usize = selected(options).map(|t| runs_of(t, options)).sum();
     tasks + usize::from(options.suites.contains(&Suite::Speed)) + usize::from(options.suites.contains(&Suite::Tools))
 }
 
@@ -168,13 +174,16 @@ async fn run_inner(
             completion_tokens: 0,
             skipped: None,
         };
-        for _ in 0..options.runs.max(1) {
+        for _ in 0..runs_of(task, options) {
             if cancelled(&cancel) {
                 aborted = Some("stopped".to_string());
                 break;
             }
             step(task.id.to_string());
-            let outcome = run_task(settings, task, &model, cancel.clone()).await;
+            let outcome = match task.suite {
+                Suite::Retrieval => run_retrieval(task).await,
+                _ => run_task(settings, task, &model, cancel.clone()).await,
+            };
             result.runs += 1;
             result.seconds.push(outcome.seconds);
             result.prompt_tokens += outcome.prompt_tokens;
@@ -238,7 +247,8 @@ struct TaskOutcome {
 async fn run_task(settings: &Settings, task: &EvalTask, model: &str, cancel: Option<watch::Receiver<bool>>) -> TaskOutcome {
     let dir = task.fixture.map(|fixture| fixture.create());
     let root = dir.as_ref().map(|d| d.to_string_lossy().to_string());
-    let mut inv = AiInvocation::new(task.prompt, task.stdin);
+    let long = task.long_input.map(|build| build());
+    let mut inv = AiInvocation::new(task.prompt, long.as_deref().unwrap_or(task.stdin));
     inv.cwd = root.as_deref();
     inv.task = task.task;
     inv.model = model;
@@ -265,6 +275,85 @@ async fn run_task(settings: &Settings, task: &EvalTask, model: &str, cancel: Opt
         let _ = std::fs::remove_dir_all(dir);
     }
     TaskOutcome { verdict, seconds, prompt_tokens, completion_tokens }
+}
+
+/// How many results a retrieval task reads; its check decides how deep the answer must be.
+const RETRIEVAL_LIMIT: usize = 5;
+
+/// A retrieval task: the fixture indexed as a repository of its own — its notes from a database of
+/// the bench's own, never the app's — searched the way a model's `search_knowledge` call is, and the
+/// rendered answer handed to the check. The collections are dropped afterwards: the shared index is
+/// left as it was found.
+async fn run_retrieval(task: &EvalTask) -> TaskOutcome {
+    let started = std::time::Instant::now();
+    let Some(fixture) = task.fixture else {
+        return TaskOutcome { verdict: Err("a retrieval task needs a fixture".to_string()), seconds: 0.0, prompt_tokens: 0, completion_tokens: 0 };
+    };
+    let dir = fixture.create();
+    let workspace = format!("eval-{}", uuid::Uuid::new_v4());
+    let scope = retrieval_scope(fixture, &dir, &workspace);
+    let prepared = {
+        let scope = scope.clone();
+        tokio::task::spawn_blocking(move || prepare_retrieval(fixture, &workspace, &scope)).await.map_err(|e| e.to_string()).and_then(|r| r)
+    };
+    let verdict = match prepared {
+        Ok(()) => match crate::knowledge::search_indexed(&scope, task.prompt, RETRIEVAL_LIMIT).await {
+            Ok(answer) => (task.check)(&dir, &crate::knowledge::render(&answer)),
+            Err(error) => Err(corpus::clip(&error)),
+        },
+        Err(error) => Err(corpus::clip(&error)),
+    };
+    let keys = scope.keys();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(index) = crate::knowledge::index::global() {
+            for key in keys {
+                let _ = crate::knowledge::index::remove_collection(&index, &key);
+            }
+        }
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    TaskOutcome { verdict, seconds: started.elapsed().as_secs_f64(), prompt_tokens: 0, completion_tokens: 0 }
+}
+
+/// The fixture as a repository of its own (keyed by its folder) and, when it has notes, a workspace
+/// of its own — the local view, and none of the app's other sources.
+fn retrieval_scope(fixture: fixtures::Fixture, dir: &std::path::Path, workspace: &str) -> crate::knowledge::Scope {
+    crate::knowledge::Scope {
+        workspace_id: Some(workspace.to_string()),
+        repos: vec![(format!("path:{}", dir.to_string_lossy()), fixture.slug().to_string(), dir.to_path_buf())],
+        notes: !fixture.notes().is_empty(),
+        cloud: false,
+        sources: crate::knowledge::Sources { global_notes: false, meetings: false, docs: false, stories: false, reviews: false, commits: false },
+        ..Default::default()
+    }
+}
+
+/// The fixture's notes in a scratch database, and the scope indexed from it.
+fn prepare_retrieval(fixture: fixtures::Fixture, workspace: &str, scope: &crate::knowledge::Scope) -> Result<(), String> {
+    let conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
+    crate::db::migrations::run(&conn).map_err(|e| e.to_string())?;
+    let notes = fixture.notes();
+    if !notes.is_empty() {
+        conn.execute(
+            "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at) VALUES (?1, 'Bench', 'book', '#111', 99, '2026-01-01T00:00:00+00:00')",
+            rusqlite::params![workspace],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO note_books (id, workspace_id, name, created_at, updated_at) VALUES ('eval-book', ?1, 'Equipo', '1', '1')",
+            rusqlite::params![workspace],
+        )
+        .map_err(|e| e.to_string())?;
+        for (id, title, body) in notes {
+            conn.execute(
+                "INSERT INTO notes (id, workspace_id, book_id, title, content, created_at, updated_at) VALUES (?1, ?2, 'eval-book', ?3, ?4, '1', '1')",
+                rusqlite::params![id, workspace, title, body],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    crate::knowledge::refresh_with(&crate::knowledge::Main::Conn(&conn), scope, true).map(|_| ())
 }
 
 /// Reads the model server's resident memory every half second and keeps the highest: the bundled
@@ -372,11 +461,36 @@ mod bench {
 mod tests {
     use super::*;
 
+    /// The retrieval tasks on the lexical search alone — a test starts no embedding model: the docs,
+    /// the note, the needle and the honest empty answer pass on words. The Spanish question over the
+    /// English record is the vectors' to answer and is left to the real bench.
+    #[test]
+    fn the_retrieval_tasks_pass_where_words_suffice() {
+        for task in TASKS.iter().filter(|t| t.suite == Suite::Retrieval && t.id != "retrieval-cross-language") {
+            let fixture = task.fixture.unwrap();
+            let dir = fixture.create();
+            let workspace = format!("eval-{}", uuid::Uuid::new_v4());
+            let scope = retrieval_scope(fixture, &dir, &workspace);
+            prepare_retrieval(fixture, &workspace, &scope).unwrap();
+            let found = crate::knowledge::search_lexical(None, &scope, task.prompt, RETRIEVAL_LIMIT);
+            let answer = crate::knowledge::Answer { found, searched: scope.searched(), ..Default::default() };
+            let verdict = (task.check)(&dir, &crate::knowledge::render(&answer));
+            assert!(verdict.is_ok(), "{}: {verdict:?}", task.id);
+            if let Ok(index) = crate::knowledge::index::global() {
+                for key in scope.keys() {
+                    let _ = crate::knowledge::index::remove_collection(&index, &key);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     #[test]
     fn planned_steps_count_runs_and_the_two_probes() {
         let all = Options { runs: 2, ..Options::default() };
-        let tasks = TASKS.len();
-        assert_eq!(planned_steps(&all), tasks * 2 + 2);
+        let retrieval = TASKS.iter().filter(|t| t.suite == Suite::Retrieval).count();
+        let tasks = TASKS.len() - retrieval;
+        assert_eq!(planned_steps(&all), tasks * 2 + retrieval + 2, "a retrieval task runs once");
         let text_only = Options { suites: vec![Suite::Text], ..Options::default() };
         assert_eq!(planned_steps(&text_only), TASKS.iter().filter(|t| t.suite == Suite::Text).count());
         let one = Options { suites: vec![Suite::Agent], only: vec!["fix-single-file".into()], ..Options::default() };

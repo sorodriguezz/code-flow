@@ -11,7 +11,28 @@ import { useKnowledgeStore } from "../../state/knowledgeStore";
 import { useUiStore } from "../../state/uiStore";
 import { useConfirmStore } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
-import { knowledgeSearch, type KnowledgeFound, type KnowledgeStatus } from "../../lib/tauri/knowledgeCommands";
+import { knowledgeSearch, type KnowledgeFound, type KnowledgeOverview, type KnowledgeStatus } from "../../lib/tauri/knowledgeCommands";
+import type { TranslationKey } from "../../lib/i18n/translations";
+
+/** The sources beside repositories and folders, as `knowledge_overview` sums them (`SourceKnowledge`). */
+type SourceKind = "note" | "meeting" | "doc" | "story" | "review" | "commit";
+interface KnowledgeSource {
+  kind: SourceKind;
+  status: KnowledgeStatus;
+}
+
+/** What a result's or a source's chip says, by its `source`. */
+const KIND_LABEL: Record<string, TranslationKey> = {
+  repo: "knowledge.repo",
+  folder: "knowledge.folder",
+  symbol: "knowledge.kind.symbol",
+  note: "knowledge.kind.note",
+  meeting: "knowledge.kind.meeting",
+  doc: "knowledge.kind.doc",
+  story: "knowledge.kind.story",
+  review: "knowledge.kind.review",
+  commit: "knowledge.kind.commit",
+};
 
 function ago(ms: number | null, t: ReturnType<typeof useT>): string {
   if (!ms) return t("knowledge.never");
@@ -19,11 +40,11 @@ function ago(ms: number | null, t: ReturnType<typeof useT>): string {
   return minutes < 1 ? t("knowledge.justNow") : minutes < 60 ? t("knowledge.minutesAgo", { n: String(minutes) }) : new Date(ms).toLocaleString();
 }
 
-function StatusLine({ status }: { status: KnowledgeStatus }) {
+function StatusLine({ status, documents = false }: { status: KnowledgeStatus; documents?: boolean }) {
   const t = useT();
   return (
     <span className="text-[11px] tabular-nums text-[var(--cf-text-muted)]">
-      {t("knowledge.counts", { files: String(status.files), chunks: String(status.chunks) })}
+      {t(documents ? "knowledge.countsDocs" : "knowledge.counts", { files: String(status.files), chunks: String(status.chunks) })}
       {status.vectors > 0 && ` · ${t("knowledge.vectors", { n: String(status.vectors) })}`}
       {` · ${ago(status.refreshedAt, t)}`}
     </span>
@@ -55,6 +76,9 @@ export function AiKnowledgeSettings() {
   }
 
   const activeModel = overview.embedSetting ?? overview.embedModels.find((m) => m.installed)?.id ?? null;
+  // Notes, meetings, generated docs, stories, review findings and commits — only the ones that hold
+  // something: an empty kind is a row that says nothing.
+  const sources = ((overview as KnowledgeOverview & { sources?: KnowledgeSource[] }).sources ?? []).filter((s) => s.status.files > 0);
 
   const search = async () => {
     if (!query.trim()) return;
@@ -184,6 +208,14 @@ export function AiKnowledgeSettings() {
               </button>
             </div>
           ))}
+          {sources.map(({ kind, status }) => (
+            <div key={kind} className="flex flex-col border-b border-[var(--cf-border)] px-3 py-1.5 last:border-b-0">
+              <span className="flex min-w-0 items-center gap-2">
+                <span className={chipClass("neutral")}>{t(KIND_LABEL[kind])}</span>
+              </span>
+              <StatusLine status={status} documents />
+            </div>
+          ))}
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => void pickFolder(false)} className={buttonClass({ variant: "secondary", size: "sm" })}>
@@ -217,7 +249,7 @@ export function AiKnowledgeSettings() {
             {results.map((found, index) => (
               <div key={`${found.path}-${index}`} className="border-b border-[var(--cf-border)] px-3 py-1.5 last:border-b-0">
                 <div className="flex items-center gap-2">
-                  <span className={chipClass("neutral")}>{found.source}</span>
+                  <span className={chipClass("neutral")}>{KIND_LABEL[found.source] ? t(KIND_LABEL[found.source]) : found.source}</span>
                   {found.source === "repo" || found.source === "symbol" ? (
                     <button
                       type="button"

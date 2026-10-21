@@ -307,6 +307,12 @@ impl Engine {
             .arg(UBATCH.to_string())
             .arg("--cache-reuse")
             .arg(CACHE_REUSE.to_string())
+            // No host-memory prompt cache. b10587 defaults to `--cache-ram 8192` and, with the
+            // automatic slots this server runs, keeps every request's state in RAM: the embedder
+            // grew to ~9 GB that way (2026-10-20). `--cache-reuse` above is the cache this engine
+            // lives on — the KV of the slot it is typing in — and is unaffected.
+            .arg("--cache-ram")
+            .arg("0")
             // No `-ngl`, as in the `--fim-qwen-*` presets the flags above come from. llama.cpp's
             // `--fit` (on by default) places as many layers as the GPU's free memory holds and keeps
             // the rest on the CPU — but only while the layer count is left unset. Given `-ngl 99`,

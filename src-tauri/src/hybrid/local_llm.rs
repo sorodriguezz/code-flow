@@ -108,6 +108,52 @@ pub fn is_loopback(url: &str) -> bool {
     }
 }
 
+/// Whether `url` is on the user's own machines — this one, or a private network they run (the Mac
+/// beside it, the box with the 4090): loopback, RFC 1918 / unique-local / link-local addresses, and
+/// names that only resolve inside such a network (`.local`, `.lan`, `.home.arpa`, `.internal`, a
+/// single label like `gpu-box`). Anything else is someone's server on the internet — the cloud this
+/// app never sends work to (the user's rule, 2026-10-19: "solo modelos locales, nada de cloud").
+pub fn on_users_network(url: &str) -> bool {
+    if is_loopback(url) {
+        return true;
+    }
+    let Ok(parsed) = url::Url::parse(url) else { return false };
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_private() || ip.is_link_local(),
+        Some(url::Host::Ipv6(ip)) => {
+            let first = ip.segments()[0];
+            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            !name.contains('.') || [".local", ".lan", ".home.arpa", ".internal", ".localdomain"].iter().any(|s| name.ends_with(s))
+        }
+        None => false,
+    }
+}
+
+/// Why a local model may not be used at `url` with `model`, or `None` when it may: the one check
+/// every door to a "local" model passes through — the executor, the CodeFlow provider, a flow's
+/// own endpoint, the embedder, meetings — so "local" means the same thing everywhere.
+pub fn cloud_refusal(url: &str, model: &str) -> Option<String> {
+    if !model.trim().is_empty() && is_cloud_name(model) {
+        return Some(format!("«{model}» runs on Ollama's cloud, not on your machines — CodeFlow only uses local models"));
+    }
+    if !url.trim().is_empty() && !on_users_network(url) {
+        return Some(format!("{url} is not on this machine or your private network — CodeFlow only uses local models"));
+    }
+    None
+}
+
+/// [`cloud_refusal`] for a request about to leave: the bundled engine is always this machine (its
+/// URL is the loopback port it was started on), anything else is checked by its address and model.
+fn refuse_unless_local(endpoint: &Endpoint, model: &str) -> Result<(), LocalError> {
+    match cloud_refusal(&endpoint.base_url, model) {
+        Some(why) => Err(LocalError::NotLocal(why)),
+        None => Ok(()),
+    }
+}
+
 fn client_for(url: &str) -> &'static reqwest::Client {
     static LOOPBACK: OnceLock<reqwest::Client> = OnceLock::new();
     static REMOTE: OnceLock<reqwest::Client> = OnceLock::new();
@@ -178,6 +224,11 @@ pub enum LocalError {
     Stalled(String),
     /// The server answered in a shape this client does not read.
     Malformed(String),
+    /// Not a local model at all: a server on the internet, or an Ollama cloud model. Refused before
+    /// anything is sent — the sentence is [`cloud_refusal`]'s. Never retried and never swapped for
+    /// another engine: the user's rule is "only local models", and an answer from somewhere else
+    /// would break it in silence.
+    NotLocal(String),
 }
 
 impl LocalError {
@@ -188,6 +239,7 @@ impl LocalError {
             Self::Cancelled => "Stopped.".to_string(),
             Self::Stalled(detail) => format!("The local model stopped responding ({detail})."),
             Self::Malformed(detail) => format!("The local model server answered in an unexpected format: {detail}"),
+            Self::NotLocal(why) => format!("{why}."),
         }
     }
 
@@ -199,6 +251,7 @@ impl LocalError {
             Self::Cancelled => "cancelled",
             Self::Stalled(_) => "stalled",
             Self::Malformed(_) => "malformed",
+            Self::NotLocal(_) => "not-local",
         }
     }
 
@@ -671,7 +724,8 @@ pub async fn ollama_delete(endpoint: &Endpoint, model: &str) -> Result<(), Local
 
 /// Exact token count from a llama.cpp server's `/tokenize`, or `None` when it does not have one.
 pub async fn count_tokens(endpoint: &Endpoint, text: &str) -> Option<u64> {
-    if endpoint.kind == BackendKind::Ollama {
+    // The text is the prompt itself: it goes nowhere a request with it would not be allowed to.
+    if endpoint.kind == BackendKind::Ollama || refuse_unless_local(endpoint, "").is_err() {
         return None;
     }
     let client = client_for(&endpoint.base_url);
@@ -756,6 +810,10 @@ where
     F: FnMut(&str),
     C: Future<Output = ()>,
 {
+    // The one door every local request goes through — the executor, the «CodeFlow» provider, a
+    // flow's node with its own address, meetings, `cf llm` — so "local" is checked here once
+    // rather than trusted from whichever caller built the endpoint.
+    refuse_unless_local(endpoint, request.model)?;
     let client = client_for(&endpoint.base_url);
     let messages = json!([
         { "role": "system", "content": request.system },
@@ -1006,6 +1064,8 @@ pub async fn converse<C>(endpoint: &Endpoint, request: &ConverseRequest<'_>, can
 where
     C: Future<Output = ()>,
 {
+    // As in [`chat`]: nothing of the conversation leaves for a server that is not the user's own.
+    refuse_unless_local(endpoint, request.model)?;
     let client = client_for(&endpoint.base_url);
     let builder = match endpoint.kind {
         BackendKind::Ollama => {
@@ -1319,6 +1379,56 @@ mod tests {
         assert!(!is_loopback("http://192.168.1.20:11434"));
         assert!(!is_loopback("https://proxy.example.com"));
         assert!(!is_loopback("not a url"));
+    }
+
+    #[test]
+    fn the_users_own_network_is_local_and_the_internet_is_not() {
+        for url in ["http://127.0.0.1:11434", "http://192.168.1.20:11434", "http://10.0.0.5:8080", "http://172.20.1.2:1234", "http://gpu-box:11434", "http://studio.local:1234", "http://[fd00::2]:8080"] {
+            assert!(on_users_network(url), "{url}");
+        }
+        for url in ["https://api.example.com/v1", "http://8.8.8.8:11434", "https://ollama.com", "not a url"] {
+            assert!(!on_users_network(url), "{url}");
+        }
+        assert!(cloud_refusal("http://127.0.0.1:11434", "gpt-oss:120b-cloud").is_some());
+        assert!(cloud_refusal("https://api.example.com/v1", "qwen3:8b").is_some());
+        assert!(cloud_refusal("http://192.168.1.20:11434", "qwen3:8b").is_none());
+    }
+
+    /// The refusal happens before a byte is sent: the address below would hang or fail on a
+    /// network error if anything were attempted, and the answer is `NotLocal` at once.
+    #[tokio::test]
+    async fn a_request_to_a_public_server_or_a_cloud_model_is_refused_before_it_leaves() {
+        let public = Endpoint::new(BackendKind::Openai, "https://api.example.com/v1", Some("key".into()));
+        let request = ChatRequest {
+            model: "qwen3:8b",
+            system: "s",
+            user: "the user's code",
+            num_ctx: None,
+            max_tokens: 16,
+            temperature: 0.0,
+            think: None,
+            keep_alive: None,
+            schema: None,
+        };
+        let error = chat(&public, &request, |_| {}, std::future::pending::<()>()).await.expect_err("refused");
+        assert!(matches!(error, LocalError::NotLocal(_)), "{error:?}");
+        assert_eq!(error.code(), "not-local");
+
+        let ollama = Endpoint::new(BackendKind::Ollama, "http://127.0.0.1:9", None);
+        let converse_request = ConverseRequest {
+            model: "gpt-oss:120b-cloud",
+            messages: &[json!({ "role": "user", "content": "hi" })],
+            tools: &[],
+            no_more_tools: false,
+            num_ctx: None,
+            max_tokens: 16,
+            temperature: 0.0,
+            keep_alive: None,
+            think: None,
+        };
+        let error = converse(&ollama, &converse_request, std::future::pending::<()>()).await.expect_err("refused");
+        assert!(matches!(error, LocalError::NotLocal(_)), "a cloud model on a local Ollama is still the cloud: {error:?}");
+        assert_eq!(count_tokens(&public, "the user's code").await, None, "the prompt is not sent to be counted either");
     }
 
     #[test]

@@ -83,17 +83,20 @@ pub struct Report {
     pub tasks: Vec<TaskResult>,
     /// Highest resident memory of the model server during the run, when it could be read.
     pub peak_rss_bytes: Option<u64>,
-    /// Passed runs over run runs, across every task that was not skipped.
+    /// Passed runs over runs, across every model task that was not skipped (not the retrieval suite).
     pub score: f64,
     /// Set when the run stopped early (Stop pressed, server gone).
     pub aborted: Option<String>,
 }
 
 impl Report {
+    /// The model's score: passed runs over runs. The retrieval suite is left out — it measures the
+    /// knowledge engine, which answers the same whichever model is loaded, so counting it would only
+    /// narrow the gap between two models.
     pub fn compute_score(tasks: &[TaskResult]) -> f64 {
         let (passed, runs) = tasks
             .iter()
-            .filter(|t| t.skipped.is_none())
+            .filter(|t| t.skipped.is_none() && t.suite != Suite::Retrieval)
             .fold((0usize, 0usize), |(p, r), t| (p + t.passed, r + t.runs));
         if runs == 0 { 0.0 } else { passed as f64 / runs as f64 }
     }
@@ -246,6 +249,12 @@ mod tests {
         skipped.skipped = Some("node missing".into());
         assert_eq!(Report::compute_score(&[task("a", 2, 4), skipped]), 0.5);
         assert_eq!(Report::compute_score(&[]), 0.0);
+    }
+
+    #[test]
+    fn the_retrieval_suite_is_not_the_model_s_score() {
+        let retrieval = TaskResult { suite: Suite::Retrieval, ..task("retrieval-docs", 0, 1) };
+        assert_eq!(Report::compute_score(&[task("a", 2, 2), retrieval]), 1.0, "no model took part in it");
     }
 
     #[test]

@@ -15,8 +15,34 @@
 //! Output is sized for a small model's window: a file comes back a few hundred lines at a time with
 //! line numbers, a search a few dozen hits, a command its last few kilobytes. Each says what it left
 //! out, so the model can ask for the next part instead of assuming it saw everything.
+//!
+//! # The same reach as Claude Code's, offered by need
+//!
+//! What a CLI agent gets over the app's MCP server (`codemap::mcp`) this agent gets here, answered
+//! by the same code: the map's queries, `search_knowledge`, `recall` and `read_note`, the app's read
+//! tools (a service's log, its readiness, another terminal's output) and — for a run that may act —
+//! its action tools (restart a service, open a file for the user, notify them, propose a memory or
+//! a task, and *use* a saved database connection, API request or keyring entry). The app tools go
+//! through `agentcli::run_verb`, the very door `cf` and the MCP server use, so every approval the
+//! user gives Claude Code's runs in the window is asked for this one too, and a credential is used
+//! by the app and never returned to the model.
+//!
+//! A small model pays for every tool on offer — its schema takes the window, and each extra name is
+//! one more to pick wrongly — so what is offered follows the run ([`Reach`]) and what is there to
+//! reach ([`Inventory`]): no `db_query` on a workspace with no saved connection, no `recall` when
+//! every approved memory is already in the message, no app tool at all for a run judging material
+//! someone else wrote. See [`offered`].
+//!
+//! # A destructive command waits for the user
+//!
+//! `run_command` checks every line against `cf guard`'s rules (`crate::shell_rules`, the file Claude
+//! Code's `PreToolUse` hook is built from) and holds a match for the user's approval in the same
+//! modal; a refusal comes back to the model with the user's words.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -37,6 +63,8 @@ const LIST_ENTRIES: usize = 300;
 const COMMAND_OUTPUT_CHARS: usize = 8_000;
 /// How long a command may run.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// What one app tool's answer may take of the window: a log tail, a result table, a response.
+const APP_OUTPUT_CHARS: usize = 12_000;
 /// Files a non-git folder is walked for, at most — a chat's own folder, not a whole disk.
 const PLAIN_WALK_LIMIT: usize = 5_000;
 /// Names in the plain file list a run falls back to when the repository map cannot be built.
@@ -49,6 +77,120 @@ const SKIPPED_DIRS: &[&str] = &[".git", "node_modules", "target", "dist", "build
 pub struct Grants {
     pub write: bool,
     pub run: bool,
+    pub reach: Reach,
+}
+
+/// How far past the working copy a run reaches — decided from the invocation (`Mode::of`), never
+/// from what the model asks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Reach {
+    /// The project alone: its files, its map, its knowledge and the memories the user approved. A
+    /// run that judges material someone else wrote — a review, a CI log, a story (the MCP server's
+    /// *grounding* runs, whose text is where an injected instruction would reach for the app) — or
+    /// a single-purpose job such as a fix, which needs nothing of the app around it.
+    Project,
+    /// …and what the app shows: a service's log, its readiness, another terminal's output. A
+    /// conversation that may not act.
+    Observe,
+    /// …and what the app does for the run, each use of something the user keeps approved by them in
+    /// the window: a conversation that may act (not read-only).
+    Act,
+}
+
+/// What the run's place has for the app's tools to reach. A tool with nothing to act on is not
+/// offered: a `db_query` on a workspace with no saved connection can only fail, and costs a small
+/// model its schema's share of the window on every step all the same.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Inventory {
+    /// The folder belongs to a project (`add_task` files into its tree).
+    pub project: bool,
+    pub services: bool,
+    pub terminals: bool,
+    pub databases: bool,
+    pub requests: bool,
+    pub secrets: bool,
+    /// Notes the knowledge search can cite (`read_note` opens one whole).
+    pub notes: bool,
+    /// Approved memories for this place, in all — `recall` is offered only while there are more of
+    /// them than the run was already handed ([`Toolbox::with_given_memories`]).
+    pub memories: usize,
+}
+
+/// One request to the app on the run's behalf.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppCall {
+    /// `cf guard`'s question: a destructive command, held until the user says yes.
+    Guard { command: String, reason: &'static str },
+    /// A `cf` verb, with its arguments as `codemap::mcp` builds them.
+    Verb { verb: &'static str, args: Vec<String>, stdin: String },
+}
+
+/// Where an [`AppCall`] goes: the window, through `agentcli::run_verb` — or a stub in a test.
+pub type Door = Arc<dyn Fn(AppCall) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync>;
+
+/// The app's read tools — the `cf` verbs that change nothing.
+const OBSERVE_TOOLS: &[&str] = &["service_logs", "service_wait", "terminal_output"];
+/// The app's action tools, offered only to a run that may act.
+const ACT_TOOLS: &[&str] =
+    &["service_restart", "open_in_editor", "notify", "propose_memory", "add_task", "db_query", "http_request", "run_with_secret"];
+
+/// The tools a run is offered, in the order the model reads them: what the project is (the map,
+/// the knowledge, the memories, the notes), then its files, then what may change them, then the app.
+///
+/// `map`: the repository map's tools are on (`codemap::mcp::enabled`). `checks`: the repository has
+/// trusted checks for `run_check`. `given_memories`: the approved memories already in the run's
+/// message, so `recall` only when there are more.
+pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, given_memories: usize) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    if map {
+        names.extend(["find_symbol", "find_usages", "outline"]);
+    }
+    names.push("search_knowledge");
+    if inventory.memories > given_memories {
+        names.push("recall");
+    }
+    // A note is cited by its id in a passage; the run judging someone's material quotes passages
+    // but has no business opening a whole notebook (the MCP server's grounding set has no reader).
+    if inventory.notes && grants.reach > Reach::Project {
+        names.push("read_note");
+    }
+    names.extend(["list_files", "find_files", "read_file", "search"]);
+    if grants.write {
+        names.extend(["edit_file", "write_file"]);
+        if checks {
+            names.push("run_check");
+        }
+    }
+    if grants.run {
+        names.push("run_command");
+    }
+    if grants.reach >= Reach::Observe {
+        if inventory.services {
+            names.extend(["service_logs", "service_wait"]);
+        }
+        if inventory.terminals {
+            names.push("terminal_output");
+        }
+    }
+    if grants.reach == Reach::Act {
+        if inventory.services {
+            names.push("service_restart");
+        }
+        names.extend(["open_in_editor", "notify", "propose_memory"]);
+        if inventory.project {
+            names.push("add_task");
+        }
+        if inventory.databases {
+            names.push("db_query");
+        }
+        if inventory.requests {
+            names.push("http_request");
+        }
+        if inventory.secrets {
+            names.push("run_with_secret");
+        }
+    }
+    names
 }
 
 pub struct Toolbox {
@@ -76,6 +218,13 @@ pub struct Toolbox {
     checks: Vec<String>,
     /// The model driving the run, for the audit log.
     model: String,
+    /// The project and the workspace the folder belongs to, for `read_note` and the inventory.
+    workspace_id: Option<String>,
+    inventory: Inventory,
+    /// Approved memories already in the run's message — see [`offered`].
+    given_memories: usize,
+    /// Where the app tools and the guard's question go.
+    door: Door,
 }
 
 /// One tool call's result: the text the model reads, and a short line for the run log.
@@ -104,8 +253,19 @@ impl Toolbox {
         let git = git2::Repository::open(&root_path).ok().and_then(|repo| repo.workdir().map(Path::to_path_buf)).is_some_and(|workdir| {
             workdir.canonicalize().is_ok_and(|workdir| workdir == root_path)
         });
+        let root_str = root_path.to_string_lossy().to_string();
+        let (workspace_id, inventory, workspace_chat) =
+            crate::ai_usage::with_conn(|conn| take_inventory(conn, &root_str, grants.reach)).unwrap_or_default();
+        // A workspace chat's folder is not a repository: the MCP server gives such a run the
+        // workspace's knowledge and memories and none of the app's tools — "no one place for them to
+        // act in" — and so does this. Its own files stay its to read and write.
+        let grants = if workspace_chat { Grants { reach: grants.reach.min(Reach::Observe), ..grants } } else { grants };
+        // "Allow in this terminal" for this run's approvals is keyed by the run, as the MCP server
+        // keys a chat's: an allowance lasts the turn it was given in.
+        let session = format!("codeflow:{}", crate::ai_runs::current().map(|ctx| ctx.run_id).unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()));
         Ok(Self {
-            root_str: root_path.to_string_lossy().to_string(),
+            door: app_door(root_str.clone(), session),
+            root_str,
             root: root_path,
             git,
             grants,
@@ -120,7 +280,36 @@ impl Toolbox {
             })
             .unwrap_or_default(),
             model: String::new(),
+            workspace_id,
+            inventory,
+            given_memories: 0,
         })
+    }
+
+    /// How many approved memories the run's message already carries — `recall` is offered only for
+    /// the rest ([`offered`]).
+    pub fn with_given_memories(mut self, count: usize) -> Self {
+        self.given_memories = count;
+        self
+    }
+
+    /// Another door for the app tools and the guard — a test's stub.
+    #[cfg(test)]
+    pub fn with_door(mut self, door: Door) -> Self {
+        self.door = door;
+        self
+    }
+
+    /// Another inventory — a test's, which has no database to take one from.
+    #[cfg(test)]
+    pub fn with_inventory(mut self, inventory: Inventory) -> Self {
+        self.inventory = inventory;
+        self
+    }
+
+    /// The names of the tools on offer — [`offered`] for this run.
+    pub fn offered(&self) -> Vec<&'static str> {
+        offered(self.grants, self.map, !self.checks.is_empty(), &self.inventory, self.given_memories)
     }
 
     /// The model driving the run, for the audit log.
@@ -182,10 +371,6 @@ impl Toolbox {
         }
     }
 
-    pub fn has_map(&self) -> bool {
-        self.map
-    }
-
     pub fn grants(&self) -> Grants {
         self.grants
     }
@@ -205,112 +390,210 @@ impl Toolbox {
         map
     }
 
-    /// The tool schemas, OpenAI-shaped, for what this run may do.
+    /// The tool schemas, OpenAI-shaped, for what this run may do — [`Toolbox::offered`], each named
+    /// and described as the MCP server describes it to a CLI agent, shortened where that text talks
+    /// about a shell this agent does not have.
     pub fn schemas(&self) -> Vec<Value> {
-        let mut tools = Vec::new();
-        if self.map {
-            tools.push(tool(
+        self.offered().into_iter().filter_map(|name| self.schema(name)).collect()
+    }
+
+    fn schema(&self, name: &str) -> Option<Value> {
+        let string = |description: &str| json!({ "type": "string", "description": description });
+        let integer = |description: &str| json!({ "type": "integer", "description": description });
+        Some(match name {
+            "find_symbol" => tool(
                 "find_symbol",
                 "Find where a function, method, class or type is declared, by name. Returns path:start-end for each. Use it instead of search to locate a definition.",
-                json!({ "name": { "type": "string", "description": "The name, e.g. applyDiscount or Cart.total" } }),
+                json!({ "name": string("The name, e.g. applyDiscount or Cart.total") }),
                 &["name"],
-            ));
-            tools.push(tool(
+            ),
+            "find_usages" => tool(
                 "find_usages",
                 "List the files that use a function or class (and the line), leaving out files that only have a different thing with the same name. Use it before changing a function's parameters, or to see where a value comes from.",
                 json!({
-                    "name": { "type": "string", "description": "The function or class name." },
-                    "path": { "type": "string", "description": "The file that declares it, if the name is declared in several files. Optional." }
+                    "name": string("The function or class name."),
+                    "path": string("The file that declares it, if the name is declared in several files. Optional.")
                 }),
                 &["name"],
-            ));
-            tools.push(tool(
+            ),
+            "outline" => tool(
                 "outline",
                 "List what a file declares with line numbers (so read_file can start at the right line), plus the files it imports and the files that import it.",
-                json!({ "path": { "type": "string", "description": "File path relative to the project root." } }),
+                json!({ "path": string("File path relative to the project root.") }),
                 &["path"],
-            ));
-        }
-        tools.push(tool(
-            "search_knowledge",
-            "Search the project's knowledge for a question: its documentation (READMEs, docs/, architecture decisions), the document folders the user added and their notes, plus the code. Returns passages with path:lines. Use it for questions about why or how the project does something, or what was decided.",
-            json!({ "query": { "type": "string", "description": "The question, or the words to look for." } }),
-            &["query"],
-        ));
-        tools.extend(vec![
-            tool(
-                "list_files",
-                "List the files and folders in one folder of the project (one level). Folders end with '/'.",
-                json!({ "path": { "type": "string", "description": "Folder relative to the project root; empty for the root." } }),
+            ),
+            "search_knowledge" => tool(
+                "search_knowledge",
+                "Search the project's knowledge for a question: its documentation (READMEs, docs/, architecture decisions), the document folders the user added and their notes, plus the code. Returns passages with path:lines. Use it for questions about why or how the project does something, or what was decided.",
+                json!({ "query": string("The question, or the words to look for.") }),
+                &["query"],
+            ),
+            "recall" => tool(
+                "recall",
+                "The memories the user approved in CodeFlow for this project: decisions, conventions and preferences to respect. The ones that bear on this request are already above; call this with a topic to look up others.",
+                json!({ "topic": string("What to recall memories about. Optional.") }),
                 &[],
             ),
-            tool(
+            "read_note" => tool(
+                "read_note",
+                "Read one of the user's notes whole, by the id search_knowledge cites it with (note:…), when its passage is not enough.",
+                json!({ "note": string("The note's id, e.g. note:4f2a…") }),
+                &["note"],
+            ),
+            "list_files" => tool(
+                "list_files",
+                "List the files and folders in one folder of the project (one level). Folders end with '/'.",
+                json!({ "path": string("Folder relative to the project root; empty for the root.") }),
+                &[],
+            ),
+            "find_files" => tool(
                 "find_files",
                 "Find files by name or glob anywhere in the project, e.g. '*.ts', 'src/**/*.rs', 'package.json'.",
-                json!({ "pattern": { "type": "string", "description": "A file name or glob." } }),
+                json!({ "pattern": string("A file name or glob.") }),
                 &["pattern"],
             ),
-            tool(
+            "read_file" => tool(
                 "read_file",
                 "Read a text file, with line numbers. Long files come back in parts: use start_line to read further.",
                 json!({
-                    "path": { "type": "string", "description": "File path relative to the project root." },
-                    "start_line": { "type": "integer", "description": "First line to read, 1-based. Optional." },
-                    "end_line": { "type": "integer", "description": "Last line to read. Optional." }
+                    "path": string("File path relative to the project root."),
+                    "start_line": integer("First line to read, 1-based. Optional."),
+                    "end_line": integer("Last line to read. Optional.")
                 }),
                 &["path"],
             ),
-            tool(
+            "search" => tool(
                 "search",
                 "Search the text of every file in the project. Returns path:line: text for each match.",
                 json!({
-                    "query": { "type": "string", "description": "Text to look for (or a regular expression when regex is true)." },
+                    "query": string("Text to look for (or a regular expression when regex is true)."),
                     "regex": { "type": "boolean", "description": "Treat query as a regular expression." },
-                    "include": { "type": "string", "description": "Comma-separated globs limiting the files searched, e.g. 'src/**, *.ts'." }
+                    "include": string("Comma-separated globs limiting the files searched, e.g. 'src/**, *.ts'.")
                 }),
                 &["query"],
             ),
-        ]);
-        if self.grants.write {
-            tools.push(tool(
+            "edit_file" => tool(
                 "edit_file",
                 "Replace text in an existing file. old_text must match the file exactly (whitespace included) and be unique unless replace_all is true. Read the file first.",
                 json!({
-                    "path": { "type": "string", "description": "File path relative to the project root." },
-                    "old_text": { "type": "string", "description": "The exact text to replace." },
-                    "new_text": { "type": "string", "description": "What to put instead." },
+                    "path": string("File path relative to the project root."),
+                    "old_text": string("The exact text to replace."),
+                    "new_text": string("What to put instead."),
                     "replace_all": { "type": "boolean", "description": "Replace every occurrence." }
                 }),
                 &["path", "old_text", "new_text"],
-            ));
-            tools.push(tool(
+            ),
+            "write_file" => tool(
                 "write_file",
                 "Create a file, or replace a whole file, with the given content. Prefer edit_file for small changes to an existing file.",
                 json!({
-                    "path": { "type": "string", "description": "File path relative to the project root." },
-                    "content": { "type": "string", "description": "The complete new content of the file." }
+                    "path": string("File path relative to the project root."),
+                    "content": string("The complete new content of the file.")
                 }),
                 &["path", "content"],
-            ));
-        }
-        if self.grants.write && !self.checks.is_empty() {
-            let list = self.checks.iter().enumerate().map(|(i, c)| format!("{}: {c}", i + 1)).collect::<Vec<_>>().join("; ");
-            tools.push(tool(
-                "run_check",
-                &format!("Run one of this repository's approved checks (tests, build, lint) and get its exit code and the end of its output. Available: {list}."),
-                json!({ "check": { "type": "string", "description": "The check's number or its exact command." } }),
-                &["check"],
-            ));
-        }
-        if self.grants.run {
-            tools.push(tool(
+            ),
+            "run_check" => {
+                let list = self.checks.iter().enumerate().map(|(i, c)| format!("{}: {c}", i + 1)).collect::<Vec<_>>().join("; ");
+                tool(
+                    "run_check",
+                    &format!("Run one of this repository's approved checks (tests, build, lint) and get its exit code and the end of its output. Available: {list}."),
+                    json!({ "check": string("The check's number or its exact command.") }),
+                    &["check"],
+                )
+            }
+            "run_command" => tool(
                 "run_command",
-                "Run a shell command in the project root (tests, builds, git status…). Returns its exit code and the end of its output. Do not run interactive or never-ending commands.",
-                json!({ "command": { "type": "string", "description": "The command line." } }),
+                "Run a shell command in the project root (tests, builds, git status…). Returns its exit code and the end of its output. A command that deletes or overwrites something waits for the user's approval. Do not run interactive or never-ending commands.",
+                json!({ "command": string("The command line.") }),
                 &["command"],
-            ));
-        }
-        tools
+            ),
+            "service_logs" => tool(
+                "service_logs",
+                "The recent output of a service CodeFlow runs for this workspace (a dev server, a worker). Without a name: the workspace's services, their state and ports.",
+                json!({ "service": string("The service's name as the Services dock shows it. Optional."), "tail": integer("How many of the last lines (default 100).") }),
+                &[],
+            ),
+            "service_wait" => tool(
+                "service_wait",
+                "Wait until a service CodeFlow runs is ready, and say so — or that it failed or stopped, with its last lines. Use it after a restart.",
+                json!({ "service": string("The service's name."), "timeout_seconds": integer("How long to wait (default 120).") }),
+                &["service"],
+            ),
+            "terminal_output" => tool(
+                "terminal_output",
+                "The recent output of a terminal in CodeFlow's agents panel — a test watcher, a build, another agent. Without a name: the workspace's terminals.",
+                json!({ "terminal": string("The terminal's title, or its number from the list. Optional."), "tail": integer("How many of the last lines (default 100).") }),
+                &[],
+            ),
+            "service_restart" => tool(
+                "service_restart",
+                "Restart a service CodeFlow runs (its dependents first, as the Services dock does). Follow it with service_wait.",
+                json!({ "service": string("The service's name.") }),
+                &["service"],
+            ),
+            "open_in_editor" => tool(
+                "open_in_editor",
+                "Open a file of this project in CodeFlow's editor, at a line, in front of the user — to show them what you are talking about.",
+                json!({ "path": string("Path relative to the project root."), "line": integer("The line to show. Optional.") }),
+                &["path"],
+            ),
+            "notify" => tool(
+                "notify",
+                "Put one short line in front of the user in CodeFlow, wherever they are in the app.",
+                json!({ "text": string("One short line.") }),
+                &["text"],
+            ),
+            "propose_memory" => tool(
+                "propose_memory",
+                "Propose a memory for this project — a decision, convention or preference worth keeping. It is a candidate: models read it only after the user approves it. Only what will still be true next month; never a secret.",
+                json!({
+                    "fact": string("The fact, first line as its title."),
+                    "kind": { "type": "string", "enum": ["decision", "convention", "fact", "preference"], "description": "Optional: fact." }
+                }),
+                &["fact"],
+            ),
+            "add_task" => tool(
+                "add_task",
+                "Add a draft task to this project's task tree in CodeFlow. Nothing starts it: the user does.",
+                json!({
+                    "title": string("What the task is, in a line."),
+                    "prompt": string("What to do, in full. Optional."),
+                    "agent": string("The roster agent's name. Optional.")
+                }),
+                &["title"],
+            ),
+            "db_query" => tool(
+                "db_query",
+                "Run SQL on a database connection the user saved in CodeFlow and get the rows as a table. The app connects with the saved password, which you never see; the user approves every statement first.",
+                json!({
+                    "connection": string("The saved connection's name."),
+                    "sql": string("The statement(s)."),
+                    "max_rows": integer("At most this many rows (default 200).")
+                }),
+                &["connection", "sql"],
+            ),
+            "http_request" => tool(
+                "http_request",
+                "Send a request saved in CodeFlow's API client, with its environment and auth, and get the answer with every credential removed. The user approves it first.",
+                json!({
+                    "request": string("Collection/Folder/Request, or the request's name."),
+                    "environment": string("The environment's name. Optional: the active one.")
+                }),
+                &["request"],
+            ),
+            "run_with_secret" => tool(
+                "run_with_secret",
+                "Run a shell command in this project with an entry of the user's CodeFlow keyring in an environment variable named after it (GitHub token → $GITHUB_TOKEN). CodeFlow runs it after the user approves the exact command; the output comes back with the secret removed, and its value never reaches you.",
+                json!({
+                    "entry": string("The keyring entry's title."),
+                    "command": string("The shell command, using the variable."),
+                    "field": string("Which field of the entry. Optional."),
+                    "env": string("Another variable name. Optional.")
+                }),
+                &["entry", "command"],
+            ),
+            _ => return None,
+        })
     }
 
     /// Runs one call. Never panics and never returns `Err`: a failure is an answer the model reads
@@ -318,13 +601,14 @@ impl Toolbox {
     pub async fn call(&self, name: &str, args: &Value, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
         let started = std::time::Instant::now();
         let mut outcome = self.dispatch(name, args, cancel).await;
-        // Content from the project that talks to an AI is marked as data before the model reads it.
-        if matches!(name, "read_file" | "search" | "run_command" | "run_check" | "search_knowledge") && outcome.ok {
+        // Content from the project — or from what the app runs and reaches — that talks to an AI is
+        // marked as data before the model reads it.
+        if is_outside_text(name) && outcome.ok {
             if let Some(warning) = crate::tool_gateway::injection_warning(&outcome.content) {
                 outcome.content = format!("{warning}{}", outcome.content);
             }
         }
-        if matches!(name, "edit_file" | "write_file" | "run_command" | "run_check") {
+        if matches!(name, "edit_file" | "write_file" | "run_command" | "run_check") || ACT_TOOLS.contains(&name) {
             crate::tool_gateway::audit(crate::tool_gateway::Action {
                 root: &self.root_str,
                 run_ref: crate::ai_runs::current().map(|ctx| ctx.run_id),
@@ -343,7 +627,25 @@ impl Toolbox {
 
     async fn dispatch(&self, name: &str, args: &Value, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
         let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        // What was never offered does not exist — the same answer for a tool this run may not have
+        // as for one nobody has, so a model that invents a call learns nothing it was not shown.
+        // The file and command tools keep their own refusals below, which say why.
+        let gated = matches!(name, "recall" | "read_note") || OBSERVE_TOOLS.contains(&name) || ACT_TOOLS.contains(&name);
+        if gated && !self.offered().contains(&name) {
+            return Outcome::err(format!("there is no tool named {name:?}"));
+        }
+        if let Some(call) = app_verb(name, args) {
+            return match call {
+                Ok(call) => self.app(name, call, cancel).await,
+                Err(error) => Outcome::err(error),
+            };
+        }
         match name {
+            "recall" => match crate::codemap::mcp::call_tool_as(&self.root_str, "recall", args, false).await {
+                Ok(text) => Outcome::ok(text, args.get("topic").and_then(Value::as_str).unwrap_or("memories").to_string()),
+                Err(error) => Outcome::err(error),
+            },
+            "read_note" => self.read_note(&text("note")).await,
             "list_files" => self.list_files(&text("path")),
             "find_files" => self.find_files(&text("pattern")),
             "read_file" => self.read_file(&text("path"), line_arg(args, "start_line"), line_arg(args, "end_line")),
@@ -361,7 +663,10 @@ impl Toolbox {
             ),
             "write_file" => self.write_file(&text("path"), &text("content")),
             "run_command" if !self.grants.run => Outcome::err("commands cannot be run in this conversation"),
-            "run_command" => self.run_command(&text("command"), true, cancel).await,
+            "run_command" => match self.guard(text("command").trim(), cancel).await {
+                Some(refusal) => refusal,
+                None => self.run_command(&text("command"), true, cancel).await,
+            },
             "run_check" if !self.grants.write => Outcome::err("checks cannot be run in this conversation"),
             "run_check" => match self.check_named(&text("check")) {
                 Some(check) => self.run_command(&check, false, cancel).await,
@@ -372,6 +677,70 @@ impl Toolbox {
                 )),
             },
             other => Outcome::err(format!("there is no tool named {other:?}")),
+        }
+    }
+
+    /// `cf guard`'s rules for `command`, and the user's approval when one matches: `None` to run it,
+    /// the refusal the model reads otherwise. Stop ends the wait like any other.
+    async fn guard(&self, command: &str, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Option<Outcome> {
+        let reason = crate::shell_rules::dangerous(command)?;
+        let asked = (self.door)(AppCall::Guard { command: command.to_string(), reason });
+        let answer = tokio::select! {
+            answer = asked => answer,
+            _ = crate::ai_runs::cancelled(cancel) => return Some(Outcome::err("stopped")),
+        };
+        match answer {
+            Ok(_) => None,
+            Err(said) => {
+                // The same sentence `cf guard` hands Claude Code, so both agents learn the same thing.
+                let said = said.trim();
+                let said = if said.is_empty() || said == "no" || said == "no answer" { String::new() } else { format!(" They said: {said}") };
+                let mut outcome = Outcome::err(format!("The user did not approve this command ({reason}).{said}"));
+                outcome.summary = format!("{command} · not approved");
+                Some(outcome)
+            }
+        }
+    }
+
+    /// One app tool, through the door: the verb's answer, or its refusal — the user's words when the
+    /// approval was what said no. Never the credential it used: `agentcli`'s vault verbs scrub it.
+    async fn app(&self, name: &str, call: AppCall, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
+        let asked = (self.door)(call);
+        let answer = tokio::select! {
+            answer = asked => answer,
+            _ = crate::ai_runs::cancelled(cancel) => return Outcome::err("stopped"),
+        };
+        // The run card's line names the subject from the call's own arguments; this is its outcome.
+        let first_line = |text: &str| text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().chars().take(80).collect::<String>();
+        match answer {
+            Ok(text) if text.trim().is_empty() => Outcome::ok("Done.".to_string(), "done".to_string()),
+            Ok(text) => Outcome::ok(clip_middle(&text, APP_OUTPUT_CHARS), first_line(&text)),
+            Err(error) => {
+                let mut outcome = Outcome::err(format!("{name}: {error}"));
+                outcome.summary = first_line(&error);
+                outcome
+            }
+        }
+    }
+
+    /// One note whole (`knowledge::read_note`), as a local engine may see it: a local-only book is
+    /// this machine's own, so it is not held back.
+    async fn read_note(&self, note: &str) -> Outcome {
+        let note = note.trim().to_string();
+        if note.is_empty() {
+            return Outcome::err("note is empty");
+        }
+        let workspace = self.workspace_id.clone();
+        let id = note.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            crate::ai_usage::with_conn(|conn| crate::knowledge::read_note(conn, workspace.as_deref(), &id, false))
+                .unwrap_or_else(|| Err("Notes are not available here.".to_string()))
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()));
+        match read {
+            Ok(text) => Outcome::ok(clip_middle(&text, READ_CHARS), note),
+            Err(error) => Outcome::err(error),
         }
     }
 
@@ -846,6 +1215,181 @@ impl Toolbox {
     }
 }
 
+/// Whether a tool's answer is text from outside the run — the project's files, a command's output,
+/// what the app reaches — and so is checked for instructions aimed at a model before it reads it.
+fn is_outside_text(name: &str) -> bool {
+    matches!(name, "read_file" | "search" | "run_command" | "run_check" | "search_knowledge" | "recall" | "read_note")
+        || OBSERVE_TOOLS.contains(&name)
+        || matches!(name, "db_query" | "http_request" | "run_with_secret")
+}
+
+/// The `cf` verb behind an app tool and its arguments, built exactly as `codemap::mcp::app_tool`
+/// builds them for a CLI agent — `None` for a tool that is not one of the app's, `Err` for a call
+/// missing what the verb needs. `local_llm` is left out on purpose: this run *is* the local model.
+pub(crate) fn app_verb(name: &str, args: &Value) -> Option<Result<AppCall, String>> {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let number = |key: &str| match args.get(key) {
+        Some(Value::Number(n)) => n.as_u64().map(|n| n.to_string()),
+        Some(Value::String(s)) => s.trim().parse::<u64>().ok().map(|n| n.to_string()),
+        _ => None,
+    };
+    let need = |key: &str| {
+        let value = text(key);
+        if value.is_empty() { Err(format!("{key} is required")) } else { Ok(value) }
+    };
+    let mut list: Vec<String> = Vec::new();
+    let verb = match name {
+        "service_logs" => {
+            list.extend((!text("service").is_empty()).then(|| text("service")));
+            list.extend(number("tail").into_iter().flat_map(|n| ["--tail".to_string(), n]));
+            "logs"
+        }
+        "service_wait" => {
+            list.push(match need("service") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            list.extend(number("timeout_seconds").into_iter().flat_map(|n| ["--timeout".to_string(), n]));
+            "wait"
+        }
+        "terminal_output" => {
+            list.extend((!text("terminal").is_empty()).then(|| text("terminal")));
+            list.extend(number("tail").into_iter().flat_map(|n| ["--tail".to_string(), n]));
+            "term"
+        }
+        "service_restart" => {
+            list.push(match need("service") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            "restart"
+        }
+        "open_in_editor" => {
+            let path = match need("path") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            list.push(match number("line") { Some(line) => format!("{path}:{line}"), None => path });
+            "open"
+        }
+        "notify" => {
+            list.push(match need("text") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            "notify"
+        }
+        "propose_memory" => {
+            let fact = match need("fact") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            // A fact unless the model said otherwise, in words the verb knows: a proposed
+            // preference, once approved, rides every question of every turn.
+            let kind = text("kind").to_ascii_lowercase();
+            let kind = if matches!(kind.as_str(), "decision" | "convention" | "fact" | "preference") { kind } else { "fact".to_string() };
+            list.extend(["--kind".to_string(), kind, fact]);
+            "remember"
+        }
+        "add_task" => {
+            list.push(match need("title") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            if !text("agent").is_empty() {
+                list.extend(["--agent".to_string(), text("agent")]);
+            }
+            if !text("prompt").is_empty() {
+                list.extend(["--".to_string(), text("prompt")]);
+            }
+            "task"
+        }
+        "db_query" => {
+            list.push(match need("connection") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            list.extend(number("max_rows").into_iter().flat_map(|n| ["--max-rows".to_string(), n]));
+            list.push(match need("sql") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            "db"
+        }
+        "http_request" => {
+            list.push(match need("request") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            if !text("environment").is_empty() {
+                list.extend(["--env".to_string(), text("environment")]);
+            }
+            "http"
+        }
+        "run_with_secret" => {
+            list.push(match need("entry") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            for key in ["field", "env"] {
+                if !text(key).is_empty() {
+                    list.extend([format!("--{key}"), text(key)]);
+                }
+            }
+            list.push("--".to_string());
+            list.push(match need("command") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            "secret"
+        }
+        _ => return None,
+    };
+    Some(Ok(AppCall::Verb { verb, args: list, stdin: String::new() }))
+}
+
+/// The door of a real run: the app's own `agentcli::run_verb`, as this run's folder and session.
+fn app_door(root: String, session: String) -> Door {
+    Arc::new(move |call| {
+        let (root, session) = (root.clone(), session.clone());
+        Box::pin(async move {
+            let Some(app) = crate::ai_usage::app() else { return Err("CodeFlow is not ready yet".to_string()) };
+            match call {
+                // The reason as the modal's question and the command verbatim as what is approved.
+                AppCall::Guard { command, reason } => crate::agentcli::guard(app, &command, reason, &root).await,
+                AppCall::Verb { verb, args, stdin } => crate::agentcli::run_verb(app, verb, args, stdin, &root, &session).await,
+            }
+        })
+    })
+}
+
+/// What the run's place has for the app tools, from the database: `(workspace, inventory, whether
+/// the folder is a workspace chat's)`. Reads only what the run's [`Reach`] can use, so a fix or a
+/// review pays for none of the lookups.
+fn take_inventory(conn: &rusqlite::Connection, root: &str, reach: Reach) -> (Option<String>, Inventory, bool) {
+    let project = crate::knowledge::owning_project(conn, root);
+    let chat_workspace = if project.is_none() { crate::workspace_chat::workspace_of_dir(conn, root) } else { None };
+    let workspace_chat = chat_workspace.is_some();
+    let workspace = project.as_ref().map(|p| p.workspace_id.clone()).filter(|ws| !ws.is_empty()).or(chat_workspace);
+    let mut inventory = Inventory { project: project.is_some(), ..Default::default() };
+    inventory.memories = approved_memories(conn, workspace.as_deref(), project.as_ref().map(|p| p.id.as_str()));
+    let Some(ws) = workspace.as_deref() else { return (workspace, inventory, workspace_chat) };
+    inventory.notes = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM notes WHERE deleted_at = '' AND (scope = 'global' OR workspace_id = ?1))",
+            rusqlite::params![ws],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if workspace_chat {
+        return (workspace, inventory, true);
+    }
+    if reach >= Reach::Observe {
+        inventory.services = crate::db::service_queries::list_services(conn, ws).is_ok_and(|list| !list.is_empty());
+        inventory.terminals = crate::db::queries::list_workspace_terminals(conn, ws).is_ok_and(|list| !list.is_empty());
+    }
+    if reach == Reach::Act {
+        inventory.databases = crate::db::datasource_queries::load_tree(conn, ws).is_ok_and(|tree| !tree.connections.is_empty());
+        inventory.requests = crate::db::api_queries::load_tree(conn, ws).is_ok_and(|tree| !tree.requests.is_empty());
+        inventory.secrets = crate::db::keyvault_queries::load_tree(conn, ws).is_ok_and(|tree| !tree.items.is_empty());
+    }
+    (workspace, inventory, false)
+}
+
+/// How many approved memories apply to this place — `ai_memory::relevant`'s scope rule, counted
+/// without marking any of them used. A table this cannot read counts as one, so `recall` stays on
+/// offer rather than vanishing over a schema it did not expect.
+fn approved_memories(conn: &rusqlite::Connection, workspace: Option<&str>, project: Option<&str>) -> usize {
+    conn.query_row(
+        "SELECT COUNT(*) FROM ai_memories WHERE status = 'approved'
+           AND (scope = 'global'
+                OR (scope = 'workspace' AND workspace_id IS ?1)
+                OR (scope IN ('project', 'task') AND project_id IS ?2))",
+        rusqlite::params![workspace, project],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n.max(0) as usize)
+    .unwrap_or(1)
+}
+
+/// `text` cut to `max` characters, the head and the tail kept, saying how much of the middle went.
+fn clip_middle(text: &str, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max / 3).collect();
+    let tail: String = text.chars().skip(total - (max - max / 3)).collect();
+    format!("{head}\n[… {} characters cut from the middle …]\n{tail}", total - max)
+}
+
 /// `old` matched against `original` line by line with leading and trailing whitespace ignored; when
 /// exactly one run of lines matches, it is replaced by `new`, each new line given the indentation of
 /// the original line in its position (the last one's past the end) plus whatever indentation the
@@ -1075,8 +1619,163 @@ mod tests {
         Toolbox::new(dir.path().to_str().unwrap(), grants).expect("toolbox")
     }
 
-    const READ: Grants = Grants { write: false, run: false };
-    const WRITE: Grants = Grants { write: true, run: false };
+    const READ: Grants = Grants { write: false, run: false, reach: Reach::Project };
+    const WRITE: Grants = Grants { write: true, run: false, reach: Reach::Project };
+
+    /// Everything a workspace can have for the app tools.
+    const FULL: Inventory =
+        Inventory { project: true, services: true, terminals: true, databases: true, requests: true, secrets: true, notes: true, memories: 3 };
+
+    /// A door that answers `reply` to everything and keeps what it was asked.
+    fn stub_door(reply: Result<String, String>) -> (Door, Arc<std::sync::Mutex<Vec<AppCall>>>) {
+        let calls: Arc<std::sync::Mutex<Vec<AppCall>>> = Default::default();
+        let seen = calls.clone();
+        let door: Door = Arc::new(move |call| {
+            seen.lock().unwrap().push(call);
+            let reply = reply.clone();
+            Box::pin(async move { reply })
+        });
+        (door, calls)
+    }
+
+    fn names(tools: &Toolbox) -> Vec<String> {
+        tools.schemas().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn a_run_judging_someone_elses_material_gets_the_project_and_nothing_of_the_app() {
+        let offered = offered(READ, true, false, &FULL, 0);
+        assert_eq!(
+            offered,
+            vec!["find_symbol", "find_usages", "outline", "search_knowledge", "recall", "list_files", "find_files", "read_file", "search"]
+        );
+    }
+
+    #[test]
+    fn a_read_only_conversation_looks_at_the_app_but_never_acts() {
+        let observe = Grants { write: false, run: false, reach: Reach::Observe };
+        let offered = offered(observe, true, false, &FULL, 0);
+        for name in ["service_logs", "service_wait", "terminal_output", "read_note", "recall"] {
+            assert!(offered.contains(&name), "{name}: {offered:?}");
+        }
+        for name in ACT_TOOLS.iter().chain(["edit_file", "write_file", "run_command"].iter()) {
+            assert!(!offered.contains(name), "{name} in a read-only run: {offered:?}");
+        }
+    }
+
+    #[test]
+    fn an_acting_conversation_gets_only_the_tools_with_something_to_act_on() {
+        let act = Grants { write: true, run: true, reach: Reach::Act };
+        let all = offered(act, true, true, &FULL, 0);
+        for name in ACT_TOOLS.iter().chain(OBSERVE_TOOLS).chain(["run_check", "run_command", "edit_file"].iter()) {
+            assert!(all.contains(name), "{name}: {all:?}");
+        }
+        // A workspace with nothing saved: no db_query, http_request, run_with_secret, no services.
+        let bare = offered(act, false, false, &Inventory::default(), 0);
+        for name in ["db_query", "http_request", "run_with_secret", "service_logs", "service_restart", "terminal_output", "add_task", "recall", "read_note", "run_check", "find_symbol"] {
+            assert!(!bare.contains(&name), "{name} with nothing to reach: {bare:?}");
+        }
+        for name in ["open_in_editor", "notify", "propose_memory"] {
+            assert!(bare.contains(&name), "{name}: {bare:?}");
+        }
+    }
+
+    #[test]
+    fn recall_is_offered_only_for_memories_the_message_does_not_already_carry() {
+        let inventory = Inventory { memories: 2, ..Default::default() };
+        assert!(offered(READ, false, false, &inventory, 1).contains(&"recall"));
+        assert!(!offered(READ, false, false, &inventory, 2).contains(&"recall"), "both are already in the message");
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_was_not_offered_does_not_exist() {
+        let dir = temp_repo();
+        let (door, calls) = stub_door(Ok("rows".into()));
+        let tools = toolbox(&dir, Grants { write: false, run: false, reach: Reach::Observe }).with_inventory(FULL).with_door(door);
+        let out = tools.call("db_query", &json!({ "connection": "prod", "sql": "select 1" }), &mut None).await;
+        assert!(!out.ok && out.content.contains("no tool named"), "{}", out.content);
+        assert!(calls.lock().unwrap().is_empty(), "nothing reached the app");
+    }
+
+    #[tokio::test]
+    async fn the_app_tools_reach_the_app_as_cf_does_and_say_what_the_user_said() {
+        let dir = temp_repo();
+        let (door, calls) = stub_door(Ok("| id |\n| 1 |".into()));
+        let tools = toolbox(&dir, Grants { write: false, run: false, reach: Reach::Act }).with_inventory(FULL).with_door(door);
+        assert!(names(&tools).contains(&"db_query".to_string()));
+        let out = tools.call("db_query", &json!({ "connection": "local pg", "sql": "select 1", "max_rows": 5 }), &mut None).await;
+        assert!(out.ok, "{}", out.content);
+        assert!(out.content.contains("| 1 |"));
+        let out = tools.call("propose_memory", &json!({ "fact": "Amounts are stored in cents" }), &mut None).await;
+        assert!(out.ok);
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls[0],
+            AppCall::Verb { verb: "db", args: vec!["local pg".into(), "--max-rows".into(), "5".into(), "select 1".into()], stdin: String::new() }
+        );
+        assert_eq!(
+            calls[1],
+            AppCall::Verb { verb: "remember", args: vec!["--kind".into(), "fact".into(), "Amounts are stored in cents".into()], stdin: String::new() },
+            "a fact unless the model says which kind"
+        );
+
+        let (door, _) = stub_door(Err("not against production".into()));
+        let tools = toolbox(&dir, Grants { write: false, run: false, reach: Reach::Act }).with_inventory(FULL).with_door(door);
+        let out = tools.call("http_request", &json!({ "request": "Orders/Create" }), &mut None).await;
+        assert!(!out.ok && out.content.contains("not against production"), "{}", out.content);
+    }
+
+    #[test]
+    fn app_tool_arguments_are_built_like_the_mcp_servers() {
+        let call = app_verb("run_with_secret", &json!({ "entry": "GitHub token", "command": "gh api user", "env": "GH_TOKEN" })).unwrap().unwrap();
+        assert_eq!(
+            call,
+            AppCall::Verb { verb: "secret", args: vec!["GitHub token".into(), "--env".into(), "GH_TOKEN".into(), "--".into(), "gh api user".into()], stdin: String::new() }
+        );
+        assert!(app_verb("service_wait", &json!({})).unwrap().is_err(), "a service is required");
+        assert_eq!(
+            app_verb("open_in_editor", &json!({ "path": "src/a.ts", "line": "12" })).unwrap().unwrap(),
+            AppCall::Verb { verb: "open", args: vec!["src/a.ts:12".into()], stdin: String::new() }
+        );
+        assert!(app_verb("read_file", &json!({})).is_none(), "not an app tool");
+        assert!(app_verb("local_llm", &json!({ "instruction": "x" })).is_none(), "this run is the local model");
+    }
+
+    #[tokio::test]
+    async fn a_destructive_command_waits_for_the_user_and_a_no_keeps_it_from_running() {
+        let dir = temp_repo();
+        std::fs::create_dir_all(dir.path().join("build/out")).unwrap();
+        let run = Grants { write: true, run: true, reach: Reach::Project };
+        let (door, calls) = stub_door(Err("keep the build, I need it".into()));
+        let tools = toolbox(&dir, run).with_door(door);
+        let out = tools.call("run_command", &json!({ "command": "rm -rf build" }), &mut None).await;
+        assert!(!out.ok);
+        assert!(out.content.contains("did not approve") && out.content.contains("keep the build, I need it"), "{}", out.content);
+        assert!(dir.path().join("build/out").is_dir(), "refused, so nothing was deleted");
+        assert!(matches!(calls.lock().unwrap().as_slice(), [AppCall::Guard { command, .. }] if command == "rm -rf build"));
+
+        let (door, _) = stub_door(Ok(String::new()));
+        let tools = toolbox(&dir, run).with_door(door);
+        let out = tools.call("run_command", &json!({ "command": "rm -rf build" }), &mut None).await;
+        assert!(out.ok, "approved: {}", out.content);
+        assert!(!dir.path().join("build").exists());
+
+        let (door, calls) = stub_door(Err("never asked".into()));
+        let tools = toolbox(&dir, run).with_door(door);
+        let out = tools.call("run_command", &json!({ "command": "echo hi" }), &mut None).await;
+        assert!(out.ok && out.content.contains("hi"));
+        assert!(calls.lock().unwrap().is_empty(), "an ordinary command asks nobody");
+    }
+
+    #[tokio::test]
+    async fn a_skill_the_run_was_told_about_can_be_opened() {
+        let dir = temp_repo();
+        std::fs::create_dir_all(dir.path().join(".claude/skills/release")).unwrap();
+        std::fs::write(dir.path().join(".claude/skills/release/SKILL.md"), "---\nname: release\n---\nBump the version first.\n").unwrap();
+        let tools = toolbox(&dir, READ);
+        let out = tools.call("read_file", &json!({ "path": ".claude/skills/release/SKILL.md" }), &mut None).await;
+        assert!(out.ok && out.content.contains("Bump the version first."), "{}", out.content);
+    }
 
     #[tokio::test]
     async fn read_only_offers_and_runs_no_write_tool() {
@@ -1111,7 +1810,7 @@ mod tests {
         let buffers = vec![crate::context::UnsavedBuffer { path: "a.txt".into(), content: "in the editor\n".into() }];
         let root = dir.to_string_lossy().to_string();
         crate::context::with_unsaved(buffers, async {
-            let toolbox = Toolbox::new(&root, Grants { write: true, run: false }).unwrap();
+            let toolbox = Toolbox::new(&root, Grants { write: true, run: false, reach: Reach::Project }).unwrap();
             let read = toolbox.read_file("a.txt", None, None);
             assert!(read.content.contains("in the editor"), "{}", read.content);
             let edit = toolbox.edit_file("a.txt", "in the editor", "changed", false);

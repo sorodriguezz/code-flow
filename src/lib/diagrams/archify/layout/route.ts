@@ -33,6 +33,14 @@ export interface RouteOptions {
   labelH?: number;
   /** Places a label must keep off besides the boxes: the titles of frames. */
   avoid?: Box[];
+  /** Boxes lines must go around without being anyone's end — the titles of nested frames. */
+  obstacles?: Box[];
+  /**
+   * Top-to-bottom, but a target above and clearly to one side is reached sideways (out of the
+   * facing side, into the near one) instead of round the top. For hand-laid architecture sheets,
+   * where people sit in a column to the left of everything they call.
+   */
+  lateral?: boolean;
 }
 
 type Side = "left" | "right" | "top" | "bottom";
@@ -54,8 +62,12 @@ function centre(b: Box): Pt {
 }
 
 /** Which side each end of an edge uses, from where the two boxes sit. */
-function sidePair(s: Box, t: Box, direction: "LR" | "TB", mid: Pt): [Side, Side] {
+function sidePair(s: Box, t: Box, direction: "LR" | "TB", mid: Pt, lateral = false): [Side, Side] {
   const gap = 6;
+  if (lateral && direction === "TB" && !(t[1] >= s[1] + s[3] + gap)) {
+    if (t[0] >= s[0] + s[2] + gap) return ["right", "left"];
+    if (t[0] + t[2] <= s[0] - gap) return ["left", "right"];
+  }
   if (direction === "LR") {
     if (t[0] >= s[0] + s[2] + gap) return ["right", "left"];
     if (t[0] + t[2] <= s[0] - gap) {
@@ -222,8 +234,13 @@ interface Grid {
 
 const key = (n: number) => Math.round(n * 2) / 2;
 
-function buildGrid(boxes: Box[], extra: Pt[], bounds: Box): Grid {
-  const inflated = boxes.map((b) => [b[0] - MARGIN, b[1] - MARGIN, b[0] + b[2] + MARGIN, b[1] + b[3] + MARGIN] as const);
+function buildGrid(boxes: Box[], extra: Pt[], bounds: Box, walls: Box[] = []): Grid {
+  // Walls (frame titles) keep a hair of clearance, not a box's margin: the first card under a title
+  // has its entry stub just below it, and a full margin would swallow that stub.
+  const inflated = [
+    ...boxes.map((b) => [b[0] - MARGIN, b[1] - MARGIN, b[0] + b[2] + MARGIN, b[1] + b[3] + MARGIN] as const),
+    ...walls.map((b) => [b[0] - 2, b[1] - 2, b[0] + b[2] + 2, b[1] + b[3] + 2] as const),
+  ];
   const xs = axis(
     [bounds[0] - 28, bounds[0] + bounds[2] + 28, ...inflated.flatMap((b) => [b[0], b[2]])],
     extra.map((p) => p[0]),
@@ -401,7 +418,7 @@ export function routeAll(
       loops.push(req);
       continue;
     }
-    plans.push({ req, s, t, sides: sidePair(s, t, options.direction, mid), ports: [[0, 0], [0, 0]] });
+    plans.push({ req, s, t, sides: sidePair(s, t, options.direction, mid, options.lateral), ports: [[0, 0], [0, 0]] });
   }
 
   // Ports: the edges that meet a side share it, ordered by where their other end is.
@@ -431,7 +448,7 @@ export function routeAll(
   }
 
   const stubs = plans.map((p) => [stubOf(p.ports[0], p.sides[0]), stubOf(p.ports[1], p.sides[1])] as const);
-  const grid = buildGrid(all, stubs.flatMap(([a, b]) => [a, b]), bounds);
+  const grid = buildGrid(all, stubs.flatMap(([a, b]) => [a, b]), bounds, options.obstacles);
 
   const routed = new Map<string, Routed>();
   const order = plans

@@ -42,7 +42,8 @@ export type LocalExecErrorCode =
   | "no-models"
   | "truncated"
   | "needs-cuda"
-  | "cloud-model";
+  | "cloud-model"
+  | "not-local";
 
 /** A catalogue model's family. Matches `localai::exec_catalogue::Family`. */
 export type LocalModelFamily = "qwen" | "phi" | "nemotron";

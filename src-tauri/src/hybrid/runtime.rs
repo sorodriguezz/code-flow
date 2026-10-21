@@ -226,7 +226,6 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
     let kind = pick_backend(settings, &detected);
     let url = settings.url_for(kind);
     let machine = hardware::machine().await;
-    let also_resident = completion_engine_bytes();
 
     let (reachable, server_version, error, available, model, details) = match kind {
         BackendKind::Bundled => {
@@ -274,6 +273,17 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
                 .unwrap_or_default();
             (error.is_none(), None, error, available, Some(model), details)
         }
+        // A server on the internet is not asked anything, not even whether it is there: "local" is
+        // this machine or the user's own network (`local_llm::cloud_refusal`), and a pane that went
+        // on to list a public server's models would be one click from sending it code.
+        BackendKind::Ollama | BackendKind::Openai if local_llm::cloud_refusal(&url, "").is_some() => (
+            false,
+            None,
+            local_llm::cloud_refusal(&url, "").map(|why| ("not-local", format!("{why}."))),
+            Vec::new(),
+            settings.model_for(kind),
+            ModelDetails::default(),
+        ),
         BackendKind::Ollama | BackendKind::Openai => {
             let endpoint = Endpoint::new(kind, &url, if kind == BackendKind::Openai { config::api_key() } else { None });
             match ping(&endpoint, freshness).await {
@@ -323,6 +333,8 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
         }
     };
 
+    // Everything else of this app's that holds model memory now, beside the model resolved here.
+    let also_resident = resident_beside(kind, model.as_deref(), &url);
     let ctx_options = if details.ctx_fixed_by_server {
         details.max_ctx.map(|ctx| vec![ctx]).unwrap_or_else(|| budget::ctx_options(None))
     } else {
@@ -363,6 +375,9 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
         Some((code, sentence)) => (Some(code), Some(sentence)),
         None => (None, None),
     };
+    if let Some(model) = model.as_deref().filter(|_| error_code.is_none()) {
+        note_window(model, ctx);
+    }
     Resolved {
         kind,
         url,
@@ -435,6 +450,105 @@ pub fn completion_engine_bytes() -> u64 {
     }
 }
 
+/// What this app's other `llama-server`s hold right now, beside the model `kind`/`model`/`url`
+/// names — the memory a fit estimate must not hand out twice.
+///
+/// Counting only the completion engine was the old answer, from when it was the only other one.
+/// There are four now, and each can be up while a task asks whether its model fits: the completion
+/// engine (the editor), the embedder (knowledge search — ~0.4–0.9 GB), the executor (another task's
+/// model, with its window's cache) and a fine-tuned adapter's server. The executor is left out when
+/// it is the very model being resolved (its memory *is* `need_bytes`), and so is the adapter's
+/// server when `url` is its address.
+pub fn resident_beside(kind: BackendKind, model: Option<&str>, url: &str) -> u64 {
+    let mut bytes = completion_engine_bytes() + crate::localai::embedder::resident_bytes();
+    if let Some((running, held)) = executor::resident() {
+        if !(kind == BackendKind::Bundled && model == Some(running.as_str())) {
+            bytes += held;
+        }
+    }
+    if let Some((port, held)) = crate::learning::serving::resident() {
+        let own = url::Url::parse(url).ok().and_then(|parsed| parsed.port()) == Some(port) && local_llm::is_loopback(url);
+        if !own {
+            bytes += held;
+        }
+    }
+    bytes
+}
+
+/// The window each model was last resolved with — what [`known_window`] answers from without
+/// asking a server.
+fn windows() -> &'static Mutex<HashMap<String, u32>> {
+    static WINDOWS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
+}
+
+fn note_window(model: &str, ctx: u32) {
+    if let Ok(mut windows) = windows().lock() {
+        windows.insert(model.trim().to_string(), ctx);
+    }
+}
+
+/// The window the «CodeFlow» provider last ran — or the pane last resolved — `model` with, without
+/// asking any server: for a caller that cannot wait, such as the context meter
+/// (`ai::context_window_for`). `None` until something resolved that model this session; an empty
+/// `model` or «auto» is the pane's own model, whichever that was last.
+// Read by the chats' context meter (`chat_cmd::chat_context_window`).
+pub fn known_window(model: &str) -> Option<u32> {
+    let model = model.trim();
+    let windows = windows().lock().ok()?;
+    if model.is_empty() || model == crate::model_registry::AUTO {
+        return LAST_PANE_MODEL.lock().ok()?.as_deref().and_then(|pane| windows.get(pane).copied());
+    }
+    windows.get(model).copied()
+}
+
+/// The pane's model as last resolved, for [`known_window`]'s «auto».
+#[allow(dead_code)]
+static LAST_PANE_MODEL: Mutex<Option<String>> = Mutex::new(None);
+
+/// The window the «CodeFlow» provider runs `model` with right now — the figure its runs are
+/// budgeted against, so the one a context meter and an auto-compaction should measure with:
+///
+/// * Ollama: the `num_ctx` every request is sent with (the pane's choice, capped at the model's own);
+/// * the bundled engine, a llama.cpp or LM Studio server: the window the server was started with
+///   when it says one (`ctx_fixed_by_server`), the pane's choice otherwise;
+/// * a fine-tuned adapter (`adapter:<id>`): the window its server is started with.
+///
+/// `model` empty or «auto» is the pane's model. Asks the server only when its last answer is older
+/// than a few seconds ([`Freshness::Recent`]); `None` when the settings cannot be read or the model
+/// is on no server.
+#[allow(dead_code)]
+pub async fn codeflow_window(model: &str) -> Option<u32> {
+    let settings = crate::ai_usage::with_conn(config::read)?.ok()?;
+    let model = model.trim();
+    if model.starts_with(crate::learning::serving::PREFIX) {
+        return Some(crate::learning::serving::window(&settings));
+    }
+    let resolved = resolve(&settings, Freshness::Recent).await;
+    if let Some(pane) = resolved.model.clone() {
+        if let Ok(mut last) = LAST_PANE_MODEL.lock() {
+            *last = Some(pane);
+        }
+    }
+    if model.is_empty() || model == crate::model_registry::AUTO || resolved.model.as_deref() == Some(model) {
+        return resolved.model.is_some().then_some(resolved.ctx);
+    }
+    if !resolved.available.iter().any(|candidate| candidate.id == model) {
+        return None;
+    }
+    // Another model of the same server: resolved as a run picking it would be (`local_agent`), so
+    // its own cap on the window applies.
+    let mut chosen = settings.clone();
+    chosen.backend = Some(resolved.kind);
+    match resolved.kind {
+        BackendKind::Bundled => chosen.model_bundled = Some(model.to_string()),
+        BackendKind::Ollama => chosen.model_ollama = Some(model.to_string()),
+        BackendKind::Openai => chosen.model_openai = Some(model.to_string()),
+    }
+    let picked = resolve(&chosen, Freshness::Recent).await;
+    (picked.model.as_deref() == Some(model)).then_some(picked.ctx)
+}
+
 /// A live connection to the chosen model: the endpoint, plus the bundled engine's handle when the
 /// bundled engine is what serves it (held so the engine is counted as in use).
 pub struct Live {
@@ -446,6 +560,12 @@ pub struct Live {
 /// Opens `kind`/`url`/`model` for requests, starting the bundled engine (and waiting for it) when
 /// that is the backend.
 pub async fn connect(kind: BackendKind, url: &str, model: &str, ctx: u32) -> Result<Live, String> {
+    // Every caller that reaches a local model goes through here or through `local_llm::chat` /
+    // `converse` (which check again): a stored run, a flow node with its own address, a meeting. A
+    // refusal is the error the caller shows — never a quiet switch to another engine.
+    if let Some(why) = local_llm::cloud_refusal(if kind == BackendKind::Bundled { "" } else { url }, model) {
+        return Err(format!("{why}."));
+    }
     match kind {
         BackendKind::Bundled => {
             let entry = exec_catalogue::find(model).ok_or_else(|| format!("Unknown local model: {model}"))?;
@@ -459,7 +579,7 @@ pub async fn connect(kind: BackendKind, url: &str, model: &str, ctx: u32) -> Res
                 model_id: model.to_string(),
                 ctx,
                 no_reasoning: !crate::model_registry::server_reasoning(),
-                cpu_moe_layers: budget::cpu_moe_layers(&shape, entry.moe_layers, ctx, completion_engine_bytes(), &machine),
+                cpu_moe_layers: budget::cpu_moe_layers(&shape, entry.moe_layers, ctx, resident_beside(kind, Some(model), url), &machine),
             };
             let engine = executor::ensure_ready(entry, models::path_of(&entry.spec), launch).await?;
             Ok(Live {

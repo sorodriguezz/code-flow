@@ -76,6 +76,17 @@ struct Slot {
     child: tokio::process::Child,
     leases: Arc<AtomicUsize>,
     last_used: Instant,
+    /// The memory it holds, as far as is known: the GGUF and its LoRA plus llama.cpp's working
+    /// buffers for a `llama-server`; 0 for `mlx_lm`, whose weights live in the Hugging Face cache.
+    bytes: u64,
+}
+
+/// The adapter server's port and the memory it holds, when one is up — for the fit estimate of a
+/// model beside it (`hybrid::runtime::resident_beside`). `None` while a swap holds the slot.
+pub fn resident() -> Option<(u16, u64)> {
+    let guard = SLOT.try_lock().ok()?;
+    let slot = guard.as_ref()?;
+    Some((slot.port, slot.bytes))
 }
 
 static SLOT: Mutex<Option<Slot>> = Mutex::const_new(None);
@@ -182,7 +193,9 @@ fn command(target: &Target, port: u16) -> Result<tokio::process::Command, String
             let mut cmd = crate::proc::command(crate::localai::engine::locate()?);
             // The executor's flags (`localai::executor`): loopback only, one slot so the whole window
             // is the request's, no `-ngl` so `--fit` places what the GPU holds.
-            cmd.arg("-m").arg(model).args(["--host", "127.0.0.1", "--port", &port.to_string(), "-c", &ctx.to_string(), "-np", "1", "--no-webui", "--alias", alias]);
+            // `--cache-ram 0` as on the executor: no finished prompts kept in RAM beside the model
+            // (llama.cpp keeps up to 8 GB by default; the embedder grew to ~9 GB without it).
+            cmd.arg("-m").arg(model).args(["--host", "127.0.0.1", "--port", &port.to_string(), "-c", &ctx.to_string(), "-np", "1", "--cache-ram", "0", "--no-webui", "--alias", alias]);
             if let Some(lora) = lora {
                 cmd.arg("--lora").arg(lora);
             }
@@ -220,6 +233,13 @@ async fn start(target: &Target, key: String, adapter_id: Option<&str>) -> Result
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
+    let bytes = match target {
+        Target::Llama { model, lora, .. } => {
+            let size = |path: &Path| std::fs::metadata(path).map_or(0, |meta| meta.len());
+            size(model) + lora.as_deref().map_or(0, size) + crate::hybrid::budget::WORKING_OVERHEAD
+        }
+        Target::Mlx { .. } => 0,
+    };
     Ok(Slot {
         key,
         adapter_id: adapter_id.map(str::to_string),
@@ -228,6 +248,7 @@ async fn start(target: &Target, key: String, adapter_id: Option<&str>) -> Result
         child,
         leases: Arc::new(AtomicUsize::new(0)),
         last_used: Instant::now(),
+        bytes,
     })
 }
 

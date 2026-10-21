@@ -21,6 +21,7 @@ import {
   Send,
   Square,
   Waypoints,
+  Network,
   Workflow,
   X,
   type LucideIcon,
@@ -550,6 +551,8 @@ function appMeta(refId: string): {
       return { labelKey: "tabbar.chat", icon: MessagesSquare };
     case "flows":
       return { labelKey: "tabbar.flows", icon: Waypoints };
+    case "architecture":
+      return { labelKey: "tabbar.architecture", icon: Network };
     default:
       return { labelKey: "windows.unknownApp", icon: Layers };
   }

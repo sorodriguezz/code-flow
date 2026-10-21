@@ -59,6 +59,7 @@ export type ShortcutId =
   | "view.vault"
   | "view.chat"
   | "view.flows"
+  | "view.architecture"
   | "chat.focusComposer"
   | "view.remote"
   | "view.pipelines"
@@ -194,6 +195,8 @@ const VIEW_ORDER: { view: MainView; workspace?: ApiWorkspace }[] = [
   { view: "chat" },
   // Flujos, newest, last — the same argument chat makes above it.
   { view: "flows" },
+  // Arquitectura, newer still, after it for the same reason.
+  { view: "architecture" },
   // The keyring is deliberately absent, for a sharper version of `remote`'s reason: cycling into it
   // by accident would put a lock screen — or worse, an open vault — on screen in the middle of
   // moving between documents. It has its own chord.
@@ -522,6 +525,16 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "tabbar.flows",
     defaultChord: "Mod+Alt+W",
     run: () => useUiStore.getState().setActiveView("flows"),
+  },
+  {
+    // Arquitectura. Digits and the obvious letters are taken (⌘⌥A is the AI panel, ⌘⌥R refreshes
+    // the database tree), so U — free everywhere, and a letter AltGr leaves alone on the Spanish and
+    // German layouts.
+    id: "view.architecture",
+    group: "views",
+    labelKey: "tabbar.architecture",
+    defaultChord: "Mod+Alt+U",
+    run: () => useUiStore.getState().setActiveView("architecture"),
   },
   {
     /**

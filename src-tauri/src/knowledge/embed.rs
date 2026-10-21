@@ -76,11 +76,15 @@ pub enum Provider {
 impl Space {
     /// The space the settings name — or, with none chosen, the default bundled model when it is
     /// downloaded. `None`: no local embedding model is available, and search stays lexical.
+    ///
+    /// An Ollama space is named here without its weights' digest — [`Space::resolve`] asks the
+    /// server for it. Never a cloud model, and never a server off this machine and the user's own
+    /// network: the knowledge is embedded where it lives ([`crate::hybrid::local_llm::cloud_refusal`]).
     pub fn configured(setting: Option<&str>, ollama_url: &str) -> Option<Self> {
         match setting.map(str::trim).filter(|s| !s.is_empty()) {
             Some(raw) if raw.starts_with("ollama:") => {
                 let model = raw.trim_start_matches("ollama:").to_string();
-                if crate::hybrid::local_llm::is_cloud_name(&model) {
+                if crate::hybrid::local_llm::cloud_refusal(ollama_url, &model).is_some() {
                     return None;
                 }
                 Some(Self { name: format!("ollama:{model}"), provider: Provider::Ollama { url: ollama_url.to_string(), model } })
@@ -90,6 +94,23 @@ impl Space {
                 .filter(|e| crate::localai::models::is_installed(&e.spec))
                 .map(Self::bundled),
         }
+    }
+
+    /// [`Space::configured`], with an Ollama model named by its weights too:
+    /// `ollama:<model>@<first 12 of its digest>`. A re-pull that changed the bytes is then a new
+    /// space, as a bundled model's new file is, instead of new vectors compared with old ones. `None`
+    /// when Ollama does not list the model (it is gone, or the server is down — embedding would fail
+    /// either way). A server that publishes no digest keeps the bare name.
+    pub async fn resolve(setting: Option<&str>, ollama_url: &str) -> Option<Self> {
+        let mut space = Self::configured(setting, ollama_url)?;
+        if let Provider::Ollama { url, model } = &space.provider {
+            match ollama_digest(url, model).await {
+                Digest::Of(digest) => space.name = ollama_space(model, Some(&digest)),
+                Digest::Unpublished => {}
+                Digest::Absent => return None,
+            }
+        }
+        Some(space)
     }
 
     pub fn bundled(entry: &'static crate::localai::embedder::EmbedModelSpec) -> Self {
@@ -143,9 +164,143 @@ impl Space {
     }
 }
 
+/// What Ollama says about one model's weights.
+#[derive(Clone, Debug, PartialEq)]
+enum Digest {
+    Of(String),
+    /// Listed, without a digest.
+    Unpublished,
+    /// Not listed, or the server did not answer.
+    Absent,
+}
+
+/// The space name of an Ollama model: its digest's first 12 characters when there is one.
+pub fn ollama_space(model: &str, digest: Option<&str>) -> String {
+    match digest.map(|d| d.trim_start_matches("sha256:")).filter(|d| d.len() >= 12) {
+        Some(digest) => format!("ollama:{model}@{}", &digest[..12]),
+        None => format!("ollama:{model}"),
+    }
+}
+
+/// Whether a listed Ollama name is the model the setting names (`nomic-embed-text` is listed as
+/// `nomic-embed-text:latest`).
+fn same_model(listed: &str, model: &str) -> bool {
+    listed == model || listed.strip_suffix(":latest") == Some(model) || model.strip_suffix(":latest") == Some(listed)
+}
+
+/// The models a local Ollama lists, `(name, digest)`, or `None` when it cannot be asked (a URL off
+/// this machine is never asked) or did not answer.
+pub async fn ollama_models(url: &str) -> Option<Vec<(String, Option<String>)>> {
+    if crate::hybrid::local_llm::cloud_refusal(url, "").is_some() {
+        return None;
+    }
+    let endpoint = crate::hybrid::local_llm::Endpoint::new(crate::hybrid::local_llm::BackendKind::Ollama, url, None);
+    let listed = crate::hybrid::local_llm::list_models(&endpoint).await.ok()?;
+    Some(listed.into_iter().map(|m| (m.id, m.digest)).collect())
+}
+
+/// One answer per minute per model: a search should not ask Ollama its listing every time.
+static DIGESTS: std::sync::Mutex<Vec<(String, String, Digest, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+async fn ollama_digest(url: &str, model: &str) -> Digest {
+    if let Ok(cache) = DIGESTS.lock() {
+        if let Some((_, _, digest, _)) = cache.iter().find(|(u, m, _, at)| u == url && m == model && at.elapsed() < std::time::Duration::from_secs(60)) {
+            return digest.clone();
+        }
+    }
+    let digest = match ollama_models(url).await {
+        Some(models) => match models.into_iter().find(|(name, _)| same_model(name, model)) {
+            Some((_, Some(digest))) => Digest::Of(digest),
+            Some((_, None)) => Digest::Unpublished,
+            None => Digest::Absent,
+        },
+        None => Digest::Absent,
+    };
+    if let Ok(mut cache) = DIGESTS.lock() {
+        cache.retain(|(u, m, _, _)| !(u == url && m == model));
+        cache.push((url.to_string(), model.to_string(), digest.clone(), std::time::Instant::now()));
+    }
+    digest
+}
+
+/// The Ollama spaces of `spaces` nothing can query any more, given what the server lists now: a
+/// model no longer pulled, a digest the model no longer has (re-pulled), and the bare
+/// `ollama:<model>` of older builds once the model publishes a digest — its vectors were made
+/// before the name carried the weights, and the digest-named space replaces them.
+pub fn ollama_orphans(spaces: &[String], listed: &[(String, Option<String>)]) -> Vec<String> {
+    spaces
+        .iter()
+        .filter(|space| {
+            let Some(rest) = space.strip_prefix("ollama:") else { return false };
+            let (model, digest) = match rest.rsplit_once('@') {
+                Some((model, digest)) => (model, Some(digest)),
+                None => (rest, None),
+            };
+            let current = listed.iter().find(|(name, _)| same_model(name, model));
+            match (current, digest) {
+                (None, _) => true,
+                (Some((_, Some(now))), Some(then)) => !now.trim_start_matches("sha256:").starts_with(then),
+                (Some((_, Some(_))), None) => true,
+                (Some((_, None)), Some(_)) => true,
+                (Some((_, None)), None) => false,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// The bundled spaces of `spaces` nothing can query: a model no longer downloaded, or a file that
+/// changed under the same id (its digest moved).
+pub fn bundled_orphans(spaces: &[String]) -> Vec<String> {
+    spaces
+        .iter()
+        .filter(|space| !space.starts_with("ollama:"))
+        .filter(|space| {
+            let Some((id, sha)) = space.rsplit_once('@') else { return false };
+            match crate::localai::embedder::find(id) {
+                Some(entry) => !crate::localai::models::is_installed(&entry.spec) || !entry.spec.sha256.starts_with(sha),
+                None => true,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ollama_space_names_its_weights_and_the_stale_ones_are_found() {
+        assert_eq!(ollama_space("nomic-embed-text", Some("sha256:0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f")), "ollama:nomic-embed-text@0a109f422b47");
+        assert_eq!(ollama_space("m", None), "ollama:m");
+        let spaces: Vec<String> = [
+            "ollama:nomic-embed-text@0a109f422b47",
+            "ollama:nomic-embed-text@ffffffffffff",
+            "ollama:nomic-embed-text",
+            "ollama:gone-model@0a109f422b47",
+            "ollama:no-digest",
+            "qwen3-embedding-0.6b@abc",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let listed = vec![
+            ("nomic-embed-text:latest".to_string(), Some("0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f".to_string())),
+            ("no-digest".to_string(), None),
+        ];
+        assert_eq!(
+            ollama_orphans(&spaces, &listed),
+            vec!["ollama:nomic-embed-text@ffffffffffff", "ollama:nomic-embed-text", "ollama:gone-model@0a109f422b47"],
+            "a re-pull, the bare name of older builds and a removed model; bundled spaces are not Ollama's"
+        );
+    }
+
+    #[test]
+    fn a_remote_ollama_is_never_an_embedding_space() {
+        assert!(Space::configured(Some("ollama:nomic-embed-text"), "https://ollama.example.com").is_none());
+        assert!(Space::configured(Some("ollama:nomic-embed-text"), "http://127.0.0.1:11434").is_some());
+    }
 
     #[test]
     fn blobs_round_trip() {

@@ -67,9 +67,15 @@ const MEMORY_TITLE: usize = 80;
 /// `cf remember <fact>`: a memory proposed for the project — a *candidate*, which no model reads
 /// until the user approves it in Settings › Local intelligence › Memory.
 pub fn remember(request: &Request, app: &AppHandle) -> Reply {
-    let text = request.text.trim();
+    // `--kind decision|convention|fact|preference` first, as the MCP tool's `kind` arrives. A fact by
+    // default: a proposed *preference*, once approved, rides every question of every turn.
+    let (kind, rest) = match request.args.as_slice() {
+        [flag, kind, rest @ ..] if flag == "--kind" => (memory_kind(kind), rest.join(" ")),
+        _ => (None, request.text.clone()),
+    };
+    let text = rest.trim();
     if text.is_empty() {
-        return Reply::no("usage: cf remember <fact>");
+        return Reply::no("usage: cf remember [--kind decision|convention|fact|preference] <fact>");
     }
     let place = place::of(app, &request.cwd, &request.session);
     let first = text.lines().next().unwrap_or(text).trim();
@@ -87,16 +93,32 @@ pub fn remember(request: &Request, app: &AppHandle) -> Reply {
         body: text.to_string(),
         approved: false,
         source: Some("agent".to_string()),
+        kind: Some(kind.unwrap_or(crate::ai_memory::Kind::Fact)),
         ..Default::default()
     };
-    match crate::ai_usage::with_conn(|conn| crate::ai_memory::create(conn, input)) {
-        Some(Ok(memory)) if memory.status == "candidate" => Reply::ok(format!(
+    match crate::ai_usage::with_conn(|conn| crate::ai_memory::propose(conn, input)) {
+        Some(Ok((memory, crate::ai_memory::Remembered::New))) => Reply::ok(format!(
             "proposed «{}»; models read it only after the user approves it in Settings › Local intelligence › Memory",
             memory.title
         )),
-        Some(Ok(memory)) => Reply::ok(format!("already remembered: «{}»", memory.title)),
+        Some(Ok((memory, _))) if memory.status == "candidate" => Reply::ok(format!(
+            "already proposed as «{}» (waiting for the user's approval); your wording was added to it",
+            memory.title
+        )),
+        Some(Ok((memory, _))) => Reply::ok(format!("already remembered: «{}»", memory.title)),
         Some(Err(error)) => Reply::no(error),
         None => Reply::no("the app's database is not available yet"),
+    }
+}
+
+fn memory_kind(word: &str) -> Option<crate::ai_memory::Kind> {
+    use crate::ai_memory::Kind;
+    match word.trim().to_ascii_lowercase().as_str() {
+        "decision" => Some(Kind::Decision),
+        "convention" => Some(Kind::Convention),
+        "fact" => Some(Kind::Fact),
+        "preference" => Some(Kind::Preference),
+        _ => None,
     }
 }
 

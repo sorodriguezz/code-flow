@@ -58,6 +58,7 @@ const ERROR_KEY: Partial<Record<LocalExecErrorCode, TranslationKey>> = {
   "no-models": "localexec.errNoModels",
   "needs-cuda": "localexec.errNeedsCuda",
   "cloud-model": "localexec.errCloudModel",
+  "not-local": "localexec.errNotLocal",
 };
 
 /** What the catalogue declares a model can do, as chips: whether it calls tools and whether it can

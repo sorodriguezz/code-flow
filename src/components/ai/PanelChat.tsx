@@ -257,6 +257,7 @@ export function PanelChat({
   const [caret, setCaret] = useState(0);
   const mentions = useMentions({
     repoPath: project?.local_path ?? null,
+    workspaceId: workspaceId ?? null,
     text: draft,
     caret,
     onInsert: (next) => {

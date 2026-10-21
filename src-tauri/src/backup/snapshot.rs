@@ -275,6 +275,9 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     "ai_datasets",
     "ai_training_runs",
     "ai_model_adapters",
+    // The last running cost each CLI session reported: bookkeeping about sessions whose files are on
+    // this machine's disk. Without it a resumed session files one turn's tokens with no price.
+    "ai_session_costs",
 ];
 
 // ---------------------------------------------------------------------------

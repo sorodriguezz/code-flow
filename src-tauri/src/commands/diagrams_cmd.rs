@@ -314,6 +314,7 @@ fn file_extension(format: &str, doc: &str) -> &'static str {
         diagram_queries::FORMAT_DBML => "dbml",
         diagram_queries::FORMAT_EXCALIDRAW => "excalidraw",
         diagram_queries::FORMAT_MERMAID => "mmd",
+        diagram_queries::FORMAT_ARCH => "arch.json",
         diagram_queries::FORMAT_ARCHIFY if doc.trim_start().starts_with('{') => archify_json_extension(doc),
         diagram_queries::FORMAT_ARCHIFY => "html",
         _ => "drawio",
@@ -472,13 +473,15 @@ pub fn diagrams_create_folder(
     parent_id: Option<String>,
     name: String,
     color: String,
+    // Whose tree it goes in — absent for Diagramas, `arch` for Arquitectura.
+    app: Option<String>,
 ) -> Result<DiagramFolderRow, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("A folder needs a name".into());
     }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    diagram_queries::create_folder(&conn, &workspace_id, parent_id.as_deref(), trimmed, &color)
+    diagram_queries::create_folder(&conn, &workspace_id, parent_id.as_deref(), trimmed, &color, app.as_deref().unwrap_or(""))
         .map_err(|e| e.to_string())
 }
 

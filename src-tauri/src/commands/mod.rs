@@ -53,6 +53,7 @@ pub mod services_cmd;
 pub mod settings;
 pub mod mcp_cmd;
 pub mod skills_cmd;
+pub mod architecture_cmd;
 pub mod ssh_cmd;
 pub mod stories_cmd;
 pub mod terminal_cmd;

@@ -53,6 +53,9 @@ pub struct ChatReply {
     context: Vec<crate::context::ContextSource>,
     /// The memory a "recuerda que…" in the question saved, approved — the panel says so.
     learned_memory: Option<String>,
+    /// What that "recuerda que…" did: a new memory, an existing proposal approved, an existing one
+    /// updated, or one already known — so the toast says which instead of always "learned".
+    learned_outcome: Option<crate::ai_memory::Remembered>,
 }
 
 /// How much of a turn's message the approved memories may take.
@@ -183,6 +186,10 @@ pub(crate) enum AiTask {
     /// sources are read by CodeFlow (anydoc for documents, the code map for a repository) and go on
     /// stdin — so it routes anywhere, a local model included.
     Skills,
+    /// Arquitectura's assistant — ask, review board, decision records, threat model, tutor, design
+    /// from an idea. Read-only, in the section's own working folder with its bundled skills; the
+    /// document and what the app computed go on stdin, so it routes anywhere, a local model included.
+    Architecture,
 }
 
 impl AiTask {
@@ -192,7 +199,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 26] = [
+    pub(crate) const ALL: [AiTask; 27] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -219,6 +226,7 @@ impl AiTask {
         AiTask::SpokenSummary,
         AiTask::Api,
         AiTask::Skills,
+        AiTask::Architecture,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -252,6 +260,7 @@ impl AiTask {
             AiTask::SpokenSummary => "spoken_summary",
             AiTask::Api => "api",
             AiTask::Skills => "skills",
+            AiTask::Architecture => "architecture",
         }
     }
 }
@@ -1009,12 +1018,34 @@ fn special_mention_notes(asked: &str, repo: &str) -> String {
     out
 }
 
-/// Characters of transcript a sessionless engine is re-sent each panel turn: the newest turns win.
-const PANEL_REPLAY_CHARS: usize = 16_000;
+/// How much of a repository conversation a turn is handed, by why it is handed any.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Replay {
+    /// An engine that keeps no session (Cline, CodeFlow's): re-sent on every turn, so kept short.
+    EveryTurn,
+    /// A fresh session on a conversation that already has turns — a branch («Bifurcar desde aquí»),
+    /// a session the CLI lost. Said once, after which the session carries it, so it can afford the
+    /// conversation itself: at the every-turn size a branch of a long thread was told its last three
+    /// or four exchanges, each answer cut at 3,000 characters, and knew next to nothing of the rest.
+    Once,
+}
+
+impl Replay {
+    /// Characters in all, per question, per answer — the newest turns win.
+    fn budget(self) -> (usize, usize, usize) {
+        match self {
+            Replay::EveryTurn => (16_000, 2_000, 3_000),
+            Replay::Once => (40_000, 4_000, 12_000),
+        }
+    }
+}
 
 /// A repository conversation's turns so far, since its last `/clear`, for an engine that does not
 /// carry them itself. Failed turns are left out: an error is this app's sentence, not the model's.
-fn panel_transcript(conn: &Connection, project_id: &str, conversation_id: &str) -> Option<String> {
+/// Turns that do not fit are said to be missing, so the model answers "that is not in what I have"
+/// rather than inventing them.
+fn panel_transcript(conn: &Connection, project_id: &str, conversation_id: &str, replay: Replay) -> Option<String> {
+    let (budget, question_chars, answer_chars) = replay.budget();
     let turns = queries::get_conversation_messages_lite(conn, project_id, conversation_id).ok()?;
     let cleared = queries::conversation_resets(conn, conversation_id).ok().and_then(|resets| resets.into_iter().max());
     let clip = |text: &str, max: usize| -> String {
@@ -1029,19 +1060,26 @@ fn panel_transcript(conn: &Connection, project_id: &str, conversation_id: &str) 
         .iter()
         .filter(|turn| !turn.is_error && !turn.answer.trim().is_empty())
         .filter(|turn| cleared.as_deref().map_or(true, |at| turn.created_at.as_str() > at))
-        .map(|turn| format!("User: {}\nAssistant: {}", clip(&turn.question, 2_000), clip(&turn.answer, 3_000)))
+        .map(|turn| format!("User: {}\nAssistant: {}", clip(&turn.question, question_chars), clip(&turn.answer, answer_chars)))
         .collect();
     let mut kept: Vec<&String> = Vec::new();
     let mut total = 0;
     for part in parts.iter().rev() {
-        if total + part.len() > PANEL_REPLAY_CHARS && !kept.is_empty() {
+        if total + part.len() > budget && !kept.is_empty() {
             break;
         }
         total += part.len();
         kept.push(part);
     }
     kept.reverse();
-    (!kept.is_empty()).then(|| kept.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("\n\n"))
+    if kept.is_empty() {
+        return None;
+    }
+    let body = kept.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("\n\n");
+    Some(match parts.len() - kept.len() {
+        0 => body,
+        left_out => format!("[…{left_out} turnos anteriores omitidos: no los tienes. Si te preguntan por ellos, dilo en vez de suponer.]\n\n{body}"),
+    })
 }
 
 /// Open-ended chat about the project — "preguntas abiertas del repositorio", the free-text
@@ -1088,6 +1126,7 @@ pub async fn send_chat_message(
     let editor = editor.unwrap_or_default();
     let mut context_sources: Vec<crate::context::ContextSource> = Vec::new();
     let mut learned_memory: Option<String> = None;
+    let mut learned_outcome: Option<crate::ai_memory::Remembered> = None;
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         // Moved to the chat workspace (`chat_cmd::chat_move_from_panel`): it lives there now, and a
@@ -1253,8 +1292,9 @@ pub async fn send_chat_message(
     // account: the transcript draws that line as "nothing above this is in context", and it stays
     // true. After a `/clear` there is nothing to replay, since the transcript starts there.
     if !config.engine.resumes_sessions() || (session_id.is_none() && !account_changed) {
+        let kind = if config.engine.resumes_sessions() { Replay::Once } else { Replay::EveryTurn };
         let replay = conversation_id.as_deref().and_then(|id| {
-            db.0.lock().ok().and_then(|conn| panel_transcript(&conn, &project_id, id))
+            db.0.lock().ok().and_then(|conn| panel_transcript(&conn, &project_id, id, kind))
         });
         if let Some(replay) = replay {
             enabled_contexts.push(("Conversation so far".to_string(), replay));
@@ -1304,31 +1344,48 @@ pub async fn send_chat_message(
         Some(note) => format!("{engine_message}{note}"),
         None => engine_message,
     };
+    // The blocks below that are not this turn's own — rules, the editor's state, memories — are said
+    // to a resumed session only when it does not already hold them (`context::said`).
+    let said_key = conversation_id.clone().unwrap_or_else(|| format!("panel:{project_id}"));
+    let mut said = crate::context::said::Blocks::new(&said_key, session_id.as_deref().filter(|_| config.engine.resumes_sessions()));
     // A conversation, not a story's or a hybrid task's step: how long to answer, and how to ask the
     // user something back — `ai::chat_turn_rules`.
     if step.is_none() {
         if let Ok(conn) = db.0.lock() {
-            engine_message.push_str(&ai::chat_turn_rules(&conn));
+            engine_message.push_str(said.say("rules", &ai::chat_turn_rules(&conn)));
         }
         let mentioned = ai::mentioned_paths(&asked, &project.local_path);
         context_sources.extend(crate::context::mention_sources(&mentioned));
         if let Some(note) = ai::mention_note(&mentioned) {
             engine_message.push_str(&note);
         }
-        let diffs = special_mention_notes(&asked, &project.local_path);
+        // What leaves for a cloud engine leaves without the keys in it: a diff of a `.env`, a token
+        // pasted into an unsaved buffer. The user's rule — credentials are used, never handed over —
+        // holds for what the app itself attaches, not only for what `cf` returns.
+        let cloud = config.provider != crate::local_agent::PROVIDER_ID;
+        let scrub = |text: String| if cloud { crate::secret_scan::redact(&text).0 } else { text };
+        // Notes cited as `[[Título]]`, read in full under the knowledge rules.
+        if let Ok(conn) = db.0.lock() {
+            if let Some((note, sources)) = ai::note_mention_note(&conn, Some(&workspace_id), &asked, cloud) {
+                engine_message.push_str(&note);
+                context_sources.extend(sources);
+            }
+        }
+        let diffs = scrub(special_mention_notes(&asked, &project.local_path));
         if !diffs.is_empty() {
             context_sources.push(crate::context::ContextSource::new(crate::context::SourceKind::Diff, "diff", None));
         }
         engine_message.push_str(&diffs);
         let (editor_note, editor_sources) = crate::context::editor_note(&editor, std::path::Path::new(&project.local_path));
-        engine_message.push_str(&editor_note);
+        let editor_note = scrub(editor_note);
+        engine_message.push_str(said.say("editor", &editor_note));
         context_sources.extend(editor_sources);
         // Memories the user approved for this project (`crate::ai_memory`) — a cloud engine gets only
         // the ones not marked local-only — and a "recuerda que…" in the question becomes one.
         if let Ok(conn) = db.0.lock() {
             let cloud = config.provider != crate::local_agent::PROVIDER_ID;
             if let Some(rule) = crate::ai_memory::remember_request(&asked) {
-                if let Ok(memory) = crate::ai_memory::create(
+                if let Ok((memory, outcome)) = crate::ai_memory::remember(
                     &conn,
                     crate::ai_memory::NewMemory {
                         scope: Some(crate::ai_memory::Scope::Project),
@@ -1336,17 +1393,17 @@ pub async fn send_chat_message(
                         project_id: Some(project_id.clone()),
                         kind: Some(crate::ai_memory::Kind::Preference),
                         title: rule,
-                        approved: true,
                         source: Some("user".into()),
                         ..Default::default()
                     },
                 ) {
                     learned_memory = Some(memory.title);
+                    learned_outcome = Some(outcome);
                 }
             }
             if let Ok(found) = crate::ai_memory::relevant(&conn, Some(&workspace_id), Some(&project_id), &asked, cloud, MEMORY_NOTE_CHARS) {
                 if let Some((note, sources)) = crate::ai_memory::note(&found) {
-                    engine_message.push_str(&note);
+                    engine_message.push_str(said.say("memories", &note));
                     context_sources.extend(sources);
                 }
             }
@@ -1369,6 +1426,24 @@ pub async fn send_chat_message(
         // from being read as a command. Same rule, same reason, as in `chat_cmd::chat_send`.
         if super::chat_cmd::is_cli_command(&asked) {
             engine_message = asked.clone();
+            said = crate::context::said::Blocks::new(&said_key, None);
+        }
+    } else if analysis && matches!(config.provider.as_str(), "gemini" | "grok") {
+        // A task's step leans on the map server for memories and knowledge (`recall`,
+        // `search_knowledge`) — which a read-only Gemini or Grok run is never given (`ai::run`
+        // hands them a server only on runs that may write). Without this the step had neither, so
+        // they ride the step's message, as they do this chat's.
+        if let Ok(conn) = db.0.lock() {
+            if let Ok(found) = crate::ai_memory::relevant(&conn, Some(&workspace_id), Some(&project_id), &asked, true, MEMORY_NOTE_CHARS) {
+                if let Some((note, sources)) = crate::ai_memory::note(&found) {
+                    engine_message.push_str(&note);
+                    context_sources.extend(sources);
+                }
+            }
+            if let Some((note, sources)) = crate::knowledge::prompt_note(&conn, &project.local_path, &asked) {
+                engine_message.push_str(&note);
+                context_sources.extend(sources);
+            }
         }
     }
     // Claude Code denies, in `-p`, any tool nobody pre-approved, and `Skill` is the one that opens a
@@ -1473,7 +1548,10 @@ pub async fn send_chat_message(
         conversation_id.unwrap_or_else(|| format!("conv-{}", uuid::Uuid::new_v4()));
 
     let run = match result {
-        Ok(run) => run,
+        Ok(run) => {
+            said.settle(run.session_id.as_deref());
+            run
+        }
         Err(e) => {
             // A run the user stopped isn't history: it has no answer, and filing it would leave
             // a permanent failed turn in the transcript for something they did on purpose.
@@ -1609,6 +1687,7 @@ pub async fn send_chat_message(
         context_tokens: run.context_tokens,
         context: context_sources,
         learned_memory,
+        learned_outcome,
     })
 }
 
@@ -1719,6 +1798,7 @@ async fn run_hybrid_execute(
                 context_tokens: None,
                 context: Vec::new(),
                 learned_memory: None,
+                learned_outcome: None,
             })
         }
     }
@@ -1894,6 +1974,36 @@ mod tests {
         queries::set_setting(&conn, "ai_provider", "").unwrap();
         assert!(routed_providers(&conn).unwrap().contains("claude"));
     }
+
+    /// A branch («Bifurcar desde aquí») starts a fresh session that is told the conversation once:
+    /// all of a long thread it can afford, not the three or four exchanges an engine with no session
+    /// is re-sent every turn — and, when even that does not fit, told that turns are missing.
+    #[test]
+    fn a_branch_is_told_its_conversation_and_what_it_left_out() {
+        let conn = install();
+        conn.execute("INSERT INTO workspaces (id, name, sort_order, created_at) VALUES ('w', 'W', 0, '2026-01-01T00:00:00Z')", []).unwrap();
+        conn.execute("INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at) VALUES ('p', 'w', 'P', '/tmp', 0, '2026-01-01T00:00:00Z')", []).unwrap();
+        let meta = || queries::TurnMeta { provider: Some("claude"), account_id: None, model: None, engine_version: None, response_time_ms: None };
+        let mut last = String::new();
+        for n in 0..12 {
+            let answer = format!("respuesta {n} {}", "x".repeat(4_000));
+            last = queries::add_activity_log(&conn, "p", "conv", Some("s1"), &format!("pregunta {n}"), &answer, None, meta(), false).unwrap().created_at;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(queries::branch_chat_conversation(&conn, "p", "conv", "fork", &last, "t (rama)").unwrap(), 12);
+
+        let once = panel_transcript(&conn, "p", "fork", Replay::Once).unwrap();
+        let every = panel_transcript(&conn, "p", "fork", Replay::EveryTurn).unwrap();
+        let told = |text: &str| (0..12).filter(|n| text.contains(&format!("pregunta {n}\n"))).count();
+        assert!(told(&once) >= 9, "the branch hears most of it: {}", told(&once));
+        assert!(told(&every) <= 5, "the every-turn replay stays short: {}", told(&every));
+        assert!(once.contains("pregunta 11") && once.contains(&"x".repeat(4_000)), "newest turn whole");
+        assert!(once.starts_with("[…") && once.contains("turnos anteriores omitidos"), "a gap is said");
+
+        let short = queries::add_activity_log(&conn, "p", "small", Some("s1"), "hola", "Hola Ana", None, meta(), false).unwrap();
+        queries::branch_chat_conversation(&conn, "p", "small", "small-fork", &short.created_at, "").unwrap();
+        assert_eq!(panel_transcript(&conn, "p", "small-fork", Replay::Once).as_deref(), Some("User: hola\nAssistant: Hola Ana"));
+    }
 }
 
 /// A fix's verification, kept as an experience: whether the command passed after the model's change
@@ -1907,4 +2017,3 @@ fn record_verification(repo: &str, command: &str, passed: bool, attempt: u8) {
         serde_json::json!({ "command": command, "attempt": attempt, "at": chrono::Utc::now().timestamp_millis() }),
     );
 }
-

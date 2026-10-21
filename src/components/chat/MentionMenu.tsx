@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Braces, Folder, FolderGit2, GitBranch, GitCompareArrows } from "lucide-react";
+import { Braces, Folder, FolderGit2, GitBranch, GitCompareArrows, StickyNote } from "lucide-react";
 import { FileGlyph } from "../common/FileGlyph";
 import { listRepoFiles } from "../../lib/tauri/commands";
+import { notesLoadTree } from "../../lib/tauri/notesCommands";
 import { codemapFind, type SymbolHit } from "../../lib/tauri/codemapCommands";
 import { rankPaths } from "../../lib/fuzzyPath";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -16,6 +17,9 @@ import { useLanguageStore, useT } from "../../state/languageStore";
  *   `@rama`, what the branch adds over its base (`ai::special_mentions`, which attaches the diffs).
  * - **Workspace chat** (`repos`): the repositories first (`@api/`), then that repository's paths
  *   (`@api/src/app.ts`) — `ai::workspace_mentioned_paths` resolves them to absolute paths.
+ * - **Both** (`workspaceId`): `[[` and part of a title offers the workspace's notes, inserted as
+ *   `[[Título]]` — Notas' own link syntax — which `ai::note_mention_note` reads into the turn in
+ *   full, under the knowledge rules (never a local-only book for a cloud engine).
  */
 
 /** Rows offered. The list is narrowed by typing, not by scrolling. */
@@ -34,7 +38,7 @@ const cache = new Map<string, { at: number; paths: string[] }>();
 
 /** One row of the menu. `insert` is what goes after the `@`. */
 export interface MentionItem {
-  kind: "path" | "symbol" | "changes" | "branch" | "repo";
+  kind: "path" | "symbol" | "changes" | "branch" | "repo" | "note";
   insert: string;
   /** The bold part of the row and the muted part after it. */
   label: string;
@@ -81,6 +85,53 @@ function useRepoPaths(repoPath: string | null, enabled: boolean): string[] {
     };
   }, [repoPath, enabled]);
   return paths;
+}
+
+const noteCache = new Map<string, { at: number; titles: { title: string; book: string }[] }>();
+
+/** The workspace's note titles (its own and the global ones), for `[[`. */
+function useNoteTitles(workspaceId: string | null, enabled: boolean): { title: string; book: string }[] {
+  const [titles, setTitles] = useState<{ title: string; book: string }[]>(() => (workspaceId ? (noteCache.get(workspaceId)?.titles ?? []) : []));
+  useEffect(() => {
+    if (!enabled || !workspaceId) return;
+    const hit = noteCache.get(workspaceId);
+    if (hit) setTitles(hit.titles);
+    if (hit && Date.now() - hit.at < FRESH_MS) return;
+    let live = true;
+    void notesLoadTree(workspaceId)
+      .then((tree) => {
+        const books = new Map(tree.books.map((book) => [book.id, book.name]));
+        const all = tree.notes
+          .filter((note) => note.title.trim())
+          .map((note) => ({ title: note.title.trim(), book: note.book_id ? (books.get(note.book_id) ?? "") : "" }));
+        noteCache.set(workspaceId, { at: Date.now(), titles: all });
+        if (live) setTitles(all);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [workspaceId, enabled]);
+  return titles;
+}
+
+/** Case and accents folded, as the backend matches a cited title. */
+function fold(text: string): string {
+  return text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+/** The `[[title` being typed at the caret — where its `[[` starts and what follows — or `null`. */
+export function noteMentionAt(text: string, caret: number): { start: number; query: string } | null {
+  const match = /\[\[([^\[\]\n]*)$/.exec(text.slice(0, caret));
+  if (!match) return null;
+  return { start: caret - match[1].length - 2, query: match[1] };
+}
+
+/** `text` with the `[[…` at `start` replaced by the whole link and a space, and where the caret goes. */
+export function insertNoteMention(text: string, start: number, caret: number, title: string): { text: string; caret: number } {
+  const inserted = `[[${title}]] `;
+  const rest = text.slice(caret).replace(/^[^\s\]]*\]{0,2}/, "").replace(/^ /, "");
+  return { text: text.slice(0, start) + inserted + rest, caret: start + inserted.length };
 }
 
 /** The index's declarations matching `query`, asked once typing pauses. */
@@ -153,6 +204,7 @@ function pathItem(path: string, prefix = ""): MentionItem {
 export function useMentions({
   repoPath = null,
   repos,
+  workspaceId = null,
   text,
   caret,
   onInsert,
@@ -161,13 +213,16 @@ export function useMentions({
   repoPath?: string | null;
   /** The workspace chat's repositories, instead. */
   repos?: { name: string; path: string }[];
+  /** Whose notes `[[` offers. */
+  workspaceId?: string | null;
   text: string;
   caret: number;
   onInsert: (next: { text: string; caret: number }) => void;
 }) {
   const t = useT();
   const language = useLanguageStore((s) => s.language);
-  const mention = mentionAt(text, caret);
+  const noteMention = workspaceId ? noteMentionAt(text, caret) : null;
+  const mention = noteMention ?? mentionAt(text, caret);
   const [dismissedAt, setDismissedAt] = useState<number | null>(null);
   const active = mention !== null && dismissedAt !== mention.start;
   const query = mention?.query ?? "";
@@ -177,11 +232,20 @@ export function useMentions({
   const inRepo = repos && slash > 0 ? (repos.find((repo) => mentionName(repo.name) === query.slice(0, slash)) ?? null) : null;
   const listedRepo = repos ? (inRepo?.path ?? null) : repoPath;
   const pathQuery = inRepo ? query.slice(slash + 1) : query;
-  const paths = useRepoPaths(listedRepo, active && (!repos || inRepo !== null));
-  const symbols = useSymbols(repoPath, query, active && !repos);
+  const paths = useRepoPaths(listedRepo, active && !noteMention && (!repos || inRepo !== null));
+  const symbols = useSymbols(repoPath, query, active && !noteMention && !repos);
+  const notes = useNoteTitles(workspaceId, active && noteMention !== null);
 
   const items = useMemo<MentionItem[]>(() => {
     if (!active) return [];
+    if (noteMention) {
+      const needle = fold(query.trim());
+      const label = t("chat.mentionNote");
+      return notes
+        .filter((note) => fold(note.title).includes(needle))
+        .slice(0, MAX_ROWS)
+        .map((note) => ({ kind: "note" as const, insert: note.title, label: note.title, detail: note.book || label }));
+    }
     if (repos) {
       if (inRepo) return rankPaths(paths, pathQuery, MAX_ROWS).map((path) => pathItem(path, `${mentionName(inRepo.name)}/`));
       const needle = query.toLowerCase();
@@ -204,7 +268,7 @@ export function useMentions({
     }));
     const rest = MAX_ROWS - special.length - found.length;
     return [...special, ...found, ...rankPaths(paths, query, Math.max(0, rest)).map((path) => pathItem(path))];
-  }, [active, repos, inRepo, paths, pathQuery, query, symbols, language, t]);
+  }, [active, noteMention, notes, repos, inRepo, paths, pathQuery, query, symbols, language, t]);
 
   const [index, setIndex] = useState(0);
   useEffect(() => setIndex(0), [mention?.query, mention?.start]);
@@ -215,7 +279,7 @@ export function useMentions({
 
   const pick = (item: MentionItem) => {
     if (!mention) return;
-    onInsert(insertMention(text, mention.start, caret, item.insert));
+    onInsert(item.kind === "note" ? insertNoteMention(text, mention.start, caret, item.insert) : insertMention(text, mention.start, caret, item.insert));
   };
 
   const onKeyDown = (e: React.KeyboardEvent): boolean => {
@@ -256,6 +320,8 @@ function ItemIcon({ item }: { item: MentionItem }) {
       return <GitBranch size={12} className={muted} />;
     case "repo":
       return <FolderGit2 size={12} className={muted} />;
+    case "note":
+      return <StickyNote size={12} className={muted} />;
     case "symbol":
       return <Braces size={12} className="shrink-0 text-[var(--cf-accent)]" />;
     case "path":

@@ -25,7 +25,7 @@ import type { DiagramFormat } from "../../types/diagrams";
  * own CLI renders (`archify`). A diagram is only ever offered the ones its own format is written in
  * — see `DiagramsView`'s export menus, which are built per format.
  */
-export type ExportFormat = "png" | "svg" | "pdf" | "drawio" | "dbml" | "excalidraw" | "html" | "archify" | "mermaid";
+export type ExportFormat = "png" | "svg" | "pdf" | "drawio" | "dbml" | "excalidraw" | "html" | "archify" | "mermaid" | "arch";
 
 /** The dialog's filter and the extension, per format. */
 const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
@@ -40,6 +40,8 @@ const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
   // one comes from the suggested name instead — see `DiagramsView.openArchifyExportMenu`.
   archify: { name: "Archify", extensions: ["json"] },
   mermaid: { name: "Mermaid", extensions: ["mmd"] },
+  // An Arquitectura document; the suggested name carries the `.arch.json` the bridge opens it by.
+  arch: { name: "Arquitectura", extensions: ["json"] },
 };
 
 /**

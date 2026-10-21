@@ -78,6 +78,7 @@ mod oauth;
 mod onedrive;
 mod opencode;
 mod paths;
+mod architecture;
 mod power;
 mod pr_link;
 mod prettier;
@@ -105,6 +106,11 @@ mod services;
 mod shell_env;
 mod shell_integration;
 mod shell_profiles;
+/// `cf guard`'s rules for a destructive shell line, compiled from the sidecar's own file so the app's
+/// agent asks about exactly what Claude Code's hook asks about.
+#[path = "../cf/src/rules.rs"]
+#[allow(dead_code)]
+mod shell_rules;
 /// The one cleanup every way out of the app runs — the `Exit` event and a Windows update alike.
 mod shutdown;
 /// AWS request signing, shared by the API client and the Remote workspace's S3 transport.
@@ -2357,6 +2363,13 @@ sharded_invoke_handler! {
         commands::api_cmd::api_backfill_share_projects,
         commands::api_cmd::api_sync_conflicts,
         commands::api_cmd::api_resolve_conflict,
+        commands::architecture_cmd::architecture_ai,
+        commands::architecture_cmd::architecture_generate,
+        commands::architecture_cmd::architecture_scan_repo,
+        commands::architecture_cmd::architecture_cloud_contexts,
+        commands::architecture_cmd::architecture_cloud_scopes,
+        commands::architecture_cmd::architecture_cloud_plan,
+        commands::architecture_cmd::architecture_cloud_read,
     ]
 }
 

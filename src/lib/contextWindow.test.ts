@@ -6,6 +6,7 @@ import {
   contextSplit,
   estimateTokens,
   formatTokens,
+  leavesContextAsIs,
 } from "./contextWindow";
 
 // The window these numbers are divided by comes from Rust — `ai::context_window_for`, tested in
@@ -99,5 +100,24 @@ describe("contextSplit", () => {
   it("refuses to claim an overhead of zero or less", () => {
     expect(contextSplit(30_000, 30_000)).toBeNull();
     expect(contextSplit(30_000, 44_000)).toBeNull();
+  });
+});
+
+describe("leavesContextAsIs", () => {
+  // The CLI answers these itself, so the turn reports no prompt — and the meter must not read that
+  // as the context having emptied out (user report, 2026-10-21).
+  it("is the commands that never reach the model", () => {
+    expect(leavesContextAsIs("/context")).toBe(true);
+    expect(leavesContextAsIs("  /usage ")).toBe(true);
+    expect(leavesContextAsIs("/CONTEXT")).toBe(true);
+  });
+
+  it("is not a command that changes the context, nor a sentence about one", () => {
+    expect(leavesContextAsIs("/compact")).toBe(false);
+    expect(leavesContextAsIs("/clear")).toBe(false);
+    expect(leavesContextAsIs("/init")).toBe(false);
+    expect(leavesContextAsIs("/contexto")).toBe(false);
+    expect(leavesContextAsIs("¿qué muestra /context?")).toBe(false);
+    expect(leavesContextAsIs("/context\nexplícame la tabla")).toBe(false);
   });
 });

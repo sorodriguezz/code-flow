@@ -40,6 +40,9 @@ export type LayoutKey =
   | "notesOutlineWidth"
   | "diagramsSidebarWidth"
   | "flowsSidebarWidth"
+  | "architectureSidebarWidth"
+  | "architectureEditorWidth"
+  | "architecturePanelWidth"
   | "vaultSidebarWidth"
   | "chatSidebarWidth"
   | "dbmlEditorWidth"
@@ -89,6 +92,9 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   notesOutlineWidth: "layout_notes_outline_width",
   diagramsSidebarWidth: "layout_diagrams_sidebar_width",
   flowsSidebarWidth: "layout_flows_sidebar_width",
+  architectureSidebarWidth: "layout_architecture_sidebar_width",
+  architectureEditorWidth: "layout_architecture_editor_width",
+  architecturePanelWidth: "layout_architecture_panel_width",
   vaultSidebarWidth: "layout_vault_sidebar_width",
   chatSidebarWidth: "layout_chat_sidebar_width",
   dbmlEditorWidth: "layout_dbml_editor_width",
@@ -171,6 +177,10 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   diagramsSidebarWidth: 288,
   // Narrower than the diagrams' tree: a flow row is a glyph and a name, and the canvas wants the room.
   flowsSidebarWidth: 248,
+  // Arquitectura's list is titles only, and the canvas, the JSON and a lens panel share the rest.
+  architectureSidebarWidth: 220,
+  architectureEditorWidth: 380,
+  architecturePanelWidth: 330,
   vaultSidebarWidth: 300,
   // The conversation list, and narrow on purpose. A row here is a title and a timestamp, and the
   // titles are auto-generated from the first message truncated at 60 characters — so past roughly

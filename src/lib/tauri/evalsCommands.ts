@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
  * `src-tauri/src/evals/report.rs` and `src-tauri/src/model_registry/store.rs`.
  */
 
-export type EvalSuite = "speed" | "tools" | "text" | "agent";
+export type EvalSuite = "speed" | "tools" | "text" | "agent" | "retrieval";
 
 export interface EvalProgress {
   step: string;

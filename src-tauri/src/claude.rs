@@ -61,7 +61,8 @@ fn write_system_prompt_file(inv: &AiInvocation, sp: &str) -> Option<std::path::P
 
 /// The whole system prompt of a text-only run whose task brings none of its own: those tasks say
 /// everything in the ask, and Claude Code's own prompt is written for an agent this run is not.
-const TEXT_ONLY_SYSTEM_PROMPT: &str = "Eres un asistente integrado en CodeFlow. Sigue al pie de la letra las \
+/// Every engine that can replace its CLI's prompt uses this one (`codex.rs` too).
+pub(crate) const TEXT_ONLY_SYSTEM_PROMPT: &str = "Eres un asistente integrado en CodeFlow. Sigue al pie de la letra las \
     instrucciones del mensaje y responde solo con lo que piden.";
 
 /// The settings a run adds over the user's own, as JSON, or `None` when it adds nothing.
@@ -297,6 +298,14 @@ impl AiEngine for ClaudeEngine {
     /// and an empty report is dropped by the caller.
     fn reported_usage(&self, stdout: &str, _stderr: &str) -> Option<AiUsage> {
         result_payload(stdout).as_ref().and_then(usage_of)
+    }
+
+    /// `total_cost_usd` is the session's, not the run's: a resumed run starts from the total the
+    /// session's `cost-state` kept (2.1.305) — turn 2 of a Haiku chat reported turn 1's $0.00396
+    /// plus its own $0.00115. The tokens beside it in `usage` are the run's own.
+    fn session_cost(&self, stdout: &str) -> Option<(String, f64)> {
+        let verdict = result_payload(stdout)?;
+        Some((verdict.session_id?, verdict.total_cost_usd?))
     }
 
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
@@ -874,6 +883,25 @@ struct ClaudeUsage {
     cache_creation_input_tokens: i64,
 }
 
+/// The model that wrote this run's answer: the last step of the main thread that a model took.
+///
+/// Read from the steps because `modelUsage` is the session's, like the cost — a conversation that
+/// switched model mid-way lists both, and [`model_used`] then cannot say. A subagent's steps
+/// (`parent_tool_use_id` set) are its own model's, and a CLI-answered command's are `<synthetic>`.
+fn last_step_model(stdout: &str) -> Option<String> {
+    stdout.lines().rev().map(str::trim).filter(|line| line.starts_with('{')).find_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+            return None;
+        }
+        if value.get("parent_tool_use_id").is_some_and(|parent| !parent.is_null()) {
+            return None;
+        }
+        let model = value.get("message")?.get("model")?.as_str()?.trim();
+        (!model.is_empty() && model != "<synthetic>").then(|| model.to_string())
+    })
+}
+
 fn model_used(parsed: &ClaudeCliResult) -> Option<String> {
     match parsed.model_usage.len() {
         1 => parsed.model_usage.keys().next().cloned(),
@@ -890,7 +918,15 @@ fn usage_of(parsed: &ClaudeCliResult) -> Option<AiUsage> {
         cache_write_tokens: usage.cache_creation_input_tokens,
         cost_usd: parsed.total_cost_usd,
     };
-    match reported.is_empty() {
+    // A run that asked the model nothing — `/context` and `/usage`, answered by the CLI itself —
+    // bills zero tokens and still carries `total_cost_usd`, which on a resumed session is the
+    // session's spend so far (2.1.305). Recorded, every such command billed the turns before it
+    // a second time.
+    let asked_nothing = reported.input_tokens == 0
+        && reported.output_tokens == 0
+        && reported.cache_read_tokens == 0
+        && reported.cache_write_tokens == 0;
+    match reported.is_empty() || asked_nothing {
         true => None,
         false => Some(reported),
     }
@@ -1013,7 +1049,7 @@ fn interpret_output(
         if failed {
             return Err(text.to_string());
         }
-        let model = parsed.as_ref().and_then(model_used);
+        let model = last_step_model(stdout).or_else(|| parsed.as_ref().and_then(model_used));
         let usage = parsed.as_ref().and_then(usage_of);
         return Ok(AiRun {
             text: text.to_string(),
@@ -1035,7 +1071,7 @@ fn interpret_output(
         return Ok(AiRun {
             text: String::new(),
             session_id: verdict.session_id.clone(),
-            model: model_used(verdict),
+            model: last_step_model(stdout).or_else(|| model_used(verdict)),
             usage: usage_of(verdict),
             context_tokens: last_step_context(stdout),
         });
@@ -1709,6 +1745,55 @@ mod tests {
             last_step_context(r#"{"type":"result","usage":{"input_tokens":900,"cache_read_input_tokens":12000}}"#),
             None,
         );
+    }
+
+    /// `/context` on a resumed session, as 2.1.305 prints it: a synthetic message, zero tokens, and
+    /// the cost of the turns before it. Nothing of that was spent by this run.
+    #[test]
+    fn a_command_the_cli_answered_itself_costs_nothing() {
+        let stdout = concat!(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Context Usage"}],"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Context Usage","num_turns":0,"local_command":"context","session_id":"s1","total_cost_usd":0.0051,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"modelUsage":{"claude-haiku-5-5":{"inputTokens":4,"outputTokens":37,"costUSD":0.0051}}}"#,
+        );
+        let run = interpret_output(true, "exit 0", stdout, "").unwrap();
+        assert_eq!(run.text, "Context Usage");
+        assert!(run.usage.is_none());
+        // And it measured nothing either: the meter keeps the figure from before (`leavesContextAsIs`).
+        assert_eq!(run.context_tokens, None);
+    }
+
+    /// The session and its running total, from the verdict — what the meter turns into the run's
+    /// own cost. A verdict without either has nothing to offer.
+    #[test]
+    fn a_verdict_names_its_session_and_running_cost() {
+        let engine = ClaudeEngine;
+        let stdout = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s1","total_cost_usd":0.0051,"usage":{"input_tokens":2,"output_tokens":4}}"#;
+        assert_eq!(engine.session_cost(stdout), Some(("s1".to_string(), 0.0051)));
+        assert_eq!(engine.session_cost(r#"{"type":"result","result":"ok","session_id":"s1"}"#), None);
+        assert_eq!(engine.session_cost(""), None);
+    }
+
+    /// `modelUsage` lists every model the *session* used, so a chat that switched model mid-way
+    /// named none. The run's last main-thread step says which one answered — not a subagent's, and
+    /// not the CLI's own `<synthetic>` reply.
+    #[test]
+    fn the_model_is_the_one_that_took_the_last_step() {
+        let stdout = concat!(
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"model":"claude-opus-5-5","content":[],"usage":{"input_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"model":"claude-haiku-5-5","content":[],"usage":{"input_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s1","usage":{"input_tokens":20,"output_tokens":5},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":9},"claude-opus-5-5":{"inputTokens":20}}}"#,
+        );
+        assert_eq!(interpret_output(true, "exit 0", stdout, "").unwrap().model.as_deref(), Some("claude-opus-5-5"));
+        // A command the CLI answered itself falls back to the one model the session used.
+        let command = concat!(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":[],"usage":{"input_tokens":0}}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Context Usage","session_id":"s1","usage":{"input_tokens":0},"modelUsage":{"claude-haiku-5-5":{"inputTokens":4}}}"#,
+        );
+        assert_eq!(interpret_output(true, "exit 0", command, "").unwrap().model.as_deref(), Some("claude-haiku-5-5"));
     }
 
     #[test]

@@ -138,6 +138,9 @@ const DiagramsView = lazy(() =>
   import("./components/diagrams/DiagramsView").then((m) => ({ default: m.DiagramsView })),
 );
 const FlowsView = lazy(() => import("./components/flows/FlowsView").then((m) => ({ default: m.FlowsView })));
+const ArchitectureView = lazy(() =>
+  import("./components/architecture/ArchitectureView").then((m) => ({ default: m.ArchitectureView })),
+);
 const ChatView = lazy(() => import("./components/chat/ChatView").then((m) => ({ default: m.ChatView })));
 
 const loadServicesDock = () =>
@@ -329,6 +332,8 @@ const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   // Automations: a flow describes the system around the code, like a diagram does, and is made
   // before — and outlives — any one repository it touches.
   { id: "flows", render: () => <FlowsView /> },
+  // Architecture documents, like diagrams: about the system, made before any one repository.
+  { id: "architecture", render: () => <ArchitectureView /> },
   // In this list because it renders with no project open, not because it follows the workspace —
   // the keyring is global. Membership here is what exempts a view from the "no project" empty
   // state, and the gate is `workspaceId !== null`, which is true whenever the app is usable.

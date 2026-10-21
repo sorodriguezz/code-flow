@@ -144,6 +144,10 @@ pub struct ChatReply {
     /// this is the turn's own, and without it the meter could only ever read the row, so it stayed
     /// on whatever the last measured turn had said.
     context_tokens: Option<i64>,
+    /// The memory a workspace chat's "recuerda que…" saved, and what saving it did — as the
+    /// repository chat's reply says them (`claude_cmd::ChatResponse`).
+    learned_memory: Option<String>,
+    learned_outcome: Option<crate::ai_memory::Remembered>,
 }
 
 /// A slash command the composer's `/` menu can offer for a provider. See
@@ -865,7 +869,10 @@ pub fn chat_caveman_resolve(argument: String) -> Option<String> {
 /// one rather than falling back to a plausible number.
 #[tauri::command]
 pub fn chat_context_window(model: String) -> Option<i64> {
-    ai::context_window_for(&model)
+    // A model this app serves itself (the «CodeFlow» provider) has the window it was started with —
+    // `num_ctx`, the server's own — which no name can tell. Known once it has been resolved; before
+    // that there is no bar rather than a wrong one, as for every local model.
+    ai::context_window_for(&model).or_else(|| crate::hybrid::runtime::known_window(&model).map(i64::from))
 }
 
 // ---------- groups ----------
@@ -1064,15 +1071,38 @@ pub fn chat_branch_conversation(
     // A thread that continued another hands its fork what it continued from: the copied prefix
     // starts where that summary ends, and without it the fork's engine would be given the middle of
     // a conversation with no beginning.
+    //
+    // For the same reason the fork keeps what the parent's engine knew up to the branch point: the
+    // compaction summary, when it covers no turn past `at_turn` (one written later summarised turns
+    // the fork does not have), and the places its context started again. Without the summary a long
+    // thread's fork was replayed only the tail of its raw turns — everything the summary had kept
+    // from the beginning was gone, which is the fork "knowing nothing" of what it came from.
+    let compaction = parent
+        .compacted_through_turn
+        .filter(|through| *through <= at_turn && !parent.compacted_summary.trim().is_empty());
+    let resets: Vec<_> = parent.context_resets.iter().filter(|reset| reset.turn <= at_turn).cloned().collect();
+    // And how the parent was set up, which is part of what its engine was told: the project it is
+    // filed under (whose instructions and documents every turn carries), the reasoning level, the
+    // answer style and the MCP switches. A fork that left its project answered without either.
+    conn.execute(
+        "UPDATE chat_conversations SET group_id = ?2, effort = ?3, caveman_level = ?4, mcp_overrides = ?5
+         WHERE id = ?1",
+        rusqlite::params![fork.id, parent.group_id, parent.effort, parent.caveman_level, parent.mcp_overrides],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE chat_conversations SET parent_conversation_id = ?2, branched_at_turn = ?3,
-             title = ?4, continued_from = ?5 WHERE id = ?1",
+             title = ?4, continued_from = ?5, compacted_summary = ?6, compacted_through_turn = ?7,
+             context_resets = ?8 WHERE id = ?1",
         rusqlite::params![
             fork.id,
             parent.id,
             at_turn,
             parent.title,
-            chat_queries::continuation_column(parent.continued_from.as_ref())
+            chat_queries::continuation_column(parent.continued_from.as_ref()),
+            if compaction.is_some() { parent.compacted_summary.as_str() } else { "" },
+            compaction,
+            if resets.is_empty() { String::new() } else { serde_json::to_string(&resets).unwrap_or_default() }
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1617,13 +1647,18 @@ pub async fn chat_send(
     // What the engine is actually asked, which is the user's question plus the style rules when the
     // conversation is in a mode. Built here, after the question has been persisted above, so the
     // two can never be confused: `message` is what was asked, `engine_message` is what was sent.
+    let mut learned_memory: Option<String> = None;
+    let mut learned_outcome: Option<crate::ai_memory::Remembered> = None;
+    // The blocks below that are not this turn's own — rules, the workspace's state, memories — are
+    // said to a resumed session only when it does not already hold them (`context::said`).
+    let mut said = crate::context::said::Blocks::new(&conversation_id, session_id.as_deref().filter(|_| config.engine.resumes_sessions()));
     let mut engine_message = match caveman.as_deref() {
         Some(rules) => format!("{message}\n\n{rules}"),
         None => message.clone(),
     };
     // How long to answer, and how to ask the user something back — `ai::chat_turn_rules`.
     if let Ok(conn) = db.0.lock() {
-        engine_message.push_str(&ai::chat_turn_rules(&conn));
+        engine_message.push_str(said.say("rules", &ai::chat_turn_rules(&conn)));
     }
     // A skill picked in the composer, said to the engine and not to the transcript — the same split
     // as the style rules above. An app skill is pointed at the copy synced into this very folder,
@@ -1633,6 +1668,14 @@ pub async fn chat_send(
         let local = (pick.source == "app").then(|| format!("{root}/{}/SKILL.md", pick.name.trim()));
         engine_message.push_str("\n\n");
         engine_message.push_str(&crate::provider_skills::instruction(&config.provider, pick, local.as_deref()));
+    }
+    // Notes cited as `[[Título]]`, read in full under the knowledge rules. These chats run on CLI
+    // engines — or on the local one, which may see a local-only book.
+    if let Ok(conn) = db.0.lock() {
+        let cloud = config.provider != crate::local_agent::PROVIDER_ID;
+        if let Some((note, _)) = ai::note_mention_note(&conn, Some(&conversation.workspace_id), &asked, cloud) {
+            engine_message.push_str(&note);
+        }
     }
     // Who else is working in this conversation's repository right now, if it has one — the same
     // invisible note the repository chat sends (see `ai::parallel_work_note`).
@@ -1649,7 +1692,7 @@ pub async fn chat_send(
         // The workspace's repositories as they are right now — paths, branches, specification
         // folders — on every turn, since a resumed session is never sent a system prompt again. Said
         // to the engine and never stored as the question, like the style rules above.
-        engine_message.push_str(&crate::workspace_chat::live_block(&ws_repos));
+        engine_message.push_str(said.say("workspace", &crate::workspace_chat::live_block(&ws_repos)));
         // `@repo/path` in the question: the engine is told to read them, as the repository chat's.
         let named: Vec<(String, String)> =
             ws_repos.iter().filter(|repo| repo.on_disk).map(|repo| (repo.name.clone(), repo.path.clone())).collect();
@@ -1657,11 +1700,29 @@ pub async fn chat_send(
             engine_message.push_str(&note);
         }
         // The workspace's and the global memories the user approved (`crate::ai_memory`). This chat
-        // runs on CLI engines, so the local-only ones stay out.
+        // runs on CLI engines, so the local-only ones stay out. A "recuerda que…" in the question
+        // becomes one first — of the workspace, since this chat speaks for all its repositories —
+        // so the rule already holds for the turn that stated it.
         if let Ok(conn) = db.0.lock() {
+            if let Some(rule) = crate::ai_memory::remember_request(&asked) {
+                if let Ok((memory, outcome)) = crate::ai_memory::remember(
+                    &conn,
+                    crate::ai_memory::NewMemory {
+                        scope: Some(crate::ai_memory::Scope::Workspace),
+                        workspace_id: Some(conversation.workspace_id.clone()),
+                        kind: Some(crate::ai_memory::Kind::Preference),
+                        title: rule,
+                        source: Some("user".into()),
+                        ..Default::default()
+                    },
+                ) {
+                    learned_memory = Some(memory.title);
+                    learned_outcome = Some(outcome);
+                }
+            }
             if let Ok(found) = crate::ai_memory::relevant(&conn, Some(&conversation.workspace_id), None, &asked, true, 3_000) {
                 if let Some((note, _)) = crate::ai_memory::note(&found) {
-                    engine_message.push_str(&note);
+                    engine_message.push_str(said.say("memories", &note));
                 }
             }
             // Agy and Grok take no server here: the passages that best match the question ride it.
@@ -1680,6 +1741,7 @@ pub async fn chat_send(
     // CLI can recognise it. Last, so no note added later can quietly re-break this.
     if is_cli_command {
         engine_message = asked.clone();
+        said = crate::context::said::Blocks::new(&conversation_id, None);
     }
 
     let started = std::time::Instant::now();
@@ -1732,6 +1794,7 @@ pub async fn chat_send(
                 app_mcp: turn_mcp.app.iter().cloned().chain(ws_knowledge.as_ref().map(|(server, _)| server.clone())).collect(),
                 json_schema: None,
                 extra_dirs: &ws_extra_dirs,
+                text_only: false,
             },
         )
         .await
@@ -1778,7 +1841,10 @@ pub async fn chat_send(
     };
 
     let run = match result {
-        Ok(run) => run,
+        Ok(run) => {
+            said.settle(run.session_id.as_deref());
+            run
+        }
         Err(e) => {
             let cancelled = e.starts_with(ai_runs::CANCELLED_MARKER);
             if let Ok(conn) = db.0.lock() {
@@ -1910,6 +1976,8 @@ pub async fn chat_send(
         outputs: produced_paths,
         checkpoints: turn_checkpoints,
         context_tokens: run.context_tokens,
+        learned_memory,
+        learned_outcome,
     })
 }
 
@@ -2050,6 +2118,8 @@ async fn flow_turn(
         checkpoints: None,
         // A flow is no model with a window to fill.
         context_tokens: None,
+        learned_memory: None,
+        learned_outcome: None,
     })
 }
 
@@ -2448,6 +2518,13 @@ fn needs_compacting(
             (Some(tokens), Some(window)) if window > 0 => {
                 tokens as f64 / window as f64 >= AUTO_COMPACT_AT
             }
+            // An engine that reports nothing (every CLI but Claude) still holds at least the
+            // conversation itself, which is on disk: counted at the meter's 3.5 characters a token,
+            // it is a floor — the session also carries the agent's prompt and every file it read —
+            // so this triggers late rather than early, and never on a guess about the window.
+            (None, Some(window)) if window > 0 => {
+                session_chars(conn, conversation) as f64 / CHARS_PER_TOKEN / window as f64 >= AUTO_COMPACT_AT
+            }
             _ => false,
         }
     } else {
@@ -2460,6 +2537,27 @@ fn needs_compacting(
             })
             .unwrap_or(false)
     }
+}
+
+/// The meter's characters per token (`lib/contextWindow.ts`), for the estimate in
+/// [`needs_compacting`].
+const CHARS_PER_TOKEN: f64 = 3.5;
+
+/// How much of this conversation its current session holds as text: the turns since the last
+/// reset and past the compaction cut, plus the summary that stands in for the rest — what
+/// [`replayed_prefix`] would replay, without its budget.
+fn session_chars(conn: &Connection, conversation: &ChatConversation) -> usize {
+    let through = conversation.compacted_through_turn.filter(|_| !conversation.compacted_summary.trim().is_empty());
+    let starts_at = conversation.context_resets.iter().map(|reset| reset.turn).max();
+    let Ok(messages) = chat_queries::list_messages(conn, &conversation.id, false) else { return 0 };
+    let turns: usize = messages
+        .iter()
+        .filter(|m| !m.is_cancelled && !m.is_error)
+        .filter(|m| starts_at.is_none_or(|start| m.turn >= start))
+        .filter(|m| through.is_none_or(|cut| m.turn > cut))
+        .map(|m| m.content.chars().count())
+        .sum();
+    turns + if through.is_some() { conversation.compacted_summary.chars().count() } else { 0 }
 }
 
 /// The body of a compaction, with no lease of its own.
@@ -2573,12 +2671,14 @@ async fn summarize(
                 // on a précis.
                 effort: None,
                 attachments: &[],
-                // It reads a transcript and writes a paragraph; nothing else is its business.
+                // It reads a transcript and writes a paragraph; nothing else is its business — not
+                // a tool, not a server, not the agent's own prompt (see `AiInvocation::text_only`).
                 read_only: true,
                 mcp_block: Vec::new(),
                 app_mcp: Vec::new(),
                 json_schema: None,
                 extra_dirs: &[],
+                text_only: true,
             },
         )
         .await
@@ -2781,12 +2881,15 @@ fn replayed_prefix(conn: &Connection, conversation_id: &str) -> Option<String> {
         (Some((summary, _)), _) => format!(
             "Resumen de la parte anterior de esta conversación, hecho por ti mismo en una compactación \
              previa. Es lo único que queda de esos mensajes: trátalo como tu propia memoria de lo ya \
-             hablado, no como algo que el usuario acabe de decir.\n\n{summary}"
+             hablado, no como algo que el usuario acabe de decir. Es un resumen y puede haber perdido \
+             o torcido detalles: lo que diga del código o de archivos, compruébalo antes de afirmarlo.\n\n{summary}"
         ),
         (None, Some(summary)) => format!(
             "Esta conversación continúa otra anterior, que el modelo que la llevaba resumió para \
              empezar esta. Ese resumen es lo único que queda de ella: trátalo como tu propia memoria \
-             de lo ya hablado, no como algo que el usuario acabe de decir.\n\n{summary}"
+             de lo ya hablado, no como algo que el usuario acabe de decir. Es un resumen y puede haber \
+             perdido o torcido detalles: lo que diga del código o de archivos, compruébalo antes de \
+             afirmarlo.\n\n{summary}"
         ),
         (None, None) => {
             if lines.is_empty() {
@@ -3780,5 +3883,56 @@ plain prose with no leading slash
                 "{provider} must still be able to read, or an attachment is unreadable"
             );
         }
+    }
+
+    /// A fork carries what its parent's engine knew at the branch point — the compaction summary
+    /// that covers no later turn, and where its context started again — so a branch of a long,
+    /// compacted thread is not replayed only the tail of its raw turns.
+    #[test]
+    fn a_fork_is_told_what_its_parent_knew_at_the_branch_point() {
+        use tauri::Manager;
+        let conn = install();
+        let ws = workspace(&conn);
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
+        for turn in 0..5 {
+            say(&conn, &c.id, turn, "user", &format!("pregunta {turn}"));
+            say(&conn, &c.id, turn, "assistant", &format!("respuesta {turn}"));
+        }
+        chat_queries::set_compaction(&conn, &c.id, "RESUMEN de los turnos 0 y 1", 1).unwrap();
+        let group = chat_queries::create_group(&conn, "Proyecto", "").unwrap();
+        chat_queries::set_conversation_group(&conn, &c.id, Some(&group.id)).unwrap();
+        chat_queries::set_effort(&conn, &c.id, "high").unwrap();
+        chat_queries::set_caveman_level(&conn, &c.id, "lite").unwrap();
+        chat_queries::set_mcp_overrides(&conn, &c.id, r#"{"trello":true}"#).unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(Db(std::sync::Mutex::new(conn)));
+        let db = || app.state::<Db>();
+
+        let fork = chat_branch_conversation(db(), c.id.clone(), 3).unwrap();
+        assert!(fork.engine_session_id.is_none(), "a fork never resumes its parent's session");
+        assert_eq!(fork.group_id.as_deref(), Some(group.id.as_str()), "it stays in its project");
+        assert_eq!((fork.effort.as_str(), fork.caveman_level.as_str()), ("high", "lite"));
+        assert_eq!(fork.mcp_overrides, r#"{"trello":true}"#);
+        let prefix = replayed_prefix(&db().0.lock().unwrap(), &fork.id).expect("the fork is told something");
+        assert!(prefix.contains("RESUMEN de los turnos 0 y 1"), "{prefix}");
+        assert!(prefix.contains("pregunta 2") && prefix.contains("respuesta 3"), "{prefix}");
+        assert!(!prefix.contains("pregunta 0") && !prefix.contains("pregunta 4"), "{prefix}");
+
+        // Branched before the summary's last turn: the summary speaks of turns the fork lacks, so it
+        // is replayed raw instead.
+        let early = chat_branch_conversation(db(), c.id.clone(), 0).unwrap();
+        let prefix = replayed_prefix(&db().0.lock().unwrap(), &early.id).unwrap();
+        assert!(!prefix.contains("RESUMEN") && prefix.contains("pregunta 0") && !prefix.contains("pregunta 1"), "{prefix}");
+
+        // A thread moved from the assistant with a `/clear` at turn 2 and another at 4: a fork at 3
+        // starts where its parent's context did, and the later line is not the fork's.
+        db().0.lock().unwrap().execute(
+            "UPDATE chat_conversations SET compacted_summary = '', compacted_through_turn = NULL, context_resets = ?2 WHERE id = ?1",
+            rusqlite::params![c.id, r#"[{"turn":2,"reason":"clear"},{"turn":4,"reason":"clear"}]"#],
+        ).unwrap();
+        let moved = chat_branch_conversation(db(), c.id.clone(), 3).unwrap();
+        assert_eq!(moved.context_resets.iter().map(|r| r.turn).collect::<Vec<_>>(), vec![2]);
+        let prefix = replayed_prefix(&db().0.lock().unwrap(), &moved.id).unwrap();
+        assert!(!prefix.contains("pregunta 1") && prefix.contains("pregunta 2") && prefix.contains("pregunta 3"), "{prefix}");
     }
 }

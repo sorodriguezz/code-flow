@@ -203,6 +203,14 @@ async fn local_on(app: &tauri::AppHandle, host: Option<&AppHost>, call: LocalCal
     let (kind, url, model, context) = match BackendKind::from_setting(&call.server) {
         Some(kind) => {
             let url = nonblank(&call.url).unwrap_or_else(|| settings.url_for(kind));
+            // A node may name its own server — written in the flow, perhaps by someone else — and it is
+            // held to the rule Settings is: this machine or the user's own network, never a server on
+            // the internet. Checked before the listing below, which would already be a request to it.
+            if kind != BackendKind::Bundled {
+                if let Some(why) = local_llm::cloud_refusal(&url, "") {
+                    return Err(format!("{why}."));
+                }
+            }
             let mut model = nonblank(&call.model).or_else(|| settings.model_for(kind));
             if model.is_none() {
                 model = match kind {
@@ -230,6 +238,10 @@ async fn local_on(app: &tauri::AppHandle, host: Option<&AppHost>, call: LocalCal
             (resolved.kind, resolved.url.clone(), model, context)
         }
     };
+    // …and so is its model: an Ollama cloud model on a local Ollama is still the cloud.
+    if let Some(why) = local_llm::cloud_refusal("", &model) {
+        return Err(format!("{why}."));
+    }
     let live = runtime::connect(kind, &url, &model, context).await?;
     let endpoint = match (kind, &call.api_key) {
         (BackendKind::Openai, Some(key)) => Endpoint::new(kind, &url, Some(key.clone())),
@@ -247,6 +259,12 @@ async fn local_on(app: &tauri::AppHandle, host: Option<&AppHost>, call: LocalCal
     };
     if !call.messages.is_empty() || !call.tools.is_empty() {
         return converse(app, &run_id, label, kind, &endpoint, &live.model, context, &call, cancel).await;
+    }
+    // Measured before it is sent — exactly where the server counts — so a prompt the node's window
+    // cannot hold is refused here, and one the server cut anyway is caught below.
+    let sent = measure(&endpoint, &format!("{}\n{}", call.system, call.prompt)).await;
+    if let Some(refusal) = over_window(sent, context, call.max_tokens) {
+        return Err(refusal);
     }
     let request = ChatRequest {
         model: &live.model,
@@ -281,6 +299,9 @@ async fn local_on(app: &tauri::AppHandle, host: Option<&AppHost>, call: LocalCal
         Err(LocalError::Cancelled) => return Err("The local model run was stopped from the status bar".to_string()),
         Err(error) => return Err(error.sentence()),
     };
+    if let Some(refusal) = cut_prompt(sent, outcome.prompt_tokens, context) {
+        return Err(refusal);
+    }
     let usage = crate::ai::AiUsage {
         input_tokens: outcome.prompt_tokens.unwrap_or(0) as i64,
         output_tokens: outcome.completion_tokens.unwrap_or(0) as i64,
@@ -316,6 +337,14 @@ async fn converse(
         messages.push(json!({ "role": "system", "content": call.system }));
     }
     messages.extend(call.messages.iter().cloned());
+    let text: Vec<String> = messages
+        .iter()
+        .map(|m| format!("{}{}", m["content"].as_str().unwrap_or_default(), m.get("tool_calls").map(|c| c.to_string()).unwrap_or_default()))
+        .collect();
+    let sent = measure(endpoint, &text.join("\n")).await;
+    if let Some(refusal) = over_window(sent, context, call.max_tokens) {
+        return Err(refusal);
+    }
     let request = local_llm::ConverseRequest {
         model,
         messages: &messages,
@@ -347,6 +376,9 @@ async fn converse(
         Err(LocalError::Cancelled) => return Err("The local model run was stopped from the status bar".to_string()),
         Err(error) => return Err(error.sentence()),
     };
+    if let Some(refusal) = cut_prompt(sent, outcome.prompt_tokens, context) {
+        return Err(refusal);
+    }
     let usage = crate::ai::AiUsage {
         input_tokens: outcome.prompt_tokens.unwrap_or(0) as i64,
         output_tokens: outcome.completion_tokens.unwrap_or(0) as i64,
@@ -362,6 +394,40 @@ async fn converse(
         cut: outcome.finish == local_llm::Finish::Length,
         message: Some(outcome.message),
         tool_calls: outcome.tool_calls,
+    })
+}
+
+/// A local node's prompt, counted by the server where it can (llama.cpp's `/tokenize`), estimated
+/// otherwise.
+async fn measure(endpoint: &Endpoint, text: &str) -> crate::hybrid::budget::Sent {
+    match local_llm::count_tokens(endpoint, text).await {
+        Some(exact) => crate::hybrid::budget::Sent::Exact(exact),
+        None => crate::hybrid::budget::Sent::Estimate(crate::hybrid::budget::estimate_tokens(text)),
+    }
+}
+
+/// Why a prompt counted exactly at more than the node's window leaves for its answer is not sent —
+/// the server would cut it in silence and the node pass on an answer to half a question. Only an
+/// exact count refuses ahead: the estimate runs high on purpose, and a node that fits must not be
+/// refused on a guess (the check after the answer catches what it misses).
+fn over_window(sent: crate::hybrid::budget::Sent, context: u32, max_tokens: u32) -> Option<String> {
+    match sent {
+        crate::hybrid::budget::Sent::Exact(tokens) if tokens + u64::from(max_tokens.max(16)) > u64::from(context) => Some(format!(
+            "The prompt is {tokens} tokens and the node's window of {context} keeps {} for the answer: it would be cut. Raise the node's context or shorten what it sends.",
+            max_tokens.max(16)
+        )),
+        _ => None,
+    }
+}
+
+/// Why an answer is not passed on: the server reports reading less of the prompt than it was sent.
+fn cut_prompt(sent: crate::hybrid::budget::Sent, reported: Option<u64>, context: u32) -> Option<String> {
+    crate::hybrid::budget::prompt_cut(sent, reported, Some(context)).then(|| {
+        format!(
+            "The local server cut the prompt (it read {} of {} tokens), so the answer can't be trusted. Raise the node's context or shorten what it sends.",
+            reported.unwrap_or(0),
+            sent.tokens()
+        )
     })
 }
 
@@ -560,6 +626,23 @@ mod tests {
         assert!(is_settings_server("http://127.0.0.1:11434/", own));
         assert!(!is_settings_server("https://third-party.example/v1", own));
         assert!(!is_settings_server("http://127.0.0.1:11435", own));
+    }
+
+    #[test]
+    fn a_prompt_counted_past_the_nodes_window_is_refused_and_an_estimate_never_is() {
+        use crate::hybrid::budget::Sent;
+        assert!(over_window(Sent::Exact(7_000), 8_192, 2_048).is_some(), "7,000 + 2,048 for the answer > 8,192");
+        assert!(over_window(Sent::Exact(5_000), 8_192, 2_048).is_none());
+        assert!(over_window(Sent::Estimate(9_000), 8_192, 2_048).is_none(), "the estimate runs high: the server decides");
+    }
+
+    #[test]
+    fn an_answer_to_a_prompt_the_server_cut_is_not_passed_on() {
+        use crate::hybrid::budget::Sent;
+        // Ollama handed more than num_ctx keeps exactly num_ctx.
+        let refusal = cut_prompt(Sent::Estimate(10_000), Some(8_192), 8_192).expect("cut");
+        assert!(refusal.contains("8192 of 10000"), "{refusal}");
+        assert!(cut_prompt(Sent::Exact(3_000), Some(3_020), 8_192).is_none());
     }
 }
 

@@ -94,7 +94,8 @@ impl AiEngine for OpenCodeEngine {
         // `.cmd` shims reject newline args). Order: system → ask → data, so the ask reads as the
         // primary instruction and the data as its input.
         let mut brief = String::new();
-        if let Some(sp) = inv.system_prompt {
+        // A text-only run's system prompt is its agent's prompt instead (see [`run_config`]).
+        if let Some(sp) = inv.system_prompt.filter(|_| !inv.text_only) {
             if !sp.trim().is_empty() {
                 brief.push_str(sp);
                 brief.push_str("\n\n");
@@ -136,18 +137,32 @@ impl AiEngine for OpenCodeEngine {
         // spelling is not merely ignored — yargs is strict here, so the CLI printed its own help to
         // stdout and exited 1, and *every* write flow surfaced that help text as the engine's error.
         // Verified against 1.15.7: with this flag the run reaches the model.
-        if inv.auto_approve_edits && !inv.read_only {
+        if inv.auto_approve_edits && !inv.read_only && !inv.text_only {
             cmd.arg("--dangerously-skip-permissions");
         }
-        if let Some(dir) = inv.cwd {
-            cmd.arg("--dir").arg(dir);
+        if inv.text_only {
+            // Nothing to read, so nothing to be in: an empty folder of its own, as `cline.rs` does.
+            if let Some(dir) = inv.prompt_files.dir("opencode-scratch") {
+                cmd.arg("--dir").arg(dir);
+            }
+            cmd.arg("--agent").arg(TEXT_AGENT);
+            // Skill scans of `~/.claude` and `~/.agents`: a listing a run with no tools cannot use.
+            cmd.env("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1");
+            cmd.env("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS", "1");
+        } else {
+            if let Some(dir) = inv.cwd {
+                cmd.arg("--dir").arg(dir);
+            }
+            if inv.read_only {
+                cmd.arg("--agent").arg(READ_ONLY_AGENT);
+            }
         }
         // The app's servers for this run — the repository map — as inline config, which opencode
         // merges over the user's own files (`OPENCODE_CONFIG_CONTENT`, read in its config loader on
         // 1.18.31). In the environment, never on the command line, as `claude.rs` does with its
         // `${VAR}`s. Verified on 1.18.31: `opencode mcp list` connects to it, and a run without
         // `--dangerously-skip-permissions` calls its tools (`codeflow_map_find_symbol`) unasked.
-        if let Some(config) = app_mcp_config(inv) {
+        if let Some(config) = run_config(inv) {
             cmd.env("OPENCODE_CONFIG_CONTENT", config);
         }
         // Multi-turn chat: resume *this conversation's* session by id, not whichever session the
@@ -316,10 +331,27 @@ fn write_payload_file(inv: &AiInvocation, content: &str) -> Option<std::path::Pa
 /// A value the user set themselves is kept and the servers are added to it. One that is not a JSON
 /// object (opencode also takes comments in it) is left alone, and the run goes without the map
 /// rather than without the user's config.
-fn app_mcp_config(inv: &AiInvocation) -> Option<String> {
-    let servers = crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only);
+///
+/// Two more things ride in it, for the runs that must not have the whole agent:
+///
+/// - **Text-only** ([`AiInvocation::text_only`]): an agent of the app's own, [`TEXT_AGENT`], whose
+///   `prompt` *replaces* opencode's provider prompt (`LLMRequestPrep.prepare` takes
+///   `agent.prompt` over `go.provider(model)` on 1.18.35) and whose permissions deny every tool —
+///   opencode drops a denied tool from what the model is offered. Measured against a local fake of
+///   the Anthropic API on 1.18.35: a title cost 31,264 characters of request (9.6k of prompt, ten
+///   tool schemas at 21.3k) plus a *second* model call to title the session.
+/// - **Read-only**: [`READ_ONLY_AGENT`], which may read, search and fetch and nothing else —
+///   `edit`, `bash` and `task` denied, `.env` files too (a headless run cannot answer opencode's
+///   "ask" for them) — so the limit is opencode's permission system and not only the absence of
+///   `--dangerously-skip-permissions`.
+///
+/// Either way the user's own MCP servers are switched off by name (`{"enabled": false}`, a shape
+/// the config schema takes for any entry): a run with no tools has no use for them, and a
+/// read-only one must not be handed a server that writes.
+fn run_config(inv: &AiInvocation) -> Option<String> {
+    let servers = if inv.text_only { Vec::new() } else { crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only) };
     let remote: Vec<_> = servers.iter().filter(|server| server.transport == "http").collect();
-    if remote.is_empty() {
+    if remote.is_empty() && !inv.text_only && !inv.read_only {
         return None;
     }
     let mut config = match std::env::var("OPENCODE_CONFIG_CONTENT") {
@@ -332,13 +364,140 @@ fn app_mcp_config(inv: &AiInvocation) -> Option<String> {
     if !config["mcp"].is_object() {
         config["mcp"] = serde_json::json!({});
     }
+    if inv.text_only || inv.read_only {
+        for name in users_mcp_servers(inv.cwd) {
+            config["mcp"][name.as_str()] = serde_json::json!({ "enabled": false });
+        }
+    }
     for server in remote {
         let headers: serde_json::Map<String, serde_json::Value> =
             server.headers.iter().map(|(name, value)| (name.clone(), value.clone().into())).collect();
         config["mcp"][server.name.as_str()] =
             serde_json::json!({ "type": "remote", "url": server.url, "headers": headers, "enabled": true, "oauth": false });
     }
+    if inv.text_only || inv.read_only {
+        if !config["agent"].is_object() {
+            config["agent"] = serde_json::json!({});
+        }
+    }
+    if inv.text_only {
+        let prompt = inv.system_prompt.filter(|sp| !sp.trim().is_empty()).unwrap_or(crate::claude::TEXT_ONLY_SYSTEM_PROMPT);
+        config["agent"][TEXT_AGENT] = serde_json::json!({
+            "mode": "primary",
+            "description": "CodeFlow: answers from what it is handed, with no tools",
+            "prompt": prompt,
+            "permission": { "*": "deny" },
+        });
+    } else if inv.read_only {
+        config["agent"][READ_ONLY_AGENT] = serde_json::json!({
+            "mode": "primary",
+            "description": "CodeFlow: reads and searches, changes nothing",
+            "permission": {
+                "*": "deny",
+                "read": { "*": "allow", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow" },
+                "glob": "allow",
+                "grep": "allow",
+                "list": "allow",
+                "codesearch": "allow",
+                "webfetch": "allow",
+                "websearch": "allow",
+                "skill": "allow",
+                "todowrite": "allow",
+                "todoread": "allow",
+            },
+        });
+        // The repository map's tools, by opencode's `<server>_<tool>` names.
+        config["agent"][READ_ONLY_AGENT]["permission"][format!("{}_*", crate::codemap::mcp::SERVER_NAME)] = "allow".into();
+    }
     Some(config.to_string())
+}
+
+/// The app's own opencode agents — see [`run_config`].
+const TEXT_AGENT: &str = "codeflow-text";
+const READ_ONLY_AGENT: &str = "codeflow-readonly";
+
+/// The MCP servers the user's opencode config declares — the global files under
+/// `$XDG_CONFIG_HOME/opencode` (`~/.config/opencode`) and the project's `opencode.json[c]` in
+/// `cwd` — by name. A file that does not parse names none: switching a server off is a saving, and
+/// a run is never refused over a comment this reader did not expect.
+fn users_mcp_servers(cwd: Option<&str>) -> Vec<String> {
+    let mut files = Vec::new();
+    let config_home = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".config")));
+    if let Some(home) = config_home {
+        for name in ["config.json", "opencode.json", "opencode.jsonc"] {
+            files.push(home.join("opencode").join(name));
+        }
+    }
+    if let Some(cwd) = cwd {
+        for name in ["opencode.json", "opencode.jsonc"] {
+            files.push(std::path::Path::new(cwd).join(name));
+        }
+    }
+    let mut names: Vec<String> = Vec::new();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        for name in mcp_names(&text) {
+            if name != crate::codemap::mcp::SERVER_NAME && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// The keys of a config's `mcp` object — JSON, or JSONC with `//` and `/* */` comments.
+fn mcp_names(text: &str) -> Vec<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(text).or_else(|_| serde_json::from_str::<serde_json::Value>(&strip_json_comments(text)));
+    match parsed {
+        Ok(value) => value.get("mcp").and_then(|m| m.as_object()).map(|m| m.keys().cloned().collect()).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// `text` without its comments, strings left as they are.
+fn strip_json_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            out.push(ch);
+            if ch == '\\' {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match (ch, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                out.push(ch);
+            }
+            ('/', Some('/')) => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut last = ' ';
+                for c in chars.by_ref() {
+                    if last == '*' && c == '/' {
+                        break;
+                    }
+                    last = c;
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// One line of `opencode run --format json`. Every event is `{type, timestamp, sessionID, ...data}`,
@@ -558,6 +717,61 @@ mod tests {
     fn a_session_with_no_assistant_turn_reports_nothing() {
         let empty = r#"{"info":{},"messages":[{"info":{"role":"user"}}]}"#;
         assert!(parse_export(empty).is_none());
+    }
+
+    fn config_json(cmd: &Command) -> serde_json::Value {
+        let text = cmd
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == "OPENCODE_CONFIG_CONTENT")
+            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().to_string()))
+            .expect("an inline config");
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn a_text_only_run_is_an_agent_of_its_own_with_no_tools_and_its_own_prompt() {
+        let mut inv = AiInvocation::new("Escribe un título", "la conversación");
+        inv.text_only = true;
+        inv.system_prompt = Some("Eres quien titula.");
+        let cmd = OpenCodeEngine.build_command("opencode", &inv);
+        let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|pair| pair == ["--agent", TEXT_AGENT]), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
+        let config = config_json(&cmd);
+        assert_eq!(config["agent"][TEXT_AGENT]["prompt"], "Eres quien titula.");
+        assert_eq!(config["agent"][TEXT_AGENT]["permission"]["*"], "deny");
+        // Said once, as the agent's prompt — not again in the brief.
+        let at = args.iter().position(|a| a == "--file").unwrap();
+        let brief = std::fs::read_to_string(&args[at + 1]).unwrap();
+        assert!(!brief.contains("Eres quien titula.") && brief.contains("Escribe un título"), "{brief}");
+        // In an empty folder of its own.
+        let dir = &args[args.iter().position(|a| a == "--dir").unwrap() + 1];
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_read_only_run_reads_and_searches_and_is_denied_the_rest() {
+        let mut inv = AiInvocation::new("¿qué hace esto?", "");
+        inv.read_only = true;
+        let cmd = OpenCodeEngine.build_command("opencode", &inv);
+        let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|pair| pair == ["--agent", READ_ONLY_AGENT]), "{args:?}");
+        let permission = &config_json(&cmd)["agent"][READ_ONLY_AGENT]["permission"];
+        assert_eq!(permission["*"], "deny");
+        assert_eq!(permission["grep"], "allow");
+        assert_eq!(permission["read"]["*.env"], "deny");
+        assert_eq!(permission["codeflow_map_*"], "allow");
+        for denied in ["edit", "bash", "task"] {
+            assert!(permission.get(denied).is_none(), "{denied} falls to the deny-all");
+        }
+    }
+
+    #[test]
+    fn the_users_servers_are_read_from_json_with_comments() {
+        let text = "{\n  // mine\n  \"mcp\": { \"github\": {\"type\": \"local\"}, /* x */ \"vercel\": {\"url\": \"https://a//b\"} }\n}";
+        assert_eq!(mcp_names(text), vec!["github".to_string(), "vercel".to_string()]);
+        assert!(mcp_names("not json").is_empty());
     }
 
     /// The repository map reaches opencode as inline config in its environment — its token never on

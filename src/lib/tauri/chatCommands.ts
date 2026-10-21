@@ -278,6 +278,9 @@ export interface ChatReply extends EngineReply {
   account_id?: string | null;
   /** What a workspace chat's turn changed, per repository — JSON `[{repo, path, id, paths}]`. */
   checkpoints?: string | null;
+  /** The memory a workspace chat's "recuerda que…" saved, and what saving it did. */
+  learned_memory?: string | null;
+  learned_outcome?: "new" | "approved" | "updated" | "already_known" | null;
 }
 
 // ---------- conversations ----------

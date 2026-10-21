@@ -39,8 +39,13 @@ pub fn kind_of(path: &str) -> Kind {
 
 /// `text` as chunks, by `path`'s kind.
 pub fn chunk(path: &str, text: &str) -> Vec<Chunk> {
+    chunk_as(kind_of(path), text)
+}
+
+/// `text` as chunks of `kind` — for a document that has no file name to tell (a note, a meeting).
+pub fn chunk_as(kind: Kind, text: &str) -> Vec<Chunk> {
     let lines: Vec<&str> = text.lines().collect();
-    match kind_of(path) {
+    match kind {
         Kind::Markdown => markdown(&lines),
         Kind::Text => paragraphs(&lines, 0, ""),
         Kind::Code => code(&lines),

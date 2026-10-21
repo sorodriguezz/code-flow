@@ -267,6 +267,16 @@ pub fn running_model() -> Option<String> {
     guard.as_ref().filter(|e| e.is_alive()).map(|e| e.model_id.clone())
 }
 
+/// Working memory a running embedder takes beyond its weights: measured 2026-10-20 on an M4, the
+/// 0.6B Qwen3 embedder sat flat at 0.9 GB with `--cache-ram 0` — its 0.64 GB of weights and the rest.
+const RUNNING_OVERHEAD: u64 = 256 * 1024 * 1024;
+
+/// The memory the running embedder holds (0 when it is not running), for the fit estimate of a
+/// chat model beside it (`hybrid::runtime::resident_beside`).
+pub fn resident_bytes() -> u64 {
+    running_model().and_then(|id| find(&id)).map_or(0, |entry| entry.spec.size_bytes + RUNNING_OVERHEAD)
+}
+
 pub async fn shutdown() {
     let slot = SLOT.get_or_init(|| AsyncMutex::new(None));
     let mut guard = slot.lock().await;

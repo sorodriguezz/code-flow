@@ -36,7 +36,7 @@ const DIAGRAM_COLUMNS: &str = "id, workspace_id, folder_id, title, doc, format, 
                                pinned, shape_count, origin_project_id, origin_path, \
                                sort_order, created_at, updated_at";
 const FOLDER_COLUMNS: &str = "id, workspace_id, parent_id, name, color, origin_project_id, \
-                              sort_order, created_at, updated_at";
+                              sort_order, created_at, updated_at, app";
 const TEMPLATE_COLUMNS: &str = "id, workspace_id, name, description, icon, doc, format, tags, \
                                 sort_order, created_at, updated_at";
 
@@ -53,6 +53,10 @@ pub(crate) const FORMAT_ARCHIFY: &str = "archify";
 /// A Mermaid diagram: the Mermaid source, as a `.mmd` file holds it. Mirrors `FORMAT_MERMAID` in
 /// `lib/diagrams/doc.ts`.
 pub(crate) const FORMAT_MERMAID: &str = "mermaid";
+/// An Arquitectura document: the system as JSON (zones, components, connections, decisions), drawn
+/// by the Arquitectura app, which owns this format — Diagramas hides it. JSONC, so comments and
+/// trailing commas are allowed. Mirrors `FORMAT_ARCH` in `state/architectureStore.ts`.
+pub(crate) const FORMAT_ARCH: &str = "arch";
 
 fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<DiagramFolderRow> {
     Ok(DiagramFolderRow {
@@ -65,6 +69,7 @@ fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<DiagramFolderRow> {
         sort_order: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        app: row.get(9)?,
     })
 }
 
@@ -148,8 +153,93 @@ fn derive(doc: &str, format: &str) -> i64 {
         FORMAT_EXCALIDRAW => count_excalidraw(doc),
         FORMAT_ARCHIFY => count_archify(doc),
         FORMAT_MERMAID => count_mermaid(doc),
+        FORMAT_ARCH => count_arch(doc),
         _ => 0,
     }
+}
+
+/// An Arquitectura document is JSONC: its comments and trailing commas become spaces, so
+/// `serde_json` reads it. Strings are copied untouched — a `//` inside a URL is not a comment.
+pub(crate) fn jsonc_to_json(src: &str) -> String {
+    // Two passes, as in `lib/architecture/parse.ts`: comments first, then trailing commas over the
+    // text without them — a comma followed by a comment and then `}` is still a trailing comma.
+    let bytes = src.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            in_string = true;
+        } else if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out[i] = b' ';
+                i += 1;
+            }
+            continue;
+        } else if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                if bytes[i] != b'\n' {
+                    out[i] = b' ';
+                }
+                i += 1;
+            }
+            for slot in out.iter_mut().take((i + 2).min(bytes.len())).skip(i) {
+                *slot = b' ';
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    let stripped = out.clone();
+    in_string = false;
+    i = 0;
+    while i < stripped.len() {
+        let c = stripped[i];
+        if in_string {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+        } else if c == b'"' {
+            in_string = true;
+        } else if c == b',' {
+            let mut j = i + 1;
+            while j < stripped.len() && stripped[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if matches!(stripped.get(j), Some(b'}') | Some(b']')) {
+                out[i] = b' ';
+            }
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| src.to_string())
+}
+
+/// What an architecture shows: its components plus the connections between them.
+fn count_arch(doc: &str) -> i64 {
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(&jsonc_to_json(doc)) else {
+        return 0;
+    };
+    let components = document.get("components").and_then(|v| v.as_object()).map_or(0, |m| m.len());
+    let connections = document.get("connections").and_then(|v| v.as_array()).map_or(0, |l| l.len());
+    (components + connections) as i64
 }
 
 // ---------------------------------------------------------------------------------- content search
@@ -251,12 +341,13 @@ pub fn searchable_text(doc: &str, format: &str) -> String {
             }
             words.join("\n")
         }
-        FORMAT_EXCALIDRAW | FORMAT_ARCHIFY => {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(doc) else { return String::new() };
+        FORMAT_EXCALIDRAW | FORMAT_ARCHIFY | FORMAT_ARCH => {
+            let json = if format == FORMAT_ARCH { jsonc_to_json(doc) } else { doc.to_string() };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else { return String::new() };
             let mut words = Vec::new();
             fn walk(value: &serde_json::Value, words: &mut Vec<String>, key: &str) {
                 match value {
-                    serde_json::Value::String(text) if !matches!(key, "id" | "type" | "fontFamily" | "strokeColor" | "backgroundColor" | "fillStyle" | "strokeStyle" | "version" | "source" | "link" | "dataURL" | "mimeType" | "fileId") => {
+                    serde_json::Value::String(text) if !matches!(key, "id" | "type" | "fontFamily" | "strokeColor" | "backgroundColor" | "fillStyle" | "strokeStyle" | "version" | "source" | "link" | "dataURL" | "mimeType" | "fileId" | "icon" | "badge" | "category" | "kind" | "style" | "direction" | "align" | "format") => {
                         if !text.trim().is_empty() && text.len() < 2000 {
                             words.push(text.trim().to_string());
                         }
@@ -735,7 +826,7 @@ fn repo_folder(
     if let Some(id) = existing {
         return Ok(id);
     }
-    Ok(create_folder_for(conn, workspace_id, None, project_name, "", project_id)?.id)
+    Ok(create_folder_for(conn, workspace_id, None, project_name, "", project_id, "")?.id)
 }
 
 /// Files `rel_path` as a diagram in this workspace, and answers with it.
@@ -878,8 +969,9 @@ pub fn create_folder(
     parent_id: Option<&str>,
     name: &str,
     color: &str,
+    app: &str,
 ) -> rusqlite::Result<DiagramFolderRow> {
-    create_folder_for(conn, workspace_id, parent_id, name, color, "")
+    create_folder_for(conn, workspace_id, parent_id, name, color, "", app)
 }
 
 /// [`create_folder`], plus the repository the folder collects.
@@ -894,6 +986,7 @@ pub fn create_folder_for(
     name: &str,
     color: &str,
     origin_project_id: &str,
+    app: &str,
 ) -> rusqlite::Result<DiagramFolderRow> {
     let id = Uuid::new_v4().to_string();
     let stamp = now();
@@ -907,9 +1000,9 @@ pub fn create_folder_for(
     conn.execute(
         "INSERT INTO diagram_folders \
          (id, workspace_id, parent_id, name, color, origin_project_id, sort_order, created_at, \
-          updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-        params![id, workspace_id, parent_id, name, color, origin_project_id, sort_order, stamp],
+          updated_at, app) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
+        params![id, workspace_id, parent_id, name, color, origin_project_id, sort_order, stamp, app],
     )?;
 
     conn.query_row(
@@ -1083,6 +1176,17 @@ pub fn delete_template(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_architecture_document_counts_components_and_connections_through_its_comments() {
+        let doc = "{\n  // a comment\n  \"components\": { \"a\": {}, \"b\": {}, },\n  \"connections\": [ { \"from\": \"a\", \"to\": \"b\" } ], /* trailing */\n}";
+        assert_eq!(derive(doc, FORMAT_ARCH), 3);
+        let text = searchable_text("{ \"components\": { \"api\": { \"name\": \"Orders API\", \"icon\": \"aws:lambda\" } } }", FORMAT_ARCH);
+        assert!(text.contains("Orders API"));
+        assert!(!text.contains("aws:lambda"));
+        assert_eq!(jsonc_to_json("{\"u\": \"http://x\"} // c"), "{\"u\": \"http://x\"}     ");
+    }
+
     use super::*;
 
     #[test]
@@ -1180,12 +1284,26 @@ mod tests {
     /// write, and nothing was telling it the workspace had changed — so a board opened in `w1` went
     /// on showing `w1` while the user was in `w2`, and every drawing made there was filed into
     /// `w1`. The fix lives in `diagramsStore.ts`; this locks the half it leans on.
+    /// Arquitectura shares these tables; its folders carry `app = "arch"` so each app can list only
+    /// its own, and the column comes back on every read.
+    #[test]
+    fn a_folder_says_whose_tree_it_is_in() {
+        let conn = workspaces();
+        create_folder(&conn, "w1", None, "Dibujos", "", "").unwrap();
+        let arch = create_folder(&conn, "w1", None, "Clientes", "", "arch").unwrap();
+        assert_eq!(arch.app, "arch");
+        let tree = load_tree(&conn, "w1").unwrap();
+        let mut apps: Vec<(&str, &str)> = tree.folders.iter().map(|f| (f.name.as_str(), f.app.as_str())).collect();
+        apps.sort();
+        assert_eq!(apps, vec![("Clientes", "arch"), ("Dibujos", "")]);
+    }
+
     #[test]
     fn a_workspace_sees_only_its_own_diagrams_folders_and_templates() {
         let conn = workspaces();
 
-        let here = create_folder(&conn, "w1", None, "Aqui", "").unwrap();
-        let there = create_folder(&conn, "w2", None, "Alla", "").unwrap();
+        let here = create_folder(&conn, "w1", None, "Aqui", "", "").unwrap();
+        let there = create_folder(&conn, "w2", None, "Alla", "", "").unwrap();
         create_diagram(&conn, "w1", Some(&here.id), "Dibujo de w1", "<mxfile/>", "drawio", "[]")
             .unwrap();
         create_diagram(&conn, "w2", Some(&there.id), "Dibujo de w2", "<mxfile/>", "drawio", "[]")
@@ -1226,7 +1344,7 @@ mod tests {
         let conn = workspaces();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
 
-        let folder = create_folder(&conn, "w2", None, "Alla", "").unwrap();
+        let folder = create_folder(&conn, "w2", None, "Alla", "", "").unwrap();
         create_diagram(&conn, "w2", Some(&folder.id), "Dibujo", "<mxfile/>", "drawio", "[]")
             .unwrap();
         create_template(&conn, "w2", "Plantilla", "", "workflow", "", "drawio", "[]").unwrap();
@@ -1393,7 +1511,7 @@ mod tests {
         assert_eq!(made.origin_path, "");
         assert_eq!(made.origin_project_id, "");
 
-        let folder = create_folder(&conn, "w1", None, "Mio", "").unwrap();
+        let folder = create_folder(&conn, "w1", None, "Mio", "", "").unwrap();
         assert_eq!(folder.origin_project_id, "", "and neither does a folder the user made");
     }
 }

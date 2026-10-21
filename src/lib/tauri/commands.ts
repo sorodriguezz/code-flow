@@ -1603,6 +1603,8 @@ export interface ChatReply {
   context?: ContextSource[];
   /** The memory a "recuerda que…" in the question saved, approved. */
   learned_memory?: string | null;
+  /** What that "recuerda que…" did — see `ai_memory::Remembered`. */
+  learned_outcome?: "new" | "approved" | "updated" | "already_known" | null;
 }
 
 /** `sessionId` is the engine's resume token; `conversationId` is *our* identity for the chat and

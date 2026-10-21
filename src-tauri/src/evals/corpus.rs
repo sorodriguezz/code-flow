@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::fixtures::{node_eval, Fixture};
+use super::fixtures::{self, node_eval, Fixture};
 use crate::ai::task;
 
 /// Which part of the bench a task belongs to — and so which ones a run can select.
@@ -21,10 +21,15 @@ pub enum Suite {
     Tools,
     /// Reading and writing speed — see [`super::speed`].
     Speed,
+    /// The knowledge engine alone, no model: whether its search puts the passage that answers in the
+    /// first results (recall@k), finds nothing when nothing answers, and reads a note. Measured with
+    /// the bench because every layer has to win here, and left out of a model's score
+    /// ([`super::report::Report::compute_score`]) because no model takes part.
+    Retrieval,
 }
 
 impl Suite {
-    pub const ALL: [Suite; 4] = [Suite::Speed, Suite::Tools, Suite::Text, Suite::Agent];
+    pub const ALL: [Suite; 5] = [Suite::Speed, Suite::Tools, Suite::Retrieval, Suite::Text, Suite::Agent];
 }
 
 pub type Check = fn(&Path, &str) -> Result<(), String>;
@@ -40,6 +45,9 @@ pub struct EvalTask {
     pub stdin: &'static str,
     pub schema: Option<&'static str>,
     pub needs_node: bool,
+    /// Built when the task runs and handed over as `stdin` instead: an input too long to write out
+    /// (the needle's haystack).
+    pub long_input: Option<fn() -> String>,
     pub check: Check,
 }
 
@@ -54,6 +62,7 @@ pub const TASKS: &[EvalTask] = &[
         stdin: "",
         schema: None,
         needs_node: true,
+        long_input: None,
         check: |dir, _| match node_eval(dir, "console.log(require('./src/cart').cartTotal([{price: 2}, {price: 3}]))") {
             Some(total) if total == "5" => Ok(()),
             Some(total) => Err(format!("cartTotal gives {total}")),
@@ -70,6 +79,7 @@ pub const TASKS: &[EvalTask] = &[
         stdin: "",
         schema: None,
         needs_node: true,
+        long_input: None,
         check: |dir, _| match node_eval(dir, "console.log(require('./src/checkout/checkout').checkoutSummary([{price: 100, qty: 1}], 10).total)") {
             Some(total) if total == "90" => Ok(()),
             Some(total) => Err(format!("checkout total is {total}")),
@@ -86,6 +96,7 @@ pub const TASKS: &[EvalTask] = &[
         stdin: "",
         schema: None,
         needs_node: true,
+        long_input: None,
         check: |dir, _| {
             let leftovers: Vec<&str> = ["src/cart/cart.js", "src/checkout/checkout.js"]
                 .into_iter()
@@ -111,6 +122,7 @@ pub const TASKS: &[EvalTask] = &[
         stdin: "",
         schema: None,
         needs_node: true,
+        long_input: None,
         check: |dir, _| match node_eval(dir, "const t = require('./src/lib/tax'); console.log(Math.round(t.taxIncluded(100, 0.19) * 100) / 100, typeof t.taxFor)") {
             Some(out) if out == "119 function" => Ok(()),
             Some(out) => Err(format!("got {out}")),
@@ -127,6 +139,7 @@ pub const TASKS: &[EvalTask] = &[
         stdin: "",
         schema: None,
         needs_node: false,
+        long_input: None,
         check: |dir, answer| {
             let untouched = std::fs::read_to_string(dir.join("src/cart.js")).unwrap_or_default().contains("total -= item.price");
             if !untouched {
@@ -145,6 +158,7 @@ pub const TASKS: &[EvalTask] = &[
         stdin: "",
         schema: None,
         needs_node: false,
+        long_input: None,
         check: |_, answer| {
             if answer.to_lowercase().contains("sqlite") { Ok(()) } else { Err(format!("the answer does not say SQLite: {}", clip(answer))) }
         },
@@ -159,6 +173,7 @@ pub const TASKS: &[EvalTask] = &[
         stdin: "--- a/src/cart.js\n+++ b/src/cart.js\n@@ -3,7 +3,7 @@ function cartTotal(items) {\n   let total = 0;\n   for (const item of items) {\n-    total -= item.price;\n+    total += item.price;\n   }\n   return total;\n }\n",
         schema: None,
         needs_node: false,
+        long_input: None,
         check: |_, answer| {
             let line = answer.trim().trim_matches('`').lines().next().unwrap_or_default().trim();
             let conventional = regex::Regex::new(r"^(fix|feat|refactor|chore|docs|test|perf|style|build|ci)(\([^)]+\))?!?: \S").unwrap();
@@ -181,6 +196,7 @@ pub const TASKS: &[EvalTask] = &[
         stdin: "Incident: since this morning every POST to /checkout returns 500. The stack trace points at src/api/server.js and src/checkout/checkout.js. Customers cannot pay, so this blocks sales.",
         schema: Some(r#"{"type":"object","properties":{"title":{"type":"string"},"severity":{"type":"string","enum":["low","medium","high"]},"files":{"type":"array","items":{"type":"string"}}},"required":["title","severity","files"],"additionalProperties":false}"#),
         needs_node: false,
+        long_input: None,
         check: |_, answer| {
             let value: serde_json::Value = serde_json::from_str(answer.trim()).map_err(|e| format!("not JSON ({e}): {}", clip(answer)))?;
             let schema: serde_json::Value = serde_json::from_str(TASKS.iter().find(|t| t.id == "json-extract").and_then(|t| t.schema).unwrap_or("{}")).unwrap();
@@ -207,6 +223,7 @@ pub const TASKS: &[EvalTask] = &[
         stdin: "¿Cómo configuro el contexto del modelo local para que no se corte en archivos grandes?",
         schema: None,
         needs_node: false,
+        long_input: None,
         check: |_, answer| {
             let title = answer.trim().trim_matches(|c| c == '"' || c == '*' || c == '#').trim();
             if title.is_empty() || title.contains('\n') {
@@ -216,7 +233,168 @@ pub const TASKS: &[EvalTask] = &[
             if words > 8 { Err(format!("{words} words")) } else { Ok(()) }
         },
     },
+    EvalTask {
+        id: "answer-not-in-docs",
+        suite: Suite::Agent,
+        fixture: Some(Fixture::Docs),
+        prompt: "¿Qué broker de mensajes (Kafka, RabbitMQ, NATS…) usa este servicio para publicar sus eventos, según su documentación?",
+        task: task::CHAT,
+        write: false,
+        stdin: "",
+        schema: None,
+        needs_node: false,
+        long_input: None,
+        // Nothing in the project names one: the answer has to say so, not pick the likeliest.
+        check: |_, answer| says_not_found(answer),
+    },
+    EvalTask {
+        id: "answer-cross-language",
+        suite: Suite::Agent,
+        fixture: Some(Fixture::Docs),
+        prompt: "¿Durante cuántos días se conservan los movimientos de stock?",
+        task: task::CHAT,
+        write: false,
+        stdin: "",
+        schema: None,
+        needs_node: false,
+        long_input: None,
+        // The decision is written in English; the question is not.
+        check: |_, answer| if answer.contains("90") { Ok(()) } else { Err(format!("the answer does not say 90 days: {}", clip(answer))) },
+    },
+    EvalTask {
+        id: "needle-long-context",
+        suite: Suite::Text,
+        fixture: None,
+        prompt: "The text below is a log of warehouse operations. How often do the warehouse scanners flush their buffer? Answer with the number of seconds only.",
+        task: task::CHAT,
+        write: false,
+        stdin: "",
+        schema: None,
+        needs_node: false,
+        long_input: Some(fixtures::haystack_text),
+        check: |_, answer| if answer.contains("47") { Ok(()) } else { Err(format!("the needle is 47 seconds: {}", clip(answer))) },
+    },
+    EvalTask {
+        id: "retrieval-docs",
+        suite: Suite::Retrieval,
+        fixture: Some(Fixture::Docs),
+        prompt: "How long are stock movements kept before they are summarised?",
+        task: "",
+        write: false,
+        stdin: "",
+        schema: None,
+        needs_node: false,
+        long_input: None,
+        check: |_, answer| recall_at(answer, "docs/adr/0003-retention.md", 3),
+    },
+    EvalTask {
+        id: "retrieval-note",
+        suite: Suite::Retrieval,
+        fixture: Some(Fixture::Docs),
+        prompt: "¿Qué hace la guardia cuando los escáneres pierden la conexión?",
+        task: "",
+        write: false,
+        stdin: "",
+        schema: None,
+        needs_node: false,
+        long_input: None,
+        // Only the team's note says it; the repository does not.
+        check: |_, answer| recall_at(answer, "note:eval-oncall", 3),
+    },
+    EvalTask {
+        id: "retrieval-needle",
+        suite: Suite::Retrieval,
+        fixture: Some(Fixture::Haystack),
+        prompt: "How often do the warehouse scanners flush their buffer?",
+        task: "",
+        write: false,
+        stdin: "",
+        schema: None,
+        needs_node: false,
+        long_input: None,
+        check: |_, answer| recall_at(answer, fixtures::NEEDLE_PATH, 3),
+    },
+    EvalTask {
+        id: "retrieval-cross-language",
+        suite: Suite::Retrieval,
+        fixture: Some(Fixture::Docs),
+        prompt: "¿Durante cuántos días se conservan los movimientos de stock?",
+        task: "",
+        write: false,
+        stdin: "",
+        schema: None,
+        needs_node: false,
+        long_input: None,
+        // Shares one word with the English decision record: the vectors' job, and lexical search
+        // alone is expected to miss it.
+        check: |_, answer| recall_at(answer, "docs/adr/0003-retention.md", 3),
+    },
+    EvalTask {
+        id: "retrieval-absent",
+        suite: Suite::Retrieval,
+        fixture: Some(Fixture::Docs),
+        prompt: "Which message broker, Kafka or RabbitMQ, does the inventory service publish its events to?",
+        task: "",
+        write: false,
+        stdin: "",
+        schema: None,
+        needs_node: false,
+        long_input: None,
+        // Two of its words are in the README; neither is an answer.
+        check: |_, answer| {
+            if answer.starts_with("Nothing in this workspace's knowledge") {
+                Ok(())
+            } else {
+                Err(format!("passages for a question nothing answers: {:?}", cited_paths(answer)))
+            }
+        },
+    },
 ];
+
+/// The paths a knowledge search's answer cites, best first: the `N. path…` line of each result, its
+/// lines cut off. Numbered from 1 without a gap, so a numbered list quoted inside a passage is not
+/// taken for a result.
+pub fn cited_paths(answer: &str) -> Vec<String> {
+    let line = regex::Regex::new(r"^(\d+)\. (\S+)").unwrap();
+    let lines = regex::Regex::new(r":\d+-\d+$").unwrap();
+    let mut out = Vec::new();
+    for text in answer.lines() {
+        let Some(found) = line.captures(text) else { continue };
+        if found[1].parse::<usize>().ok() != Some(out.len() + 1) {
+            continue;
+        }
+        out.push(lines.replace(&found[2], "").to_string());
+    }
+    out
+}
+
+/// Recall at `k`: `path` is among the first `k` results.
+pub fn recall_at(answer: &str, path: &str, k: usize) -> Result<(), String> {
+    let cited = cited_paths(answer);
+    match cited.iter().position(|p| p == path) {
+        Some(rank) if rank < k => Ok(()),
+        Some(rank) => Err(format!("{path} ranked {} (wanted the first {k})", rank + 1)),
+        None => Err(format!("{path} not among {cited:?}")),
+    }
+}
+
+/// The answer says the documentation does not name it — and does not name one anyway. "No usa
+/// Kafka" is not a claim; "usa Kafka" is.
+pub fn says_not_found(answer: &str) -> Result<(), String> {
+    let absent = regex::Regex::new(
+        r"(?i)\bno (se )?(menciona|encuentr|encontr|aparece|especifica|indica|documenta|dice|hay|figura|consta)|\bnot (mentioned|found|documented|specified|stated)|\b(doesn't|does not|don't|do not) (mention|say|specify|document|name)|\bno (information|mention)\b|\bsin (información|mención)|\bningún|\bninguna\b",
+    )
+    .unwrap();
+    let claim = regex::Regex::new(r"(?i)\b(usa|utiliza|emplea|publica en|uses|publishes to|relies on)\s+\**(kafka|rabbitmq|nats|redis|sqs|pulsar|activemq)").unwrap();
+    let negated = |at: usize| {
+        let before: String = answer[..at].chars().rev().take(12).collect::<String>().chars().rev().collect::<String>().to_lowercase();
+        before.trim_end().ends_with("no") || before.trim_end().ends_with("not") || before.contains("n't")
+    };
+    if let Some(found) = claim.find_iter(answer).find(|m| !negated(m.start())) {
+        return Err(format!("it names a broker the docs never mention ({}): {}", found.as_str(), clip(answer)));
+    }
+    if absent.is_match(answer) { Ok(()) } else { Err(format!("it does not say the docs do not name one: {}", clip(answer))) }
+}
 
 pub fn clip(text: &str) -> String {
     let flat = text.trim().replace('\n', " ");
@@ -243,7 +421,7 @@ mod tests {
     fn agent_tasks_have_a_project_and_text_tasks_do_not() {
         for task in TASKS {
             match task.suite {
-                Suite::Agent => assert!(task.fixture.is_some(), "{}", task.id),
+                Suite::Agent | Suite::Retrieval => assert!(task.fixture.is_some(), "{}", task.id),
                 Suite::Text => assert!(task.fixture.is_none(), "{}", task.id),
                 _ => panic!("{} belongs to a suite that is not a task list", task.id),
             }
@@ -278,6 +456,33 @@ mod tests {
         assert!(check(dir, "\"Contexto del modelo local\"").is_ok());
         assert!(check(dir, "uno dos tres cuatro cinco seis siete ocho nueve").is_err());
         assert!(check(dir, "").is_err());
+    }
+
+    #[test]
+    fn recall_reads_the_ranked_citations_and_nothing_quoted_inside_them() {
+        let answer = "<retrieved_content note=\"x\">\n1. docs/a.md:3-9 — A [inv]\n1. a numbered line quoted in a passage\n\n2. note:eval-oncall — Guardia [note]\nbody\n</retrieved_content>";
+        assert_eq!(cited_paths(answer), vec!["docs/a.md", "note:eval-oncall"]);
+        assert!(recall_at(answer, "note:eval-oncall", 3).is_ok());
+        assert!(recall_at(answer, "note:eval-oncall", 1).is_err());
+        assert!(recall_at(answer, "docs/b.md", 3).is_err());
+    }
+
+    #[test]
+    fn not_found_means_saying_so_without_naming_one() {
+        assert!(says_not_found("La documentación no menciona ningún broker de mensajes.").is_ok());
+        assert!(says_not_found("The docs do not mention a message broker; it does not use Kafka as far as they say.").is_ok());
+        assert!(says_not_found("Usa Kafka para publicar los eventos.").is_err(), "an invented answer");
+        assert!(says_not_found("No se menciona, pero probablemente usa RabbitMQ.").is_err(), "a guess dressed as an answer");
+        assert!(says_not_found("Publica eventos en una cola.").is_err(), "neither says it is absent");
+    }
+
+    #[test]
+    fn the_needle_task_hands_over_the_whole_haystack() {
+        let task = by_id("needle-long-context");
+        let input = (task.long_input.expect("built at run time"))();
+        assert!(input.contains(fixtures::NEEDLE) && input.len() > 20_000);
+        assert!((task.check)(Path::new("."), "47").is_ok());
+        assert!((task.check)(Path::new("."), "60").is_err());
     }
 
     #[test]

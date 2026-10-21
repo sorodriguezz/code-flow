@@ -8,6 +8,8 @@ export interface KnowledgeStatus {
   chunks: number;
   vectors: number;
   refreshedAt: number | null;
+  /** The commit the collection was indexed at (repositories), empty otherwise. */
+  head: string;
 }
 
 export interface KnowledgeCollection {
@@ -40,10 +42,13 @@ export interface KnowledgeOverview {
   space: string | null;
   repos: { projectId: string; name: string; status: KnowledgeStatus }[];
   folders: { collection: KnowledgeCollection; status: KnowledgeStatus }[];
+  /** The workspace's own content indexed beside the repositories: notes, meetings, generated docs,
+   *  story drafts, PR review findings and commit messages. */
+  sources: { kind: "note" | "meeting" | "doc" | "story" | "review" | "commit"; status: KnowledgeStatus }[];
 }
 
 export interface KnowledgeFound {
-  source: "repo" | "folder" | "note" | "symbol";
+  source: "repo" | "folder" | "note" | "symbol" | "meeting" | "doc" | "story" | "review" | "commit";
   label: string;
   path: string;
   startLine: number;
@@ -51,6 +56,11 @@ export interface KnowledgeFound {
   heading: string;
   snippet: string;
   score: number;
+  /** A note's or document's title. */
+  title: string;
+  /** The commit its repository was indexed at, empty when it has none. */
+  commit: string;
+  indexedAt: number | null;
 }
 
 export interface KnowledgeRefreshed {

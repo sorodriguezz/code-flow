@@ -35,7 +35,7 @@
  * `components/diagrams/ArchifyViewer`. The branch between them is in exactly one place —
  * `DiagramsView` picks the editor — which is what the column was for.
  */
-export type DiagramFormat = "mxgraph" | "dbml" | "excalidraw" | "archify" | "mermaid" | (string & {});
+export type DiagramFormat = "mxgraph" | "dbml" | "excalidraw" | "archify" | "mermaid" | "arch" | (string & {});
 
 /** A diagram without its document, as it comes off the IPC boundary. `tags` is a JSON array. */
 export interface DiagramMetaRow {
@@ -126,6 +126,8 @@ export interface DiagramThumbnailRow {
 
 export interface DiagramFolderRow {
   id: string;
+  /** Whose tree it is in: `""` for Diagramas, `"arch"` for Arquitectura — they share the table. */
+  app?: string;
   workspace_id: string;
   parent_id: string | null;
   name: string;

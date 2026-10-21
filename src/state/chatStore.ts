@@ -13,6 +13,8 @@ import {
 import { useChatHistoryStore } from "./activityStore";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { translate } from "./languageStore";
+import { learnedKey } from "../lib/memoryToast";
+import { leavesContextAsIs } from "../lib/contextWindow";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -759,7 +761,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ],
           sessionId: reply.session_id,
           model: reply.model ?? session.model,
-          contextTokens: reply.context_tokens ?? null,
+          // A `/context` or `/usage` asked the model nothing: the figure before it still holds,
+          // where dropping it fell back to the transcript's estimate, a fraction of the real prompt.
+          contextTokens: reply.context_tokens ?? (leavesContextAsIs(trimmed) ? session.contextTokens : null),
           sending: false,
           runId: null,
           runStartedAt: null,
@@ -769,7 +773,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }));
         void useChatHistoryStore.getState().load(projectId);
         // Said only when a memory was really saved — never to suggest the model itself learned.
-        if (reply.learned_memory) pushSuccessToast(translate("memory.learned", { title: reply.learned_memory }));
+        if (reply.learned_memory) pushSuccessToast(translate(learnedKey(reply.learned_outcome), { title: reply.learned_memory }));
         // The turn is persisted by the time this resolves, so a phone can go and read it. Nothing
         // about a chat turn moves a byte on disk, and its output stream is one no phone subscribes
         // to unless it already knows the run — so this emit is the only thing that tells one the

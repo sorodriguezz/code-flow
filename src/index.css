@@ -4455,25 +4455,29 @@ body.cf-dragging * {
  * WKWebView on 2026-10-10, a provider row clicked shut kept its chevron at 0deg, pointing down as
  * if still open, so a click that worked looked like one that had not ("se ve bug y no lo hace").
  * The same turn written as a `transform` animates in every engine, and `transition-transform`
- * already lists `transform`. Unlayered, so it outranks the utilities layer it overrides. */
+ * already lists `transform`. Unlayered, so it outranks the utilities layer it overrides.
+ * `rotate: none` has to stay `!important`: the build's CSS optimizer (Lightning CSS, inside
+ * Tailwind's vite plugin, never run by `tauri dev`) folds a plain `rotate: none` into the
+ * `transform` beside it and drops it, so the packaged app kept the utility's `rotate` *and* added
+ * this `transform` — every chevron turned twice, pointing backwards. `!important` survives it. */
 svg.rotate-45 {
-  rotate: none;
+  rotate: none !important;
   transform: rotate(45deg);
 }
 svg.rotate-90 {
-  rotate: none;
+  rotate: none !important;
   transform: rotate(90deg);
 }
 svg.\-rotate-90 {
-  rotate: none;
+  rotate: none !important;
   transform: rotate(-90deg);
 }
 svg.rotate-180 {
-  rotate: none;
+  rotate: none !important;
   transform: rotate(180deg);
 }
 svg.\-rotate-180 {
-  rotate: none;
+  rotate: none !important;
   transform: rotate(-180deg);
 }
 
@@ -4481,4 +4485,80 @@ svg.\-rotate-180 {
 .cf-db-run-flash {
   background: color-mix(in oklab, var(--cf-accent) 22%, transparent);
   border-radius: 2px;
+}
+
+/*
+ * Arquitectura's canvas. A zone is see-through to the pane except on its title band (its drag
+ * handle) and its resize frame, so a drag across the inside of a big cloud pans the canvas rather
+ * than picking the cloud up. React Flow sets `pointer-events: all` on every node inline, hence the
+ * !important. Highlight reaches into the export's own SVG through the classes it already carries
+ * (`.cb` on a card's border, `.zb` on a zone's).
+ */
+.arch-flow .react-flow__node-zone {
+  pointer-events: none !important;
+}
+.arch-flow .arch-zone-grip {
+  position: absolute;
+  inset: 0 0 auto 0;
+  pointer-events: all;
+  cursor: grab;
+}
+.arch-flow .react-flow__node-zone .react-flow__resize-control {
+  pointer-events: all;
+}
+.arch-flow .react-flow__node-card {
+  cursor: grab;
+}
+.arch-flow .react-flow__node.dragging {
+  cursor: grabbing;
+}
+.arch-card,
+.arch-zone {
+  position: relative;
+  transition: opacity 0.15s ease;
+}
+.arch-card.is-dim {
+  opacity: 0.38;
+}
+.arch-edge.is-dim {
+  opacity: 0.14;
+}
+.arch-card.is-hot .cb,
+.arch-card.is-sel .cb {
+  stroke: var(--arch-hot);
+  stroke-width: 2;
+}
+.arch-zone.is-sel .zb {
+  stroke: var(--arch-hot);
+  stroke-width: 2;
+}
+.arch-flow .arch-handle {
+  width: 9px;
+  height: 9px;
+  min-width: 0;
+  min-height: 0;
+  border: 2px solid var(--arch-card);
+  background: var(--arch-hot);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.arch-flow .react-flow__node-card:hover .arch-handle,
+.arch-flow .react-flow__node-card.selected .arch-handle,
+.arch-flow .react-flow__pane.connecting ~ * .arch-handle,
+.arch-flow .connectingfrom,
+.arch-flow .connectingto {
+  opacity: 1;
+}
+.arch-flow .arch-resize-line {
+  border-color: var(--arch-hot) !important;
+}
+.arch-flow .arch-resize-handle {
+  width: 8px !important;
+  height: 8px !important;
+  border-radius: 2px;
+  background: var(--arch-hot) !important;
+  border: 1.5px solid var(--arch-card) !important;
+}
+.arch-flow .react-flow__edge-path {
+  transition: stroke-width 0.15s ease;
 }

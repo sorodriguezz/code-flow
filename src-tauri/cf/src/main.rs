@@ -36,6 +36,7 @@
 //! `{"ok":…,"text":…}`; `ok` is the exit code, `text` is printed.
 
 mod guard;
+mod rules;
 
 use std::io::{IsTerminal, Read, Write};
 use std::net::TcpStream;
@@ -131,6 +132,7 @@ The code, and what the app knows about it
   cf search <question>              the project's code, docs and notes, ranked
   cf recall <question>              what the app remembers about this project
   cf remember <fact>                propose a memory; the user approves it in the app
+                                    [--kind decision|convention|fact|preference]
   cf task <title> [-- <what to do>] a draft task in the project's task tree [--agent <name>]
 
 The local model (nothing leaves the machine)

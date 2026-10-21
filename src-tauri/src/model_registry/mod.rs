@@ -215,33 +215,93 @@ pub fn agent_refusal(verified: Option<bool>, spanish: bool) -> Option<String> {
 pub const AUTO: &str = "auto";
 
 /// One local model as `auto` weighs it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Candidate {
     pub model: String,
     /// The latest bench score of this model on a machine like this one (same arch, RAM within 10 %).
     pub score: Option<f64>,
+    /// The same bench's score on the tasks of each class alone ([`class_scores`]) — what a task of
+    /// that class is routed by: a model that writes the best commit messages is not, for that, the
+    /// one that fixes bugs best.
+    pub class_scores: Vec<(TaskClass, f64)>,
     pub gen_tps: Option<f64>,
     pub tools: Option<bool>,
     /// Fits this machine comfortably or tightly (false: spills to the CPU or does not fit).
     pub fits: bool,
 }
 
+impl Candidate {
+    /// What this model is weighed by for `class`: its score on that class's tasks when the bench ran
+    /// any, its overall score otherwise (the executor's class has no task of its own).
+    pub fn score_for(&self, class: TaskClass) -> Option<f64> {
+        self.class_scores.iter().find(|(c, _)| *c == class).map(|(_, s)| *s).or(self.score)
+    }
+}
+
+/// A report's score per class of task: each bench task counted under the class its AI task runs as
+/// ([`class_of`]), passed runs over runs. Retrieval, tool conformance and speed are not tasks of a
+/// class — the first measures no model, the other two are weighed on their own.
+pub fn class_scores(report: &crate::evals::report::Report) -> Vec<(TaskClass, f64)> {
+    use crate::evals::corpus::{Suite, TASKS};
+    let mut tally: Vec<(TaskClass, usize, usize)> = Vec::new();
+    for result in report.tasks.iter().filter(|t| t.skipped.is_none() && t.runs > 0) {
+        if !matches!(result.suite, Suite::Agent | Suite::Text) {
+            continue;
+        }
+        let Some(task) = TASKS.iter().find(|t| t.id == result.id) else { continue };
+        let class = class_of(task.task, result.suite == Suite::Agent);
+        match tally.iter_mut().find(|(c, _, _)| *c == class) {
+            Some((_, passed, runs)) => {
+                *passed += result.passed;
+                *runs += result.runs;
+            }
+            None => tally.push((class, result.passed, result.runs)),
+        }
+    }
+    tally.into_iter().map(|(class, passed, runs)| (class, passed as f64 / runs as f64)).collect()
+}
+
 /// What `auto` picks for `class` among `candidates`: never a model that failed tool calling for an
-/// agent run, never one that does not fit; the best measured score, then the fastest. `None` when
-/// nothing was ever measured — the caller keeps the pane's model then, not a guess.
+/// agent run, never one that does not fit; the best measured score for that class
+/// ([`Candidate::score_for`]), then the fastest. `None` when nothing was ever measured — the caller
+/// keeps the pane's model then, not a guess.
 pub fn pick_auto(candidates: &[Candidate], class: TaskClass) -> Option<String> {
     let mut usable: Vec<&Candidate> = candidates
         .iter()
-        .filter(|c| c.fits && c.score.is_some())
+        .filter(|c| c.fits && c.score_for(class).is_some())
         .filter(|c| !(class == TaskClass::Agent && c.tools == Some(false)))
         .collect();
     usable.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+        b.score_for(class)
+            .partial_cmp(&a.score_for(class))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(b.gen_tps.partial_cmp(&a.gen_tps).unwrap_or(std::cmp::Ordering::Equal))
     });
     usable.first().map(|c| c.model.clone())
+}
+
+/// The latest bench of `model` (without an adapter) on this backend and a machine like this one.
+/// By content when both sides know it: the evaluation of these exact weights, under whatever name
+/// they were measured — and not the evaluation of the same name before a re-pull changed them. By
+/// name when either side has no digest (a server that publishes none, a report from before).
+pub fn latest_evaluation<'a>(
+    evaluations: &'a [store::EvaluationRow],
+    backend: &str,
+    model: &str,
+    digest: Option<&str>,
+    machine: &crate::evals::report::MachineSummary,
+) -> Option<&'a store::EvaluationRow> {
+    evaluations.iter().find(|e| {
+        let same_model = match (digest, e.digest.as_deref()) {
+            (Some(now), Some(then)) => now == then,
+            _ => e.model == model,
+        };
+        same_model
+            && e.backend == backend
+            && e.adapter_id.is_none()
+            && e.report.machine.arch == machine.arch
+            && (e.report.machine.ram_gb - machine.ram_gb).abs() <= machine.ram_gb * 0.1
+    })
 }
 
 /// The candidates `resolved`'s server offers, weighed with what the bench measured on this machine.
@@ -259,13 +319,11 @@ pub fn candidates(conn: &rusqlite::Connection, resolved: &Resolved) -> Vec<Candi
     models
         .into_iter()
         .map(|model| {
-            let latest = evaluations.iter().find(|e| {
-                e.model == model
-                    && e.backend == resolved.kind.as_str()
-                    && e.adapter_id.is_none()
-                    && e.report.machine.arch == machine.arch
-                    && (e.report.machine.ram_gb - machine.ram_gb).abs() <= machine.ram_gb * 0.1
-            });
+            let digest = match resolved.kind {
+                BackendKind::Bundled => exec_catalogue::find(&model).map(|entry| entry.spec.sha256.to_string()),
+                _ => resolved.available.iter().find(|m| m.id == model).and_then(|m| m.digest.clone()),
+            };
+            let latest = latest_evaluation(&evaluations, resolved.kind.as_str(), &model, digest.as_deref(), &machine);
             let fits = match exec_catalogue::find(&model).filter(|_| resolved.kind == BackendKind::Bundled) {
                 Some(entry) => {
                     let need = crate::hybrid::budget::memory_need(entry.spec.size_bytes, entry.kv_bytes_per_token, resolved.ctx);
@@ -280,6 +338,7 @@ pub fn candidates(conn: &rusqlite::Connection, resolved: &Resolved) -> Vec<Candi
             let tools = store::get(conn, &registry_id(resolved.kind, &model)).ok().flatten().and_then(|r| r.current_verdict());
             Candidate {
                 score: latest.map(|e| e.score),
+                class_scores: latest.map(|e| class_scores(&e.report)).unwrap_or_default(),
                 gen_tps: latest.and_then(|e| e.report.speed.as_ref().and_then(|s| s.gen_tps)),
                 tools,
                 fits,
@@ -343,6 +402,7 @@ mod tests {
             gen_tps: Some(tps),
             tools,
             fits,
+            ..Candidate::default()
         };
         let all = vec![
             c("big", Some(1.0), 8.0, Some(true), false),
@@ -354,6 +414,104 @@ mod tests {
         assert_eq!(pick_auto(&all, TaskClass::Agent).as_deref(), Some("qwen"), "same score, faster wins; no failed tools, no misfit");
         assert_eq!(pick_auto(&all, TaskClass::Text).as_deref(), Some("failed-tools"), "text needs no tools");
         assert_eq!(pick_auto(&[c("x", None, 1.0, None, true)], TaskClass::Agent), None, "nothing measured: no guess");
+    }
+
+    /// One overall score routed every kind of task to the same model: the one best at commit
+    /// messages also got the bug fixes. Each class now goes to the model best at that class.
+    #[test]
+    fn auto_routes_each_class_by_its_own_tasks() {
+        let c = |model: &str, score: f64, classes: Vec<(TaskClass, f64)>| Candidate {
+            model: model.into(),
+            score: Some(score),
+            class_scores: classes,
+            gen_tps: Some(20.0),
+            tools: Some(true),
+            fits: true,
+        };
+        let writer = c("writer", 0.8, vec![(TaskClass::Text, 1.0), (TaskClass::Agent, 0.5)]);
+        let fixer = c("fixer", 0.7, vec![(TaskClass::Text, 0.4), (TaskClass::Agent, 0.9)]);
+        let all = vec![writer, fixer];
+        assert_eq!(pick_auto(&all, TaskClass::Agent).as_deref(), Some("fixer"));
+        assert_eq!(pick_auto(&all, TaskClass::Text).as_deref(), Some("writer"));
+        assert_eq!(pick_auto(&all, TaskClass::Executor).as_deref(), Some("writer"), "no executor task: the overall score");
+    }
+
+    fn evaluation(model: &str, digest: Option<&str>, tasks: Vec<(&str, crate::evals::corpus::Suite, usize, usize)>) -> store::EvaluationRow {
+        use crate::evals::report::{MachineSummary, Report, TaskResult, FORMAT};
+        let tasks: Vec<TaskResult> = tasks
+            .into_iter()
+            .map(|(id, suite, passed, runs)| TaskResult {
+                id: id.into(),
+                suite,
+                runs,
+                passed,
+                seconds: vec![1.0; runs],
+                failures: Vec::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                skipped: None,
+            })
+            .collect();
+        let report = Report {
+            format: FORMAT,
+            app_version: None,
+            started_at: String::new(),
+            finished_at: String::new(),
+            backend: "ollama".into(),
+            model: model.into(),
+            model_digest: digest.map(str::to_string),
+            adapter: None,
+            ctx: 8192,
+            machine: MachineSummary { os: "macos".into(), arch: "aarch64".into(), ram_gb: 16.0, gpu: "unified".into(), gpu_name: None, gpu_gb: None },
+            speed: None,
+            conformance: None,
+            score: Report::compute_score(&tasks),
+            tasks,
+            peak_rss_bytes: None,
+            aborted: None,
+        };
+        store::EvaluationRow {
+            id: model.into(),
+            backend: "ollama".into(),
+            model: model.into(),
+            digest: digest.map(str::to_string),
+            adapter_id: None,
+            score: report.score,
+            tools_passed: None,
+            tools_total: None,
+            created_at: 0,
+            report,
+        }
+    }
+
+    #[test]
+    fn a_bench_counts_its_tasks_under_the_class_they_run_as() {
+        use crate::evals::corpus::Suite;
+        let row = evaluation(
+            "m",
+            None,
+            vec![("fix-single-file", Suite::Agent, 2, 2), ("commit-message", Suite::Text, 0, 2), ("json-extract", Suite::Text, 2, 2), ("retrieval-docs", Suite::Retrieval, 0, 1)],
+        );
+        let scores = class_scores(&row.report);
+        assert!(scores.contains(&(TaskClass::Agent, 1.0)));
+        assert!(scores.contains(&(TaskClass::Text, 0.0)), "the commit message is text");
+        assert!(scores.contains(&(TaskClass::Analysis, 1.0)), "the extraction is an analysis");
+        assert_eq!(scores.len(), 3, "retrieval is no model's class");
+    }
+
+    /// Evaluations were matched by name: a re-pulled model kept the score of the bytes it replaced,
+    /// and the same weights under another name had none.
+    #[test]
+    fn an_evaluation_is_matched_by_the_weights_when_both_sides_know_them() {
+        use crate::evals::report::MachineSummary;
+        let here = MachineSummary { os: "macos".into(), arch: "aarch64".into(), ram_gb: 16.0, gpu: "unified".into(), gpu_name: None, gpu_gb: None };
+        let rows = vec![evaluation("qwen3:8b", Some("old"), vec![]), evaluation("my-qwen", Some("new"), vec![]), evaluation("plain", None, vec![])];
+        assert_eq!(latest_evaluation(&rows, "ollama", "qwen3:8b", Some("new"), &here).map(|e| e.id.as_str()), Some("my-qwen"), "same bytes, another name");
+        assert!(latest_evaluation(&rows, "ollama", "qwen3:8b", Some("newest"), &here).is_none(), "re-pulled: the old score is about other bytes");
+        assert_eq!(latest_evaluation(&rows, "ollama", "plain", Some("d"), &here).map(|e| e.id.as_str()), Some("plain"), "no digest recorded: by name");
+        assert_eq!(latest_evaluation(&rows, "ollama", "qwen3:8b", None, &here).map(|e| e.id.as_str()), Some("qwen3:8b"));
+        let elsewhere = MachineSummary { ram_gb: 64.0, ..here };
+        assert!(latest_evaluation(&rows, "ollama", "plain", None, &elsewhere).is_none(), "another machine");
     }
 }
 

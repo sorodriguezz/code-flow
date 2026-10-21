@@ -7965,6 +7965,35 @@ ok", "").unwrap().unwrap();
 // consumption is an account's, and splitting it by which folder happened to be open would answer a
 // question nobody is asking of a status bar.
 
+/// The running cost a CLI session last reported, if this app has seen one — the baseline
+/// `ai_usage::run_cost` takes a resumed run's share against.
+pub fn ai_session_cost(conn: &Connection, provider: &str, session_id: &str) -> rusqlite::Result<Option<f64>> {
+    conn.query_row(
+        "SELECT total_usd FROM ai_session_costs WHERE provider = ?1 AND session_id = ?2",
+        params![provider, session_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// Remembers a session's running cost, and forgets the sessions nobody has resumed for
+/// `ai_usage::SESSION_COST_KEEP_DAYS`. Swept here, on the write, because nothing reads the table
+/// in bulk: it is one row per session, and the sweep is a scan of a few thousand of them at most.
+pub fn set_ai_session_cost(conn: &Connection, provider: &str, session_id: &str, total: f64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO ai_session_costs (provider, session_id, total_usd, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(provider, session_id) DO UPDATE SET total_usd = excluded.total_usd, updated_at = excluded.updated_at",
+        params![provider, session_id, total, now()],
+    )?;
+    conn.execute(
+        "DELETE FROM ai_session_costs WHERE updated_at < ?1",
+        params![(Utc::now() - chrono::Duration::days(crate::ai_usage::SESSION_COST_KEEP_DAYS))
+            .trunc_subsecs(6)
+            .to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 /// Files one run's report. Silently a no-op for a run that reported nothing worth keeping — the
 /// caller checks too, and a meter is never worth failing a turn over.
 pub fn record_ai_usage(

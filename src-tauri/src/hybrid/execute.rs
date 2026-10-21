@@ -400,8 +400,10 @@ async fn run_item<R: Runtime>(
     let mut tokens = (0i64, 0i64);
     let mut note = String::new();
     let mut code = "";
+    // Read once per task, not per attempt: a retry is the same task, and every read counts as a use.
+    let memories = memory_block(job, item);
     for attempt in 0..2 {
-        let result = attempt_item(job, run, kind, live, item, &note, rx, &mut tokens).await;
+        let result = attempt_item(job, run, kind, live, item, &note, &memories, rx, &mut tokens).await;
         let ms = started.elapsed().as_millis() as i64;
         let base = ItemOutcome { tokens_in: tokens.0, tokens_out: tokens.1, ms, ..Default::default() };
         match result {
@@ -439,6 +441,25 @@ async fn run_item<R: Runtime>(
         ms: started.elapsed().as_millis() as i64,
         ..Default::default()
     })
+}
+
+/// Characters of approved memories one task carries — the size of the block a chat turn gets on
+/// a CLI (`claude_cmd`'s 3,000) cut down for a window that also has to hold a whole file.
+const MEMORY_CHARS: usize = 2_000;
+
+/// The memories the user approved for this task's repository and workspace that bear on it —
+/// conventions and preferences always, decisions and facts when the task's words match them
+/// (`ai_memory::relevant`) — as the block its prompt carries. Local-only memories count: this model
+/// is on the user's machine. Empty when there are none or the database is busy elsewhere.
+fn memory_block<R: Runtime>(job: &Job<'_, R>, item: &HybridItem) -> String {
+    let Some(repo) = job.repo(&item.project_id) else { return String::new() };
+    let Ok(conn) = job.db.0.lock() else { return String::new() };
+    let project = crate::knowledge::owning_project(&conn, &repo.path);
+    let workspace = project.as_ref().map(|p| p.workspace_id.clone()).filter(|ws| !ws.is_empty());
+    let project_id = project.map(|p| p.id).unwrap_or_else(|| repo.project_id.clone());
+    let question = format!("{}\n{}\n{}", item.title, item.file, item.instruction);
+    let found = crate::ai_memory::relevant(&conn, workspace.as_deref(), Some(&project_id), &question, false, MEMORY_CHARS).unwrap_or_default();
+    crate::ai_memory::note(&found).map(|(note, _)| note).unwrap_or_default()
 }
 
 fn read_text(path: &Path) -> Result<Option<String>, String> {
@@ -497,6 +518,7 @@ async fn attempt_item<R: Runtime>(
     live: &runtime::Live,
     item: &HybridItem,
     note: &str,
+    memories: &str,
     rx: &mut Option<watch::Receiver<bool>>,
     tokens: &mut (i64, i64),
 ) -> Attempt {
@@ -586,6 +608,7 @@ async fn attempt_item<R: Runtime>(
             &refs,
             &run.gate_note,
             note,
+            memories,
             run.budget_input.max(0) as u64,
             run.budget_output.max(0) as u64,
         ) {
@@ -595,6 +618,9 @@ async fn attempt_item<R: Runtime>(
         if prompt.references_used < refs.len() {
             log(&format!("  {} of {} references fit the budget", prompt.references_used, refs.len()));
         }
+        if !memories.trim().is_empty() && !prompt.memories_used {
+            log("  the approved memories did not fit beside the task and were left out");
+        }
         // Counted exactly where the server can count (llama.cpp's `/tokenize`); estimated otherwise.
         let sent = match local_llm::count_tokens(&live.endpoint, &format!("{}\n{}", prompts::EXECUTOR_SYSTEM, prompt.user)).await {
             Some(exact) if exact > run.budget_input.max(0) as u64 => {
@@ -603,8 +629,8 @@ async fn attempt_item<R: Runtime>(
                     format!("The task needs {exact} tokens and the local model's budget is {}.", run.budget_input),
                 )
             }
-            Some(exact) => exact,
-            None => prompt.estimate,
+            Some(exact) => budget::Sent::Exact(exact),
+            None => budget::Sent::Estimate(prompt.estimate),
         };
 
         let request = ChatRequest {
@@ -649,10 +675,12 @@ async fn attempt_item<R: Runtime>(
         let outcome = match answer {
             Ok(outcome) => outcome,
             Err(LocalError::Cancelled) => return Attempt::Cancelled,
+            // Not the user's machine: no retry can make it so, and no other engine may stand in.
+            Err(failure @ LocalError::NotLocal(_)) => return Attempt::Unavailable(failure.sentence()),
             Err(failure) if failure.is_unreachable() => return Attempt::Unavailable(failure.sentence()),
             Err(failure) => return Attempt::Retry(why::SERVER, failure.sentence()),
         };
-        let prompt_tokens = outcome.prompt_tokens.unwrap_or(sent) as i64;
+        let prompt_tokens = outcome.prompt_tokens.unwrap_or(sent.tokens()) as i64;
         let completion_tokens = outcome
             .completion_tokens
             .unwrap_or_else(|| budget::estimate_tokens(&outcome.text)) as i64;
@@ -672,12 +700,14 @@ async fn attempt_item<R: Runtime>(
             },
         );
 
-        if budget::truncated(sent, outcome.prompt_tokens) {
+        if budget::prompt_cut(sent, outcome.prompt_tokens, Some(run.ctx.max(0) as u32)) {
             return Attempt::Fail(
                 why::CUT_PROMPT,
                 format!(
-                    "The server processed {} of ~{sent} tokens: it cut the prompt, so the answer can't be trusted. Raise the server's context.",
-                    outcome.prompt_tokens.unwrap_or(0)
+                    "The server processed {} of {}{} tokens: it cut the prompt, so the answer can't be trusted. Raise the server's context.",
+                    outcome.prompt_tokens.unwrap_or(0),
+                    if matches!(sent, budget::Sent::Exact(_)) { "" } else { "~" },
+                    sent.tokens()
                 ),
             );
         }

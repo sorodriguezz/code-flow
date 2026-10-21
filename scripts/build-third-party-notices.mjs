@@ -449,6 +449,8 @@ async function main() {
   const bundled = collectBundled();
   const fonts = collectFonts(npm.dirs);
   const icons = collectIconSets(npm.dirs);
+  const archIcons = collectArchIcons();
+  const skills = collectVendoredSkills();
   const carried = collectCarriedNotices(npm.dirs, cargo.packages);
   const models = collectModels();
 
@@ -459,10 +461,11 @@ async function main() {
     ...bundled.map((row) => ({ name: row.name, declared: row.licence, elected: row.licence })),
     ...fonts.map((row) => ({ name: row.family, declared: row.licence, elected: row.licence })),
     ...icons.map((row) => ({ name: row.name, declared: row.licence, elected: row.licence })),
+    ...skills.map((row) => ({ name: `skill ${row.name}`, declared: row.licence, elected: row.licence })),
   ]);
   warnAboutStaleConstants(npm, cargo);
 
-  const markdown = render({ targets, npm: npm.components, cargo: cargo.components, native, bundled, fonts, icons, carried, models });
+  const markdown = render({ targets, npm: npm.components, cargo: cargo.components, native, bundled, fonts, icons, archIcons, skills, carried, models });
   const tally =
     `${resolved(npm.components)} npm packages, ${resolved(cargo.components)} crates, ` +
     `${native.filter((row) => !row.part).length} C libraries, ${bundled.length} bundled runtimes`;
@@ -830,6 +833,86 @@ const COPIED_MARKS = [
   },
 ];
 
+/**
+ * Arquitectura's cloud icons: the providers' official architecture sets, compacted into
+ * `src/lib/architecture/icons/packs/` by `scripts/build-arch-icons.mjs` from the zips each provider
+ * publishes. None is an open licence — each provider permits its icons in architecture diagrams,
+ * which is the only thing the app draws with them. The count and the notice are read back from the
+ * pack itself, so a rebuilt pack cannot leave this table describing the old one.
+ */
+const ARCH_ICON_PACKS = [
+  {
+    file: "src/lib/architecture/icons/packs/azure.json",
+    source: "[Azure architecture icons](https://learn.microsoft.com/azure/architecture/icons/) (Microsoft)",
+    terms: "Microsoft's icon terms — use permitted in architecture diagrams, training material and documentation",
+  },
+  {
+    file: "src/lib/architecture/icons/packs/aws.json",
+    source: "[AWS Architecture Icons](https://aws.amazon.com/architecture/icons/) (Amazon Web Services)",
+    terms: "AWS's icon terms — permitted for creating architecture diagrams",
+  },
+  {
+    file: "src/lib/architecture/icons/packs/gcp.json",
+    source: "[Google Cloud icons](https://cloud.google.com/icons) (Google)",
+    terms: "Google's icon terms — provided for architecture diagrams",
+  },
+];
+
+/**
+ * The skills Arquitectura hands its models, vendored as text (scripts left out) into
+ * `src-tauri/src/architecture/skills/` and embedded in the binary by `skills_table.rs`. Each folder
+ * keeps its upstream licence as `LICENSE.txt`, and every run proves that file still says what the
+ * row claims. `codeflow-architecture` is the app's own and has no row.
+ */
+const VENDORED_SKILLS = [
+  { name: "architecture", repo: "anthropics/knowledge-work-plugins", licence: "Apache-2.0" },
+  { name: "architecture-designer", repo: "jeffallan/claude-skills", licence: "MIT" },
+  { name: "aws-well-architected-review", repo: "aws/agent-toolkit-for-aws", licence: "Apache-2.0" },
+  { name: "c4-architecture", repo: "softaworks/agent-toolkit", licence: "MIT" },
+  { name: "cloud-design-patterns", repo: "github/awesome-copilot", licence: "MIT" },
+  { name: "ddia-systems", repo: "wondelai/skills", licence: "MIT" },
+  { name: "design-code-architecture", repo: "wondelai/skills", licence: "MIT" },
+  { name: "design-system", repo: "nextlevelbuilder/ui-ux-pro-max-skill", licence: "MIT" },
+  { name: "documentation-and-adrs", repo: "addyosmani/agent-skills", licence: "MIT" },
+  { name: "domain-modeling", repo: "mattpocock/skills", licence: "MIT" },
+  { name: "google-cloud-solution-architecture", repo: "google/skills", licence: "Apache-2.0" },
+  { name: "grilling", repo: "mattpocock/skills", licence: "MIT" },
+  { name: "security-threat-model", repo: "openai/skills", licence: "Apache-2.0" },
+  { name: "stride-analysis-patterns", repo: "wshobson/agents", licence: "MIT" },
+  { name: "system-design", repo: "wondelai/skills", licence: "MIT" },
+  { name: "teach", repo: "mattpocock/skills", licence: "MIT" },
+];
+
+const LICENCE_PROOF = {
+  MIT: ["MIT License", "Permission is hereby granted, free of charge"],
+  "Apache-2.0": ["Apache License", "Version 2.0, January 2004"],
+};
+
+function collectArchIcons() {
+  return ARCH_ICON_PACKS.map((pack) => {
+    const data = JSON.parse(readRepo(pack.file));
+    const total = Object.keys(data.icons ?? {}).length;
+    if (!total) fail(`${pack.file} holds no icons — rebuild it with scripts/build-arch-icons.mjs`);
+    return { ...pack, label: data.label, total };
+  });
+}
+
+function collectVendoredSkills() {
+  const dir = "src-tauri/src/architecture/skills";
+  const listed = new Set(VENDORED_SKILLS.map((skill) => skill.name));
+  for (const name of readdirSync(join(ROOT, dir))) {
+    if (name !== "codeflow-architecture" && statSync(join(ROOT, dir, name)).isDirectory() && !listed.has(name)) {
+      fail(`${dir}/${name} is vendored but has no row in VENDORED_SKILLS`);
+    }
+  }
+  return VENDORED_SKILLS.map((skill) => {
+    const licence = `${dir}/${skill.name}/LICENSE.txt`;
+    if (!existsSync(join(ROOT, licence))) fail(`${skill.name}: ${licence} is missing`);
+    proveFile(licence, LICENCE_PROOF[skill.licence], `skill ${skill.name}`, skill.licence);
+    return skill;
+  });
+}
+
 /** Every `@iconify-json/*` set in the production tree, described by its own `info.json`. */
 function collectIconSets(npmDirs) {
   const rows = [];
@@ -1063,7 +1146,7 @@ const NORMALISATION = [
   "because there the order carries meaning.",
 ].join("\n");
 
-function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, models }) {
+function render({ targets, npm, cargo, native, bundled, fonts, icons, archIcons, skills, carried, models }) {
   const mpl = [...npm, ...cargo].filter((component) => component.elected === "MPL-2.0").sort(byName);
   const elected = [...npm, ...cargo].filter((component) => ELECTIONS[component.name]).sort(byName);
   const libgit2 = native.find((row) => row.notice === "libgit2");
@@ -1328,6 +1411,28 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, carried, m
     }
     w("");
   }
+
+  w(
+    "## Arquitectura: cloud icons and skills",
+    "",
+    "The architecture diagrams draw the cloud providers' own icons, compacted into",
+    "`src/lib/architecture/icons/packs/` and loaded on demand. They are not under an open licence:",
+    "each provider permits them in architecture diagrams, which is all the app uses them for.",
+    "",
+    "| Source | Terms | Icons |",
+    "|---|---|---|",
+  );
+  for (const pack of archIcons) w(`| ${pack.source} | ${pack.terms} | ${pack.total} |`);
+  w(
+    "",
+    "The section's AI reads these skills, embedded in the app as text and installed only in its own",
+    "working folder. Each keeps its upstream licence beside it as `LICENSE.txt`.",
+    "",
+    "| Skill | From | Licence (SPDX) |",
+    "|---|---|---|",
+  );
+  for (const skill of skills) w(`| \`${skill.name}\` | [${skill.repo}](https://github.com/${skill.repo}) | ${skill.licence} |`);
+  w("");
 
   w(
     "## Notification sounds",

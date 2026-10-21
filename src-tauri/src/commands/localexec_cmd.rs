@@ -213,7 +213,10 @@ pub async fn local_exec_state(db: State<'_, Db>, fresh: Option<bool>) -> Result<
     Ok(LocalExecState {
         backend: resolved.kind,
         backend_chosen: settings.backend.is_some(),
-        remote: resolved.kind != BackendKind::Bundled && !local_llm::is_loopback(&resolved.url),
+        // Another machine of the user's own network: allowed, and the pane says the code goes there.
+        // A server on the internet is refused instead (`error_code` "not-local", from `resolve`), and
+        // the warning would be saying something that no longer happens.
+        remote: resolved.kind != BackendKind::Bundled && !local_llm::is_loopback(&resolved.url) && local_llm::on_users_network(&resolved.url),
         url: resolved.url,
         detected: resolved.detected,
         reachable: resolved.reachable,
@@ -271,7 +274,10 @@ fn needs(entry: &exec_catalogue::ExecModelSpec, machine: &Machine, via_ollama: b
 }
 
 fn judge(entry: &exec_catalogue::ExecModelSpec, size_bytes: u64, machine: &Machine) -> (Fit, Option<f64>) {
-    let also_resident = runtime::completion_engine_bytes();
+    // What else holds memory while this one would run: the completion engine, the embedder and an
+    // adapter's server — not the executor, which a catalogue model replaces rather than joins.
+    let swapped = executor::resident().map(|(model, _)| model);
+    let also_resident = runtime::resident_beside(BackendKind::Bundled, swapped.as_deref(), "");
     let need = budget::memory_need(size_bytes, entry.kv_bytes_per_token, ROW_CTX);
     let fit = budget::fit(need, also_resident, machine);
     if fit == Fit::DoesNotFit {

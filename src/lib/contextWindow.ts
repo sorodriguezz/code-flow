@@ -62,6 +62,24 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / CHARS_PER_TOKEN);
 }
 
+/** Claude Code's commands that the CLI answers itself, without a call to the model. */
+const READ_ONLY_COMMANDS = new Set(["/context", "/usage"]);
+
+/**
+ * Whether a composed line is a command the CLI answers without asking the model — Claude Code's
+ * `/context` and `/usage` — and so leaves the context exactly as it was.
+ *
+ * Such a turn reports no prompt of its own: the CLI's reply is a synthetic message billed at zero
+ * tokens. Read as "this turn measured nothing", that dropped the repository chat's meter to the
+ * transcript's estimate, and turned the other chats' figure approximate, right after the user asked
+ * how full the context was (user report, 2026-10-21). The measurement before it still describes it.
+ */
+export function leavesContextAsIs(line: string): boolean {
+  const text = line.trim();
+  if (!text.startsWith("/") || text.includes("\n")) return false;
+  return READ_ONLY_COMMANDS.has(text.split(/\s/)[0].toLowerCase());
+}
+
 /**
  * A token count at a glance: `840`, `12,3k`, `1,2M`.
  *

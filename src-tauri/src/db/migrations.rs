@@ -1348,6 +1348,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- coloured like any other, and two repositories called `api` still get one folder
             -- each. See `diagrams.origin_project_id`.
             origin_project_id TEXT NOT NULL DEFAULT '',
+            -- Whose tree the folder is in: '' for Diagramas, 'arch' for Arquitectura. The two apps
+            -- share these tables and each hides the other's documents, so each must hide the
+            -- other's folders too. Also added by `add_app_to_diagram_folders`.
+            app          TEXT NOT NULL DEFAULT '',
             sort_order   INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL,
             updated_at   TEXT NOT NULL
@@ -1974,6 +1978,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_tab_to_workspace_terminals(conn)?;
     add_repo_origin_to_diagrams(conn)?;
     add_effort_to_chat_conversations(conn)?;
+    add_app_to_diagram_folders(conn)?;
     add_outputs_to_chat_messages(conn)?;
     add_state_to_chat_groups(conn)?;
     add_groups_to_chat_conversations(conn)?;
@@ -2024,6 +2029,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_batch_to_agent_tasks(conn)?;
     add_context_to_activity_log(conn)?;
     add_ai_platform_tables(conn)?;
+    add_ai_session_costs(conn)?;
     Ok(())
 }
 
@@ -3499,6 +3505,14 @@ fn add_compaction_to_chat_conversations(conn: &Connection) -> rusqlite::Result<(
     Ok(())
 }
 
+/// Gives an already-created `diagram_folders` its `app` column — every folder before it is Diagramas'.
+fn add_app_to_diagram_folders(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "diagram_folders")? && !has_column(conn, "diagram_folders", "app")? {
+        conn.execute_batch("ALTER TABLE diagram_folders ADD COLUMN app TEXT NOT NULL DEFAULT '';")?;
+    }
+    Ok(())
+}
+
 /// Gives an already-created `chat_conversations` its `effort` column.
 fn add_effort_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
     if table_exists(conn, "chat_conversations")? && !has_column(conn, "chat_conversations", "effort")? {
@@ -3695,6 +3709,21 @@ fn add_wiki_etag_to_doc_pages(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE doc_pages ADD COLUMN wiki_etag TEXT NOT NULL DEFAULT '';")?;
     }
     Ok(())
+}
+
+/// The running cost each CLI session last reported, so a resumed run is billed only for what it
+/// added — see `ai_usage::run_cost`. One row per session, forgotten after
+/// `ai_usage::SESSION_COST_KEEP_DAYS` without a resume.
+fn add_ai_session_costs(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ai_session_costs (
+            provider    TEXT NOT NULL,
+            session_id  TEXT NOT NULL,
+            total_usd   REAL NOT NULL,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (provider, session_id)
+        );",
+    )
 }
 
 /// What the engines have spent, one row per finished run that reported it.

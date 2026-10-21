@@ -16,8 +16,12 @@ pub enum Fixture {
     /// ~25 files: cart, checkout, an HTTP layer and filler domain modules. The discount bug lives in
     /// `src/lib/pricing.js`, two imports away from the symptom.
     Shop,
-    /// A service whose decisions live in `docs/adr/`, for questions answered by documentation.
+    /// A service whose decisions live in `docs/adr/`, for questions answered by documentation — and
+    /// a note of the team's (see [`Fixture::notes`]), for a question only the notes answer.
     Docs,
+    /// Sixty days of operations notes in `docs/ops/`, one sentence of which is the answer: a needle
+    /// among passages that share its words.
+    Haystack,
 }
 
 impl Fixture {
@@ -30,6 +34,7 @@ impl Fixture {
             Fixture::Cart => cart(&dir),
             Fixture::Shop => shop(&dir),
             Fixture::Docs => docs(&dir),
+            Fixture::Haystack => haystack(&dir),
         }
         dir
     }
@@ -39,6 +44,20 @@ impl Fixture {
             Fixture::Cart => "cart",
             Fixture::Shop => "shop",
             Fixture::Docs => "docs",
+            Fixture::Haystack => "haystack",
+        }
+    }
+
+    /// The notes the fixture's workspace holds, `(id, title, body)` — written into a database of the
+    /// bench's own (never the app's), for the retrieval tasks.
+    pub fn notes(self) -> &'static [(&'static str, &'static str, &'static str)] {
+        match self {
+            Fixture::Docs => &[(
+                "eval-oncall",
+                "Guardia de inventario",
+                "## Escáneres sin conexión\n\nSi los escáneres del almacén pierden la conexión, la persona de guardia reinicia el servicio con `systemctl restart inventory` y avisa en el canal #almacen antes de diez minutos.\n",
+            )],
+            _ => &[],
         }
     }
 }
@@ -98,6 +117,55 @@ fn docs(dir: &Path) {
     write(dir, "docs/adr/0003-retention.md", "# 3. Stock history retention\n\nStatus: accepted\n\nStock movements are kept for **90 days**; older rows are summarised into a monthly total and deleted.\n");
 }
 
+/// The answer the haystack hides.
+pub const NEEDLE: &str = "Since the March firmware update the warehouse scanners flush their buffer every 47 seconds.";
+/// Where it hides.
+pub const NEEDLE_PATH: &str = "docs/ops/day-031.md";
+
+/// One day of operations notes: words the needle shares (scanners, buffer, warehouse) in other
+/// sentences, so the search has to rank, not just match.
+fn ops_day(day: usize) -> String {
+    let crews = ["north dock", "south dock", "cold room", "returns bay", "mezzanine"];
+    let events = [
+        "the scanners were rebooted after a power dip",
+        "the label printer ran out of ribbon",
+        "a pallet jack was sent for repair",
+        "the buffer pool of the stock database was resized",
+        "two forklifts were recharged overnight",
+        "the warehouse doors were serviced",
+        "a shipment of returns was counted twice",
+    ];
+    let mut text = format!("# Operations, day {day}\n\n");
+    for shift in 0..3 {
+        text.push_str(&format!(
+            "## Shift {}\n\nAt the {} {}. The supervisor logged {} pallets and {} open tickets.\n\n",
+            shift + 1,
+            crews[(day + shift) % crews.len()],
+            events[(day * 3 + shift) % events.len()],
+            40 + (day * 7 + shift * 3) % 60,
+            (day + shift) % 9,
+        ));
+    }
+    if format!("docs/ops/day-{day:03}.md") == NEEDLE_PATH {
+        text.push_str(&format!("## Firmware\n\n{NEEDLE}\n"));
+    }
+    text
+}
+
+const HAYSTACK_DAYS: usize = 60;
+
+fn haystack(dir: &Path) {
+    write(dir, "README.md", "# Warehouse operations\n\nDaily notes of the warehouse crews, one file a day in `docs/ops/`.\n");
+    for day in 1..=HAYSTACK_DAYS {
+        write(dir, &format!("docs/ops/day-{day:03}.md"), &ops_day(day));
+    }
+}
+
+/// Every day of the haystack as one text — the long context a model is asked to find the needle in.
+pub fn haystack_text() -> String {
+    (1..=HAYSTACK_DAYS).map(ops_day).collect::<Vec<_>>().join("\n")
+}
+
 /// Runs `code` with node in `dir`, returning its trimmed stdout. `None` when node is missing or the
 /// script fails — which a check reports as "the project no longer runs".
 pub fn node_eval(dir: &Path, code: &str) -> Option<String> {
@@ -116,12 +184,20 @@ mod tests {
 
     #[test]
     fn every_fixture_is_a_repository_with_its_files() {
-        for fixture in [Fixture::Cart, Fixture::Shop, Fixture::Docs] {
+        for fixture in [Fixture::Cart, Fixture::Shop, Fixture::Docs, Fixture::Haystack] {
             let dir = fixture.create();
             assert!(dir.join(".git").is_dir(), "{fixture:?} is not a repository");
             assert!(dir.join("README.md").is_file());
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn the_needle_is_in_one_day_and_its_words_in_many() {
+        let text = haystack_text();
+        assert_eq!(text.matches(NEEDLE).count(), 1);
+        assert!(text.matches("scanners").count() > 10, "distractors share the needle's words");
+        assert!(ops_day(31).contains(NEEDLE) && !ops_day(30).contains(NEEDLE), "in the middle, where a long context loses things");
     }
 
     #[test]

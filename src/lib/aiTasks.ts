@@ -122,6 +122,10 @@ export const AI_TASKS: AiTaskDef[] = [
   // repository, documents or pages itself and puts them on stdin, so it routes anywhere, a local
   // model included. Its prompt — what a good skill is — is the `skill_template` row below it.
   { key: "skills", labelKey: "task.skills", hintKey: "task.skillsHint", area: "docs", modelForKey: "task.skillsModelFor" },
+  // Arquitectura's assistant (`AiTask::Architecture`): ask, review board, ADRs, threat model, tutor
+  // and design from an idea. Read-only in the section's own folder with its bundled skills; the
+  // document goes on stdin, so it routes anywhere, a local model included.
+  { key: "architecture", labelKey: "task.architecture", hintKey: "task.architectureHint", area: "docs", modelForKey: "task.architectureModelFor" },
   { key: "spoken_summary", labelKey: "task.spokenSummary", hintKey: "task.spokenSummaryHint", area: "other", modelForKey: "task.spokenSummaryModelFor" },
 ];
 

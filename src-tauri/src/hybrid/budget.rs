@@ -42,18 +42,71 @@ pub fn budget_for(ctx: u32) -> Budget {
     Budget { ctx, output, input }
 }
 
-/// Whether the server cut the prompt.
-///
-/// Compares what was sent (estimated, or counted exactly when the server can count) with what the
-/// server says it processed. Below half means the prompt was truncated: the measured case is a
-/// 6,982-token prompt Ollama processed as 2,050 — a ratio of 0.29 against the exact count, and
-/// lower still against the estimate. Prompts under 1k tokens are never judged; the template and
-/// the estimate's error are the same order of size there.
-pub fn truncated(sent_tokens: u64, reported: Option<u64>) -> bool {
-    match reported {
-        Some(reported) if sent_tokens >= 1_024 => (reported as f64) < sent_tokens as f64 * 0.5,
-        _ => false,
+/// How the size of a prompt about to be sent was measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sent {
+    /// Counted by the server's own tokenizer (llama.cpp's `/tokenize`) — what it will process, give
+    /// or take the chat template, which only ever adds.
+    Exact(u64),
+    /// [`estimate_tokens`], which runs high on purpose (three characters a token).
+    Estimate(u64),
+}
+
+impl Sent {
+    pub fn tokens(self) -> u64 {
+        match self {
+            Sent::Exact(tokens) | Sent::Estimate(tokens) => tokens,
+        }
     }
+}
+
+/// The share of an exact count the server may report and still have read everything. The template
+/// *adds* tokens, so anything below the count is tokens that went missing; the margin is for a
+/// count taken of the parts rather than the templated whole (a role marker merged into a word).
+const EXACT_FLOOR: f64 = 0.9;
+
+/// The same against the estimate. Tighter than the half it used to be: code runs 3–4 characters a
+/// token and prose 4–4.5, so a whole prompt reports 0.67–1.0 of the estimate (more with the
+/// template); 0.6 is past the longest-worded prose a tokenizer splits (five characters a token)
+/// and still well above the measured cut — a 6,982-token prompt Ollama processed as 2,050, 0.21 of
+/// its estimate.
+const ESTIMATE_FLOOR: f64 = 0.6;
+
+/// Whether the server cut the prompt it was sent.
+///
+/// Three signs, any one enough:
+///
+/// * against an **exact** count, the server reports fewer tokens than it was given;
+/// * against the **estimate**, it reports less than [`ESTIMATE_FLOOR`] of it (prompts under 1k
+///   tokens are not judged on the estimate: the template and the estimate's error are the same
+///   order of size there);
+/// * the prompt it reports fills the whole `window` — Ollama's runner, handed more than `num_ctx`,
+///   keeps exactly `num_ctx` tokens, and a prompt that really were that long would leave no room
+///   for a single token of answer anyway.
+pub fn prompt_cut(sent: Sent, reported: Option<u64>, window: Option<u32>) -> bool {
+    let Some(reported) = reported else { return false };
+    if window.is_some_and(|window| window > 0 && reported + 8 >= window as u64) {
+        return true;
+    }
+    match sent {
+        Sent::Exact(tokens) => tokens >= 64 && (reported as f64) < tokens as f64 * EXACT_FLOOR,
+        Sent::Estimate(tokens) => tokens >= 1_024 && (reported as f64) < tokens as f64 * ESTIMATE_FLOOR,
+    }
+}
+
+/// [`prompt_cut`] against an estimate and no window — the form the speed bench and older callers
+/// use. `sent_tokens` from a server's exact count is still judged as an estimate here, which errs
+/// towards not flagging; callers that have the count say so with [`Sent::Exact`].
+pub fn truncated(sent_tokens: u64, reported: Option<u64>) -> bool {
+    prompt_cut(Sent::Estimate(sent_tokens), reported, None)
+}
+
+/// Whether a prompt measured as `sent` fits `input_budget` — what a request is checked against
+/// before it is sent, so an over-long one ends the run with a reason instead of reaching a server
+/// that would cut it in silence. An estimate is given the benefit of its own pessimism only when it
+/// is all there is.
+pub fn fits(sent: Sent, input_budget: u64) -> bool {
+    sent.tokens() <= input_budget
 }
 
 /// Which tasks the planner may hand to the local model.
@@ -403,6 +456,37 @@ mod tests {
         assert!(!truncated(9_600, Some(6_400)));
         assert!(!truncated(500, Some(10)), "short prompts are never judged");
         assert!(!truncated(9_600, None), "no count, no verdict");
+    }
+
+    #[test]
+    fn an_exact_count_catches_a_cut_the_estimate_would_have_let_through() {
+        // 6,000 tokens counted, 4,096 processed: 0.68 — under the estimate's floor this would pass.
+        assert!(prompt_cut(Sent::Exact(6_000), Some(4_096), None));
+        assert!(!prompt_cut(Sent::Estimate(6_000), Some(4_096), None), "an estimate can't tell 0.68 from prose");
+        // The template only adds: a whole prompt reports at least its count.
+        assert!(!prompt_cut(Sent::Exact(6_000), Some(6_040), None));
+        assert!(!prompt_cut(Sent::Exact(30), Some(1), None), "a few tokens are never judged");
+    }
+
+    #[test]
+    fn the_estimate_floor_is_stricter_than_half() {
+        // 0.55 of the estimate: let through at the old 0.5, a cut now.
+        assert!(prompt_cut(Sent::Estimate(10_000), Some(5_500), None));
+        assert!(!prompt_cut(Sent::Estimate(10_000), Some(6_500), None), "prose at ~4.5 characters a token");
+    }
+
+    #[test]
+    fn a_prompt_that_fills_the_whole_window_was_cut() {
+        // Ollama handed more than num_ctx keeps exactly num_ctx: the ratio alone (0.82) passes.
+        assert!(prompt_cut(Sent::Estimate(10_000), Some(8_192), Some(8_192)));
+        assert!(!prompt_cut(Sent::Estimate(10_000), Some(8_000), Some(16_384)));
+        assert!(!prompt_cut(Sent::Exact(5_000), None, Some(8_192)), "no report, no verdict");
+    }
+
+    #[test]
+    fn a_prompt_is_checked_against_the_budget_before_it_is_sent() {
+        assert!(fits(Sent::Exact(5_600), 5_632));
+        assert!(!fits(Sent::Estimate(5_700), 5_632));
     }
 
     #[test]

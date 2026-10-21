@@ -8,6 +8,7 @@ import {
   chatContinueInNewThread,
   chatContextWindow,
   chatCreateConversation,
+  chatMcpSet,
   chatDeleteConversation,
   chatGetConversation,
   chatListConversations,
@@ -59,6 +60,7 @@ import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine 
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { formatAgentLogLine, repeatsStatus } from "../lib/agentLog";
 import { providerCapabilities } from "../lib/aiProviders";
+import { leavesContextAsIs } from "../lib/contextWindow";
 import { translate } from "./languageStore";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { notify } from "./notificationStore";
@@ -711,6 +713,13 @@ interface ConversationState {
   pendingCaveman: string;
   setPendingCaveman: (level: string) => void;
   /**
+   * The MCP switches the *next* conversation will be created with, by server key — the third of
+   * these for the same reason: the plug is on the empty state too, and a switch flipped there has no
+   * row to be written to until the first message creates one.
+   */
+  pendingMcp: Record<string, boolean>;
+  setPendingMcp: (server: string, enabled: boolean) => void;
+  /**
    * Applies `/caveman <argument>` to a conversation, or holds it for the next one when none is
    * open. Resolves the word through the backend first — see {@link chatCavemanResolve} — and
    * answers `false` when it is not a level, so the caller can say which words are.
@@ -943,6 +952,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   pendingEffort: "",
   cavemanLevels: [],
   pendingCaveman: "",
+  pendingMcp: {},
   groups: [],
   activeGroupId: null,
   groupContext: {},
@@ -1227,6 +1237,16 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         // conversation.
       }
     }
+    // The MCP switches flipped on the empty state, written onto the row before its first turn reads
+    // them. One that fails costs that server's default for this conversation, which its plug then
+    // shows — not the conversation.
+    const pendingMcp = Object.entries(get().pendingMcp);
+    if (pendingMcp.length > 0) {
+      await Promise.all(
+        pendingMcp.map(([server, enabled]) => chatMcpSet({ conversationId: created.id }, server, enabled).catch(() => {})),
+      );
+      set({ pendingMcp: {} });
+    }
     // And the files, for the third time the same problem: the empty state has a paperclip and no
     // row to hang the file on, so it was staged in a folder of this window's own. This is where it
     // stops being temporary — the copies are *moved* into this conversation's directory, because
@@ -1507,7 +1527,10 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           conversationId,
           role: "assistant",
           content: typed ? reply.text : "",
-          turn: lastTurn + 2,
+          // Its question's turn: the two halves of an exchange share one (see `questionBehind`), as
+          // the rows on disk do. It was `+ 2`, which numbered a transcript grown in this window as
+          // if each message were a turn, so a branch taken from it copied turns past the branch point.
+          turn: question.turn,
           createdAt: reply.created_at,
           provider: reply.provider,
           model: reply.model ?? undefined,
@@ -1534,8 +1557,9 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           model: reply.model ?? current.model,
           accountId: reply.account_id !== undefined ? reply.account_id : current.accountId,
           // `null` and not `?? current.contextTokens`: a turn that said nothing is exactly what the
-          // meter has to know about — see `ConversationSession.contextTokens`.
-          contextTokens: reply.context_tokens ?? null,
+          // meter has to know about — see `ConversationSession.contextTokens`. Except a `/context`
+          // or `/usage`, which asked the model nothing and so left the last figure standing.
+          contextTokens: reply.context_tokens ?? (leavesContextAsIs(trimmed) ? current.contextTokens : null),
           sending: false,
           runId: null,
           runStartedAt: null,
@@ -1630,7 +1654,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           conversationId,
           role: "assistant",
           content: cancelled ? "" : String(e),
-          turn: lastTurn + 2,
+          turn: question.turn,
           createdAt: new Date().toISOString(),
           provider,
           model: model || undefined,
@@ -1834,6 +1858,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   setPendingEffort: (effort) => set({ pendingEffort: effort }),
 
   setPendingCaveman: (level) => set({ pendingCaveman: level }),
+
+  setPendingMcp: (server, enabled) => set((s) => ({ pendingMcp: { ...s.pendingMcp, [server]: enabled } })),
 
   applyCaveman: async (conversationId, argument) => {
     const level = await chatCavemanResolve(argument).catch(() => null);

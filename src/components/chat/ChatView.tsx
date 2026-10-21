@@ -365,6 +365,8 @@ export function ChatView() {
   const setCaveman = useConversationStore((s) => s.setCaveman);
   const pendingCaveman = useConversationStore((s) => s.pendingCaveman);
   const setPendingCaveman = useConversationStore((s) => s.setPendingCaveman);
+  const pendingMcp = useConversationStore((s) => s.pendingMcp);
+  const setPendingMcp = useConversationStore((s) => s.setPendingMcp);
   // Asked once per model and cached. `undefined` — not yet answered — and `null` — asked, and the
   // app will not name a window for this one — draw identically, so there is no flash of a wrong bar
   // while the probe is in flight.
@@ -439,14 +441,13 @@ export function ChatView() {
        * narrower question than whether the setting is on.
        *
        * A replaying turn is always protected: the backend builds the prefix and measures it against
-       * its own budget. A *resuming* one can only be protected where both halves of a percentage
-       * exist — a reported occupancy and a window the app will name — and on four of the six
-       * engines neither does. Saying "it will compact itself" there would be a promise this app
-       * cannot keep, so the panel only makes it where it is true. Mirrors
-       * `auto_compact_if_full`.
+       * its own budget. A *resuming* one is protected wherever the app names the model's window:
+       * against the engine's reported occupancy when it reports one (Claude), and otherwise against
+       * the conversation's own text — a floor, so it compacts late rather than early. With no window
+       * there is no percentage, and saying "it will compact itself" would be a promise this app
+       * cannot keep. Mirrors `needs_compacting`.
        */
-      autoCompacts:
-        autoCompactEnabled && (!resumes || (measured !== null && window !== null)),
+      autoCompacts: autoCompactEnabled && (!resumes || window !== null),
       compactedTurns: cut === null ? 0 : cut + 1,
       summary,
       compacting,
@@ -859,6 +860,9 @@ export function ChatView() {
               onRunAppCommand={runAppCommand}
               onOpenTerminal={onOpenTerminal}
               skillScope={{ workspaceId: skillWorkspace }}
+              // The plug on the empty state too: what is switched here waits for the row the first
+              // message creates, like the reasoning dial and `/caveman` above.
+              mcpHeld={{ switches: pendingMcp, onSet: setPendingMcp }}
             />
           </div>
         ) : (

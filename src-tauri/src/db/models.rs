@@ -1328,6 +1328,9 @@ pub struct DiagramFolderRow {
     /// Identity, not decoration: it is how the next schema opened from that repository finds its
     /// way here after the folder has been renamed or moved.
     pub origin_project_id: String,
+    /// Whose tree it is in: empty for Diagramas, `arch` for Arquitectura (which shares the tables).
+    #[serde(default)]
+    pub app: String,
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,

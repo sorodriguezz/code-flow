@@ -66,3 +66,10 @@
   --xy-minimap-mask-stroke-color: var(--cf-accent);
   --xy-minimap-mask-stroke-width: 1.5;
 }
+
+/* A map too narrow for it: the minimap would sit on the legend and on the nodes it summarises. */
+@container (max-width: 560px) {
+  .cf-map-canvas .react-flow__minimap.cf-map-minimap {
+    display: none;
+  }
+}

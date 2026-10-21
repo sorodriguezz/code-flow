@@ -37,6 +37,10 @@ export type MainView =
   /** Flujos — node-based automations. Workspace-scoped and rail-reached like the seven above; see
    *  `components/flows`. */
   | "flows"
+  /** Arquitectura — architecture documents as JSON, with review, simulation, decisions and AI.
+   *  Workspace-scoped and rail-reached like Diagramas, whose table it shares; see
+   *  `components/architecture`. */
+  | "architecture"
   | "vault"
   /**
    * The chat workspace — the odd one among the odd ones, and for a different reason than the vault.

@@ -63,6 +63,23 @@ const COMMIT_MESSAGE_MODEL: &str = "";
 /// `-p`. A PR-review diff alone can reach 120k, well past the ~32k Windows command-line limit.
 const INLINE_LIMIT: usize = 12_000;
 
+/// What every run ends with, the text-only one included: its schema and the session it resumes.
+fn finish(mut cmd: Command, inv: &AiInvocation) -> Command {
+    // The final answer must satisfy this schema (grok 1.0.4's `--json-schema`, which implies the
+    // `json` output already chosen above). A flow node checks the answer itself either way.
+    if let Some(schema) = inv.json_schema {
+        cmd.arg("--json-schema").arg(schema);
+    }
+    // Resume by id. Not `--session-id`: that names a **new** conversation and errors if the id
+    // already exists, so using it to resume would fail on the second turn of every chat.
+    if let Some(session) = inv.resume_session_id {
+        if !session.trim().is_empty() {
+            cmd.arg("--resume").arg(session);
+        }
+    }
+    cmd
+}
+
 pub struct GrokEngine;
 
 impl AiEngine for GrokEngine {
@@ -127,8 +144,23 @@ impl AiEngine for GrokEngine {
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
         }
-        if inv.auto_approve_edits && !inv.read_only {
+        if inv.auto_approve_edits && !inv.read_only && !inv.text_only {
             cmd.arg("--always-approve");
+        }
+        // A text-only run needs none of the agent: grok's own prompt is replaced by a one-line one
+        // (the task's own instructions stay in the brief above, which may be several lines — a
+        // multi-line argument is what the brief file exists to avoid), the tools narrow to one that
+        // only reads and MCP is denied. All three flags predate this module's 1.0.4 baseline; the
+        // newer `--no-subagents` / `--disable-web-search` are left out rather than risk a CLI that
+        // refuses a flag it does not know.
+        if inv.text_only {
+            cmd.arg("--system-prompt-override").arg(crate::claude::TEXT_ONLY_SYSTEM_PROMPT);
+            cmd.arg("--tools").arg("read_file");
+            cmd.arg("--deny").arg("MCPTool");
+            if let Some(dir) = inv.prompt_files.dir("grok-scratch") {
+                cmd.current_dir(dir);
+            }
+            return finish(cmd, inv);
         }
         // The allow-list. `--tools` is comma-separated and, per grok's own docs, leaves only the
         // listed tools available — so naming a read-only set here is what actually takes
@@ -141,22 +173,10 @@ impl AiEngine for GrokEngine {
         } else if !inv.allowed_tools.is_empty() {
             cmd.arg("--tools").arg(inv.allowed_tools.join(","));
         }
-        // The final answer must satisfy this schema (grok 1.0.4's `--json-schema`, which implies the
-        // `json` output already chosen above). A flow node checks the answer itself either way.
-        if let Some(schema) = inv.json_schema {
-            cmd.arg("--json-schema").arg(schema);
-        }
-        // Resume by id. Not `--session-id`: that names a **new** conversation and errors if the id
-        // already exists, so using it to resume would fail on the second turn of every chat.
-        if let Some(session) = inv.resume_session_id {
-            if !session.trim().is_empty() {
-                cmd.arg("--resume").arg(session);
-            }
-        }
         if let Some(dir) = inv.cwd {
             cmd.current_dir(dir);
         }
-        cmd
+        finish(cmd, inv)
     }
 
     /// grok's own tool ids, from the table in its shipped headless-mode docs (re-checked on 1.0.4):
@@ -291,6 +311,10 @@ struct GrokReply {
     /// CLI that adds one to this object must not take the whole reply down with it.
     #[serde(default)]
     usage: Option<GrokUsage>,
+    /// Filed as the run's own cost. Claude's field of the same name is the *session's* running
+    /// total on `--resume` (see `ClaudeEngine::session_cost`); whether grok's is too has not been
+    /// checked — it takes a paid turn, and there is no endpoint to point it at a fake API. If it is,
+    /// implement `AiEngine::session_cost` here the same way and the meter does the rest.
     #[serde(default)]
     total_cost_usd: Option<f64>,
 }
@@ -490,6 +514,21 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--deny", "MCPTool"]), "{args:?}");
         assert!(!args.iter().any(|a| a == "--always-approve"), "{args:?}");
         assert!(!args.iter().any(|a| a.contains("search_replace")), "{args:?}");
+    }
+
+    #[test]
+    fn a_text_only_run_replaces_the_agent_prompt_and_keeps_one_reading_tool() {
+        let mut inv = AiInvocation::new("Escribe un título", "la conversación");
+        inv.text_only = true;
+        inv.auto_approve_edits = true;
+        let cmd = GrokEngine.build_command("grok", &inv);
+        let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|pair| pair == ["--system-prompt-override", crate::claude::TEXT_ONLY_SYSTEM_PROMPT]), "{args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["--tools", "read_file"]), "{args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["--deny", "MCPTool"]), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--always-approve"), "{args:?}");
+        let cwd = cmd.as_std().get_current_dir().expect("a scratch directory");
+        assert_eq!(std::fs::read_dir(cwd).unwrap().count(), 0);
     }
 
     /// Every id in the read-only set is one grok's docs list as a read tool — none of them writes.

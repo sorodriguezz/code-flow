@@ -82,6 +82,50 @@ pub fn record(provider: &str, model: &str, task: &str, account_id: Option<&str>,
 /// every single AI turn.
 pub const KEEP_DAYS: i64 = 30;
 
+/// How long a session's last running total is remembered. Longer than [`KEEP_DAYS`]: a conversation
+/// is resumed long after its rows have left the meter, and a session nobody remembers costs its next
+/// turn its price (see [`cost_since`]).
+pub const SESSION_COST_KEEP_DAYS: i64 = 90;
+
+/// What one run spent, for a CLI that reports the **session's** running cost rather than the run's
+/// (Claude Code on `--resume`: 2.1.305 restores the total from the session's `cost-state`, so every
+/// resumed turn's `total_cost_usd` includes all the turns before it).
+///
+/// `total` is remembered as the session's new baseline whatever is returned — a run that billed
+/// nothing still opened or moved the session the next run resumes.
+pub fn run_cost(provider: &str, session_id: &str, total: f64, resumed: bool) -> Option<f64> {
+    with_conn(|conn| run_cost_in(conn, provider, session_id, total, resumed))
+        // No database — every unit test: only a session this run opened has a total all its own.
+        .unwrap_or_else(|| cost_since(None, total, resumed))
+}
+
+/// [`run_cost`] against a given connection.
+fn run_cost_in(conn: &rusqlite::Connection, provider: &str, session_id: &str, total: f64, resumed: bool) -> Option<f64> {
+    let before = queries::ai_session_cost(conn, provider, session_id).ok().flatten();
+    let _ = queries::set_ai_session_cost(conn, provider, session_id, total);
+    cost_since(before, total, resumed)
+}
+
+/// The pure half of [`run_cost`]: the run's share of a session's running total, given the total
+/// remembered before it.
+///
+/// - A new session's total is the run's alone.
+/// - A resumed one is the difference — and a total *below* the remembered one means the CLI started
+///   counting again, so all of it is new.
+/// - A resumed session this app never saw a total for has no baseline: its figure includes turns
+///   already filed (before this existed) or run elsewhere. `None`, so the tokens are filed and the
+///   price is left unsaid, rather than billing every earlier turn once more.
+pub(crate) fn cost_since(before: Option<f64>, total: f64, resumed: bool) -> Option<f64> {
+    if !resumed {
+        return Some(total);
+    }
+    match before {
+        Some(before) if total >= before => Some(total - before),
+        Some(_) => Some(total),
+        None => None,
+    }
+}
+
 // ---------- the statistics view ----------
 //
 // Everything below is read by one screen and nothing else. It is deliberately computed in SQL
@@ -203,6 +247,53 @@ mod tests {
 
     fn usage(input: i64, output: i64, cost: Option<f64>) -> AiUsage {
         AiUsage { input_tokens: input, output_tokens: output, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: cost }
+    }
+
+    /// One Claude chat as 2.1.305 reports it, where every `total_cost_usd` is the session's so far:
+    /// each turn is billed for what it added, and the commands the CLI answers itself for nothing.
+    #[test]
+    fn a_resumed_session_is_billed_only_for_what_each_turn_added() {
+        let conn = install();
+        let cost = |session: &str, total: f64, resumed: bool| run_cost_in(&conn, "claude", session, total, resumed);
+        let near = |got: Option<f64>, want: f64| assert!(got.is_some_and(|got| (got - want).abs() < 1e-9), "{got:?} ≠ {want}");
+
+        near(cost("s1", 0.00395789, false), 0.00395789);
+        // `/context`: nothing asked of the model, the total stands still.
+        near(cost("s1", 0.00395789, true), 0.0);
+        // Turn 2 — reported as turn 1 plus itself.
+        near(cost("s1", 0.00510443, true), 0.00114654);
+        // `/clear` resumes s1 and answers from a new session, s2: that one starts here.
+        near(cost("s2", 0.0, false), 0.0);
+        near(cost("s2", 0.0021, true), 0.0021);
+        // A total below the last one: the CLI started counting again, so all of it is new.
+        near(cost("s1", 0.001, true), 0.001);
+    }
+
+    /// A session resumed with no total on record — a chat from before this existed, or one run
+    /// outside the app — files its tokens and leaves the price unsaid, rather than billing every
+    /// earlier turn again. Its total is the baseline the next turn is measured from.
+    #[test]
+    fn a_session_never_seen_before_gets_no_price_once() {
+        let conn = install();
+        assert_eq!(run_cost_in(&conn, "claude", "old", 0.75, true), None);
+        let next = run_cost_in(&conn, "claude", "old", 0.80, true).unwrap();
+        assert!((next - 0.05).abs() < 1e-9);
+        // Nor does a provider share another's sessions.
+        assert_eq!(run_cost_in(&conn, "other", "old", 0.80, true), None);
+    }
+
+    /// Sessions nobody resumed for the keep window are forgotten on the next write.
+    #[test]
+    fn a_session_unresumed_for_months_is_forgotten() {
+        let conn = install();
+        conn.execute(
+            "INSERT INTO ai_session_costs (provider, session_id, total_usd, updated_at) VALUES ('claude', 'stale', 1.0, '2020-01-01T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        queries::set_ai_session_cost(&conn, "claude", "fresh", 0.1).unwrap();
+        assert_eq!(queries::ai_session_cost(&conn, "claude", "stale").unwrap(), None);
+        assert_eq!(queries::ai_session_cost(&conn, "claude", "fresh").unwrap(), Some(0.1));
     }
 
     /// Two to three dozen columns whatever the window, and never a narrower column for a wider one.

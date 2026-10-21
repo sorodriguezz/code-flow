@@ -205,6 +205,23 @@ pub async fn shutdown() {
     set_status(Status::Off);
 }
 
+/// The model the running executor has open and the memory it holds — weights, its window's KV
+/// cache and the working buffers (`hybrid::budget::memory_need`) — for the fit estimate of a model
+/// that would run *beside* it (`hybrid::runtime::resident_beside`). `None` when it is not running.
+/// While another task is starting it (the slot's lock is held), the weights alone: the window being
+/// started is not known yet.
+pub fn resident() -> Option<(String, u64)> {
+    if let Some(Ok(guard)) = ENGINE.get().map(|slot| slot.try_lock()) {
+        let engine = guard.as_ref().filter(|engine| engine.is_alive())?;
+        let entry = super::exec_catalogue::find(&engine.launch.model_id)?;
+        let bytes = crate::hybrid::budget::memory_need(entry.spec.size_bytes, entry.kv_bytes_per_token, engine.launch.ctx);
+        return Some((engine.launch.model_id.clone(), bytes));
+    }
+    let model_id = running_model()?;
+    let bytes = super::exec_catalogue::find(&model_id)?.spec.size_bytes;
+    Some((model_id, bytes))
+}
+
 /// The model the running executor has open, if any — so deleting that model's file can stop it
 /// first (a mapped file cannot be unlinked on Windows).
 pub fn running_model() -> Option<String> {
@@ -245,6 +262,14 @@ impl ExecEngine {
             // budget every task was cut to would silently stop being true.
             .arg("-np")
             .arg("1")
+            // No prompt cache in RAM, said rather than implied. b10587 keeps up to 8 GB of finished
+            // prompts' state by default (`--cache-ram 8192`): with several slots every request
+            // leaves its state there, which is how the embedder grew to ~9 GB (`super::embedder`).
+            // One slot did not grow that way, but nothing here ever asks for a prompt it already
+            // finished — a step's prefix is reused from the slot's own cache, not this one — so the
+            // gigabytes would buy nothing beside a model that already takes most of the memory.
+            .arg("--cache-ram")
+            .arg("0")
             // No `-ngl`. llama.cpp's `--fit` (on by default) places as many layers as the GPU's free
             // memory holds and keeps the rest on the CPU — mixture experts first — but only for
             // the arguments left unset: given `-ngl 99`, b10587 gives up the moment a model does

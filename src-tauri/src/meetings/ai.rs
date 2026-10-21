@@ -14,7 +14,11 @@
 use serde::Deserialize;
 
 use crate::ai::AiEngine;
+use crate::hybrid::budget::{self, Sent};
 use crate::hybrid::local_llm::{self, BackendKind, ChatRequest, Endpoint, LocalError};
+
+/// The answer a local call is given room for — minutes, a plan, a follow-up mail.
+const ANSWER_TOKENS: u32 = 2_048;
 
 /// What every answer is told: be faithful, cite minutes, write Markdown in the reader's language.
 const SYSTEM: &str = "Eres quien toma las notas de una reunión. Recibes los datos de la reunión y su \
@@ -98,12 +102,27 @@ impl Runner<'_> {
             Runner::Cli { engine, binary, model } => crate::ai::meeting_answer(*engine, binary, model, SYSTEM, ask, stdin).await,
             Runner::Local { endpoint, model, ctx, label } => {
                 let user = format!("{ask}\n\n{stdin}");
+                // The part was cut to the window by characters ([`Runner::budget`]); the server's own
+                // count, where it has one, says whether that held — a transcript in a script the
+                // estimate reads low would otherwise reach a server that cuts it in silence, and the
+                // minutes would leave out what was said without a word.
+                let sent = match local_llm::count_tokens(endpoint, &format!("{SYSTEM}\n{user}")).await {
+                    Some(exact) => Sent::Exact(exact),
+                    None => Sent::Estimate(budget::estimate_tokens(SYSTEM) + budget::estimate_tokens(&user)),
+                };
+                if let Sent::Exact(tokens) = sent {
+                    if tokens + u64::from(ANSWER_TOKENS) > u64::from(*ctx) {
+                        return Err(format!(
+                            "This part of the transcript is {tokens} tokens and the local model's window of {ctx} keeps {ANSWER_TOKENS} for the notes: it doesn't fit. Raise the context under Local model."
+                        ));
+                    }
+                }
                 let request = ChatRequest {
                     model,
                     system: SYSTEM,
                     user: &user,
                     num_ctx: (endpoint.kind == BackendKind::Ollama).then_some(*ctx),
-                    max_tokens: 2_048,
+                    max_tokens: ANSWER_TOKENS,
                     temperature: 0.2,
                     think: None,
                     keep_alive: (endpoint.kind == BackendKind::Ollama).then_some("5m"),
@@ -117,6 +136,11 @@ impl Runner<'_> {
                 // Minutes are read later, not watched: background work in the local-model queue.
                 let outcome = crate::hybrid::scheduler::background(local_llm::chat(endpoint, &request, |_| {}, crate::ai_runs::cancelled(&mut stop))).await;
                 match outcome {
+                    Ok(outcome) if budget::prompt_cut(sent, outcome.prompt_tokens, Some(*ctx)) => Err(format!(
+                        "The local server cut what it was sent (it read {} of {} tokens), so these notes would leave part of the meeting out. Raise the context under Local model.",
+                        outcome.prompt_tokens.unwrap_or(0),
+                        sent.tokens()
+                    )),
                     Ok(outcome) => {
                         let usage = crate::ai::AiUsage {
                             input_tokens: outcome.prompt_tokens.unwrap_or(0) as i64,
