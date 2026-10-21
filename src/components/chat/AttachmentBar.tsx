@@ -1,6 +1,7 @@
 import { FileText, ImageIcon, X } from "lucide-react";
 import type { ChatAttachment } from "../../lib/tauri/chatCommands";
 import { useT } from "../../state/languageStore";
+import { ImageChipHover } from "./ImageChipHover";
 
 /** Human-readable size. Bytes below a kilobyte are shown as bytes, because "0.0 KB" reads as a
  *  failure and an empty file is worth noticing. */
@@ -50,16 +51,13 @@ export function AttachmentBar({
     <div className="flex flex-wrap gap-1.5 px-1 pb-1.5">
       {files.map((file) => {
         const blind = file.isImage && !canSeeImages;
-        return (
-          <span
-            key={file.id}
-            title={blind ? t("chat.attachImageBlind", { provider: providerLabel }) : file.path}
-            className={`group flex max-w-[240px] items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] ${
-              blind
-                ? "border-[var(--cf-warning)]/40 bg-[color-mix(in_oklab,var(--cf-warning)_8%,transparent)]"
-                : "border-[var(--cf-border)] bg-[var(--cf-surface-2)]"
-            }`}
-          >
+        const className = `group flex max-w-[240px] items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] ${
+          blind
+            ? "border-[var(--cf-warning)]/40 bg-[color-mix(in_oklab,var(--cf-warning)_8%,transparent)]"
+            : "border-[var(--cf-border)] bg-[var(--cf-surface-2)]"
+        }`;
+        const content = (
+          <>
             {file.isImage ? (
               <ImageIcon size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
             ) : (
@@ -75,6 +73,22 @@ export function AttachmentBar({
             >
               <X size={11} />
             </button>
+          </>
+        );
+        // An image shows itself and where it was copied on hover; any other file, its path.
+        return file.isImage ? (
+          <ImageChipHover
+            key={file.id}
+            path={file.path}
+            name={file.name}
+            note={blind ? t("chat.attachImageBlind", { provider: providerLabel }) : undefined}
+            className={className}
+          >
+            {content}
+          </ImageChipHover>
+        ) : (
+          <span key={file.id} title={file.path} className={className}>
+            {content}
           </span>
         );
       })}

@@ -159,6 +159,7 @@ function ProviderBlock({
           {quota.limits.map((limit) => (
             <LimitRow key={`${limit.kind}:${limit.scope}`} limit={limit} narrowed={narrowed} />
           ))}
+          {quota.error.startsWith("from_run") && <FromRunNote quota={quota} />}
         </div>
       )}
     </section>
@@ -287,6 +288,44 @@ export function limitLabel(limit: QuotaLimit, narrowed: Set<string>, t: Translat
   return narrowed.has(limit.kind) ? `${base} · ${t("quota.allModels")}` : base;
 }
 
+/**
+ * Numbers that came from the CLI's last run rather than from the provider (`from_run`): said, with
+ * how old they are — and, for the system account, why the provider could not be read (`from_run|…`).
+ */
+function FromRunNote({ quota }: { quota: ProviderQuota }) {
+  const t = useT();
+  const why = quota.error.split("|").slice(1).join("|");
+  const minutes = quota.fetched_at ? Math.max(0, Math.floor((Date.now() - Date.parse(quota.fetched_at)) / 60_000)) : 0;
+  const when = minutes < 1 ? t("quota.fromRunNow") : t("quota.fromRun", { minutes });
+  return (
+    <p className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]" title={why || undefined}>
+      {why ? `${when} · ${t("quota.directFailed", { why: reasonText(why, t) })}` : when}
+    </p>
+  );
+}
+
+/** Why the provider could not be read, for the note under numbers that came from a run instead. */
+function reasonText(why: string, t: Translate): string {
+  const until = rateLimitedUntil(why);
+  return until ? t("quota.rateLimitedShort", { time: until }) : shortReason(why);
+}
+
+/** `rate_limited|<RFC 3339>`: the provider answered 429 and the app asks again at that time, given as
+ *  a local clock time — `null` for any other reason. */
+function rateLimitedUntil(error: string): string | null {
+  const [code, at] = error.split("|");
+  if (code !== "rate_limited") return null;
+  const when = new Date(at ?? "");
+  return Number.isNaN(when.getTime()) ? "—" : when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** A transport error can run to a paragraph; a status line wants its head. The whole of it stays in
+ *  the tooltip. */
+function shortReason(why: string): string {
+  const line = why.split("\n")[0].trim();
+  return line.length > 60 ? `${line.slice(0, 57)}…` : line;
+}
+
 /** Whether this provider has not answered yet, as opposed to having answered with nothing.
  *
  * The backend marks it by leaving `fetched_at` empty — no limits, no error and no read time is a
@@ -304,8 +343,8 @@ function isPending(quota: ProviderQuota): boolean {
  * credits, where a prepaid balance has no denominator to be a percentage of. `no_plan` is the
  * account being on the free tier of something that *does* publish windows. `unreadable` is this app
  * failing to parse what it got, which is the only one of the five that is nobody's problem but
- * ours. Anything unrecognised falls in with that last one, because an HTTP status code in a 300px
- * panel helps nobody. */
+ * ours. Anything unrecognised — an HTTP status, a transport error — falls in with that last one, and
+ * says what it was in a few words: "could not read" alone left the user asking why (2026-10-20). */
 function emptyMessage(error: string, t: Translate): string {
   if (!error) return t("quota.noLimits");
   if (error === "signed_out") return t("quota.signedOut");
@@ -313,5 +352,9 @@ function emptyMessage(error: string, t: Translate): string {
   if (error === "no_plan") return t("quota.noPlan");
   // An added Claude account: its numbers arrive with its runs, so there are none before the first.
   if (error === "not_yet") return t("quota.notYet");
-  return t("quota.unreadable");
+  if (error === "unreadable") return t("quota.unreadable");
+  // A 429: nobody's fault and nothing to do, except to know when it will be asked again.
+  const until = rateLimitedUntil(error);
+  if (until) return t("quota.rateLimited", { time: until });
+  return t("quota.unreadableWhy", { why: shortReason(error) });
 }

@@ -296,7 +296,12 @@ export function TooltipBubble({
       }
       // The shadow lives in `.cf-tip` rather than a Tailwind class — it is two layers, and one of
       // them is mixed per theme. See `index.css`.
-      className="cf-tip pointer-events-none fixed z-[70] max-w-[17rem] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-1.5"
+      //
+      // Above every layer the app has — menus (9999), context menus and dialogs (10000), the
+      // first-run notice (100001), the confetti (100010). It is only ever shown for an element under
+      // the pointer or focused, so whatever it belongs to is on top already; at `z-[70]` the model
+      // picker's rows drew their labels behind the picker itself.
+      className="cf-tip pointer-events-none fixed z-[100020] max-w-[17rem] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-1.5"
     >
       <div className="flex items-center gap-2">
         {leading}

@@ -14,7 +14,13 @@ import {
   Star,
   X,
 } from "lucide-react";
-import { getSetting, setSetting } from "../../lib/tauri/commands";
+import {
+  CLAUDE_CHAT_PLUGINS_OFF_KEY,
+  claudeChatPlugins,
+  getSetting,
+  setSetting,
+  type ClaudeChatPlugin,
+} from "../../lib/tauri/commands";
 import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, type AiProviderOption } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { openExternalUrl } from "../../lib/tauri/commands";
@@ -683,11 +689,63 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                 </div>
               )}
 
+              {provider.id === "claude" && <ClaudeChatPlugins />}
+
               {status?.available && <SetupHelp provider={provider} />}
             </>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Which of the user's Claude Code plugins CodeFlow's chats load. Each one loaded brings its skills,
+ * MCP servers and hooks into every session — Vercel's alone was ~5,600 tokens a session — so one
+ * the chats never use is paid for on every new thread. Off here is off for CodeFlow's runs only
+ * (`--settings`, see `claude.rs`); the user's own Claude Code is untouched.
+ *
+ * Nothing to show until there is a plugin: no empty-state text.
+ */
+function ClaudeChatPlugins() {
+  const t = useT();
+  const [plugins, setPlugins] = useState<ClaudeChatPlugin[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    claudeChatPlugins()
+      .then((list) => !cancelled && setPlugins(list))
+      .catch(() => !cancelled && setPlugins([]));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!plugins || plugins.length === 0) return null;
+
+  const toggle = (id: string) => {
+    const next = plugins.map((plugin) => (plugin.id === id ? { ...plugin, off: !plugin.off } : plugin));
+    setPlugins(next);
+    const off = next.filter((plugin) => plugin.off).map((plugin) => plugin.id);
+    void setSetting(CLAUDE_CHAT_PLUGINS_OFF_KEY, JSON.stringify(off)).catch(() => setPlugins(plugins));
+  };
+
+  return (
+    <div>
+      <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">{t("settings.chatPlugins")}</label>
+      <p className="mb-2 text-[11px] text-[var(--cf-text-muted)]">{t("settings.chatPluginsHint")}</p>
+      <div className="space-y-1.5 rounded-lg border border-[var(--cf-border)] p-2.5">
+        {plugins.map((plugin) => (
+          <label key={plugin.id} className="flex cursor-pointer items-start gap-2 rounded-md px-1.5 py-1 hover:bg-[var(--cf-hover)]">
+            <Checkbox checked={!plugin.off} onChange={() => toggle(plugin.id)} className="mt-0.5" />
+            <span className="min-w-0">
+              <span className="block text-[13px] font-medium">{plugin.name}</span>
+              <span className="block truncate font-mono text-[11px] text-[var(--cf-text-muted)]">{plugin.id}</span>
+            </span>
+          </label>
+        ))}
+      </div>
     </div>
   );
 }

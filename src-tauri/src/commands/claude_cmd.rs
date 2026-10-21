@@ -179,6 +179,10 @@ pub(crate) enum AiTask {
     /// written from a description. Text-only: the request and its response go on stdin with their
     /// credentials masked, and nothing else is opened, so it routes anywhere, a local model included.
     Api,
+    /// «Generar skill»: a skill written from a repository, documents, pages or text. Text-only — the
+    /// sources are read by CodeFlow (anydoc for documents, the code map for a repository) and go on
+    /// stdin — so it routes anywhere, a local model included.
+    Skills,
 }
 
 impl AiTask {
@@ -188,7 +192,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 25] = [
+    pub(crate) const ALL: [AiTask; 26] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -214,6 +218,7 @@ impl AiTask {
         AiTask::Meetings,
         AiTask::SpokenSummary,
         AiTask::Api,
+        AiTask::Skills,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -246,6 +251,7 @@ impl AiTask {
             AiTask::Meetings => "meetings",
             AiTask::SpokenSummary => "spoken_summary",
             AiTask::Api => "api",
+            AiTask::Skills => "skills",
         }
     }
 }
@@ -428,6 +434,16 @@ pub(crate) fn shared_template(conn: &Connection, key: &str, legacy_key: &str) ->
     Ok(queries::get_setting(conn, legacy_key)
         .map_err(|e| e.to_string())?
         .unwrap_or_default())
+}
+
+/// The user's Claude Code plugins and which of them CodeFlow's chats keep out — the switch under
+/// Claude in Proveedores. The choice itself is a plain setting the pane writes
+/// ([`crate::claude::CHAT_PLUGINS_OFF_KEY`]); this only says what there is to choose from.
+#[tauri::command]
+pub fn claude_chat_plugins() -> Vec<crate::claude::ChatPlugin> {
+    let settings = ai_accounts::claude_config_dir(&ai_accounts::AccountEnv::system("claude"))
+        .and_then(|dir| std::fs::read_to_string(dir.join("settings.json")).ok());
+    crate::claude::chat_plugins(settings.as_deref())
 }
 
 #[tauri::command]

@@ -219,35 +219,88 @@ impl Scope {
 /// The scope a run in the checkout at `root` gets: that repository, its workspace's enabled folders
 /// and notes. `cloud`: the consumer is a cloud engine, so local-only folders are left out — and
 /// `None` when the workspace's cloud switch is off.
+///
+/// The workspace is the [`owning_project`]'s, so a task's worktree is searched as its project — the
+/// project's index, folders, notes and switch. A checkout no project owns is searched alone, with
+/// the global folders only: it has no workspace, and another workspace's folders are not its own.
 pub fn scope_for_repo(conn: &Connection, root: &str, cloud: bool) -> Option<Scope> {
-    let (project_id, name, workspace_id): (String, String, Option<String>) = conn
-        .query_row(
-            "SELECT id, name, workspace_id FROM projects WHERE local_path = ?1 LIMIT 1",
-            params![root.trim_end_matches(['/', '\\'])],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .ok()
-        .unwrap_or_else(|| (String::new(), String::new(), None));
-    if cloud {
-        if let Some(ws) = workspace_id.as_deref() {
-            let off = crate::db::queries::get_setting(conn, &cloud_key(ws)).ok().flatten().is_some_and(|v| v == "0" || v == "false");
-            if off {
-                return None;
-            }
-        }
+    let project = owning_project(conn, root);
+    let workspace_id = project.as_ref().map(|p| p.workspace_id.clone()).filter(|ws| !ws.is_empty());
+    if cloud && workspace_id.as_deref().is_some_and(|ws| cloud_off(conn, ws)) {
+        return None;
     }
-    let repos = if project_id.is_empty() {
-        vec![(format!("path:{}", root), Path::new(root).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), PathBuf::from(root))]
-    } else {
-        vec![(project_id, name, PathBuf::from(root))]
+    // The project's own folder even from a worktree, as `agentcli::place` keys it: one index per
+    // project, not a second copy built from scratch for every checkout a task makes.
+    let repos = match project {
+        Some(p) => vec![(p.id, p.name, PathBuf::from(p.local_path))],
+        None => vec![(format!("path:{}", root), Path::new(root).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), PathBuf::from(root))],
     };
-    let folders = collections(conn, workspace_id.as_deref())
+    let folders = folders_of(conn, workspace_id.as_deref(), cloud);
+    Some(Scope { notes: workspace_id.is_some(), workspace_id, repos, folders })
+}
+
+/// The workspace chat's scope: every repository of `workspace_id` that is on disk, its enabled
+/// folders and the global ones, and its notes — under the same cloud rules as [`scope_for_repo`].
+/// A repository that is not on disk is left out rather than refreshed into an empty index.
+pub fn scope_for_workspace(conn: &Connection, workspace_id: &str, cloud: bool) -> Option<Scope> {
+    if cloud && cloud_off(conn, workspace_id) {
+        return None;
+    }
+    let repos = crate::db::queries::list_projects(conn, workspace_id)
         .unwrap_or_default()
         .into_iter()
-        .filter(|c| c.enabled && !(cloud && c.local_only))
-        .map(|c| (c.id, c.name, PathBuf::from(c.path)))
+        .filter(|p| !p.local_path.trim().is_empty() && Path::new(&p.local_path).is_dir())
+        .map(|p| (p.id, p.name, PathBuf::from(p.local_path)))
         .collect();
-    Some(Scope { notes: workspace_id.is_some(), workspace_id, repos, folders })
+    let folders = folders_of(conn, Some(workspace_id), cloud);
+    Some(Scope { workspace_id: Some(workspace_id.to_string()), repos, folders, notes: true })
+}
+
+/// The scope of a run that works at `root`: the whole workspace from the workspace chat's own
+/// folder (`workspace_chat::working_dir`), the repository's anywhere else.
+pub fn scope_for_root(conn: &Connection, root: &str, cloud: bool) -> Option<Scope> {
+    match crate::workspace_chat::workspace_of_dir(conn, root) {
+        Some(workspace_id) => scope_for_workspace(conn, &workspace_id, cloud),
+        None => scope_for_repo(conn, root, cloud),
+    }
+}
+
+/// The workspace's switch says its cloud engines may not search it.
+fn cloud_off(conn: &Connection, workspace_id: &str) -> bool {
+    crate::db::queries::get_setting(conn, &cloud_key(workspace_id)).ok().flatten().is_some_and(|v| v == "0" || v == "false")
+}
+
+/// The enabled folders a search under `workspace_id` may read: its own and the global ones — only
+/// the global ones without a workspace, since `collections(None)` is every workspace's. `cloud`
+/// leaves the local-only ones out.
+fn folders_of(conn: &Connection, workspace_id: Option<&str>, cloud: bool) -> Vec<(String, String, PathBuf)> {
+    collections(conn, workspace_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.enabled && !(cloud && c.local_only) && (c.workspace_id.is_none() || c.workspace_id.as_deref() == workspace_id))
+        .map(|c| (c.id, c.name, PathBuf::from(c.path)))
+        .collect()
+}
+
+/// The project a run at `root` belongs to: the one whose folder `root` is, however either is
+/// spelled (the map's server hands over the canonical path, the database keeps what the user
+/// picked), or — for a linked worktree — the project of the checkout it was made from.
+pub fn owning_project(conn: &Connection, root: &str) -> Option<crate::db::models::Project> {
+    let projects = crate::db::queries::list_all_projects(conn).ok()?;
+    let find = |path: &str| {
+        let wanted = crate::repo_identity::canonical_path(path);
+        projects.iter().find(|p| !p.local_path.trim().is_empty() && crate::repo_identity::canonical_path(&p.local_path) == wanted).cloned()
+    };
+    if let Some(project) = find(root) {
+        return Some(project);
+    }
+    let repo = git2::Repository::open(root).ok()?;
+    if !repo.is_worktree() {
+        return None;
+    }
+    // A linked worktree's common git folder is the main checkout's `.git`; its parent is the project.
+    let common = crate::git::features::common_dir(&repo);
+    find(&common.parent()?.to_string_lossy())
 }
 
 /// The files of a non-git folder worth indexing, relative to it.
@@ -563,9 +616,10 @@ pub fn as_text(found: &[Found]) -> String {
         .join("\n\n")
 }
 
-/// The MCP / agent tool's answer: `question` searched in the scope of the checkout at `root`.
+/// The MCP / agent tool's answer: `question` searched in the scope of the run at `root` — the
+/// checkout's, or the whole workspace's from the workspace chat's folder ([`scope_for_root`]).
 pub async fn tool_answer(root: &str, question: &str, limit: usize, cloud: bool) -> Result<String, String> {
-    let scope = crate::ai_usage::with_conn(|conn| scope_for_repo(conn, root, cloud)).flatten();
+    let scope = crate::ai_usage::with_conn(|conn| scope_for_root(conn, root, cloud)).flatten();
     let scope = match scope {
         Some(scope) => scope,
         // No app database (tests, the bench): the repository alone.
@@ -584,7 +638,17 @@ pub async fn tool_answer(root: &str, question: &str, limit: usize, cloud: bool) 
 /// read-only Gemini or Grok run, which refuses MCP tools. Lexical only and from the index as it
 /// is (a refresh starts in the background), so the question is never kept waiting on indexing.
 pub fn prompt_note(main: &Connection, root: &str, question: &str) -> Option<(String, Vec<crate::context::ContextSource>)> {
-    let scope = scope_for_repo(main, root, true)?;
+    note_for(main, scope_for_repo(main, root, true)?, question)
+}
+
+/// [`prompt_note`] for the workspace chat on an engine the map's server does not reach there (agy,
+/// Grok): the passages that best match the question across the whole workspace, each naming its
+/// repository.
+pub fn workspace_prompt_note(main: &Connection, workspace_id: &str, question: &str) -> Option<(String, Vec<crate::context::ContextSource>)> {
+    note_for(main, scope_for_workspace(main, workspace_id, true)?, question)
+}
+
+fn note_for(main: &Connection, scope: Scope, question: &str) -> Option<(String, Vec<crate::context::ContextSource>)> {
     let background = scope.clone();
     std::thread::spawn(move || {
         let _ = refresh_blocking(&background, false);
@@ -698,6 +762,114 @@ mod tests {
         let alive: std::collections::HashSet<String> = ["p1", "f1", "other"].iter().map(|s| s.to_string()).collect();
         assert_eq!(clear(&conn, &scope, &alive).unwrap(), 2);
         assert_eq!(index::collection_keys(&conn).unwrap(), vec!["repo:other".to_string()]);
+    }
+
+    /// The app's database: project `p1` (workspace `w1`) at `api`, `p2` in `w2`, and four folders —
+    /// `docs` and the local-only `private` in `w1`, `theirs` in `w2`, the global `shared`.
+    fn main_db(api: &str) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "DELETE FROM workspaces;
+             INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                 VALUES ('w1', 'Flow', 'book', '#111', 0, '2026-01-01T00:00:00+00:00'),
+                        ('w2', 'Other', 'book', '#111', 1, '2026-01-01T00:00:00+00:00');
+             INSERT INTO projects (id, workspace_id, name, local_path, color, icon, sort_order, created_at)
+                 VALUES ('p2', 'w2', 'other', '/nowhere/other', '#222', 'folder', 0, '2026-01-01T00:00:00+00:00');
+             INSERT INTO ai_knowledge_collections (id, workspace_id, name, kind, path, local_only, enabled, created_at, updated_at)
+                 VALUES ('docs', 'w1', 'docs', 'folder', '/nowhere/docs', 0, 1, 1, 1),
+                        ('private', 'w1', 'private', 'folder', '/nowhere/private', 1, 1, 1, 1),
+                        ('theirs', 'w2', 'theirs', 'folder', '/nowhere/theirs', 0, 1, 1, 1),
+                        ('shared', NULL, 'shared', 'folder', '/nowhere/shared', 0, 1, 1, 1);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, workspace_id, name, local_path, color, icon, sort_order, created_at)
+             VALUES ('p1', 'w1', 'api', ?1, '#222', 'folder', 1, '2026-01-01T00:00:00+00:00')",
+            params![api],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn folder_ids(scope: &Scope) -> Vec<String> {
+        let mut ids: Vec<String> = scope.folders.iter().map(|(id, _, _)| id.clone()).collect();
+        ids.sort();
+        ids
+    }
+
+    /// A checkout no project owns used to be given every workspace's folders: `collections(None)`
+    /// matches all of them, and with no workspace there was no switch to stop it either.
+    #[test]
+    fn a_checkout_no_project_owns_gets_the_global_folders_alone() {
+        let conn = main_db("/nowhere/api");
+        let scope = scope_for_repo(&conn, "/nowhere/unregistered", false).unwrap();
+        assert_eq!(scope.repos[0].0, "path:/nowhere/unregistered");
+        assert_eq!(folder_ids(&scope), vec!["shared"]);
+        assert!(scope.workspace_id.is_none() && !scope.notes);
+    }
+
+    /// A task's worktree is searched as its project: the project's index, its workspace's folders and
+    /// notes, and its workspace's cloud switch — found though the database spells the folder
+    /// differently from the canonical path the map's server hands over.
+    #[test]
+    fn a_worktree_is_searched_as_the_project_it_was_made_from() {
+        let base = std::env::temp_dir().join(format!("codeflow-knowledge-wt-{}", uuid::Uuid::new_v4()));
+        let main = base.join("api");
+        std::fs::create_dir_all(&main).unwrap();
+        let repo = git2::Repository::init(&main).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        let worktree = base.join("task-1");
+        repo.worktree("task-1", &worktree, None).unwrap();
+        let worktree = worktree.canonicalize().unwrap().to_string_lossy().to_string();
+        let local_path = format!("{}/", main.to_string_lossy());
+        let conn = main_db(&local_path);
+
+        let scope = scope_for_repo(&conn, &worktree, true).unwrap();
+        assert_eq!(scope.repos, vec![("p1".to_string(), "api".to_string(), PathBuf::from(&local_path))]);
+        assert_eq!(folder_ids(&scope), vec!["docs", "shared"], "local-only stays out of a cloud run");
+        assert_eq!(scope.workspace_id.as_deref(), Some("w1"));
+        assert!(scope.notes);
+        assert_eq!(folder_ids(&scope_for_repo(&conn, &worktree, false).unwrap()), vec!["docs", "private", "shared"]);
+
+        crate::db::queries::set_setting(&conn, &cloud_key("w1"), "0").unwrap();
+        assert!(scope_for_repo(&conn, &worktree, true).is_none(), "the workspace's switch holds for its worktrees");
+        assert!(scope_for_repo(&conn, &worktree, false).is_some(), "a local model still searches");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The workspace chat searches every repository of its workspace that is on disk — never another
+    /// workspace's — with the folders and notes, under the same cloud rules; and its own folder is
+    /// what tells a tool that knows only where its run works to search that way.
+    #[test]
+    fn the_workspace_chat_searches_every_repository_of_its_workspace() {
+        let api = std::env::temp_dir().join(format!("codeflow-knowledge-ws-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&api).unwrap();
+        let conn = main_db(&api.to_string_lossy());
+        conn.execute_batch(
+            "INSERT INTO projects (id, workspace_id, name, local_path, color, icon, sort_order, created_at)
+             VALUES ('p3', 'w1', 'gone', '/nowhere/gone', '#222', 'folder', 2, '2026-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+
+        let scope = scope_for_workspace(&conn, "w1", true).unwrap();
+        let repos: Vec<&str> = scope.repos.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(repos, vec!["p1"], "w2's repository and the one not on disk stay out");
+        assert_eq!(folder_ids(&scope), vec!["docs", "shared"]);
+        assert!(scope.notes && scope.workspace_id.as_deref() == Some("w1"));
+
+        let chat_folder = crate::workspace_chat::working_dir("w1").to_string_lossy().to_string();
+        let from_folder = scope_for_root(&conn, &chat_folder, false).unwrap();
+        assert_eq!(from_folder.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(folder_ids(&from_folder), vec!["docs", "private", "shared"], "a local model sees the local-only folder");
+        assert_eq!(scope_for_root(&conn, &api.to_string_lossy(), true).unwrap().repos[0].0, "p1", "a repository is still a repository");
+
+        crate::db::queries::set_setting(&conn, &cloud_key("w1"), "false").unwrap();
+        assert!(scope_for_workspace(&conn, "w1", true).is_none());
+        assert!(scope_for_root(&conn, &chat_folder, true).is_none());
+        let _ = std::fs::remove_dir_all(api);
     }
 
     #[test]

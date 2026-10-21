@@ -1,5 +1,6 @@
 import type * as MonacoApi from "monaco-editor";
 import { tsServes } from "./tsserver";
+import { nativeTypeScriptHolds } from "./lsp/client";
 
 /**
  * Monaco's own TypeScript worker, as the answer for exactly the files the compiler is not.
@@ -54,9 +55,10 @@ export const WORKER_MODE_CONFIGURATION: MonacoApi.typescript.ModeConfiguration =
   diagnostics: true,
 };
 
-/** Whether the isolated worker answers for a model: whenever the compiler does not. */
+/** Whether the isolated worker answers for a model: whenever the compiler does not — tsserver, or
+ *  on TypeScript 7 the project's own language server (`lib/lsp/client`). */
 export function workerAnswers(uri: { scheme: string; path: string }): boolean {
-  return !tsServes(uri);
+  return !tsServes(uri) && !nativeTypeScriptHolds(uri);
 }
 
 type Features = typeof import("monaco-editor/languages/features/typescript/languageFeatures");

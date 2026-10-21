@@ -29,6 +29,7 @@ import { writeFileBytes } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { findTheme } from "../../lib/codeThemes";
 import { useThemeStore } from "../../state/themeStore";
+import { ImageChipHover } from "./ImageChipHover";
 
 /**
  * What a bubble needs to know about a turn.
@@ -456,16 +457,20 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
           )}
           {sentFiles.length > 0 && (
             <span className="mb-1 flex flex-wrap gap-1 whitespace-normal">
-              {sentFiles.map((file) => (
-                <span
-                  key={file.path}
-                  title={file.path}
-                  className="flex min-w-0 max-w-full items-center gap-1 rounded border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)]"
-                >
-                  {file.isImage ? <ImageIcon size={11} className="shrink-0" /> : <FileText size={11} className="shrink-0" />}
-                  <span className="truncate">{file.name}</span>
-                </span>
-              ))}
+              {sentFiles.map((file) => {
+                const chip = "flex min-w-0 max-w-full items-center gap-1 rounded border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)]";
+                return file.isImage ? (
+                  <ImageChipHover key={file.path} path={file.path} name={file.name} className={chip}>
+                    <ImageIcon size={11} className="shrink-0" />
+                    <span className="truncate">{file.name}</span>
+                  </ImageChipHover>
+                ) : (
+                  <span key={file.path} title={file.path} className={chip}>
+                    <FileText size={11} className="shrink-0" />
+                    <span className="truncate">{file.name}</span>
+                  </span>
+                );
+              })}
             </span>
           )}
           {body}

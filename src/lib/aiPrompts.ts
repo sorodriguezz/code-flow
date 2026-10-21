@@ -37,6 +37,7 @@ import {
   ListChecks,
   Network,
   NotebookPen,
+  Puzzle,
   Route,
   ScanSearch,
   Rows3,
@@ -53,6 +54,7 @@ import {
   defaultCommitTemplate,
   defaultPipelineTemplate,
   defaultSampleRowsTemplate,
+  defaultSkillTemplate,
   defaultResolveConflictTemplate,
   defaultWorkspacePrompt,
   getSetting,
@@ -181,6 +183,17 @@ const BUILT_IN_PROMPTS: PromptDef[] = [
     icon: AudioLines,
     scope: "global",
     key: "spoken_summary_template",
+  },
+  // What «Generar skill» is told a good skill is (`ai::DEFAULT_SKILL_PROMPT`). The answer's format is
+  // appended by the backend and is not part of this text, so editing it freely cannot break parsing.
+  {
+    id: "skill_template",
+    task: "skills",
+    labelKey: "prompts.skill",
+    hintKey: "prompts.skillHint",
+    icon: Puzzle,
+    scope: "global",
+    key: "skill_template",
   },
   // Read by the CI failure analyser since it shipped, and until now editable from nowhere at all.
   {
@@ -433,6 +446,8 @@ export async function loadPromptDefault(prompt: PromptDef): Promise<string> {
       return defaultNotebookTemplate().catch(() => "");
     case "spoken_summary_template":
       return defaultSpokenSummaryTemplate().catch(() => "");
+    case "skill_template":
+      return defaultSkillTemplate().catch(() => "");
     default:
       return "";
   }

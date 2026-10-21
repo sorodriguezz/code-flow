@@ -104,8 +104,12 @@ export function NotePreview({ source, className }: { source: string; className?:
     let live = true;
     const dark = resolved === "dark";
     root.querySelectorAll<HTMLElement>(".cf-note-mermaid").forEach((block) => {
-      const code = block.querySelector(".cf-mermaid-src")?.textContent ?? "";
+      // Kept on the block, because drawing replaces the source it was read from. A theme switch that
+      // leaves the HTML string as it was reruns this over the drawn diagram — React only rewrites
+      // `innerHTML` when the string changes — and has to draw it again in the new colours.
+      const code = block.querySelector(".cf-mermaid-src")?.textContent ?? block.dataset.cfMermaidCode ?? "";
       if (!code.trim()) return;
+      block.dataset.cfMermaidCode = code;
       void import("../../lib/diagrams/mermaidRuntime")
         .then(({ renderMermaid }) => renderMermaid(code, dark))
         .then((svg) => {

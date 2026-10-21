@@ -9,6 +9,8 @@ import {
   FileText,
   FileUp,
   BookPlus,
+  CalendarDays,
+  Plus,
   LayoutTemplate,
   Palette,
   Lock,
@@ -24,7 +26,7 @@ import {
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { NoteTreeRow } from "./NoteTreeRow";
 import { TemplatePickerModal } from "./TemplatePickerModal";
-import { ICON_BUTTON, TagPill } from "./notesChrome";
+import { TagPill } from "./notesChrome";
 import { TREE_COLORS } from "../../lib/swatchColors";
 import { scopeMenuItems } from "../../lib/scopeMenu";
 import { noteRepoItems } from "./noteRepoItems";
@@ -103,7 +105,7 @@ export function NoteExplorer() {
 
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  const [importMenu, setImportMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [createMenu, setCreateMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   /** Which row holds the tree's single tab stop. See `NoteTreeRow`'s roving-tabindex comment. */
   const [focusedId, setFocusedId] = useState<string | null>(null);
   /** The tag cloud folded shut, which is how it starts.
@@ -694,63 +696,68 @@ export function NoteExplorer() {
           <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("notes.title")}
           </span>
-          <button
-            type="button"
-            className={ICON_BUTTON}
-            title={t("notes.newBook")}
-            aria-label={t("notes.newBook")}
-            onClick={() => {
-              void promptAction(t("notes.newBookPrompt"), {
-                confirmLabel: t("notes.create"),
-              }).then((value) => value && void createBook(null, value));
-            }}
-          >
-            <BookPlus size={13} />
-          </button>
-          <button
-            type="button"
-            className={ICON_BUTTON}
-            title={t("notes.newNote")}
-            aria-label={t("notes.newNote")}
-            onClick={() => void createNote(null)}
-            data-tour="notes-new"
-          >
-            <FilePlus2 size={13} />
-          </button>
-          <button
-            type="button"
-            className={ICON_BUTTON}
-            title={t("notes.importMarkdownHint")}
-            aria-label={t("notes.importMarkdown")}
-            onClick={(event) =>
-              setImportMenu({
-                x: event.clientX,
-                y: event.clientY,
-                items: [
-                  { label: t("notes.importMarkdown"), icon: FileUp, onClick: () => void importMarkdownFiles(null) },
-                  { label: t("notes.importObsidian"), icon: FolderInput, separated: true, onClick: () => void importVault("folder") },
-                  { label: t("notes.importNotion"), icon: FolderInput, onClick: () => void importVault("zip") },
-                ],
-              })
-            }
-          >
-            <FileUp size={13} />
-          </button>
-          {importMenu && <ContextMenu x={importMenu.x} y={importMenu.y} items={importMenu.items} onClose={() => setImportMenu(null)} />}
-          <button
-            type="button"
-            className={`${ICON_BUTTON} ${trashOpen ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : ""}`}
-            title={t("notes.trash")}
-            aria-label={t("notes.trash")}
-            aria-pressed={trashOpen}
-            onClick={() => {
-              const state = useNotesStore.getState();
-              if (state.trashOpen) state.closeTrash();
-              else void state.openTrash();
-            }}
-          >
-            <Trash2 size={13} />
-          </button>
+          {/* One way in to everything that adds notes. Four look-alike glyphs used to sit here —
+              new book, new note, import, and the trash — and new note and import read as the same
+              page with an arrow, while the bin read as "delete" rather than as a place to go. The
+              common act keeps its one click and says what it does; the rest — the note of the day
+              too, which was a lone calendar over the gallery — are named in the menu, and the trash
+              is a row at the foot of the sidebar. */}
+          <div className="flex shrink-0 items-stretch rounded-md border border-[var(--cf-border)]">
+            <button
+              type="button"
+              onClick={() => void createNote(null)}
+              data-tour="notes-new"
+              className="flex h-6 items-center gap-1 rounded-l-md px-1.5 text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
+            >
+              <Plus size={12} />
+              {t("notes.newNote")}
+            </button>
+            <button
+              type="button"
+              aria-label={t("notes.createMenu")}
+              title={t("notes.createMenu")}
+              aria-haspopup="menu"
+              aria-expanded={createMenu !== null}
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setCreateMenu({
+                  x: rect.right - 200,
+                  y: rect.bottom + 4,
+                  items: [
+                    { label: t("notes.newNote"), icon: FilePlus2, onClick: () => void createNote(null) },
+                    // Today's note — opened when it exists, made in «Diario» when it does not.
+                    { label: t("notes.dailyNote"), icon: CalendarDays, onClick: () => void useNotesStore.getState().openDailyNote() },
+                    {
+                      label: t("notes.newBook"),
+                      icon: BookPlus,
+                      onClick: () => {
+                        void promptAction(t("notes.newBookPrompt"), {
+                          confirmLabel: t("notes.create"),
+                        }).then((value) => value && void createBook(null, value));
+                      },
+                    },
+                    {
+                      label: t("notes.import"),
+                      icon: FileUp,
+                      separated: true,
+                      onClick: () => {},
+                      children: [
+                        { label: t("notes.importMarkdownFiles"), icon: FileUp, onClick: () => void importMarkdownFiles(null) },
+                        { label: t("notes.importObsidian"), icon: FolderInput, onClick: () => void importVault("folder") },
+                        { label: t("notes.importNotion"), icon: FolderInput, onClick: () => void importVault("zip") },
+                      ],
+                    },
+                  ],
+                });
+              }}
+              className={`flex h-6 w-5 items-center justify-center rounded-r-md border-l border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] ${
+                createMenu ? "bg-[var(--cf-hover)] text-[var(--cf-text)]" : ""
+              }`}
+            >
+              <ChevronDown size={11} />
+            </button>
+          </div>
+          {createMenu && <ContextMenu x={createMenu.x} y={createMenu.y} items={createMenu.items} onClose={() => setCreateMenu(null)} />}
         </div>
 
         <div className="relative" data-tour="notes-search">
@@ -956,6 +963,28 @@ export function NoteExplorer() {
       )}
 
       <TemplateStrip />
+
+      {/* A place, at the foot with the other places, rather than a bin icon among the buttons
+          that add notes — where it read as "delete this". */}
+      <div className="shrink-0 border-t border-[var(--cf-border)] p-1.5">
+        <button
+          type="button"
+          aria-pressed={trashOpen}
+          onClick={() => {
+            const state = useNotesStore.getState();
+            if (state.trashOpen) state.closeTrash();
+            else void state.openTrash();
+          }}
+          className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[12px] ${
+            trashOpen
+              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+              : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+          }`}
+        >
+          <Trash2 size={12} className="shrink-0" />
+          {t("notes.trash")}
+        </button>
+      </div>
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />

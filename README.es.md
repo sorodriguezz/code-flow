@@ -12,7 +12,7 @@ una sola app nativa y rápida. Después prueba el endpoint que acabas de cambiar
 datos que hay detrás y entra por SSH a la máquina donde corre, sin salir de la ventana. **Tú decides
 qué modelo hace qué.**
 
-![versión](https://img.shields.io/badge/versión-2.3.50-6C5CE7)
+![versión](https://img.shields.io/badge/versión-2.3.51-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-EN%20%7C%20ES-0984E3)
@@ -734,7 +734,7 @@ publicado en internet.
   nivel, el revisor paralelo, la pasada entre archivos y el resumen final. Los números no se escriben
   dentro — llegan desde la pestaña Motor mediante marcadores tipo `{{MIN_CONFIANZA}}`, así que
   reescribir la redacción nunca puede descuadrar la instrucción y el filtro que la aplica.
-- Por workspace: **contexto de revisión**, **instrucciones (.md)** y **Skills**.
+- Por workspace: **contexto de revisión**, **instrucciones (.md)** y **Skills**: se buscan en skills.sh, se generan con IA (cloud o local) a partir de un repositorio, documentos, páginas web o texto, y se importan o descargan como `.skill`.
 - **Un historial completo** de lo que ha hecho la IA — fallos incluidos, para que mañana sepas qué pasó.
 
 ## ⚙️ Primeros pasos

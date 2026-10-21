@@ -1,3 +1,5 @@
+import { TS_PREFERENCES } from "../tsserver";
+
 /** Which language server backs each language.
  *
  * The same shape, and the same deal, as `debugAdapters.ts`: the server is a separate program the
@@ -18,7 +20,10 @@
  *   through `tsserver.rs`, which is the same architecture as this one and a better fit for those
  *   two languages specifically: it is `tsserver`'s own protocol rather than LSP's translation of
  *   it, and it is already wired to the npm install flow. A `typescript-language-server` entry here
- *   would be a second, worse answer competing with it in the same completion list.
+ *   would be a second, worse answer competing with it in the same completion list. The exception
+ *   is a project on TypeScript 7, which has no tsserver: its own executable is the language server,
+ *   [`NATIVE_TYPESCRIPT`] — outside the catalogue, because it is the project's and is found by
+ *   `ts_start`, not on `PATH`.
  * - **JSON, CSS, SCSS, HTML.** Monaco bundles real language services for these and `monacoSetup.ts`
  *   already wires up their workers. A server would be work to draw even.
  * - **Vue, Svelte, Astro, Terraform** share a Monaco language with plainer files (`html`, `hcl`),
@@ -75,6 +80,10 @@ const LSP_LANGUAGE_BY_EXTENSION: Record<string, string> = {
   astro: "astro",
   tf: "terraform",
   tfvars: "terraform-vars",
+  // Monaco calls both `typescript`/`javascript`; a server parses by these. TypeScript 7 reads a
+  // `.tsx` opened as `typescript` as plain TypeScript, and every JSX tag in it is then an error.
+  tsx: "typescriptreact",
+  jsx: "javascriptreact",
 };
 
 /** Monaco's id for each language above — what providers are registered against. */
@@ -84,6 +93,8 @@ const MONACO_LANGUAGE_OF: Record<string, string> = {
   astro: "html",
   terraform: "hcl",
   "terraform-vars": "hcl",
+  typescriptreact: "typescript",
+  javascriptreact: "javascript",
 };
 
 export function lspLanguageOf(path: string, monacoLanguage: string): string {
@@ -182,7 +193,18 @@ export const LANGUAGE_SERVERS: LanguageServer[] = [
     tier: 0,
     // Claims the languages a class attribute appears in, which is why it sits beside the other
     // servers rather than replacing one.
-    languages: ["css", "scss", "html", "typescript", "javascript", "vue", "svelte", "astro"],
+    languages: [
+      "css",
+      "scss",
+      "html",
+      "typescript",
+      "typescriptreact",
+      "javascript",
+      "javascriptreact",
+      "vue",
+      "svelte",
+      "astro",
+    ],
     command: "tailwindcss-language-server",
     args: ["--stdio"],
     npm: "@tailwindcss/language-server",
@@ -468,6 +490,30 @@ export const LANGUAGE_SERVERS: LanguageServer[] = [
     install: "brew install kotlin-language-server",
   },
 ];
+
+/**
+ * TypeScript 7's own language server — the project's native compiler, run with `--lsp --stdio`.
+ *
+ * Not in [`LANGUAGE_SERVERS`]: it is not something installed on the machine and found on `PATH`, but
+ * the executable inside the project's `typescript` package, which `ts_start` finds where it found
+ * tsserver for 6 and earlier — so `command` is replaced by that path, and a project on 6 never sees
+ * this entry. `settings` are what it reads its preferences from (`workspace/configuration`), under
+ * the same names tsserver's `configure` takes.
+ */
+export const NATIVE_TYPESCRIPT: LanguageServer = {
+  id: "typescript",
+  label: "TypeScript",
+  tier: 1,
+  languages: ["typescript", "typescriptreact", "javascript", "javascriptreact"],
+  command: "tsc",
+  args: ["--lsp", "--stdio"],
+  npm: null,
+  versionArgs: ["--version"],
+  rootFiles: [],
+  initializationOptions: {},
+  settings: { typescript: TS_PREFERENCES, javascript: TS_PREFERENCES },
+  install: "npm i -D typescript",
+};
 
 /** The servers worth starting for a repo whose root contains `rootEntries`.
  *

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { LoaderCircle, Maximize2, ZoomIn, ZoomOut } from "lucide-react";
-import { layoutGraph } from "../../lib/notes/graphLayout";
+import { layoutGroups } from "../../lib/notes/graphLayout";
 import { bounds, createSimulation, isSettled, nodeAt, reheat, step, type SimLink, type SimNode, type Simulation } from "../../lib/notes/graphSim";
 import { notesGraph } from "../../lib/tauri/notesCommands";
 import { useNotesStore } from "../../state/notesStore";
@@ -13,6 +13,12 @@ import { iconButtonClass } from "../common/Button";
  * (`graphLayout`). A dot's size is how connected it is; a note nothing links sits small and grey on
  * the outside — the ones a vault forgets. Hovering lifts a note and everything it touches out of
  * the rest, dragging one pushes its neighbours around, and clicking opens it.
+ *
+ * **Each book is an island in its own colour** — its top-level book, so a book's sub-books stay
+ * with it: laid out apart (`layoutGroups`) and pulled towards its own centre, painted in the book's
+ * colour or, without one, a colour of a fixed set, with a legend once there are two. Labels never
+ * pile up: the better-linked note keeps its name where two would overlap, and the other shows once
+ * the zoom makes room.
  *
  * # Why a canvas and not React Flow
  *
@@ -71,12 +77,46 @@ function Loaded({
   onOpen: (id: string) => void;
 }) {
   const t = useT();
-  const notes = useMemo(
-    () => graph.nodes.map((note) => ({ id: note.id, title: note.title || t("notes.untitled") })),
-    [graph, t],
-  );
-  return <GraphCanvas nodes={notes} edges={graph.edges} visibleIds={visibleIds} onOpen={onOpen} />;
+  const books = useNotesStore((s) => s.books);
+  const { notes, groups } = useMemo(() => {
+    const byId = new Map(books.map((book) => [book.id, book]));
+    /** A book's top-level book — a guard against a cycle the database should never hold. */
+    const rootOf = (id: string) => {
+      let book = byId.get(id);
+      for (let hops = 0; book?.parent_id && byId.has(book.parent_id) && hops < 64; hops++) book = byId.get(book.parent_id);
+      return book?.id ?? id;
+    };
+    const notes = graph.nodes.map((note) => ({ id: note.id, title: note.title || t("notes.untitled"), group: rootOf(note.book_id) }));
+    const counts = new Map<string, number>();
+    for (const note of notes) counts.set(note.group, (counts.get(note.group) ?? 0) + 1);
+    // The shelf's own order, so a book keeps its colour as notes come and go; then anything else.
+    const order = [
+      ...books.filter((book) => !book.parent_id && counts.has(book.id)).map((book) => book.id),
+      ...[...counts.keys()].filter((id) => !byId.get(id) || byId.get(id)?.parent_id),
+    ];
+    const groups: GraphGroup[] = order.map((id, at) => ({
+      id,
+      name: byId.get(id)?.name ?? "—",
+      color: byId.get(id)?.color || (order.length > 1 ? GROUP_COLORS[at % GROUP_COLORS.length] : ""),
+      count: counts.get(id) ?? 0,
+    }));
+    return { notes, groups };
+  }, [graph, books, t]);
+  return <GraphCanvas nodes={notes} groups={groups} edges={graph.edges} visibleIds={visibleIds} onOpen={onOpen} />;
 }
+
+/** A book as the graph paints it. `color` is the book's own, a colour of [`GROUP_COLORS`] when it
+ *  has none, or empty for the accent — a vault of one book. */
+interface GraphGroup {
+  id: string;
+  name: string;
+  color: string;
+  count: number;
+}
+
+/** For books without a colour of their own: mid-tones that hold up on the dark themes and the
+ *  light ones, far enough apart in hue to tell neighbours apart. */
+const GROUP_COLORS = ["#60a5fa", "#f472b6", "#34d399", "#fbbf24", "#a78bfa", "#fb7185", "#22d3ee", "#fb923c", "#a3e635", "#e879f9"];
 
 /** The palette, read once from the document rather than written here: the app has fourteen themes
  *  and a user-chosen accent, and every one of them is already a CSS variable. */
@@ -87,6 +127,8 @@ interface Palette {
   faint: string;
   text: string;
   textMuted: string;
+  /** Each book's colour, resolved — empty for the accent. */
+  groups: Map<string, string>;
 }
 
 /**
@@ -97,7 +139,7 @@ interface Palette {
  * silently ignores, leaving whatever colour was set before. Reading it through a probe element's
  * `color` makes the browser resolve the whole chain to an `rgb()` first.
  */
-function readPalette(host: HTMLElement): Palette {
+function readPalette(host: HTMLElement, groups: GraphGroup[]): Palette {
   const probe = document.createElement("span");
   probe.style.position = "absolute";
   probe.style.visibility = "hidden";
@@ -115,7 +157,14 @@ function readPalette(host: HTMLElement): Palette {
     faint: resolve("--cf-text-faint", "#6b6b78"),
     text: resolve("--cf-text", "#e6e6ec"),
     textMuted: resolve("--cf-text-muted", "#9a9aa8"),
+    groups: new Map<string, string>(),
   };
+  for (const group of groups) {
+    if (!group.color) continue;
+    probe.style.color = palette.accent;
+    probe.style.color = group.color;
+    palette.groups.set(group.id, getComputedStyle(probe).color || palette.accent);
+  }
   probe.remove();
   return palette;
 }
@@ -132,24 +181,34 @@ function fade(color: string, alpha: number): string {
  *  without being twenty times the size of it. */
 const radiusOf = (node: SimNode) => 3.4 + Math.sqrt(node.degree) * 2.3;
 
+/** The smallest a dot is drawn on screen, in CSS pixels: zoomed out over a big vault a dot in graph
+ *  units would shrink to nothing and leave only the lines. */
+const MIN_DOT = 2.5;
+
+/** A dot's radius as drawn — and as hit — at `scale`, in graph units. */
+const drawnRadius = (node: SimNode, scale: number) => Math.max(radiusOf(node), MIN_DOT / scale);
+
 /** The chrome of the zoom controls, which float over the canvas and need an edge of their own. */
 const CONTROL = iconButtonClass({
   size: "xs",
   className: "border border-[var(--cf-border)] bg-[var(--cf-surface)]/85 backdrop-blur-sm",
 });
 
-/** Below this zoom the labels would be a grey smear, so only the highlighted ones are drawn. */
-const LABEL_ZOOM = 0.62;
+/** Below this zoom only the highlighted labels are drawn. Low, because labels never overlap (see
+ *  the label pass): zoomed out, the best-linked notes keep their names and name the picture. */
+const LABEL_ZOOM = 0.25;
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 3;
 
 function GraphCanvas({
   nodes: notes,
+  groups,
   edges,
   visibleIds,
   onOpen,
 }: {
-  nodes: { id: string; title: string }[];
+  nodes: { id: string; title: string; group: string }[];
+  groups: GraphGroup[];
   edges: [string, string][];
   visibleIds: Set<string>;
   onOpen: (id: string) => void;
@@ -167,10 +226,16 @@ function GraphCanvas({
   const paletteRef = useRef<Palette | null>(null);
   const sizeRef = useRef({ width: 0, height: 0 });
   const visibleRef = useRef(visibleIds);
+  const groupsRef = useRef(groups);
+  /** Node indices, best-linked first: the order labels claim their room in. */
+  const labelOrderRef = useRef<number[]>([]);
+  /** Label widths at 11px, by text — measured once rather than every frame. */
+  const widthsRef = useRef(new Map<string, number>());
   const frameRef = useRef<number | null>(null);
   const dirtyRef = useRef(true);
 
   visibleRef.current = visibleIds;
+  groupsRef.current = groups;
 
   /** Who links to whom, by id — what a hover lights up. Both directions: a backlink is as much a
    *  neighbour as a link out. */
@@ -186,6 +251,7 @@ function GraphCanvas({
   }, [edges]);
 
   const titles = useMemo(() => new Map(notes.map((note) => [note.id, note.title])), [notes]);
+  const groupOf = useMemo(() => new Map(notes.map((note) => [note.id, note.group])), [notes]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -228,18 +294,19 @@ function GraphCanvas({
     }
 
     const labels = camera.scale >= LABEL_ZOOM;
-    context.textAlign = "center";
-    context.textBaseline = "top";
-    const fontFamily = getComputedStyle(canvas).fontFamily;
-    for (const node of sim.nodes) {
-      const radius = radiusOf(node);
-      const shown = inView(node.id);
+    const colorOf = (node: SimNode) => palette.groups.get(groupOf.get(node.id) ?? "") ?? palette.accent;
+    const alphaOf = (node: SimNode) => {
       const highlighted = lit(node.id);
-      const alpha = shown ? (highlighted ? 1 : 0.22) : highlighted ? 0.3 : 0.12;
-      context.globalAlpha = alpha;
+      return inView(node.id) ? (highlighted ? 1 : 0.22) : highlighted ? 0.3 : 0.12;
+    };
+    for (const node of sim.nodes) {
+      const radius = drawnRadius(node, camera.scale);
+      const color = colorOf(node);
+      context.globalAlpha = alphaOf(node);
       context.beginPath();
       context.arc(node.x, node.y, radius, 0, Math.PI * 2);
-      context.fillStyle = node.degree > 0 ? palette.accent : palette.faint;
+      // A note nothing links is its book's colour, faded — still the ones a vault forgets.
+      context.fillStyle = node.degree > 0 ? color : fade(color, 0.45);
       context.fill();
       // The dot sits on the lines it owns; a rim in the background colour cuts them off at its edge
       // instead of letting them run visibly underneath it.
@@ -249,23 +316,88 @@ function GraphCanvas({
       if (hovered?.id === node.id) {
         context.beginPath();
         context.arc(node.x, node.y, radius + 3.5 / camera.scale, 0, Math.PI * 2);
-        context.strokeStyle = fade(palette.accent, 0.8);
+        context.strokeStyle = fade(color, 0.8);
         context.lineWidth = 1.5 / camera.scale;
         context.stroke();
       }
+    }
 
-      if (!labels && !(hovered && highlighted)) continue;
-      // Divided by the zoom, like every other length here: the canvas is drawn in graph
-      // coordinates, so this is what keeps a label the same size on screen at any zoom.
-      context.font = `${11 / camera.scale}px ${fontFamily}`;
-      context.fillStyle = hovered?.id === node.id ? palette.text : palette.textMuted;
-      context.globalAlpha = alpha;
-      const title = titles.get(node.id) ?? "";
-      const label = title.length > 28 ? `${title.slice(0, 27)}…` : title;
-      context.fillText(label, node.x, node.y + radius + 3 / camera.scale);
+    // Labels after every dot, so none is covered by one, and best-linked first: where two would
+    // overlap the first keeps its room and the other waits for a closer zoom. The hovered note's
+    // goes first of all. Boxes are kept in a grid of cells, so each label checks its neighbours only.
+    if (labels || hovered) {
+      const fontFamily = getComputedStyle(canvas).fontFamily;
+      const drawFont = `${11 / camera.scale}px ${fontFamily}`;
+      context.font = drawFont;
+      context.textAlign = "center";
+      context.textBaseline = "top";
+      const cell = 160 / camera.scale;
+      const placed = new Map<string, { x0: number; y0: number; x1: number; y1: number }[]>();
+      const cellsOf = (box: { x0: number; y0: number; x1: number; y1: number }) => {
+        const keys: string[] = [];
+        for (let cx = Math.floor(box.x0 / cell); cx <= Math.floor(box.x1 / cell); cx++) {
+          for (let cy = Math.floor(box.y0 / cell); cy <= Math.floor(box.y1 / cell); cy++) keys.push(`${cx},${cy}`);
+        }
+        return keys;
+      };
+      const order = hovered ? [sim.nodes.indexOf(hovered), ...labelOrderRef.current] : labelOrderRef.current;
+      const done = new Set<number>();
+      for (const at of order) {
+        if (at < 0 || done.has(at)) continue;
+        done.add(at);
+        const node = sim.nodes[at];
+        const highlighted = lit(node.id);
+        if (!labels && !highlighted) continue;
+        const title = titles.get(node.id) ?? "";
+        const label = title.length > 28 ? `${title.slice(0, 27)}…` : title;
+        let width = widthsRef.current.get(label);
+        if (width === undefined) {
+          context.font = `11px ${fontFamily}`;
+          width = context.measureText(label).width;
+          widthsRef.current.set(label, width);
+          context.font = drawFont;
+        }
+        const half = (width / 2 + 3) / camera.scale;
+        const top = node.y + drawnRadius(node, camera.scale) + 3 / camera.scale;
+        const box = { x0: node.x - half, y0: top, x1: node.x + half, y1: top + 14 / camera.scale };
+        const keys = cellsOf(box);
+        const taken = keys.some((key) =>
+          placed.get(key)?.some((other) => box.x0 < other.x1 && box.x1 > other.x0 && box.y0 < other.y1 && box.y1 > other.y0),
+        );
+        if (taken && hovered?.id !== node.id) continue;
+        for (const key of keys) {
+          const list = placed.get(key);
+          if (list) list.push(box);
+          else placed.set(key, [box]);
+        }
+        context.globalAlpha = alphaOf(node);
+        context.fillStyle = hovered?.id === node.id ? palette.text : palette.textMuted;
+        context.fillText(label, node.x, top);
+      }
     }
     context.globalAlpha = 1;
-  }, [titles]);
+  }, [titles, groupOf]);
+
+  /** The camera framing the whole graph — what "fit" does, and what the view does by itself while
+   *  a new graph is still spreading out (`followRef`). */
+  const frameAll = useCallback(() => {
+    const sim = simRef.current;
+    const { width, height } = sizeRef.current;
+    if (!sim || sim.nodes.length === 0 || width === 0) return false;
+    // Room for the labels that hang off the outermost dots, not only for the dots.
+    const box = bounds(sim.nodes, 220);
+    const scale = Math.min(width / (box.maxX - box.minX), height / (box.maxY - box.minY));
+    cameraRef.current = {
+      x: (box.minX + box.maxX) / 2,
+      y: (box.minY + box.maxY) / 2,
+      scale: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale)),
+    };
+    return true;
+  }, []);
+
+  /** Keep framing the graph while it settles — it opens compact and spreads out over its first
+   *  seconds — until the user takes the camera: a zoom, a pan, a drag. */
+  const followRef = useRef(true);
 
   /** Runs the loop until the graph is asleep and nothing is waiting to be redrawn. Interactions
    *  call it rather than keeping a frame request alive the whole time the view is open. */
@@ -277,6 +409,7 @@ function GraphCanvas({
       if (!sim) return;
       const moving = !isSettled(sim);
       if (moving) step(sim);
+      if (moving && followRef.current) frameAll();
       if (moving || dirtyRef.current) {
         dirtyRef.current = false;
         draw();
@@ -284,7 +417,7 @@ function GraphCanvas({
       if (moving || dirtyRef.current) frameRef.current = requestAnimationFrame(tick);
     };
     frameRef.current = requestAnimationFrame(tick);
-  }, [draw]);
+  }, [draw, frameAll]);
 
   const invalidate = useCallback(() => {
     dirtyRef.current = true;
@@ -295,19 +428,10 @@ function GraphCanvas({
   const fittedRef = useRef(false);
 
   const fit = useCallback(() => {
-    const sim = simRef.current;
-    const { width, height } = sizeRef.current;
-    if (!sim || sim.nodes.length === 0 || width === 0) return;
+    if (!frameAll()) return;
     fittedRef.current = true;
-    const box = bounds(sim.nodes);
-    const scale = Math.min(width / (box.maxX - box.minX), height / (box.maxY - box.minY));
-    cameraRef.current = {
-      x: (box.minX + box.maxX) / 2,
-      y: (box.minY + box.maxY) / 2,
-      scale: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale)),
-    };
     invalidate();
-  }, [invalidate]);
+  }, [frameAll, invalidate]);
 
   // The simulation, rebuilt when the graph itself changes — not when the filter does, which only
   // changes how it is painted.
@@ -323,23 +447,33 @@ function GraphCanvas({
       degree.set(from, (degree.get(from) ?? 0) + 1);
       degree.set(to, (degree.get(to) ?? 0) + 1);
     }
-    const seeded = layoutGraph(
+    const group = new Map(notes.map((note) => [note.id, note.group]));
+    const { points, anchors } = layoutGroups(
       notes.map((note) => note.id),
       edges,
+      (id) => group.get(id) ?? "",
     );
-    simRef.current = createSimulation(
-      notes.map((note) => ({
-        id: note.id,
-        ...(seeded.get(note.id) ?? { x: 0, y: 0 }),
-        degree: degree.get(note.id) ?? 0,
-      })),
+    const sim = createSimulation(
+      notes.map((note) => {
+        const anchor = anchors.get(note.group) ?? { x: 0, y: 0 };
+        return {
+          id: note.id,
+          ...(points.get(note.id) ?? anchor),
+          degree: degree.get(note.id) ?? 0,
+          ax: anchor.x,
+          ay: anchor.y,
+        };
+      }),
       links,
     );
+    simRef.current = sim;
+    labelOrderRef.current = sim.nodes.map((_, at) => at).sort((a, b) => sim.nodes[b].degree - sim.nodes[a].degree);
     hoverRef.current = null;
     neighboursRef.current = new Set();
     // Framed by the pane, which has no size yet on the first pass — effects run before the browser
     // has laid the canvas out. The resize below does it as soon as there is a box to frame into.
     fittedRef.current = false;
+    followRef.current = true;
     fit();
   }, [notes, edges, fit]);
 
@@ -349,7 +483,7 @@ function GraphCanvas({
     const host = hostRef.current;
     const canvas = canvasRef.current;
     if (!host || !canvas) return;
-    paletteRef.current = readPalette(host);
+    paletteRef.current = readPalette(host, groupsRef.current);
     const resize = () => {
       const rect = host.getBoundingClientRect();
       const ratio = window.devicePixelRatio || 1;
@@ -377,13 +511,15 @@ function GraphCanvas({
     const host = hostRef.current;
     if (!host) return;
     const reread = () => {
-      paletteRef.current = readPalette(host);
+      paletteRef.current = readPalette(host, groupsRef.current);
       invalidate();
     };
+    // A book recoloured, added or emptied: its dots change colour without a relayout.
+    reread();
     const observer = new MutationObserver(reread);
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "style", "class"] });
     return () => observer.disconnect();
-  }, [invalidate]);
+  }, [invalidate, groups]);
 
   // Once the view is left there is nothing to draw on.
   useEffect(() => {
@@ -425,9 +561,10 @@ function GraphCanvas({
     if (!sim) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     const at = toGraph(event);
-    const node = nodeAt(sim.nodes, at.x, at.y, radiusOf);
+    const node = nodeAt(sim.nodes, at.x, at.y, (n) => drawnRadius(n, cameraRef.current.scale));
     if (node) node.pinned = true;
     dragRef.current = { node, x: event.clientX, y: event.clientY, moved: false };
+    followRef.current = false;
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -436,7 +573,7 @@ function GraphCanvas({
     const drag = dragRef.current;
     const at = toGraph(event);
     if (!drag) {
-      setHover(nodeAt(sim.nodes, at.x, at.y, radiusOf));
+      setHover(nodeAt(sim.nodes, at.x, at.y, (n) => drawnRadius(n, cameraRef.current.scale)));
       return;
     }
     // A couple of pixels of travel is a click with a shaky hand, not a drag.
@@ -488,6 +625,7 @@ function GraphCanvas({
         y: (event.clientY - rect.top - rect.height / 2) / camera.scale + camera.y,
       };
       const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, camera.scale * Math.exp(-event.deltaY * 0.0015)));
+      followRef.current = false;
       camera.scale = next;
       camera.x = before.x - (event.clientX - rect.left - rect.width / 2) / next;
       camera.y = before.y - (event.clientY - rect.top - rect.height / 2) / next;
@@ -502,6 +640,7 @@ function GraphCanvas({
   useEffect(() => invalidate(), [visibleIds, invalidate]);
 
   const zoomBy = (factor: number) => {
+    followRef.current = false;
     const camera = cameraRef.current;
     camera.scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, camera.scale * factor));
     invalidate();
@@ -531,6 +670,17 @@ function GraphCanvas({
           <Maximize2 size={13} />
         </button>
       </div>
+      {groups.length > 1 && (
+        <ul className="pointer-events-none absolute left-3 top-2 flex max-h-[45%] flex-col gap-0.5 overflow-hidden rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)]/85 px-2 py-1.5 text-[11px] backdrop-blur-sm">
+          {groups.map((group) => (
+            <li key={group.id} className="flex items-center gap-1.5 text-[var(--cf-text-muted)]">
+              <span className="size-2 shrink-0 rounded-full" style={{ background: group.color || "var(--cf-accent)" }} />
+              <span className="max-w-[180px] truncate text-[var(--cf-text)]">{group.name}</span>
+              <span className="tabular-nums text-[var(--cf-text-faint)]">{group.count}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       <p className="pointer-events-none absolute bottom-2 left-3 text-[11px] text-[var(--cf-text-faint)]">
         {t("notes.graphLegend", { notes: notes.length, links: edges.length })}
       </p>

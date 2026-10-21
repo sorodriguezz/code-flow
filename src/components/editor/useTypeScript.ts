@@ -3,6 +3,7 @@ import type { CancellationToken, IDisposable, IRange, editor as MonacoEditorNS, 
 import type { Monaco } from "@monaco-editor/react";
 import {
   TS_LANGUAGES,
+  TS_PREFERENCES,
   onTsEvent,
   partsToText,
   scriptKind,
@@ -42,6 +43,7 @@ import { reportSoon, useProblemsStore, type Problem } from "../../state/problems
 import { useEditorPanelStore } from "../../state/editorPanelStore";
 import { applyRename } from "./renameFlow";
 import { installTsRefactors } from "./tsRefactors";
+import { startNativeTypeScript } from "../../lib/lsp/client";
 
 /**
  * Real TypeScript IntelliSense in the editor, from the project's own `tsserver`.
@@ -542,28 +544,6 @@ export async function tsDefinitions(
 }
 
 /**
- * Which inlay hints the compiler computes — handed to `configure` with the rest of the preferences,
- * since `provideInlayHints` takes a span and reads what to draw from there.
- *
- * Every *type* hint, and parameter names only where the argument is a literal: `retry(3, true)` is
- * the call nobody can read without the signature, while `send(request, options)` already says what
- * it passes, and naming every argument of every call doubles the width of the code for nothing. A
- * hint that would repeat the name beside it (`const user: User`) is left out for the same reason.
- * `interactiveInlayHints` is what makes the type inside a hint a link, as in VS Code.
- */
-const INLAY_HINT_PREFERENCES = {
-  includeInlayParameterNameHints: "literals",
-  includeInlayParameterNameHintsWhenArgumentMatchesName: false,
-  includeInlayFunctionParameterTypeHints: true,
-  includeInlayVariableTypeHints: true,
-  includeInlayVariableTypeHintsWhenTypeMatchesName: false,
-  includeInlayPropertyDeclarationTypeHints: true,
-  includeInlayFunctionLikeReturnTypeHints: true,
-  includeInlayEnumMemberValueHints: true,
-  interactiveInlayHints: true,
-};
-
-/**
  * Tells Monaco the hints it is showing may be stale for a reason the buffer did not give — a server
  * that has just come up, having answered nothing for the files opened before it. Set when the
  * providers are installed; Monaco asks again for every editor on screen.
@@ -939,7 +919,7 @@ function installProviders(monaco: Monaco): void {
 
   /**
    * Inlay hints: the type the compiler inferred and the parameter a literal lands in, drawn faint
-   * beside the code. Which of them it computes is `INLAY_HINT_PREFERENCES`, handed over with
+   * beside the code. Which of them it computes is `TS_PREFERENCES`, handed over with
    * `configure`; whether any are drawn is the Editor's switch (`editorDisplayStore`), which is
    * Monaco's own and keeps it from asking at all.
    *
@@ -1177,8 +1157,26 @@ export function useTypeScript(
     if (!monaco || !repoPath || !activePath || !scriptKind(activePath)) return;
     let alive = true;
     void tsStart(repoPath)
-      .then(() => {
+      .then((started) => {
         if (!alive) return;
+        if (started.kind === "native") {
+          // TypeScript 7: no tsserver to run. Its own executable is a language server, started
+          // beside the others (`lib/lsp/client`), and the LSP providers answer for its files. The
+          // providers here stay silent — they ask a server that is not running. What it cannot do
+          // is check the whole project on request, so that button is not offered.
+          setTsRunning(null);
+          const panel = useEditorPanelStore.getState();
+          void startNativeTypeScript(projectId, repoPath, started.executable).then(
+            () => panel.setProjectCheck({ canCheckProject: false, checkingProject: false, tsUnavailable: null }),
+            (e: unknown) =>
+              panel.setProjectCheck({
+                canCheckProject: false,
+                checkingProject: false,
+                tsUnavailable: `TypeScript ${started.version}: ${String(e)}`,
+              }),
+          );
+          return;
+        }
         // `ts_start` hands back the running server when it already serves this repository, so only
         // a server that is new to this window invalidates what the previous one was told.
         const fresh = tsRunningRoot() !== repoPath;
@@ -1186,16 +1184,7 @@ export function useTypeScript(
         if (fresh) {
           tsOpenFiles.clear();
           sentEnd.clear();
-          // Rename keeps shorthand properties working (`{ foo }` becomes `{ foo: bar }`, not
-          // `{ bar }`, which would change the object's key) and never renames an import path. The
-          // inlay hints are the ones `INLAY_HINT_PREFERENCES` picks.
-          void tsRequest("configure", {
-            preferences: {
-              providePrefixAndSuffixTextForRename: true,
-              allowRenameOfImportPath: false,
-              ...INLAY_HINT_PREFERENCES,
-            },
-          }).catch(() => undefined);
+          void tsRequest("configure", { preferences: TS_PREFERENCES }).catch(() => undefined);
         }
         sweep(monaco);
         // Every editor already on screen asked for hints before there was a server to answer.
@@ -1217,7 +1206,7 @@ export function useTypeScript(
     return () => {
       alive = false;
     };
-  }, [monaco, repoPath, activePath]);
+  }, [monaco, repoPath, projectId, activePath]);
 
   /**
    * What is wrong with the file, and what is merely unused.

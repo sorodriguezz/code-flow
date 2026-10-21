@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Bot, Check, Download, FolderGit2, History, Link2, ListChecks, ListPlus, Paperclip, Play, Search, SquarePen, Square, Trash2, Workflow } from "lucide-react";
+import { ArrowDown, ArrowUp, Download, FolderGit2, History, Link2, ListChecks, ListPlus, Paperclip, Play, Search, SquarePen, Square, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
@@ -29,7 +29,6 @@ import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import { useEffortSupported } from "../../lib/useEffortSupport";
 import { isImagePath, useImageDrop } from "../../lib/useImageDrop";
 import { useModelReadsImages } from "../../lib/useModelReadsImages";
-import { listWorkspaceAgents } from "../../lib/tauri/commands";
 import { workspaceChatSnapshot, type ChatAttachment, type SkillPick, type WorkspaceChatSnapshot } from "../../lib/tauri/chatCommands";
 import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
@@ -44,21 +43,19 @@ import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { EMPTY_WS_CHAT, EMPTY_WS_LIST, useWorkspaceChatStore, wsChatQueueKey } from "../../state/workspaceChatStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import type { WorkspaceAgent } from "../../types/domain";
 
 const STICK_PX = 48;
 const MAX_COMPOSER_HEIGHT = 180;
 const PENDING_SHELL = { role: "assistant" as const, content: "" };
-const NO_AGENTS: WorkspaceAgent[] = [];
 const NO_FILES: ChatAttachment[] = [];
 const NO_PROJECTS: { name: string; local_path: string; id: string }[] = [];
 
 /**
  * A chat with every repository of the workspace, in its own tab of the assistant — beside, not
  * instead of, the repository chat. It runs in a folder of its own with each repository in reach,
- * and every question carries the workspace's live state: the repositories and the SDD/Harness work
- * in flight (`src-tauri/src/workspace_chat.rs`), so a chain, a story or a hybrid run can be asked
- * about and carried on from here. One of the workspace's agents can be put in charge of it.
+ * and every question carries the repositories as they are (path, branch, and the specification or
+ * harness folders the user keeps in them — `src-tauri/src/workspace_chat.rs`). Opened from a chain
+ * in Tareas, it also carries that chain's brief, to carry it on.
  *
  * The composer is the repository chat's: engine, thinking level, queue, Stop, dictation, images.
  */
@@ -107,40 +104,28 @@ export function WorkspaceChat({
   useEffect(() => {
     if (!active || session.sending) return;
     let live = true;
-    void workspaceChatSnapshot(workspaceId, focus || null).then(
+    void workspaceChatSnapshot(workspaceId).then(
       (next) => live && setSnapshot(next),
       () => {},
     );
     return () => {
       live = false;
     };
-  }, [active, session.sending, workspaceId, focus]);
+  }, [active, session.sending, workspaceId]);
   const focusChain = useChainStore((s) => (focus ? (s.chains.find((c) => c.id === focus) ?? null) : null));
 
   // ── Engine, level and role ─────────────────────────────────────────────────────────────────
-  const [agents, setAgents] = useState<WorkspaceAgent[]>(NO_AGENTS);
-  useEffect(() => {
-    let live = true;
-    void listWorkspaceAgents(workspaceId).then(
-      (list) => live && setAgents(list.filter((agent) => agent.enabled)),
-      () => {},
-    );
-    return () => {
-      live = false;
-    };
-  }, [workspaceId]);
-  const agent = session.agentId ? (agents.find((a) => a.id === session.agentId) ?? null) : null;
   const routedProvider = useTaskProvider("chat");
   const routedModel = useAiProviderStore((s) => s.taskModels.chat ?? s.model);
   const accounts = useAiAccountsStore((s) => s.accounts);
   const taskPins = useAiAccountsStore((s) => s.taskPins);
   const workspaceDefaults = useAiAccountsStore((s) => s.workspaceDefaults);
   const providerDefaults = useAiAccountsStore((s) => s.providerDefaults);
-  // The agent in charge answers on its own engine; otherwise the conversation's, else the routing.
-  const provider = agent?.provider || session.provider || routedProvider;
-  const model = agent ? agent.model : session.provider ? session.model : routedModel;
+  // The conversation's engine, else the routing.
+  const provider = session.provider || routedProvider;
+  const model = session.provider ? session.model : routedModel;
   const account =
-    (agent ? agent.account_id : session.accountId) ??
+    session.accountId ??
     resolveAccount({ accounts, taskPins, workspaceDefaults, providerDefaults }, provider, "chat", workspaceId);
   const effortSupported = useEffortSupported(provider, model);
   const pickEngine = (nextProvider: string, nextModel: string, nextAccount?: string) =>
@@ -394,15 +379,6 @@ export function WorkspaceChat({
           <FolderGit2 size={11} className="shrink-0" />
           <span className="truncate">{t("assistant.wsChatRepos", { n: snapshot?.repos ?? repoCount })}</span>
         </span>
-        {snapshot && snapshot.inFlight > 0 && (
-          <span
-            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
-            title={snapshot.text}
-          >
-            <Workflow size={9} />
-            {t("assistant.wsChatInFlight", { n: snapshot.inFlight })}
-          </span>
-        )}
         {focusChain && (
           <span className="inline-flex min-w-0 items-center gap-1 truncate" title={t("assistant.wsChatFocusHint")}>
             <Link2 size={10} className="shrink-0" />
@@ -484,7 +460,7 @@ export function WorkspaceChat({
                   message={message}
                   sessionId={session.engineSessionId}
                   actions={{
-                    ...(message.isError && !agent ? { onPickModel: (next: string) => pickEngine(provider, next) } : {}),
+                    ...(message.isError ? { onPickModel: (next: string) => pickEngine(provider, next) } : {}),
                     // Only the last answer, and only while nothing is running: an option clicked on
                     // an older card would be answering a question the conversation moved past.
                     onAnswer:
@@ -658,13 +634,6 @@ export function WorkspaceChat({
                 provider={provider}
                 scope={{ accountId: account ?? "system", workspaceId, conversationId: session.persisted ? conversationId : null }}
               />
-              {agents.length > 0 && (
-                <AgentMenu
-                  agents={agents}
-                  current={agent}
-                  onPick={(id) => void useWorkspaceChatStore.getState().setAgent(conversationId, id)}
-                />
-              )}
               {/* Always offered: a file is something every engine can read, whatever it can see. */}
               <button
                 type="button"
@@ -715,63 +684,6 @@ export function WorkspaceChat({
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-/** The SDD/Harness agent in charge of this chat — none, or one of the workspace's enabled ones. */
-function AgentMenu({
-  agents,
-  current,
-  onPick,
-}: {
-  agents: WorkspaceAgent[];
-  current: WorkspaceAgent | null;
-  onPick: (agentId: string) => void;
-}) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useDismiss(ref, open, () => setOpen(false));
-  const pick = (id: string) => {
-    setOpen(false);
-    onPick(id);
-  };
-  return (
-    <div ref={ref} className="relative min-w-0">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title={current ? t("assistant.wsChatAgentOn", { agent: current.name }) : t("assistant.wsChatAgentHint")}
-        aria-label={t("assistant.wsChatAgent")}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        className={`flex h-6 max-w-[140px] items-center gap-1 rounded-md px-1.5 text-[11px] hover:bg-[var(--cf-hover)] ${
-          current ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-        }`}
-      >
-        <Bot size={13} className="shrink-0" />
-        {current && <span className="min-w-0 truncate">{current.name}</span>}
-      </button>
-      {open && (
-        <div role="menu" className={`absolute bottom-full right-0 z-40 mb-1 w-60 max-w-[calc(100vw-16px)] ${popoverClass}`}>
-          <button role="menuitem" onClick={() => pick("")} className={menuRowClass(!current)}>
-            <Check size={13} className={`mt-0.5 shrink-0 ${current ? "invisible" : ""}`} />
-            <span className="min-w-0 truncate">{t("assistant.wsChatNoAgent")}</span>
-          </button>
-          {agents.map((agent) => (
-            <button key={agent.id} role="menuitem" onClick={() => pick(agent.id)} className={menuRowClass(current?.id === agent.id)}>
-              <Check size={13} className={`mt-0.5 shrink-0 ${current?.id === agent.id ? "" : "invisible"}`} />
-              <span className="min-w-0">
-                <span className="block truncate">{agent.name}</span>
-                <span className="block truncate text-[11.5px] text-[var(--cf-text-muted)]">
-                  {[agent.role, agent.provider, agent.model].filter(Boolean).join(" · ")}
-                </span>
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

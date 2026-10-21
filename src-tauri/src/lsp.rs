@@ -18,7 +18,8 @@
 //! **TypeScript and JavaScript are deliberately not in that list.** `useTypeScript.ts` drives the
 //! project's own `tsserver` through `tsserver.rs`, and an entry here would be a second, worse
 //! answer competing with it in the same completion list — see the header of `src/lib/lsp/servers.ts`,
-//! which is the catalogue.
+//! which is the catalogue. Except on TypeScript 7, which has no tsserver: its native executable is
+//! itself a language server, and runs here like the others (`tsserver::Started::Native`).
 //!
 //! The server is a separate program the user installs — in VS Code it arrives inside an extension;
 //! here it is named in that catalogue and either found on `PATH` or run through an `npx` that

@@ -922,6 +922,46 @@ pub fn chat_read_output(conversation_id: String, rel_path: String) -> Result<Vec
     std::fs::read(&real_source).map_err(|e| e.to_string())
 }
 
+/// An attached image as a `data:` URL, for the preview its chip shows on hover — in the composer
+/// and in the question once sent, in both chats.
+///
+/// `path` crosses the IPC boundary, so before a byte is read it is canonicalised and must land
+/// inside one of the chats' own attachment folders and be an image by name: this previews a file the
+/// app copied, never any path on the machine. Past [`OUTPUT_PREVIEW_MAX_BYTES`] the chip keeps its
+/// path and goes without the picture.
+#[tauri::command]
+pub fn chat_attachment_preview(path: String) -> Result<String, String> {
+    let roots = [
+        crate::paths::chat_attachments_dir(),
+        crate::paths::repo_chat_attachments_dir(),
+        crate::paths::chat_pending_attachments_root(),
+        crate::paths::chat_group_context_root(),
+    ];
+    preview_in(&roots, &path)
+}
+
+fn preview_in(roots: &[PathBuf], path: &str) -> Result<String, String> {
+    use base64::Engine;
+    let real = Path::new(path).canonicalize().map_err(|_| "that file is no longer there".to_string())?;
+    let inside = roots.iter().filter_map(|root| root.canonicalize().ok()).any(|root| real.starts_with(&root));
+    let mime = match real.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        _ => return Err("invalid path".to_string()),
+    };
+    if !inside || !real.is_file() {
+        return Err("invalid path".to_string());
+    }
+    if real.metadata().map(|m| m.len()).unwrap_or(u64::MAX) > OUTPUT_PREVIEW_MAX_BYTES {
+        return Err("that file is too large to preview".to_string());
+    }
+    let bytes = std::fs::read(&real).map_err(|e| e.to_string())?;
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
 /// Drops a conversation's working directory. The twin of
 /// [`discard_conversation_attachments`], called from the same place and best-effort for the same
 /// reason.
@@ -986,6 +1026,29 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cf-attach-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A chip's hover reads the image the app copied and nothing else: an image outside the
+    /// attachment folders, one reached with `..`, or a file that is not an image is refused.
+    #[test]
+    fn a_preview_reads_only_an_image_inside_the_attachment_folders() {
+        let root = scratch("root");
+        let elsewhere = scratch("elsewhere");
+        std::fs::create_dir_all(root.join("c1")).unwrap();
+        std::fs::write(root.join("c1/a1b2-captura.PNG"), b"png").unwrap();
+        std::fs::write(root.join("c1/a1b2-notas.txt"), b"txt").unwrap();
+        std::fs::write(elsewhere.join("secreto.png"), b"png").unwrap();
+        let roots = [root.clone()];
+
+        let url = preview_in(&roots, &root.join("c1/a1b2-captura.PNG").to_string_lossy()).unwrap();
+        assert_eq!(url, "data:image/png;base64,cG5n");
+        assert!(preview_in(&roots, &elsewhere.join("secreto.png").to_string_lossy()).is_err());
+        let climbed = root.join("..").join(elsewhere.file_name().unwrap()).join("secreto.png");
+        assert!(preview_in(&roots, &climbed.to_string_lossy()).is_err());
+        assert!(preview_in(&roots, &root.join("c1/a1b2-notas.txt").to_string_lossy()).is_err());
+        assert!(preview_in(&roots, &root.join("c1/gone.png").to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(elsewhere);
     }
 
     /// The whole promise of staging: what was attached before the conversation existed is *in* the

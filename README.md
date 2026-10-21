@@ -11,7 +11,7 @@ a backlog, and let AI write your commits, find your bugs and resolve your confli
 native app. Then test the endpoint you just changed, query the database behind it and SSH into the
 box it runs on without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-2.3.50-6C5CE7)
+![version](https://img.shields.io/badge/version-2.3.51-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -707,7 +707,7 @@ internet.
   parallel reviewer, the cross-file pass and the closing summary. The numbers are not typed into them
   — they arrive from the Engine tab through `{{MIN_CONFIANZA}}`-style placeholders, so rewriting the
   wording can never put the instruction and the filter that enforces it out of step.
-- Per workspace: **review context**, **instructions (.md)** and **Skills**.
+- Per workspace: **review context**, **instructions (.md)** and **Skills** — searched on skills.sh, generated with AI (cloud or local) from a repository, documents, web pages or text, and imported or downloaded as `.skill`.
 - **A full history** of what the AI has done — failures included, so tomorrow you know what happened.
 
 ## ⚙️ Getting started

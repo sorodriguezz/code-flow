@@ -1,8 +1,17 @@
 import { lspCapabilities, lspNotify, lspProbe, lspRequest, lspStart, lspStopProject } from "../tauri/commands";
-import { LANGUAGE_SERVERS, monacoLanguageOf, serversForRepo, spawnFor, withRepoPath, type LanguageServer } from "./servers";
+import {
+  LANGUAGE_SERVERS,
+  NATIVE_TYPESCRIPT,
+  monacoLanguageOf,
+  serversForRepo,
+  spawnFor,
+  withRepoPath,
+  type LanguageServer,
+} from "./servers";
 import { fileUriFor, type LspFileOperationFilter, type LspWorkspaceEdit } from "./protocol";
 import { renameWanted } from "./fileOperations";
 import { WINDOW } from "../windowIdentity";
+import { relPathFromModelUri } from "../editorModel";
 
 /**
  * Whether this window only ever *joins* servers — a floating editor (`lib/editorIslands`).
@@ -218,53 +227,101 @@ export function refreshProbes(): void {
  * this existed: no completions for Go.
  */
 export async function startForProject(projectId: string, repoPath: string, rootEntries: string[]): Promise<void> {
-  if (context && context.projectId !== projectId) await stopAll();
-  context = { projectId, repoPath };
-
+  await enter(projectId, repoPath);
   await Promise.all(
-    serversForRepo(rootEntries).map((server) => {
-      const id = `${projectId}:${server.id}`;
-      if (sessions.has(id)) return undefined;
-      const inflight = starting.get(id);
-      if (inflight) return inflight;
-      const attempt = (async () => {
-        if (joinOnly) {
-          const running = await lspCapabilities(id).catch(() => null);
-          if (running && context?.projectId === projectId) {
-            sessions.set(id, { id, server, capabilities: running });
-          }
-          return;
-        }
-        const { launch } = await probe(server);
-        if (!launch) return;
-        // The outcome is carried rather than collapsed into `null`: `lsp_start` answers `null`
-        // for a server that declares no capabilities, which is unusual but legal, and reading
-        // that as "it failed to start" would leave a live process outside the registry.
-        const started = await lspStart(
-          id,
-          repoPath,
-          launch.command,
-          launch.args,
-          withRepoPath(server.initializationOptions, repoPath),
-          withRepoPath(server.settings, repoPath),
-        ).then(
-          (capabilities) => ({ ok: true as const, capabilities }),
-          () => ({ ok: false as const, capabilities: null }),
-        );
-        if (!started.ok) return;
-        // The project this attempt belongs to may have closed while `initialize` was in flight;
-        // registering now would resurrect it under a stale id. `stopAll` has already asked the
-        // backend to stop everything under that prefix, so the process is on its way out.
-        if (context?.projectId !== projectId) return;
-        sessions.set(id, { id, server, capabilities: started.capabilities ?? {} });
-      })().finally(() => {
-        starting.delete(id);
-      });
-      starting.set(id, attempt);
-      return attempt;
-    }),
+    serversForRepo(rootEntries).map((server) =>
+      startSession(projectId, repoPath, server, async () => (await probe(server)).launch).catch(() => undefined),
+    ),
   );
   announce();
+}
+
+/**
+ * Starts TypeScript 7's own language server for the project — the executable `ts_start` found in
+ * its `typescript` package (see `NATIVE_TYPESCRIPT`).
+ *
+ * Unlike the catalogue's servers a failure is the caller's to show, not swallowed: this is the
+ * project's compiler, and without it no file of the project is type-checked at all — the Problems
+ * toolbar says so, with this rejection's reason. Called each time a script file comes on screen, so
+ * a server already running or starting is simply waited for.
+ */
+export async function startNativeTypeScript(projectId: string, repoPath: string, executable: string): Promise<void> {
+  await enter(projectId, repoPath);
+  const id = `${projectId}:${NATIVE_TYPESCRIPT.id}`;
+  const fresh = !sessions.has(id);
+  await startSession(projectId, repoPath, NATIVE_TYPESCRIPT, async () => ({
+    command: executable,
+    args: NATIVE_TYPESCRIPT.args,
+  }));
+  // Only when it is new: every listener re-sweeps the models and asks for inlay hints again, which
+  // is right once and waste on each tab switch that finds it already running.
+  if (fresh && sessions.has(id)) announce();
+}
+
+/**
+ * Whether TypeScript 7's language server holds this model's file — the one question Monaco's own
+ * isolated worker asks before answering (`tsWorkerFallback`), the way it asks `tsServes` for
+ * tsserver: exactly one of them answers.
+ */
+export function nativeTypeScriptHolds(uri: { scheme: string; path: string }): boolean {
+  if (!context || !sessions.has(`${context.projectId}:${NATIVE_TYPESCRIPT.id}`)) return false;
+  const relPath = relPathFromModelUri(uri, context.projectId);
+  return relPath !== null && documents.has(relPath);
+}
+
+/** Points the client at a project, stopping the previous one's servers first. */
+async function enter(projectId: string, repoPath: string): Promise<void> {
+  if (context && context.projectId !== projectId) await stopAll();
+  context = { projectId, repoPath };
+}
+
+/**
+ * Starts one server for the project, or waits for the attempt already under way.
+ *
+ * Rejects when the server fails to start, and resolves without a session when `launch` finds
+ * nothing to run (not installed).
+ */
+function startSession(
+  projectId: string,
+  repoPath: string,
+  server: LanguageServer,
+  launch: () => Promise<{ command: string; args: string[] } | null>,
+): Promise<void> {
+  const id = `${projectId}:${server.id}`;
+  if (sessions.has(id)) return Promise.resolve();
+  const inflight = starting.get(id);
+  if (inflight) return inflight;
+  const attempt = (async () => {
+    if (joinOnly) {
+      const running = await lspCapabilities(id).catch(() => null);
+      if (running && context?.projectId === projectId) {
+        sessions.set(id, { id, server, capabilities: running });
+      }
+      return;
+    }
+    const how = await launch();
+    if (!how) return;
+    // `lsp_start` answers `null` for a server that declares no capabilities, which is unusual but
+    // legal: only a rejection means it failed to start, and reading `null` as one would leave a
+    // live process outside the registry.
+    const capabilities = await lspStart(
+      id,
+      repoPath,
+      how.command,
+      how.args,
+      withRepoPath(server.initializationOptions, repoPath),
+      withRepoPath(server.settings, repoPath),
+    );
+    // The project this attempt belongs to may have closed while `initialize` was in flight;
+    // registering now would resurrect it under a stale id. `stopAll` has already asked the
+    // backend to stop everything under that prefix, so the process is on its way out.
+    if (context?.projectId !== projectId) return;
+    sessions.set(id, { id, server, capabilities: capabilities ?? {} });
+  })().finally(() => {
+    starting.delete(id);
+  });
+  starting.set(id, attempt);
+  return attempt;
 }
 
 export async function stopAll(): Promise<void> {

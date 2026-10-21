@@ -16,8 +16,45 @@ import type { TsRenameGroup } from "./workspaceEdit";
  * classic way to get completions for the character before the caret.
  */
 
-/** Starts the server for a repository. Resolves with the `tsserver.js` that answered. */
-export const tsStart = (repoPath: string) => invoke<string>("ts_start", { repoPath });
+/**
+ * What `ts_start` found for a repository: tsserver, started (TypeScript 6 and earlier), or a project
+ * on TypeScript 7 — which has no tsserver, and whose language service is its native executable
+ * spoken to over LSP. That one is started by `lib/lsp/client`, beside the other language servers.
+ */
+export type TsStarted =
+  | { kind: "server"; script: string }
+  | { kind: "native"; executable: string; version: string };
+
+/** Starts the server for a repository, or says it is a TypeScript 7 one (see `TsStarted`). */
+export const tsStart = (repoPath: string) => invoke<TsStarted>("ts_start", { repoPath });
+
+/**
+ * The compiler's preferences: handed to tsserver with `configure`, and to TypeScript 7's language
+ * server as its `typescript` and `javascript` settings, which it reads under the same names.
+ *
+ * Rename keeps shorthand properties working (`{ foo }` becomes `{ foo: bar }`, not `{ bar }`, which
+ * would change the object's key) and never renames an import path.
+ *
+ * Inlay hints: every *type* hint, and parameter names only where the argument is a literal:
+ * `retry(3, true)` is the call nobody can read without the signature, while `send(request, options)`
+ * already says what it passes, and naming every argument of every call doubles the width of the code
+ * for nothing. A hint that would repeat the name beside it (`const user: User`) is left out for the
+ * same reason. `interactiveInlayHints` is what makes the type inside a hint a link, as in VS Code.
+ * `provideInlayHints` takes a span and reads what to draw from here.
+ */
+export const TS_PREFERENCES = {
+  providePrefixAndSuffixTextForRename: true,
+  allowRenameOfImportPath: false,
+  includeInlayParameterNameHints: "literals",
+  includeInlayParameterNameHintsWhenArgumentMatchesName: false,
+  includeInlayFunctionParameterTypeHints: true,
+  includeInlayVariableTypeHints: true,
+  includeInlayVariableTypeHintsWhenTypeMatchesName: false,
+  includeInlayPropertyDeclarationTypeHints: true,
+  includeInlayFunctionLikeReturnTypeHints: true,
+  includeInlayEnumMemberValueHints: true,
+  interactiveInlayHints: true,
+};
 
 /** A request that expects an answer. Rejects on timeout and on a refusal from the server. */
 export const tsRequest = <T>(command: string, args: unknown) =>

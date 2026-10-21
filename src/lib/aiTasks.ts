@@ -118,6 +118,10 @@ export const AI_TASKS: AiTaskDef[] = [
   // «Resumen hablado»: a long answer cut to two or three sentences before the thinking mark reads
   // it aloud (`speechStore.speakAnswer`). Text-only, and like `chat_title` it runs on the engine's
   // fast model unless this row names another — it runs after every answer the user asked to hear.
+  // «Generar skill» in Herramientas de IA › Skills (`AiTask::Skills`). Text-only: CodeFlow reads the
+  // repository, documents or pages itself and puts them on stdin, so it routes anywhere, a local
+  // model included. Its prompt — what a good skill is — is the `skill_template` row below it.
+  { key: "skills", labelKey: "task.skills", hintKey: "task.skillsHint", area: "docs", modelForKey: "task.skillsModelFor" },
   { key: "spoken_summary", labelKey: "task.spokenSummary", hintKey: "task.spokenSummaryHint", area: "other", modelForKey: "task.spokenSummaryModelFor" },
 ];
 

@@ -17,7 +17,7 @@ component's own licence wins — which is what section 6 says.
 
 | What ships | Count |
 |---|---|
-| npm packages (production tree) | 349 resolved versions of 320 packages |
+| npm packages (production tree) | 351 resolved versions of 319 packages |
 | Rust crates (resolved for macOS and Windows) | 878 resolved versions of 772 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
@@ -172,14 +172,14 @@ macOS's zlib, and on Windows the CNG cryptography libssh2 uses in place of OpenS
 |---|---|---|---|---|---|
 | Instrument Sans | 5.3.0 (upstream v4) | OFL-1.1 | the interface | `@fontsource-variable/instrument-sans` | Copyright 2022 The Instrument Sans Project Authors (https://github.com/Instrument/instrument-sans) |
 | JetBrains Mono | 5.3.0 (upstream v24) | OFL-1.1 | the editor, terminal and code | `@fontsource-variable/jetbrains-mono` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) |
-| Roboto | 3.014 | OFL-1.1 | text in exported PDFs | inside `pdfmake` 0.3.11 (`build/vfs_fonts.js`) | Copyright 2011 The Roboto Project Authors (https://github.com/googlefonts/roboto-classic) |
+| Roboto | 3.014 | OFL-1.1 | text in exported PDFs | inside `pdfmake` 0.3.12 (`build/vfs_fonts.js`) | Copyright 2011 The Roboto Project Authors (https://github.com/googlefonts/roboto-classic) |
 | Excalifont | 1.000 | MIT | hand-drawn text on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Excalifont`) | Copyright (c) 2024 by Excalidraw. All rights reserved. |
 | Virgil | 001.001 | OFL-1.1 | hand-drawn text in older whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Virgil`) | Copyright (c) 2011 by Your Own Font Foundry. All rights reserved. |
 | Nunito ExtraLight Medium | 3.602 | MIT | plain text on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Nunito`) | Copyright 2014 The Nunito Project Authors (https://github.com/googlefonts/nunito) |
 | Comic Shanns Regular | 1.3.0 | MIT | code on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/ComicShanns`) | Copyright (c) 2018 Shannon Miwa; Copyright (c) 2023 Jesus Gonzalez; Copyright (c) 2023 Rodrigo Batista de Moraes; Copyright (c) 2024 Fini Jastrow; Copyright (c) 2024 Kyle Beechly |
 | Lilita One | 1.002 | MIT | headings on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Lilita`) | Copyright (c) 2011 Juan Montoreano (juan@remolacha.biz), with Reserved Font Names "Lilita One" |
 | Assistant | 3.000 | OFL-1.1 | the whiteboard editor's own controls | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Assistant/Assistant-Regular.woff2`) | Copyright 2020 The Assistant Project Authors (https://github.com/hafontia/Assistant). Copyright 2010 The Source Sans Pro Authors (https://github.com/adobe-fonts/source-sans-pro), with Reserved Font Name 'Source'. Source is a trademark of Adobe Systems Incorporated in the United States and/or other countries. |
-| codicon | 1.15 | MIT | the editor's own icons | inside `monaco-editor` 0.56.0 (`esm/vs/base/browser/ui/codicons/codicon/codicon.ttf`) | — |
+| codicon | 1.15 | MIT | the editor's own icons | inside `monaco-editor` 0.57.0 (`esm/vs/base/browser/ui/codicons/codicon/codicon.ttf`) | — |
 | KaTeX_Main | 1.1 | OFL-1.1 | formulas in notes (and the rest of KaTeX's families) | inside `katex` 0.16.47 (`dist/fonts/KaTeX_Main-Regular.ttf`) | Copyright (c) 2009-2010 Design Science, Inc.; Copyright (c) 2014-2018 Khan Academy |
 
 Each OFL font carries its copyright notice and licence in its own metadata, which is where the
@@ -202,8 +202,8 @@ loaded on demand. Each set's licence is the one its own `info.json` declares.
 
 | Set | Package | Version | Licence (SPDX) | Author | Icons |
 |---|---|---|---|---|---|
-| SVG Logos | `@iconify-json/logos` | 1.2.12 | CC0-1.0 | [Gil Barbara](https://github.com/gilbarbara/logos) | 1861 |
-| VSCode Icons | `@iconify-json/vscode-icons` | 1.2.69 (upstream 12.19.0) | MIT | [Roberto Huertas](https://github.com/vscode-icons/vscode-icons) | 1566 |
+| SVG Logos | `@iconify-json/logos` | 1.2.17 | CC0-1.0 | [Gil Barbara](https://github.com/gilbarbara/logos) | 2016 |
+| VSCode Icons | `@iconify-json/vscode-icons` | 1.2.91 (upstream 13.0.0) | MIT | [Roberto Huertas](https://github.com/vscode-icons/vscode-icons) | 1704 |
 
 Single marks copied into the source from sets and artwork the app does not install, for the
 AI engines and platforms it integrates with, the databases it connects to and the container
@@ -256,7 +256,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### MIT — 239 packages
+### MIT — 238 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -276,7 +276,7 @@ because there the order carries meaning.
 | `@floating-ui/react-dom` | 2.1.9 | MIT | <https://floating-ui.com/docs/react-dom> |
 | `@floating-ui/utils` | 0.2.12 | MIT | <https://floating-ui.com> |
 | `@glideapps/ts-necessities` | 2.2.3 | MIT | <https://github.com/glideapps/ts-necessities> |
-| `@iconify-json/vscode-icons` | 1.2.69 | MIT | <https://icon-sets.iconify.design/vscode-icons> |
+| `@iconify-json/vscode-icons` | 1.2.91 | MIT | <https://icon-sets.iconify.design/vscode-icons> |
 | `@iconify/types` | 2.0.0 | MIT | <https://github.com/iconify/iconify> |
 | `@iconify/utils` | 3.1.7 | MIT | <https://iconify.design/docs/libraries/utils> |
 | `@mermaid-js/parser` | 0.6.3, 1.2.1 | MIT | <https://github.com/mermaid-js/mermaid/tree/develop/packages/mermaid/parser> |
@@ -342,8 +342,8 @@ because there the order carries meaning.
 | `@types/d3-zoom` | 3.0.9 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-zoom> |
 | `@types/geojson` | 7946.0.16 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/geojson> |
 | `@types/node` | 26.2.0 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/node> |
-| `@types/react` | 19.2.17 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/react> |
-| `@types/react-dom` | 19.2.3 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/react-dom> |
+| `@types/react` | 19.3.0 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/react> |
+| `@types/react-dom` | 19.3.0 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/react-dom> |
 | `@types/readable-stream` | 4.0.10 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/readable-stream> |
 | `@types/trusted-types` | 2.0.7 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/trusted-types> |
 | `@types/urijs` | 1.19.26 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/urijs> |
@@ -363,7 +363,6 @@ because there the order carries meaning.
 | `braces` | 3.0.3 | MIT | <https://github.com/micromatch/braces> |
 | `brotli` | 1.3.3 | MIT | <https://github.com/devongovett/brotli.js> |
 | `browser-or-node` | 3.0.0 | MIT | <https://github.com/flexdinesh/browser-or-node> |
-| `browserify-zlib` | 0.2.0 | MIT | <https://github.com/devongovett/browserify-zlib> |
 | `buffer` | 6.0.3 | MIT | <https://github.com/feross/buffer> |
 | `canvas-roundrect-polyfill` | 0.0.1 | MIT | <https://github.com/Kaiido/roundRect> |
 | `chevrotain-allstar` | 0.3.1 | MIT | <https://github.com/langium/chevrotain-allstar> |
@@ -371,7 +370,7 @@ because there the order carries meaning.
 | `classcat` | 5.0.5 | MIT | <https://github.com/jorgebucaran/classcat> |
 | `clone` | 2.1.2 | MIT | <https://github.com/pvorb/node-clone> |
 | `clsx` | 1.1.1 | MIT | <https://github.com/lukeed/clsx> |
-| `commander` | 2.20.3, 7.2.0, 8.3.0 | MIT | <https://github.com/tj/commander.js> |
+| `commander` | 15.0.0, 2.20.3, 7.2.0, 8.3.0 | MIT | <https://github.com/tj/commander.js> |
 | `cose-base` | 1.0.3, 2.2.0 | MIT | <https://github.com/iVis-at-Bilkent/cose-base> |
 | `cross-env` | 7.0.3 | MIT | <https://github.com/kentcdodds/cross-env> |
 | `cross-spawn` | 7.0.6 | MIT | <https://github.com/moxystudio/node-cross-spawn> |
@@ -392,6 +391,7 @@ because there the order carries meaning.
 | `events` | 3.3.0 | MIT | <https://github.com/Gozala/events> |
 | `fast-deep-equal` | 3.1.3 | MIT | <https://github.com/epoberezkin/fast-deep-equal> |
 | `fastdom` | 1.0.12 | MIT | <https://github.com/wilsonpage/fastdom> |
+| `fflate` | 0.8.3 | MIT | <https://101arrowz.github.io/fflate> |
 | `fill-range` | 7.1.1 | MIT | <https://github.com/jonschlinkert/fill-range> |
 | `fontkit` | 2.0.4 | MIT | <https://github.com/foliojs/fontkit> |
 | `framer-motion` | 12.42.2 | MIT | <https://github.com/motiondivision/motion> |
@@ -411,8 +411,7 @@ because there the order carries meaning.
 | `is-url` | 1.2.4 | MIT | <https://github.com/segmentio/is-url> |
 | `jotai` | 2.11.0 | MIT | <https://github.com/pmndrs/jotai> |
 | `jotai-scope` | 0.7.2 | MIT | <https://github.com/jotaijs/jotai-scope> |
-| `js-md5` | 0.8.3 | MIT | <https://github.com/emn178/js-md5> |
-| `katex` | 0.16.47 | MIT | <https://katex.org> |
+| `katex` | 0.16.47, 0.19.0 | MIT | <https://katex.org> |
 | `khroma` | 2.1.0 | MIT | <https://github.com/fabiospampinato/khroma> |
 | `langium` | 3.3.1 | MIT | <https://langium.org> |
 | `layout-base` | 1.0.2, 2.0.1 | MIT | <https://github.com/iVis-at-Bilkent/layout-base> |
@@ -422,9 +421,9 @@ because there the order carries meaning.
 | `lodash.debounce` | 4.0.8 | MIT | <https://lodash.com> |
 | `lodash.throttle` | 4.1.1 | MIT | <https://lodash.com> |
 | `luxon` | 3.7.2 | MIT | <https://github.com/moment/luxon> |
-| `marked` | 14.0.0, 16.4.2, 18.0.7 | MIT | <https://marked.js.org> |
+| `marked` | 14.0.0, 16.4.2, 18.1.1 | MIT | <https://marked.js.org> |
 | `mermaid` | 11.17.2 | MIT | <https://github.com/mermaid-js/mermaid> |
-| `monaco-editor` | 0.56.0 | MIT | <https://github.com/microsoft/monaco-editor> |
+| `monaco-editor` | 0.57.0 | MIT | <https://github.com/microsoft/monaco-editor> |
 | `motion-dom` | 12.42.2 | MIT | <https://github.com/motiondivision/motion> |
 | `motion-utils` | 12.39.0 | MIT | <https://github.com/motiondivision/motion> |
 | `multimath` | 2.0.0 | MIT | <https://github.com/nodeca/multimath> |
@@ -439,8 +438,8 @@ because there the order carries meaning.
 | `path-data-parser` | 0.1.0 | MIT | <https://github.com/pshihn/path-data-parser> |
 | `path-key` | 3.1.1 | MIT | <https://github.com/sindresorhus/path-key> |
 | `pathe` | 2.0.3 | MIT | <https://github.com/unjs/pathe> |
-| `pdfkit` | 0.19.1 | MIT | <http://pdfkit.org> |
-| `pdfmake` | 0.3.11 | MIT | <http://pdfmake.org> |
+| `pdfkit` | 0.20.2 | MIT | <http://pdfkit.org> |
+| `pdfmake` | 0.3.12 | MIT | <http://pdfmake.org> |
 | `perfect-freehand` | 1.2.0 | MIT | <https://github.com/steveruizok/perfect-freehand> |
 | `pica` | 7.1.1 | MIT | <https://github.com/nodeca/pica> |
 | `picomatch` | 2.3.2 | MIT | <https://github.com/micromatch/picomatch> |
@@ -448,14 +447,14 @@ because there the order carries meaning.
 | `png-chunk-text` | 1.0.0 | MIT | <https://github.com/hughsk/png-chunk-text> |
 | `png-chunks-encode` | 1.0.0 | MIT | <https://github.com/hughsk/png-chunks-encode> |
 | `png-chunks-extract` | 1.0.0 | MIT | <https://github.com/hughsk/png-chunks-extract> |
-| `png-js` | 1.1.0 | MIT | <https://github.com/devongovett/png.js> |
+| `png-js` | 2.0.0 | MIT | <https://github.com/devongovett/png.js> |
 | `points-on-curve` | 0.2.0, 1.0.1 | MIT | <https://github.com/pshihn/bezier-points> |
 | `points-on-path` | 0.2.1 | MIT | <https://github.com/pshihn/points-on-path> |
 | `process` | 0.11.10 | MIT | <https://github.com/shtylman/node-process> |
 | `qrcode-generator` | 2.0.4 | MIT | <https://github.com/kazuhikoarase/qrcode-generator> |
 | `randexp` | 0.4.6 | MIT | <http://fent.github.io/randexp.js> |
-| `react` | 19.2.8 | MIT | <https://react.dev> |
-| `react-dom` | 19.2.8 | MIT | <https://react.dev> |
+| `react` | 19.3.1 | MIT | <https://react.dev> |
+| `react-dom` | 19.3.1 | MIT | <https://react.dev> |
 | `react-remove-scroll` | 2.7.2 | MIT | <https://github.com/theKashey/react-remove-scroll> |
 | `react-remove-scroll-bar` | 2.3.8 | MIT | <https://github.com/theKashey/react-remove-scroll-bar> |
 | `react-style-singleton` | 2.2.3 | MIT | <https://github.com/theKashey/react-style-singleton> |
@@ -467,7 +466,7 @@ because there the order carries meaning.
 | `safe-buffer` | 5.1.2, 5.2.1 | MIT | <https://github.com/feross/safe-buffer> |
 | `safer-buffer` | 2.1.2 | MIT | <https://github.com/ChALkeR/safer-buffer> |
 | `sass` | 1.51.0 | MIT | <https://github.com/sass/dart-sass> |
-| `scheduler` | 0.27.0 | MIT | <https://react.dev> |
+| `scheduler` | 0.28.0 | MIT | <https://react.dev> |
 | `shebang-command` | 2.0.0 | MIT | <https://github.com/kevva/shebang-command> |
 | `shebang-regex` | 3.0.0 | MIT | <https://github.com/sindresorhus/shebang-regex> |
 | `sliced` | 1.0.1 | MIT | <https://github.com/aheckmann/sliced> |
@@ -498,7 +497,7 @@ because there the order carries meaning.
 | `webworkify` | 1.5.0 | MIT | <https://github.com/substack/webworkify> |
 | `wordwrap` | 1.0.0 | MIT | <https://github.com/substack/node-wordwrap> |
 | `xmldoc` | 2.0.3 | MIT | <https://github.com/nfarina/xmldoc> |
-| `zustand` | 4.5.7, 5.0.14 | MIT | <https://github.com/pmndrs/zustand> |
+| `zustand` | 4.5.7, 5.0.15 | MIT | <https://github.com/pmndrs/zustand> |
 
 ### ISC — 39 packages
 
@@ -540,9 +539,9 @@ because there the order carries meaning.
 | `inherits` | 2.0.4 | ISC | <https://github.com/isaacs/inherits> |
 | `internmap` | 1.0.1, 2.0.3 | ISC | <https://github.com/mbostock/internmap> |
 | `isexe` | 2.0.0 | ISC | <https://github.com/isaacs/isexe> |
-| `lucide-react` | 1.25.0 | ISC | <https://lucide.dev> |
+| `lucide-react` | 1.59.0 | ISC | <https://lucide.dev> |
 | `which` | 2.0.2 | ISC | <https://github.com/isaacs/node-which> |
-| `yaml` | 2.9.0 | ISC | <https://eemeli.org/yaml> |
+| `yaml` | 2.9.0, 2.9.1 | ISC | <https://eemeli.org/yaml> |
 
 ### Apache-2.0 — 14 packages
 
@@ -593,7 +592,7 @@ because there the order carries meaning.
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
-| `@iconify-json/logos` | 1.2.12 | CC0-1.0 | <https://icon-sets.iconify.design/logos> |
+| `@iconify-json/logos` | 1.2.17 | CC0-1.0 | <https://icon-sets.iconify.design/logos> |
 | `fractional-indexing` | 3.2.0 | CC0-1.0 | <https://github.com/rocicorp/fractional-indexing> |
 | `railroad-diagrams` | 1.0.0 | CC0-1.0 | <https://github.com/tabatkins/railroad-diagrams> |
 
@@ -614,7 +613,7 @@ because there the order carries meaning.
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
-| `dompurify` | 3.4.12, 3.4.8 | Apache-2.0 OR MPL-2.0 | <https://github.com/cure53/DOMPurify> |
+| `dompurify` | 3.4.12, 3.4.15, 3.4.17 | Apache-2.0 OR MPL-2.0 | <https://github.com/cure53/DOMPurify> |
 
 ### BlueOak-1.0.0 — 1 package
 
@@ -626,7 +625,7 @@ because there the order carries meaning.
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
-| `pako` | 1.0.11, 2.0.3 | MIT AND Zlib | <https://github.com/nodeca/pako> |
+| `pako` | 2.0.3 | MIT AND Zlib | <https://github.com/nodeca/pako> |
 
 ### MPL-2.0 — 1 package
 
@@ -1622,7 +1621,7 @@ the version listed, and they are the authoritative record of what they cover.
 | `cfg_aliases` | 0.2.2 | crate | `NOTICES.md` |
 | `es-toolkit` | 1.52.0 | npm | `NOTICE` |
 | `moka` | 0.12.15 | crate | `NOTICE` |
-| `monaco-editor` | 0.56.0 | npm | `ThirdPartyNotices.txt` |
+| `monaco-editor` | 0.57.0 | npm | `ThirdPartyNotices.txt` |
 | `security-framework` | 2.11.1 | crate | `THIRD_PARTY` |
 | `security-framework` | 3.7.0 | crate | `THIRD_PARTY` |
 | `vscode-jsonrpc` | 8.2.0 | npm | `thirdpartynotices.txt` |

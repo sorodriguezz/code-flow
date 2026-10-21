@@ -20,6 +20,15 @@
 //! phantom errors on code that compiles. A project without TypeScript installed gets a clear "not
 //! found" rather than a silent fallback.
 //!
+//! # TypeScript 7 has no tsserver
+//!
+//! 7.0 is the native port: one executable per platform, no `tsserver.js` and no JavaScript API. Its
+//! language service is that executable run with `--lsp --stdio`, which is LSP, so a project on 7 is
+//! not served here at all — [`ts_start`] answers [`Started::Native`] with the executable, and the
+//! editor starts it through `lsp.rs` like any other language server. Looking only for `tsserver.js`
+//! answered such a project "No TypeScript in node_modules", which was false, and left it with the
+//! isolated Monaco worker that knows nothing of the project.
+//!
 //! # Framing
 //!
 //! Requests go out as one JSON object per line. Replies come back LSP-style, `Content-Length` header
@@ -62,6 +71,8 @@ struct Session {
     /// The repository this server was started for. A request naming a file outside it is a bug
     /// upstream, and the field is what lets `start` decide whether an existing session can be kept.
     root: String,
+    /// The `tsserver.js` it runs — handed back again when `start` keeps this session.
+    script: String,
 }
 
 type SessionSlot = Mutex<Option<Arc<Session>>>;
@@ -86,19 +97,111 @@ fn current() -> Option<Arc<Session>> {
 /// installed once at the workspace root, which is where pnpm and npm workspaces put it; looking
 /// only at the folder that was opened answered "no TypeScript here" for the arrangement most
 /// repositories this app opens actually use. The walk stops at the first hit, so a package that
-/// does pin its own compiler still wins over the root's.
-fn tsserver_script(root: &str) -> Option<PathBuf> {
+/// does pin its own compiler still wins over the root's — whichever kind it is.
+fn find_compiler(root: &str) -> Option<Compiler> {
     let mut dir = Some(Path::new(root));
     // A handful of levels: enough for `apps/web` or `packages/x/y`, and not a walk to the drive root.
     for _ in 0..6 {
         let at = dir?;
-        let path = at.join("node_modules").join("typescript").join("lib").join("tsserver.js");
-        if path.exists() {
-            return Some(path);
+        let package = at.join("node_modules").join("typescript");
+        let script = package.join("lib").join("tsserver.js");
+        if script.exists() {
+            return Some(Compiler::Server(script));
+        }
+        if let Some(manifest) = manifest_of(&package) {
+            if let Some(script) = compatibility_server(&package, &manifest) {
+                return Some(Compiler::Server(script));
+            }
+            if let Some(version) = native_version(&manifest) {
+                return Some(Compiler::Native { executable: native_executable(&package), version });
+            }
         }
         dir = at.parent();
     }
     None
+}
+
+/// The TypeScript a repository builds with, by how the editor has to talk to it.
+#[derive(Debug, PartialEq)]
+enum Compiler {
+    /// TypeScript 6 or earlier: its `tsserver.js`, run here.
+    Server(PathBuf),
+    /// TypeScript 7 or later. `executable` is `None` when the package is installed and its
+    /// platform package — the one holding the binary — is not.
+    Native { executable: Option<PathBuf>, version: String },
+}
+
+fn manifest_of(package: &Path) -> Option<Value> {
+    serde_json::from_str(&std::fs::read_to_string(package.join("package.json")).ok()?).ok()
+}
+
+/// The version of a `typescript` package that is the native port — 7 or later.
+fn native_version(manifest: &Value) -> Option<String> {
+    let version = manifest.get("version")?.as_str()?;
+    let major: u32 = version.split('.').next()?.parse().ok()?;
+    (major >= 7).then(|| version.to_string())
+}
+
+/// `typescript` aliased to `@typescript/typescript6`, the package TypeScript 7 ships for the tools
+/// that still need 6's API. It keeps 6 in a dependency of its own (`@typescript/old`), and the
+/// `tsserver.js` is there rather than in the package `node_modules/typescript` names.
+fn compatibility_server(package: &Path, manifest: &Value) -> Option<PathBuf> {
+    if manifest.get("name")?.as_str()? != "@typescript/typescript6" {
+        return None;
+    }
+    resolve_beside(package, &["@typescript", "old", "lib", "tsserver.js"])
+}
+
+/// Where the native port keeps its executable: `@typescript/typescript-<platform>-<arch>/lib/tsc`,
+/// an optional dependency of `typescript` installed for this machine only. The same lookup the
+/// package's own `getExePath` makes, under Node's names for the platform.
+fn native_executable(package: &Path) -> Option<PathBuf> {
+    let (name, file) = native_package()?;
+    resolve_beside(package, &["@typescript", &name, "lib", file])
+}
+
+/// `typescript-<platform>-<arch>` for this machine, and the executable's file name in it.
+fn native_package() -> Option<(String, &'static str)> {
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        "linux" => "linux",
+        "freebsd" => "freebsd",
+        _ => return None,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "arm" => "arm",
+        _ => return None,
+    };
+    Some((format!("typescript-{platform}-{arch}"), if cfg!(windows) { "tsc.exe" } else { "tsc" }))
+}
+
+/// A file of another package, found the way Node would find it from inside `package`.
+///
+/// From where the package really is, not where `node_modules` links it from: pnpm links
+/// `node_modules/typescript` into its store and installs the package's own dependencies beside it
+/// there, which the top level does not have. Every folder above is tried, skipping the
+/// `node_modules` folders themselves, as Node does.
+fn resolve_beside(package: &Path, parts: &[&str]) -> Option<PathBuf> {
+    let real = dunce::canonicalize(package).ok()?;
+    real.ancestors()
+        .filter(|dir| dir.file_name().is_some_and(|name| name != "node_modules"))
+        .map(|dir| parts.iter().fold(dir.join("node_modules"), |path, part| path.join(part)))
+        .find(|path| path.is_file())
+}
+
+/// What [`ts_start`] started, or found to start elsewhere.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Started {
+    /// tsserver is up; `script` is the `tsserver.js` answering — "which TypeScript is this" is the
+    /// first question when an answer looks wrong.
+    Server { script: String },
+    /// TypeScript 7: nothing was started here. `executable` is its language server, for the editor
+    /// to start over LSP.
+    Native { executable: String, version: String },
 }
 
 /// The `node` to run `tsserver.js` with.
@@ -146,32 +249,43 @@ fn route(message: &Value) -> Route {
     }
 }
 
-/// Starts the server for a repository, reusing the one already running for it.
-///
-/// Returns the path of the `tsserver.js` it started, which is the one piece of information worth
-/// surfacing: "which TypeScript is answering" is the first question when an answer looks wrong.
+/// Starts the server for a repository, reusing the one already running for it — or, for a project
+/// on TypeScript 7, starts nothing and says where its own language server is (see the module note).
 #[tauri::command]
-pub async fn ts_start(app: AppHandle, repo_path: String) -> Result<String, String> {
+pub async fn ts_start(app: AppHandle, repo_path: String) -> Result<Started, String> {
     // Already serving this repository. Restarting would throw away a loaded project — seconds of
     // work — to arrive at the same place.
     if let Some(existing) = current() {
         if existing.root == repo_path {
-            return Ok(existing.root.clone());
+            return Ok(Started::Server { script: existing.script.clone() });
         }
     }
     ts_stop().await;
 
-    // Blocking, both of them: `tsserver_script` stats a few folders and `node_program` can ask a
+    // Blocking, both of them: `find_compiler` stats a few folders and `node_program` can ask a
     // login shell for its `PATH`. Off the async runtime rather than on a worker thread it would
     // hold for as long as that shell takes to start.
     let repo = repo_path.clone();
-    let (script, node) = tokio::task::spawn_blocking(move || (tsserver_script(&repo), node_program()))
+    let compiler = tokio::task::spawn_blocking(move || find_compiler(&repo))
         .await
         .map_err(|e| e.to_string())?;
-    let script = script
-        .ok_or_else(|| {
-            format!("No TypeScript in {repo_path}/node_modules, nor in the folders above it — install it to get diagnostics and completions")
-        })?;
+    let script = match compiler {
+        Some(Compiler::Server(script)) => script,
+        Some(Compiler::Native { executable: Some(executable), version }) => {
+            return Ok(Started::Native { executable: executable.to_string_lossy().to_string(), version });
+        }
+        Some(Compiler::Native { executable: None, version }) => {
+            return Err(format!(
+                "TypeScript {version} is installed without its executable for this computer (the @typescript/typescript-<platform> package) — reinstall the project's dependencies"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "No TypeScript in {repo_path}/node_modules, nor in the folders above it — install it to get diagnostics and completions"
+            ));
+        }
+    };
+    let node = tokio::task::spawn_blocking(node_program).await.map_err(|e| e.to_string())?;
 
     // `proc::command`, not `Command::new`: on Windows every console child this app starts gets
     // its own `conhost` window unless `CREATE_NO_WINDOW` is set, and `node` is a console binary.
@@ -202,6 +316,7 @@ pub async fn ts_start(app: AppHandle, repo_path: String) -> Result<String, Strin
         pending: Mutex::new(HashMap::new()),
         child: Mutex::new(Some(child)),
         root: repo_path.clone(),
+        script: script.to_string_lossy().to_string(),
     });
 
     // Writer. Owns stdin so nothing else can interleave a half-written line into the protocol.
@@ -277,10 +392,11 @@ pub async fn ts_start(app: AppHandle, repo_path: String) -> Result<String, Strin
         }
     });
 
+    let started = Started::Server { script: session.script.clone() };
     if let Ok(mut guard) = slot().lock() {
         *guard = Some(session);
     }
-    Ok(script.to_string_lossy().to_string())
+    Ok(started)
 }
 
 /// A request that expects an answer.
@@ -365,24 +481,113 @@ mod tests {
         // that does not depend on a fixture existing.
         let root = env!("CARGO_MANIFEST_DIR");
         let repo = Path::new(root).parent().expect("src-tauri has a parent");
-        assert!(tsserver_script(&repo.to_string_lossy()).is_some());
-        assert!(tsserver_script("/definitely/not/a/project").is_none());
+        assert!(find_compiler(&repo.to_string_lossy()).is_some());
+        assert!(find_compiler("/definitely/not/a/project").is_none());
+    }
+
+    /// A scratch folder for one test, removed when the test ends however it ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("cf-ts-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("scratch folder");
+            Self(dunce::canonicalize(&root).expect("scratch folder"))
+        }
+
+        fn file(&self, relative: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(relative);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("parent folders");
+            std::fs::write(&path, contents).expect("fixture file");
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn manifest(name: &str, version: &str) -> String {
+        format!(r#"{{ "name": "{name}", "version": "{version}" }}"#)
     }
 
     #[test]
     fn a_workspace_package_is_served_by_the_compiler_at_the_root() {
         // What pnpm and npm workspaces produce: one TypeScript at the root, packages with none of
         // their own. Opening `apps/web` on its own used to answer "no TypeScript here".
-        let root = std::env::temp_dir().join(format!("cf-ts-{}", std::process::id()));
-        let package = root.join("apps").join("web").join("src");
+        let scratch = Scratch::new("workspace");
+        let package = scratch.0.join("apps").join("web").join("src");
         std::fs::create_dir_all(&package).expect("temp package");
-        let lib = root.join("node_modules").join("typescript").join("lib");
-        std::fs::create_dir_all(&lib).expect("temp node_modules");
-        std::fs::write(lib.join("tsserver.js"), "").expect("temp tsserver");
+        let script = scratch.file("node_modules/typescript/lib/tsserver.js", "");
 
-        let found = tsserver_script(&package.to_string_lossy());
-        assert_eq!(found, Some(lib.join("tsserver.js")));
-        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(find_compiler(&package.to_string_lossy()), Some(Compiler::Server(script)));
+    }
+
+    #[test]
+    fn typescript_7_is_its_native_executable_and_not_a_missing_tsserver() {
+        // npm's layout: the platform package hoisted beside `typescript`.
+        let Some((name, file)) = native_package() else { return };
+        let scratch = Scratch::new("native");
+        scratch.file("node_modules/typescript/package.json", &manifest("typescript", "7.0.2"));
+        let executable = scratch.file(&format!("node_modules/@typescript/{name}/lib/{file}"), "");
+
+        assert_eq!(
+            find_compiler(&scratch.0.to_string_lossy()),
+            Some(Compiler::Native { executable: Some(executable), version: "7.0.2".into() })
+        );
+    }
+
+    #[test]
+    fn typescript_7_without_its_platform_package_says_so() {
+        let scratch = Scratch::new("native-missing");
+        scratch.file("node_modules/typescript/package.json", &manifest("typescript", "7.1.0"));
+        assert_eq!(
+            find_compiler(&scratch.0.to_string_lossy()),
+            Some(Compiler::Native { executable: None, version: "7.1.0".into() })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn under_pnpm_the_executable_is_found_beside_the_linked_package() {
+        // pnpm's layout: `node_modules/typescript` is a link into the store, and the platform
+        // package sits next to the real `typescript` there — not at the top level.
+        let Some((name, file)) = native_package() else { return };
+        let scratch = Scratch::new("pnpm");
+        let store = "node_modules/.pnpm/typescript@7.0.2/node_modules";
+        scratch.file(&format!("{store}/typescript/package.json"), &manifest("typescript", "7.0.2"));
+        let executable = scratch.file(&format!("{store}/@typescript/{name}/lib/{file}"), "");
+        std::os::unix::fs::symlink(scratch.0.join(store).join("typescript"), scratch.0.join("node_modules/typescript"))
+            .expect("link");
+
+        assert_eq!(
+            find_compiler(&scratch.0.to_string_lossy()),
+            Some(Compiler::Native { executable: Some(executable), version: "7.0.2".into() })
+        );
+    }
+
+    #[test]
+    fn the_typescript_6_compatibility_package_is_served_by_the_6_it_carries() {
+        // `"typescript": "npm:@typescript/typescript6"`, what the TypeScript 7 announcement suggests
+        // for tools that need 6's API: the real 6 is its dependency `@typescript/old`.
+        let scratch = Scratch::new("compat");
+        scratch.file("node_modules/typescript/package.json", &manifest("@typescript/typescript6", "6.0.2"));
+        let script = scratch.file("node_modules/@typescript/old/lib/tsserver.js", "");
+
+        assert_eq!(find_compiler(&scratch.0.to_string_lossy()), Some(Compiler::Server(script)));
+    }
+
+    #[test]
+    fn the_nearest_typescript_wins_whatever_its_kind() {
+        // A package of a monorepo pinned to 7, under a root still on 5: the package's own compiler.
+        let scratch = Scratch::new("nearest");
+        scratch.file("node_modules/typescript/lib/tsserver.js", "");
+        scratch.file("apps/web/node_modules/typescript/package.json", &manifest("typescript", "7.0.2"));
+        let found = find_compiler(&scratch.0.join("apps/web").to_string_lossy());
+        assert!(matches!(found, Some(Compiler::Native { .. })), "{found:?}");
     }
 
     #[test]

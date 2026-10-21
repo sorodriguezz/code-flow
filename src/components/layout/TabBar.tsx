@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { ChevronRight, Code2, FolderGit2, GitBranch, History, Layers, Network, Route, ShieldCheck, type LucideIcon } from "lucide-react";
-import { useUiStore, type MainView } from "../../state/uiStore";
+import { REPO_VIEWS, useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -49,7 +49,6 @@ const REVIEWER_TAB: Tab = {
 /** The repository map, after the Revisor (which the user placed right after Editor). */
 const CODEMAP_TAB: Tab = { id: "codemap", labelKey: "tabbar.codemap", icon: Network, shortcut: "view.codemap" };
 
-const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "reviewer", "codemap", "pipelines"];
 
 /**
  * The colour of the dot the Revisor tab wears: the selected repository's last review. Nothing while
@@ -140,7 +139,7 @@ function TabButton({ tab, active, badge, dot }: { tab: Tab; active: boolean; bad
 export function ChromeScope() {
   const activeView = useUiStore((s) => s.activeView);
   const apiWorkspace = useUiStore((s) => s.apiWorkspace);
-  const setActiveView = useUiStore((s) => s.setActiveView);
+  const returnToRepo = useUiStore((s) => s.returnToRepo);
   const project = useWorkspaceStore((s) => s.activeProject());
   const workspace = useWorkspaceStore((s) => s.workspaces.find((w) => w.id === s.activeWorkspaceId) ?? null);
   const connections = useVcsConnectionsStore();
@@ -212,7 +211,7 @@ export function ChromeScope() {
         description={t("tabbar.scopeWorkspaceReset")}
       >
         <button
-          onClick={() => setActiveView("graph")}
+          onClick={returnToRepo}
           className="flex h-7 min-w-0 shrink-0 items-center gap-2 rounded-md pl-1 pr-2 text-[13px] font-semibold text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
         >
           <span

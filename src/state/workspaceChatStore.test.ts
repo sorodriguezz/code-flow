@@ -37,7 +37,6 @@ vi.mock("@tauri-apps/api/core", () => ({
         branchedAtTurn: null,
         accountId: null,
         workspaceScope: true,
-        agentId: args.agentId ?? "",
         focusChainId: args.focusChainId ?? "",
         createdAt: "t",
         updatedAt: "t",
@@ -87,7 +86,6 @@ describe("workspace chat", () => {
     const store = useWorkspaceChatStore.getState();
     store.prepare("11111111-1111-4111-8111-111111111111", "ws-1", { focusChainId: "chain-9" });
     await store.setEffort("11111111-1111-4111-8111-111111111111", "high");
-    await store.setAgent("11111111-1111-4111-8111-111111111111", "agent-2");
     // Nothing persisted yet: the picks wait for the row.
     expect(backend.calls.map((c) => c.name)).toEqual([]);
 
@@ -96,7 +94,8 @@ describe("workspace chat", () => {
     const names = backend.calls.map((c) => c.name);
     expect(names.indexOf("chat_create_workspace_conversation")).toBeLessThan(names.indexOf("chat_send"));
     const created = backend.calls.find((c) => c.name === "chat_create_workspace_conversation")!.args;
-    expect(created).toMatchObject({ workspaceId: "ws-1", effort: "high", agentId: "agent-2", focusChainId: "chain-9" });
+    expect(created).toMatchObject({ workspaceId: "ws-1", effort: "high", focusChainId: "chain-9" });
+    expect(created).not.toHaveProperty("agentId");
 
     backend.sends[0].resolve(reply("at the gate"));
     await flush();

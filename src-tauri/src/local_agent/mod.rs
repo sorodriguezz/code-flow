@@ -1220,6 +1220,8 @@ mod tests_support {
             app_mcp: Vec::new(),
             json_schema: None,
             extra_dirs: &[],
+            text_only: false,
+            disabled_plugins: Vec::new(),
         }
     }
 }

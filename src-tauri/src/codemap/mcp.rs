@@ -50,13 +50,20 @@ struct Access {
     /// What "allow in this terminal" is keyed by for this run's approvals — the run, so an allowance
     /// lasts the turn it was given in.
     session: String,
+    /// A workspace chat's run, whose `root` is the chat's own folder and not a repository: it gets
+    /// the workspace's knowledge and memories ([`WORKSPACE_TOOLS`]) and nothing else — there is no
+    /// one repository to map, and no one place for the app's tools to act in.
+    workspace: bool,
 }
 
 impl Access {
     fn new(root: &str, acts: bool, token: &str) -> Self {
-        Access { root: root.to_string(), acts, session: format!("mcp:{}", &token[..token.len().min(16)]) }
+        Access { root: root.to_string(), acts, session: format!("mcp:{}", &token[..token.len().min(16)]), workspace: false }
     }
 }
+
+/// The tools a workspace chat's token opens — see [`Access::workspace`].
+const WORKSPACE_TOOLS: &[&str] = &["search_knowledge", "recall"];
 
 /// A run's access to the map of its repository. Dropping it revokes the token.
 pub struct Grant {
@@ -75,10 +82,25 @@ impl Drop for Grant {
 /// webhook server cannot listen (its port is taken), in which case the run simply goes without.
 /// `acts`: the run may act, so it gets the app's action tools as well as the queries.
 pub fn for_run(root: &str, acts: bool) -> Option<(LiveServer, Grant)> {
+    serve(|token| Access::new(root, acts, token))
+}
+
+/// The server for a workspace chat's turn: the knowledge of every repository of the workspace, its
+/// folders and notes, and its memories — queries only, so a read-only turn may have it too. `None`
+/// when the user switched the map off or the webhook server cannot listen.
+pub fn for_workspace_chat(workspace_id: &str) -> Option<(LiveServer, Grant)> {
+    if !enabled() {
+        return None;
+    }
+    let root = crate::workspace_chat::working_dir(workspace_id).to_string_lossy().to_string();
+    serve(|token| Access { workspace: true, ..Access::new(&root, false, token) })
+}
+
+fn serve(access: impl FnOnce(&str) -> Access) -> Option<(LiveServer, Grant)> {
     let app = crate::ai_usage::app()?;
     crate::flows::triggers::webhook::ensure_server(app).ok()?;
     let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-    RUNS.lock().ok()?.insert(token.clone(), Access::new(root, acts, &token));
+    RUNS.lock().ok()?.insert(token.clone(), access(&token));
     let server = LiveServer {
         name: SERVER_NAME.to_string(),
         transport: "http".to_string(),
@@ -469,8 +491,11 @@ pub async fn call_tool_as(root: &str, name: &str, args: &Value, cloud: bool) -> 
             let root = root.to_string();
             tokio::task::spawn_blocking(move || {
                 crate::ai_usage::with_conn(|conn| {
-                    let (project, workspace): (Option<String>, Option<String>) = conn
-                        .query_row("SELECT id, workspace_id FROM projects WHERE local_path = ?1", [root.trim_end_matches(['/', '\\'])], |r| Ok((r.get(0)?, r.get(1)?)))
+                    // A worktree recalls its project's memories, as it searches its knowledge; the
+                    // workspace chat's folder, its workspace's.
+                    let (project, workspace) = crate::knowledge::owning_project(conn, &root)
+                        .map(|p| (Some(p.id), Some(p.workspace_id).filter(|ws| !ws.is_empty())))
+                        .or_else(|| crate::workspace_chat::workspace_of_dir(conn, &root).map(|ws| (None, Some(ws))))
                         .unwrap_or((None, None));
                     let found = crate::ai_memory::relevant(conn, workspace.as_deref(), project.as_deref(), &topic, cloud, 6_000).unwrap_or_default();
                     match crate::ai_memory::note(&found) {
@@ -526,6 +551,31 @@ pub async fn call_tool(root: &str, name: &str, args: &Value) -> Result<String, S
 
 /// The tools a run gets: the map and knowledge queries and the app's read tools always, the app's
 /// action tools only when it may act.
+/// What a workspace chat's token lists ([`WORKSPACE_TOOLS`]): the knowledge and memory queries,
+/// described for a workspace rather than for one repository.
+fn workspace_tools() -> Vec<Value> {
+    [
+        json!({
+            "name": "search_knowledge",
+            "description": "Search this workspace's knowledge for a question: every repository's files and documentation (architecture decisions, READMEs, specs), the document folders the user added and their notes. Returns the most relevant passages with file:line citations, each naming its repository in brackets. Use it for questions about why or how a project does something, before guessing.",
+            "inputSchema": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "The question or the words to look for, in any language"},
+                "limit": {"type": "integer", "description": "How many passages (default 8, at most 20)"}
+            }, "required": ["query"]},
+        }),
+        json!({
+            "name": "recall",
+            "description": "The memories the user approved in CodeFlow for this workspace and the global ones: decisions, conventions and preferences to respect. Call it at the start of a task, or with a topic to get the memories about it.",
+            "inputSchema": {"type": "object", "properties": {
+                "topic": {"type": "string", "description": "What the task is about. Optional: without it, the standing preferences and conventions."}
+            }},
+        }),
+    ]
+    .into_iter()
+    .map(read_only)
+    .collect()
+}
+
 pub fn tools_for(acts: bool) -> Vec<Value> {
     let mut all = tools();
     all.extend(app_read_tools().into_iter().map(read_only));
@@ -742,21 +792,30 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
         "initialize" => {
             let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL);
             let version = if SUPPORTED.contains(&asked) { asked } else { PROTOCOL };
+            let instructions = if access.workspace {
+                "CodeFlow's knowledge of this workspace: search_knowledge searches every repository's files and documentation, the document folders the user added and their notes, and names the repository of each passage; recall returns the memories the user approved for the workspace. Use them before guessing why or how something is done, or what was decided."
+            } else {
+                "CodeFlow's map of this repository: where each symbol is declared and which files really use it (imports resolved, namesakes left out). Prefer find_symbol over a text search to locate a definition, and find_usages before changing a signature. It also reaches the CodeFlow app around you: the logs of the services it runs and another terminal's output, the local model for cheap work, and — when this run may act — restarting a service, opening a file for the user, notifying them, proposing a memory or a task, and using the database connections, API requests and keyring entries the user saved, which the app uses for you after the user approves and never shows you."
+            };
             result_reply(
                 id,
                 json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "codeflow-map", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "CodeFlow's map of this repository: where each symbol is declared and which files really use it (imports resolved, namesakes left out). Prefer find_symbol over a text search to locate a definition, and find_usages before changing a signature. It also reaches the CodeFlow app around you: the logs of the services it runs and another terminal's output, the local model for cheap work, and — when this run may act — restarting a service, opening a file for the user, notifying them, proposing a memory or a task, and using the database connections, API requests and keyring entries the user saved, which the app uses for you after the user approves and never shows you.",
+                    "instructions": instructions,
                 }),
             )
         }
         "ping" => result_reply(id, json!({})),
+        "tools/list" if access.workspace => result_reply(id, json!({"tools": workspace_tools()})),
         "tools/list" => result_reply(id, json!({"tools": tools_for(access.acts)})),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            if access.workspace && !WORKSPACE_TOOLS.contains(&name) {
+                return Some(text_result(id, format!("{name} is not available in the workspace chat: there is no single repository here"), true));
+            }
             if let Some(result) = app_tool(access, name, &args).await {
                 return Some(match result {
                     Ok(text) => text_result(id, text, false),
@@ -822,6 +881,28 @@ mod tests {
         let annotation = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].as_bool();
         assert_eq!(annotation("service_logs"), Some(true));
         assert_eq!(annotation("db_query"), Some(false));
+    }
+
+    /// A workspace chat's token: the knowledge and the memories, read-only, and nothing that needs one
+    /// repository — no map query, no app tool, not even when called by name.
+    #[tokio::test]
+    async fn a_workspace_chat_token_opens_the_knowledge_and_nothing_else() {
+        let token = "test-token-".to_string() + &uuid::Uuid::new_v4().simple().to_string();
+        RUNS.lock().unwrap().insert(token.clone(), Access { workspace: true, ..Access::new("/tmp/workspace-chat/w1", false, &token) });
+        let _grant = Grant { token: token.clone() };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+        let (_, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
+        assert_eq!(tool_names(&reply), vec!["search_knowledge", "recall"]);
+        assert!(reply["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
+
+        for name in ["find_symbol", "service_logs", "open_in_editor"] {
+            let call = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": {"name": "x", "path": "a.rs"}}});
+            let (_, reply) = post(&headers, call).await;
+            assert_eq!(reply["result"]["isError"], true, "{name}: {reply}");
+            assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("workspace chat"), "{name}: {reply}");
+        }
     }
 
     #[tokio::test]

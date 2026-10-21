@@ -139,6 +139,14 @@ pub mod reason {
     /// the CLI reports at the end of each run — this app reads no token for an account it added —
     /// so there is nothing to show until it has been used once.
     pub const NOT_YET: &str = "not_yet";
+    /// Not a failure: the limits beside it are what the CLI reported at the end of its last run,
+    /// not a read of the provider — an added account always, the system account when reading the
+    /// provider failed. Followed by `|<why>` in that second case, so the panel can say both.
+    pub const FROM_RUN: &str = "from_run";
+    /// The provider answered `429`: it is refusing these reads for a while. Followed by `|<RFC 3339>`,
+    /// the moment this app will ask again — until then it does not, since asking a back end that is
+    /// throttling you is what keeps it throttling you.
+    pub const RATE_LIMITED: &str = "rate_limited";
 }
 
 /// Providers whose back end publishes a plan limit at all. Everything outside this list is absent
@@ -745,15 +753,7 @@ mod claude {
         super::homes::from_env("CLAUDE_CONFIG_DIR").or_else(|| Some(dirs::home_dir()?.join(".claude")))
     }
 
-    /// Reads the plan limits.
-    ///
-    /// **This never refreshes the token, and that is a decision rather than an omission.** Anthropic
-    /// rotates refresh tokens: spending Claude Code's on its behalf and keeping the replacement
-    /// here would invalidate the copy the CLI still holds, and the user would find themselves
-    /// signed out of their own terminal by a status widget. So an expired credential is reported as
-    /// [`reason::STALE`] and left alone — Claude Code refreshes it the next time it runs, including
-    /// every time this app runs it, which makes the panel correct exactly when the engine is in use.
-/// An added account's windows, from what its last run reported rather than from its token.
+    /// An added account's windows, from what its last run reported rather than from its token.
     ///
     /// The run prints them anyway (`rate_limit_event`, see `crate::claude::last_rate_limit`), so
     /// for an account this app added it never opens a credential at all — the thing Anthropic's
@@ -764,37 +764,71 @@ mod claude {
         let Some((limit, at)) = crate::claude::last_rate_limit(account_key) else {
             return failed("claude", reason::NOT_YET);
         };
-        let when = |seconds: i64| {
-            (seconds > 0)
-                .then(|| chrono::DateTime::from_timestamp(seconds, 0).map(|d| d.to_rfc3339()))
-                .flatten()
-                .unwrap_or_default()
-        };
-        let limits = vec![
-            QuotaLimit {
-                kind: "session".to_string(),
-                scope: String::new(),
-                used_percent: limit.five_hour_pct,
-                resets_at: when(limit.five_hour_resets_at),
-            },
-            QuotaLimit {
-                kind: "weekly".to_string(),
-                scope: String::new(),
-                used_percent: limit.seven_day_pct,
-                resets_at: when(limit.seven_day_resets_at),
-            },
-        ];
+        let limits = run_limits(&limit, chrono::Utc::now().timestamp());
+        if limits.is_empty() {
+            return failed("claude", reason::NOT_YET);
+        }
         ProviderQuota {
             provider: "claude".to_string(),
             limits: tighten(limits),
             plan: String::new(),
-            error: String::new(),
+            error: reason::FROM_RUN.to_string(),
             fetched_at: at,
             account_id: None,
         }
     }
 
-        pub async fn quota() -> ProviderQuota {
+    /// The windows a run reported that still apply at `now`: one the CLI did not name (a `0` reset)
+    /// is left out rather than drawn as 0% used, and one whose reset has passed is left out too —
+    /// its percentage belongs to a window that is over.
+    fn run_limits(limit: &crate::ai::AiRateLimit, now: i64) -> Vec<QuotaLimit> {
+        let window = |kind: &str, percent: f64, resets_at: i64| {
+            (resets_at > now).then(|| QuotaLimit {
+                kind: kind.to_string(),
+                scope: String::new(),
+                used_percent: percent,
+                resets_at: chrono::DateTime::from_timestamp(resets_at, 0).map(|d| d.to_rfc3339()).unwrap_or_default(),
+            })
+        };
+        [
+            window("session", limit.five_hour_pct, limit.five_hour_resets_at),
+            window("weekly", limit.seven_day_pct, limit.seven_day_resets_at),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The system account's limits: read from Anthropic, or — when that read fails and the CLI has
+    /// run in this app since it started — what that run reported, with why the read failed. The
+    /// endpoint refuses now and then (an expired token this app will not refresh, a 429) while the
+    /// CLI keeps working and reporting its windows on every turn; "could not read" over numbers the
+    /// app already has was the wrong answer (user report, 2026-10-20).
+    pub async fn quota() -> ProviderQuota {
+        let read = match backing_off(chrono::Utc::now()) {
+            Some(until) => failed("claude", &rate_limited(&until)),
+            None => read_endpoint().await,
+        };
+        if !read.limits.is_empty() || read.error.is_empty() {
+            return read;
+        }
+        let mut from_run = from_last_run("claude");
+        if from_run.limits.is_empty() {
+            return read;
+        }
+        from_run.error = format!("{}|{}", reason::FROM_RUN, read.error);
+        from_run
+    }
+
+    /// Reads the plan limits from Anthropic's endpoint.
+    ///
+    /// **This never refreshes the token, and that is a decision rather than an omission.** Anthropic
+    /// rotates refresh tokens: spending Claude Code's on its behalf and keeping the replacement
+    /// here would invalidate the copy the CLI still holds, and the user would find themselves
+    /// signed out of their own terminal by a status widget. So an expired credential is reported as
+    /// [`reason::STALE`] and left alone — Claude Code refreshes it the next time it runs, including
+    /// every time this app runs it, which makes the panel correct exactly when the engine is in use.
+    async fn read_endpoint() -> ProviderQuota {
         // Off the runtime, and not as a micro-optimisation: on macOS the first read raises a
         // system dialog asking the user to let this app open Claude Code's keychain item, and
         // `get_password` does not return until they answer it. That is an unbounded wait on a
@@ -829,6 +863,11 @@ mod claude {
             // sign-out elsewhere, which is a different problem from an expired one.
             return failed("claude", reason::SIGNED_OUT);
         }
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = response.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let until = back_off(retry_after.as_deref(), chrono::Utc::now());
+            return failed("claude", &rate_limited(&until));
+        }
         if !response.status().is_success() {
             return failed("claude", &format!("HTTP {}", response.status().as_u16()));
         }
@@ -837,6 +876,7 @@ mod claude {
             Ok(parsed) => parsed,
             Err(e) => return failed("claude", &e.to_string()),
         };
+        clear_back_off();
 
         ProviderQuota {
             provider: "claude".to_string(),
@@ -846,6 +886,56 @@ mod claude {
             fetched_at: now_rfc3339(),
             account_id: None,
         }
+    }
+
+    /// When the endpoint said `429`: how long this app waits before asking again, and how many
+    /// refusals in a row led to it.
+    ///
+    /// The endpoint is shared with the CLI's own `/usage` and anything else holding the same token,
+    /// and it throttles hard. Before this, a refusal was not remembered at all — the panel's
+    /// one-a-minute poll, every open and every Refresh went straight back to a back end that was
+    /// saying "too many", which is the surest way to stay on its list (user report, 2026-10-20).
+    static BACK_OFF: Mutex<Option<(chrono::DateTime<chrono::Utc>, u32)>> = Mutex::new(None);
+
+    /// The first wait when Anthropic gives none, doubled for each refusal in a row up to [`MAX_WAIT`].
+    const FIRST_WAIT: i64 = 5 * 60;
+    const MAX_WAIT: i64 = 30 * 60;
+
+    /// The moment to ask again, if a refusal is still in force at `now`.
+    fn backing_off(now: chrono::DateTime<chrono::Utc>) -> Option<chrono::DateTime<chrono::Utc>> {
+        let guard = BACK_OFF.lock().ok()?;
+        guard.as_ref().map(|(until, _)| *until).filter(|until| *until > now)
+    }
+
+    /// Files a `429` and returns when to ask again: what the response's `Retry-After` said (seconds
+    /// or an HTTP date), else [`FIRST_WAIT`] doubled per refusal in a row — clamped either way to
+    /// between a minute and an hour.
+    fn back_off(retry_after: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+        let Ok(mut guard) = BACK_OFF.lock() else { return now + chrono::Duration::seconds(FIRST_WAIT) };
+        let strikes = guard.as_ref().map(|(_, strikes)| *strikes).unwrap_or(0);
+        let until = now + chrono::Duration::seconds(wait_for(retry_after, strikes, now));
+        *guard = Some((until, strikes + 1));
+        until
+    }
+
+    fn wait_for(retry_after: Option<&str>, strikes: u32, now: chrono::DateTime<chrono::Utc>) -> i64 {
+        let said = retry_after.map(str::trim).and_then(|value| {
+            value.parse::<i64>().ok().or_else(|| {
+                chrono::DateTime::parse_from_rfc2822(value).ok().map(|at| (at.with_timezone(&chrono::Utc) - now).num_seconds())
+            })
+        });
+        let wait = said.unwrap_or_else(|| FIRST_WAIT.saturating_mul(1 << strikes.min(4)).min(MAX_WAIT));
+        wait.clamp(60, 3_600)
+    }
+
+    fn clear_back_off() {
+        if let Ok(mut guard) = BACK_OFF.lock() {
+            *guard = None;
+        }
+    }
+
+    fn rate_limited(until: &chrono::DateTime<chrono::Utc>) -> String {
+        format!("{}|{}", reason::RATE_LIMITED, until.to_rfc3339())
     }
 
     /// Anthropic's `limits[]` in this module's terms — a straight pass-through of `percent`, which
@@ -879,6 +969,34 @@ mod claude {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// What a run reported, as the panel draws it: only windows the CLI named and that are still
+        /// open — never a week at 0% the run said nothing about.
+        #[test]
+        fn a_run_shows_the_windows_it_reported_and_that_still_apply() {
+            let limit = crate::ai::AiRateLimit { five_hour_pct: 3.0, five_hour_resets_at: 2_000, seven_day_pct: 0.0, seven_day_resets_at: 0 };
+            let limits = run_limits(&limit, 1_000);
+            assert_eq!(limits.len(), 1);
+            assert_eq!((limits[0].kind.as_str(), limits[0].used_percent), ("session", 3.0));
+            assert!(run_limits(&limit, 3_000).is_empty(), "the session rolled over");
+            let both = crate::ai::AiRateLimit { seven_day_pct: 40.0, seven_day_resets_at: 9_000, ..limit };
+            assert_eq!(run_limits(&both, 1_000).len(), 2);
+        }
+
+        /// A `429` is waited out: as long as Anthropic asks, else five minutes doubling per refusal in
+        /// a row, never under a minute or over an hour.
+        #[test]
+        fn a_refusal_is_waited_out_before_asking_again() {
+            let now = chrono::DateTime::parse_from_rfc3339("2026-10-20T22:00:00Z").unwrap().with_timezone(&chrono::Utc);
+            assert_eq!(wait_for(Some("120"), 0, now), 120);
+            assert_eq!(wait_for(Some("Tue, 20 Oct 2026 22:10:00 GMT"), 0, now), 600);
+            assert_eq!(wait_for(Some("5"), 0, now), 60, "never sooner than a minute");
+            assert_eq!(wait_for(Some("86400"), 0, now), 3_600, "never longer than an hour");
+            assert_eq!(wait_for(None, 0, now), 300);
+            assert_eq!(wait_for(None, 1, now), 600);
+            assert_eq!(wait_for(None, 9, now), 1_800, "capped");
+            assert_eq!(wait_for(Some("soon"), 1, now), 600, "an unreadable header is no header");
+        }
 
         /// Trimmed from a real `GET /api/oauth/usage` on a Max plan — the three shapes the endpoint
         /// actually returns, including the scoped bucket whose `scope.model.id` is null while its

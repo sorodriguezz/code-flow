@@ -535,6 +535,7 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   "api-explain": "usage.task.apiExplain",
   "api-tests": "usage.task.apiTests",
   "api-request": "usage.task.apiRequest",
+  "skill-write": "usage.task.skillWrite",
   other: "usage.task.other",
 };
 

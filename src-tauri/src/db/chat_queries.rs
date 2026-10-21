@@ -442,7 +442,9 @@ pub fn get_conversation(
 /// `crate::workspace_chat`. The id comes from the frontend because the tab exists (and is keyed by
 /// it) before its first question creates this row. A UUID is required, so nothing a webview sends
 /// can become an odd path segment or collide with a chat-workspace row's shape.
-#[allow(clippy::too_many_arguments)]
+///
+/// `agent_id` is written blank: the column stays from when an agent could be put in charge of one of
+/// these chats, which it no longer can.
 pub fn create_workspace_conversation(
     conn: &Connection,
     id: &str,
@@ -450,7 +452,6 @@ pub fn create_workspace_conversation(
     provider: &str,
     account_id: Option<&str>,
     model: &str,
-    agent_id: &str,
     focus_chain_id: &str,
 ) -> rusqlite::Result<ChatConversation> {
     if Uuid::parse_str(id).is_err() {
@@ -461,8 +462,8 @@ pub fn create_workspace_conversation(
         "INSERT INTO chat_conversations
              (id, workspace_id, project_id, title, provider, model, system_prompt, created_at,
               updated_at, account_id, workspace_scope, agent_id, focus_chain_id)
-         VALUES (?1, ?2, NULL, '', ?3, ?4, '', ?5, ?5, ?6, 1, ?7, ?8)",
-        params![id, workspace_id, provider, model, at, account_id, agent_id, focus_chain_id],
+         VALUES (?1, ?2, NULL, '', ?3, ?4, '', ?5, ?5, ?6, 1, '', ?7)",
+        params![id, workspace_id, provider, model, at, account_id, focus_chain_id],
     )?;
     get_conversation(conn, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
@@ -490,21 +491,6 @@ pub fn workspace_conversation_ids(conn: &Connection) -> rusqlite::Result<Vec<Str
     let mut statement = conn.prepare("SELECT id FROM chat_conversations WHERE workspace_scope = 1")?;
     let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
     rows.collect()
-}
-
-/// Puts an SDD/Harness agent in charge of a workspace chat, or takes it out (`""`).
-///
-/// A change **drops the engine session**: the agent's prompt is part of what a session is told when
-/// it starts, so a resumed session would go on answering as the role it began with.
-pub fn set_agent(conn: &Connection, id: &str, agent_id: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "UPDATE chat_conversations
-         SET engine_session_id = CASE WHEN agent_id = ?2 THEN engine_session_id ELSE NULL END,
-             agent_id = ?2, updated_at = ?3
-         WHERE id = ?1",
-        params![id, agent_id, now()],
-    )?;
-    Ok(())
 }
 
 /// Records where the engine got to: the session it will be resumed under, and the model it
@@ -1223,10 +1209,10 @@ mod tests {
         let conn = seeded();
         let plain = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         let id = Uuid::new_v4().to_string();
-        let scoped = create_workspace_conversation(&conn, &id, "w1", "claude", None, "opus", "agent-1", "chain-9").unwrap();
+        let scoped = create_workspace_conversation(&conn, &id, "w1", "claude", None, "opus", "chain-9").unwrap();
         assert!(scoped.workspace_scope);
         assert_eq!(scoped.id, id);
-        assert_eq!(scoped.agent_id, "agent-1");
+        assert_eq!(scoped.agent_id, "");
         assert_eq!(scoped.focus_chain_id, "chain-9");
         assert!(scoped.project_id.is_none());
 
@@ -1250,21 +1236,7 @@ mod tests {
     #[test]
     fn a_workspace_chat_id_must_be_a_uuid() {
         let conn = seeded();
-        assert!(create_workspace_conversation(&conn, "../../etc", "w1", "claude", None, "", "", "").is_err());
-    }
-
-    #[test]
-    fn changing_the_agent_drops_the_session_and_keeping_it_does_not() {
-        let conn = seeded();
-        let id = Uuid::new_v4().to_string();
-        create_workspace_conversation(&conn, &id, "w1", "claude", None, "", "", "").unwrap();
-        update_session(&conn, &id, Some("sess-1"), "claude", None, "opus", None).unwrap();
-        set_agent(&conn, &id, "").unwrap();
-        assert_eq!(get_conversation(&conn, &id).unwrap().unwrap().engine_session_id.as_deref(), Some("sess-1"));
-        set_agent(&conn, &id, "agent-2").unwrap();
-        let row = get_conversation(&conn, &id).unwrap().unwrap();
-        assert_eq!(row.agent_id, "agent-2");
-        assert!(row.engine_session_id.is_none());
+        assert!(create_workspace_conversation(&conn, "../../etc", "w1", "claude", None, "", "").is_err());
     }
 
     fn user_message(conversation_id: &str, turn: i64, content: &str) -> ChatMessageRow {

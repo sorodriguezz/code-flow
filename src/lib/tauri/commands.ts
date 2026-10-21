@@ -1308,6 +1308,29 @@ export const listWorkspaceSkills = (workspaceId: string) =>
 export const installWorkspaceSkill = (workspaceId: string, sourceRepo: string, skillName: string) =>
   invoke<WorkspaceSkill>("install_workspace_skill", { workspaceId, sourceRepo, skillName });
 
+/** One skills.sh search result — see `src-tauri/src/skills_registry.rs`. */
+export interface RegistrySkill {
+  id: string;
+  /** `owner/repo`, or a domain for a site-hosted source. */
+  source: string;
+  /** What `--skill` installs. */
+  skillId: string;
+  name: string;
+  installs: number;
+}
+
+/** What a registry skill is for: its `SKILL.md` description and the start of its instructions. */
+export interface RegistryDetail {
+  description: string;
+  preview: string;
+  pageUrl: string;
+  fileUrl: string | null;
+}
+
+export const skillsRegistrySearch = (query: string) => invoke<RegistrySkill[]>("skills_registry_search", { query });
+export const skillsRegistryDescribe = (source: string, skillId: string) =>
+  invoke<RegistryDetail>("skills_registry_describe", { source, skillId });
+
 export const removeWorkspaceSkill = (id: string) => invoke<void>("remove_workspace_skill", { id });
 
 export const setWorkspaceSkillEnabled = (id: string, enabled: boolean) =>
@@ -1322,6 +1345,67 @@ export const importSkillFromFolder = (workspaceId: string, srcDir: string) =>
 /** Unpacks a `.skill` bundle — the zipped skill folder — into the workspace's skill store. */
 export const importSkillFromFile = (workspaceId: string, filePath: string) =>
   invoke<WorkspaceSkill>("import_skill_from_file", { workspaceId, filePath });
+
+/** A workspace skill written out as a `.skill` bundle at `destPath`; resolves to the path written. */
+export const exportWorkspaceSkill = (workspaceId: string, skillName: string, destPath: string) =>
+  invoke<string>("export_workspace_skill", { workspaceId, skillName, destPath });
+
+/** What «Generar skill» writes a skill from — see `src-tauri/src/skill_builder.rs`. */
+export type SkillSource =
+  | { kind: "repo"; path: string }
+  | { kind: "document"; path: string }
+  | { kind: "url"; url: string }
+  | { kind: "text"; text: string };
+
+export interface SkillFile {
+  path: string;
+  content: string;
+}
+
+/** Something the backend fixed or found missing in a generated skill; `code` names it. */
+export interface SkillDraftNote {
+  code: "nameFixed" | "nameMissing" | "descriptionMissing" | "descriptionTrimmed" | "bodyLong" | "pathDropped" | "filesDropped";
+  detail: string;
+}
+
+/** A generated skill, normalised but not saved. `files[0]` is `SKILL.md`. */
+export interface SkillDraft {
+  name: string;
+  description: string;
+  files: SkillFile[];
+  notes: SkillDraftNote[];
+}
+
+export const skillGenerate = (args: {
+  sources: SkillSource[];
+  focus: string;
+  language: string;
+  runId: string;
+  workspaceId: string | null;
+}) => invoke<SkillDraft>("skill_generate", args);
+
+export const defaultSkillTemplate = () => invoke<string>("default_skill_template");
+
+/** One of the user's Claude Code plugins, and whether CodeFlow's chats keep it out
+ *  (`claude::ChatPlugin`). */
+export interface ClaudeChatPlugin {
+  /** `name@marketplace` — the key `enabledPlugins` takes. */
+  id: string;
+  name: string;
+  off: boolean;
+}
+
+/** The plugins a chat could load. The choice is the `claude_chat_plugins_off` setting, a JSON array
+ *  of ids (`claude::CHAT_PLUGINS_OFF_KEY`). */
+export const claudeChatPlugins = () => invoke<ClaudeChatPlugin[]>("claude_chat_plugins");
+export const CLAUDE_CHAT_PLUGINS_OFF_KEY = "claude_chat_plugins_off";
+
+export const skillSaveDraft = (workspaceId: string, name: string, files: SkillFile[]) =>
+  invoke<WorkspaceSkill>("skill_save_draft", { workspaceId, name, files });
+
+/** A generated skill downloaded as a `.skill` without saving it; resolves to the path written. */
+export const skillWriteBundle = (name: string, files: SkillFile[], destPath: string) =>
+  invoke<string>("skill_write_bundle", { name, files, destPath });
 
 export const listSkillFiles = (workspaceId: string, skillName: string) =>
   invoke<string[]>("list_skill_files", { workspaceId, skillName });

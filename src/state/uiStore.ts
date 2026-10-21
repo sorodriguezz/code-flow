@@ -56,6 +56,9 @@ export type MainView =
    */
   | "chat";
 
+/** The views that are the open repository's — its tabs — as against the workspace's apps. */
+export const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "reviewer", "codemap", "pipelines"];
+
 /** The three directions the stories section works in. Its own sub-tab, one level under the view. */
 export type StoriesMode = "batches" | "review" | "wiki";
 
@@ -107,6 +110,15 @@ export type PaletteScope = "all" | "workspaces" | "projects";
 
 interface UiState {
   activeView: MainView;
+  /**
+   * The repository tab last on screen — what going back to the repository from an app returns to.
+   * It always went to the graph, so an hour in the editor, a minute in Notas and back left the
+   * editor behind (user report, 2026-10-20). Kept by the subscription at the end of this file,
+   * whatever set the view. In memory only: a restart opens on the graph, as it always has.
+   */
+  lastRepoView: MainView;
+  /** Back from an app to the repository, on the tab it was left on. */
+  returnToRepo: () => void;
   /**
    * Which stories sub-tab is showing.
    *
@@ -241,8 +253,11 @@ interface UiState {
   closePrLinkModal: () => void;
 }
 
-export const useUiStore = create<UiState>((set) => ({
+export const useUiStore = create<UiState>((set, get) => ({
   activeView: "graph",
+  lastRepoView: "graph",
+  // A conditional tab that has gone meanwhile (Pipelines, Revisor) is App's to send to the graph.
+  returnToRepo: () => set({ activeView: get().lastRepoView, settingsOpen: false }),
   storiesMode: "batches",
   settingsOpen: false,
   settingsSection: "general",
@@ -329,3 +344,10 @@ export const useUiStore = create<UiState>((set) => ({
   togglePrLinkModal: () => set((s) => ({ prLinkModalOpen: !s.prLinkModalOpen })),
   closePrLinkModal: () => set({ prLinkModalOpen: false }),
 }));
+
+// Every way the view changes — an action, a shortcut, the tour's direct `setState` — passes here.
+useUiStore.subscribe((state, previous) => {
+  if (state.activeView !== previous.activeView && REPO_VIEWS.includes(state.activeView) && state.lastRepoView !== state.activeView) {
+    useUiStore.setState({ lastRepoView: state.activeView });
+  }
+});

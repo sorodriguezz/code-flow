@@ -534,10 +534,8 @@ pub fn chat_set_engine(
 // ---------- workspace chats (the assistant panel's) ----------
 
 /// Opens a **workspace chat** — see `crate::workspace_chat` — under the id the panel minted for its
-/// tab. `agent_id` puts one of the workspace's SDD/Harness agents in charge from the first turn;
-/// `focus_chain_id` names the chain it was opened to carry on.
+/// tab. `focus_chain_id` names the chain it was opened to carry on, when it was opened from one.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub fn chat_create_workspace_conversation(
     db: State<'_, Db>,
     conversation_id: String,
@@ -545,7 +543,6 @@ pub fn chat_create_workspace_conversation(
     provider: String,
     model: String,
     account: Option<String>,
-    agent_id: Option<String>,
     focus_chain_id: Option<String>,
     effort: Option<String>,
 ) -> Result<ChatConversation, String> {
@@ -576,7 +573,6 @@ pub fn chat_create_workspace_conversation(
         &provider,
         account_id.as_deref(),
         &model,
-        agent_id.as_deref().unwrap_or("").trim(),
         focus_chain_id.as_deref().unwrap_or("").trim(),
     )
     .map_err(|e| e.to_string())?;
@@ -602,51 +598,19 @@ pub fn chat_list_workspace_conversations(
     chat_queries::list_workspace_conversations(&conn, &workspace_id).map_err(|e| e.to_string())
 }
 
-/// Puts one of the workspace's SDD/Harness agents in charge of a workspace chat (`""` takes it
-/// out). The agent must be one of that workspace's; its routing and prompt are read at each turn.
-#[tauri::command]
-pub fn chat_set_workspace_agent(
-    db: State<'_, Db>,
-    conversation_id: String,
-    agent_id: String,
-) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let conversation = chat_queries::get_conversation(&conn, &conversation_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "conversation not found".to_string())?;
-    if !conversation.workspace_scope {
-        return Err("not a workspace chat".to_string());
-    }
-    let agent_id = agent_id.trim();
-    if !agent_id.is_empty()
-        && !queries::list_workspace_agents(&conn, &conversation.workspace_id)
-            .map_err(|e| e.to_string())?
-            .iter()
-            .any(|agent| agent.id == agent_id)
-    {
-        return Err("agent not found in this workspace".to_string());
-    }
-    chat_queries::set_agent(&conn, &conversation_id, agent_id).map_err(|e| e.to_string())
-}
-
 /// What a workspace chat's next turn is told about the workspace — the same block `chat_send`
-/// appends — so the panel can show it (and count the work in flight) without a turn.
+/// appends — so the panel can show it without a turn.
 #[tauri::command]
-pub fn workspace_chat_snapshot(
-    db: State<'_, Db>,
-    workspace_id: String,
-    focus_chain_id: Option<String>,
-) -> Result<WorkspaceChatSnapshot, String> {
+pub fn workspace_chat_snapshot(db: State<'_, Db>, workspace_id: String) -> Result<WorkspaceChatSnapshot, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let repos = crate::workspace_chat::repos(&conn, &workspace_id).map_err(|e| e.to_string())?;
-    let chains = crate::workspace_chat::chains(&conn, &workspace_id, focus_chain_id.as_deref().unwrap_or(""))
-        .map_err(|e| e.to_string())?;
-    let tasks = crate::workspace_chat::tasks(&conn, &workspace_id).map_err(|e| e.to_string())?;
+    let projects = queries::list_projects(&conn, &workspace_id).map_err(|e| e.to_string())?;
+    // Every repository is opened to read its branch: not under the lock.
+    drop(conn);
+    let repos = crate::workspace_chat::repo_lines(projects);
     Ok(WorkspaceChatSnapshot {
         repos: repos.len(),
         repos_on_disk: repos.iter().filter(|r| r.on_disk).count(),
-        in_flight: chains.len() + tasks.len(),
-        text: crate::workspace_chat::live_block(&repos, &chains, &tasks).trim().to_string(),
+        text: crate::workspace_chat::live_block(&repos).trim().to_string(),
     })
 }
 
@@ -655,8 +619,6 @@ pub fn workspace_chat_snapshot(
 pub struct WorkspaceChatSnapshot {
     pub repos: usize,
     pub repos_on_disk: usize,
-    /// Chains and tasks the block lists.
-    pub in_flight: usize,
     pub text: String,
 }
 
@@ -1267,29 +1229,21 @@ pub async fn chat_send(
     };
 
     // A workspace chat of the assistant panel: no repository of its own and every repository of the
-    // workspace in reach, answered by an SDD/Harness agent when one is in charge of it. See
-    // `crate::workspace_chat`. Read now, with the rest of what this turn is filed against.
+    // workspace in reach. See `crate::workspace_chat`. Read now, with the rest of what this turn is
+    // filed against.
     let workspace_scope = conversation.workspace_scope;
-    let (ws_projects, ws_agent, ws_name) = if workspace_scope {
+    let (ws_projects, ws_name) = if workspace_scope {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let projects = queries::list_projects(&conn, &conversation.workspace_id).map_err(|e| e.to_string())?;
-        let agent = if conversation.agent_id.is_empty() {
-            None
-        } else {
-            queries::list_workspace_agents(&conn, &conversation.workspace_id)
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .find(|agent| agent.id == conversation.agent_id && agent.enabled)
-        };
         let name = queries::list_workspaces(&conn)
             .map_err(|e| e.to_string())?
             .into_iter()
             .find(|w| w.id == conversation.workspace_id)
             .map(|w| w.name)
             .unwrap_or_default();
-        (projects, agent, name)
+        (projects, name)
     } else {
-        (Vec::new(), None, String::new())
+        (Vec::new(), String::new())
     };
     // Outside the lock: every repository is opened to read its branch.
     let ws_repos = crate::workspace_chat::repo_lines(ws_projects);
@@ -1327,19 +1281,7 @@ pub async fn chat_send(
     // engine and has to know which one it is before the turn's context is assembled.
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        match ws_agent.as_ref() {
-            // The agent in charge answers on its own provider, model and account, whatever the
-            // conversation or this turn named — the same rule as the repository chat's roles.
-            Some(agent) => load_ai_config_as(
-                &conn,
-                &agent.provider,
-                agent.model.trim(),
-                ai_accounts::Choice::parse(agent.account_id.as_deref()),
-                Some(AiTask::Chat),
-                Some(&conversation.workspace_id),
-            )?,
-            None => conversation_config(&conn, &conversation, provider.as_deref(), model.as_deref())?,
-        }
+        conversation_config(&conn, &conversation, provider.as_deref(), model.as_deref())?
     };
 
     // A resume token minted by a different engine — or by another account of the same one — is
@@ -1403,12 +1345,8 @@ pub async fn chat_send(
                 workspace_contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)),
             );
         }
-        // The agent in charge frames the whole session, so its instructions go first.
-        if let Some(agent) = ws_agent.as_ref().filter(|agent| !agent.prompt.trim().is_empty()) {
-            contexts.insert(0, (format!("Agente — {}", agent.name), agent.prompt.clone()));
-        }
-        // The chain this chat was opened to carry on: all of it, once per session. The per-turn
-        // block keeps saying where it is now.
+        // The chain this chat was opened to carry on, when it was opened from one: all of it, once
+        // per session.
         if workspace_scope && !conversation.focus_chain_id.is_empty() {
             if let Ok(Some(brief)) = crate::workspace_chat::chain_brief(&conn, &conversation.focus_chain_id) {
                 contexts.push(("Trabajo a retomar".to_string(), brief));
@@ -1556,6 +1494,15 @@ pub async fn chat_send(
         crate::chat_mcp::TurnMcp::default()
     };
     allowed_tools.extend(turn_mcp.allow_rules.iter().cloned());
+    // The workspace chat's knowledge — every repository's files and docs, the workspace's folders,
+    // notes and memories — through the map's server, on the engines that take the app's servers per
+    // run. Queries only, so a read-only turn has it too. Held until the turn ends: dropping the grant
+    // revokes its token. Agy and Grok get the best passages with the question instead, below.
+    let ws_knowledge = if workspace_scope && matches!(config.provider.as_str(), "claude" | "codex" | "opencode" | "cline") {
+        crate::codemap::mcp::for_workspace_chat(&conversation.workspace_id)
+    } else {
+        None
+    };
 
     // Auto-approval, not "may write": an engine that has to ask permission it has no way to be
     // granted is an engine that stops halfway and narrates a file it never created — which is
@@ -1699,18 +1646,10 @@ pub async fn chat_send(
         if let Some(note) = ai::parallel_work_note(&others) {
             engine_message.push_str(&note);
         }
-        // The workspace as it is right now — repositories and the agent work in flight — on every
-        // turn, since a resumed session is never sent a system prompt again. Said to the engine and
-        // never stored as the question, like the style rules above.
-        let (chains, tasks) = {
-            let conn = db.0.lock().map_err(|e| e.to_string())?;
-            (
-                crate::workspace_chat::chains(&conn, &conversation.workspace_id, &conversation.focus_chain_id)
-                    .unwrap_or_default(),
-                crate::workspace_chat::tasks(&conn, &conversation.workspace_id).unwrap_or_default(),
-            )
-        };
-        engine_message.push_str(&crate::workspace_chat::live_block(&ws_repos, &chains, &tasks));
+        // The workspace's repositories as they are right now — paths, branches, specification
+        // folders — on every turn, since a resumed session is never sent a system prompt again. Said
+        // to the engine and never stored as the question, like the style rules above.
+        engine_message.push_str(&crate::workspace_chat::live_block(&ws_repos));
         // `@repo/path` in the question: the engine is told to read them, as the repository chat's.
         let named: Vec<(String, String)> =
             ws_repos.iter().filter(|repo| repo.on_disk).map(|repo| (repo.name.clone(), repo.path.clone())).collect();
@@ -1722,6 +1661,12 @@ pub async fn chat_send(
         if let Ok(conn) = db.0.lock() {
             if let Ok(found) = crate::ai_memory::relevant(&conn, Some(&conversation.workspace_id), None, &asked, true, 3_000) {
                 if let Some((note, _)) = crate::ai_memory::note(&found) {
+                    engine_message.push_str(&note);
+                }
+            }
+            // Agy and Grok take no server here: the passages that best match the question ride it.
+            if matches!(config.provider.as_str(), "gemini" | "grok") {
+                if let Some((note, _)) = crate::knowledge::workspace_prompt_note(&conn, &conversation.workspace_id, &asked) {
                     engine_message.push_str(&note);
                 }
             }
@@ -1784,7 +1729,7 @@ pub async fn chat_send(
                 // engine's CLI enforces — see the module docs, §1, for which ones that is.
                 read_only: !write_access,
                 mcp_block: turn_mcp.block.clone(),
-                app_mcp: turn_mcp.app.clone(),
+                app_mcp: turn_mcp.app.iter().cloned().chain(ws_knowledge.as_ref().map(|(server, _)| server.clone())).collect(),
                 json_schema: None,
                 extra_dirs: &ws_extra_dirs,
             },

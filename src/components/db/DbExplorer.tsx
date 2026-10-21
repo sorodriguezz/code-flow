@@ -13,6 +13,7 @@ import {
   FolderCode,
   FolderOpen,
   Globe,
+  Grid2x2X,
   FolderPlus,
   Hash,
   KeyRound,
@@ -28,7 +29,6 @@ import {
   Search,
   Settings2,
   Table2,
-  Trash,
   Trash2,
   Wand2,
   X,
@@ -410,6 +410,13 @@ function NodeSubtree({
   const generatesSql = engineInfo(connectionRow?.kind ?? "postgres").sql;
   /** Which non-SQL dialect this connection speaks, for the menu labels and the starter statement. */
   const consoleLanguage = engineInfo(connectionRow?.kind ?? "postgres").consoleLanguage;
+  /** The generator menu's name, on the row that opens it and over the menu itself: a Mongo
+   *  collection's row offering "Generate SQL" named a language that connection does not speak. */
+  const generateLabel = generatesSql
+    ? t("db.generateSql")
+    : consoleLanguage === "redis"
+      ? t("db.generateRedis")
+      : t("db.generateMql");
   /**
    * What is narrowing whatever this node lists, or `null` when nothing is.
    *
@@ -587,7 +594,7 @@ function NodeSubtree({
     // question of their own ("which statement?"), and folding them into the actions above would
     // bury "Open data" — the thing you actually came to do — under a wall of SQL verbs.
     menuItems.push({
-      label: t("db.generateSql"),
+      label: generateLabel,
       icon: Wand2,
       onClick: () => setGenerateMenu(menu),
     });
@@ -908,15 +915,7 @@ function NodeSubtree({
         <ContextMenu
           x={generateMenu.x}
           y={generateMenu.y}
-          // "Generate SQL" over a Mongo collection was naming a language that connection does not
-          // speak. What the menu produces is a draft in whatever the console runs.
-          heading={
-            generatesSql
-              ? t("db.generateSql")
-              : consoleLanguage === "redis"
-                ? t("db.generateRedis")
-                : t("db.generateMql")
-          }
+          heading={generateLabel}
           items={GENERATED.filter(
             (entry) =>
               (!entry.appliesTo || entry.appliesTo.includes(node.kind)) &&
@@ -994,7 +993,9 @@ const GENERATED: {
     icon: Eraser,
     appliesTo: ["table", "collection"],
   },
-  { template: "drop", label: "db.sql.drop", altLabel: { javascript: "db.mql.drop", redis: "db.redis.del" }, icon: Trash },
+  // Not a trash can: lucide made `Trash` and `Trash2` one glyph, and this menu has DELETE above it.
+  // Dropping is the whole object, so the mark is the table itself, crossed out.
+  { template: "drop", label: "db.sql.drop", altLabel: { javascript: "db.mql.drop", redis: "db.redis.del" }, icon: Grid2x2X },
   { template: "grant", label: "db.sql.grant", icon: KeyRound, separated: true, sqlOnly: true },
   { template: "revoke", label: "db.sql.revoke", icon: KeyRound, sqlOnly: true },
 ];

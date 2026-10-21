@@ -11,7 +11,8 @@ import type { Monaco } from "@monaco-editor/react";
 import { listDir } from "../../lib/tauri/commands";
 import { onLspDiagnostics, onLspExited, onLspRefresh } from "../../lib/tauri/events";
 import { relPathFromModelUri } from "../../lib/editorModel";
-import { LANGUAGE_SERVERS, lspLanguageOf, monacoLanguageOf } from "../../lib/lsp/servers";
+import { LANGUAGE_SERVERS, NATIVE_TYPESCRIPT, lspLanguageOf, monacoLanguageOf } from "../../lib/lsp/servers";
+import { TS_LANGUAGES } from "../../lib/tsserver";
 import {
   askAll,
   currentProjectId,
@@ -19,6 +20,7 @@ import {
   forgetSession,
   languagesServedWith,
   lspKnows,
+  nativeTypeScriptHolds,
   sessionsForLanguage,
   onSessionsChanged,
   startForProject,
@@ -55,7 +57,8 @@ import { reportSoon, useProblemsStore } from "../../state/problemsStore";
 import { applyRename } from "./renameFlow";
 
 /**
- * Real language intelligence for everything that isn't TypeScript, from the project's own servers.
+ * Real language intelligence for everything that isn't TypeScript, from the project's own servers —
+ * and for TypeScript too in a project on 7, whose compiler is a language server (see below).
  *
  * # Why this is not `useTypeScript`
  *
@@ -64,6 +67,8 @@ import { applyRename } from "./renameFlow";
  * it is the compiler the project already builds with, and it is wired into the npm install flow.
  * This one speaks LSP, which is the protocol every *other* language's server speaks. The catalogue
  * in `lib/lsp/servers.ts` records which languages each of them owns, and neither claims the other's.
+ * TypeScript 7 is where they meet: it has no tsserver, so `useTypeScript` hands its executable to
+ * `startNativeTypeScript` and the providers here answer for it.
  *
  * # Registered once, for the whole app
  *
@@ -80,10 +85,11 @@ import { applyRename } from "./renameFlow";
  * that follow the cursor and completions that describe the file as it was last saved.
  */
 
-/** Every language any catalogued server claims. Providers register for all of them once, and each
- *  returns nothing when no session is running for the file in front of it. */
+/** Every language any server claims — the catalogue's and TypeScript 7's own. Providers register
+ *  for all of them once, and each returns nothing when no session is running for the file in front
+ *  of it. */
 const CLAIMED_LANGUAGES = [
-  ...new Set(LANGUAGE_SERVERS.flatMap((server) => server.languages.map(monacoLanguageOf))),
+  ...new Set([...LANGUAGE_SERVERS, NATIVE_TYPESCRIPT].flatMap((server) => server.languages.map(monacoLanguageOf))),
 ];
 
 let installed = false;
@@ -728,6 +734,26 @@ function installDiagnostics(monaco: Monaco): void {
         tags: diagnostic.tags?.includes(1) ? [monaco.MarkerTag.Unnecessary] : undefined,
       })),
     );
+  });
+
+  /**
+   * Monaco's isolated worker checks the syntax of every TypeScript model (`tsWorkerFallback`), and
+   * TypeScript 7's server reports the same syntax errors among its own — every one of them twice in
+   * the hover. For a file that server holds it is the only voice, so the worker's markers are cleared
+   * as they arrive. tsserver has no such overlap: it is asked for semantic diagnostics only. Monaco
+   * fires this after the change, not inside it, so the clear does not recurse.
+   */
+  monaco.editor.onDidChangeMarkers((uris: readonly import("monaco-editor").Uri[]) => {
+    for (const uri of uris) {
+      if (!nativeTypeScriptHolds(uri)) continue;
+      const model = monaco.editor.getModel(uri);
+      if (!model) continue;
+      for (const owner of TS_LANGUAGES) {
+        if (monaco.editor.getModelMarkers({ resource: uri, owner }).length > 0) {
+          monaco.editor.setModelMarkers(model, owner, []);
+        }
+      }
+    }
   });
 
   void onLspExited((event) => {

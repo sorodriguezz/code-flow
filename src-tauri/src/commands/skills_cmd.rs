@@ -29,6 +29,12 @@ fn npx_command() -> Command {
 /// Installs a skill from skills.sh into this workspace's canonical skill store
 /// (`C:\CodeFlow\workspaces\<id>\skills\.claude\skills\<name>`) via `npx skills add`,
 /// streaming its output, then records it in `workspace_skills`.
+///
+/// The flags are what make it run here at all. Without `--agent` the CLI asks which of its ~80
+/// agents to install to, and with stdin not a terminal it cancels ("Interactive prompt required but
+/// stdin is not a TTY"); `-y` skips its other confirmations. `--copy` because its default is a
+/// symlink from `.claude/skills/<name>` into `.agents/skills/` — which the sync into a project would
+/// skip, and which a delete here would leave the real copy of behind.
 #[tauri::command]
 pub async fn install_workspace_skill(
     app: AppHandle,
@@ -41,7 +47,8 @@ pub async fn install_workspace_skill(
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let mut cmd = npx_command();
-    cmd.args(["--yes", "skills", "add", &source_repo, "--skill", &skill_name])
+    // The first `--yes` is npx's (install the CLI without asking); `-y` is the CLI's own.
+    cmd.args(["--yes", "skills", "add", &source_repo, "--skill", &skill_name, "--agent", "claude-code", "--copy", "-y"])
         .current_dir(&dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -57,6 +64,7 @@ pub async fn install_workspace_skill(
         if let Some(out) = stdout {
             let mut lines = tokio::io::BufReader::new(out).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                let Some(line) = readable(&line) else { continue };
                 let _ = app_out.emit("skills:progress", SkillProgressEvent { line: line.clone() });
                 collected.push(line);
             }
@@ -69,6 +77,7 @@ pub async fn install_workspace_skill(
         if let Some(err) = stderr {
             let mut lines = tokio::io::BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                let Some(line) = readable(&line) else { continue };
                 let _ = app_err.emit("skills:progress", SkillProgressEvent { line: line.clone() });
                 collected.push(line);
             }
@@ -99,6 +108,149 @@ pub async fn install_workspace_skill(
 
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::add_workspace_skill(&conn, &workspace_id, &skill_name, &source_repo).map_err(|e| e.to_string())
+}
+
+/// One line of the CLI's output as text: it draws its prompts and spinners with cursor and colour
+/// codes even when nobody is watching, and those showed up raw in the panel (`[?25l`). `None` for a
+/// line that was nothing else.
+fn readable(line: &str) -> Option<String> {
+    let text = crate::services::log::strip_ansi(line);
+    let text = text.trim_end();
+    (!text.trim().is_empty()).then(|| text.to_string())
+}
+
+/// Skills on skills.sh matching `query` — the registry browsed in place of typing a repo and a name.
+#[tauri::command]
+pub async fn skills_registry_search(query: String) -> Result<Vec<crate::skills_registry::RegistrySkill>, String> {
+    crate::skills_registry::search(&query).await
+}
+
+/// What a registry skill is for, before installing it: its `SKILL.md`'s description and a preview.
+#[tauri::command]
+pub async fn skills_registry_describe(source: String, skill_id: String) -> Result<crate::skills_registry::RegistryDetail, String> {
+    crate::skills_registry::describe(&source, &skill_id).await
+}
+
+/// «Generar skill»: reads `sources` (a repository, documents, pages, text), hands them and `focus` to
+/// the engine the `skills` task is routed to, and returns the skill it wrote — normalised, not saved.
+/// The user reviews it and then saves it ([`skill_save_draft`]) or downloads it
+/// ([`skill_write_bundle`]). Cancellable through `run_id`; reading the sources is part of the run.
+#[tauri::command]
+pub async fn skill_generate(
+    app: AppHandle,
+    db: State<'_, Db>,
+    sources: Vec<crate::skill_builder::SkillSource>,
+    focus: Option<String>,
+    language: Option<String>,
+    run_id: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<crate::skill_builder::SkillDraft, String> {
+    if sources.is_empty() {
+        return Err("Add something to write the skill from".to_string());
+    }
+    let (config, template) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        (
+            crate::commands::claude_cmd::load_ai_config_in(&conn, crate::commands::claude_cmd::AiTask::Skills, workspace_id.as_deref())?,
+            crate::commands::claude_cmd::shared_template(&conn, "skill_template", "")?,
+        )
+    };
+    let focus = focus.unwrap_or_default();
+    let language = language.unwrap_or_else(|| "es".to_string());
+    crate::ai_runs::scoped(app, run_id, async {
+        let read = crate::skill_builder::read_sources(&sources).await?;
+        let data = crate::skill_builder::assemble(&focus, &read);
+        let answer = crate::ai::write_skill(&*config.engine, &config.binary, &config.model, &template, &data, &language).await?;
+        let fallback = read.iter().map(|r| r.name.as_str()).find(|n| !n.trim().is_empty()).unwrap_or_default();
+        crate::skill_builder::parse_draft(&answer, fallback)
+    })
+    .await
+}
+
+/// The built-in prompt behind «Generar skill» when `skill_template` is blank.
+#[tauri::command]
+pub fn default_skill_template() -> String {
+    crate::ai::DEFAULT_SKILL_PROMPT.to_string()
+}
+
+/// Saves a generated skill — as the user left it after reviewing — into the workspace store, under
+/// `name` made a valid skill name and written into its `SKILL.md`. Staged and renamed into place like
+/// an import, so a failure leaves nothing half-written for a sync to copy into a project.
+#[tauri::command(async)]
+pub fn skill_save_draft(
+    db: State<Db>,
+    workspace_id: String,
+    name: String,
+    files: Vec<crate::skill_builder::SkillFile>,
+) -> Result<WorkspaceSkill, String> {
+    let name = crate::skill_builder::spec_name(&name);
+    if name.is_empty() {
+        return Err("Please give the skill a name".to_string());
+    }
+    if name.eq_ignore_ascii_case("synced") {
+        return Err("\"synced\" is a reserved name".to_string());
+    }
+    let files = crate::skill_builder::finalize(&name, files)?;
+    let dir = skill_dir(&workspace_id, &name);
+    if dir.exists() {
+        return Err(format!("A skill named \"{name}\" already exists in this workspace"));
+    }
+    let staging = dir.with_file_name(format!(".{name}.importing"));
+    let _ = std::fs::remove_dir_all(&staging);
+    let written = (|| -> std::io::Result<()> {
+        for file in &files {
+            let path = staging.join(&file.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, &file.content)?;
+            #[cfg(unix)]
+            if file.path.starts_with("scripts/") {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = written.and_then(|_| std::fs::rename(&staging, &dir)) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e.to_string());
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    match queries::add_workspace_skill(&conn, &workspace_id, &name, "generated") {
+        Ok(row) => Ok(row),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// A generated skill, downloaded as a `.skill` without being saved — to send, or to load elsewhere.
+#[tauri::command(async)]
+pub fn skill_write_bundle(name: String, files: Vec<crate::skill_builder::SkillFile>, dest_path: String) -> Result<String, String> {
+    let name = crate::skill_builder::spec_name(&name);
+    if name.is_empty() {
+        return Err("Please give the skill a name".to_string());
+    }
+    let files = crate::skill_builder::finalize(&name, files)?;
+    let dest = crate::skill_builder::bundle_path(&dest_path);
+    crate::skill_builder::write_bundle(&name, &crate::skill_builder::draft_entries(&files), &dest)?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// A workspace skill as a `.skill` bundle — the shape [`import_skill_from_file`] and claude.ai read.
+#[tauri::command(async)]
+pub fn export_workspace_skill(workspace_id: String, skill_name: String, dest_path: String) -> Result<String, String> {
+    let name = sanitize_name(&skill_name);
+    let dir = skill_dir(&workspace_id, &name);
+    if !dir.join("SKILL.md").is_file() {
+        return Err(format!("\"{name}\" has no SKILL.md to export"));
+    }
+    let entries = crate::skill_builder::folder_entries(&dir)?;
+    let dest = crate::skill_builder::bundle_path(&dest_path);
+    crate::skill_builder::write_bundle(&name, &entries, &dest)?;
+    Ok(dest.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -568,7 +720,9 @@ pub fn sync_skills_into_project(skills: &[WorkspaceSkill], workspace_id: &str, p
     std::fs::create_dir_all(&dest_root).map_err(|e| e.to_string())?;
     for entry in std::fs::read_dir(&src_root).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
-        if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+        // `path().is_dir()` follows a link: a skill installed before `--copy` is a symlink into
+        // `.agents/skills/`, and a `file_type()` check skipped it, so it never reached a project.
+        if !entry.path().is_dir() {
             continue;
         }
         let name = entry.file_name();
@@ -915,6 +1069,38 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&store);
+    }
+
+    /// What «Descargar .skill» writes is what «Importar .skill» reads: the folder found at the root,
+    /// and every file beside `SKILL.md` unpacked under it.
+    #[test]
+    fn an_exported_bundle_imports_back() {
+        let dir = scratch();
+        let files = vec![
+            crate::skill_builder::SkillFile { path: "SKILL.md".into(), content: "---\nname: draft\n---\nbody".into() },
+            crate::skill_builder::SkillFile { path: "references/api.md".into(), content: "# API".into() },
+        ];
+        let files = crate::skill_builder::finalize("round-trip", files).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("round-trip.skill");
+        crate::skill_builder::write_bundle("round-trip", &crate::skill_builder::draft_entries(&files), &dest).unwrap();
+
+        let mut zip = zip::ZipArchive::new(std::io::BufReader::new(std::fs::File::open(&dest).unwrap())).unwrap();
+        let (at, prefix) = find_skill_root(&mut zip).unwrap();
+        assert_eq!(prefix, "round-trip/");
+        assert_eq!(front_matter_name(&read_archive_text(&mut zip, at).unwrap()).as_deref(), Some("round-trip"));
+        let out = dir.join("unpacked");
+        extract_skill(&mut zip, &prefix, &out).unwrap();
+        assert_eq!(std::fs::read_to_string(out.join("references/api.md")).unwrap(), "# API");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the CLI printed when it cancelled, as the panel showed it.
+    #[test]
+    fn the_cli_output_reaches_the_panel_without_terminal_codes() {
+        assert_eq!(readable("\x1b[?25l\x1b[1G\x1b[J\u{25c7}  79 agents").as_deref(), Some("\u{25c7}  79 agents"));
+        assert_eq!(readable("\x1b[?25h"), None);
+        assert_eq!(readable("   "), None);
     }
 
     #[test]

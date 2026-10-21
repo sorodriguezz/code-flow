@@ -13,21 +13,27 @@
  *   than every other node in the vault — the difference between a 600-note graph at 60fps and one
  *   that stutters.
  * * **Springs** along the links, pulling what cites each other together.
- * * **Gravity** towards the origin, which is what keeps notes nobody links orbiting the rest
- *   instead of drifting off-screen for good.
+ * * **Gravity** towards each note's anchor — its book's centre (`layoutGroups`), the origin when
+ *   there is one book — which keeps notes nobody links orbiting the rest instead of drifting
+ *   off-screen for good, and each book an island of its own.
  *
  * `alpha` is the temperature: every displacement is scaled by it and it decays each frame, so the
  * graph settles and then stops costing anything. Dragging reheats it (`reheat`).
  */
 
 /** Where a spring is happy: the distance a single link settles at. */
-const LINK_DISTANCE = 78;
-const LINK_STRENGTH = 0.035;
+const LINK_DISTANCE = 120;
+const LINK_STRENGTH = 0.025;
 /** Beyond this, two nodes do not push each other at all — what makes the grid worth using. */
-const REPULSION_RANGE = 240;
-const REPULSION = 2600;
-const GRAVITY = 0.012;
+const REPULSION_RANGE = 400;
+const REPULSION = 16000;
+const GRAVITY = 0.004;
 const DAMPING = 0.82;
+/** Closer than this, two nodes push as if they were this far apart: the inverse square near zero
+ *  is a kick big enough to throw a note clear across the graph. */
+const MIN_REPULSION_DISTANCE = 12;
+/** The most a node moves in one frame — the other guard against a note flung off on its own. */
+const MAX_SPEED = 40;
 /** Below this the picture no longer visibly changes, and the loop can stop. */
 export const ALPHA_SLEEP = 0.004;
 const ALPHA_DECAY = 0.985;
@@ -40,6 +46,9 @@ export interface SimNode {
   vy: number;
   /** How many links touch it — the dot's size, and nothing to do with the physics. */
   degree: number;
+  /** Where gravity pulls it: its book's centre. */
+  ax: number;
+  ay: number;
   /** Held in place: the node under the pointer while it is being dragged. */
   pinned: boolean;
 }
@@ -56,11 +65,11 @@ export interface Simulation {
 }
 
 export function createSimulation(
-  seeds: { id: string; x: number; y: number; degree: number }[],
+  seeds: { id: string; x: number; y: number; degree: number; ax?: number; ay?: number }[],
   links: SimLink[],
 ): Simulation {
   return {
-    nodes: seeds.map((seed) => ({ ...seed, vx: 0, vy: 0, pinned: false })),
+    nodes: seeds.map((seed) => ({ ...seed, ax: seed.ax ?? 0, ay: seed.ay ?? 0, vx: 0, vy: 0, pinned: false })),
     links,
     // Warm, not hot: the seed is already a settled layout, so this is the nudge that turns it into
     // a live one — starting at 1 would throw the deterministic opening picture away.
@@ -121,7 +130,8 @@ export function step(sim: Simulation): void {
             dy = Math.sin(i * 2.399) * 0.5;
             distance = 0.5;
           }
-          const force = (REPULSION / (distance * distance)) * alpha;
+          const near = Math.max(distance, MIN_REPULSION_DISTANCE);
+          const force = (REPULSION / (near * near)) * alpha;
           const fx = (dx / distance) * force;
           const fy = (dy / distance) * force;
           node.vx += fx;
@@ -156,8 +166,13 @@ export function step(sim: Simulation): void {
       node.vy = 0;
       continue;
     }
-    node.vx = (node.vx - node.x * GRAVITY * alpha) * DAMPING;
-    node.vy = (node.vy - node.y * GRAVITY * alpha) * DAMPING;
+    node.vx = (node.vx - (node.x - node.ax) * GRAVITY * alpha) * DAMPING;
+    node.vy = (node.vy - (node.y - node.ay) * GRAVITY * alpha) * DAMPING;
+    const speed = Math.hypot(node.vx, node.vy);
+    if (speed > MAX_SPEED) {
+      node.vx *= MAX_SPEED / speed;
+      node.vy *= MAX_SPEED / speed;
+    }
     node.x += node.vx;
     node.y += node.vy;
   }

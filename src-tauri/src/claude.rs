@@ -59,6 +59,48 @@ fn write_system_prompt_file(inv: &AiInvocation, sp: &str) -> Option<std::path::P
     inv.prompt_files.write("claude-system", "txt", sp)
 }
 
+/// The whole system prompt of a text-only run whose task brings none of its own: those tasks say
+/// everything in the ask, and Claude Code's own prompt is written for an agent this run is not.
+const TEXT_ONLY_SYSTEM_PROMPT: &str = "Eres un asistente integrado en CodeFlow. Sigue al pie de la letra las \
+    instrucciones del mensaje y responde solo con lo que piden.";
+
+/// The settings a run adds over the user's own, as JSON, or `None` when it adds nothing.
+///
+/// - **Text-only:** no hooks. A plugin's `SessionStart` hook is context injected into every session
+///   (Vercel's is ~8,500 characters), and a run with no tools has nothing for the others to watch.
+/// - **Plugins kept out of the chats:** each one `false` in `enabledPlugins`, which drops its skills,
+///   servers and hooks for this run. Verified on 2.1.304 with the init event and the token counts.
+fn run_settings(inv: &AiInvocation) -> Option<String> {
+    let mut settings = serde_json::Map::new();
+    if inv.text_only {
+        settings.insert("disableAllHooks".to_string(), serde_json::Value::Bool(true));
+    }
+    if !inv.disabled_plugins.is_empty() {
+        let off: serde_json::Map<String, serde_json::Value> =
+            inv.disabled_plugins.iter().map(|id| (id.clone(), serde_json::Value::Bool(false))).collect();
+        settings.insert("enabledPlugins".to_string(), serde_json::Value::Object(off));
+    }
+    (!settings.is_empty()).then(|| serde_json::Value::Object(settings).to_string())
+}
+
+/// Where the plugins the user keeps out of CodeFlow's chats are stored: a JSON array of the ids
+/// Claude Code knows them by (`name@marketplace`). Their own Claude Code is not touched.
+pub const CHAT_PLUGINS_OFF_KEY: &str = "claude_chat_plugins_off";
+
+/// The plugins kept out of CodeFlow's chats — see [`CHAT_PLUGINS_OFF_KEY`]. Empty when unset or
+/// unreadable, which is what every chat ran with before the setting existed.
+pub fn chat_plugins_off() -> Vec<String> {
+    crate::ai_usage::with_conn(|conn| crate::db::queries::get_setting(conn, CHAT_PLUGINS_OFF_KEY).ok().flatten())
+        .flatten()
+        .map(|raw| parse_plugin_ids(&raw))
+        .unwrap_or_default()
+}
+
+fn parse_plugin_ids(raw: &str) -> Vec<String> {
+    let ids: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
+    ids.into_iter().map(|id| id.trim().to_string()).filter(|id| id.contains('@')).collect()
+}
+
 pub struct ClaudeEngine;
 
 impl AiEngine for ClaudeEngine {
@@ -106,7 +148,15 @@ impl AiEngine for ClaudeEngine {
         } else {
             cmd.arg("-p").arg(inv.prompt);
         }
-        if let Some(sp) = inv.system_prompt {
+        // A text-only run replaces Claude Code's system prompt rather than adding to it: that prompt
+        // is written for an agent with tools, and this run has none. The subscription accepts it.
+        if inv.text_only {
+            let sp = inv.system_prompt.filter(|sp| !sp.trim().is_empty()).unwrap_or(TEXT_ONLY_SYSTEM_PROMPT);
+            match write_system_prompt_file(inv, sp) {
+                Some(path) => cmd.arg("--system-prompt-file").arg(path),
+                None => cmd.arg("--system-prompt").arg(sp),
+            };
+        } else if let Some(sp) = inv.system_prompt {
             match write_system_prompt_file(inv, sp) {
                 Some(path) => cmd.arg("--append-system-prompt-file").arg(path),
                 None => cmd.arg("--append-system-prompt").arg(sp),
@@ -133,7 +183,15 @@ impl AiEngine for ClaudeEngine {
         // Read-only first, because it narrows what the line below approves: `--tools` decides which
         // built-in tools exist at all for this run, where `--allowedTools` only decides which of the
         // existing ones run without asking. See the module docs.
-        if inv.read_only {
+        //
+        // A text-only run gets nothing at all: no built-in tools, no MCP server, and no skills or
+        // commands, whose listing alone is thousands of tokens. `--json-schema` still works, since
+        // its answer tool is the CLI's own and not one of the built-in set.
+        if inv.text_only {
+            cmd.arg("--tools").arg("");
+            cmd.arg("--strict-mcp-config");
+            cmd.arg("--disable-slash-commands");
+        } else if inv.read_only {
             let mut tools = self.read_only_tools();
             // `Skill` only when the caller asked for it — the chat does, compaction and story
             // analysis do not. A skill is instructions: with no shell and no writer beside it here,
@@ -146,7 +204,8 @@ impl AiEngine for ClaudeEngine {
         }
         // The app's own servers this run loads — in a read-only run only the repository map, the one
         // server that can do nothing but read (`codemap::mcp`).
-        let app_servers = crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only);
+        let app_servers =
+            if inv.text_only { Vec::new() } else { crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only) };
         let mut allowed: Vec<String> = inv.allowed_tools.to_vec();
         if app_servers.iter().any(|server| server.name == crate::codemap::mcp::SERVER_NAME) {
             allowed.push(crate::codemap::mcp::allow_rule());
@@ -156,7 +215,7 @@ impl AiEngine for ClaudeEngine {
         }
         // The user's servers this conversation keeps out: denied by rule, which also takes their
         // tools off the list the model is shown — context a turn no longer pays for.
-        if !inv.mcp_block.is_empty() && !inv.read_only {
+        if !inv.mcp_block.is_empty() && !inv.read_only && !inv.text_only {
             let rules: Vec<String> = inv.mcp_block.iter().map(|server| mcp_rule(server)).collect();
             cmd.arg("--disallowedTools").arg(rules.join(","));
         }
@@ -171,6 +230,15 @@ impl AiEngine for ClaudeEngine {
                     cmd.env(name, value);
                 }
             }
+        }
+        // Settings for this run alone, layered over the user's (`--settings`), so nothing in their
+        // Claude Code changes. A file rather than the JSON inline, for the same `.cmd` shim reason as
+        // the system prompt: quotes do not survive it.
+        if let Some(settings) = run_settings(inv) {
+            match inv.prompt_files.write("claude-settings", "json", &settings) {
+                Some(path) => cmd.arg("--settings").arg(path),
+                None => cmd.arg("--settings").arg(&settings),
+            };
         }
         if inv.auto_approve_edits && !inv.read_only {
             cmd.arg("--permission-mode").arg("acceptEdits");
@@ -349,7 +417,26 @@ fn limits_cell() -> &'static Mutex<std::collections::HashMap<String, (AiRateLimi
 /// process. What an added account's row in the limits panel is drawn from — this app reads no
 /// token for an account it added; the CLI tells it on every run. See `ai_quota::claude`.
 pub fn last_rate_limit(account_key: &str) -> Option<(AiRateLimit, String)> {
-    limits_cell().lock().ok()?.get(account_key).cloned()
+    if let Some(found) = limits_cell().lock().ok()?.get(account_key).cloned() {
+        return Some(found);
+    }
+    // Not run since the app started: what the last run before it reported, if it was kept. The
+    // caller drops windows that have rolled over since, so an old reading cannot pass as today's.
+    let stored = crate::ai_usage::setting(&stored_rate_limit_key(account_key))?;
+    serde_json::from_str::<StoredRateLimit>(&stored).ok().map(|kept| (kept.limit, kept.at))
+}
+
+/// Where an account's last reported windows are kept between launches — percentages and reset
+/// times, nothing that identifies or authenticates anyone. Without it a restart left the limits
+/// panel with nothing to fall back on until the engine ran again (user report, 2026-10-20).
+fn stored_rate_limit_key(account_key: &str) -> String {
+    format!("claude_last_rate_limit:{account_key}")
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredRateLimit {
+    limit: AiRateLimit,
+    at: String,
 }
 
 /// Files what a finished run reported about itself: the windows it ran in and the context window
@@ -362,8 +449,14 @@ fn record_run_meta(stdout: &str) {
     // engine bound to one, and outside it for the system account.
     if let Some(limit) = parse_rate_limit(stdout) {
         let key = crate::ai_accounts::current().map(|env| env.key()).unwrap_or_else(|| "claude".to_string());
+        let previous = last_rate_limit(&key).map(|(old, _)| old);
+        let merged = merge_rate_limit(previous.as_ref(), limit, chrono::Utc::now().timestamp());
+        let at = chrono::Utc::now().to_rfc3339();
+        if let Ok(stored) = serde_json::to_string(&StoredRateLimit { limit: merged, at: at.clone() }) {
+            crate::ai_usage::with_conn(|conn| crate::db::queries::set_setting(conn, &stored_rate_limit_key(&key), &stored));
+        }
         if let Ok(mut limits) = limits_cell().lock() {
-            limits.insert(key, (limit, chrono::Utc::now().to_rfc3339()));
+            limits.insert(key, (merged, at));
         }
     }
 }
@@ -398,9 +491,12 @@ fn record_context_windows(stdout: &str) {
 /// means by "percent" and nothing downstream has to remember which source it came from.
 ///
 /// The last such line wins: the CLI reports one per API call, and a turn that made several has
-/// only one current answer.
+/// only one current answer. **Per window**, though: an event may carry only the window it is about
+/// (`"unifiedWindows":{"five_hour":{…}}` alone, seen 2026-10-20), and a window it leaves out keeps
+/// what an earlier event said — or stays at a `0` reset, which is how "not reported" reads
+/// downstream, rather than becoming a week at 0%.
 fn parse_rate_limit(stdout: &str) -> Option<AiRateLimit> {
-    let mut found = None;
+    let mut found: Option<AiRateLimit> = None;
     for line in stdout.lines() {
         let line = line.trim();
         // Cheap gate first: this walks a log that can be megabytes of tool chatter, and a JSON
@@ -415,14 +511,34 @@ fn parse_rate_limit(stdout: &str) -> Option<AiRateLimit> {
         let Some(windows) = event.rate_limit_info.and_then(|info| info.unified_windows) else {
             continue;
         };
-        found = Some(AiRateLimit {
-            five_hour_pct: windows.five_hour.utilization * 100.0,
-            seven_day_pct: windows.seven_day.utilization * 100.0,
-            five_hour_resets_at: windows.five_hour.resets_at,
-            seven_day_resets_at: windows.seven_day.resets_at,
-        });
+        let mut next = found.unwrap_or_default();
+        if windows.five_hour.resets_at > 0 {
+            next.five_hour_pct = windows.five_hour.utilization * 100.0;
+            next.five_hour_resets_at = windows.five_hour.resets_at;
+        }
+        if windows.seven_day.resets_at > 0 {
+            next.seven_day_pct = windows.seven_day.utilization * 100.0;
+            next.seven_day_resets_at = windows.seven_day.resets_at;
+        }
+        found = Some(next);
     }
     found
+}
+
+/// `fresh` over what the account reported before, window by window: a run whose events named only
+/// the session keeps the week the previous run reported, as long as that week has not rolled over.
+fn merge_rate_limit(previous: Option<&AiRateLimit>, fresh: AiRateLimit, now: i64) -> AiRateLimit {
+    let Some(previous) = previous else { return fresh };
+    let mut out = fresh;
+    if out.five_hour_resets_at == 0 && previous.five_hour_resets_at > now {
+        out.five_hour_pct = previous.five_hour_pct;
+        out.five_hour_resets_at = previous.five_hour_resets_at;
+    }
+    if out.seven_day_resets_at == 0 && previous.seven_day_resets_at > now {
+        out.seven_day_pct = previous.seven_day_pct;
+        out.seven_day_resets_at = previous.seven_day_resets_at;
+    }
+    out
 }
 
 /// Both shapes are defaulted end to end on purpose: these events are telemetry riding along with
@@ -501,6 +617,11 @@ pub struct PluginRef {
     pub name: String,
     #[serde(default)]
     pub path: String,
+    /// The id Claude Code knows it by — `vercel@claude-plugins-official`, `design@synced`,
+    /// `…@builtin` for the ones that come with the CLI — which is what `enabledPlugins` is keyed by.
+    /// Empty in a report filed before it was kept.
+    #[serde(default)]
+    pub source: String,
 }
 
 /// What a Claude Code install told the most recent **full** chat-capable run about itself, per
@@ -518,6 +639,10 @@ pub struct ClaudeInstallReport {
     pub skills: Vec<String>,
     #[serde(default)]
     pub plugins: Vec<PluginRef>,
+    /// Installed plugins the chats keep out ([`CHAT_PLUGINS_OFF_KEY`]), so absent from `plugins` —
+    /// remembered so Settings can still list them to switch back on.
+    #[serde(default)]
+    pub plugins_off: Vec<PluginRef>,
     /// `None` until a run that loaded the user's servers has reported them — a restricted run's
     /// empty list is not an answer, and must not erase one.
     #[serde(default)]
@@ -530,6 +655,16 @@ pub struct ClaudeInstallReport {
 fn reports_cell() -> &'static Mutex<Option<BTreeMap<String, ClaudeInstallReport>>> {
     static REPORTS: OnceLock<Mutex<Option<BTreeMap<String, ClaudeInstallReport>>>> = OnceLock::new();
     REPORTS.get_or_init(|| Mutex::new(None))
+}
+
+/// The reports in `cell`, read from the cache file the first time.
+fn loaded_reports(cell: &mut Option<BTreeMap<String, ClaudeInstallReport>>) -> &mut BTreeMap<String, ClaudeInstallReport> {
+    cell.get_or_insert_with(|| {
+        std::fs::read_to_string(reports_file())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    })
 }
 
 fn reports_file() -> std::path::PathBuf {
@@ -545,25 +680,17 @@ fn reports_file() -> std::path::PathBuf {
 /// has ever run here — from memory, or from the cache file after a restart.
 pub fn install_report(account_key: &str) -> Option<ClaudeInstallReport> {
     let mut cell = reports_cell().lock().ok()?;
-    let reports = cell.get_or_insert_with(|| {
-        std::fs::read_to_string(reports_file())
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    });
+    let reports = loaded_reports(&mut cell);
     reports.get(account_key).cloned()
 }
 
 /// Files a run's `init` under its account. Commands, skills and plugins are replaced by any run
 /// that reported them; the server list only by a run that actually loaded the user's servers.
-fn record_install_report(account_key: &str, init: InitEvent) {
+/// `kept_out` are the plugins the run switched off: missing from its list by choice, so whatever
+/// was known about them moves to `plugins_off` rather than being forgotten.
+fn record_install_report(account_key: &str, init: InitEvent, kept_out: &[String]) {
     let Ok(mut cell) = reports_cell().lock() else { return };
-    let reports = cell.get_or_insert_with(|| {
-        std::fs::read_to_string(reports_file())
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    });
+    let reports = loaded_reports(&mut cell);
     let entry = reports.entry(account_key.to_string()).or_default();
     if !init.slash_commands.is_empty() {
         entry.slash_commands = init.slash_commands;
@@ -572,7 +699,16 @@ fn record_install_report(account_key: &str, init: InitEvent) {
         entry.skills = init.skills;
     }
     if !init.plugins.is_empty() {
+        let loaded: std::collections::HashSet<String> = init.plugins.iter().map(|plugin| plugin.source.clone()).collect();
+        let mut off: Vec<PluginRef> = Vec::new();
+        for plugin in entry.plugins.iter().chain(entry.plugins_off.iter()) {
+            let id = &plugin.source;
+            if kept_out.contains(id) && !loaded.contains(id) && !off.iter().any(|known| &known.source == id) {
+                off.push(plugin.clone());
+            }
+        }
         entry.plugins = init.plugins;
+        entry.plugins_off = off;
     }
     // A run whose tool set was cut down (`--tools`, which the read-only paths use together with
     // `--strict-mcp-config`) loaded no servers by design; only one with the ordinary writers in hand
@@ -600,7 +736,7 @@ fn record_install_report(account_key: &str, init: InitEvent) {
 /// The project's own skills and commands are taken out first — the ones in `<cwd>/.claude` — since
 /// the report stands for the *install*, and a repository's `.claude/skills` would otherwise be
 /// listed in every other conversation as if it came with the CLI.
-pub fn record_install_from_run(account_key: &str, cwd: Option<&str>, stdout: &str) {
+pub fn record_install_from_run(account_key: &str, cwd: Option<&str>, stdout: &str, kept_out: &[String]) {
     let Some(mut init) = parse_init(stdout) else { return };
     if let Some(cwd) = cwd {
         let project = std::path::Path::new(cwd).join(".claude");
@@ -620,7 +756,68 @@ pub fn record_install_from_run(account_key: &str, cwd: Option<&str>, stdout: &st
         init.skills.retain(|name| !skills.contains(name));
         init.slash_commands.retain(|name| !skills.contains(name) && !commands.contains(name));
     }
-    record_install_report(account_key, init);
+    record_install_report(account_key, init, kept_out);
+}
+
+/// One of the user's Claude Code plugins, as Settings lists it for the chats.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPlugin {
+    /// `name@marketplace` — the key `enabledPlugins` takes.
+    pub id: String,
+    pub name: String,
+    /// Kept out of CodeFlow's chats.
+    pub off: bool,
+}
+
+/// The plugins a chat could load, for Settings: every one a run on any account has reported —
+/// loaded or kept out — then those `settings_json` (the system account's `settings.json`) enables,
+/// for an install no chat has run on yet. The ones built into the CLI are left out: they are part
+/// of Claude Code, not something the user installed.
+pub fn chat_plugins(settings_json: Option<&str>) -> Vec<ChatPlugin> {
+    let reported: Vec<PluginRef> = install_reports_all()
+        .into_iter()
+        .flat_map(|report| report.plugins.into_iter().chain(report.plugins_off))
+        .collect();
+    plugin_list(reported, settings_json, &chat_plugins_off())
+}
+
+fn plugin_list(reported: Vec<PluginRef>, settings_json: Option<&str>, off: &[String]) -> Vec<ChatPlugin> {
+    let enabled: Vec<String> = settings_json
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|value| value.get("enabledPlugins").and_then(serde_json::Value::as_object).cloned())
+        .map(|map| map.into_iter().filter(|(_, on)| on.as_bool() == Some(true)).map(|(id, _)| id).collect())
+        .unwrap_or_default();
+    let mut out: Vec<ChatPlugin> = Vec::new();
+    let mut add = |id: String, name: String| {
+        if id.is_empty() || id.ends_with("@builtin") || out.iter().any(|plugin| plugin.id == id) {
+            return;
+        }
+        let off = off.contains(&id);
+        out.push(ChatPlugin { id, name, off });
+    };
+    for plugin in reported {
+        // A report filed before ids were kept: the id is found by name among the enabled ones.
+        let id = if plugin.source.is_empty() {
+            enabled.iter().find(|id| id.split('@').next() == Some(plugin.name.as_str())).cloned().unwrap_or_default()
+        } else {
+            plugin.source.clone()
+        };
+        add(id, plugin.name.clone());
+    }
+    for id in enabled {
+        let name = id.split('@').next().unwrap_or(&id).to_string();
+        add(id, name);
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
+/// Every account's report, from memory or the cache file.
+fn install_reports_all() -> Vec<ClaudeInstallReport> {
+    let Ok(mut cell) = reports_cell().lock() else { return Vec::new() };
+    let reports = loaded_reports(&mut cell);
+    reports.values().cloned().collect()
 }
 
 /// The `init` event of a run, whole. The first one wins — a run emits exactly one.
@@ -1133,6 +1330,118 @@ mod tests {
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
     }
 
+    /// A text-only run carries nothing of the agent: no tools, no servers (not even the ones the app
+    /// would hand it), no skills, no hooks, and its own system prompt in place of Claude Code's.
+    #[test]
+    fn a_text_only_run_loads_nothing_but_its_own_prompt() {
+        let server = crate::mcp_registry::LiveServer {
+            name: crate::codemap::mcp::SERVER_NAME.to_string(),
+            transport: "http".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: "http://127.0.0.1:47811/mcp/code".into(),
+            headers: Vec::new(),
+        };
+        let mut inv = AiInvocation::new("Escribe un título", "la pregunta");
+        inv.text_only = true;
+        inv.read_only = true;
+        inv.app_mcp = vec![server];
+        inv.mcp_block = vec!["trello".into()];
+        inv.system_prompt = Some("Eres quien titula.");
+        inv.json_schema = Some(r#"{"type":"object"}"#);
+        let args = command_args(&ClaudeEngine.build_command("claude", &inv));
+        assert!(args.windows(2).any(|pair| pair == ["--tools", ""]), "{args:?}");
+        for flag in ["--strict-mcp-config", "--disable-slash-commands", "--json-schema"] {
+            assert!(args.iter().any(|a| a == flag), "{flag}: {args:?}");
+        }
+        for flag in ["--mcp-config", "--disallowedTools", "--allowedTools", "--append-system-prompt-file", "--append-system-prompt"] {
+            assert!(!args.iter().any(|a| a == flag), "{flag}: {args:?}");
+        }
+        assert_eq!(args.iter().filter(|a| *a == "--tools").count(), 1, "read-only adds no second list: {args:?}");
+        let at = args.iter().position(|a| a == "--system-prompt-file").expect("its own prompt, replacing");
+        assert_eq!(std::fs::read_to_string(&args[at + 1]).unwrap(), "Eres quien titula.");
+        let at = args.iter().position(|a| a == "--settings").expect("run settings");
+        let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&args[at + 1]).unwrap()).unwrap();
+        assert_eq!(settings["disableAllHooks"], true);
+
+        // A task with no system prompt of its own still replaces Claude Code's, with the neutral one.
+        let mut bare = AiInvocation::new("Escribe un título", "la pregunta");
+        bare.text_only = true;
+        let args = command_args(&ClaudeEngine.build_command("claude", &bare));
+        let at = args.iter().position(|a| a == "--system-prompt-file").expect("a prompt file");
+        assert_eq!(std::fs::read_to_string(&args[at + 1]).unwrap(), TEXT_ONLY_SYSTEM_PROMPT);
+    }
+
+    /// Plugins a chat keeps out are switched off for the run alone, and nothing else changes; an
+    /// ordinary run adds no settings at all.
+    #[test]
+    fn plugins_kept_out_are_switched_off_for_the_run() {
+        let mut inv = AiInvocation::new("hola", "");
+        inv.disabled_plugins = vec!["vercel@claude-plugins-official".into(), "design@synced".into()];
+        let args = command_args(&ClaudeEngine.build_command("claude", &inv));
+        let at = args.iter().position(|a| a == "--settings").expect("run settings");
+        let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&args[at + 1]).unwrap()).unwrap();
+        assert_eq!(settings, serde_json::json!({"enabledPlugins": {"vercel@claude-plugins-official": false, "design@synced": false}}));
+        assert!(!args.iter().any(|a| a == "--tools" || a == "--disable-slash-commands"), "{args:?}");
+
+        let plain = command_args(&ClaudeEngine.build_command("claude", &AiInvocation::new("hola", "")));
+        assert!(!plain.iter().any(|a| a == "--settings"), "{plain:?}");
+    }
+
+    /// A plugin a chat kept out is missing from that run's report by choice: it is remembered as
+    /// off, so Settings can still offer it, and comes back once a run loads it again.
+    #[test]
+    fn a_plugin_kept_out_is_remembered_not_forgotten() {
+        let account = format!("test-plugins-{}", uuid::Uuid::new_v4().simple());
+        let both = r#"{"type":"system","subtype":"init","tools":["Edit"],"plugins":[{"name":"vercel","path":"/p/v","source":"vercel@official"},{"name":"warp","path":"/p/w","source":"warp@warp"}]}"#;
+        let warp_only = r#"{"type":"system","subtype":"init","tools":["Edit"],"plugins":[{"name":"warp","path":"/p/w","source":"warp@warp"}]}"#;
+        let ids = |plugins: &[PluginRef]| plugins.iter().map(|p| p.source.clone()).collect::<Vec<_>>();
+
+        record_install_from_run(&account, None, both, &[]);
+        record_install_from_run(&account, None, warp_only, &["vercel@official".to_string()]);
+        let report = install_report(&account).unwrap();
+        assert_eq!(ids(&report.plugins), vec!["warp@warp"]);
+        assert_eq!(ids(&report.plugins_off), vec!["vercel@official"]);
+
+        // Still off on the next turn, though that run's report never mentioned it.
+        record_install_from_run(&account, None, warp_only, &["vercel@official".to_string()]);
+        assert_eq!(ids(&install_report(&account).unwrap().plugins_off), vec!["vercel@official"]);
+
+        record_install_from_run(&account, None, both, &[]);
+        let report = install_report(&account).unwrap();
+        assert_eq!(ids(&report.plugins), vec!["vercel@official", "warp@warp"]);
+        assert!(report.plugins_off.is_empty());
+    }
+
+    /// Settings lists what the user installed — reported or only enabled in `settings.json` — and
+    /// never the plugins built into the CLI; an old report without ids is matched by name.
+    #[test]
+    fn the_plugin_list_is_what_the_user_installed() {
+        let plugin = |name: &str, source: &str| PluginRef { name: name.into(), path: "/p".into(), source: source.into() };
+        let reported = vec![
+            plugin("vercel", ""),
+            plugin("design", "design@synced"),
+            plugin("cc-plugin-telemetry", "cc-plugin-telemetry@builtin"),
+        ];
+        let settings = r#"{"enabledPlugins":{"vercel@claude-plugins-official":true,"warp@claude-code-warp":true,"old@x":false}}"#;
+        let list = plugin_list(reported, Some(settings), &["design@synced".to_string()]);
+        let rows: Vec<(&str, bool)> = list.iter().map(|p| (p.id.as_str(), p.off)).collect();
+        assert_eq!(
+            rows,
+            vec![("design@synced", true), ("vercel@claude-plugins-official", false), ("warp@claude-code-warp", false)]
+        );
+    }
+
+    #[test]
+    fn plugin_ids_are_read_leniently() {
+        assert_eq!(parse_plugin_ids(r#"["vercel@claude-plugins-official", " design@synced ", "junk"]"#), vec![
+            "vercel@claude-plugins-official".to_string(),
+            "design@synced".to_string()
+        ]);
+        assert!(parse_plugin_ids("not json").is_empty());
+    }
+
     /// A failed run that spent tokens says so on its `result` event, and the meter now reads it.
     #[test]
     fn a_failed_run_still_reports_what_it_spent() {
@@ -1435,6 +1744,38 @@ mod tests {
         assert!((limit.seven_day_pct - 53.0).abs() < 0.001, "got {limit:?}");
     }
 
+    /// What is kept between launches reads back as it was written, per account.
+    #[test]
+    fn the_windows_kept_between_launches_read_back() {
+        let limit = AiRateLimit { five_hour_pct: 12.0, five_hour_resets_at: 1_792_542_600, seven_day_pct: 40.0, seven_day_resets_at: 1_793_000_000 };
+        let stored = serde_json::to_string(&StoredRateLimit { limit, at: "2026-10-20T22:00:00+00:00".into() }).unwrap();
+        let back: StoredRateLimit = serde_json::from_str(&stored).unwrap();
+        assert_eq!((back.limit, back.at.as_str()), (limit, "2026-10-20T22:00:00+00:00"));
+        assert_ne!(stored_rate_limit_key("claude"), stored_rate_limit_key("claude|work"));
+    }
+
+    /// An event may name only the session (2.1.304, 2026-10-20). The week it leaves out is "not
+    /// reported" — a `0` reset — and a later run that names only the session keeps the week an
+    /// earlier one reported, until that week rolls over.
+    #[test]
+    fn a_window_an_event_leaves_out_is_not_reported_as_zero() {
+        let only_session = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.03,"resetsAt":1792542600}}}}"#;
+        let limit = parse_rate_limit(only_session).unwrap();
+        assert!((limit.five_hour_pct - 3.0).abs() < 0.001 && limit.seven_day_resets_at == 0, "{limit:?}");
+
+        // Two events in one run: the second's silence about the week keeps the first's.
+        let limit = parse_rate_limit(&format!("{RATE_LIMIT_LINE}\n{only_session}")).unwrap();
+        assert!((limit.seven_day_pct - 53.0).abs() < 0.001 && (limit.five_hour_pct - 3.0).abs() < 0.001, "{limit:?}");
+
+        // Across runs: kept while the week is still open, dropped once it has rolled over.
+        let previous = parse_rate_limit(RATE_LIMIT_LINE).unwrap();
+        let fresh = parse_rate_limit(only_session).unwrap();
+        let merged = merge_rate_limit(Some(&previous), fresh, 1_789_000_000);
+        assert_eq!(merged.seven_day_resets_at, 1_790_010_000);
+        let merged = merge_rate_limit(Some(&previous), fresh, 1_791_000_000);
+        assert_eq!(merged.seven_day_resets_at, 0);
+    }
+
     /// The common case by far: nothing in the log mentions a rate limit, which is "cannot tell"
     /// rather than "zero used".
     #[test]
@@ -1462,7 +1803,7 @@ mod tests {
     fn the_app_s_own_servers_stay_out_of_the_install_report() {
         let account = format!("test-dynamic-{}", uuid::Uuid::new_v4().simple());
         let stdout = r#"{"type":"system","subtype":"init","tools":["Edit","Read"],"mcp_servers":[{"name":"github","status":"connected","source":"user"},{"name":"codeflow_map","status":"connected","source":"dynamic"},{"name":"claude.ai Gmail","status":"pending","source":"claudeai"}]}"#;
-        record_install_from_run(&account, None, stdout);
+        record_install_from_run(&account, None, stdout, &[]);
         let names: Vec<String> = install_report(&account).unwrap().mcp_servers.unwrap().into_iter().map(|server| server.name).collect();
         assert_eq!(names, vec!["github", "claude.ai Gmail"]);
     }

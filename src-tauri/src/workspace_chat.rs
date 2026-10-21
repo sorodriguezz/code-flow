@@ -1,5 +1,5 @@
 //! The assistant panel's **workspace chat**: one conversation that talks to every repository of a
-//! workspace at once, and that knows what the workspace's SDD/Harness agents are in the middle of.
+//! workspace at once.
 //!
 //! It is a `chat_conversations` row with `workspace_scope = 1` (see `db::chat_queries`), run by
 //! `commands::chat_cmd::chat_send` like any chat-workspace thread — streaming, effort, compaction,
@@ -11,20 +11,18 @@
 //!   without that flag still gets the absolute paths, and is told to use them.
 //! - **What it may do.** Write, like the repository chat: edits auto-approved, a checkpoint per
 //!   repository around each turn.
-//! - **What it is told once.** [`system_prompt`]: the role, and that the live state arrives with
+//! - **What it is told once.** [`system_prompt`]: the role, and that the repositories arrive with
 //!   every message. A system prompt only reaches an engine when its session starts, so nothing that
 //!   changes lives there.
-//! - **What it is told every turn.** [`live_block`]: the repositories (path, branch) and the agent
-//!   work in flight — chains, story runs, hybrid runs, running tasks — compact, so the user can ask
-//!   about them and carry them on from the chat. A chat opened *for* one chain also gets that
-//!   chain's whole brief ([`chain_brief`]) once per session.
+//! - **What it is told every turn.** [`live_block`]: the repositories — path, branch, and the
+//!   specification or harness folders the user keeps in them ([`SPEC_DIRS`]: spec-kit, OpenSpec,
+//!   Kiro…), which the model is told to read and follow.
 //!
-//! The snapshot is read from the database each turn, never cached: the point of it is to be what
-//! the Agents view shows right now.
+//! It is not tied to the app's own agents. A chat opened from a chain to carry it on («Continuar en
+//! chat del workspace», in Tareas) is the one exception, and it is opt-in: that chain's whole brief
+//! ([`chain_brief`]) rides the first turn of the session.
 
 use rusqlite::{params, Connection, OptionalExtension};
-
-use crate::db::queries;
 
 /// One repository of the workspace, as the model is told about it.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,22 +32,33 @@ pub struct RepoLine {
     /// The checked-out branch; `""` when detached, unreadable or missing.
     pub branch: String,
     pub on_disk: bool,
+    /// The [`SPEC_DIRS`] it has, in that order, with a trailing `/`.
+    pub spec_dirs: Vec<String>,
 }
 
-/// The workspace's repositories, in the sidebar's order, with their branch read off disk.
-pub fn repos(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<RepoLine>> {
-    Ok(repo_lines(queries::list_projects(conn, workspace_id)?))
+/// Folders where specification-driven or harness tooling keeps a repository's specs, plans and
+/// steering — spec-kit (`.specify/`, `specs/`), OpenSpec, Kiro, Agent OS, BMAD, and a plain
+/// `harness/`. Whichever of them a repository has is named on its line, so the model reads what the
+/// user left there instead of rediscovering, or contradicting, it.
+pub const SPEC_DIRS: &[&str] =
+    &[".specify", "specs", "openspec", ".kiro/specs", ".kiro/steering", ".agent-os", ".bmad-core", "harness", ".harness"];
+
+/// The [`SPEC_DIRS`] under `root` that are folders.
+pub fn spec_dirs(root: &std::path::Path) -> Vec<String> {
+    SPEC_DIRS.iter().filter(|dir| root.join(dir).is_dir()).map(|dir| format!("{dir}/")).collect()
 }
 
-/// [`repos`] for projects already read — so a caller holding the database lock can let it go
-/// before every repository is opened to read its branch.
+/// The workspace's repositories (`queries::list_projects`, the sidebar's order) with their branch and
+/// specification folders read off disk — opened one by one, so not under the database lock.
 pub fn repo_lines(projects: Vec<crate::db::models::Project>) -> Vec<RepoLine> {
     projects
         .into_iter()
         .map(|project| {
-            let on_disk = std::path::Path::new(&project.local_path).is_dir();
+            let root = std::path::Path::new(&project.local_path);
+            let on_disk = root.is_dir();
             let branch = if on_disk { current_branch(&project.local_path) } else { String::new() };
-            RepoLine { name: project.name, path: project.local_path, branch, on_disk }
+            let spec_dirs = if on_disk { spec_dirs(root) } else { Vec::new() };
+            RepoLine { name: project.name, path: project.local_path, branch, on_disk, spec_dirs }
         })
         .collect()
 }
@@ -78,6 +87,21 @@ pub fn working_dir(workspace_id: &str) -> std::path::PathBuf {
     crate::paths::state_dir().join("workspace-chat").join(if safe.is_empty() { "_".to_string() } else { safe })
 }
 
+/// The workspace whose chat folder `dir` is ([`working_dir`]), however it is spelled. What lets a
+/// tool that only knows where its run works — the knowledge search, the memories — answer for the
+/// whole workspace there.
+pub fn workspace_of_dir(conn: &Connection, dir: &str) -> Option<String> {
+    if !dir.contains("workspace-chat") {
+        return None;
+    }
+    let wanted = crate::repo_identity::canonical_path(dir);
+    crate::db::queries::list_workspaces(conn)
+        .ok()?
+        .into_iter()
+        .map(|workspace| workspace.id)
+        .find(|id| crate::repo_identity::canonical_path(&working_dir(id).to_string_lossy()) == wanted)
+}
+
 /// The role, said once per engine session. Everything that changes is in [`live_block`].
 pub fn system_prompt(workspace_name: &str, cwd: &str, extra_dirs_reach: bool) -> String {
     let reach = if extra_dirs_reach {
@@ -96,95 +120,12 @@ pub fn system_prompt(workspace_name: &str, cwd: &str, extra_dirs_reach: bool) ->
          que toque. Puedes editar en cualquiera de ellos; cada turno deja un punto de restauración por \
          repositorio. Si un cambio afecta a varios repositorios, di antes en una línea qué vas a tocar y \
          dónde, y mantén los cambios coherentes entre ellos.\n\n\
-         El bloque también resume el trabajo de los agentes SDD/Harness del workspace (cadenas, \
-         historias, ejecuciones híbridas y tareas). Si el usuario te pide retomarlo, continúa ese trabajo \
-         directamente en los repositorios que indica. No puedes aprobar compuertas ni reanudar o detener \
-         cadenas desde aquí: si hace falta, dile que lo haga en Tareas. No menciones el bloque salvo que \
-         te pregunten por él o sea relevante. Responde en el idioma del usuario."
+         Si junto a un repositorio el bloque nombra carpetas de especificación o de harness, léelas antes \
+         de cambiar lo que describen y síguelas. Si tienes la herramienta search_knowledge, úsala antes de \
+         suponer por qué o cómo hace algo un repositorio, o qué se decidió: busca en todos los repositorios, \
+         las carpetas de documentos y las notas del workspace. No menciones el bloque salvo que te pregunten \
+         por él o sea relevante. Responde en el idioma del usuario."
     )
-}
-
-/// One chain of the workspace that is not finished, with the step it is at.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChainLine {
-    pub id: String,
-    pub title: String,
-    /// `chain` | `story` | `hybrid`.
-    pub kind: String,
-    pub status: String,
-    pub step_count: i64,
-    pub last_reason: String,
-    pub repos: Vec<String>,
-    pub step: Option<StepLine>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct StepLine {
-    /// Zero-based.
-    pub index: i64,
-    pub agent_name: String,
-    pub phase: String,
-    pub status: String,
-    pub repo: String,
-    /// What the gate will send when approved — only meaningful on a gated step.
-    pub pending_input: String,
-    pub last_error: String,
-}
-
-/// An agent task running (or just finished badly) outside any chain.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TaskLine {
-    pub title: String,
-    pub agent_name: String,
-    pub status: String,
-    pub repo: String,
-    pub last_error: String,
-}
-
-/// How many of each the block lists — the newest. The block rides every message; a workspace with
-/// thirty paused plans must not turn each question into a report.
-const MAX_CHAINS: i64 = 8;
-const MAX_TASKS: i64 = 6;
-/// How far back a failure still counts as "in the middle of" something.
-const RECENT_FAILURE_DAYS: i64 = 3;
-
-fn recent_cutoff() -> String {
-    (chrono::Utc::now() - chrono::Duration::days(RECENT_FAILURE_DAYS)).to_rfc3339()
-}
-
-/// The workspace's unfinished chains, newest first — plus `focus`, whatever its state.
-pub fn chains(conn: &Connection, workspace_id: &str, focus: &str) -> rusqlite::Result<Vec<ChainLine>> {
-    let mut stmt = conn.prepare(
-        "SELECT c.id, c.title, c.kind, c.status, c.step_count, c.last_reason
-           FROM agent_chains c JOIN projects p ON p.id = c.project_id
-          WHERE p.workspace_id = ?1
-            AND (c.status IN ('queued', 'running', 'gated', 'paused')
-                 OR (c.status = 'failed' AND c.updated_at >= ?3)
-                 OR (c.id = ?2 AND ?2 <> ''))
-          ORDER BY (c.id = ?2) DESC, c.updated_at DESC
-          LIMIT ?4",
-    )?;
-    let rows: Vec<ChainLine> = stmt
-        .query_map(params![workspace_id, focus, recent_cutoff(), MAX_CHAINS], |row| {
-            Ok(ChainLine {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                kind: row.get(2)?,
-                status: row.get(3)?,
-                step_count: row.get(4)?,
-                last_reason: row.get(5)?,
-                repos: Vec::new(),
-                step: None,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    rows.into_iter()
-        .map(|mut chain| {
-            chain.repos = chain_repo_names(conn, &chain.id)?;
-            chain.step = current_step(conn, &chain.id)?;
-            Ok(chain)
-        })
-        .collect()
 }
 
 fn chain_repo_names(conn: &Connection, chain_id: &str) -> rusqlite::Result<Vec<String>> {
@@ -194,56 +135,6 @@ fn chain_repo_names(conn: &Connection, chain_id: &str) -> rusqlite::Result<Vec<S
     )?;
     let names = stmt.query_map(params![chain_id], |row| row.get::<_, String>(0))?;
     names.filter(|name| !matches!(name, Ok(n) if n.is_empty())).collect()
-}
-
-/// The step a chain is at: the one running, else the first still to run (a gate waits on it), else
-/// the last one touched.
-fn current_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<StepLine>> {
-    conn.query_row(
-        "SELECT s.step_index, s.agent_name, s.phase, s.status, COALESCE(p.name, ''), s.pending_input, s.last_error
-           FROM agent_chain_steps s LEFT JOIN projects p ON p.id = s.project_id
-          WHERE s.chain_id = ?1
-          ORDER BY CASE s.status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
-                   CASE WHEN s.status IN ('running', 'pending') THEN s.step_index ELSE -s.step_index END
-          LIMIT 1",
-        params![chain_id],
-        |row| {
-            Ok(StepLine {
-                index: row.get(0)?,
-                agent_name: row.get(1)?,
-                phase: row.get(2)?,
-                status: row.get(3)?,
-                repo: row.get(4)?,
-                pending_input: row.get(5)?,
-                last_error: row.get(6)?,
-            })
-        },
-    )
-    .optional()
-}
-
-/// Agent tasks of the workspace running on their own (a chain's step tasks are told with the
-/// chain), and the ones that failed lately.
-pub fn tasks(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<TaskLine>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.title, t.agent_name, t.status, COALESCE(p.name, ''), t.last_error
-           FROM agent_tasks t LEFT JOIN projects p ON p.id = t.project_id
-          WHERE t.workspace_id = ?1
-            AND (t.status = 'running' OR (t.status = 'error' AND t.updated_at >= ?2))
-            AND t.id NOT IN (SELECT task_id FROM agent_chain_steps WHERE task_id <> '')
-          ORDER BY t.updated_at DESC
-          LIMIT ?3",
-    )?;
-    let rows = stmt.query_map(params![workspace_id, recent_cutoff(), MAX_TASKS], |row| {
-        Ok(TaskLine {
-            title: row.get(0)?,
-            agent_name: row.get(1)?,
-            status: row.get(2)?,
-            repo: row.get(3)?,
-            last_error: row.get(4)?,
-        })
-    })?;
-    rows.collect()
 }
 
 fn chain_kind_label(kind: &str) -> &'static str {
@@ -279,8 +170,9 @@ fn clip(text: &str, max: usize) -> String {
     }
 }
 
-/// The block appended to every message: repositories and agent work, compact.
-pub fn live_block(repos: &[RepoLine], chains: &[ChainLine], tasks: &[TaskLine]) -> String {
+/// The block appended to every message: the repositories, each with its path, its branch and the
+/// specification folders it has.
+pub fn live_block(repos: &[RepoLine]) -> String {
     let mut out = String::from(
         "\n\n---\nEstado del workspace (lo añade CodeFlow en cada mensaje; no lo escribió el usuario):\nRepositorios:",
     );
@@ -291,59 +183,13 @@ pub fn live_block(repos: &[RepoLine], chains: &[ChainLine], tasks: &[TaskLine]) 
         out.push_str(&format!("\n- {} — {}", repo.name, repo.path));
         if !repo.on_disk {
             out.push_str(" (no está en disco)");
-        } else if !repo.branch.is_empty() {
+            continue;
+        }
+        if !repo.branch.is_empty() {
             out.push_str(&format!(" (rama {})", repo.branch));
         }
-    }
-    if chains.is_empty() && tasks.is_empty() {
-        out.push_str("\nTrabajo de agentes en curso: ninguno.");
-        return out;
-    }
-    out.push_str("\nTrabajo de agentes en curso:");
-    for chain in chains {
-        out.push_str(&format!(
-            "\n- {} «{}» — {}",
-            chain_kind_label(&chain.kind),
-            clip(&chain.title, 80),
-            status_label(&chain.status)
-        ));
-        if let Some(step) = &chain.step {
-            out.push_str(&format!("; paso {}/{}", step.index + 1, chain.step_count.max(step.index + 1)));
-            if !step.agent_name.is_empty() {
-                out.push_str(&format!(": {}", step.agent_name));
-            }
-            if !step.phase.is_empty() {
-                out.push_str(&format!(" (fase {})", step.phase));
-            }
-            if !step.repo.is_empty() {
-                out.push_str(&format!(" en {}", step.repo));
-            }
-            if chain.status == "gated" && !step.pending_input.trim().is_empty() {
-                out.push_str(&format!("; enviará al aprobar: «{}»", clip(&step.pending_input, 220)));
-            }
-            if !step.last_error.trim().is_empty() && chain.status != "running" {
-                out.push_str(&format!("; error: {}", clip(&step.last_error, 160)));
-            }
-        }
-        if !chain.last_reason.trim().is_empty() && chain.status != "running" {
-            out.push_str(&format!("; motivo: {}", clip(&chain.last_reason, 120)));
-        }
-        if !chain.repos.is_empty() {
-            out.push_str(&format!("; repos: {}", chain.repos.join(", ")));
-        }
-        out.push_str(&format!("; id {}", chain.id));
-    }
-    for task in tasks {
-        out.push_str(&format!("\n- Tarea «{}»", clip(&task.title, 80)));
-        if !task.agent_name.is_empty() {
-            out.push_str(&format!(" ({})", task.agent_name));
-        }
-        if !task.repo.is_empty() {
-            out.push_str(&format!(" en {}", task.repo));
-        }
-        out.push_str(&format!(" — {}", status_label(&task.status)));
-        if task.status == "error" && !task.last_error.trim().is_empty() {
-            out.push_str(&format!(": {}", clip(&task.last_error, 160)));
+        if !repo.spec_dirs.is_empty() {
+            out.push_str(&format!("; carpetas de especificación: {}", repo.spec_dirs.join(", ")));
         }
     }
     out
@@ -423,6 +269,12 @@ pub fn chain_brief(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option
             break;
         }
     }
+    // What the system prompt used to say for every workspace chat, now said only where a chain is
+    // being carried on: the chat works in the repositories, the chain's controls stay in Tareas.
+    out.push_str(
+        "\nNo puedes aprobar compuertas ni reanudar o detener esta cadena desde el chat: si hace falta, \
+         dile al usuario que lo haga en Tareas.",
+    );
     Ok(Some(out))
 }
 
@@ -474,67 +326,39 @@ mod tests {
     #[test]
     fn repos_lists_the_workspace_only_and_says_what_is_missing() {
         let conn = seeded();
-        let repos = repos(&conn, "w1").unwrap();
+        let repos = repo_lines(crate::db::queries::list_projects(&conn, "w1").unwrap());
         assert_eq!(repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["api", "web"]);
-        assert!(repos.iter().all(|r| !r.on_disk));
+        assert!(repos.iter().all(|r| !r.on_disk && r.spec_dirs.is_empty()));
         assert!(extra_dirs(&repos).is_empty());
-        let block = live_block(&repos, &[], &[]);
+        let block = live_block(&repos);
         assert!(block.contains("- api — /nowhere/api (no está en disco)"));
-        assert!(block.contains("Trabajo de agentes en curso: ninguno."));
+        // Repositories only: the app's own agents are not this chat's business.
+        assert!(!block.contains("agentes"), "{block}");
+        assert!(live_block(&[]).ends_with("Repositorios: ninguno."));
     }
 
+    /// The specification and harness folders a user keeps in a repository are named on its line, so
+    /// the model reads them; a file with one of those names is not a folder and is not named.
     #[test]
-    fn the_snapshot_carries_open_chains_and_their_gate_but_not_finished_or_foreign_ones() {
-        let conn = seeded();
-        let now = chrono::Utc::now().to_rfc3339();
-        chain(&conn, "gated", "p1", "story", "gated", &now);
-        step(&conn, "gated", 0, "done", "", "analysed");
-        step(&conn, "gated", 1, "pending", "Implement the plan in web", "");
-        chain(&conn, "done", "p1", "chain", "done", &now);
-        chain(&conn, "old-fail", "p1", "chain", "failed", "2020-01-01T00:00:00+00:00");
-        chain(&conn, "foreign", "p3", "chain", "running", &now);
+    fn a_repository_s_spec_folders_are_named_on_its_line() {
+        let root = std::env::temp_dir().join(format!("cf-ws-spec-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("specs/001-login")).unwrap();
+        std::fs::create_dir_all(root.join(".kiro/steering")).unwrap();
+        std::fs::create_dir_all(root.join(".kiro/hooks")).unwrap();
+        std::fs::write(root.join("harness"), "not a folder").unwrap();
+        assert_eq!(spec_dirs(&root), vec!["specs/".to_string(), ".kiro/steering/".to_string()]);
 
-        let listed = chains(&conn, "w1", "").unwrap();
-        assert_eq!(listed.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["gated"]);
-        let gated = &listed[0];
-        let at = gated.step.as_ref().unwrap();
-        assert_eq!((at.index, at.status.as_str(), at.repo.as_str()), (1, "pending", "web"));
-        assert_eq!(gated.repos, vec!["api".to_string()]);
-
-        let block = live_block(&[], &listed, &[]);
-        assert!(block.contains("Historia (SDD) «Plan gated» — esperando aprobación"), "{block}");
-        assert!(block.contains("paso 2/2: Agent1 (fase implement) en web"), "{block}");
-        assert!(block.contains("enviará al aprobar: «Implement the plan in web»"), "{block}");
-        assert!(block.contains("id gated"));
-
-        // A chain the chat was opened for is listed whatever its state, first.
-        let focused = chains(&conn, "w1", "done").unwrap();
-        assert_eq!(focused.first().map(|c| c.id.as_str()), Some("done"));
-    }
-
-    #[test]
-    fn tasks_skip_chain_steps_and_old_failures() {
-        let conn = seeded();
-        let now = chrono::Utc::now().to_rfc3339();
-        for (id, status, updated) in [("t-run", "running", now.as_str()), ("t-old", "error", "2020-01-01"), ("t-step", "running", now.as_str())] {
-            conn.execute(
-                "INSERT INTO agent_tasks (id, workspace_id, project_id, agent_name, title, conversation_id, status, created_at, updated_at)
-                 VALUES (?1, 'w1', 'p1', 'Reviewer', ?1, ?1, ?2, ?3, ?3)",
-                params![id, status, updated],
-            )
-            .unwrap();
-        }
-        chain(&conn, "c", "p1", "chain", "running", &now);
-        conn.execute(
-            "INSERT INTO agent_chain_steps (id, chain_id, step_index, task_id, created_at, updated_at)
-             VALUES ('c-0', 'c', 0, 't-step', '2026-01-01', '2026-01-01')",
-            [],
-        )
-        .unwrap();
-        let listed = tasks(&conn, "w1").unwrap();
-        assert_eq!(listed.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), vec!["t-run"]);
-        let block = live_block(&[], &[], &listed);
-        assert!(block.contains("- Tarea «t-run» (Reviewer) en api — ejecutándose"), "{block}");
+        let line = RepoLine {
+            name: "api".into(),
+            path: root.to_string_lossy().into_owned(),
+            branch: "main".into(),
+            on_disk: true,
+            spec_dirs: spec_dirs(&root),
+        };
+        let block = live_block(std::slice::from_ref(&line));
+        assert!(block.ends_with("(rama main); carpetas de especificación: specs/, .kiro/steering/"), "{block}");
+        assert!(system_prompt("Flow", "/tmp/x", true).contains("carpetas de especificación o de harness"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -552,6 +376,7 @@ mod tests {
         assert!(brief.contains("END"));
         assert!(brief.contains("Resultado: …"));
         assert!(brief.contains("2. Agent1"));
+        assert!(brief.ends_with("dile al usuario que lo haga en Tareas."), "{brief}");
         assert!(chain_brief(&conn, "missing").unwrap().is_none());
     }
 

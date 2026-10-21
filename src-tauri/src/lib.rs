@@ -109,7 +109,9 @@ mod shell_profiles;
 mod shutdown;
 /// AWS request signing, shared by the API client and the Remote workspace's S3 transport.
 mod sigv4;
+mod skill_builder;
 mod skill_meta;
+mod skills_registry;
 mod supabase;
 mod sysload;
 mod keep_awake;
@@ -1031,7 +1033,6 @@ sharded_invoke_handler! {
         commands::chat_cmd::chat_set_effort,
         commands::chat_cmd::chat_create_workspace_conversation,
         commands::chat_cmd::chat_list_workspace_conversations,
-        commands::chat_cmd::chat_set_workspace_agent,
         commands::chat_cmd::workspace_chat_snapshot,
         commands::chat_cmd::chat_effort_support,
         commands::chat_cmd::chat_model_effort_support,
@@ -1067,6 +1068,7 @@ sharded_invoke_handler! {
         commands::chat_attach::chat_list_outputs,
         commands::chat_attach::chat_save_output,
         commands::chat_attach::chat_read_output,
+        commands::chat_attach::chat_attachment_preview,
         commands::chat_cmd::chat_delete_conversation,
         commands::chat_cmd::chat_set_pinned,
         commands::chat_cmd::chat_set_archived,
@@ -1402,6 +1404,13 @@ sharded_invoke_handler! {
         commands::settings::upsert_review_context,
         commands::settings::delete_review_context,
         commands::skills_cmd::install_workspace_skill,
+        commands::skills_cmd::skills_registry_search,
+        commands::skills_cmd::skills_registry_describe,
+        commands::skills_cmd::skill_generate,
+        commands::skills_cmd::default_skill_template,
+        commands::skills_cmd::skill_save_draft,
+        commands::skills_cmd::skill_write_bundle,
+        commands::skills_cmd::export_workspace_skill,
         commands::skills_cmd::list_workspace_skills,
         commands::skills_cmd::remove_workspace_skill,
         commands::skills_cmd::set_workspace_skill_enabled,
@@ -1429,6 +1438,7 @@ sharded_invoke_handler! {
         commands::secrets_cmd::delete_monday_token,
         commands::secrets_cmd::set_linear_token,
         commands::secrets_cmd::delete_linear_token,
+        commands::claude_cmd::claude_chat_plugins,
         commands::claude_cmd::generate_commit_message,
         commands::claude_cmd::draft_pr_comment_reply,
         commands::claude_cmd::list_ai_models,

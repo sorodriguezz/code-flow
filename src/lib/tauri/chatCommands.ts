@@ -98,8 +98,6 @@ export interface ChatConversation {
   /** A workspace chat of the assistant panel (it talks to every repository of `workspaceId`), never
    *  listed here — see `workspaceChatStore`. */
   workspaceScope?: boolean;
-  /** The SDD/Harness agent answering a workspace chat, `""` for none. */
-  agentId?: string;
   /** The chain a workspace chat was opened to carry on, `""` for none. */
   focusChainId?: string;
   createdAt: string;
@@ -759,6 +757,10 @@ export const chatSaveOutput = (conversationId: string, relPath: string, destPath
 export const chatReadOutput = (conversationId: string, relPath: string) =>
   invoke<number[]>("chat_read_output", { conversationId, relPath });
 
+/** An attached image as a `data:` URL, for its chip's hover preview. Only a file under the chats'
+ *  own attachment folders, and refused above 8 MB — see `chat_attach::chat_attachment_preview`. */
+export const chatAttachmentPreview = (path: string) => invoke<string>("chat_attachment_preview", { path });
+
 export const chatSetGroupInstructions = (groupId: string, instructions: string) =>
   invoke<void>("chat_set_group_instructions", { groupId, instructions });
 
@@ -807,7 +809,6 @@ export const chatCreateWorkspaceConversation = (args: {
   provider: string;
   model: string;
   account?: string | null;
-  agentId?: string | null;
   focusChainId?: string | null;
   effort?: string | null;
 }) =>
@@ -817,7 +818,6 @@ export const chatCreateWorkspaceConversation = (args: {
     provider: args.provider,
     model: args.model,
     account: args.account ?? null,
-    agentId: args.agentId ?? null,
     focusChainId: args.focusChainId ?? null,
     effort: args.effort ?? null,
   });
@@ -826,19 +826,13 @@ export const chatCreateWorkspaceConversation = (args: {
 export const chatListWorkspaceConversations = (workspaceId: string) =>
   invoke<ChatConversation[]>("chat_list_workspace_conversations", { workspaceId });
 
-/** Puts an SDD/Harness agent of the workspace in charge of a workspace chat; `""` takes it out. */
-export const chatSetWorkspaceAgent = (conversationId: string, agentId: string) =>
-  invoke<void>("chat_set_workspace_agent", { conversationId, agentId });
-
 export interface WorkspaceChatSnapshot {
   repos: number;
   reposOnDisk: number;
-  /** Chains and tasks in flight the next turn is told about. */
-  inFlight: number;
   /** The block itself, as the engine reads it. */
   text: string;
 }
 
 /** What a workspace chat's next turn is told about the workspace. */
-export const workspaceChatSnapshot = (workspaceId: string, focusChainId?: string | null) =>
-  invoke<WorkspaceChatSnapshot>("workspace_chat_snapshot", { workspaceId, focusChainId: focusChainId ?? null });
+export const workspaceChatSnapshot = (workspaceId: string) =>
+  invoke<WorkspaceChatSnapshot>("workspace_chat_snapshot", { workspaceId });

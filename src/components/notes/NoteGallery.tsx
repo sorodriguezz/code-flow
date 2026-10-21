@@ -1,6 +1,5 @@
 import { lazy, memo, Suspense, useMemo, useState } from "react";
 import {
-  CalendarDays,
   Waypoints,
   ArrowUpDown,
   Book,
@@ -212,15 +211,6 @@ export function NoteGallery() {
             onClick={() => setGalleryView("graph")}
           />
         </div>
-        <button
-          type="button"
-          className={`${ICON_BUTTON} shrink-0`}
-          title={t("notes.dailyNote")}
-          aria-label={t("notes.dailyNote")}
-          onClick={() => void useNotesStore.getState().openDailyNote()}
-        >
-          <CalendarDays size={13} />
-        </button>
       </div>
 
       {galleryView === "graph" ? (

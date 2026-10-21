@@ -146,13 +146,24 @@ fn newest_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
 ///
 /// From the CLI's own report when a chat turn has filed one — that is exactly what it loaded —
 /// else from `installed_plugins.json` filtered by `settings.json`'s `enabledPlugins`.
+///
+/// Leaves out the ones CodeFlow's chats keep out (`claude::CHAT_PLUGINS_OFF_KEY`): a chat run does
+/// not load them, so their skills and commands are nothing a chat can open.
 pub fn claude_plugins(config: &Path, report: Option<&crate::claude::ClaudeInstallReport>) -> Vec<(String, PathBuf)> {
+    let off = crate::claude::chat_plugins_off();
+    let kept_out = |name: &str, id: &str| {
+        if id.is_empty() {
+            off.iter().any(|off| off.split('@').next() == Some(name))
+        } else {
+            off.iter().any(|off| off == id)
+        }
+    };
     if let Some(report) = report {
         if !report.plugins.is_empty() {
             return report
                 .plugins
                 .iter()
-                .filter(|plugin| !plugin.path.is_empty())
+                .filter(|plugin| !plugin.path.is_empty() && !kept_out(&plugin.name, &plugin.source))
                 .map(|plugin| (plugin.name.clone(), PathBuf::from(&plugin.path)))
                 .collect();
         }
@@ -170,7 +181,7 @@ pub fn claude_plugins(config: &Path, report: Option<&crate::claude::ClaudeInstal
 
     let mut out = Vec::new();
     for (key, installs) in installed {
-        if enabled.get(&key).and_then(serde_json::Value::as_bool) != Some(true) {
+        if enabled.get(&key).and_then(serde_json::Value::as_bool) != Some(true) || off.contains(&key) {
             continue;
         }
         let name = key.split('@').next().unwrap_or(&key).to_string();
@@ -208,7 +219,13 @@ pub fn claude(config: &Path, cwd: Option<&Path>, report: Option<&crate::claude::
         out.extend(scan_root(&path.join("skills"), "plugin", Some(&name)));
     }
     if let Some(report) = report {
+        // A run from before a plugin was kept out of the chats still named its skills (`vercel:deploy`).
+        let off: Vec<String> =
+            crate::claude::chat_plugins_off().iter().filter_map(|id| id.split('@').next().map(|name| format!("{name}:"))).collect();
         for name in &report.skills {
+            if off.iter().any(|prefix| name.starts_with(prefix.as_str())) {
+                continue;
+            }
             if !out.iter().any(|skill| &skill.name == name) {
                 out.push(ProviderSkill {
                     name: name.clone(),
@@ -462,22 +479,27 @@ pub fn gemini() -> Vec<ProviderSkill> {
 /// to stdin), an attachment, caveman's rules or agy's system prompt on a first turn all put
 /// something in front of it. Claude is told to open it with its `Skill` tool, which every chat turn
 /// is granted; everyone else is pointed at the file.
+///
+/// **It says the skill was attached, and that a question can be about it.** It used to say only
+/// "para esta petición usa la skill X", and a question *about* the skill then read as a task to do
+/// with it: asked "¿en qué me ayuda esta kill?" (sic) with `architecture-designer` attached, Haiku
+/// opened the skill and went on to search the repositories for something called "kill" (user report,
+/// 2026-10-20). Naming what "esta skill" points at, typo included, and giving the two cases — explain
+/// it, or follow it — is what lets a small model tell them apart.
 pub fn instruction(provider: &str, pick: &SkillPick, resolved_path: Option<&str>) -> String {
     let name = pick.name.trim();
     let path = resolved_path.or(pick.path.as_deref()).filter(|path| !path.trim().is_empty());
-    match (provider, path) {
-        ("claude", Some(path)) => format!(
-            "Para esta petición usa la skill «{name}»: invócala con tu herramienta Skill y sigue sus \
-             instrucciones (su definición está en {path})."
-        ),
-        ("claude", None) => {
-            format!("Para esta petición usa la skill «{name}»: invócala con tu herramienta Skill y sigue sus instrucciones.")
-        }
-        (_, Some(path)) => format!(
-            "Para esta petición usa la skill «{name}»: antes de responder, lee {path} y sigue sus instrucciones."
-        ),
-        (_, None) => format!("Para esta petición usa tu skill «{name}» y sigue sus instrucciones."),
-    }
+    let open = match (provider, path) {
+        ("claude", Some(path)) => format!("Ábrela con tu herramienta Skill (su definición está en {path})."),
+        ("claude", None) => "Ábrela con tu herramienta Skill.".to_string(),
+        (_, Some(path)) => format!("Antes de responder, lee {path}."),
+        (_, None) => "Antes de responder, consulta esa skill.".to_string(),
+    };
+    format!(
+        "El usuario adjuntó a este mensaje la skill «{name}»: si habla de «esta skill» (aunque lo escriba \
+         mal), se refiere a ella. {open} Si pregunta por la skill misma —qué hace, para qué sirve, cuándo \
+         usarla—, respóndele a partir de lo que dice; si no, sigue sus instrucciones para hacer lo que pide."
+    )
 }
 
 #[cfg(test)]
@@ -603,7 +625,7 @@ mod tests {
         std::fs::write(plugin.join("commands/_conventions.md"), "notes").unwrap();
         std::fs::write(plugin.join("commands/deploy.md.tmpl"), "template").unwrap();
         let report = crate::claude::ClaudeInstallReport {
-            plugins: vec![crate::claude::PluginRef { name: "vercel".into(), path: plugin.to_string_lossy().into_owned() }],
+            plugins: vec![crate::claude::PluginRef { name: "vercel".into(), path: plugin.to_string_lossy().into_owned(), source: String::new() }],
             ..Default::default()
         };
         let commands = claude_commands(&config, None, Some(&report));
@@ -646,5 +668,7 @@ mod tests {
         assert!(codex.contains("lee .agents/skills/pdf/SKILL.md"), "the resolved copy wins: {codex}");
         let bare = instruction("grok", &SkillPick { name: "x".into(), ..Default::default() }, None);
         assert!(bare.contains("«x»"), "{bare}");
+        // A question about the skill is not a task to run with it.
+        assert!(claude.contains("adjuntó") && claude.contains("la skill misma"), "{claude}");
     }
 }

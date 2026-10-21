@@ -1,9 +1,10 @@
 import { type ReactNode, useEffect, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, FileArchive, FolderInput, Loader2, PackagePlus, Plus, Trash2 } from "lucide-react";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ChevronDown, Download, FileArchive, FolderInput, Loader2, PackagePlus, Plus, Trash2 } from "lucide-react";
 import {
   createCustomSkill,
   deleteSkillFile,
+  exportWorkspaceSkill,
   importSkillFromFile,
   importSkillFromFolder,
   installWorkspaceSkill,
@@ -15,7 +16,7 @@ import {
   writeSkillFile,
 } from "../../lib/tauri/commands";
 import { onSkillsProgress } from "../../lib/tauri/events";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { WorkspaceSkill } from "../../types/domain";
 import { confirmAction } from "../../state/confirmStore";
@@ -26,6 +27,10 @@ import { SettingsHeader } from "../api/settingsChrome";
 import { riseDelay } from "../../lib/rise";
 import { buttonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
+import { SkillsRegistry } from "./SkillsRegistry";
+import { SkillGenerator } from "./SkillGenerator";
+import { AiWand } from "../common/AiGlyph";
+import { useSkillGenStore } from "../../state/skillGenStore";
 
 const DEFAULT_SKILL_MD = "---\nname: my-skill\ndescription: What this skill does and when to use it.\n---\n\n# My skill\n\nInstructions for the model…\n";
 
@@ -41,6 +46,14 @@ export function SkillsSettings({ bare = false }: { bare?: boolean } = {}) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
+  /** The repo-and-name fields, for a skill the registry search does not return. */
+  const [manual, setManual] = useState(false);
+  /** «Generar con IA» open — and kept open while this workspace has a run or a draft in it. */
+  const [generating, setGenerating] = useState(false);
+  const genBusy = useSkillGenStore((s) => {
+    const gen = workspaceId ? s.byWorkspace[workspaceId] : undefined;
+    return Boolean(gen?.runId || gen?.draft);
+  });
 
   /**
    * Re-reads one workspace's skills — and refuses to publish them into a screen that has moved on.
@@ -76,13 +89,14 @@ export function SkillsSettings({ bare = false }: { bare?: boolean } = {}) {
     );
   }
 
-  const install = async () => {
-    if (!repo.trim() || !skillName.trim()) return;
+  /** Installs `name` from `source` — picked in the registry, or typed in the two fields. */
+  const install = async (source = repo, name = skillName) => {
+    if (!source.trim() || !name.trim()) return;
     setInstalling(true);
     setLines([]);
     const unlisten = await onSkillsProgress((e) => setLines((prev) => [...prev.slice(-200), e.line]));
     try {
-      await installWorkspaceSkill(workspaceId, repo.trim(), skillName.trim());
+      await installWorkspaceSkill(workspaceId, source.trim(), name.trim());
       setRepo("");
       setSkillName("");
       await reload(workspaceId);
@@ -143,6 +157,22 @@ export function SkillsSettings({ bare = false }: { bare?: boolean } = {}) {
     }
   };
 
+  /** A skill as a `.skill` bundle — to send, or to load into claude.ai or another machine. */
+  const exportSkill = async (skill: WorkspaceSkill) => {
+    const dest = await saveDialog({
+      defaultPath: `${skill.skill_name}.skill`,
+      filters: [{ name: "Skill", extensions: ["skill"] }],
+      title: t("skills.gen.downloadTitle"),
+    });
+    if (!dest) return;
+    try {
+      const written = await exportWorkspaceSkill(workspaceId, skill.skill_name, dest);
+      pushSuccessToast(t("skills.gen.downloaded", { path: written }));
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
   const toggle = async (skill: WorkspaceSkill, enabled: boolean) => {
     setSkills((prev) => prev.map((s) => (s.id === skill.id ? { ...s, enabled } : s)));
     try {
@@ -189,30 +219,42 @@ export function SkillsSettings({ bare = false }: { bare?: boolean } = {}) {
         <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("settings.skillFromRegistry")}
         </p>
-        <div className="flex gap-1.5">
-          <input
-            value={repo}
-            onChange={(e) => setRepo(e.target.value)}
-            disabled={installing}
-            placeholder={t("settings.skillRepoPlaceholder")}
-            className={fieldClass({ className: "flex-1 font-mono" })}
-          />
-          <input
-            value={skillName}
-            onChange={(e) => setSkillName(e.target.value)}
-            disabled={installing}
-            placeholder={t("settings.skillNamePlaceholder")}
-            className={fieldClass({ className: "w-40 font-mono" })}
-          />
-          <button
-            onClick={install}
-            disabled={installing || !repo.trim() || !skillName.trim()}
-            className={buttonClass({ variant: "primary" })}
-          >
-            {installing ? <Loader2 size={13} className="animate-spin" /> : <PackagePlus size={13} />}
-            {installing ? t("settings.installingSkill") : t("settings.installSkill")}
-          </button>
-        </div>
+        <SkillsRegistry installed={skills} installing={installing} onInstall={(source, name) => install(source, name)} />
+        <button
+          type="button"
+          onClick={() => setManual((v) => !v)}
+          aria-expanded={manual}
+          className="flex items-center gap-1 text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        >
+          <ChevronDown size={11} className={manual ? "" : "-rotate-90"} />
+          {t("settings.skillManual")}
+        </button>
+        {manual && (
+          <div className="flex gap-1.5">
+            <input
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              disabled={installing}
+              placeholder={t("settings.skillRepoPlaceholder")}
+              className={fieldClass({ className: "flex-1 font-mono" })}
+            />
+            <input
+              value={skillName}
+              onChange={(e) => setSkillName(e.target.value)}
+              disabled={installing}
+              placeholder={t("settings.skillNamePlaceholder")}
+              className={fieldClass({ className: "w-40 font-mono" })}
+            />
+            <button
+              onClick={() => void install()}
+              disabled={installing || !repo.trim() || !skillName.trim()}
+              className={buttonClass({ variant: "primary" })}
+            >
+              {installing ? <Loader2 size={13} className="animate-spin" /> : <PackagePlus size={13} />}
+              {installing ? t("settings.installingSkill") : t("settings.installSkill")}
+            </button>
+          </div>
+        )}
         {lines.length > 0 && (
           <div className="max-h-28 overflow-auto rounded-md bg-[var(--cf-hover)] p-2 font-mono text-[11px] text-[var(--cf-text-muted)]">
             {lines.map((line, i) => (
@@ -243,6 +285,9 @@ export function SkillsSettings({ bare = false }: { bare?: boolean } = {}) {
             </div>
           ) : (
             <>
+              <button onClick={() => setGenerating(true)} className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline">
+                <AiWand size={13} /> {t("skills.gen.open")}
+              </button>
               <button onClick={() => setCreating(true)} className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline">
                 <Plus size={13} /> {t("settings.skillCreateCustom")}
               </button>
@@ -257,6 +302,20 @@ export function SkillsSettings({ bare = false }: { bare?: boolean } = {}) {
         </div>
       </div>
 
+      {(generating || genBusy) && (
+        <div className="mb-3">
+          <SkillGenerator
+            workspaceId={workspaceId}
+            onClose={() => setGenerating(false)}
+            onSaved={async (created) => {
+              setGenerating(false);
+              await reload(workspaceId);
+              setExpandedId(created.id);
+            }}
+          />
+        </div>
+      )}
+
       <div className="space-y-1">
         {skills.map((s, at) => (
           <div key={s.id} style={riseDelay(at)} className="cf-rise rounded-md border border-[var(--cf-border)]">
@@ -270,7 +329,9 @@ export function SkillsSettings({ bare = false }: { bare?: boolean } = {}) {
                     ? t("settings.skillBadgeLocal")
                     : s.source_repo === "bundle"
                       ? t("settings.skillBadgeBundle")
-                      : s.source_repo}
+                      : s.source_repo === "generated"
+                        ? t("settings.skillBadgeGenerated")
+                        : s.source_repo}
               </span>
               <div className="ml-auto flex items-center gap-2">
                 <button
@@ -279,6 +340,14 @@ export function SkillsSettings({ bare = false }: { bare?: boolean } = {}) {
                 >
                   <ChevronDown size={13} className={`transition-transform ${expandedId === s.id ? "" : "-rotate-90"}`} />
                   {t("settings.skillEdit")}
+                </button>
+                <button
+                  onClick={() => void exportSkill(s)}
+                  title={t("skills.gen.download")}
+                  aria-label={t("skills.gen.download")}
+                  className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                >
+                  <Download size={13} />
                 </button>
                 <button onClick={() => void remove(s)} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]">
                   <Trash2 size={13} />

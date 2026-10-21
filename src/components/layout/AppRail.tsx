@@ -309,7 +309,7 @@ export function AppRail() {
     // app stays exactly where it was, rather than leaving this window on an empty view.
     if (!moved) return;
     if (activeView === app.id && (app.workspace ?? apiWorkspace) === apiWorkspace) {
-      setActiveView("graph");
+      useUiStore.getState().returnToRepo();
     }
   };
 
@@ -345,7 +345,7 @@ export function AppRail() {
           <button
             type="button"
             data-tour="workspace-menu"
-            onClick={() => setActiveView("graph")}
+            onClick={() => useUiStore.getState().returnToRepo()}
             aria-label={`${workspace?.name ?? t("tabbar.scopeWorkspace")} — ${t("tabbar.scopeWorkspaceReset")}`}
             className="mb-0.5 flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-[8px] border transition-[filter,transform] hover:brightness-105 active:scale-95"
             style={{ backgroundColor: wash(wsColor, 16), borderColor: wash(wsColor, 40) }}

@@ -16,7 +16,6 @@ import {
   chatSetEffort,
   chatSetEngine,
   chatSetUnread,
-  chatSetWorkspaceAgent,
   chatTurnCheckpoints,
   type ChatAttachment,
   type ChatConversation,
@@ -46,7 +45,7 @@ import { pushErrorToast } from "./toastStore";
 
 /**
  * The assistant panel's **workspace chats** — one conversation that talks to every repository of a
- * workspace and knows what its SDD/Harness agents are in the middle of (`src-tauri/src/workspace_chat.rs`).
+ * workspace (`src-tauri/src/workspace_chat.rs`).
  *
  * Backed by the chat workspace's tables and its `chat_send` (rows with `workspace_scope = 1`, which
  * that workspace never lists), so streaming, effort, compaction and titles are that engine path's.
@@ -55,7 +54,7 @@ import { pushErrorToast } from "./toastStore";
  *
  * - **The tab mints the id.** A new chat is a tab before it is a row; its first question creates the
  *   row under the same id (`chatCreateWorkspaceConversation`), carrying what was picked meanwhile —
- *   engine, thinking level, agent, the chain it was opened for.
+ *   engine, thinking level, the chain it was opened for.
  * - **Every turn is stamped with its workspace before the first await** (run isolation): the run
  *   row, the notification and the unread mark name the workspace the question was asked in.
  * - **Enter keeps working while a turn runs** — the same queue the other chats use (`chatQueueStore`).
@@ -74,8 +73,6 @@ export interface WsChatSession {
   model: string;
   accountId: string | null;
   effort: string;
-  /** The SDD/Harness agent in charge, `""` for none. While one is, its routing answers. */
-  agentId: string;
   /** The chain this chat was opened to carry on, `""` for none. */
   focusChainId: string;
   messages: WsChatMessage[];
@@ -134,7 +131,6 @@ interface WsChatState {
   loadList: (workspaceId: string) => Promise<void>;
   setEngine: (conversationId: string, provider: string, model: string, account?: string | null) => Promise<void>;
   setEffort: (conversationId: string, effort: string) => Promise<void>;
-  setAgent: (conversationId: string, agentId: string) => Promise<void>;
   setPlan: (conversationId: string, on: boolean) => void;
   /** Conversations whose summary is being written right now — the meter's spinner. */
   compacting: Record<string, boolean>;
@@ -172,7 +168,6 @@ export const EMPTY_WS_CHAT: WsChatSession = {
   model: "",
   accountId: null,
   effort: "",
-  agentId: "",
   focusChainId: "",
   messages: [],
   persisted: false,
@@ -266,7 +261,6 @@ export function sessionFromRow(row: ChatConversation): WsChatSession {
     model: row.model,
     accountId: row.accountId ?? null,
     effort: row.effort,
-    agentId: row.agentId ?? "",
     focusChainId: row.focusChainId ?? "",
     contextTokens: row.contextTokens,
     // Read off the row, which is the last measurement there has ever been — so until a turn runs
@@ -433,15 +427,13 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
     setEngine: async (conversationId, provider, model, account) => {
       const session = get().byConversation[conversationId];
       if (!session) return;
-      // Picking an engine is taking the agent out of charge: one answers, not both.
-      patch(conversationId, (s) => ({ ...s, provider, model, accountId: account ?? s.accountId, agentId: "" }));
+      patch(conversationId, (s) => ({ ...s, provider, model, accountId: account ?? s.accountId }));
       if (!session.persisted) return;
       try {
-        if (session.agentId) await chatSetWorkspaceAgent(conversationId, "");
         const accountId = await chatSetEngine(conversationId, provider, model, account ?? null);
         patch(conversationId, (s) => ({ ...s, accountId }));
       } catch (e) {
-        patch(conversationId, (s) => ({ ...s, provider: session.provider, model: session.model, accountId: session.accountId, agentId: session.agentId }));
+        patch(conversationId, (s) => ({ ...s, provider: session.provider, model: session.model, accountId: session.accountId }));
         pushErrorToast(String(e));
       }
     },
@@ -481,17 +473,6 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       } finally {
         set((s) => ({ compacting: { ...s.compacting, [conversationId]: false } }));
       }
-    },
-
-    setAgent: async (conversationId, agentId) => {
-      const session = get().byConversation[conversationId];
-      if (!session) return;
-      patch(conversationId, (s) => ({ ...s, agentId }));
-      if (!session.persisted) return;
-      await chatSetWorkspaceAgent(conversationId, agentId).catch((e: unknown) => {
-        patch(conversationId, (s) => ({ ...s, agentId: session.agentId }));
-        pushErrorToast(String(e));
-      });
     },
 
     submit: (conversationId, text, opts) => {
@@ -621,7 +602,6 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             provider: session.provider,
             model: session.model,
             account: session.accountId,
-            agentId: session.agentId || null,
             focusChainId: session.focusChainId || null,
             effort: session.effort || null,
           });

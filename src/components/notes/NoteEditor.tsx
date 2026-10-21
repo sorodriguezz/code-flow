@@ -544,14 +544,16 @@ export function NoteEditor() {
         {showPreview && (
           <div
             ref={previewPane}
-            className={`min-w-0 overflow-y-auto px-6 py-4 ${showEditor ? "flex-1" : "w-full"}`}
+            // The pane's width, less a margin: no 760px column in the middle of a wide window. The
+            // exports set their own measure (`lib/notes/exportNotes`), so this changes no file.
+            className={`min-w-0 overflow-y-auto px-8 py-4 ${showEditor ? "flex-1" : "w-full"}`}
           >
             {settled.trim() ? (
               // Memoised on `source`, and `source` is the deferred text — so the document is
               // parsed and re-highlighted once per settled edit rather than once per keystroke.
-              <NotePreview source={settled} className="cf-markdown-preview mx-auto max-w-[760px]" />
+              <NotePreview source={settled} className="cf-markdown-preview" />
             ) : (
-              <p className="mx-auto max-w-[760px] text-[13px] italic text-[var(--cf-text-muted)]">
+              <p className="text-[13px] italic text-[var(--cf-text-muted)]">
                 {t("notes.previewEmpty")}
               </p>
             )}
