@@ -31,6 +31,7 @@ import {
   BrainCircuit,
   Briefcase,
   ChartColumn,
+  Code2,
   Cloud,
   Compass,
   Cpu,
@@ -304,6 +305,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     tabs: [
       { id: "list", labelKey: "settings.tabWorkspaces", icon: Briefcase, searchKey: "settings.searchTermsProjects" },
       { id: "current", labelKey: "settings.tabThisWorkspace", hintKey: "settings.thisWorkspaceHint", icon: Layers, searchKey: "settings.searchTermsThisWorkspace" },
+      // «Abrir en …»: the app's editor, the workspace's, each repository's.
+      { id: "externalEditor", labelKey: "externalEditor.title", hintKey: "externalEditor.hint", icon: Code2, searchKey: "externalEditor.searchTerms" },
     ],
   },
   {

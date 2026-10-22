@@ -363,6 +363,8 @@ mod tests {
             ("open the database", Some(("app.open", "api:database"))),
             ("cambia al repositorio api pagos", Some(("repo.switch", "api pagos"))),
             ("saca el chat a una ventana aparte", Some(("island.detach", "chat"))),
+            ("saca flujos a una isla", Some(("island.detach", "flows"))),
+            ("las notas en modo isla", Some(("island.detach", "notes"))),
             ("cambia al workspace de clientes", Some(("workspace.switch", "clientes"))),
             ("abre la configuración de voz", Some(("settings.open", "voice"))),
             ("muéstrame el grafo de commits", Some(("view.open", "graph"))),

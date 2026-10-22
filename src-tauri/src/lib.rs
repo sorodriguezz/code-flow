@@ -51,6 +51,7 @@ mod meetings;
 mod speech;
 mod voice_fit;
 mod flows;
+mod external_editor;
 mod fsops;
 mod explorer_bridge;
 mod clipboard_text;
@@ -1647,7 +1648,8 @@ sharded_invoke_handler! {
         commands::fs_cmd::delete_path,
         commands::fs_cmd::open_in_default_app,
         commands::fs_cmd::reveal_in_file_manager,
-        commands::fs_cmd::open_in_vscode,
+        commands::external_editor_cmd::external_editor_state,
+        commands::external_editor_cmd::open_in_external_editor,
         commands::activity_cmd::list_chat_conversations,
         commands::activity_cmd::get_chat_conversation,
         commands::activity_cmd::get_turn_trace,

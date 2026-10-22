@@ -212,11 +212,6 @@ pub fn reveal_in_file_manager(path: String) -> Result<(), String> {
     fsops::reveal_in_file_manager(&path)
 }
 
-#[tauri::command]
-pub fn open_in_vscode(path: String) -> Result<(), String> {
-    fsops::open_in_vscode(&path)
-}
-
 /// Every non-ignored file in the repo — what "go to file" filters over. Listed once per open
 /// rather than streamed: even a large repo is a few thousand short strings, and filtering in the
 /// frontend keeps typing instant.

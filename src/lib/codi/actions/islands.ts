@@ -164,7 +164,11 @@ const islandDetach = defineAction({
     en: "Send a rail app or a repository out to a window of its own (an island). An app already out is brought forward.",
     es: "Saca una app del rail o un repositorio a su propia ventana (una isla). Si ya está fuera, la trae al frente.",
   },
-  aliases: { es: ["saca", "saca a una ventana", "sacalo a una ventana", "abre en una ventana aparte", "abre en su propia ventana", "ventana aparte", "separa", "desacopla"], en: ["detach", "pop out", "open in its own window", "open in a new window", "undock"] },
+  // «isla» is what the app calls it, and so does the user (2026-10-21: «abrir una app del carril en modo isla»).
+  aliases: {
+    es: ["saca", "saca a una ventana", "sacalo a una ventana", "abre en una ventana aparte", "abre en su propia ventana", "ventana aparte", "separa", "desacopla", "isla", "en una isla", "como isla", "modo isla", "en modo isla"],
+    en: ["detach", "pop out", "open in its own window", "open in a new window", "undock", "island", "as an island"],
+  },
   get vocabulary() {
     return { app: appVocabulary() };
   },

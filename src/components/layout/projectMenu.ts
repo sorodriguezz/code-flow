@@ -25,6 +25,7 @@ import {
   PinOff,
   Plus,
   Settings2,
+  SquareArrowOutUpRight,
   Trash2,
 } from "lucide-react";
 import { WORKSPACE_COLORS } from "../../lib/workspaceColors";
@@ -50,7 +51,7 @@ export interface ProjectMenuContext {
   onRemove: () => void;
   /** The rest are offered where the caller wires them — the unfolded row and the folded chip both
    *  do, so folding the panel no longer takes verbs away. */
-  onOpenVsCode?: () => void;
+  editor?: ProjectEditorMenu;
   onRename?: () => void;
   onColor?: (color: string) => void;
   pinned?: boolean;
@@ -61,6 +62,21 @@ export interface ProjectMenuContext {
   onNewGroup?: () => void;
   /** Absent when there is no other workspace to move it to. */
   onMove?: () => void;
+}
+
+/** «Abrir en …» and where it is chosen — see `externalEditorStore`. */
+export interface ProjectEditorMenu {
+  /** The editor that opens this repository now. */
+  label: string;
+  onOpen: () => void;
+  /** The editors this machine has: «Abrir con» opens in one once; «Editor del repositorio» keeps one. */
+  installed: { id: string; label: string }[];
+  onOpenWith: (id: string) => void;
+  /** This repository's own choice, `null` when it follows its workspace. */
+  chosen: string | null;
+  /** What it follows without one: its workspace's editor. */
+  inherited: string;
+  onChoose: (id: string | null) => void;
 }
 
 export function projectMenuItems(context: ProjectMenuContext): MenuItem[] {
@@ -90,8 +106,27 @@ export function projectMenuItems(context: ProjectMenuContext): MenuItem[] {
     });
   }
 
-  if (context.onOpenVsCode) {
-    items.push({ label: t("sidebar.openInVsCode"), icon: Code2, disabled: broken, onClick: context.onOpenVsCode });
+  const editor = context.editor;
+  if (editor) {
+    items.push({ label: t("sidebar.openInEditor", { editor: editor.label }), icon: Code2, disabled: broken, onClick: editor.onOpen });
+    if (editor.installed.length > 1) {
+      items.push({
+        label: t("sidebar.openWith"),
+        icon: SquareArrowOutUpRight,
+        disabled: broken,
+        onClick: () => {},
+        children: editor.installed.map((option) => ({ label: option.label, onClick: () => editor.onOpenWith(option.id) })),
+      });
+    }
+    items.push({
+      label: t("sidebar.repoEditor"),
+      icon: Settings2,
+      onClick: () => {},
+      children: [
+        { label: t("sidebar.repoEditorInherit", { editor: editor.inherited }), checked: editor.chosen === null, onClick: () => editor.onChoose(null) },
+        ...editor.installed.map((option, i) => ({ label: option.label, checked: editor.chosen === option.id, separated: i === 0, onClick: () => editor.onChoose(option.id) })),
+      ],
+    });
   }
 
   const arrange: MenuItem[] = [];

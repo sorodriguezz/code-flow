@@ -8,6 +8,7 @@ import type { SettingsSectionId } from "../../state/uiStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useAiAccountsStore } from "../../state/aiAccountsStore";
+import { useExternalEditorStore } from "../../state/externalEditorStore";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -33,10 +34,12 @@ export function ThisWorkspaceSettings() {
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const workspaceName = useWorkspaceStore((s) => s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.name ?? "");
   const accounts = useAiAccountsStore((s) => s.workspaceDefaults);
+  const editors = useExternalEditorStore((s) => s.state);
   const [facts, setFacts] = useState<Facts | null>(null);
 
   useEffect(() => {
     void useAiAccountsStore.getState().ensure();
+    void useExternalEditorStore.getState().load();
   }, []);
 
   useEffect(() => {
@@ -108,6 +111,16 @@ export function ThisWorkspaceSettings() {
       value: t("thisWorkspace.review"),
       custom: true,
       to: ["review", "engine"],
+    },
+    {
+      label: t("externalEditor.title"),
+      value: (() => {
+        const own = editors?.workspaces[workspaceId];
+        const label = editors?.editors.find((editor) => editor.id === own)?.label;
+        return label ?? t("thisWorkspace.inherits");
+      })(),
+      custom: !!editors?.workspaces[workspaceId],
+      to: ["projects", "externalEditor"],
     },
     {
       label: t("settings.mcp"),

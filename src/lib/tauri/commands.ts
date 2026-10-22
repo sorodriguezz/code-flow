@@ -2296,8 +2296,6 @@ export const openInDefaultApp = (repoPath: string, relPath: string) =>
 
 export const revealInFileManager = (path: string) => invoke<void>("reveal_in_file_manager", { path });
 
-export const openInVsCode = (path: string) => invoke<void>("open_in_vscode", { path });
-
 /** Every non-ignored file in the repo, repo-relative — the corpus "go to file" filters over. */
 export const listRepoFiles = (repoPath: string) => invoke<string[]>("list_repo_files", { repoPath });
 

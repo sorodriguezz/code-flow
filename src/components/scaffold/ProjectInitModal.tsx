@@ -12,7 +12,8 @@ import { confirmAction } from "../../state/confirmStore";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 import { currentPlatform } from "../../lib/platform";
 import { onTerminalExit } from "../../lib/tauri/events";
-import { closeTerminal, defaultCloneDir, openInVsCode, revealInFileManager } from "../../lib/tauri/commands";
+import { closeTerminal, defaultCloneDir, revealInFileManager } from "../../lib/tauri/commands";
+import { useExternalEditorStore } from "../../state/externalEditorStore";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import {
   checkDest,
@@ -921,6 +922,12 @@ function DoneActions({
   onClose: () => void;
 }) {
   const t = useT();
+  // The app's (or the open workspace's) editor: the new project is in no repository list yet.
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const editorLabel = useExternalEditorStore((s) => s.editorFor(null, workspaceId)?.label ?? "VS Code");
+  useEffect(() => {
+    void useExternalEditorStore.getState().load();
+  }, []);
   return (
     <>
       <div className="mr-auto min-w-0 truncate text-[12px] text-[var(--cf-text-muted)]">
@@ -938,9 +945,12 @@ function DoneActions({
             <FolderSearch size={13} />
             {t("scaffold.done.reveal")}
           </Button>
-          <Button variant="ghost" onClick={() => void openInVsCode(result.root).catch((e) => pushErrorToast(String(e)))}>
+          <Button
+            variant="ghost"
+            onClick={() => void useExternalEditorStore.getState().open(result.root, { workspaceId })}
+          >
             <Code2 size={13} />
-            VS Code
+            {editorLabel}
           </Button>
         </>
       )}

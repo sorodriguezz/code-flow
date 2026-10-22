@@ -64,10 +64,10 @@ import {
   type DuplicateProject,
   type FoundRepo,
   revealInFileManager,
-  openInVsCode,
   autoLinkProject,
   openRepoInBrowser,
 } from "../../lib/tauri/commands";
+import { useExternalEditorStore } from "../../state/externalEditorStore";
 import { loadGithubConnections } from "../../lib/githubConnections";
 import { loadGitlabConnections } from "../../lib/gitlabConnections";
 import { loadBitbucketConnections } from "../../lib/bitbucketConnections";
@@ -1758,7 +1758,9 @@ function ProjectRow({
   const [showCreateBranch, setShowCreateBranch] = useState(false);
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [revealing, setRevealing] = useState(false);
-  const [openingVsCode, setOpeningVsCode] = useState(false);
+  const [openingEditor, setOpeningEditor] = useState(false);
+  // The editor this repository opens in, by name — its own choice, its workspace's or the app's.
+  const editorLabel = useExternalEditorStore((s) => s.editorFor(project.id, project.workspace_id)?.label ?? "VS Code");
   const [removing, setRemoving] = useState(false);
   // Keyed on the repository and not on `branches`: this component stays mounted for inactive projects,
   // and the array is replaced on every filesystem-watcher tick. See `useIncremental`.
@@ -2079,22 +2081,21 @@ function ProjectRow({
               </button>
             )}
             <button
-              title={t("sidebar.openInVsCode")}
+              title={t("sidebar.openInEditor", { editor: editorLabel })}
+              aria-label={t("sidebar.openInEditor", { editor: editorLabel })}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={async (e) => {
                 e.stopPropagation();
-                setOpeningVsCode(true);
+                setOpeningEditor(true);
                 try {
-                  await openInVsCode(project.local_path);
-                } catch (err) {
-                  pushErrorToast(String(err));
+                  await useExternalEditorStore.getState().open(project.local_path, { projectId: project.id, workspaceId: project.workspace_id });
                 } finally {
-                  setOpeningVsCode(false);
+                  setOpeningEditor(false);
                 }
               }}
               className={ROW_ACTION_CLASS}
             >
-              {openingVsCode ? <Loader2 size={13} className="animate-spin" /> : <Code2 size={13} />}
+              {openingEditor ? <Loader2 size={13} className="animate-spin" /> : <Code2 size={13} />}
             </button>
             {otherWorkspaces.length > 0 && (
               <button
@@ -2519,6 +2520,10 @@ export function Sidebar() {
   // The flows that add right-click entries, read as the window opens: a menu is built the instant
   // it opens, and one started the reading itself showed nothing the first time.
   useEffect(() => ensureFlowContextEntries(), []);
+  // Which editors this machine has and which each repository opens in, for «Abrir en …».
+  useEffect(() => {
+    void useExternalEditorStore.getState().load();
+  }, []);
   const collapsed = useLayoutStore((s) => s.flags.sidebarCollapsed);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);

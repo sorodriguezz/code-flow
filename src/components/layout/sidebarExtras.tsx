@@ -12,14 +12,14 @@ import { useAiPanelStore } from "../../state/aiPanelStore";
 import { promptAction } from "../../state/promptStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { translate, useT } from "../../state/languageStore";
-import { openInVsCode } from "../../lib/tauri/commands";
+import { useExternalEditorStore } from "../../state/externalEditorStore";
 import { ContextMenu } from "../common/ContextMenu";
 import { WorkspaceGlyph } from "./WorkspaceGlyph";
 
 /**
  * The verbs both forms of a repository in the panel offer from their right-click — the unfolded
- * row and the folded chip — beyond `projectMenu`'s own: rename, colour, pin, group, VS Code and
- * moving to another workspace. One hook so folding the panel never takes a verb away.
+ * row and the folded chip — beyond `projectMenu`'s own: rename, colour, pin, group, the external
+ * editor and moving to another workspace. One hook so folding the panel never takes a verb away.
  */
 export function useProjectArrangement(project: Project): {
   extras: Partial<ProjectMenuContext>;
@@ -32,9 +32,20 @@ export function useProjectArrangement(project: Project): {
   const otherWorkspaces = useWorkspaceStore((s) => s.workspaces.filter((w) => w.id !== workspaceId).length);
   const [moveOpen, setMoveOpen] = useState(false);
   const store = useSidebarLayoutStore.getState();
+  const editors = useExternalEditorStore((s) => s.state);
+  const editorStore = useExternalEditorStore.getState();
+  const scope = { projectId: project.id, workspaceId };
 
   const extras: Partial<ProjectMenuContext> = {
-    onOpenVsCode: () => void openInVsCode(project.local_path).catch((e: unknown) => pushErrorToast(String(e))),
+    editor: {
+      label: editorStore.editorFor(project.id, workspaceId)?.label ?? "VS Code",
+      onOpen: () => void editorStore.open(project.local_path, scope),
+      installed: (editors?.editors ?? []).filter((editor) => editor.installed),
+      onOpenWith: (id) => void editorStore.open(project.local_path, { ...scope, editor: id }),
+      chosen: editors?.projects[project.id] ?? null,
+      inherited: editorStore.editorFor(null, workspaceId)?.label ?? "VS Code",
+      onChoose: (id) => void editorStore.choose({ kind: "project", id: project.id }, id),
+    },
     onRename: async () => {
       const name = await promptAction(t("sidebar.renameProjectPrompt"), { initial: project.name, confirmLabel: t("sidebar.wsRename") });
       if (name && name !== project.name) {
